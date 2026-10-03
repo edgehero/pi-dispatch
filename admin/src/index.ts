@@ -129,7 +129,7 @@ import { applyDeploymentPointer, pointerPath, pointerState, readPointer, takePoi
 // The only fs use in this module: the skew notice reads one package.json through the wizard's own reader.
 // Everything else fs-shaped goes through read-model.mjs by design.
 import * as nodeFs from "node:fs";
-import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget, whatIfFlow } from "./costs.mjs";
+import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, recordInRepo, whatIfFlow } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
@@ -371,7 +371,8 @@ function registerTools(pi: ExtensionAPI): void {
       "Read-only. Folds the PII-free run history against the operator's declared subscriptions and pi-ai's " +
       "rate tables into the costs read-model: window totals, daily buckets, per-flow and per-model rollups, " +
       "per-plan verdicts, and provenance. window = 7d | 30d | mtd (default mtd); flow filters to one flow's " +
-      "runs; repo filters to one repo's runs by the by-repo rollup's key (e.g. \"acme/web\" or \"local:site\"). " +
+      "runs; repo filters to one repo's runs: a bare \"acme/web\" selects that repo on every forge, a forge-qualified " +
+      "\"github:acme/web\" (the by-repo rollup's key) one forge, and \"local:site\" a local folder's runs. " +
       "`dollars` adds the dollar caps: `windows` has one row per active dollar window (the deployment's, then each " +
       "scoped-limits dollar row), with `counterMicros` (spent and held, the Valkey counter the next job is admitted " +
       "against, null when unreadable) beside the records' side (settled micro-dollars, how many runs settled metered, " +
@@ -730,7 +731,8 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_pause_add",
     label: "pi-dispatch add pause window",
     description:
-      "Adds a scheduled pause window and applies it live: runs for `scope` (a repo \"owner/name\", a local " +
+      "Adds a scheduled pause window and applies it live: runs for `scope` (a repo \"owner/name\" on every forge, " +
+      "a forge-qualified \"<forge>:owner/name\" such as \"github:acme/web\" for that forge only, a local " +
       "folder path, or \"*\" for all) are DEFERRED between `from` and `to` (\"HH:MM\" 24h; from>to = overnight) " +
       "and resume automatically after — nothing is dropped, and deferring costs no budget. Optional `tz` (IANA, " +
       "default UTC), `days` (mon..sun), `dateFrom`/`dateTo` (\"YYYY-MM-DD\"). The operator MUST approve a confirm " +
@@ -794,7 +796,8 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Changes fields of an existing pause window (by array index from dispatch_pauses) and applies it live. " +
       "Provide only the fields to change (scope/from/to/tz/days/dateFrom/dateTo); the rest keep their current " +
-      "value. The operator MUST approve a confirm dialog showing the before->after; refused with no interactive " +
+      "value. `scope` is a repo \"owner/name\" on every forge, a forge-qualified \"<forge>:owner/name\" such as " +
+      "\"github:acme/web\" for that forge only, a local folder path, or \"*\" for all. The operator MUST approve a confirm dialog showing the before->after; refused with no interactive " +
       "operator.",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -918,14 +921,16 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_limit_add",
     label: "pi-dispatch add scoped limit",
     description:
-      "Adds a scoped limit and applies it live: jobs whose scope (a repo \"owner/name\" or a local folder " +
-      "path, ABSOLUTE, matched exactly like pause windows — no globs) exceed the `day`/`week`/`month` " +
+      "Adds a scoped limit and applies it live: jobs whose scope (a repo \"owner/name\", which counts that repo on " +
+      "every forge as one, a forge-qualified \"<forge>:owner/name\" such as \"github:acme/web\", which counts one " +
+      "forge's repo, or a local folder path, ABSOLUTE, matched exactly like pause windows, no globs) exceed the `day`/`week`/`month` " +
       "job-count caps are REFUSED before any spend (reason scope-cap, never retried); jobs over `concurrent` " +
       "are DEFERRED, never dropped, and run when a slot frees. At least one of day/week/month/concurrent is " +
       "required, each an integer >= 1. `dayUsd`/`weekUsd`/`monthUsd` are DOLLAR windows (a decimal string such as " +
       "\"2.50\": above 0, at most 1000000, at most 6 decimals): what the scope's jobs may spend per UTC day, Monday " +
       "week and month; a job that does not fit is refused dollar-cap. A scope of model:<provider>/<model> caps one " +
-      "model across every scope and takes the three dollar fields only. A dollar window needs a per-job cap " +
+      "model across every scope and takes the three dollar fields only. A bare row and a qualified row for the same " +
+      "repo are refused together: keep one form. A dollar window needs a per-job cap " +
       "(maxCostUsd). The file stays version 1 unless a row needs version 2. The operator MUST approve a confirm " +
       "dialog showing the entry; refused with no interactive operator.",
     executionMode: "sequential",
@@ -991,8 +996,13 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Changes fields of an existing scoped limit (by array index from dispatch_limits) and applies it live. " +
       "Provide only the fields to change (scope/day/week/month/concurrent/dayUsd/weekUsd/monthUsd); the rest keep " +
-      "their current value. `dayUsd`/`weekUsd`/`monthUsd` are dollar windows, written as a decimal string (\"2.50\"). " +
-      "No field can be removed here: to drop a cap from an entry, edit scoped-limits.json by hand. The file stays " +
+      "their current value. `scope` is a repo \"owner/name\" on every forge, a forge-qualified " +
+      "\"<forge>:owner/name\" such as \"github:acme/web\" for that forge only, or an ABSOLUTE local folder path. `dayUsd`/`weekUsd`/`monthUsd` are dollar windows, written as a decimal string (\"2.50\"). " +
+      "No field can be removed here: to drop a cap from an entry, edit scoped-limits.json by hand. Changing `scope` " +
+      "(such as a bare \"acme/web\" rewritten to \"github:acme/web\") starts a NEW count under a new key: the old " +
+      "row's used runs and dollars do not carry over, and jobs already running keep their slot under the old scope " +
+      "until they finish while the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until " +
+      "then. The file stays " +
       "version 1 unless a row needs version 2. The operator MUST approve a confirm dialog showing the before->after; " +
       "refused with no interactive operator.",
     executionMode: "sequential",
@@ -1033,7 +1043,7 @@ function registerTools(pi: ExtensionAPI): void {
       });
       const result = await confirmedWrite(
         ctx,
-        { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}` },
+        { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}` },
         () => {
           const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
@@ -1665,9 +1675,9 @@ function assembleCosts(paths: any, window: string, flow?: string, repo?: string)
   const subs: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
   const flowScoped = typeof flow === "string" && flow !== "" ? records.filter((r: any) => (r?.flow ?? null) === flow) : records;
   // The repo filter applies at the same records level as the flow one, so EVERY fold arm scopes --
-  // one table filtered against unscoped siblings would misread as attribution. Keyed by repoOfTarget,
-  // the exact grammar the byRepo rollup labels rows with.
-  const scoped = typeof repo === "string" && repo !== "" ? flowScoped.filter((r: any) => repoOfTarget(r?.target) === repo) : flowScoped;
+  // one table filtered against unscoped siblings would misread as attribution. `recordInRepo` (issue #498): a bare
+  // "acme/web" selects that repo on every forge, a qualified "github:acme/web" (the byRepo rollup's key) one forge.
+  const scoped = typeof repo === "string" && repo !== "" ? flowScoped.filter((r: any) => recordInRepo(r, repo)) : flowScoped;
   // The trigger join over the SCOPED records (a flow-filtered fold attributes only what it folds),
   // the same file-read-plus-pure-fold path the dashboard seam takes.
   const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
@@ -2309,7 +2319,7 @@ async function manageLimitsViaDialogs(paths: any, ui: any, notify: Notify): Prom
 
 /** Add a scoped limit: scope, then the four optional bounds (blank = omit). Validated + live. */
 async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
-  const scope = await ui.input("scope — a repo \"owner/name\" or an ABSOLUTE local folder path (exact match, no globs)", "");
+  const scope = await ui.input("scope: a repo \"owner/name\" (every forge), \"<forge>:owner/name\" such as github:acme/web (one forge), or an ABSOLUTE local folder path (exact match, no globs)", "");
   if (scope === undefined || scope.trim() === "") return;
   const day = await ui.input("day — max jobs per UTC day for this scope (blank = no day cap)", "");
   if (day === undefined) return;
@@ -2337,7 +2347,7 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
   const cur = list[index];
   const ask = async (label: string, current: string) => ui.input(`${label} — blank keeps "${current}"`, current);
   const keep = (v: string | undefined, current: any) => (v === undefined || v.trim() === "" ? current : v);
-  const scope = await ask("scope", cur.scope ?? "");
+  const scope = await ask("scope: \"owner/name\" (every forge), \"<forge>:owner/name\" (one forge) or an ABSOLUTE folder path", cur.scope ?? "");
   if (scope === undefined) return;
   const day = await ask("day cap", String(cur.day ?? ""));
   if (day === undefined) return;
@@ -2358,8 +2368,20 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
     weekUsd: cur.weekUsd,
     monthUsd: cur.monthUsd,
   });
+  const note = scopeChangeNote(buildScopedLimit(cur), merged);
+  if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;
   const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
   notify?.(res.ok ? `scoped limit #${index + 1} updated (live) — ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
+}
+
+/**
+ * The line an edit's confirm adds when it changes a row's scope (issue #498): every counter is keyed by the row's
+ * scope, so a new scope (a bare "acme/web" rewritten to "github:acme/web", or any rename) starts a new count, and the
+ * old key simply expires on its own TTL. Empty when the scope is unchanged.
+ */
+export function scopeChangeNote(before: any, after: any): string {
+  if (before?.scope === after?.scope) return "";
+  return "\nThe scope changes, so this row starts a NEW count under a new key: the used runs and dollars of the old scope do not carry over. Jobs already running keep their slot under the old scope until they finish, and the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until then.";
 }
 
 /** Delete a scoped limit: select which, confirm, remove. */
@@ -2389,7 +2411,7 @@ async function managePausesViaDialogs(paths: any, ui: any, notify: Notify): Prom
 
 /** Add a pause window: scope + from/to, then the optional tz/days/date bounds (blank = omit). Validated + live. */
 async function addPauseWindowViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
-  const scope = await ui.input("scope — a repo \"owner/name\", a local folder path, or \"*\" for all", "");
+  const scope = await ui.input("scope: a repo \"owner/name\" (every forge), \"<forge>:owner/name\" such as github:acme/web (one forge), a local folder path, or \"*\" for all", "");
   if (scope === undefined || scope.trim() === "") return;
   const from = await ui.input("from — pause start \"HH:MM\" 24h (from > to = overnight)", "22:00");
   if (from === undefined) return;
@@ -2423,7 +2445,7 @@ async function editPauseWindowViaDialogs(paths: any, ui: any, notify: Notify): P
   // Each field's current value is the placeholder; a blank answer keeps it (undefined = the operator cancelled).
   const ask = async (label: string, current: string) => ui.input(`${label} — blank keeps "${current}"`, current);
   const keep = (v: string | undefined, current: any) => (v === undefined || v.trim() === "" ? current : v);
-  const scope = await ask("scope", cur.scope ?? "");
+  const scope = await ask("scope: \"owner/name\" (every forge), \"<forge>:owner/name\" (one forge), a folder path or \"*\"", cur.scope ?? "");
   if (scope === undefined) return;
   const from = await ask("from (HH:MM)", cur.from ?? "");
   if (from === undefined) return;

@@ -14,7 +14,7 @@ import { endpointsForModel } from "./model-endpoints.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
 import { dollarWindowCaps } from "./dollar-budget.mjs";
-import { budgetCapsFor, canonicalScope, concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows } from "./scoped-limits.mjs";
+import { budgetCapsFor, concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, rowScopeFor } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 
@@ -544,7 +544,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 
 		const limits = scopedLimits();
-		const scope = canonicalScope(job.data);
+		// The MATCHED ROW's scope keys both the in-process slot and the fleet lease (issue #498), the same string
+		// `budgetCapsFor` hashes below and the boot sweeper hashes from the file: a qualified `github:acme/web` row holds
+		// GitHub jobs only, a bare `acme/web` row holds every forge's under the key it always had. With no row it is the
+		// job's canonical scope, so the folder mutex is keyed exactly as before.
+		const scope = rowScopeFor(job.data, limits);
 		let held = false;
 		let scopeSlot = null;
 		if (scope) {

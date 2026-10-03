@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "../src/backends.mjs";
 import { test } from "node:test";
-import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
+import { budgetCapsFor, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { readFileSync, readdirSync } from "node:fs";
 import { InfraRetry, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { buildRecord, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
@@ -1942,6 +1942,25 @@ test("a LOCAL scope-cap keeps the folder path out of the comment text too -- the
 	assert.equal(comments[0], "Over the day run cap for this folder (1). Not run.");
 	assert.ok(!comments[0].includes("/Users/"), "the host path never enters the comment text");
 	assert.ok(!JSON.stringify(logs).includes("/Users/someone"), "and never any log field");
+});
+
+test("issue #498: a day: 1 row on forgejo:acme/web refuses the second Forgejo job, the GitHub job reserves, and one budget:s: key moved", async () => {
+	const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: "forgejo:acme/web", day: 1 }] }), "sl.json");
+	const fj = { kind: "forgejo", repo: "acme/web", provider: "anthropic", model: "m", maxTurns: 20 };
+	const gh = { kind: "github", repo: "acme/web", provider: "anthropic", model: "m", maxTurns: 20 };
+	const redis = keyedRedis();
+	const comments = [];
+	// deps() pins `now` (2026-07-16), so every key below is a fixed string.
+	const run = (job) => runJob(job, deps({ redis, scopedCaps: budgetCapsFor(job, limits), comment: async (_j, t) => comments.push(t) }).deps);
+	assert.equal((await run(fj)).outcome, "completed");
+	const refused = await run(fj);
+	assert.equal(refused.reason, "scope-cap");
+	assert.equal(comments.at(-1), "Over the day run cap for acme/web (1). Not run.", "the comment names the repo without the forge prefix");
+	assert.equal((await run(gh)).outcome, "completed", "the GitHub job for the same repo is not capped by the Forgejo row");
+	const scopedKeys = [...redis.store.keys()].filter((k) => k.startsWith("budget:s:"));
+	assert.deepEqual(scopedKeys, [`${scopeKeyPrefix("forgejo:acme/web")}:2026-07-16`], "exactly one scoped key, the ROW's");
+	assert.equal(redis.store.get(scopedKeys[0]), 2, "both Forgejo jobs counted, the refused one included");
+	assert.equal(redis.store.get(G_DAY), 2, "the global ledger saw the two jobs that ran");
 });
 
 // --- issue #341: the job-user gate ------------------------------------------------------------------------------

@@ -153,6 +153,14 @@ declared. They were per process, which meant four hosts with a limit of one ran 
 you would not have been told: the only symptom either bound has is a denial, and multiplication produces
 fewer denials per host, so scaling out made the signal quieter while the load grew.
 
+A forge-qualified row such as `forgejo:acme/web` is one limit across the fleet, and that holds even if two hosts
+point `FORGEJO_URL` at two different Forgejo instances: the scope names the forge kind, not the instance. Keep one
+instance per forge kind across hosts that share a Valkey.
+
+Upgrade every host before you write a forge-qualified scope. In `scoped-limits.json` a qualified row makes the file
+version 2, which an older worker refuses loudly (at boot, or by keeping its last good file on a live edit and logging why). `pause-windows.json` has no version: an
+older worker reads a qualified window as a name no job has and pauses nothing, without saying so.
+
 If you were relying on that accidental multiplication, raise the knob deliberately. The published
 arithmetic in [`docs/wait-for.md`](wait-for.md) is now what it says: about one check every ten seconds
 for the whole deployment, not per host.

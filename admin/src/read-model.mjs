@@ -813,8 +813,9 @@ export function writeScopedLimits({ scopedLimitsPath, mutate, fs = nodeFs }) {
   }
   const next = mutate(current.map((l) => ({ ...l })));
   const rows = next.map((l) => Object.fromEntries(Object.entries(l).filter(([, v]) => v !== null && v !== undefined)));
-  // The LOWEST version that expresses the file (issues #501 part 5, #502 part 6): 1 unless a row carries a dollar
-  // window or is a model row, so a job-count-only file stays readable by a worker that predates version 2.
+  // The LOWEST version that expresses the file (issues #501 part 5, #502 part 6, #498): 1 unless a row carries a
+  // dollar window, is a model row or has a forge-qualified scope, so a file of bare and folder job-count rows stays
+  // readable by a worker that predates version 2.
   const text = `${JSON.stringify({ version: scopedLimitsVersionFor(rows), limits: rows }, null, 2)}\n`;
   try {
     parseScopedLimits(text, scopedLimitsPath); // the loader's own validator -- never write a file it would reject

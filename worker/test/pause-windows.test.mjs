@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePauseWindows, loadPauseWindows, pauseUntilMs, scopeOf } from "../src/pause-windows.mjs";
+import { parsePauseWindows, loadPauseWindows, parseScopeString, pauseUntilMs, qualifiedScopeOf, scopeOf, unqualifiedScope } from "../src/pause-windows.mjs";
+import { FORGE_KINDS } from "../src/forges.mjs";
 
 const wrap = (windows) => JSON.stringify({ windows });
 const parse = (windows) => parsePauseWindows(wrap(windows), "pw.json");
@@ -122,4 +123,79 @@ test("the latest end wins when two windows overlap; empty windows -> null", () =
 	]);
 	assert.equal(pauseUntilMs(w, ghJob("acme/web"), UTC(2026, 7, 23, 23)), UTC(2026, 7, 24, 6), "held until the later end");
 	assert.equal(pauseUntilMs([], ghJob("acme/web"), UTC(2026, 7, 23, 23)), null);
+});
+
+// ── forge-qualified scopes (issue #498) ─────────────────────────────────────────────────────────────────
+
+test("qualifiedScopeOf is <kind>:<repo> for every forge kind (derived from FORGE_KINDS), the folder for a local job", () => {
+	for (const kind of FORGE_KINDS) assert.equal(qualifiedScopeOf({ kind, repo: "acme/web" }), `${kind}:acme/web`);
+	assert.equal(qualifiedScopeOf(localJob("/srv/site/")), "/srv/site/", "a local job's folder, unchanged");
+	assert.equal(qualifiedScopeOf({ repo: "acme/web" }), null, "a forge job without kind");
+	assert.equal(qualifiedScopeOf({ kind: "github" }), null, "a forge job without repo");
+	assert.equal(qualifiedScopeOf(undefined), null);
+	// NFC, like canonicalScope: an NFD repo name and an NFC one are one scope.
+	assert.equal(qualifiedScopeOf({ kind: "github", repo: "acme/we\u0301b" }), "github:acme/w\u00e9b");
+});
+
+test("parseScopeString classifies local, qualified and bare, and refuses an unknown prefix naming the known kinds", () => {
+	assert.deepEqual(parseScopeString("/srv/site"), { type: "local", kind: null, repo: null });
+	assert.deepEqual(parseScopeString("C:\\srv"), { type: "local", kind: null, repo: null }, "a drive letter keeps today's handling");
+	assert.deepEqual(parseScopeString("acme/web"), { type: "bare", kind: null, repo: null });
+	assert.deepEqual(parseScopeString("acme/we:b"), { type: "bare", kind: null, repo: null }, "a colon after a slash is no prefix");
+	for (const kind of FORGE_KINDS) assert.deepEqual(parseScopeString(`${kind}:acme/web`), { type: "qualified", kind, repo: "acme/web" });
+	// The split is at the FIRST colon. No forge allows ":" in a repo or project path (GitHub, GitLab and Forgejo names are
+	// [A-Za-z0-9._-] segments; Azure DevOps refuses ":" in project and repository names), so this never cuts a real repo.
+	assert.deepEqual(parseScopeString("azure:proj/repo"), { type: "qualified", kind: "azure", repo: "proj/repo" });
+	assert.throws(() => parseScopeString("gitub:acme/web"), (e) => e.piDispatchConfig === true && /unknown prefix "gitub:"/.test(e.message) && FORGE_KINDS.every((k) => e.message.includes(k)));
+	assert.throws(() => parseScopeString("local:site"), /unknown prefix "local:"/);
+	assert.throws(() => parseScopeString("forgejo: "), /names a forge and no repo/);
+	assert.equal(unqualifiedScope("github:acme/web"), "acme/web");
+	assert.equal(unqualifiedScope("acme/web"), "acme/web");
+	assert.equal(unqualifiedScope("/srv/site"), "/srv/site");
+});
+
+test("parsePauseWindows accepts a qualified scope and refuses a near miss, naming the window", () => {
+	const [w] = parse([{ scope: " github:acme/web ", from: "09:00", to: "17:00" }]);
+	assert.equal(w.scope, "github:acme/web");
+	assert.throws(() => parse([{ scope: "*", from: "09:00", to: "17:00" }, { scope: "gitub:acme/web", from: "09:00", to: "17:00" }]), (e) => /pause window at index 1/.test(e.message) && /unknown prefix/.test(e.message) && /pw\.json/.test(e.message));
+	assert.equal(parse([{ scope: "*", from: "09:00", to: "17:00" }])[0].scope, "*", "* stays legal");
+});
+
+test("a qualified window pauses only its forge's job; a bare window pauses every forge's, as before", () => {
+	const now = UTC(2026, 7, 23, 12);
+	const fjJob = (repo) => ({ kind: "forgejo", repo });
+	const qualified = parse([{ scope: "github:acme/web", from: "09:00", to: "17:00" }]);
+	assert.equal(pauseUntilMs(qualified, ghJob("acme/web"), now), UTC(2026, 7, 23, 17));
+	assert.equal(pauseUntilMs(qualified, fjJob("acme/web"), now), null, "the Forgejo job is not paused");
+	const bare = parse([{ scope: "acme/web", from: "09:00", to: "17:00" }]);
+	assert.equal(pauseUntilMs(bare, ghJob("acme/web"), now), UTC(2026, 7, 23, 17));
+	assert.equal(pauseUntilMs(bare, fjJob("acme/web"), now), UTC(2026, 7, 23, 17));
+	// scopeOf is unchanged: still the bare repo.
+	assert.equal(scopeOf(fjJob("acme/web")), "acme/web");
+});
+
+test("parseScopeString refuses a qualified scope whose repo is not a forge repo's shape, and pause windows share the rule", () => {
+	const refused = {
+		"leading slash": "github:/acme/web",
+		"trailing slash": "github:acme/web/",
+		"empty segment": "github:acme//web",
+		"whitespace at a segment's end": "github:acme /web",
+		"whitespace at a segment's start": "github:acme/ web",
+		"control character": "github:acme/web\tx",
+		NUL: "github:acme/web\u0000",
+		"a # tail": "github:acme/web#12",
+		"a second prefix": "forgejo:github:acme/web",
+		"one segment": "github:site",
+	};
+	for (const [what, scope] of Object.entries(refused)) {
+		assert.throws(() => parseScopeString(scope), (e) => e.piDispatchConfig === true && /is not a forge repo/.test(e.message), what);
+		assert.throws(() => parse([{ scope, from: "09:00", to: "17:00" }]), (e) => /pause window at index 0/.test(e.message) && /is not a forge repo/.test(e.message), `window: ${what}`);
+	}
+	assert.equal(parseScopeString("gitlab:group/sub/proj").repo, "group/sub/proj");
+	// Azure DevOps names may hold spaces inside a segment: the window parses and pauses that Azure job only.
+	const [w] = parse([{ scope: "azure:Fabrikam Fiber/Web App", from: "09:00", to: "17:00" }]);
+	assert.equal(w.scope, "azure:Fabrikam Fiber/Web App");
+	const now = UTC(2026, 7, 23, 12);
+	assert.equal(pauseUntilMs([w], { kind: "azure", repo: "Fabrikam Fiber/Web App" }, now), UTC(2026, 7, 23, 17));
+	assert.equal(pauseUntilMs([w], { kind: "github", repo: "Fabrikam Fiber/Web App" }, now), null);
 });

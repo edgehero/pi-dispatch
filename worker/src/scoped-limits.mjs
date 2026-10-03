@@ -28,6 +28,12 @@
  * DOLLAR ledgers (dollar-budget.mjs, built here by `dollarCapsFor` and `modelDollarRows`), never job-count ones,
  * so `budgetCapsFor`, `concurrencyFor` and the mutex never see them.
  *
+ * Issue #498 adds the forge-qualified scope (`github:acme/web`), which names one forge's repo where a bare
+ * `acme/web` names that repo on every forge. A job matches its qualified row first, then its bare row, and a file
+ * holding both for one repo is refused. EVERY key (the job-count windows, the dollar windows, the in-process slot and
+ * the fleet lease) is built from the MATCHED ROW's scope, never from the job's, so a bare row keeps exactly the key
+ * it always had and a qualified row counts on its own.
+ *
  * Custom: scoped limits validated inline per triggers.mjs/pause-windows.mjs precedent; zod not in deps
  */
 
@@ -38,7 +44,7 @@ import { DOLLAR_KEY_PREFIX } from "./dollar-budget.mjs";
 import { hash16 } from "./fleet-lease.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { formatMicros, parseUsdMicros } from "./money.mjs";
-import { scopeOf } from "./pause-windows.mjs";
+import { parseScopeString, qualifiedScopeOf, scopeOf } from "./pause-windows.mjs";
 
 /**
  * The highest schema version this build reads. A file declaring a higher one is refused loudly. The admin writes the
@@ -48,6 +54,11 @@ import { scopeOf } from "./pause-windows.mjs";
  * folder row, and `model:<provider>/<model>` rows that carry those three fields only. A version 1 file that uses
  * either is refused with an error naming version 2: a version 1 worker drops unknown fields, so a file that says 1
  * while it means 2 would read as a narrower cap on one build and no cap on another.
+ *
+ * A forge-qualified row (`github:acme/web`, issue #498) needs version 2 as well, for the same reason: every released
+ * build reads `github:acme/web` as a plain repo string no job ever has, so a version 1 file holding one would be a
+ * cap, a concurrency limit and a lease that one build enforces and another silently ignores. Version 2 makes every
+ * older build refuse the file loudly instead.
  */
 export const SCOPED_LIMITS_VERSION = 2;
 
@@ -141,6 +152,7 @@ export function parseScopedLimits(text, path) {
 		throw configError(`scoped-limits file must have a "limits" array: ${path}`);
 	}
 	const rows = parsed.limits.map((row, index) => normalizeLimit(row, index, path, version));
+	refuseMixedForms(rows, path);
 	const seen = new Map();
 	rows.forEach((row, index) => {
 		// A model row's identity is its LOWERCASED ref, the one its dollar key hashes (`modelDollarKeyPrefix`): two rows
@@ -154,6 +166,26 @@ export function parseScopedLimits(text, path) {
 		seen.set(id, index);
 	});
 	return rows;
+}
+
+/**
+ * A bare row and a qualified row for one repo (`acme/web` beside `github:acme/web`) refuse the file, naming both
+ * indexes (issue #498). Whatever fields either carries, count or dollar: one row applies to a job, and with both forms
+ * present that rule would need a precedence ladder, which reads as one cap while the other silently stops counting.
+ * Refusing is the simpler rule, and it is loud. Two qualified rows for one repo on two forges are fine.
+ */
+function refuseMixedForms(rows, path) {
+	const bare = new Map();
+	rows.forEach((row, index) => {
+		if (!isModelScope(row.scope) && parseScopeString(row.scope).type === "bare") bare.set(row.scope, index);
+	});
+	rows.forEach((row, index) => {
+		if (isModelScope(row.scope)) return;
+		const parsed = parseScopeString(row.scope);
+		if (parsed.type !== "qualified" || !bare.has(parsed.repo)) return;
+		const other = bare.get(parsed.repo);
+		throw configError(`scoped limit at index ${index}: ${JSON.stringify(row.scope)} and the bare ${JSON.stringify(parsed.repo)} at index ${other} name the same repo; keep one form (a bare row covers every forge, a qualified row one forge): ${path}`);
+	});
 }
 
 /** A dollar field's value, or the refusal: `parseUsdMicros`'s rules (strings recommended), named by row and field. */
@@ -218,13 +250,21 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 		// nothing, and a silently inert money limit is the failure class this repo refuses outright.
 		throw configError(`${at}: scopes match exactly; a scope containing "*" is refused (no globs): ${path}`);
 	}
+	// Issue #498: `<forge kind>:<repo>` names one forge's repo; an unknown `<word>:` prefix is refused naming the kinds.
+	let form;
+	try {
+		form = parseScopeString(trimmed);
+	} catch (error) {
+		throw configError(`${at}: ${error.message}: ${path}`);
+	}
+	if (form.type === "qualified" && version < 2) throw configError(`${at}: a forge-qualified scope needs "version": 2 (this file says ${version}), so a build that predates it refuses the file rather than reading an inert repo string: ${path}`);
 	const norm = {
 		// An absolute path is stored resolved so a `/srv/site/` row governs `/srv/site` jobs -- the same
 		// collapse canonicalScope applies on the job side. isAbsolute is PLATFORM-NATIVE on purpose, so a
 		// foreign-platform row (a windows drive path on a POSIX worker) stays verbatim and is inert here;
 		// the doctor's unreferenced-scope advisory names it. Resolving it instead would "work" only by
 		// both sides mangling into the same cwd-prefixed string -- a match by accident, not by contract.
-		scope: isAbsolute(trimmed) ? resolve(trimmed) : trimmed,
+		scope: form.type === "qualified" ? `${form.kind}:${form.repo}` : isAbsolute(trimmed) ? resolve(trimmed) : trimmed,
 		day: null,
 		week: null,
 		month: null,
@@ -277,25 +317,45 @@ export function loadScopedLimits(config, { readFileSync = fsReadFileSync, exists
 }
 
 /**
- * The exact-match row for a canonical scope, or null. Exact string equality only -- the pause matcher's
- * semantics minus its "*" (refused above). With duplicates refused there is no precedence ladder.
+ * The row that applies to this job, or null. Exact string equality only -- the pause matcher's semantics minus
+ * its "*" (refused above). A forge job matches the row equal to its `qualifiedScopeOf` first (`github:acme/web`),
+ * then the row equal to its canonical bare repo (`acme/web`); a local job matches its resolved folder. With
+ * duplicates refused and a bare row beside a qualified row for one repo refused too, at most one of the two can
+ * exist, so the order is not a precedence ladder: it only says where to look.
  */
-export function limitFor(limits, scope) {
-	if (!Array.isArray(limits) || !isNonEmptyString(scope)) return null;
+export function limitFor(limits, job) {
+	if (!Array.isArray(limits)) return null;
 	// A model row is never a job's scope: it caps a model wherever it runs (`modelDollarRows`).
-	return limits.find((l) => l.scope === scope && !isModelScope(l.scope)) ?? null;
+	const find = (scope) => (isNonEmptyString(scope) ? limits.find((l) => l.scope === scope && !isModelScope(l.scope)) ?? null : null);
+	if (job?.kind !== "local") {
+		const qualified = find(qualifiedScopeOf(job));
+		if (qualified !== null) return qualified;
+	}
+	return find(canonicalScope(job));
+}
+
+/**
+ * The scope every per-scope KEY of this job is built from (issue #498): the matched row's scope, or the job's
+ * canonical scope when no row matches. The in-process slot, the fleet lease (`slot:s:<hash16>`), and through
+ * `budgetCapsFor`/`dollarCapsFor` the job-count and dollar windows all hash this one string. Keyed by the ROW, never
+ * the job: a bare `acme/web` row then keeps the exact key it had before qualified scopes existed (its counts carry
+ * over, and the admin, which recomputes keys from rows, keeps reading them), and it stays ONE shared cap across
+ * forges as written. The boot sweeper already hashes row scopes, so the gate and the sweeper are one rule.
+ */
+export function rowScopeFor(job, limits) {
+	return limitFor(limits, job)?.scope ?? canonicalScope(job);
 }
 
 /**
  * The scoped budget windows this job reserves against, or null when nothing applies (no row for the
- * scope, or the row is concurrency-only). The returned `scope` is CANONICAL so the redis counters are
- * spelling-stable. Shaped like the global `caps` object so `reserveBudget` consumes it unchanged.
+ * scope, or the row is concurrency-only). The returned `scope` is the MATCHED ROW's (issue #498), so the redis
+ * counters are spelling-stable and a bare row keeps its key. Shaped like the global `caps` object so
+ * `reserveBudget` consumes it unchanged.
  */
 export function budgetCapsFor(job, limits) {
-	const scope = canonicalScope(job);
-	const row = limitFor(limits, scope);
+	const row = limitFor(limits, job);
 	if (!row || (row.day === null && row.week === null && row.month === null)) return null;
-	return { scope, caps: { day: row.day, week: row.week, month: row.month } };
+	return { scope: row.scope, caps: { day: row.day, week: row.week, month: row.month } };
 }
 
 /** A row's dollar windows as integer micro-dollars `{ day, week, month }`, each null when unset, or null when none is. */
@@ -310,14 +370,13 @@ function usdCaps(row) {
 /**
  * The repo or folder dollar windows this job reserves in (issue #501 part 5), or null when its scope's row has none
  * (or there is no row). Ledger-shaped for `reserveDollars`: `{ scope, keyPrefix, caps }`, the caps in integer
- * micro-dollars and `keyPrefix` `budget:usd:s:<hash16>` of the same CANONICAL scope the job-count windows hash. A
- * sibling of `budgetCapsFor`, which is unchanged: the job-count and dollar windows of one row are separate ledgers.
+ * micro-dollars and `keyPrefix` `budget:usd:s:<hash16>` of the same MATCHED ROW scope the job-count windows hash
+ * (issue #498). A sibling of `budgetCapsFor`: the job-count and dollar windows of one row are separate ledgers.
  */
 export function dollarCapsFor(job, limits) {
-	const scope = canonicalScope(job);
-	const row = limitFor(limits, scope);
+	const row = limitFor(limits, job);
 	const caps = row ? usdCaps(row) : null;
-	return caps === null ? null : { scope, keyPrefix: scopeDollarKeyPrefix(scope), caps };
+	return caps === null ? null : { scope: row.scope, keyPrefix: scopeDollarKeyPrefix(row.scope), caps };
 }
 
 /**
@@ -382,12 +441,25 @@ export function dollarRowsBelowJobCap(limits, deploymentMaxCostUsd) {
 
 /**
  * The lowest file version that expresses `rows` (normalized or as the admin builds them): 2 when any row carries a
- * dollar field or is a model row, else 1. The admin writes this, so a file with job-count rows only stays a version 1
- * file that an older worker still reads.
+ * dollar field, is a model row or has a forge-qualified scope (issue #498), else 1. The admin writes this, so a file
+ * with bare and folder job-count rows only stays a version 1 file that an older worker still reads.
  */
 export function scopedLimitsVersionFor(rows) {
-	const v2 = (rows ?? []).some((l) => isModelScope(typeof l?.scope === "string" ? l.scope.trim() : l?.scope) || USD_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined));
+	const v2 = (rows ?? []).some((l) => {
+		const scope = typeof l?.scope === "string" ? l.scope.trim() : l?.scope;
+		return isModelScope(scope) || isQualifiedScope(scope) || USD_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined);
+	});
 	return v2 ? 2 : 1;
+}
+
+/** Is this written scope forge-qualified? False for anything `parseScopeString` refuses: the parser names that. */
+function isQualifiedScope(scope) {
+	if (typeof scope !== "string" || scope === "" || isModelScope(scope)) return false;
+	try {
+		return parseScopeString(scope).type === "qualified";
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -408,7 +480,7 @@ export function concurrencyFor(job, limits) {
 	const scope = canonicalScope(job);
 	if (scope === null) return Infinity;
 	const structural = job?.kind === "local" ? 1 : Infinity;
-	const configured = limitFor(limits, scope)?.concurrent ?? Infinity;
+	const configured = limitFor(limits, job)?.concurrent ?? Infinity;
 	return Math.min(structural, configured);
 }
 

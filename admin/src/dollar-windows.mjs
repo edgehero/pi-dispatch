@@ -29,7 +29,7 @@ import { isAbsolute } from "node:path";
 import { DOLLAR_BASIS, DOLLAR_KEY_PREFIX, MODEL_BASIS } from "@edgehero/pi-dispatch/dollar-budget";
 import { DOLLAR_ENV_NAMES, formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { dollarKeyPrefixFor, isModelScope, MODEL_SCOPE_PREFIX } from "@edgehero/pi-dispatch/scoped-limits";
-import { repoOfTarget } from "./costs.mjs";
+import { recordInRepo } from "./costs.mjs";
 
 const WINDOWS = [
   { window: "day", keyOf: dayKey, setting: "dailyCostUsd", field: "dayUsd" },
@@ -140,7 +140,8 @@ function isCount(value) {
 /**
  * Does this record belong to this window? Its run's START falls in the window (the window key the worker would
  * have reserved under, recomputed from `startedAt` with the same key function), it carries a `dollars` object, and
- * for a repo row its target is that repo. Null when the row cannot be attributed at all.
+ * for a repo row its target is that repo: on that forge for a qualified row (`github:acme/web`, issue #498), on every
+ * forge for a bare one. Null when the row cannot be attributed at all.
  */
 function belongs(record, spec) {
   if (!record || typeof record !== "object" || !record.dollars || typeof record.dollars !== "object") return false;
@@ -150,8 +151,7 @@ function belongs(record, spec) {
   if (!keyOf || keyOf(new Date(at), spec.keyPrefix) !== spec.key) return false;
   if (spec.ledger === "scope") {
     if (record.kind === "local") return false;
-    const repo = repoOfTarget(record.target);
-    return typeof repo === "string" && repo.normalize("NFC") === String(spec.name).normalize("NFC");
+    return recordInRepo(record, String(spec.name));
   }
   return true;
 }

@@ -3,6 +3,7 @@ import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
 import { configError } from "./config.mjs";
+import { unqualifiedScope } from "./pause-windows.mjs";
 import { scopeKeyPrefix } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
@@ -1012,8 +1013,9 @@ export async function runJob(job, deps) {
 				// A local job's scope is a full host path and its "comment" is not dropped -- the wiring's
 				// local adapter LOGS the text (start.mjs forgeFor fallthrough) -- so the path must never
 				// enter the message; "this folder" is enough beside the jobId the adapter logs. A forge
-				// scope IS the repo the comment posts on, safe to name.
-				const scopeLabel = job.kind === "local" ? "this folder" : scopedCaps.scope;
+				// scope IS the repo the comment posts on, safe to name, and named without a forge prefix (issue #498): the
+				// comment already lives on that forge, so `github:acme/web` reads as `acme/web` there.
+				const scopeLabel = job.kind === "local" ? "this folder" : unqualifiedScope(scopedCaps.scope);
 				await comment(job, `Over the ${w} run cap for ${scopeLabel} (${win.cap}). Not run.`);
 				// The scope rides the log as its 16-hex key, NEVER the raw string: a folder-scoped cap would
 				// put a full host path in the worker log against no-pii-in-logs (the record keeps only
@@ -1125,7 +1127,7 @@ export async function runJob(job, deps) {
 					// such job until the operator changes a setting, which "no room left" would hide behind a wait that never ends.
 					const capBelowJob = reservation.capMicros < job.maxCostMicros;
 					const refusedBy = reservation.ledger === DOLLAR_KEY_PREFIX ? "deployment" : modelPrefixes.has(reservation.ledger) ? "model" : "scope";
-					const whose = refusedBy === "deployment" ? "this deployment" : refusedBy === "model" ? `the model ${modelPrefixes.get(reservation.ledger)}` : job.kind === "local" ? "this folder" : scopedDollars.scope;
+					const whose = refusedBy === "deployment" ? "this deployment" : refusedBy === "model" ? `the model ${modelPrefixes.get(reservation.ledger)}` : job.kind === "local" ? "this folder" : unqualifiedScope(scopedDollars.scope);
 					await comment(
 						job,
 						capBelowJob

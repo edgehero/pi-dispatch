@@ -849,6 +849,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   two occurrences of one cron trigger — with no configuration, no tool, and no off-switch. Caps and
   concurrency shall be operator-editable live via the confirm-gated tools and the `/dispatch` panel
   (`INT-SCOPED-LIMITS-FILE-CONTRACT`); the mutex alone is code.
+- **Forge-separated scopes** (issue #498): a row may name one forge's repo as `<kind>:owner/name`
+  (`github:acme/web`), while a bare `owner/name` row keeps naming that repo on every forge. A job matches its
+  qualified row first, then its bare row; a file with both for one repo is refused. Every counter, slot and lease
+  is keyed by the matched row, so a bare row keeps its pre-upgrade count and a GitHub and a Forgejo job for one
+  repo under qualified rows never share a limit.
 - **Dollar windows** (issues #501 part 5 and #502 part 6, file version 2): a repo or folder row may also cap
   what the scope's jobs spend per day, week and month in dollars (`dayUsd`, `weekUsd`, `monthUsd`), and a
   `model:<provider>/<model>` row caps what every job spends on that model, across every scope. Each is reserved
@@ -881,6 +886,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   per-job cap, then the worker and `doctor` warn, and a job its trigger does not cap is refused `config-refused`.
   Given a row window below the per-job cap, then `doctor` warns, and the refusal says the budget is smaller than
   the run's cost limit rather than that no room is left.
+  Given qualified rows `github:acme/web` and `forgejo:acme/web` (issue #498), then a GitHub job and a Forgejo job
+  for `acme/web` take separate counters and leases; given a bare `acme/web` row instead, then both share it and it
+  keeps the count it had before the upgrade (no key moved). Given a bare and a qualified row for one repo, or an
+  unknown forge prefix, then the file is refused naming both indexes or the known kinds. Given a qualified row in a
+  version 1 file, then the file is refused naming version 2, so no build reads it as an inert repo string. Given a bare row and
+  triggers on more than one forge kind, then `doctor` warns with the qualified spellings.
 
 ## REQ-WAIT-FOR
 
@@ -1341,7 +1352,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: The worker shall support **per-scope scheduled pause windows**: a `pause-windows.json`
   (`PI_PAUSE_WINDOWS_FILE`) of `{ scope, from, to, tz?, days?, dateFrom?, dateTo? }` entries, where `scope`
-  matches a job's `repo` (github) or `folder` (local), or `"*"` for all. A job whose scope is inside an
+  matches a job's `repo` (any forge) or `folder` (local), a forge-qualified `<kind>:owner/name` matches that
+  repo on that forge only (issue #498), and `"*"` matches all. A job whose scope is inside an
   active window is **deferred** to the window's end via BullMQ's delayed set (`job.moveToDelayed`), **not
   dropped** — it keeps its jobId/dedup, survives restart, and resumes automatically when re-picked. The gate
   runs **before the budget reservation**, so a deferred job reserves no slot and spends nothing. Windows
@@ -1366,7 +1378,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   delayed until the window end and reserves no budget slot; given the same job out of the window, it runs;
   given a malformed pause-windows edit at runtime, the worker logs `pause_windows_reload_invalid` and keeps
   the last-good windows; given `dispatch_pause_add` with no interactive operator, it refuses and writes
-  nothing; given an approved confirm, it writes exactly the shown window.
+  nothing; given an approved confirm, it writes exactly the shown window. Given a window `github:acme/web`
+  covering now (issue #498), then the GitHub job for `acme/web` is deferred and the Forgejo job for it is not;
+  given a bare `acme/web` window, then both are deferred, as before; given `gitub:acme/web`, then the file is
+  refused naming the forge kinds.
 
 ---
 
@@ -2912,6 +2927,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-03 | Issue #498, forge-qualified scopes. **`REQ-SCOPED-LIMITS` AMENDED**: Statement and Acceptance, a row may name one forge's repo as `<kind>:owner/name`, a job matches its qualified row before its bare row, a file with both for one repo is refused, and every counter, slot and lease is keyed by the matched row, so a bare row keeps its pre-upgrade count; doctor warns about a bare row when triggers name more than one forge kind. **`REQ-SCOPED-PAUSE-WINDOWS` AMENDED**: Statement and Acceptance, a qualified window pauses one forge's repo while a bare window still pauses it on every forge, and an unknown prefix is refused. A qualified row needs file version 2, and a qualified repo must have a forge repo's shape. **Code evidence**: worker/src/scoped-limits.mjs -> limitFor, rowScopeFor, refuseMixedForms; worker/src/pause-windows.mjs -> qualifiedScopeOf, parseScopeString, pauseUntilMs; worker/src/doctor.mjs; admin/src/costs.mjs -> repoKeyOf, recordInRepo; worker/test/scope-mutex.test.mjs; worker/test/processor.test.mjs. |
 | 2026-10-03 | The leftovers of the #501 and #502 round's reviews. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the `model-not-allowed` stop sentence now also names a request change the trigger does not allow ("...this trigger does not allow, or to change an AI request in a way it does not allow..."), since the runner's model guard also stops a call whose request a hook rewrote or whose sampling settings route it, and the old sentence read as a model swap in those cases. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS. |
 | 2026-10-03 | PR #558, the end-of-round check of #501 and #502. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, Who authors which comment: a `model-unknown` refusal whose `why` starts `overlay-` posts its own fixed sentence saying the deployment's model settings file cannot be used, naming no path and no model, since the old sentence sent the author to the trigger's model settings when the operator's file was the problem. **`REQ-MODEL-POLICY` AMENDED**, Acceptance: that comment, and the run record's `why`. **Code evidence**: worker/src/processor.mjs -> OVERLAY_REFUSED_COMMENT, runJob; worker/src/run-history.mjs -> buildRecord; worker/test/model-policy.test.mjs; worker/test/run-history.test.mjs. |
 | 2026-10-03 | Issue #501 part 6 and the doctor recommendations of #501 and #502. **`REQ-MULTI-HOST-COORDINATION` AMENDED**, the Acceptance: two hosts whose dollar caps (or whose `PI_ALLOWED_MODELS` choice of model rows) differ are named by doctor, and so is a peer publishing no dollar fingerprint while dollar caps are in use, a dollar counter on the Valkey counting as in use, best effort; the fingerprint is numbers and counter hashes only and nothing refuses on it. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, the cost-cap clauses (d): doctor warns when the per-job cap is below one full-output call of the main or a listed model, a stated lower bound of the runner's own bound that carries its service-tier multiplier ($1.00608 for the default model). **`REQ-MODEL-POLICY` AMENDED**, the Acceptance: doctor names a trigger of any kind whose model the worker's gate would refuse, and the deployment's own default model or `PI_ALLOWED_MODELS` entry, a listed non-main provider with no credential source, and any disagreement between pi's own loader and the worker's catalog on the overlay `models.json` (the pinned pi beside the worker, compared only at the pin, in doctor's process, not the job image: the two share one lockfile, and a probe container would need the canary's venue, user and SELinux handling on every run). **`REQ-SPEND-CAPS-MULTI-WINDOW` and `REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: no window moves, and every new doctor line is a warning that never fails a run. **Code evidence**: worker/src/dollar-fingerprint.mjs; worker/src/doctor.mjs -> fleetDollarChecks, costCapFitChecks, unknownModelChecks, listedProviderCredentialChecks, overlayLoaderParityChecks; worker/src/pi-model-loader.mjs -> loadPiModelLoader. |

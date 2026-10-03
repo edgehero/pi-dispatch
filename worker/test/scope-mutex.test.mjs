@@ -988,3 +988,53 @@ test("a link-local endpoint takes the FLEET slot: one neighbour on a shared link
 		await a;
 	}
 });
+
+// --- forge-qualified scopes (issue #498) ---------------------------------------------------------------
+
+// Forge-qualified rows need version 2 (released builds refuse such a file rather than read an inert repo string).
+const limitsOf2 = (rows) => parseScopedLimits(JSON.stringify({ version: 2, limits: rows }), "sl.json");
+const fjJob = (id, repo) => spyJob(id, { kind: "forgejo", repo, target: { number: 1 }, flow: "fix", trigger: { deliveryId: id, sender: { id: 1 } } });
+
+test("a qualified concurrent: 1 row defers a second GitHub job and admits the Forgejo job for the same repo", { skip }, async () => {
+	const h = harness({ limits: limitsOf2([{ scope: "github:acme/web", concurrent: 1 }]) });
+	const first = h.processor(ghJob("g-1", "acme/web").job, "tok", new AbortController().signal);
+	await h.untilStarted(1);
+	await assert.rejects(() => h.processor(ghJob("g-2", "acme/web").job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(h.inFlight.count("github:acme/web"), 1, "the slot is keyed by the ROW's scope");
+	const forgejo = h.processor(fjJob("f-1", "acme/web").job, "tok", new AbortController().signal);
+	await h.untilStarted(2);
+	h.releaseNext();
+	h.releaseNext();
+	await Promise.all([first, forgejo]);
+	assert.equal(h.inFlight.count("github:acme/web") + h.inFlight.count("acme/web"), 0);
+});
+
+test("a bare concurrent: 1 row defers across forges: one key, the one it had before qualified scopes", { skip }, async () => {
+	const h = harness({ limits: limitsOf([{ scope: "acme/web", concurrent: 1 }]) });
+	const first = h.processor(ghJob("g-1", "acme/web").job, "tok", new AbortController().signal);
+	await h.untilStarted(1);
+	assert.equal(h.inFlight.count("acme/web"), 1);
+	await assert.rejects(() => h.processor(fjJob("f-1", "acme/web").job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(h.seen.started, 1, "the Forgejo job never started while the GitHub one held the bare row");
+	h.releaseNext();
+	await first;
+});
+
+test("the fleet lease key is slot:s:<hash16 of the ROW scope>:<i>, the hash the boot sweeper computes from the file", { skip }, async () => {
+	const limits = limitsOf2([{ scope: "forgejo:acme/web", concurrent: 1 }]);
+	const lease = leaseRedis();
+	const h = harness({ limits, extra: { scopeLease: makeFleetLease({ redis: lease, holderPrefix: "mini1", keyFor: scopeSlotKey, ttlMs: 60_000, timeoutMs: 50 }) } });
+	const run = h.processor(fjJob("f-1", "acme/web").job, "tok", new AbortController().signal);
+	await h.untilStarted(1);
+	// start.mjs sweeps `hash16(r.scope)` for each row: the same string the gate leased under.
+	assert.deepEqual([...lease.store.keys()], [scopeSlotKey(hash16(limits[0].scope), 0)]);
+	assert.deepEqual([...lease.store.keys()], [`slot:s:${hash16("forgejo:acme/web")}:0`]);
+	// The GitHub job for the same repo has no row: no lease at all.
+	const other = h.processor(ghJob("g-1", "acme/web").job, "tok", new AbortController().signal);
+	await h.untilStarted(2);
+	assert.equal(lease.store.size, 1);
+	h.releaseNext();
+	h.releaseNext();
+	await Promise.all([run, other]);
+	assert.equal(lease.store.size, 0);
+});

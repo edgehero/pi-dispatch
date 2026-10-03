@@ -66,7 +66,7 @@ import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs"
 import { splitModelEntry } from "./model-ref.mjs";
 import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
-import { loadPauseWindows } from "./pause-windows.mjs";
+import { loadPauseWindows, parseScopeString } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
@@ -1346,6 +1346,7 @@ export async function collectChecks(shellVars, seams) {
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
 	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
+	const pauseWindowFacts = readPauseWindowFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
@@ -3415,6 +3416,12 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	// A scope that can only ever be a folder (issue #242's dead-scope rule): a forge repo always contains "/" and never
+	// begins "/", "./" or "../" or carries a backslash. A forge-qualified row (issue #498) names a repo by construction,
+	// so it is never one. Shared by the dead-scope advisory and the bare-repo one below, so one row is never called a
+	// dead folder by one line and a bare repo by the other.
+	const folderOnly = (s) => scopeFormOf(s) !== "qualified" && (s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || !s.includes("/") || /^[A-Za-z]:/.test(s));
+
 	// The dead-scope advisory (issue #242), honest about what doctor can actually judge. A forge repo
 	// always contains "/" and never begins "/", "./" or "../" or carries a backslash, so a scope in any
 	// of THOSE shapes can only ever be a folder -- and a folder row that matches no trigger's canonical
@@ -3428,7 +3435,6 @@ export async function collectChecks(shellVars, seams) {
 	// shape `render` prints the fix line too, which the old `ok: true` never did.
 	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0 && parseError === null && triggersFilePath !== null) {
 		const folderSet = new Set(folders);
-		const folderOnly = (s) => s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || !s.includes("/") || /^[A-Za-z]:/.test(s);
 		// A model row (version 2) names a model, never a folder, so it is never "a folder no trigger runs in".
 		const dead = scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && folderOnly(s) && !folderSet.has(s));
 		if (dead.length > 0) {
@@ -3437,6 +3443,25 @@ export async function collectChecks(shellVars, seams) {
 				warn: true,
 				label: `${dead.length} scoped limit(s) name a folder no trigger runs in (${dead.join(", ")}) -- no trigger runs there, so unless a CLI or local job does, the cap guards nothing; scopes match exactly (no globs, folders by resolved ABSOLUTE path), so check the spelling against triggers.json run.folder or delete the entry`,
 				fix: `edit ${scopedLimitFacts.path} by hand or via dispatch_limit_edit/_delete -- repo-shaped scopes are never flagged here, because a webhook job's repo comes from the delivery, which triggers.json cannot enumerate`,
+			});
+		}
+	}
+
+	// Issue #498: a BARE repo scope (`acme/web`) matches that repo on every forge, so with triggers on more than one forge
+	// kind a bare row is one cap (one lease, one count) shared by GitHub's acme/web and Forgejo's, and a bare pause window
+	// pauses both. That may be meant, so this is a WARNING naming the qualified spellings, never a failure: refusing bare
+	// rows would stop existing workers from booting. Guarded like the dead-scope advisory, on readable triggers.
+	if (parseError === null && triggersFilePath !== null && forges.length > 1) {
+		const bareRows = scopedLimitFacts.parseError === null ? scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && scopeFormOf(s) === "bare" && !folderOnly(s)) : [];
+		const bareWindows = pauseWindowFacts.parseError === null ? [...new Set(pauseWindowFacts.windows.map((w) => w.scope).filter((s) => s !== "*" && scopeFormOf(s) === "bare" && !folderOnly(s)))] : [];
+		const named = [...new Set([...bareRows, ...bareWindows])];
+		if (named.length > 0) {
+			const what = [bareRows.length > 0 ? `${bareRows.length} scoped limit(s)` : null, bareWindows.length > 0 ? `${bareWindows.length} pause window(s)` : null].filter(Boolean).join(" and ");
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${what} name a bare repo (${named.join(", ")}) while triggers run on ${forges.join(" and ")}: a bare scope matches that repo on EVERY forge, so one cap, lease or pause covers all of them`,
+				fix: `if each forge should count on its own, write the scope forge-qualified: ${named.map((s) => forges.map((k) => `${k}:${s}`).join(" or ")).join("; ")} (a qualified row starts a new count, and a bare and a qualified row for one repo cannot both exist); keep the bare form if one shared cap is what you meant`,
 			});
 		}
 	}
@@ -4261,6 +4286,30 @@ function readScopedLimitFacts(env, fileExists) {
 		return { limits: parseScopedLimits(readFileSync(path, "utf8"), path), parseError: null, path };
 	} catch (e) {
 		return { limits: [], parseError: e?.message ?? String(e), path };
+	}
+}
+
+/**
+ * The pause-windows facts (issue #498): the parsed windows when PI_PAUSE_WINDOWS_FILE is set, else none. A file that
+ * does not load is the BOOT_FILES check's line, so here it only silences the advisories that read the windows.
+ */
+function readPauseWindowFacts(env, fileExists) {
+	const path = env.PI_PAUSE_WINDOWS_FILE;
+	if (typeof path !== "string" || path.trim() === "") return { windows: [], parseError: null };
+	try {
+		if (!fileExists(path) || !statSync(path).isFile()) return { windows: [], parseError: "unreadable" };
+		return { windows: loadPauseWindows({ pauseWindowsFile: path }, { readFileSync, existsSync: fileExists }), parseError: null };
+	} catch (e) {
+		return { windows: [], parseError: e?.message ?? String(e) };
+	}
+}
+
+/** A written scope's form (`parseScopeString`), or null for one it refuses: a fact reader classifies, never throws. */
+function scopeFormOf(scope) {
+	try {
+		return parseScopeString(scope).type;
+	} catch {
+		return null;
 	}
 }
 

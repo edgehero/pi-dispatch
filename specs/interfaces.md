@@ -5415,8 +5415,17 @@ validator rather than a second copy of it.
   therefore FAILS on a blank value rather than softening it, judging the service and this shell as separate
   subjects, and `up` names the line rather than filling it in.
 - **Shape**: `{ "windows": [ { scope, from, to, tz?, days?, dateFrom?, dateTo? } ] }`.
-  - `scope` (required): a github `"owner/name"`, a local folder path, or `"*"` (all). Matched against a job's
-    `repo`/`folder` by `kind`, exact.
+  - `scope` (required): a forge `"owner/name"`, a forge-qualified `"<kind>:owner/name"` (issue #498), a local
+    folder path, or `"*"` (all). Matched exactly. A bare `"owner/name"` matches the RAW `scopeOf` value, so it
+    pauses that repo on every forge, as it always did. A qualified scope matches the job's `qualifiedScopeOf`
+    (`<kind>:<repo>`, NFC), so `github:acme/web` pauses the GitHub job and not the Forgejo job for the same repo.
+    `kind` is one of `FORGE_KINDS` (`worker/src/forges.mjs`). The SHARED `parseScopeString` classifies the value,
+    and a `<word>:` prefix that is not a forge kind (`gitub:acme/web`) refuses the file, naming the known kinds:
+    such a window would pause nothing. So is a qualified repo that is not a forge repo's shape (below, in
+    `INT-SCOPED-LIMITS-FILE-CONTRACT`'s `scope`). A one-letter drive prefix (`C:`) is a folder, handled as before.
+    **This file has no version**, so a worker older than issue #498 reads a qualified window as a plain string no job
+    has and pauses nothing, without a word. Every host that reads the file must run a build with issue #498 before a
+    qualified window is written; a bare window works on every build.
   - `from` / `to` (required): `"HH:MM"` 24h. `from > to` is an overnight window. `from == to` is **rejected**
     (a 24h pause is not expressible).
 
@@ -5469,8 +5478,22 @@ validator rather than a second copy of it.
     v2 cap field an old worker dropped would be a silently WIDENED spend limit. The protection covers
     STAMPED files only — a hand-edit that plants a future field in a `version: 1` file drops in silence,
     the operator-file policy working as designed.
-  - `scope` (required): a forge `"owner/name"` or a local folder path, matched EXACTLY against the job's
-    canonical scope — no prefixes, and any scope containing `"*"` is refused at parse (an exact matcher
+  - `scope` (required): a forge `"owner/name"`, a forge-qualified `"<kind>:owner/name"` (issue #498), or a
+    local folder path, matched EXACTLY against the job's scope. `kind` is one of `FORGE_KINDS`
+    (`worker/src/forges.mjs`) and the row is stored as `<kind>:<repo>`. The SHARED `parseScopeString` classifies
+    the value: a `<word>:` prefix that is not a forge kind (`gitub:acme/web`, `GitHub:acme/web`) refuses the
+    file, naming the known kinds, because such a row would be a cap that guards nothing. For the same reason the
+    repo after the prefix must have a forge repo's shape: two or more segments separated by single `/` (no leading
+    or trailing `/`, no `//`), with no `#`, `:` or control character and no whitespace at a segment's start or end,
+    so `github:acme/web/`,
+    `github:acme/web#12` and `github:github:acme/web` are refused. Whitespace inside a segment is allowed for
+    every forge, because Azure DevOps names may hold spaces (`azure:Fabrikam Fiber/Web App`) and the receiver copies
+    them verbatim; one rule is simpler than one per kind. A qualified row needs `"version": 2` (the
+    version rule below). A one-letter drive
+    prefix (`C:`) is a folder and keeps the handling described below. A BARE row and a QUALIFIED row for the
+    same repo (`acme/web` beside `github:acme/web`) refuse the file, naming both indexes, whatever fields
+    either carries (job counts or dollar windows): one row applies to a job, with no precedence ladder. Two
+    qualified rows for one repo on two forges are two rows. Any scope containing `"*"` is refused at parse (an exact matcher
     would make a glob row silently inert). The bare `"*"` carries its own refusal: the only non-redundant
     reading (a per-scope default) would invert the pause file's `"*"` (one rule matching all scopes); if
     a later version adopts it, an exact row beats `"*"`. Duplicate scopes (after trimming and
@@ -5504,7 +5527,10 @@ validator rather than a second copy of it.
     working tree is named that way). A NEAR MISS of it (`Model:`, `models:`, `model :`, any case, spaces before
     the colon) is refused with the exact form named, never read as a repo row that would cap nothing. `project:`
     and its near misses are reserved for project windows (#499) and refused in both versions, so that change
-    needs no version 3.
+    needs no version 3. A forge-qualified row (issue #498) needs version 2 as well: every build before it reads
+    `github:acme/web` as a plain repo string no job has, so a version 1 file holding one would carry a cap, a
+    concurrency limit and a lease that one build enforces and another silently drops. The writer stamps version 2
+    for a qualified row, and an older build refuses the file loudly.
 - **Canonicalization**: a local job's scope is `path.resolve(folder.trim())` and an absolute-path-shaped
   row is stored resolved, so every spelling of one directory (`/srv/site/`, `/srv//site`, `/srv/x/../site`)
   converges on one counter and one mutex slot, and Unicode is NFC-normalized on both sides (macOS's
@@ -5517,6 +5543,23 @@ validator rather than a second copy of it.
   named `a/b` cannot share counters. The pause matcher keeps the RAW `scopeOf` value — resolving there
   would change which jobs an operator's existing trailing-slash window matches; the folder-vs-repo split
   itself stays defined once, in `scopeOf`.
+
+  **Matching and row-keyed counters** (issue #498). A forge job matches the row equal to its `qualifiedScopeOf`
+  (`<kind>:<repo>`, NFC) first, then the row equal to its bare canonical repo, else no row; a local job matches its
+  resolved folder (`limitFor`). Since a bare and a qualified row for one repo cannot coexist, at most one of the two
+  exists. EVERY key is built from the MATCHED ROW's `scope`, never from the job's: the job-count windows
+  (`budgetCapsFor`), the dollar windows (`dollarCapsFor`), the in-process concurrency slot and the fleet lease
+  `slot:s:<hash16>` (`rowScopeFor`), and the boot sweeper, which already hashed row scopes. With no row, the slot is
+  keyed by the job's canonical scope, so the folder mutex is keyed exactly as before. The migration follows: no key
+  moves. A bare row keeps `budget:s:<sha256("acme/web")[:16]>`, the key every forge's job used before, so its counts
+  carry over and the admin, which recomputes keys from rows, keeps reading them; a test pins that literal. A row
+  rewritten from bare to qualified (or renamed at all) starts a new count under a new key, and the old key expires
+  on its own TTL; the admin's edit confirm says so. Jobs already running keep the slot and lease they took at pickup
+  under the old scope until they finish, while the new row counts from zero, so with `concurrent: N` up to 2N jobs
+  can run in that window;
+  the edit confirm and `docs/scoped-limits.md` say that too. **Residual**: two hosts on different instances of one forge
+  kind (two `FORGEJO_URL`s sharing one Valkey) still share `forgejo:acme/web`. One worker serves one instance per
+  forge kind, so the instance host is not in the scope; it would be added when someone runs that shape.
 - **Validation**: the SHARED `parseScopedLimits` (worker `./scoped-limits`) validates the WHOLE file
   fail-loud (`configError`, positional labels); the admin reads AND writes through it and the worker
   boot-loads through it, so the sides cannot drift (mirrors `INT-PAUSE-WINDOWS-FILE-CONTRACT`).
@@ -5530,14 +5573,16 @@ validator rather than a second copy of it.
   the exact widening the version field exists to prevent. The worker's directory watch hot-swaps on change
   and keeps the last-good set on a bad edit.
 - **Enforcement** (issue #242): scoped windows reserve FIRST, between the token-cap read and
-  the global `reserveBudget`, under redis keys `budget:s:<16-hex sha256 of the canonical scope>` composed
+  the global `reserveBudget`, under redis keys `budget:s:<16-hex sha256 of the matched row's scope>` (issue #498;
+  for a bare or folder row this is the canonical scope it always was) composed
   by the budget module's own key builders; a scoped refusal returns `reason: "scope-cap"` pre-spend with
   the global ledger untouched and its own counter kept (refused-still-counts, per ledger), and a GLOBAL
   refusal after a scoped reserve releases the scoped slot — neither ledger's REFUSALS may drain the
   other (a mid-reserve redis fault keeps the existing partial-INCR posture, on both ledgers alike). The
   refusal record's `budgetReserved` stays global-only (false on a `scope-cap` even though a scoped slot
   was spent). The worker log names the scope by its 16-hex key, never the raw string (a folder path in the
-  log would breach no-PII-in-logs); the forge comment may name the repo it posts on. Concurrency defers at
+  log would breach no-PII-in-logs); the forge comment may name the repo it posts on, and names it without a
+  forge prefix (issue #498: the comment already lives on that forge). Concurrency defers at
   the pickup gate with a fixed re-check delay; deferral consumes no attempt, no budget, no record. Since
   issue #230 the delayed set holds a FIFTH population beside cron next-occurrences, retry backoff, quiet
   hours and scope deferrals: jobs held on `run.waitFor`. A POLLED hold is told apart from a scope deferral
@@ -5560,7 +5605,7 @@ validator rather than a second copy of it.
   records.
 - **Dollar enforcement** (issues #501 part 5, #502 part 6; `DES-DOLLAR-RESERVE-AND-SETTLE`): a job reserves its
   per-job cap in ONE `reserveDollars` call over the deployment's windows, its scope row's dollar windows under
-  `budget:usd:s:<16-hex sha256 of the canonical scope>` (the same hash as the job-count key), and each model row it
+  `budget:usd:s:<16-hex sha256 of the matched row's scope>` (the same hash as the job-count key, issue #498), and each model row it
   may reach under `budget:usd:mdl:<16-hex sha256 of the LOWERCASED provider/model>`, each with the `:YYYY-MM-DD`,
   `:w:<Monday>` and `:m:YYYY-MM` suffixes of the deployment's keys. `budget:usd:p:` stays reserved for project
   windows (#499). A job with an allowed-model list reserves in the rows of its listed models (compared ignoring
@@ -5601,6 +5646,14 @@ validator rather than a second copy of it.
   then each is a string judged by `parseUsdMicros` and shown and written in its canonical form before the confirm,
   a malformed one is refused before it (a number is read by its value; one that does not print as a plain decimal of at most 6 places is refused), and the file is stamped version 2 only while a row needs
   it: deleting the last dollar or model row writes version 1 again.
+  Given rows `github:acme/web` and `forgejo:acme/web` with `concurrent: 1` (issue #498), then a GitHub job and a
+  Forgejo job for `acme/web` hold separate slots, leases and counters; given one bare `acme/web` row instead, they
+  share one, under the key that row had before the upgrade. Given `acme/web` beside `github:acme/web`, in count or
+  dollar rows, then the file is refused naming both indexes. Given `gitub:acme/web`, then it is refused naming the
+  forge kinds. Given `github:acme/web` in a version 1 file, then it is refused naming version 2, and the admin
+  writes such a row as version 2. Given `github:acme/web/` or `github:acme/web#12`, then it is refused as not a forge
+  repo. Given an edit that changes a row's scope, then the confirm says the count starts over and that running jobs
+  keep their old slot until they finish.
 
 ---
 
@@ -6646,3 +6699,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #556. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the pre-spend model refusals gain `overlay-not-a-file`: a `models.json` that is a named pipe, a socket or a device refuses every job, judged from the reader's `lstat` and never opened. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the reader paragraph: such a file is a `configError` marked `overlayNotAFile`, so neither the pickup nor `doctor` opens it, and `doctor` says ✗. **Code evidence**: worker/src/model-endpoints.mjs -> readOverlayModels; worker/src/model-catalog.mjs -> checkModelsKnown; worker/src/doctor.mjs; worker/src/index.mjs. |
 | 2026-10-03 | Issue #501, part 6 (the fleet fingerprint). **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: the row gains `fpUsd`, a digest of the four dollar settings (integer micro-dollars, the overlay over env as a job resolves them; with an invalid overlay the env values, and such a host refuses every job as `settings-overlay-invalid`), of every scoped-limits dollar row as its counter prefix and three caps, sorted, and (PR #551's review) of the model-row counters a job without its own list reserves in under `PI_ALLOWED_MODELS` (doctor's disagreement line names it); never a scope string, a model id or an amount in clear; a thunk, so an overlay or scoped-limits edit shows within one beat; it never abstains; `doctor` warns on a differing host and on a host that publishes none while dollar caps are in use (a published fingerprint, or, best effort, a dollar counter found by `EXISTS` on the current deployment keys and a bounded `SCAN`; a host with only a per-job cap leaves no counter), and nothing refuses on it. The content rule, the TTL, the close gating and the falsification test are UNCHANGED, checked: deleting the keyspace loses a warning, never a decision. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: the comparison with pi's own model loader runs in doctor's own process, never in a probe container. **Code evidence**: worker/src/dollar-fingerprint.mjs -> usdFingerprint, usdFingerprintInput; worker/src/start.mjs -> startWorker (`fpUsd`); worker/src/doctor.mjs -> fleetDollarChecks. |
 | 2026-10-03 | PR #558, the end-of-round check of #501 and #502. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a new tail field `why`, after `dollars`, additive, nullable and unconditional: the refusal's detail as the same fixed token the log line carries (`overlay-link` under `model-unknown`, `fallback-unlisted` under `model-not-allowed`), kept only when it matches `^[a-z][a-z0-9-]{0,63}$`, else null, so the record stays PII-free; every existing record reads as `why: null`. **Code evidence**: worker/src/run-history.mjs -> buildRecord; worker/src/processor.mjs -> runJob; worker/test/run-history.test.mjs. |
+| 2026-10-03 | Issue #498, forge-qualified scopes. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: Shape, a `scope` may be `<kind>:owner/name` with `kind` from `FORGE_KINDS`, an unknown `<word>:` prefix is refused naming the kinds, and a bare row beside a qualified row for one repo refuses the file naming both indexes (count and dollar rows alike); Canonicalization, a forge job matches its qualified row first, then its bare row, and every key (job-count windows, dollar windows, the in-process slot, the fleet lease, the sweeper) is built from the MATCHED ROW's scope, so a bare row keeps its pre-upgrade key (pinned by a literal in a test) and a rewritten row starts a new count; Enforcement, the key wording follows and the forge comment names the repo without its prefix; the residual of two hosts on different instances of one forge kind is recorded. **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED**: Shape, a qualified scope pauses one forge's repo (matched against `qualifiedScopeOf`) while a bare one still matches the raw `scopeOf` value on every forge, and an unknown prefix is refused. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record already carries `kind`, which the admin's by-repo fold now keys on. Review fixes in the same PR: a qualified row needs `"version": 2` (the admin stamps it), so a released build refuses the file instead of reading an inert repo string; a qualified repo must have a forge repo's shape (segments separated by single `/`, no `#`, `:` or control character, no whitespace at a segment's start or end, while Azure names may hold spaces inside one), in both files; a scope edit says jobs already running keep their slot under the old scope until they finish; and a qualified pause window is ignored by workers older than this build, so every host runs it before one is written. **Code evidence**: worker/src/scoped-limits.mjs -> normalizeLimit, refuseMixedForms, scopedLimitsVersionFor, limitFor, rowScopeFor; worker/src/pause-windows.mjs -> parseScopeString, parsePauseWindows, pauseUntilMs; worker/src/processor.mjs; admin/src/index.ts -> scopeChangeNote; worker/test/scoped-limits.test.mjs; worker/test/pause-windows.test.mjs. |

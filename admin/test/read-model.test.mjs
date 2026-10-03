@@ -2109,6 +2109,10 @@ test("writeScopedLimits validates the RESULT through the shared parser and leave
   assert.equal(fs.files.get("sl.json"), before);
   const glob = writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (list) => [...list, { scope: "acme/*", day: 1 }] });
   assert.match(glob.invalid, /scopes match exactly/);
+  // Issue #498: a qualified row beside the bare row for the same repo is refused through the same parser, naming both.
+  const mixed = writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (list) => [...list, { scope: "forgejo:acme/web", day: 1 }] });
+  assert.match(mixed.invalid, /index 1.*at index 0/);
+  assert.equal(fs.files.get("sl.json"), before);
 });
 
 test("readScopedBudget GETs only the windows a row caps; absent keys are honest zeros; dead queue degrades", async () => {
@@ -2132,6 +2136,26 @@ test("readScopedBudget GETs only the windows a row caps; absent keys are honest 
   const dead = await readScopedBudget({ url: "not-a-url", limits });
   assert.ok(dead.unreachable, "junk URL degrades synchronously, never a timeout burn");
   assert.deepEqual(await readScopedBudget({ url: "redis://x", limits: [] }), { rows: [] });
+});
+
+test("issue #498: readScopedBudget reads a bare row's PRE-UPGRADE key, and a qualified row its own", async () => {
+  // The literal is the key a bare "acme/web" row had before qualified scopes existed (sha256 of the bare string, 16 hex):
+  // the worker reserves under it for every forge's job, so the counts an operator saw yesterday are the counts shown.
+  const limits = [
+    { scope: "acme/web", day: 3, week: null, month: null, concurrent: null },
+    { scope: "github:acme/api", day: 5, week: null, month: null, concurrent: null },
+  ];
+  const now = new Date();
+  const redis = {
+    async get(key) {
+      if (key === dayKey(now, "budget:s:86f279ce9c29f106")) return "2";
+      if (key === dayKey(now, scopeKeyPrefix("github:acme/api"))) return "4";
+      return null;
+    },
+    disconnect() {},
+  };
+  const res = await readScopedBudget({ url: "redis://x", limits, redisFn: () => redis });
+  assert.deepEqual(res.rows, [{ day: 2 }, { day: 4 }]);
 });
 
 test("writeScopedLimits writes the LOWEST version that expresses the file: v1 stays v1, a dollar or model row makes v2 (#501 p5, #502 p6)", () => {

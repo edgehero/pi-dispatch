@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { COST_CLASSES, COSTS_WINDOWS, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts } from "../src/costs.mjs";
+import { COST_CLASSES, COSTS_WINDOWS, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts, recordInRepo, repoKeyOf } from "../src/costs.mjs";
 import { parseSubscriptions } from "@edgehero/pi-dispatch/subscriptions";
 
 test("costs.mjs is pure: no fs, no redis, no queue, no env, no console -- records and opinions in, typed dollars out", () => {
@@ -447,7 +447,7 @@ test("byTrigger buckets on the passed-in join; chained/manual/unattributed are e
   assert.equal(fold([cronRun]).byTrigger, null, "no join wired -> null, because 'not computed' and 'nothing attributed' are different sentences");
 });
 
-test("byRepo groups on the stripped target; local targets ride whole and a missing target is its own stated bucket", () => {
+test("byRepo groups on the stripped target, forge-qualified; local targets ride whole and a missing target is its own stated bucket", () => {
   const gh1 = rec({ jobId: "r1", kind: "github", target: "acme/api#12", tokens: tok(0.5), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "anthropic", model: "claude-sonnet-4" });
   const gh2 = rec({ jobId: "r2", kind: "github", target: "acme/api#34", tokens: tok(0.25), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.25 })]), provider: "anthropic", model: "claude-sonnet-4" });
   const gl = rec({ jobId: "r3", kind: "gitlab", target: "group/proj!3", tokens: tok(0.1), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.1 })]), provider: "anthropic", model: "claude-sonnet-4" });
@@ -457,8 +457,8 @@ test("byRepo groups on the stripped target; local targets ride whole and a missi
   assert.deepEqual(
     f.byRepo.map((r) => [r.label, r.runs, r.kind]),
     [
-      ["acme/api", 2, "github"],
-      ["group/proj", 1, "gitlab"],
+      ["github:acme/api", 2, "github"],
+      ["gitlab:group/proj", 1, "gitlab"],
       ["local:site", 1, "local"],
       ["(no target)", 1, "local"],
     ],
@@ -466,6 +466,24 @@ test("byRepo groups on the stripped target; local targets ride whole and a missi
   );
   assert.equal(f.byRepo[0].cost.usd, 0.75);
   assert.equal(f.byRepo[3].key, null, "machine key null for the no-target bucket -- the flowKey lesson");
+});
+
+test("issue #498: one repo on two forges is two byRepo rows; a bare repo filter selects both, a qualified one selects one", () => {
+  const priced = (jobId, kind, cost) => rec({ jobId, kind, target: "acme/web#1", tokens: tok(cost), usage: usage([row("anthropic", "claude-sonnet-4", { cost })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const gh = priced("g1", "github", 0.5);
+  const fj = priced("f1", "forgejo", 0.25);
+  const f = fold([gh, fj]);
+  assert.deepEqual(f.byRepo.map((r) => [r.key, r.label, r.runs, r.kind]), [["github:acme/web", "github:acme/web", 1, "github"], ["forgejo:acme/web", "forgejo:acme/web", 1, "forgejo"]]);
+  assert.equal(repoKeyOf(gh), "github:acme/web");
+  assert.equal(repoKeyOf(rec({ target: "local:site" })), "local:site", "a local record keys by its target as before");
+  assert.equal(repoKeyOf(rec({ target: null })), null);
+  // dispatch_costs filters through recordInRepo: bare = every forge (today's result), qualified = one forge.
+  assert.deepEqual([gh, fj].filter((r) => recordInRepo(r, "acme/web")).map((r) => r.jobId), ["g1", "f1"]);
+  assert.deepEqual([gh, fj].filter((r) => recordInRepo(r, "github:acme/web")).map((r) => r.jobId), ["g1"]);
+  assert.deepEqual([gh, fj].filter((r) => recordInRepo(r, "forgejo:acme/web")).map((r) => r.jobId), ["f1"]);
+  assert.equal(recordInRepo(rec({ target: "local:site" }), "local:site"), true, "a local target still filters by its key");
+  assert.equal(recordInRepo(gh, "gitlab:acme/web"), false);
+  assert.equal(recordInRepo(gh, ""), false);
 });
 
 test("repoOfTarget strips exactly the forge issue/MR tail and nothing else", () => {

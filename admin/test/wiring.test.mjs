@@ -639,6 +639,34 @@ test("dispatch_costs.execute returns the typed fold as JSON, class on every doll
   }
 });
 
+test("issue #498: dispatch_costs.execute's repo filter: a bare repo folds every forge's runs, a qualified one only that forge's", async () => {
+  const prevLogsDir = process.env.PI_LOGS_DIR;
+  const prevSubs = process.env.PI_SUBSCRIPTIONS_FILE;
+  const dir = tempDir("admin-costsrepo-");
+  const endedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  for (const [jobId, kind] of [["gh-1", "github"], ["fj-1", "forgejo"]]) {
+    writeFileSync(join(dir, `${jobId}.json`), JSON.stringify({ jobId, kind, target: "acme/web#1", flow: "fix", outcome: "completed", endedAt, provider: "anthropic", model: "claude-sonnet-4", tokens: { input: 10, output: 5, total: 15, cost: 0.25, metered: true, calls: 1, unpriced: 0, unresolved: 0 } }));
+  }
+  process.env.PI_LOGS_DIR = dir;
+  process.env.PI_SUBSCRIPTIONS_FILE = join(dir, "absent-subscriptions.json");
+  try {
+    const { calls } = await loadRegistered();
+    const costs = toolByName(calls, "dispatch_costs");
+    const runs = async (repo) => JSON.parse((await costs.execute("call", { window: "7d", repo })).content[0].text).fold.provenance.runsTotal;
+    assert.equal(await runs("acme/web"), 2, "bare: the repo on every forge, today's result");
+    assert.equal(await runs("github:acme/web"), 1, "qualified: one forge");
+    assert.equal(await runs("forgejo:acme/web"), 1);
+    assert.equal(await runs("gitlab:acme/web"), 0);
+    const fold = JSON.parse((await costs.execute("call", { window: "7d" })).content[0].text).fold;
+    assert.deepEqual(fold.byRepo.map((r) => r.key).sort(), ["forgejo:acme/web", "github:acme/web"], "the byRepo key is the qualified filter's spelling");
+  } finally {
+    if (prevLogsDir === undefined) delete process.env.PI_LOGS_DIR;
+    else process.env.PI_LOGS_DIR = prevLogsDir;
+    if (prevSubs === undefined) delete process.env.PI_SUBSCRIPTIONS_FILE;
+    else process.env.PI_SUBSCRIPTIONS_FILE = prevSubs;
+  }
+});
+
 test("logs renders in the overlay viewer and NEVER via sendMessage", async () => {
   const { calls, def } = await loadRegistered();
   const view = fakeCtx({ withCustom: true });

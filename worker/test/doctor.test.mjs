@@ -4715,6 +4715,65 @@ test("doctor: the dead-scope advisory stays SILENT when the triggers facts are u
 	assert.ok(!absent.find((x) => /name a folder no trigger runs in/.test(x.label)), "no triggers file: no advisory");
 });
 
+test("doctor: a bare repo row or bare pause window warns when triggers name two forge kinds, with the qualified spellings (issue #498)", async () => {
+	const dir = tempDir("pi-sl-bare-forges-");
+	const triggersPath = join(dir, "triggers.json");
+	const twoForges = [
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } },
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "forgejo", flow: "fix" } },
+	];
+	writeFileSync(triggersPath, JSON.stringify({ triggers: twoForges }));
+	const limitsPath = join(dir, "scoped-limits.json");
+	// A bare row (flagged), a qualified row (never flagged, by this line or by the dead-folder one), and two relative
+	// folder rows: the dead-folder line names those, and the bare-repo line must not also call them repos.
+	writeFileSync(limitsPath, JSON.stringify({ version: 2, limits: [{ scope: "acme/web", day: 9 }, { scope: "github:acme/api", day: 2 }, { scope: "site", day: 1 }, { scope: "./site", day: 1 }] }));
+	const pausePath = join(dir, "pause-windows.json");
+	writeFileSync(pausePath, JSON.stringify({ windows: [{ scope: "acme/docs", from: "22:00", to: "06:00" }, { scope: "*", from: "01:00", to: "02:00" }, { scope: "forgejo:acme/web", from: "09:00", to: "10:00" }] }));
+	const seams = () => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true });
+	const env = imgEnv({ PI_TRIGGERS_FILE: triggersPath, PI_SCOPED_LIMITS_FILE: limitsPath, PI_PAUSE_WINDOWS_FILE: pausePath });
+	const checks = await collectChecks(env, seams());
+	const c = checks.find((x) => /name a bare repo/.test(x.label));
+	assert.ok(c, "the ambiguity warning is present");
+	assert.equal(c.ok, false);
+	assert.equal(c.warn, true, "a warning, never a failure: a bare row may be meant");
+	assert.equal(c.fixAction, undefined, "never-tier");
+	assert.equal(c.label, "1 scoped limit(s) and 1 pause window(s) name a bare repo (acme/web, acme/docs) while triggers run on forgejo and github: a bare scope matches that repo on EVERY forge, so one cap, lease or pause covers all of them");
+	assert.match(c.fix, /forgejo:acme\/web or github:acme\/web; forgejo:acme\/docs or github:acme\/docs/);
+	assert.ok(!c.label.includes("acme/api") && !c.label.includes("*"), "qualified rows and \"*\" are not bare");
+	assert.ok(!/github:site|forgejo:site/.test(c.fix), "a relative folder row is never offered a forge-qualified spelling");
+	const dead = checks.find((x) => /name a folder no trigger runs in/.test(x.label));
+	assert.match(dead.label, /\(site, \.\/site\)/, "the relative folder rows are the dead-folder line's, and only theirs");
+	assert.ok(!dead.label.includes("github:acme/api"), "the dead-folder heuristic never flags a qualified row");
+	// One forge kind: silent.
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [twoForges[0]] }));
+	const one = await collectChecks(env, seams());
+	assert.ok(!one.find((x) => /name a bare repo/.test(x.label)), "one forge: no line");
+	// Two forges and only qualified scopes: silent.
+	writeFileSync(triggersPath, JSON.stringify({ triggers: twoForges }));
+	writeFileSync(limitsPath, JSON.stringify({ version: 2, limits: [{ scope: "github:acme/web", day: 9 }] }));
+	writeFileSync(pausePath, JSON.stringify({ windows: [{ scope: "*", from: "01:00", to: "02:00" }] }));
+	const qualified = await collectChecks(env, seams());
+	assert.ok(!qualified.find((x) => /name a bare repo/.test(x.label)), "qualified only: no line");
+});
+
+test("doctor: every forge-qualified spelling the bare-repo warning suggests parses, an Azure name with spaces included (issue #498)", async () => {
+	const dir = tempDir("pi-sl-azure-spaces-");
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } },
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "azure", flow: "fix", repository: "webapp" } },
+	] }));
+	const limitsPath = join(dir, "scoped-limits.json");
+	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: "Fabrikam Fiber/Web App", day: 3 }] }));
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: triggersPath, PI_SCOPED_LIMITS_FILE: limitsPath }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	const c = checks.find((x) => /name a bare repo/.test(x.label));
+	assert.ok(c, "the warning is present");
+	for (const spelling of ["azure:Fabrikam Fiber/Web App", "github:Fabrikam Fiber/Web App"]) {
+		assert.ok(c.fix.includes(spelling), spelling);
+		assert.equal(parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: spelling, day: 3 }] }), "sl.json")[0].scope, spelling, "the worker accepts the spelling doctor recommends");
+	}
+});
+
 // --- run.waitFor (issue #230) --------------------------------------------------------------------------
 
 function waitTriggersFile({ profiles = ["jira"], after } = {}) {

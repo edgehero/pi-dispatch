@@ -277,7 +277,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   already catastrophic (the second one's reaper kills the first's live containers) and stay unsupported.
 - **A second axis since issue #242 — per-SCOPE concurrency, by deferral**: the global knob bounds how
   many jobs run at once; it says nothing about WHERE they run. The pickup gate now also holds an
-  in-process in-flight count per scope (`scopeOf`'s folder-or-repo, resolved for local paths): a job
+  in-process in-flight count per scope (the matched `scoped-limits.json` row's scope since issue #498, else
+  `scopeOf`'s folder-or-repo, resolved for local paths): a job
   over its scope's ceiling is deferred through the delayed set on a fixed re-check (`moveToDelayed` +
   `DelayedError`, the pause-gate seam), never refused — a busy scope is transient state
   (`CONST-RETRY-INFRA-ONLY`). Local folders carry a structural ceiling of ONE with no configuration and
@@ -3260,7 +3261,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
      reads the worker's real env, names the merged fault for an overlay that is valid on its own.
   9. **Scope and model windows** (issues #501 part 5 and #502 part 6; `scoped-limits.json` version 2,
      `INT-SCOPED-LIMITS-FILE-CONTRACT`). A repo or folder row's `dayUsd`/`weekUsd`/`monthUsd` is a ledger under
-     `budget:usd:s:<hash16 of the canonical scope>` (`dollarCapsFor`, the same hash as the job-count key), and each
+     `budget:usd:s:<hash16 of the matched row's scope>` (`dollarCapsFor`, the same hash as the job-count key; for a
+     bare or folder row the canonical scope it always was, issue #498), and each
      `model:<provider>/<model>` row is one under `budget:usd:mdl:<hash16 of the lowercased provider/model>`
      (`modelDollarRows`). Lowercased because the record's usage ledger lowercases ids, and a model window settles
      from that ledger: one model is one counter, whatever case a row, a list or pi spells it in.
@@ -3895,7 +3897,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     nothing. Same placement discipline as the branch-protection and token-cap gates; consistent with
     `CONST-BUDGET-BEFORE-TOKENS` (a deferred job is not a job start).
   - **Library-first + no new dependency.** BullMQ owns the delay; `Intl` owns the timezone math. Keyed on
-    `job.data.repo` (github) / `job.data.folder` (local) by `job.data.kind`, `"*"` matching all.
+    `job.data.repo` (any forge) / `job.data.folder` (local) by `job.data.kind`, `"*"` matching all, and since
+    issue #498 a forge-qualified `<kind>:<repo>` window matching that forge's job only (`qualifiedScopeOf`).
 - **Traces to**: `REQ-SCOPED-PAUSE-WINDOWS`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`, `CONST-BUDGET-BEFORE-TOKENS`,
   `DES-CRON-VIA-BULLMQ-SCHEDULER` (the live-reload template), `DES-ADMIN-VIA-PI-EXTENSION` (the confirm-gated CRUD),
   `DES-WATCHERS-CLOSE-WITH-THE-WORKER`
@@ -3909,7 +3912,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   parser, boot-load fail-loud, directory watcher keeping last-good and closed with the worker
   (`DES-WATCHERS-CLOSE-WITH-THE-WORKER`), one mutable ref read once per
   pickup. The money windows reserve through `reserveBudget`'s existing `keyPrefix` seam under
-  `budget:s:<16-hex sha256 of the canonical scope>` — SCOPED FIRST, so a noisy scope's refusals never
+  `budget:s:<16-hex sha256 of the matched row's scope>` (for a bare or folder row, the canonical scope it always
+  was; issue #498): SCOPED FIRST, so a noisy scope's refusals never
   consume a global slot, with the compensating release when the GLOBAL window refuses after a scoped
   reserve committed (either order has a victim: scoped-second lets a scope's storm burn global slots,
   scoped-first-without-the-release lets a spent global cap drain every arriving scope's week and month
@@ -3931,6 +3935,38 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   a dollar row keeps a file every worker in a mixed fleet reads. **Why a model row lives here** and not in the
   overlay or the triggers file: it is a runtime money control over a shared counter, the same class as a repo's
   window, and it must be editable live without a reviewed trigger change.
+- **Forge-qualified scopes, row-keyed counters** (issue #498): a scope was the bare repo, so a GitHub `acme/web` and
+  a Forgejo `acme/web` shared one limit, one lease, one pause and one cost row. A row may now say `<kind>:owner/name`
+  (`qualifiedScopeOf`, `parseScopeString`, both beside `scopeOf` in `pause-windows.mjs`), and a job matches its
+  qualified row first, then its bare row. **Every key comes from the MATCHED ROW** (`budgetCapsFor`,
+  `dollarCapsFor`, `rowScopeFor` for the pickup slot and lease), never from the job. That is the whole migration:
+  a bare row hashes the same string it always did, so its counters, its lease keys and the admin's reads carry
+  over with no key moved, and a qualified row counts on its own. The boot sweeper already hashed row scopes, and
+  until now only agreed with the gate because matching was exact; the gate and the sweeper are now one rule.
+  `scopeOf` is unchanged, because the pause matcher and every existing bare window depend on its value.
+  **Rejected**:
+  - *Key counters by the job's qualified scope.* Every bare row's counter would reset at upgrade, and a bare row
+    meant as one shared cap would silently split into one cap per forge.
+  - *A precedence ladder where a qualified row beats a bare one.* One row applies to a job; with both present the
+    file reads as two caps while only one counts. Refusing the mixed file, naming both indexes, is the simpler
+    rule, and it is loud. It applies to dollar rows exactly as to count rows.
+  - *The instance host in the scope* (`forgejo:git.example.org/acme/web`). One worker serves one instance per
+    forge kind, so the host adds nothing there, and it would put a hostname into operator files and comments.
+    The residual, two fleet hosts on different instances of one kind sharing one Valkey, is recorded in
+    `INT-SCOPED-LIMITS-FILE-CONTRACT`.
+  - *Rewriting existing keys to the new form.* Keys are hashes the admin recomputes from rows; a rewrite script is
+    a new way to lose counts. A row an operator rewrites starts a new count, and the edit confirm says so.
+  - *Refusing bare rows.* That would stop existing workers from booting. Doctor warns about a bare row or a bare
+    pause window instead, when the triggers name more than one forge kind.
+  - *A qualified row in a version 1 file.* Every released build reads `github:acme/web` as a plain repo string no job
+    has, so it would drop the cap, the concurrency limit and the lease without a word: the failure version 2 exists
+    to stop. A qualified row therefore needs version 2, and the admin stamps it, so an older build refuses the file.
+    Pause windows have no version to bump; every host must run this build before a qualified window is written.
+  - *Carrying a running job's slot across a scope edit.* A job keeps the slot and lease it took at pickup, so a row
+    renamed while jobs run (bare to qualified, say) counts from zero under its new key beside them: with
+    `concurrent: N`, up to 2N jobs can run until the old ones finish.
+    Counting both spellings at the gate is more machinery than a transient edit window deserves; the edit confirm
+    and the docs say so instead.
 - **Why a file and not the overlay**: the deferral gate runs ABOVE the per-job settings read, so
   gate-read config must come from a watched mutable ref; and `KNOWN_KEYS` is a flat scalar list whose
   one map-shaped resident (`secretProfiles`) is deliberately model-unreachable — the opposite of the
@@ -7299,3 +7335,4 @@ a tunnel.
 | 2026-10-03 | Issue #500, part B: the meter's seams for child processes, pure and not wired into the runner yet. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, a new Child processes bullet: `onChange` on observe and on settle, `rows()`, `setChildren()` with `childTotal`, `childProcesses` and `unmeteredChildren` (root, other and loose stay the parent's, the four parts sum to total, the token cap on parent plus children), the child rows merged before the 8-row cut, `isStopped` asked before every call on both halves (fail closed), the install options `compat`, `brake` and `children`, the cost guard's `external` (fail closed) with `spentMicros` and `inflightMicros`, the ledger file format, the fold's rules (a high-water mark per file; malformed, `metered: false`, a shrink or a vanished file counts once as unmetered and is never partly trusted; no symlink, no FIFO, 64 KiB, 256 rows; ids held to the worker's rule by a copy and a test), and the first residuals. With no children the exit line and the install and teardown lines are UNCHANGED, checked by test. `DES-DOLLAR-RESERVE-AND-SETTLE`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked: nothing emits the new keys yet. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/usage-meter.test.mjs, cost-guard.test.mjs, child-ledger.test.mjs. |
 | 2026-10-03 | Issue #500, part B, the review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the Child processes bullet: ledger amounts are bounded at `Number.MAX_SAFE_INTEGER` and ids must be printable ASCII; `setChildren` saturates instead of zeroing and keeps a high-water mark per field; the fold tracks at most 512 names (the excess counts as unmetered unread) and skips a file that is unchanged or `done`; the SPENT file and `externalFor`, so a child never counts its own spend twice; the cost guard's `spend()` replaces the snapshot keys, so the exit line is byte-identical with `external` set; a throwing children hook stops a meter with a policy; an install asked for a brake it cannot build fails; `onChange` fires on a stop; `record()` clamps negative usage at 0; the `isStopped` sentences corrected (null, undefined and false mean go, and it is asked only while a hard stop exists); a new residual, a forger that zeroes `unresolved` and then kills a child mid-call. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/usage-meter.test.mjs, cost-guard.test.mjs, child-ledger.test.mjs. |
 | 2026-10-03 | Issue #500, part B, the second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the Child processes bullet: a `done` ledger is read like any other (only an unchanged signature skips a read), because a forged `done` with unchanged numbers froze a live child's ledger; the SPENT file's parts are whole micro-dollars rounded up, so `externalFor` never refuses its own writer's file; a new residual, a forged smaller SPENT or a deleted STOP only weakens a child's pre-call check. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/child-ledger.test.mjs. |
+| 2026-10-03 | Issue #498, forge-qualified scopes. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: a bullet on qualified scopes and row-keyed counters (every key, the pickup slot and lease included, comes from the matched row, so a bare row keeps its key and the gate and the boot sweeper are one rule) with five rejected alternatives: keying by the job's qualified scope, a precedence ladder, the instance host in the scope, rewriting keys, and refusing bare rows. **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` UNCHANGED, checked**: the lease key keeps its shape `slot:s:<hash16>:<i>`, now hashed from the matched row's scope, which is what the sweeper already hashed. Two more rejected alternatives: a qualified row in a version 1 file (released builds would read it as an inert repo string, so a qualified row needs version 2) and carrying a running job's slot across a scope edit (the edit confirm and the docs name that up to 2N jobs can run under `concurrent: N` until the old ones finish). **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-DOLLAR-RESERVE-AND-SETTLE` (item 9), `DES-CONCURRENCY-3` and `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` AMENDED (wording)**: their key and matcher sentences now name the matched row's scope and the qualified window. **Code evidence**: worker/src/scoped-limits.mjs -> limitFor, rowScopeFor, refuseMixedForms, scopedLimitsVersionFor; worker/src/pause-windows.mjs -> qualifiedScopeOf, parseScopeString, pauseUntilMs; worker/src/index.mjs; worker/test/scoped-limits.test.mjs; worker/test/scope-mutex.test.mjs. |
