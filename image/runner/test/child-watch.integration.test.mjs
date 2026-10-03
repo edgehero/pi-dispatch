@@ -176,7 +176,7 @@ test("the same under a dollar cap: the child judges against SPENT, the parent st
  */
 function ownProc(pids) {
 	const real = linuxProc();
-	return { scan: () => real.scan().filter((pid) => pids.has(pid)), alive: (pid) => real.alive(pid), cpuMs: (pid) => real.cpuMs(pid), environHas: (pid, entry) => real.environHas(pid, entry) };
+	return { scan: () => real.scan().filter((pid) => pids.has(pid)), alive: (pid) => real.alive(pid), cpuMs: (pid) => real.cpuMs(pid), environ: (pid) => real.environ(pid) };
 }
 
 /**

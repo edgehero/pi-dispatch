@@ -3020,9 +3020,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     once as unmetered, keeps the mark it had, and is not read again. A file is opened without following a
     symlink and without blocking, and must be a regular file, so a FIFO cannot hang the runner. A file whose
     inode, size and change times are unchanged is not read again; a `done` file is read like any other, so a
-    forged `done` cannot hide a live child's later writes. A `done` file whose process is gone (`retire(pid)`, the
-    detector's liveness on Linux) is RETIRED: its mark joins one aggregate and its name a set, and it is never read
-    or listed again, since a dead child cannot change what it reported. At most 512 OPEN names (tracked, not `done`,
+    forged `done` cannot hide a live child's later writes. A file whose process is gone, in ANY state (`retire(pid,
+    name, entry)`, the detector's liveness on Linux), is RETIRED as it stands: its mark joins one aggregate (a
+    `running` file's unresolved calls stay counted) and its name a set, and it is never read or listed again, since a
+    dead child cannot change what it reported. Any state, because a child killed with SIGKILL (pi's own bash tool
+    kills a timed-out command tree so) never writes `done`, and must not hold an open slot for the rest of the job. At most 512 OPEN names (tracked, not `done`,
     not already unmetered) are read (`CHILD_LEDGER_MAX_FILES`, the job's pids limit: every child a busy job can have
     alive); a further name counts as unmetered without being opened (`flooded`), which bounds the tick and the memory
     a flood of files can cost. Open, not ever seen: a job that runs thousands of short pi children over its life
@@ -3233,7 +3235,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     exactly as the parent's own would.
   - **The detector** (Linux; it reads `/proc`, so elsewhere there is none and `distinct` and `peak` are null).
     - **What it scans.** All of `/proc`, not the runner's own children: a background child reparents to init. It skips
-      this process, pid 1, and any process with `PF_FORKNOEXEC` set in `/proc/<pid>/stat` (forked and not yet exec'd:
+      this process, pid 1, and any process with `PF_FORKNOEXEC` set in `/proc/<pid>/stat`, read BEFORE the command line
+      (the flag only goes from set to clear, at exec, so a fork that execs between the two reads is never taken for its
+      parent) (forked and not yet exec'd:
       for the instant before it execs a tool it still shows its parent's command line, the runner's or a pi child's;
       measured, a node parent spawning `sh -c true` was caught in that window in 232 of 3143 5 ms scans, every one with
       the flag set, and before this skip a busy job could be stopped at teardown for it). At most 4 KiB of each command
@@ -3247,22 +3251,31 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
       runner a spawner started with `PI_DISPATCH_RUNNER_PID` cleared or set to its own identity is a pi process too,
       and with no ledger in this directory it is unmetered.
     - **When it is UNMETERED.**
-      - Its environment (`/proc/<pid>/environ`, the environment it started with, which it cannot rewrite), where it
-        can be read, does not carry `PI_DISPATCH_CHILD_LEDGER=<this directory>`: a ledger named after its pid is then
-        not its own, because a spawner that knows the pid can write one. A non-dumpable process (a nested runner on the
-        image's `runner-node`) cannot be read and keeps the ledger rule.
+      - Its environment (`/proc/<pid>/environ`, the environment it started with, which it cannot rewrite), read whole,
+        does not carry BOTH `PI_DISPATCH_CHILD_LEDGER=<this directory>` and the runner's `--import=<child preload>` in
+        `NODE_OPTIONS`: a ledger named after its pid is then not its own, because a spawner that knows the pid can
+        write one, and a spawner that keeps the ledger variable but drops `NODE_OPTIONS` leaves a child with no meter
+        (measured: a forged `done` file then hid 5 calls). A non-dumpable process (a nested runner on the image's
+        `runner-node`) cannot be read, and a read that filled its 64 KiB without finding both may have been cut short
+        (a large variable in front, measured as a false stop): both keep the ledger rule.
       - No ledger names its pid two ticks after it was first seen, if it is still alive then, whether or not it still
         looks like a pi process (a title can be changed after the fact).
       - It was seen alive and no ledger ever named it: counted at teardown (a child that lived less than two ticks).
-      - Its ledger is still `starting` after 10 s of the process's own CPU time (`STARTING_GRACE_MS`, utime plus stime;
-        M5: the grace runs from the preload's stub to the meter's install, not to `session_start`, because a `pi -p`
-        waiting on stdin has spent nothing). CPU, not wall time: measured with wall time, 40 children at one CPU had 20
-        of them counted unmetered while they were only starved. It is un-counted once the ledger is no longer
-        `starting` (which is why `setChildren` takes `unmetered` as given, not as a high-water mark). A `starting`
-        ledger of a DEAD process with zero spend ended before its meter started and is done; one with spend in it was
-        not written by the preload and is unmetered. Where the proc has no CPU reading, the grace is wall time on a
-        monotonic clock. Offline children cannot spend that CPU on package installs before the meter loads: the runner
-        forces `PI_OFFLINE=1` and children inherit it.
+      - Its ledger is still `starting` (its meter never installed) once its process has used more than 1 s of CPU
+        (`STARTING_CPU_MS`, utime plus stime) OR 60 s have passed since this parent first saw it so (`STARTING_WALL_MS`,
+        monotonic). An honest child installs its meter at about 0.3 s of CPU (measured, five runs), from the
+        preload's stub to the extension factory, not to `session_start`, because a `pi -p` waiting on stdin has spent
+        nothing (M5). CPU first, because a 10 s wall grace counted 20 of 40 starved children at one CPU; the wall bound
+        catches a meterless child that does I/O at little CPU (measured before it: 31 calls in 37 s at 720 ms of CPU,
+        never counted). At teardown, a live `starting` ledger first seen two ticks or more before is unmetered too. It
+        is un-counted once the ledger is no longer `starting` (which is why `setChildren` takes `unmetered` as given,
+        not as a high-water mark). Where the proc has no CPU reading, the wall bound alone applies. Offline children
+        cannot spend that CPU on package installs before the meter loads: the runner forces `PI_OFFLINE=1` and children
+        inherit it.
+      - A `starting` ledger of a DEAD process is judged once, when its file is retired: done only when the process was
+        seen `starting` for less than the wall grace, used less than the CPU grace, and the stub holds zero spend (a
+        child that ended before its meter started); otherwise unmetered. Retired, it is never read again, so a pid
+        reused later cannot revive it.
       - The fold counts its file unmetered (`metered: false`, malformed, shrank, vanished, past the open-file cap), or
         the directory went missing.
     - A child killed mid-call leaves `running` with `unresolved`: counted as unresolved, a floor, not as unmetered. A
@@ -3289,7 +3302,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **Rejected**: scanning only the runner's own children (`/proc/self/task/*/children`: a background child is
     reparented to init and drops out); matching any argument (an image read such as `tail -f run-job.mjs` stopped
     honest jobs, measured); stopping on in-flight bounds (premature, above); a SPENT written for an uncapped job;
-    a `starting` grace in wall time (above); counting every ledger ever seen against the file cap (an honest job's
+    a 10 s `starting` grace in wall time, and one in CPU time alone (above); counting every ledger ever seen against the file cap (an honest job's
     513th short child stopped it, measured); trusting a ledger by its pid alone (a forged zero `done` file hid an
     env-scrubbed child completely, measured); removing the directory at teardown (above).
   - **Residuals added**:
@@ -3317,7 +3330,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     - background-child stdout volume can push the exit line out of the 8 KiB tail the worker reads (fails closed: no
       line is the floor);
     - children do not see the overlay `models.json` (#503);
-    - a library-mode child that never calls is not a pi process to the detector and writes no file, by design.
+    - a library-mode child that never calls is not a pi process to the detector and writes no file, by design;
+    - a ZERO-USAGE ANSWER: pi turns a provider answer with no usage block into zeros, so the call is priced at 0, the
+      guard charges its bound with no floor counter, and the job settles metered at the reported cost. This holds for a
+      parent call and a child call alike (measured in a child); a follow-up issue covers it;
+    - a meterless child that ends before either grace (under 1 s of CPU and 60 s) and before teardown is taken for one
+      that never started (done), whatever it did in between;
+    - pid reuse around a dead `starting` stub: if its pid is reused before the parent's next tick sees the death, the
+      new process's liveness and CPU are read as the stub's (a quiet new owner hides the death until the wall grace; a
+      busy one is counted unmetered, fail closed);
+    - a spawner that pads the environment past 64 KiB in front of the ledger variable reaches the ledger rule, and with a
+      forged ledger for the pid the child is hidden.
     Two named in part C's final check: importing `model-runtime.js` with the wrapper's marker query
     (`?pi-dispatch-real=1`) loads the real module unwrapped (deliberate, the same class as a renamed copy of pi); a
     `require()` of pi's `dist/core/model-runtime.js` by absolute path throws (not in pi's exports map), which fails
@@ -7672,3 +7695,4 @@ a tunnel.
 | 2026-10-03 | Issue #499, part B (project rows). **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**, a new bullet: a `project:<id>` row caps every member of a project as one, keyed by its row scope like every row; the job-count ledgers are one ordered list from one builder (repo or folder row, project row, then global), reserved in order and given back in reverse through one helper on every refund path, replacing four hand-written scoped and three global release sites; the project `concurrent` is a slot and fleet lease taken after the repo slot and given back by one drain; rejected: a project keyspace, per-ledger release sites, project before repo, caps in projects.json, a silently dropped dangling row, a one-time reload retry (a rename strands both sides; replaced by judging the pair against the other file on disk), project rows in a version 1 file (2.1.0 reads them as inert repo rows). `budgetReserved` is one rule, global-only, on every path, and a Valkey fault inside the count reservations gives back every ledger that landed whole; inside the ledger that faulted, its windows INCRed before the fault stay counted, the pre-existing posture. Code evidence: `worker/src/scoped-limits.mjs` (`scopedLedgers`, `projectRowFor`, `projectDollarCapsFor`, `checkProjectRows`, `scopeClaimRows`, version 2 for project rows), `worker/src/budget.mjs` (`reserveLedgers`, `releaseLedgers`), `worker/src/processor.mjs` (`held`, `refundLedgers`, `globalHeld`, `jobCostPrefixes`), `worker/src/index.mjs` (`scopeHolds`, `releaseScopeHolds`, `deferScope`), `worker/src/start.mjs` (`pairWith`), `worker/src/dollar-budget.mjs` (`dollarLedgers` project tier); tests `worker/test/processor-projects.test.mjs`, `scope-mutex.test.mjs`, `start-wiring.test.mjs`. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: item 1, `budget:usd:p:` is withdrawn (one key rule; a project's dollar keys are `budget:usd:s:<hash16("project:<id>")>`); item 2, the reserve follows every job-count reserve and a refusal gives back every job-count slot; item 9, the one reservation gains the project tier (deployment, scope, project, models), the log and comment name a project refusal, and the job-cost settlement names its three ledger prefixes instead of taking every non-model part. |
 | 2026-10-03 | Issue #500, part E: the parent's fold, STOP and detector. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, a new bullet The parent's fold, STOP and detector: `child-watch.mjs` is the meter's children hook; each 1 s tick and the teardown fold the ledgers into the meter, judge the stops on the job as a whole (token cap on parent plus children; under a dollar cap the parent's settled spend plus the children's, or a child's cost refusal; under a list a child's model refusal or a child row off the PARENT's list), and treat an unmetered child as a breach under any policy (`cost-cap`, else `token_budget`, else `model-not-allowed`; uncapped, a floor only). SPENT under a dollar cap and STOP once stopped are written every tick (STOP also at the stop), so a deleted one comes back; a removed directory is made again and counted lost; the parent's own failed write is a breach. The Linux detector scans all of `/proc` (self and pid 1 skipped), takes argv[0] `pi` or `pi-rpc` or an argument realpathing to a pi entry or `run-job.mjs` as a pi process, and counts one unmetered with no ledger two ticks on, never ledgered by teardown, or `starting` past 10 s while alive; a dead `starting` stub with zero spend is done. Teardown writes STOP first, folds, then removes the directory; the teardown line gains `distinct`, `peak` and `unmetered`, and the exit line always carries the three child keys. Rejected and residuals added, including the two from part C's final check (the wrapper's marker query; a `require()` of `model-runtime.js` by path). The child route bullet: the directory is removed after the final fold (was: left for the container), and a pi subcommand gets a `done` ledger with zeros (was: nothing), because after `setupCli` its command line reads only `pi`. **Code evidence**: image/runner/src/child-watch.mjs -> createChildWatch, linuxProc, isPiProcess; image/runner/src/child-preload.mjs -> preload; image/runner/src/child-route.mjs -> PI_ENTRIES; image/runner/run-job.mjs; image/runner/test/child-watch.test.mjs; image/runner/test/child-watch.integration.test.mjs. |
 | 2026-10-03 | Issue #500, part E, the review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the parent's fold, STOP and detector bullet rewritten: the scan skips a process with `PF_FORKNOEXEC` set (a fork's instant before exec showed the runner's command line and could stop a job at teardown, measured), reads at most 4 KiB of a command line and stops after 200 ms per tick; a pi process is argv[0] `pi`/`pi-rpc` or argv[1] realpathing to a pi entry or `run-job.mjs` (no other argument: `tail -f run-job.mjs` stopped honest jobs); a pi process whose readable environment lacks this job's ledger directory is unmetered whatever ledger names its pid (a forged `done` file hid an env-scrubbed child); a pid seen with no ledger is judged at two ticks while alive even after its title changes; the `starting` grace is 10 s of the process's own CPU (wall time on a monotonic clock where no CPU reading exists) and a child that then installs is un-counted; a model-less child row is not judged against the parent's list; each ledger is charged the larger of its guard's spend and its metered cost (a child whose spawner dropped its cost cap had no guard and spent past the cap); the exit line's guard counters add the children's; the unmetered stop carries a cause and does not log `token_budget_exceeded`; the SIGTERM handler and the outer catch run the teardown before their exit line; the directory and its STOP are no longer removed at teardown. The ledger file is version 2 with the cost guard's four floor counters (version 1 is malformed); the fold retires a dead child's `done` file and caps only OPEN files (an honest job's 513th short child was flooded). Release coupling with part F named; rejected alternatives and residuals extended (the N-children overshoot, deliberate concealment, pid reuse, a fork that never execs, a transient listing failure, the scan on the event loop, model-less rows, stdout volume, #503, non-pi clients). **Code evidence**: image/runner/src/child-watch.mjs -> createChildWatch, linuxProc, isPiProcess, parseStat; image/runner/src/usage-meter.mjs -> foldChildLedgers, ledgerSettled, ledgerCharge, spentFile, childLedger, parseChildLedger, meterStopHandler, setChildren; image/runner/run-job.mjs -> finishMeter; image/runner/test/child-watch.test.mjs; image/runner/test/child-watch.integration.test.mjs. |
+| 2026-10-03 | Issue #500, part E, the second review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the detector: a pi process's readable start environment must carry both this job's ledger directory and the runner's preload in `NODE_OPTIONS` (a spawner that kept the variable and dropped `NODE_OPTIONS` hid a meterless child behind a forged ledger), and a read cut at 64 KiB without both is unknown (the ledger rule), not unmetered; the stat line is read before the command line; a live `starting` ledger is stuck past 1 s of its CPU or 60 s since first sight (an honest child installs at about 0.3 s; the CPU-only grace never caught a meterless child doing I/O), and one alive at teardown after two ticks counts; a dead `starting` ledger is judged once at retirement, done only under both graces with zero spend. The fold retires a dead process's file in any state, so SIGKILLed children no longer fill the open-file cap. Residuals added: the zero-usage answer (settles metered, a follow-up issue), a meterless child that ends under both graces, pid reuse around a dead stub, an environment padded past 64 KiB. **Code evidence**: image/runner/src/child-watch.mjs -> linuxProc, createChildWatch, STARTING_CPU_MS, STARTING_WALL_MS, PRELOAD_FLAG; image/runner/src/usage-meter.mjs -> foldChildLedgers; image/runner/test/child-watch.test.mjs. |

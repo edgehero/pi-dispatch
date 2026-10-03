@@ -2435,9 +2435,11 @@ const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSyn
  *   - a file whose signature has not changed since its last read is not read again (one lstat; it is still listed,
  *     so it can still vanish). A `done` file is read like any other: `state` is not a number the mark holds, so a
  *     forged `done` with unchanged numbers would otherwise blind the fold to a live child's later writes;
- *   - RETIREMENT (issue #500 part E's review): a `done` file whose process `retire(pid)` says is gone is folded into
- *     the `retired` aggregate (its mark, its charge, its pid) and its name is kept in a set, so it is never read or
- *     listed again; a file of a live process, or with no `retire`, stays tracked. A dead child's file cannot change
+ *   - RETIREMENT (issue #500 part E's review): a file, in ANY state, whose process `retire(pid, name, entry)` says is
+ *     gone is folded into the `retired` aggregate as it stands (its mark, its charge, its pid; a `running` file's
+ *     unresolved calls stay counted) and its name is kept in a set, so it is never read or listed again; a file of a
+ *     live process, an unmetered one, or any with no `retire`, stays tracked. A child killed with SIGKILL never
+ *     writes `done`, and must not hold an open slot for the rest of the job. A dead child's file cannot change
  *     what it reported, and a job that runs thousands of short pi children over its life must not flood;
  *   - at most CHILD_LEDGER_MAX_FILES OPEN names (tracked, not `done`, not already unmetered) are read; a new name past
  *     that is counted in `flooded`, unmetered and unread. `flooded` is a high-water mark of how many such names one
@@ -2503,7 +2505,7 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 		for (const [name, entry] of files) {
 			let gone = false;
 			try {
-				gone = !entry.unmetered && entry.state === "done" && retire(entry.pid) === true;
+				gone = !entry.unmetered && retire(entry.pid, name, entry) === true;
 			} catch {
 				gone = false;
 			}

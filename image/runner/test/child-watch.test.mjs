@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CMDLINE_BYTES, createChildWatch, isPiProcess, linuxProc, NO_LEDGER_TICKS, PF_FORKNOEXEC, STARTING_GRACE_MS } from "../src/child-watch.mjs";
+import { CMDLINE_BYTES, createChildWatch, ENVIRON_BYTES, isPiProcess, linuxProc, NO_LEDGER_TICKS, PF_FORKNOEXEC, PRELOAD_FLAG, STARTING_CPU_MS, STARTING_WALL_MS } from "../src/child-watch.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
 import { childLedger, CHILD_LEDGER_MAX_FILES, createCostGuard, createPolicyGuard, createUsageMeter, foldChildLedgers, writeFileAtomic } from "../src/usage-meter.mjs";
 import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
@@ -47,7 +47,7 @@ function writeLedger(dir, pid, body, nonce = "0123456789abcdef") {
 
 /**
  * A process table: `live` the pi pids scan() finds, `alive` the pids that exist (live ones included), `cpu` a pid's CPU
- * time in ms (0 unless set), `environ` a pid's answer to environHas (true unless set; null for unreadable).
+ * time in ms (0 unless set), `environ` a pid's start environment as linuxProc gives it (null, unreadable, unless set).
  */
 function fakeProc({ live = [], alive = [], cpu = {}, environ = {} } = {}) {
 	const table = { live: [...live], alive: new Set([...live, ...alive]), cpu: { ...cpu }, environ: { ...environ } };
@@ -56,7 +56,7 @@ function fakeProc({ live = [], alive = [], cpu = {}, environ = {} } = {}) {
 		scan: () => [...table.live],
 		alive: (pid) => table.alive.has(pid),
 		cpuMs: (pid) => table.cpu[pid] ?? 0,
-		environHas: (pid) => (Object.hasOwn(table.environ, pid) ? table.environ[pid] : true),
+		environ: (pid) => (Object.hasOwn(table.environ, pid) ? table.environ[pid] : null),
 	};
 }
 
@@ -343,56 +343,148 @@ test("a pi process that stops looking like one (its title changed after the fact
 	assert.equal(meter.state.stopReason, TOKEN_BUDGET);
 });
 
-test("a pi process whose environment does not carry this job's ledger directory is unmetered, whatever ledger names its pid; an unreadable environment keeps the ledger rule (issue #500)", () => {
+/** A start environment as linuxProc reads it: the job's ledger entry and the preload in NODE_OPTIONS unless left out. */
+const envOf = (dir, { ledger: withLedger = true, preload = true, extra = [], complete = true } = {}) => ({
+	entries: [...extra, "HOME=/home/pi", ...(withLedger ? [`PI_DISPATCH_CHILD_LEDGER=${dir}`] : []), `NODE_OPTIONS=--no-warnings${preload ? ` ${PRELOAD_FLAG}` : ""}`, ""],
+	complete,
+});
+
+test("a pi process whose environment lacks this job's ledger directory OR the preload is unmetered, whatever ledger names its pid; an unreadable environment keeps the ledger rule (issue #500)", () => {
 	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
-	const proc = fakeProc({ live: [60, 61], environ: { 60: false, 61: null } });
+	const proc = fakeProc({ live: [60, 61, 62, 63] });
 	const { dir, hook, logged } = watch({ meter, proc });
-	// A forged `done` ledger for pid 60 (its spawner scrubbed its environment and wrote this file), and a real one for 61
-	// (a nested runner on the non-dumpable runner-node: its environment cannot be read).
+	proc.table.environ = {
+		// Its spawner scrubbed everything and forged a `done` ledger for it.
+		60: envOf(dir, { ledger: false, preload: false }),
+		// A nested runner on the non-dumpable runner-node: its environment cannot be read.
+		61: null,
+		// Its spawner kept the ledger variable and dropped NODE_OPTIONS: no preload, so no meter, and a forged ledger.
+		62: envOf(dir, { preload: false }),
+		// An honest child.
+		63: envOf(dir),
+	};
 	writeLedger(dir, 60, ledger({ state: "done", calls: 0 }), "aaaaaaaaaaaaaaaa");
 	writeLedger(dir, 61, ledger(), "bbbbbbbbbbbbbbbb");
+	writeLedger(dir, 62, ledger({ state: "done", calls: 0 }), "cccccccccccccccc");
+	writeLedger(dir, 63, ledger(), "dddddddddddddddd");
 	hook.sample();
-	assert.equal(meter.snapshot().unmeteredChildren, 1);
-	assert.equal(meter.snapshot().childProcesses, 2, "pid 60's process is not counted twice");
-	assert.deepEqual(logged.find((line) => line.event === "unmetered_child").fields, { why: "environ", pid: 60, unmetered: 1 });
+	assert.equal(meter.snapshot().unmeteredChildren, 2, "pids 60 and 62");
+	assert.equal(meter.snapshot().childProcesses, 4, "no process counted twice");
+	assert.deepEqual(logged.find((line) => line.event === "unmetered_child").fields, { why: "environ", pid: 60, unmetered: 2 });
 	assert.equal(meter.state.stopReason, TOKEN_BUDGET);
 });
 
-test("the environment is matched on the exact ledger directory entry (issue #500)", () => {
-	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
-	const asked = [];
-	const proc = { ...fakeProc({ live: [62] }), environHas: (pid, entry) => {
-		asked.push(entry);
-		return true;
-	} };
+test("an environment read that filled ENVIRON_BYTES without both entries is unknown, not unmetered; the exact entries are matched; it is read once (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const proc = fakeProc({ live: [70, 71, 72] });
+	let reads = 0;
+	const environ = proc.environ;
+	proc.environ = (pid) => {
+		reads += 1;
+		return environ(pid);
+	};
 	const { dir, hook } = watch({ meter, proc });
+	proc.table.environ = {
+		// A 70 KB variable in front of ours: the read stopped before them.
+		70: { entries: [`BIG=${"x".repeat(ENVIRON_BYTES - 10)}`], complete: false },
+		// A prefix of the directory is not the directory; another preload is not ours.
+		71: envOf(`${dir}-other`),
+		72: { entries: [`PI_DISPATCH_CHILD_LEDGER=${dir}`, `NODE_OPTIONS=--import=${PRELOAD_FLAG.slice("--import=".length)}x`, ""], complete: true },
+	};
+	for (const pid of [70, 71, 72]) writeLedger(dir, pid, ledger(), `${pid}`.padStart(16, "0"));
 	hook.sample();
 	hook.sample();
-	assert.deepEqual(asked, [`PI_DISPATCH_CHILD_LEDGER=${dir}`], "read once per process");
+	assert.equal(meter.snapshot().unmeteredChildren, 2, "pids 71 and 72; pid 70 keeps the ledger rule, and has one");
+	assert.equal(reads, 3, "once per process");
 });
 
-test("a `starting` ledger: a dead pid with zero spend is done; a live one past 10 s of its own CPU is unmetered and un-counted once it runs; a dead one with spend is unmetered (issue #500)", () => {
+test("a live `starting` ledger is stuck past 1 s of its CPU or 60 s since first sight; un-counted once it runs (issue #500)", () => {
+	let clock = 0;
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
-	const proc = fakeProc({ live: [61, 62], alive: [], cpu: { 61: 0, 62: 0 } });
-	const { dir, hook } = watch({ meter, proc, now: () => 1e12 });
-	writeLedger(dir, 60, ledger({ state: "starting", calls: 0 }), "aaaaaaaaaaaaaaaa");
+	const proc = fakeProc({ live: [61, 62, 64], cpu: { 61: 0, 62: 0, 64: 0 } });
+	const { dir, hook } = watch({ meter, proc, now: () => clock });
 	writeLedger(dir, 61, ledger({ state: "starting", calls: 0 }), "bbbbbbbbbbbbbbbb");
-	writeLedger(dir, 63, ledger({ state: "starting", calls: 1 }), "cccccccccccccccc");
 	writeLedger(dir, 62, ledger({ state: "starting", calls: 0 }), "dddddddddddddddd");
+	writeLedger(dir, 64, ledger({ state: "starting", calls: 0 }), "eeeeeeeeeeeeeeee");
 	hook.sample();
-	assert.equal(meter.snapshot().unmeteredChildren, 1, "only the dead `starting` ledger with spend in it (pid 63)");
-	// Wall time means nothing here: a starved child is slow, not stuck. CPU is what counts.
-	proc.table.cpu[61] = STARTING_GRACE_MS;
-	proc.table.cpu[62] = STARTING_GRACE_MS + 1;
+	proc.table.cpu[61] = STARTING_CPU_MS;
+	proc.table.cpu[62] = STARTING_CPU_MS + 1;
+	clock = STARTING_WALL_MS;
 	hook.sample();
-	assert.equal(meter.snapshot().unmeteredChildren, 2, "pid 62 used more than 10 s of CPU without installing; pid 61 exactly 10 s");
+	assert.equal(meter.snapshot().unmeteredChildren, 1, "pid 62 used more than 1 s of CPU without installing; pid 61 exactly 1 s, and 60 s exactly");
+	clock = STARTING_WALL_MS + 1;
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 3, "past 60 s, CPU or not");
 	writeLedger(dir, 62, ledger({ state: "running", calls: 0 }), "dddddddddddddddd");
 	hook.sample();
-	assert.equal(meter.snapshot().unmeteredChildren, 1, "pid 62 installed after all: judged by its file from here on");
-	assert.equal(hook.teardown().unmetered, 1, "pid 60, dead with zero spend, is done");
+	assert.equal(meter.snapshot().unmeteredChildren, 2, "pid 62 installed after all: judged by its file from here on");
 });
 
-test("off Linux (a proc with no cpuMs), the `starting` grace is wall time on a monotonic clock (issue #500)", () => {
+test("a dead process's `starting` ledger is done only when it was seen under 60 s, used under 1 s of CPU and holds no spend; judged once (issue #500)", () => {
+	let clock = 0;
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const proc = fakeProc({ live: [80, 81, 82], cpu: { 80: 300, 81: 900, 82: 300 } });
+	const { dir, hook } = watch({ meter, proc, now: () => clock });
+	writeLedger(dir, 80, ledger({ state: "starting", calls: 0 }), "a".repeat(16));
+	writeLedger(dir, 81, ledger({ state: "starting", calls: 0 }), "b".repeat(16));
+	writeLedger(dir, 82, ledger({ state: "starting", calls: 0 }), "c".repeat(16));
+	// Never seen alive: died before the first tick with spend in its stub (not one the preload wrote).
+	writeLedger(dir, 83, ledger({ state: "starting", calls: 1 }), "d".repeat(16));
+	hook.sample();
+	// pid 80 dies at once; pid 81 at 59 s; pid 82 lives on past 60 s of wall... then dies (already stuck).
+	proc.table.alive.delete(80);
+	proc.table.live = [81, 82];
+	clock = 59_000;
+	hook.sample();
+	proc.table.alive.delete(81);
+	proc.table.live = [82];
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 1, "only pid 83: 80 and 81 ended before their meter, quietly");
+	clock = 61_000;
+	hook.sample();
+	proc.table.alive.delete(82);
+	proc.table.live = [];
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 2, "pid 82 outlived the wall grace");
+	// The pid comes back as something else, CPU-heavy: its stub was settled and retired, never judged again.
+	proc.table.alive.add(80);
+	proc.table.cpu[80] = 60_000;
+	hook.sample();
+	assert.equal(hook.teardown().unmetered, 2);
+});
+
+test("robust2 Q4: a meterless child whose ledger stays `starting` while it makes calls is caught, live, at teardown, or past the CPU grace (issue #500)", () => {
+	// The lab shape: 31 calls in about 37 s at 720 ms of CPU, its stub never leaving `starting`, alive at teardown.
+	let clock = 0;
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const proc = fakeProc({ live: [91], cpu: { 91: 250 } });
+	const { dir, hook, logged } = watch({ meter, proc, now: () => clock });
+	writeLedger(dir, 91, ledger({ state: "starting", calls: 0 }));
+	for (let second = 0; second < 37; second += 1) {
+		clock = second * 1000;
+		proc.table.cpu[91] = 250 + second * 12;
+		hook.sample();
+	}
+	assert.equal(meter.snapshot().unmeteredChildren, 0, "under both graces while it runs");
+	assert.equal(hook.teardown().unmetered, 1, "a live `starting` ledger seen for two ticks is unmetered at teardown");
+	assert.equal(meter.state.stopReason, TOKEN_BUDGET);
+	assert.equal(logged.filter((line) => line.event === "unmetered_child").length, 1);
+	// The unit shape of the same review (2 s of CPU and climbing): caught live, at the first tick.
+	const heavy = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const busy = fakeProc({ live: [92], cpu: { 92: 2000 } });
+	const second = watch({ meter: heavy, proc: busy });
+	writeLedger(second.dir, 92, ledger({ state: "starting", calls: 0 }));
+	second.hook.sample();
+	assert.equal(heavy.snapshot().unmeteredChildren, 1);
+	// An honest child that starts in the job's last tick is not: it is `starting` for less than two ticks.
+	const late = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const third = watch({ meter: late, proc: fakeProc({ live: [93], cpu: { 93: 100 } }) });
+	third.hook.sample();
+	writeLedger(third.dir, 93, ledger({ state: "starting", calls: 0 }));
+	assert.equal(third.hook.teardown().unmetered, 0);
+});
+
+test("off Linux (a proc with no cpuMs), the `starting` grace is 60 s of wall time on a monotonic clock (issue #500)", () => {
 	let clock = 0;
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	const { cpuMs, ...proc } = fakeProc({ live: [61] });
@@ -400,12 +492,30 @@ test("off Linux (a proc with no cpuMs), the `starting` grace is wall time on a m
 	const { dir, hook } = watch({ meter, proc, now: () => clock });
 	writeLedger(dir, 61, ledger({ state: "starting", calls: 0 }));
 	hook.sample();
-	clock = STARTING_GRACE_MS;
+	clock = STARTING_WALL_MS;
 	hook.sample();
 	assert.equal(meter.snapshot().unmeteredChildren, 0);
-	clock = STARTING_GRACE_MS + 1;
+	clock = STARTING_WALL_MS + 1;
 	hook.sample();
 	assert.equal(meter.snapshot().unmeteredChildren, 1);
+});
+
+test("520 SIGKILLed children's ledgers (`running` with a call in flight, or `starting`) do not flood: a dead pid's file is retired as it stands (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const proc = fakeProc();
+	const { dir, hook } = watch({ meter, proc });
+	for (let child = 0; child < 520; child += 1) {
+		const body = child % 2 === 0 ? ledger({ calls: 1, unresolved: 1 }) : ledger({ state: "starting", calls: 0 });
+		writeLedger(dir, 20_000 + child, body, child.toString(16).padStart(16, "0"));
+		if (child % 10 === 9) hook.sample();
+	}
+	hook.sample();
+	writeLedger(dir, 30_000, ledger({ calls: 1 }));
+	proc.table.alive.add(30_000);
+	hook.sample();
+	const snap = meter.snapshot();
+	assert.deepEqual([snap.unmeteredChildren, snap.childProcesses, snap.unresolved], [0, 521, 260], "no flood; every killed call still unresolved");
+	assert.equal(snap.childTotal, 261 * 100);
 });
 
 test("a child killed mid-call leaves `running` with unresolved: counted unresolved, not unmetered (issue #500)", () => {
@@ -595,11 +705,13 @@ test("linuxProc: null off Linux; on Linux it skips itself, pid 1 and a fork that
 		"/proc/15/cmdline": "/opt/pi-dispatch/runner-node\0/runner/run-job.mjs\0",
 		"/proc/15/stat": stat(15, { flags: 0x400100 }),
 		"/proc/21/stat": stat(21, { state: "Z" }),
+		// Its command line says pi, but its stat is gone: it exited (or it is read in the wrong order). Skipped.
+		"/proc/16/cmdline": "pi\0",
 		"/proc/10/environ": "HOME=/home/pi\0PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x\0",
-		"/proc/11/environ": "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-xy\0",
+		"/proc/11/environ": `BIG=${"x".repeat(ENVIRON_BYTES)}\0PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x\0`,
 	};
 	const { fs } = fakeProcFs(files, {
-		names: ["1", "10", "11", "12", "13", "14", "15", "self", "net"],
+		names: ["1", "10", "11", "12", "13", "14", "15", "16", "self", "net"],
 		realpath: (path) => {
 			if (path === "/proc/11/cwd/dist/cli.js") return "/pkg/dist/cli.js";
 			if (path === "/pkg/dist/cli.js" || path === "/runner/run-job.mjs") return path;
@@ -607,14 +719,14 @@ test("linuxProc: null off Linux; on Linux it skips itself, pid 1 and a fork that
 		},
 	});
 	const proc = linuxProc({ self: 13, platform: "linux", packageDir: () => "/pkg", runJob: "/runner/run-job.mjs", fs });
-	assert.deepEqual(proc.scan(), [10, 11, 15], "pid 1, itself (13) and the unexec'd fork (14) are skipped; 12 is not pi");
+	assert.deepEqual(proc.scan(), [10, 11, 15], "pid 1, itself (13), the unexec'd fork (14) and one with no stat (16) are skipped; 12 is not pi");
 	assert.equal(proc.alive(10), true);
 	assert.equal(proc.alive(21), false, "a zombie has exited");
 	assert.equal(proc.alive(22), false);
 	assert.equal(proc.cpuMs(10), 2000, "utime + stime, at 100 ticks a second");
-	assert.equal(proc.environHas(10, "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x"), true);
-	assert.equal(proc.environHas(11, "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x"), false, "the exact entry, not a prefix");
-	assert.equal(proc.environHas(15, "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x"), null, "unreadable");
+	assert.deepEqual(proc.environ(10), { entries: ["HOME=/home/pi", "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x", ""], complete: true });
+	assert.equal(proc.environ(11).complete, false, "a read that filled ENVIRON_BYTES may have more");
+	assert.equal(proc.environ(15), null, "unreadable");
 });
 
 test("linuxProc: a command line is read only to CMDLINE_BYTES, and a scan stops at its time budget and goes on next tick (issue #500)", () => {
@@ -622,8 +734,8 @@ test("linuxProc: a command line is read only to CMDLINE_BYTES, and a scan stops 
 	const long = `sh\0${"cli.js\0".repeat(100_000)}`;
 	let resolves = 0;
 	const names = Array.from({ length: 10 }, (_, index) => String(100 + index));
-	const files = Object.fromEntries(names.map((name) => [`/proc/${name}/cmdline`, long]));
-	const { fs } = fakeProcFs(files, { names, realpath: (path) => {
+	const files = Object.fromEntries(names.flatMap((name) => [[`/proc/${name}/cmdline`, long], [`/proc/${name}/stat`, stat(Number(name))]]));
+	const { fs, reads: opened } = fakeProcFs(files, { names, realpath: (path) => {
 		resolves += 1;
 		throw Object.assign(new Error("no"), { code: "ENOENT" });
 	} });
@@ -638,10 +750,11 @@ test("linuxProc: a command line is read only to CMDLINE_BYTES, and a scan stops 
 	const proc = linuxProc({ self: 1, platform: "linux", packageDir: () => "/pkg", runJob: "/runner/run-job.mjs", fs, now: () => clock, budgetMs: 100 });
 	assert.deepEqual(proc.scan(), []);
 	assert.ok(reads.every((length) => length <= CMDLINE_BYTES), "no read past the cap");
-	const first = reads.length;
+	const cmdlines = () => [...opened.keys()].filter((path) => path.endsWith("/cmdline")).length;
+	const first = cmdlines();
 	assert.ok(first < names.length, `the budget stopped the scan early (${first} processes)`);
 	proc.scan();
-	assert.ok(reads.length > first, "the next tick goes on where it stopped");
+	assert.ok(cmdlines() > first, "the next tick goes on where it stopped");
 	// One realpath per process (its script), plus the six targets once: never one per argument.
-	assert.equal(resolves, reads.length + 6, `${resolves} realpath calls`);
+	assert.equal(resolves, cmdlines() + 6, `${resolves} realpath calls`);
 });

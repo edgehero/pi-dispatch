@@ -13,15 +13,16 @@
  *      is made again, mode 0700, when nothing else stands at its path, and counted once as unmetered.
  *   2. DETECT (Linux only: it reads /proc; elsewhere there is no detector). linuxProc() has what a pi process is. A pi
  *      process is UNMETERED when:
- *      - its environment, where it can be read, does not carry this job's ledger directory: a ledger named after its
- *        pid is then not its own (a spawner can write one), whatever it says;
+ *      - its environment, where it can be read whole, does not carry this job's ledger directory AND the preload in
+ *        NODE_OPTIONS: a ledger named after its pid is then not its own (a spawner can write one), whatever it says;
  *      - no ledger names its pid two ticks after it was first seen, if it is still alive then, whether or not it still
  *        looks like a pi process (a title can be changed after the fact);
  *      - it was seen alive and no ledger ever named it, counted at teardown;
- *      - its ledger is still `starting` after STARTING_GRACE_MS of the process's own CPU time (its meter never
- *        installed). CPU, not wall time: a starved honest child is slow, not stuck. Un-counted once it is no longer
- *        `starting`. A `starting` ledger of a DEAD process with zero spend is a child that ended before its meter
- *        started, and is done; one with spend in it is unmetered.
+ *      - its ledger is still `starting` (its meter never installed) after STARTING_CPU_MS of the process's own CPU, or
+ *        STARTING_WALL_MS since this parent first saw it; an honest child installs at about 0.3 s of CPU. Un-counted once
+ *        it is no longer `starting`. At teardown, a live `starting` ledger seen for two ticks or more is unmetered.
+ *        A `starting` ledger of a DEAD process is done only when it was seen for less than the wall grace, used less
+ *        than the CPU grace, and holds zero spend; otherwise it is unmetered. Judged once, when the file is retired.
  *   3. JUDGE. The fold goes to meter.setChildren with `unmetered` and `processes` widened by what the detector found
  *      (the token cap is judged there, on parent plus children). Then, first stop wins:
  *      - under a dollar cap: the parent's settled spend plus every child's settled spend (ledgerSettled: the larger
@@ -53,20 +54,24 @@ import { PI_ENTRIES, RUN_JOB_PATH } from "./child-route.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "./outcome.mjs";
 import { foldChildLedgers, SPENT_FILE, spentFile, STOP_FILE, stopFile, writeFileAtomic } from "./usage-meter.mjs";
 
-/** How much CPU a process may use with its ledger still `starting`: from the preload's stub to the meter's install. */
-export const STARTING_GRACE_MS = 10_000;
+/** How much CPU a process may use with its ledger still `starting`: an honest child installs its meter at about 0.3 s. */
+export const STARTING_CPU_MS = 1_000;
+/** How long, from this parent's first sight, a live ledger may stay `starting`, CPU or not (monotonic). */
+export const STARTING_WALL_MS = 60_000;
 /** How many ticks a pi process may live with no ledger before it is unmetered. */
 export const NO_LEDGER_TICKS = 2;
 /** The command-line titles pi gives itself (setupCli: `pi`; the rpc entries: `pi-rpc`). */
 export const PI_TITLES = Object.freeze(["pi", "pi-rpc"]);
 /** How much of a command line is read: the markers sit in argv[0] and argv[1]. */
 export const CMDLINE_BYTES = 4096;
-/** How much of an environment is read when looking for the ledger directory. */
+/** How much of an environment is read when looking for the ledger directory and the preload. */
 export const ENVIRON_BYTES = 64 * 1024;
 /** The time one tick's /proc scan may take; what is left is scanned on the next tick. */
 export const SCAN_BUDGET_MS = 200;
 /** The kernel's PF_FORKNOEXEC: forked and not yet exec'd, so still carrying its parent's command line. */
 export const PF_FORKNOEXEC = 0x40;
+/** The NODE_OPTIONS flag the runner gives its descendants (openChildLedger), for this image's preload. */
+export const PRELOAD_FLAG = `--import=${new URL("./child-preload.mjs", import.meta.url).href}`;
 /** The cost and model counters the exit line carries and a child ledger adds to (guardFields). */
 const GUARD_FIELDS = Object.freeze(["costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused"]);
 
@@ -122,8 +127,10 @@ export function parseStat(text) {
  *     SCAN_BUDGET_MS of `now()`: what is left is scanned on the next tick, so no number or size of processes can hold
  *     the runner's event loop.
  *   - `alive(pid)`: the process exists and is not a zombie. `cpuMs(pid)`: its CPU time, or null.
- *   - `environHas(pid, entry)`: whether its environment holds `entry` exactly; null when it cannot be read (a
- *     non-dumpable process, such as a nested runner on the image's runner-node).
+ *   - `environ(pid)`: its start environment as `{ entries, complete }`, `complete` false when the read filled
+ *     ENVIRON_BYTES (there may be more); null when it cannot be read (a non-dumpable process, such as a nested runner on
+ *     the image's runner-node). The stat line is read BEFORE the command line: PF_FORKNOEXEC only ever goes from set to
+ *     clear (at exec), so a fork that execs between the two reads is never taken for its parent.
  * Never throws: a process that vanishes mid-read, or whose files cannot be read, is skipped.
  */
 export function linuxProc({
@@ -158,6 +165,10 @@ export function linuxProc({
 	}
 	/** At most `max` bytes of a file, as latin1. Throws what the fs throws. */
 	function head(path, max) {
+		return headRead(path, max).text;
+	}
+	/** `{ text, full }`: at most `max` bytes of a file, and whether the read filled them. */
+	function headRead(path, max) {
 		const fd = fs.openSync(path, "r");
 		try {
 			const buffer = Buffer.alloc(max);
@@ -167,7 +178,7 @@ export function linuxProc({
 				if (read === 0) break;
 				length += read;
 			}
-			return buffer.subarray(0, length).toString("latin1");
+			return { text: buffer.subarray(0, length).toString("latin1"), full: length >= max };
 		} finally {
 			fs.closeSync(fd);
 		}
@@ -198,6 +209,8 @@ export function linuxProc({
 				const pid = Number(queue[cursor]);
 				cursor += 1;
 				if (pid === self || pid === 1) continue;
+				const fields = stat(pid);
+				if (fields === null || (fields.flags & PF_FORKNOEXEC) !== 0) continue;
 				let argv;
 				try {
 					argv = head(`/proc/${pid}/cmdline`, CMDLINE_BYTES).split("\u0000").filter((part) => part !== "");
@@ -212,8 +225,6 @@ export function linuxProc({
 					}
 				};
 				if (!isPiProcess(argv, { basenames, targets: realTargets(), resolve })) continue;
-				const fields = stat(pid);
-				if (fields !== null && (fields.flags & PF_FORKNOEXEC) !== 0) continue;
 				found.push(pid);
 			}
 			return found;
@@ -225,14 +236,13 @@ export function linuxProc({
 		cpuMs(pid) {
 			return stat(pid)?.cpuMs ?? null;
 		},
-		environHas(pid, entry) {
-			let text;
+		environ(pid) {
 			try {
-				text = head(`/proc/${pid}/environ`, ENVIRON_BYTES);
+				const { text, full } = headRead(`/proc/${pid}/environ`, ENVIRON_BYTES);
+				return { entries: text.split("\u0000"), complete: !full };
 			} catch {
 				return null;
 			}
-			return text.split("\u0000").includes(entry);
 		},
 	};
 }
@@ -258,6 +268,7 @@ export function createChildWatch({
 	writeFs,
 	mkdir = (path) => mkdirSync(path, { mode: 0o700 }),
 	lstat = lstatSync,
+	preloadFlag = PRELOAD_FLAG,
 }) {
 	let prev = null;
 	let ticks = 0;
@@ -270,9 +281,10 @@ export function createChildWatch({
 	const noLedger = new Set();
 	/** pid -> whether its environment carries this job's ledger directory (null: unreadable). */
 	const environ = new Map();
-	/** ledger name -> when this parent first saw it `starting` (wall-time grace only). */
-	const startingSince = new Map();
-	/** ledger names held `starting` past the grace, or dead `starting` with spend. */
+	/** ledger name -> `{ first, last, firstTick, cpu }` while it is `starting` and alive: when this parent first and last
+	 *  saw it so (monotonic), the tick of the first sight, and the most CPU its process was seen to have used. */
+	const starting = new Map();
+	/** ledger names held `starting` past a grace, or dead `starting` judged unmetered. Counted whether tracked or retired. */
 	const stuck = new Set();
 	let dirLost = false;
 	let writeFailed = false;
@@ -282,6 +294,38 @@ export function createChildWatch({
 	// After teardown nothing is written.
 	let closed = false;
 	const needle = dir === null ? null : `PI_DISPATCH_CHILD_LEDGER=${dir}`;
+
+	/**
+	 * Whether a pi process's start environment makes it this job's child: true with both the ledger directory and the
+	 * preload in NODE_OPTIONS; false when the whole environment was read and either is missing; null (the ledger rule
+	 * alone) when it could not be read, or was cut at ENVIRON_BYTES before both were found.
+	 */
+	function environVerdict(pid) {
+		let env = null;
+		try {
+			env = proc.environ?.(pid) ?? null;
+		} catch {
+			env = null;
+		}
+		if (env === null) return null;
+		const hasLedger = env.entries.includes(needle);
+		const options = env.entries.find((entry) => entry.startsWith("NODE_OPTIONS="));
+		const hasPreload = options !== undefined && options.slice("NODE_OPTIONS=".length).split(/\s+/).includes(preloadFlag);
+		if (hasLedger && hasPreload) return true;
+		return env.complete ? false : null;
+	}
+
+	/** A dead process's `starting` ledger, judged once (its file is retired right after, and its pid never read again). */
+	function settleDeadStarting(name, entry) {
+		const info = starting.get(name);
+		starting.delete(name);
+		const seenFor = info ? info.last - info.first : 0;
+		const cpu = info?.cpu ?? 0;
+		if (spent(entry.high) || seenFor >= STARTING_WALL_MS || cpu >= STARTING_CPU_MS) {
+			note("starting", entry.pid);
+			stuck.add(name);
+		}
+	}
 
 	const current = () => prev ?? emptyFold();
 	const note = (why, pid = null) => {
@@ -298,10 +342,11 @@ export function createChildWatch({
 
 	/** The unmetered count: every file the fold or the detector judged, flooded names, and the parent's own losses. */
 	function unmeteredCount(view) {
-		let total = view.flooded + noLedger.size + (dirLost ? 1 : 0) + (writeFailed ? 1 : 0);
+		let total = view.flooded + noLedger.size + (dirLost ? 1 : 0) + (writeFailed ? 1 : 0) + stuck.size;
 		for (const [name, entry] of view.files) {
-			if (entry.unmetered) note(entry.why, entry.pid);
-			if (entry.unmetered || stuck.has(name)) total += 1;
+			if (!entry.unmetered) continue;
+			note(entry.why, entry.pid);
+			if (!stuck.has(name)) total += 1;
 		}
 		if (view.flooded > 0) note("flooded");
 		return total;
@@ -378,7 +423,12 @@ export function createChildWatch({
 	function foldAndDetect({ final }) {
 		ticks += 1;
 		if (dir !== null) {
-			const retire = proc === null ? null : (pid) => !proc.alive(pid);
+			// Any file of a dead process is retired; a `starting` one is judged first, once.
+			const retire = proc === null ? null : (pid, name, entry) => {
+				if (proc.alive(pid)) return false;
+				if (entry.state === "starting") settleDeadStarting(name, entry);
+				return true;
+			};
 			const next = fold({ dir, prev, retire, ...(foldFs ? { fs: foldFs } : {}) });
 			if (next.missing) {
 				if (!dirLost) note("missing");
@@ -413,15 +463,7 @@ export function createChildWatch({
 				if (!ledgered.has(pid)) pending.add(pid);
 			}
 			if (needle !== null && !noLedger.has(pid)) {
-				if (!environ.has(pid)) {
-					let verdict = null;
-					try {
-						verdict = proc.environHas?.(pid, needle) ?? null;
-					} catch {
-						verdict = null;
-					}
-					environ.set(pid, verdict);
-				}
+				if (!environ.has(pid)) environ.set(pid, environVerdict(pid));
 				if (environ.get(pid) === false) unmeteredPid(pid, "environ");
 			}
 		}
@@ -441,28 +483,18 @@ export function createChildWatch({
 			if (entry.state !== "starting") {
 				// Its meter installed after all: judged by its file from here on.
 				if (!entry.unmetered) stuck.delete(name);
-				startingSince.delete(name);
+				starting.delete(name);
 				continue;
 			}
 			if (entry.unmetered || stuck.has(name)) continue;
-			if (!proc.alive(entry.pid)) {
-				// Ended before its meter started. With zero spend that is all it did; a `starting` file with spend in it is
-				// not one the preload wrote.
-				if (spent(entry.high)) {
-					note("starting", entry.pid);
-					stuck.add(name);
-				}
-				continue;
-			}
-			let used;
-			if (typeof proc.cpuMs === "function") {
-				used = proc.cpuMs(entry.pid) ?? 0;
-			} else {
-				const since = startingSince.get(name) ?? now();
-				startingSince.set(name, since);
-				used = now() - since;
-			}
-			if (used > STARTING_GRACE_MS) {
+			// Dead ones were judged at retirement (the fold above); this one lives.
+			const at = now();
+			const info = starting.get(name) ?? { first: at, last: at, firstTick: ticks, cpu: 0 };
+			info.last = at;
+			if (typeof proc.cpuMs === "function") info.cpu = Math.max(info.cpu, proc.cpuMs(entry.pid) ?? 0);
+			starting.set(name, info);
+			const tooLong = info.cpu > STARTING_CPU_MS || at - info.first > STARTING_WALL_MS || (final && ticks - info.firstTick >= NO_LEDGER_TICKS);
+			if (tooLong) {
 				note("starting", entry.pid);
 				stuck.add(name);
 			}
