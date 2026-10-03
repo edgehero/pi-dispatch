@@ -20,25 +20,20 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { configError } from "./config.mjs";
+import { PROJECT_ID_RE, isProjectId } from "./project-id.mjs";
 import { parseScopeString, qualifiedScopeOf } from "./pause-windows.mjs";
 import { canonicalScope } from "./scoped-limits.mjs";
 
 /** The highest schema version this build reads. A file declaring a higher one is refused loudly. */
 export const PROJECTS_VERSION = 1;
 
-/**
- * A project id: lowercase, 1 to 32 characters, free of `:`, `#` and `/`, so it can enter a run record and a Valkey key
- * without escaping. The run record checks a `project` against this same pattern (`isProjectId`).
- */
-export const PROJECT_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+// The id rule lives in an import-free module, so the run record can check an id without this module's graph.
+export { PROJECT_ID_RE, isProjectId };
 
 /** The longest `name` accepted, in UTF-16 code units. A display label, not a document. */
 const NAME_MAX = 120;
 
-/** Is this a well-formed project id? The record path's charset check. */
-export function isProjectId(value) {
-	return typeof value === "string" && PROJECT_ID_RE.test(value);
-}
 
 /**
  * Parse, validate and normalize the projects file TEXT. Returns the normalized list: each project rebuilt as an

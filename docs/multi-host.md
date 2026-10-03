@@ -161,6 +161,10 @@ Upgrade every host before you write a forge-qualified scope. In `scoped-limits.j
 version 2, which an older worker refuses loudly (at boot, or by keeping its last good file on a live edit and logging why). `pause-windows.json` has no version: an
 older worker reads a qualified window as a name no job has and pauses nothing, without saying so.
 
+`projects.json` is per host too. Each host decides which project a job belongs to from its own copy and writes that
+id into the run record, so give every host the same file, or one repo is recorded under two projects depending on
+which host ran it. See [`docs/projects.md`](projects.md).
+
 If you were relying on that accidental multiplication, raise the knob deliberately. The published
 arithmetic in [`docs/wait-for.md`](wait-for.md) is now what it says: about one check every ten seconds
 for the whole deployment, not per host.

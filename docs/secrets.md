@@ -49,7 +49,7 @@ directory for **four keys**, `PI_PAUSE_WINDOWS_FILE`, `PI_SCOPED_LIMITS_FILE`, `
 `PI_MODEL_ENDPOINTS_FILE`. The reason for the first three is that `pi-dispatch up` writes them there. The fourth
 names the model endpoints file, and doctor loads the file the service would read. Writing a line into `.env` configures the **service**, through the
 slots in the table above, and configures nothing about a shell you later type `pi-dispatch doctor` into.
-Without the read, doctor would warn that those two features are off at exactly the deployments that had
+Without the read, doctor would warn that those features are off at exactly the deployments that had
 just been set up correctly.
 
 The narrowing is the whole of the licence, and each half is load-bearing:

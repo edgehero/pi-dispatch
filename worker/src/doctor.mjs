@@ -1039,6 +1039,9 @@ const BOOT_FILES = Object.freeze([
 		unsetMeans: "the worker groups no run into a project",
 		unit: "project",
 		nothing: "projects",
+		// No panel writes this file yet (the project tools come with part C of issue #499), so the unset fix line must
+		// not say the panel reports a project it wrote as applied live.
+		panelWrites: false,
 		fails: "REFUSES TO START",
 		whenDeleted: "turns projects off",
 		whenEmpty: "turns the worker off",
@@ -3430,7 +3433,7 @@ export async function collectChecks(shellVars, seams) {
 				ok: false,
 				warn: true,
 				label: `${scaffolded} exists but ${spec.key} is unset -- the worker ignores it, so ${spec.off}`,
-				fix: `set ${fixLineFor(spec.key, scaffolded)} in .env and restart the worker -- unset means ${spec.unsetMeans}, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live; delete the file if this deployment has no ${spec.nothing}`,
+				fix: `set ${fixLineFor(spec.key, scaffolded)} in .env and restart the worker -- unset means ${spec.unsetMeans}${spec.panelWrites === false ? "" : `, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live`}; delete the file if this deployment has no ${spec.nothing}`,
 			});
 		}
 	}

@@ -4657,6 +4657,8 @@ test("doctor: a scaffolded projects.json with PI_PROJECTS_FILE unset warns; wire
 	const code = await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
 	assert.ok(text().includes(`⚠ ${join(cwd, "projects.json")} exists but PI_PROJECTS_FILE is unset -- the worker ignores it, so projects are OFF`), text());
 	assert.ok(text().includes(`set PI_PROJECTS_FILE=${join(cwd, "projects.json")}`), "the fix names the variable AND the absolute path");
+	assert.ok(text().includes(`set PI_PROJECTS_FILE=${join(cwd, "projects.json")} in .env and restart the worker -- unset means the worker groups no run into a project; delete the file if this deployment has no projects`), text());
+	assert.doesNotMatch(text(), /reports each project it writes/, "no panel writes projects yet, so the fix line promises none");
 	assert.equal(code, 0, "warn, never fail");
 	const wired = capture();
 	await runDoctor(imgEnv({ PI_PROJECTS_FILE: join(cwd, "projects.json") }), scaffoldDeps(wired.out, cwd));

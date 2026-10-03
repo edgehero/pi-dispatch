@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseProjects } from "../src/projects.mjs";
 
@@ -127,4 +128,33 @@ test("with no projects every post-gate record carries project null", { skip }, a
 	const { processor, seen } = harness({ ref: { current: [] } });
 	await processor(gh("j-1", "acme/web"), "tok", new AbortController().signal);
 	assert.equal(seen.records[0].project, null);
+});
+
+test("an operator cancel acknowledged mid-run records the PICKUP project after a live edit (the catch-side recorder)", { skip }, async () => {
+	const ref = { current: SHOP };
+	const ac = new AbortController();
+	const { processor, seen } = harness({
+		ref,
+		runContainer: async () => {
+			ref.current = OPS;
+			ac.abort("operator-cancel");
+			throw new Error("container stopped");
+		},
+	});
+	const result = await processor(gh("j-1", "acme/web"), "tok", ac.signal);
+	assert.equal(result.reason, "operator-cancel");
+	assert.equal(seen.records.length, 1);
+	assert.equal(seen.records[0].project, "shop", "the catch path carries the pickup id, never a live re-resolution");
+});
+
+test("BY SHAPE: below the pickup gate every record goes through the one bound recorder, so no site can drop the project", () => {
+	// The rule is one closure (`recordAfterGate`), not a field each call site has to remember. A bare `recordRun({`
+	// below its definition would record without the pickup project, and start.mjs would then resolve the LIVE ref.
+	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
+	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project });");
+	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project");
+	assert.ok(at > src.indexOf("const project = projectOf(job.data, projects());"), "and after the pickup resolution");
+	const below = src.slice(src.indexOf("\n", at), src.indexOf("export function createWorker("));
+	assert.deepEqual(below.match(/\brecordRun\(\{/g) ?? [], [], "no bare recordRun call below the gate");
+	assert.ok((below.match(/recordAfterGate\(\{/g) ?? []).length >= 8, "every post-gate record path uses it");
 });

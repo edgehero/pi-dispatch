@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
 import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
-import { isProjectId } from "./projects.mjs";
+import { isProjectId } from "./project-id.mjs";
 
 /**
  * Durable per-run history.

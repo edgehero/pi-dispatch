@@ -1603,3 +1603,20 @@ test("authenticExitLines keeps every signed line in order and drops the auth key
 	assert.equal(parseExitCode(authenticExitLines(text, EXIT_KEY)), 143);
 	assert.equal(authenticExitLines(text, "b2".repeat(32)), "");
 });
+
+test("the record module's import graph never reaches config.mjs: the admin loads it inside pi (#499 review)", () => {
+	// Static relative imports, followed transitively. model-ref.mjs and project-id.mjs are import-free for this reason:
+	// run-history.mjs imports both, and config.mjs would bring its fs, os and child_process reads into the panel.
+	const seen = new Set();
+	const walk = (url) => {
+		if (seen.has(url.href)) return;
+		seen.add(url.href);
+		const src = readFileSync(url, "utf8");
+		for (const m of src.matchAll(/^\s*(?:import|export)\s[^;]*?from\s+"(\.{1,2}\/[^"]+)"/gm)) walk(new URL(m[1], url));
+	};
+	walk(new URL("../src/run-history.mjs", import.meta.url));
+	const names = [...seen].map((h) => h.slice(h.lastIndexOf("/") + 1)).sort();
+	assert.ok(names.includes("project-id.mjs"), `the walk reaches the id rule: ${names}`);
+	for (const heavy of ["config.mjs", "projects.mjs", "scoped-limits.mjs", "pause-windows.mjs"]) assert.ok(!names.includes(heavy), `${heavy} is not in the record module's graph: ${names}`);
+	assert.doesNotMatch(readFileSync(new URL("../src/project-id.mjs", import.meta.url), "utf8"), /^\s*import\s/m, "project-id.mjs imports nothing");
+});

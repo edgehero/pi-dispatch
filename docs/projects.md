@@ -40,12 +40,22 @@ The file is refused when two projects share an id, when one scope is in two proj
 
 ## What a run records
 
-The worker decides a job's project once, when it picks the job up, and writes that id into the run record as
-`project`. A later edit of the file does not change it. A run outside every project records `null`, and so does
+The worker decides a job's project when it picks the job up, and writes that id into the run record as `project`. An
+edit of the file while the job runs does not change it. A retry, or a job deferred and picked up again, is decided
+again: after an edit it may record the new project, and its record replaces the earlier attempt's. A run outside every project records `null`, and so does
 every run recorded before projects existed. Old records are never moved into a project.
 
 Only a run is grouped. A webhook trigger fires for whichever repo delivers, so the trigger itself belongs to no
 project.
+
+## Matching rules
+
+- A folder matches by its path as written, resolved but not followed: a symlinked folder and its target are two
+  separate members. List the path your triggers use.
+- Paths and repo names match case-sensitively. On macOS, `/SRV/x` does not match a member `/srv/x`, even though the
+  file system treats them as one folder.
+- Every host of one fleet must carry the same `projects.json`. Each host resolves its own jobs from its own copy, so
+  two different files put the same repo in two projects, depending on which host ran it.
 
 ## Reference
 
