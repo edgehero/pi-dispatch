@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { PROJECTS_VERSION, PROJECT_ID_RE, isProjectId, loadProjects, parseProjects, projectOf } from "../src/projects.mjs";
+import { EMPTY_PROJECTS_FINGERPRINT, PROJECTS_VERSION, PROJECT_ID_RE, isProjectId, loadProjects, parseProjects, projectOf, projectsFingerprint, projectsFingerprintInput } from "../src/projects.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const wrap = (projects, version = 1) => JSON.stringify({ version, projects });
@@ -166,4 +166,30 @@ test("projectOf is null with no projects, no job, or no scope", () => {
 	assert.equal(projectOf(undefined, PROJECTS), null);
 	assert.equal(projectOf({ kind: "github" }, PROJECTS), null);
 	assert.equal(projectOf({ kind: "local" }, PROJECTS), null);
+});
+
+// ── the fleet fingerprint (issue #499 part C) ───────────────────────────────────────────────────────────
+
+test("fpProjects hashes ids and member hashes only: never a name, never a member in clear", () => {
+	const projects = parse([
+		{ id: "shop", name: "Private Webshop Name", members: ["github:acme/web", "/srv/private-folder"] },
+		{ id: "tools", name: "\u202eevil", members: ["forgejo:acme/tools"] },
+	]);
+	const input = projectsFingerprintInput(projects);
+	const text = JSON.stringify(input);
+	for (const secret of ["Private Webshop Name", "Webshop", "evil", "acme/web", "/srv/private-folder", "private-folder", "acme/tools"]) assert.ok(!text.includes(secret), `${secret} is not in the input`);
+	assert.deepEqual(input.map((p) => p.id), ["shop", "tools"]);
+	for (const p of input) for (const m of p.members) assert.match(m, /^[0-9a-f]{16}$/, "a member is its hash");
+	assert.match(projectsFingerprint(projects), /^[0-9a-f]{16}$/);
+});
+
+test("fpProjects moves with an id and with membership, and not with a name or the order", () => {
+	const base = parse([{ id: "shop", name: "A", members: ["github:acme/web", "/srv/a"] }, { id: "ops", members: ["/srv/b"] }]);
+	const fp = projectsFingerprint(base);
+	assert.equal(projectsFingerprint(parse([{ id: "ops", members: ["/srv/b"] }, { id: "shop", name: "B", members: ["/srv/a", "github:acme/web"] }])), fp, "a renamed name and a reordered file agree");
+	assert.notEqual(projectsFingerprint(parse([{ id: "shop", members: ["github:acme/web"] }, { id: "ops", members: ["/srv/b", "/srv/a"] }])), fp, "a member moved to another project disagrees");
+	assert.notEqual(projectsFingerprint(parse([{ id: "store", members: ["github:acme/web", "/srv/a"] }, { id: "ops", members: ["/srv/b"] }])), fp, "a renamed id disagrees");
+	assert.notEqual(projectsFingerprint(parse([{ id: "shop", members: ["forgejo:acme/web", "/srv/a"] }, { id: "ops", members: ["/srv/b"] }])), fp, "the same repo on another forge disagrees");
+	assert.equal(projectsFingerprint([]), EMPTY_PROJECTS_FINGERPRINT, "no projects is a fingerprint of its own, never an abstention");
+	assert.notEqual(fp, EMPTY_PROJECTS_FINGERPRINT);
 });

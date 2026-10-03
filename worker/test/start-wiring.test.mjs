@@ -4063,6 +4063,28 @@ test("per job: a service older than its conf, and a chain file deleted under the
 	assert.match(refused.message, /^Refused: \/etc\/containers\/containers\.conf\.d\/zz\.conf could not be read \(EACCES\)/);
 });
 
+test("the host row's fpProjects is a thunk over the LIVE projects ref (#499 part C)", { skip }, async () => {
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	const { projectsFingerprint, parseProjects } = await import("../src/projects.mjs");
+	const dir = tempDir("pi-fp-projects-wiring-");
+	const projectsFile = join(dir, "projects.json");
+	writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", name: "Name", members: ["github:acme/web"] }] }));
+	let fields = null;
+	await runStart({
+		env: { VALKEY_URL, PI_WORKER_NAME: "fp-projects-1", PI_PROJECTS_FILE: projectsFile },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		makeHostRegistry: (args) => {
+			const real = makeHostRegistry(args);
+			return { ...real, start: async (f, opts) => ((fields = f), real.start(f, opts)) };
+		},
+	});
+	assert.equal(typeof fields?.fpProjects, "function", "a thunk, so a peer compares against what this host believes now");
+	const first = projectsFingerprint(parseProjects(readFileSync(projectsFile, "utf8"), projectsFile));
+	assert.equal(fields.fpProjects(), first, "the booted projects");
+	assert.notEqual(first, projectsFingerprint([]), "and not the empty one");
+});
+
 test("the host row's fpUsd is the dollar fingerprint of the live settings and scoped-limits rows, re-read on every beat (#501 part 6)", { skip }, async () => {
 	const { makeHostRegistry } = await import("../src/host-registry.mjs");
 	const { usdFingerprint } = await import("../src/dollar-fingerprint.mjs");

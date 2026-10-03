@@ -8,7 +8,7 @@ changes nothing — no auto-switching, no vendor API calls, no database (`REQ-CO
 
 The surface is the **insights page** ([`insights.md`](insights.md)): `/dispatch insights` writes and
 opens one self-contained file with the plan verdicts, the daily and cumulative spend charts, the
-per-flow trend panels, and the four breakdowns (by flow, by trigger, by model, by repo) — beside the
+per-flow trend panels, and the five breakdowns (by flow, by trigger, by model, by repo, by project) beside the
 trigger/flow topology those numbers come from. This document explains the semantics behind every
 dollar that page draws.
 
@@ -23,6 +23,17 @@ spend folds the same way — dispatching a workflow extension is not cheaper by 
 `local:<folder>` targets as their own rows. A forge row is named with its forge, `github:acme/web`, so one repo
 served by two forges is two rows. The `repo` filter of `dispatch_costs` takes either form: `acme/web` selects
 that repo on every forge, `github:acme/web` one forge.
+
+The **by-project** breakdown groups spend by the `project` id each run record carries
+([projects](projects.md)). The worker writes that id when it picks the job up, so the fold never looks at
+`projects.json` as it is today:
+
+- A run outside every project is `(no project)`.
+- A run recorded before projects existed is `(no project)` too, even if its repo is a member now. Records are
+  never moved into a project after the fact.
+- The page's bars carry the id. A project's display name sits under the list, escaped and isolated.
+- The `project` filter of `dispatch_costs` takes an id (`shop`) and scopes every part of the fold to the runs
+  recorded under it.
 
 ## How to read the numbers
 
@@ -230,7 +241,8 @@ change what the windows are charged.
   still running. The row turns amber and says `full` when a job at the deployment's per-job cap would no longer
   fit. Beside it, from the run records: what settled, how many runs settled each way, and the `boundExceeded`
   count. A folder or model row says `records n/a`: a record names a folder by its basename only, and does not say
-  which model windows its job reserved in. The records side counts only the records this host can read
+  which model windows its job reserved in. A `project:<id>` row folds the records whose `project` is that id,
+  local runs included. The records side counts only the records this host can read
   (`PI_LOGS_DIR`), so on a fleet without shared logs it is this host's share. The panel reads the deployment's
   caps from the settings overlay and the deployment's `.env`, so a cap set only in the worker's service unit
   shows no deployment row.
@@ -252,9 +264,6 @@ is an open issue.
 - **A Node older than 18.19 in a job does not start.** To meter `pi` child processes, the runner adds
   `--import=<child preload>` to `NODE_OPTIONS` for every process in the job (issue #500), and such a Node refuses that
   flag. The image ships Node 22. An agent that installs an older Node in a job must clear `NODE_OPTIONS` for it.
-- **Project windows are not attributed in the panel yet** (issue #499). A `project:<id>` row's dollar windows are
-  enforced ([scoped limits](scoped-limits.md#project-rows)), but the DOLLAR WINDOWS section cannot yet match its
-  records to it, and the per-project cost view comes later.
 - **A forged exit line**, on an image that does not declare `exitAuth`, or a worker and image pair older than
   #545. The job's own tools can write a fake exit line, and a forgery after the real line, with the right code,
   is still read as the last one. The per-job cap bounds what such a run can have spent. With `exitAuth` on both

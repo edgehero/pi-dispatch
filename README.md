@@ -254,7 +254,8 @@ one job per folder at a time, because two agents editing one working tree race e
 and no undo. The guard lives in the worker process, and one worker per container daemon is the supported
 setup. Version 2 of the file adds dollar caps per day, week and month for a repo, a folder or a model.
 Manage limits with `m` in the panel ([`docs/scoped-limits.md`](docs/scoped-limits.md)). Group repos and folders into
-projects, recorded per run, with [`docs/projects.md`](docs/projects.md).
+projects, recorded per run, shown by project in the cost views and the panel (`j`), and capped as one, with
+[`docs/projects.md`](docs/projects.md).
 
 ### Waiting on a condition
 

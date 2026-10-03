@@ -15,7 +15,9 @@
  *     are here only on a shared `PI_LOGS_DIR`. So `held` is never derived as counter minus settled.
  *
  * Attribution from a record is honest about what a record can name. A repo row's runs are the forge records whose
- * target is that repo. A folder row's are not attributable (a record names a local folder by its basename only),
+ * target is that repo. A project row's are the records whose `project` is that id (issue #499 part C): the id the
+ * worker resolved at pickup and wrote into the record, never the projects file as it is now, so a record from before
+ * a member joined stays outside the window. A folder row's are not attributable (a record names a local folder by its basename only),
  * and neither are a model row's (a record keeps each model's cost, but not which model windows the job reserved
  * in: an unrestricted job holds a cap in every model row, a listed one only in its listed models'): those rows
  * carry the counter and `records: null` with the reason, never a guess.
@@ -29,7 +31,7 @@ import { isAbsolute } from "node:path";
 import { DOLLAR_BASIS, DOLLAR_KEY_PREFIX, MODEL_BASIS } from "@edgehero/pi-dispatch/dollar-budget";
 import { DOLLAR_ENV_NAMES, formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { dollarKeyPrefixFor, isModelScope, isProjectScope, MODEL_SCOPE_PREFIX } from "@edgehero/pi-dispatch/scoped-limits";
-import { recordInRepo } from "./costs.mjs";
+import { recordInProject, recordInRepo } from "./costs.mjs";
 
 const WINDOWS = [
   { window: "day", keyOf: dayKey, setting: "dailyCostUsd", field: "dayUsd" },
@@ -43,9 +45,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export const UNATTRIBUTED = Object.freeze({
   folder: "a run record names a local folder by its basename only",
   model: "a run record does not say which model windows the job reserved in",
-  // Issue #499 part B enforces project rows; their records are matched by `record.project` in part C. Until then the
-  // section says so, rather than matching no record and reading as a window nobody spent in.
-  project: "project windows are matched to their runs in a later release",
 });
 
 /**
@@ -144,7 +143,7 @@ function isCount(value) {
  * Does this record belong to this window? Its run's START falls in the window (the window key the worker would
  * have reserved under, recomputed from `startedAt` with the same key function), it carries a `dollars` object, and
  * for a repo row its target is that repo: on that forge for a qualified row (`github:acme/web`, issue #498), on every
- * forge for a bare one. Null when the row cannot be attributed at all.
+ * forge for a bare one. For a project row (`project:shop`) its `project` is that id, a local record included.
  */
 function belongs(record, spec) {
   if (!record || typeof record !== "object" || !record.dollars || typeof record.dollars !== "object") return false;
@@ -152,6 +151,7 @@ function belongs(record, spec) {
   if (!Number.isFinite(at)) return false;
   const keyOf = WINDOWS.find((w) => w.window === spec.window)?.keyOf;
   if (!keyOf || keyOf(new Date(at), spec.keyPrefix) !== spec.key) return false;
+  if (spec.ledger === "scope" && isProjectScope(spec.name)) return recordInProject(record, spec.name.slice("project:".length));
   if (spec.ledger === "scope") {
     if (record.kind === "local") return false;
     return recordInRepo(record, String(spec.name));
@@ -169,7 +169,6 @@ function belongs(record, spec) {
  */
 export function foldWindowRecords(records, spec) {
   if (spec.ledger === "model") return { records: null, unattributed: UNATTRIBUTED.model };
-  if (spec.ledger === "scope" && isProjectScope(spec.name)) return { records: null, unattributed: UNATTRIBUTED.project };
   if (spec.ledger === "scope" && typeof spec.name === "string" && isAbsolute(spec.name)) return { records: null, unattributed: UNATTRIBUTED.folder };
   const basis = Object.fromEntries(DOLLAR_BASIS.map((b) => [b, 0]));
   let runs = 0;

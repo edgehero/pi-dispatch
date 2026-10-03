@@ -23,7 +23,7 @@
  */
 
 import { buildGraphScene, clip, clipColumns, drawnColumns, escapeHtml, embedJson, fmt, FIT_JS, PAGE_JS, legendHtml, bannersHtml, PAGE_THEME, SPEND_BADGE_DY } from "./graph-html.mjs";
-import { fmtCost, fmtUsd } from "./panel.mjs";
+import { escapeInterpreted, fmtCost, fmtUsd } from "./panel.mjs";
 
 // Must equal costs.mjs's COST_CLASSES; the parity test compares the two literals. Duplicated rather
 // than re-exported because loading costs.mjs is exactly the worker coupling this module refuses.
@@ -236,6 +236,19 @@ function normFold(fold) {
   }
   byRepo.sort((a, b) => b.cost.usd - a.cost.usd || cmpStr(a.label, b.label) || cmpStr(a.key ?? "", b.key ?? ""));
 
+  // Issue #499 part C: by the project id each record carries. null (no section) for a fold that predates the arm, so
+  // its absence never reads as "nothing spent in any project". A key that is not an id is the "(no project)" bucket.
+  let byProject = null;
+  if (Array.isArray(fold.byProject)) {
+    byProject = [];
+    for (const r of fold.byProject) {
+      if (r === null || typeof r !== "object") continue;
+      const key = typeof r.key === "string" && PROJECT_ID.test(r.key) ? r.key : null;
+      byProject.push({ key, label: key ?? "(no project)", runs: posInt(r.runs), tokens: posInt(r.tokens), cost: normCost(r.cost) ?? unknownCost() });
+    }
+    byProject.sort((a, b) => b.cost.usd - a.cost.usd || cmpStr(a.label, b.label));
+  }
+
   const plans = [];
   for (const r of Array.isArray(fold.plans) ? fold.plans : []) {
     if (r === null || typeof r !== "object") continue;
@@ -287,9 +300,40 @@ function normFold(fold) {
     byModel,
     byTrigger,
     byRepo,
+    byProject,
     plans,
     provenance,
   };
+}
+
+/** The project id rule (worker/src/project-id.mjs), restated: this module loads nothing from the worker. */
+const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * The projects' display names, `id -> name` (issue #499 part C), from the payload's `projects` list. A name is the
+ * operator's free text, and `projects.json` admits a bidi override or an invisible character in it, so it is ESCAPED
+ * here (`escapeInterpreted`: each such character becomes visible `\u{...}` text) and clipped; the renderer then
+ * HTML-escapes it and ISOLATES it in a `<bdi>`, so even a right-to-left name cannot reorder the id or the text beside
+ * it. Total: junk in, an empty map out.
+ */
+function normProjectNames(v) {
+  const names = new Map();
+  for (const p of Array.isArray(v) ? v : []) {
+    if (p === null || typeof p !== "object" || typeof p.id !== "string" || !PROJECT_ID.test(p.id)) continue;
+    if (typeof p.name !== "string" || p.name.trim() === "") continue;
+    names.set(p.id, clip(escapeInterpreted(p.name), 60));
+  }
+  return names;
+}
+
+/** The names under the by-project list: each id beside its name, the name escaped and isolated. Empty when none. */
+function projectNamesHtml(rows, names) {
+  const parts = [];
+  for (const r of rows) {
+    if (r.key === null || !names.has(r.key)) continue;
+    parts.push(`<span class="pid">${escapeHtml(r.key)}</span> <bdi>${escapeHtml(names.get(r.key))}</bdi>`);
+  }
+  return parts.length === 0 ? "" : `<div class="dim small">${parts.join(" · ")}</div>`;
 }
 
 /** The per-flow daily series rows, allowlisted like every fold arm: label clipped, machine key kept
@@ -910,7 +954,7 @@ function barListSvg(rows, aria, tips) {
   return parts.join("");
 }
 
-function listSection(title, rows, aria, tips) {
+function listSection(title, rows, aria, tips, extra = "") {
   const head = rows.slice(0, LIST_TOP);
   const rest = rows.slice(LIST_TOP);
   let tail = "";
@@ -925,10 +969,10 @@ function listSection(title, rows, aria, tips) {
     tail = `<div class="dim small">(+${fmt(rest.length)} more · ${escapeHtml(fmtCost(agg))})</div>`;
   }
   const body = head.length === 0 ? '<div class="dim small">none in window</div>' : barListSvg(head, aria, tips);
-  return `<div class="bl"><h3>${escapeHtml(title)}</h3>${body}${tail}</div>`;
+  return `<div class="bl"><h3>${escapeHtml(title)}</h3>${body}${tail}${extra}</div>`;
 }
 
-function breakdownHtml(nf, minted, tips) {
+function breakdownHtml(nf, minted, tips, names = new Map()) {
   const secs = [];
   secs.push(listSection("by flow", nf.byFlow.map((r) => ({ label: r.flow, cost: r.cost, runs: r.runs, apiEquiv: r.apiEquiv })), "spend by flow", tips));
   if (nf.byTrigger === null) {
@@ -952,6 +996,10 @@ function breakdownHtml(nf, minted, tips) {
   }
   secs.push(listSection("by model", nf.byModel.map((r) => ({ label: `${r.provider}/${r.model}`, cost: r.cost, runs: r.runs })), "spend by model", tips));
   secs.push(listSection("by repo", nf.byRepo.map((r) => ({ label: r.label, cost: r.cost, runs: r.runs })), "spend by repo", tips));
+  // Issue #499 part C: the bars carry the id (what a run record holds); the names, when any, sit under the list.
+  if (nf.byProject !== null) {
+    secs.push(listSection("by project", nf.byProject.map((r) => ({ label: r.label, cost: r.cost, runs: r.runs })), "spend by project", tips, projectNamesHtml(nf.byProject.slice(0, LIST_TOP), names)));
+  }
   return `<div id="grid">${secs.join("")}</div>`;
 }
 
@@ -1244,7 +1292,13 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     bodyParts.push(`<section><h2>daily spend</h2>${dailyChartHtml(nf.daily, tips)}${cumulativeHtml(nf.daily, tips)}</section>`);
     const flows = flowLinesHtml(nf, tips);
     if (flows !== null) bodyParts.push(`<section><h2>daily spend by flow</h2>${flows}</section>`);
-    bodyParts.push(`<section><h2>breakdown</h2>${breakdownHtml(nf, minted, tips)}</section>`);
+    let names;
+    try {
+      names = normProjectNames(p.projects);
+    } catch {
+      names = new Map(); // a hostile getter in a junk payload: the bars still render, without names
+    }
+    bodyParts.push(`<section><h2>breakdown</h2>${breakdownHtml(nf, minted, tips, names)}</section>`);
   } else {
     bodyParts.push('<section><div class="dim">no cost data in this payload</div></section>');
   }

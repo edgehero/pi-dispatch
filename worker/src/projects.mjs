@@ -20,6 +20,8 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { configError } from "./config.mjs";
+import { fingerprint } from "./fingerprint.mjs";
+import { hash16 } from "./fleet-lease.mjs";
 import { PROJECT_ID_RE, isProjectId } from "./project-id.mjs";
 import { parseScopeString, qualifiedScopeOf } from "./pause-windows.mjs";
 import { canonicalScope } from "./scoped-limits.mjs";
@@ -163,3 +165,33 @@ export function projectOf(job, projects) {
 	}
 	return null;
 }
+
+/**
+ * What `fpProjects` hashes (issue #499 part C, INT-HOST-REGISTRY-CONTRACT), exported so a test can read it: one entry
+ * per project, sorted by id, as `{ id, members }` where `members` is the sorted 16-hex hash of each member. Never a
+ * `name`, which is free text, and never a member in clear: a folder member is a host path and a repo member a
+ * repository name, and the registry's content rule keeps both out of a Valkey value, even inside a digest's input.
+ * The id is charset-checked operator text, the same admissibility a run record gives it.
+ *
+ * Membership is what the comparison is about: two hosts that put one scope in two projects, or a scope in a project on
+ * one host and in none on the other, record different projects and count the scope against different project rows.
+ * A `name` decides nothing, so renaming the display text on one host is not a disagreement.
+ */
+export function projectsFingerprintInput(projects) {
+	return (Array.isArray(projects) ? projects : [])
+		.filter((p) => isProjectId(p?.id))
+		.map((p) => ({ id: p.id, members: (Array.isArray(p.members) ? p.members : []).map((m) => hash16(String(m))).sort() }))
+		.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * The 16-hex fingerprint `fpProjects` of a host's live projects (`fingerprint.mjs`). It never abstains: a host with no
+ * projects file publishes the fingerprint of no projects, because a host that puts a repo in no project while a peer
+ * puts it in one is the disagreement worth seeing.
+ */
+export function projectsFingerprint(projects) {
+	return fingerprint(projectsFingerprintInput(projects));
+}
+
+/** The fingerprint of no projects: how a reader tells whether projects are in use anywhere on the fleet. */
+export const EMPTY_PROJECTS_FINGERPRINT = projectsFingerprint([]);

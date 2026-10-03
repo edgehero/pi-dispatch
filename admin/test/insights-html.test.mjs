@@ -851,3 +851,34 @@ test("a trigger's spend badge fits its chip, the whole text in a tooltip (issue 
   // A badge that fits is drawn whole and carries no tooltip, byte for byte as before.
   assert.ok(buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW }).includes(">plan:kimi</text>"), "a short badge is untouched");
 });
+
+// ---- issue #499 part C: by project ----
+
+test("the breakdown gains a by-project list keyed by id, with names escaped and isolated under it", () => {
+  const p = CANNED_PAYLOAD();
+  p.fold.byProject = [
+    { key: "shop", label: "shop", runs: 3, tokens: 100, cost: usd(1.25, "metered") },
+    { key: "constructor", label: "constructor", runs: 1, tokens: 10, cost: usd(0.5, "metered") },
+    { key: null, label: "(no project)", runs: 2, tokens: 10, cost: usd(0.25, "metered") },
+    { key: "<script>", label: "<script>", runs: 1, tokens: 1, cost: usd(0.1, "metered") },
+  ];
+  p.projects = [
+    { id: "shop", name: "Web‮shop <b>" },
+    { id: "constructor", name: null },
+    { id: "Bad Id", name: "ignored" },
+  ];
+  const out = buildInsightsHtml(p, { now: NOW });
+  assert.ok(out.includes("<h3>by project</h3>"), "the section renders");
+  assert.ok(out.includes('aria-label="spend by project"'));
+  assert.ok(out.includes(">shop</text>") && out.includes(">constructor</text>") && out.includes(">(no project)</text>"), "bars carry the id, and the no-project bucket");
+  assert.ok(!out.includes(">&lt;script&gt;</text>"), "a non-id key never renders as a bar label");
+  assert.ok(!out.includes("‮"), "the override never reaches the page");
+  assert.ok(out.includes('<span class="pid">shop</span> <bdi>Web\\u{202E}shop &lt;b&gt;</bdi>'), "escaped, HTML-escaped and isolated in a bdi");
+  assert.ok(!out.includes("ignored"), "a name for an id that is not an id is dropped");
+  assert.equal(buildInsightsHtml(p, { now: NOW }), out, "byte-deterministic");
+});
+
+test("a fold without byProject draws no by-project section, never an empty list that reads as no spend", () => {
+  const out = buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW });
+  assert.ok(!out.includes("by project"));
+});

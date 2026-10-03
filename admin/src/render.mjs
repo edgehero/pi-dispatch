@@ -218,7 +218,7 @@ function plainDuration(ms) {
 	return h < 24 ? `${h}h${m % 60}m` : `${Math.floor(h / 24)}d${h % 24}h`;
 }
 
-export function renderScopedLimits({ limits, scopedBudget } = {}) {
+export function renderScopedLimits({ limits, scopedBudget, projects = null } = {}) {
   if (limits?.invalid) return `Scoped limits: file invalid (${limits.invalid})`;
   const list = Array.isArray(limits?.limits) ? limits.limits : [];
   if (list.length === 0) return null; // nothing configured: say nothing (the mutex needs no line)
@@ -239,6 +239,13 @@ export function renderScopedLimits({ limits, scopedBudget } = {}) {
       const micros = used?.usdMicros?.[key];
       const u = Number.isSafeInteger(micros) && micros >= 0 ? formatMicros(micros) : "-";
       bits.push(`${key} $${u}/$${cap}`);
+    }
+    // A project row (issue #499 part C): its member count, or that its project is missing (the panel's framed twin).
+    if (typeof l.scope === "string" && l.scope.startsWith("project:")) {
+      const id = l.scope.slice("project:".length);
+      const p = Array.isArray(projects?.projects) ? projects.projects.find((x) => x?.id === id) : undefined;
+      if (projects?.unset || (Array.isArray(projects?.projects) && !p)) bits.push("not in projects.json");
+      else if (p) bits.push(`${p.members.length} member${p.members.length === 1 ? "" : "s"}`);
     }
     lines.push(`  ${l.scope}: ${bits.join(" · ")}`);
   });

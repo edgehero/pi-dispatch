@@ -60,7 +60,7 @@ import { randomBytes } from "node:crypto";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
-import { loadProjects } from "./projects.mjs";
+import { EMPTY_PROJECTS_FINGERPRINT, loadProjects, projectsFingerprint } from "./projects.mjs";
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
@@ -2418,6 +2418,11 @@ export async function collectChecks(shellVars, seams) {
 		}
 		const usdHere = usdFingerprint(dollarsHere, scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], envListHere);
 		checks.push(...(await fleetDollarChecks(usdHere, peers, { dollarKeysExist: () => (seams.dollarKeysExist ?? defaultDollarKeysExist)(valkeyTalkUrl) })));
+		// Issue #499 part C: each host resolves its jobs' project from its OWN projects.json, while the project rows' counters
+		// are shared. This host's `fpProjects` from the file the service names (none when it does not load: the worker
+		// refuses to boot then, and the BOOT_FILES line says so), against every peer's published one.
+		const projectFactsHere = readProjectFacts(env, fileExists);
+		checks.push(...fleetProjectsChecks(projectsFingerprint(projectFactsHere.parseError === null ? projectFactsHere.projects : []), peers));
 	} else if (fleet.unreachable) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
@@ -4516,6 +4521,46 @@ export async function fleetDollarChecks(mine, peers, { dollarKeysExist = async (
 			warn: true,
 			label: `${silent.map((h) => h.name).join(", ")} ${silent.length === 1 ? "publishes no fingerprint of its" : "publish no fingerprint of their"} dollar caps, so whether ${silent.length === 1 ? "it holds" : "they hold"} the same caps as this host is unknown${byCounters ? " (no host that publishes one sets a dollar cap, but dollar counters exist on this Valkey, so some host reserved dollars recently)" : ""}`,
 			fix: "upgrade every worker on this Valkey to the same release: a worker from before hosts compared their dollar caps may judge the shared dollar counters against other caps, or reserve no dollars at all",
+		});
+	}
+	return checks;
+}
+
+/**
+ * Issue #499 part C: do this host's projects match its peers'? `mine` is this host's `fpProjects` as doctor computes it
+ * from the service's projects file (`projectsFingerprint`), `peers` the registry rows of every OTHER host. WARNINGS
+ * only, the fleet block's rule.
+ *
+ *   - A peer whose `fpProjects` differs: each host resolves a job's project from its own copy, so one repo can be in
+ *     two projects, or in a project on one host and in none on another, depending on which host ran the job. Its runs
+ *     are then recorded under two ids and counted against two project rows (or none), while the counters are shared.
+ *   - A peer with no `fpProjects` (or an empty one): it runs a worker from before hosts published one. Said only when
+ *     projects are in use somewhere (this host's fingerprint, or any peer's, is not the one of no projects), so a
+ *     fleet that never used a projects file hears nothing new on upgrade.
+ *
+ * Hosts are named, never a project's members or name: the registry carries a digest, so "different" is all a reader
+ * can know.
+ */
+export function fleetProjectsChecks(mine, peers) {
+	const checks = [];
+	const opinions = peers.filter((h) => typeof h.fpProjects === "string" && h.fpProjects !== "");
+	const differing = opinions.filter((h) => h.fpProjects !== mine);
+	if (differing.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `Hosts disagree about the projects: ${differing.map((h) => h.name).join(", ")} ${differing.length === 1 ? "reads" : "read"} a projects.json with other ids or members than this host's, so a run is recorded under, and counted against, a different project depending on which host ran it`,
+			fix: "copy the same projects.json to every host (PI_PROJECTS_FILE): the project rows' counters are shared, and each host decides a job's project from its own copy. An edit shows within one beat",
+		});
+	}
+	const silent = peers.filter((h) => typeof h.fpProjects !== "string" || h.fpProjects === "");
+	const inUse = mine !== EMPTY_PROJECTS_FINGERPRINT || opinions.some((h) => h.fpProjects !== EMPTY_PROJECTS_FINGERPRINT);
+	if (silent.length > 0 && inUse) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${silent.map((h) => h.name).join(", ")} ${silent.length === 1 ? "publishes no fingerprint of its" : "publish no fingerprint of their"} projects, so whether ${silent.length === 1 ? "it reads" : "they read"} the same projects.json as this host is unknown`,
+			fix: "upgrade every worker on this Valkey to the same release: a worker from before hosts compared their projects records no project and counts no project row",
 		});
 	}
 	return checks;

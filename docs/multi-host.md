@@ -163,7 +163,8 @@ older worker reads a qualified window as a name no job has and pauses nothing, w
 
 `projects.json` is per host too. Each host decides which project a job belongs to from its own copy and writes that
 id into the run record, so give every host the same file, or one repo is recorded under two projects depending on
-which host ran it. See [`docs/projects.md`](projects.md).
+which host ran it. Each host publishes a fingerprint of its projects (ids and member hashes, never a name), and
+`pi-dispatch doctor` names a host whose projects differ. See [`docs/projects.md`](projects.md).
 
 If you were relying on that accidental multiplication, raise the knob deliberately. The published
 arithmetic in [`docs/wait-for.md`](wait-for.md) is now what it says: about one check every ten seconds

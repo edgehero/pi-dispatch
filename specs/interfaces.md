@@ -5765,8 +5765,11 @@ validator rather than a second copy of it.
 **operator → worker (and, from part C of issue #499, the admin extension).** A project is a named group of repos and
 folders. A job whose scope is a member belongs to that project, and its run record carries the project's id.
 
-- **Producer/Consumer**: the operator writes the file by hand (the admin's confirm-gated project tools come with part
-  C of issue #499). The worker reads it at boot, refusing to start on a file that does not load, and holds it in a
+- **Producer/Consumer**: the operator writes the file by hand, or through the admin's confirm-gated tools
+  `dispatch_project_add`, `dispatch_project_edit` and `dispatch_project_delete` (issue #499 part C). They write the
+  file `PI_PROJECTS_FILE` names (refused while it is unset: the worker then reads no projects), through
+  `parseProjects`, by tmp and rename, so the watcher never reads half a file. The admin also reads it for the
+  `dispatch_projects` tool, the panel's projects view and the insights page's project names. The worker reads it at boot, refusing to start on a file that does not load, and holds it in a
   watched ref: a live edit that loads replaces it (`projects_reloaded`), one that does not keeps the last good copy
   (`projects_reload_invalid`). The receiver does not read it. Those log events are telemetry, not contract. They name
   a count or the loader's message, never a project's `name`.
@@ -5783,8 +5786,10 @@ folders. A job whose scope is a member belongs to that project, and its run reco
     money file, and the version rule is the scoped-limits one for that reason.
   - `id` (required): `^[a-z0-9][a-z0-9-]{0,31}$`. Lowercase and free of `:`, `#` and `/`, so it enters a run record
     and a Valkey key without escaping. Two projects with one id refuse the file, naming both indexes.
-  - `name` (optional): display text, 1 to 120 characters, no control characters. It appears only in the panel. It
-    NEVER enters a record or a log line, and no refusal quotes it; a file that is not valid JSON is refused without
+  - `name` (optional): display text, 1 to 120 characters, no control characters. It appears only on the admin's
+    surfaces (the panel, the insights page, a confirm and a tool result), each time ESCAPED (an invisible or bidi
+    character such as U+202E, which this rule admits, shows as `\u{202E}`) and ISOLATED (last on its panel line, in a
+    `<bdi>` on the page). It NEVER enters a record, a log line or the host registry, and no refusal quotes it; a file that is not valid JSON is refused without
     the parser's own message, which quotes file text.
   - `members` (required, non-empty): scopes in the grammar of `parseScopeString` (issue #498). A forge member is
     forge-qualified, `<kind>:owner/name`, and stored so. A local member is an absolute folder, stored resolved
@@ -5808,11 +5813,19 @@ folders. A job whose scope is a member belongs to that project, and its run reco
   `project:<id>` row there caps every member of the project as one, and its id must be a project here: a scoped-limits
   row naming an id this file does not define refuses the worker's boot, and an edit of THIS file that would drop or
   rename a project a row still names is kept out on a live reload (`projects_reload_invalid`), so remove the row first.
+  The admin's project tools hold the same pair from this side: a write that removes an id a row names is refused
+  before the confirm (delete or change the row first), and an edit cannot change an id. A row that ALREADY names a
+  missing project does not block an unrelated write; that write returns `pending` (the worker applies it once its
+  live scoped limits no longer name that id).
+- **Fleet** (issue #499 part C): the file is per host while the project rows' counters are shared, so hosts of one
+  fleet must carry the same file. Each host publishes `fpProjects` (`INT-HOST-REGISTRY-CONTRACT`), a digest of its
+  live projects' ids and member hashes, and doctor names a peer whose digest differs.
 - **Residuals**: records are never re-attributed from current membership, so an old record, and every record
-  written before issue #499, keeps `project: null`. Webhook triggers are not grouped by project: a webhook trigger
-  fires for whichever repo delivers, so only its runs are. The file is per host while counters are shared: hosts of
-  one fleet must carry the same file (a fingerprint comes with part C of issue #499). A symlinked folder and its
-  target are two members, as they are two scopes.
+  written before issue #499, keeps `project: null` and folds into "(no project)" in every cost view. One project per
+  scope. Webhook triggers are not grouped by project: a webhook trigger fires for whichever repo delivers, so only its
+  runs are. The project is resolved per attempt, so a retry after an edit may record a different project. Two hosts
+  on different instances of one forge kind still put one `<kind>:owner/name` in one project. A symlinked folder and
+  its target are two members, as they are two scopes.
 - **Acceptance**: a job for a member scope records `project: "<id>"`, a non-member records `null`; a file claiming
   one scope in two projects refuses to load, naming both ids; a bare member, a duplicate id, an empty `members` and
   a newer `version` refuse to load; with `PI_PROJECTS_FILE` unset every record carries `project: null` and nothing
@@ -6404,6 +6417,7 @@ abstains.
     fpCron          this host's schedule-set fingerprint, or "" when cron is disabled (= ABSTAIN)
     cronCount       how many cron entries that fingerprint covers -- for the MESSAGE, never the rule
     fpUsd           a fingerprint of the dollar caps this host judges the shared dollar counters against
+    fpProjects      a fingerprint of this host's live projects: ids and member hashes, never a name
 ```
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
@@ -6441,6 +6455,19 @@ publishes none while dollar caps are in use, which is this host's or a peer's pu
 empty one, or else a dollar counter found on the Valkey (best effort, asked only then: `EXISTS` on the deployment's
 current day, week and month keys, then a bounded `SCAN` for `budget:usd:*`, within two seconds; a capped host from
 before `fpUsd` leaves its counters, but a host with only a per-job cap leaves no counter). Nothing refuses on it.
+
+**`fpProjects` is ids and member hashes only** (issue #499 part C). Each host resolves a job's project from its own
+`projects.json` while the project rows' counters are shared, so two copies put one repo in two projects, or in a
+project on one host and in none on another. `fpProjects` is `fingerprint.mjs`'s 16-hex digest of the projects sorted
+by id, each as its id and the sorted 16-hex hash (`hash16`) of each member: never a `name` (free text that decides
+nothing) and never a member in clear (a folder member is a host path, a repo member a repository name). A separate
+field rather than a part of `fpUsd`, deliberately: membership decides the job-count project rows and the recorded
+project as well as the dollar rows, so it matters on a fleet that sets no dollar cap, and one warning that says
+"projects" names the file to copy where a dollar warning would send the operator to the wrong one. Published as a
+thunk over the live projects ref, so an edit shows within one beat. It never ABSTAINS: a host with no projects file
+publishes the digest of no projects. Only `doctor` reads it, to WARN (`doctor.mjs -> fleetProjectsChecks`): a peer
+whose digest differs, or one that publishes none while projects are in use (this host's or a peer's digest is not the
+one of no projects). Nothing refuses on it.
 
 **The TTL is refreshed on EVERY beat**, which reverses this project's stated set-once rule (`budget.mjs`:
 *"set the TTL only when the key is first created, so a long window cannot push its expiry forward"*). The
@@ -6873,3 +6900,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #499, part B (project rows). **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: a `project:<id>` row carries `day`, `week`, `month`, `concurrent`, `dayUsd`, `weekUsd` and `monthUsd`, needs version 2 in every field (the released 2.1.0 reads a version 1 `project:` row as an inert repo row), and caps every member of the project as one; near misses and a malformed id stay refused; a row whose id is not a project refuses the boot, a reload of either file is judged as a pair (against the other file on disk, both taken when they agree, so a rename applies in either save order; else against the other's live copy; else last good is kept, the reason naming the row and both files), the admin judges rows against the projects file the worker reads (unset is no projects), refuses to write a dangling row, names an unreadable projects file as such and, while an unchanged row dangles on disk, says only that the worker applies the write once its live projects define the id, and doctor fails on one. New **Reserve order**: the job-count ledgers are one ordered list (repo or folder row, project row, global) reserved by one helper and given back in reverse by one helper on every refund path; a project refusal is `project-cap` and gives back the repo slot; a global refusal gives back both. Keys are row-keyed (`scopeKeyPrefix("project:<id>")`, `scopeDollarKeyPrefix("project:<id>")`); the project `concurrent` takes a slot and a fleet lease `slot:s:<hash16("project:<id>")>` after the repo slot, given back last first on every deferral, local members included, and swept at boot. Dollar enforcement gains the project tier (deployment, scope, project, models, one hold) and `budget:usd:p:` is withdrawn. A Valkey fault inside the count reservations gives back every ledger that landed whole; inside the ledger that faulted, its windows INCRed before the fault stay counted, the pre-existing posture. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `project-cap` joins the `reason` enum, described beside `dollar-cap`, whose text now says every job-count slot and states one global-only `budgetReserved` rule for every path. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: a Caps bullet (caps live in scoped-limits.json; an edit dropping a project a row names is kept out). UNCHANGED, checked: `INT-DEPLOYMENT-POINTER-CONTRACT` (no new key), `INT-HOST-REGISTRY-CONTRACT` (the fingerprint is part C). Code evidence: `worker/src/scoped-limits.mjs` (`normalizeLimit` project branch, `scopedLimitsVersionFor`, `scopedLedgers`, `checkProjectRows`, `scopeClaimRows`), `worker/src/budget.mjs` (`reserveLedgers`, `releaseLedgers`), `worker/src/processor.mjs` (`held`, `refundLedgers`, `globalHeld`), `worker/src/index.mjs` (`scopeHolds`, `deferScope`), `worker/src/start.mjs` (`pairWith`, the boot `checkProjectRows`), `worker/src/doctor.mjs` (`projectRowChecks`), `admin/src/read-model.mjs` (`judgeProjectRows`, `projectsFile`); tests `worker/test/scoped-limits.test.mjs`, `processor-projects.test.mjs`, `scope-mutex.test.mjs`, `start-wiring.test.mjs`, `doctor.test.mjs`, `admin/test/read-model.test.mjs`. |
 | 2026-10-03 | Issue #500, part E: the parent's fold. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `tokens` gains `childTotal`, `childProcesses` and `unmeteredChildren` between `unpriced` and the cost fields, on every line of the process-wide meter (zeros with no children, every other key then byte-identical); with children the totals, counts and `usage` rows include theirs. One table row: the job's pi children past a cap or a list, or a pi child with no ledger, stop with the existing reasons (`token_budget`, `cost-cap`, `model-not-allowed`); no new exit code or reason, checked. The worker's closed key list drops the three keys until part F, and the `total` it keeps already includes the children. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the record's `tokens` is rebuilt from the worker's closed list, which part F widens. `INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked: no name, mount or flag changes. **Code evidence**: image/runner/src/child-watch.mjs -> createChildWatch; image/runner/run-job.mjs; worker/src/run-history.mjs -> TOKEN_KEYS, rebuildTokens. |
 | 2026-10-03 | Issue #500, part E, the review's fixes. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, the child keys paragraph: `unmeteredChildren` also counts the parent's own lost ledger directory or failed control write; the guard counters the parent writes (`costRefused`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `modelRefused`) include the children's; every exit line of a metered run, the SIGTERM line and the outer catch's included, carries the children's final fold. No new key, exit code or reason, checked. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked. **Code evidence**: image/runner/src/child-watch.mjs -> guardFields; image/runner/run-job.mjs -> finishMeter. |
+| 2026-10-03 | Issue #499, part C (the operator surfaces). **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: a host row gains `fpProjects`, the digest of the host's live projects as ids and the hash of each member, never a name or a member in clear; a separate field rather than a part of `fpUsd`, because membership decides the job-count project rows and the recorded project as well as the dollar rows, so it matters on a fleet with no dollar cap, and a projects warning names the file to copy; it never abstains (no projects file is the digest of no projects); doctor warns on a peer that differs, and on one that publishes none while projects are in use (`fleetProjectsChecks`). Ships with part B's project rows in one release. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin's project tools are producers (the file `PI_PROJECTS_FILE` names, refused while it is unset, the worker's parser, tmp and rename); the name rule says where a name renders and that it is escaped and isolated there; the Caps bullet says how the tools hold the pair rule; a Fleet bullet names `fpProjects`; the Residuals say old records fold into `(no project)`, one project per scope, webhook triggers not grouped, the project is per attempt, and one forge kind on two instances is one member. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the `project` field is read, not changed. **Code evidence**: worker/src/projects.mjs -> projectsFingerprint, projectsFingerprintInput; worker/src/start.mjs -> fpProjects; worker/src/doctor.mjs -> fleetProjectsChecks. |

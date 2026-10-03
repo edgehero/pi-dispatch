@@ -894,6 +894,127 @@ function judgeProjectRows(before, after, projectsPath, fs) {
   return {};
 }
 
+/** Why a projects write cannot happen with PI_PROJECTS_FILE unset: the worker reads no projects file then. */
+const PROJECTS_UNSET = "PI_PROJECTS_FILE is unset, so the worker reads no projects file and a project written here would decide nothing. Set it in the deployment's .env (pi-dispatch up does) and restart the worker. Nothing was written";
+
+/**
+ * Read + validate the projects file for display (issue #499 part C, INT-PROJECTS-FILE-CONTRACT), through the SHARED
+ * `parseProjects`. `projectsPath` is the file the WORKER reads (`resolvePaths().projectsFile`): null when
+ * PI_PROJECTS_FILE is unset, which reads `{ unset }` (the worker has no projects then, so the panel shows none rather
+ * than a cwd file the worker never loads). `{ projects }`, or `{ missing }` / `{ invalid }` so the viewer degrades. A
+ * `name` rides in the result for the panel to escape and isolate where it renders; it is never logged.
+ */
+export function readProjects({ projectsPath, fs = nodeFs }) {
+  if (projectsPath === null || projectsPath === undefined) return { unset: true };
+  let text;
+  try {
+    text = fs.readFileSync(projectsPath, "utf8");
+  } catch {
+    return { missing: true };
+  }
+  try {
+    return { projects: parseProjects(text, projectsPath) };
+  } catch (e) {
+    return { invalid: e?.message ?? String(e) };
+  }
+}
+
+/**
+ * Plan a read-modify-write of the projects file without writing it (issue #499 part C): what `writeProjects` would
+ * write, or why it refuses. The tools call it BEFORE their confirm, so an operator is never asked to approve a change
+ * the write would refuse, and `writeProjects` calls it again after the confirm, so a file that changed in between is
+ * judged as it is then.
+ *
+ * `mutate(projects)` receives copies of the parsed projects (`{ id, name, members }`) and returns the new list. The
+ * existing file goes THROUGH the parser, so a file that does not load, or a newer `version`, refuses the write (this is
+ * a money file: which project a scope is in decides which project row counts it). Only a MISSING file starts from no
+ * projects. The result is re-validated by `parseProjects`, the worker's own loader.
+ *
+ * THE PAIR RULE (issue #499 part B), from the projects side. The worker keeps its last good projects when an edit would
+ * leave a `project:<id>` row in scoped-limits.json naming a project that is gone (`pairWith`), so this refuses a write
+ * that removes an id a row on disk names: delete or change the row first. An id the write does not remove is never
+ * judged, so a row that ALREADY dangles cannot block an unrelated edit; such a write returns `pending`, in the words
+ * `writeScopedLimits` uses, because the admin cannot see what the worker has live. When the scoped-limits file cannot
+ * be read or parsed and the write removes an id, the row cannot be checked, so it is refused.
+ *
+ * Returns `{ text, projects, pending? }` or `{ invalid }`. No message quotes a `name`.
+ */
+export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutate, fs = nodeFs }) {
+  if (projectsPath === null || projectsPath === undefined) return { invalid: PROJECTS_UNSET };
+  let current = [];
+  let existing = null;
+  try {
+    existing = fs.readFileSync(projectsPath, "utf8");
+  } catch {
+    // Missing file: start from no projects -- the one repair this writer performs.
+  }
+  if (existing !== null) {
+    try {
+      current = parseProjects(existing, projectsPath);
+    } catch (e) {
+      return { invalid: e?.message ?? String(e) };
+    }
+  }
+  const next = mutate(current.map((p) => ({ ...p, members: [...p.members] })));
+  // The stored shape: `name` only when there is one, the committed example's shape.
+  const rows = next.map((p) => (p?.name === null || p?.name === undefined ? { id: p?.id, members: p?.members } : { id: p.id, name: p.name, members: p.members }));
+  const text = `${JSON.stringify({ version: 1, projects: rows }, null, 2)}\n`;
+  let written;
+  try {
+    written = parseProjects(text, projectsPath); // the loader's own validator -- never write a file it would refuse
+  } catch (e) {
+    return { invalid: e?.message ?? String(e) };
+  }
+  // Written in the STORED spelling the loader just produced (members resolved and qualified as `projectOf` matches
+  // them, the name trimmed), so the file says what the worker will read rather than what was typed.
+  const stored = written.map((p) => (p.name === null ? { id: p.id, members: p.members } : { id: p.id, name: p.name, members: p.members }));
+  const finalText = `${JSON.stringify({ version: 1, projects: stored }, null, 2)}\n`;
+  const kept = new Set(written.map((p) => p.id));
+  const removed = current.map((p) => p.id).filter((id) => !kept.has(id));
+  let limits = [];
+  if (scopedLimitsPath !== null && scopedLimitsPath !== undefined) {
+    let raw = null;
+    try {
+      raw = fs.readFileSync(scopedLimitsPath, "utf8");
+    } catch {
+      // No scoped-limits file: no row can name a project.
+    }
+    if (raw !== null) {
+      try {
+        limits = parseScopedLimits(raw, scopedLimitsPath);
+      } catch (e) {
+        if (removed.length > 0) return { invalid: `the scoped-limits file does not load (${e?.message ?? String(e)}), so a row naming ${removed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+        limits = [];
+      }
+    }
+  }
+  const dangling = danglingProjectRows(limits, written);
+  const blocking = dangling.filter((d) => removed.includes(d.id));
+  if (blocking.length > 0) {
+    const rows = blocking.map((d) => `project:${d.id} (index ${d.index})`).join(", ");
+    return { invalid: `${rows} in ${scopedLimitsPath} names this project, and the worker keeps its last good projects while a row names a missing one; delete or change that row first (dispatch_limit_delete or dispatch_limit_edit). Nothing was written` };
+  }
+  if (dangling.length > 0) {
+    const ids = [...new Set(dangling.map((d) => d.id))].join(", ");
+    return { text: finalText, projects: written, pending: `${dangling.map((d) => `project:${d.id}`).join(", ")} in ${scopedLimitsPath} names a project that is not in this file; the worker applies this once its live scoped limits no longer name ${ids}; if they do, it keeps its last good projects. Run pi-dispatch doctor` };
+  }
+  return { text: finalText, projects: written };
+}
+
+/**
+ * Read-modify-write the projects file (issue #499 part C): `planProjectsWrite`, then written ATOMICALLY (tmp + rename,
+ * the scoped-limits writer's pattern) so the worker's live-reload watcher never reads half a file. Reached only from
+ * the confirm-gated `dispatch_project_*` tools. Returns `{ ok, pending? }` or `{ invalid }`.
+ */
+export function writeProjects({ projectsPath, scopedLimitsPath = null, mutate, fs = nodeFs }) {
+  const plan = planProjectsWrite({ projectsPath, scopedLimitsPath, mutate, fs });
+  if (plan.invalid) return { invalid: plan.invalid };
+  const tmp = `${projectsPath}.tmp`;
+  fs.writeFileSync(tmp, plan.text, { mode: 0o644 });
+  fs.renameSync(tmp, projectsPath);
+  return plan.pending ? { ok: true, pending: plan.pending } : { ok: true };
+}
+
 /**
  * The used counts behind each scoped limit row (issue #242): GET only the windows a row actually caps
  * (a concurrent-only row touches redis zero times -- in-flight is worker-process state this reader

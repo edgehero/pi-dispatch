@@ -329,9 +329,9 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
 
 /**
  * The model-facing control surface (DES-ADMIN-VIA-PI-EXTENSION, amended): the reads
- * (`dispatch_status`/`_runs`/`_costs`/`_triggers`/`_pauses`/`_limits`/`_waits`), the on/off controls
+ * (`dispatch_status`/`_runs`/`_costs`/`_triggers`/`_pauses`/`_limits`/`_waits`/`_projects`), the on/off controls
  * (`_pause`/`_resume`), the gated PAID enqueue (`_run`), and the confirm-gated writes (`_set`, the
- * trigger, pause-window and scoped-limit CRUD, and `_wait_cancel`). No count words: the arrays below are
+ * trigger, pause-window, scoped-limit and project CRUD, and `_wait_cancel`). No count words: the arrays below are
  * the inventory, and a number beside them would be the second unchecked claim that caused issue #280 --
  * in this very comment, which said "eleven" while the array three lines down said twenty-one. Two
  * invariants are locked here: there
@@ -343,11 +343,11 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
  * and the two spec entries that carry the same enumeration had drifted identically (issue #280). That is
  * why the spec scan below exists rather than a fourth hand-maintained copy.
  */
-const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete", "dispatch_limit_add", "dispatch_limit_edit", "dispatch_limit_delete", "dispatch_wait_cancel"];
+const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete", "dispatch_limit_add", "dispatch_limit_edit", "dispatch_limit_delete", "dispatch_wait_cancel", "dispatch_project_add", "dispatch_project_edit", "dispatch_project_delete"];
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
   const { calls } = await loadRegistered();
   const names = calls.registerTool.map((t) => t.name).sort();
-  assert.equal(calls.registerTool.length, 21, "exactly twenty-one tools");
+  assert.equal(calls.registerTool.length, 25, "exactly twenty-five tools");
   assert.deepEqual(names, [
     "dispatch_costs",
     "dispatch_limit_add",
@@ -359,6 +359,10 @@ test("registers exactly the read/control/enqueue/write tools, and never a raw-lo
     "dispatch_pause_delete",
     "dispatch_pause_edit",
     "dispatch_pauses",
+    "dispatch_project_add",
+    "dispatch_project_delete",
+    "dispatch_project_edit",
+    "dispatch_projects",
     "dispatch_resume",
     "dispatch_run",
     "dispatch_runs",

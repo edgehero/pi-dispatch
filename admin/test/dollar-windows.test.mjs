@@ -137,13 +137,26 @@ test("a repo row folds its own forge runs; a folder or model row says why its ru
   assert.equal(foldWindowRecords(records, specs[2]).unattributed, UNATTRIBUTED.model);
 });
 
-test("issue #499 part B: a project row's dollar window says its runs are matched later, never a window nobody spent in", () => {
-  const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: "project:shop", dayUsd: "5" }] }), "sl.json");
+test("issue #499 part C: a project row's dollar window folds the records whose project is that id, a local run included", () => {
+  const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: "project:shop", dayUsd: "5" }, { scope: "project:constructor", dayUsd: "5" }] }), "sl.json");
   const specs = dollarWindowSpecs({ caps: {}, limits, now: NOW });
-  assert.deepEqual(specs.map((s) => [s.ledger, s.name]), [["scope", "project:shop"]]);
-  const [row] = dollarWindowRows({ specs, counters: {}, records: [record()] });
-  assert.equal(row.records, null);
-  assert.equal(row.unattributed, UNATTRIBUTED.project);
+  assert.deepEqual(specs.map((s) => [s.ledger, s.name]), [["scope", "project:shop"], ["scope", "project:constructor"]]);
+  const records = [
+    record({ jobId: "gh-shop", project: "shop" }),
+    record({ jobId: "local-shop", kind: "local", target: "local:site", project: "shop", dollars: { reservedMicros: 1, settledMicros: 250_000, basis: "floor", modelBasis: null } }),
+    // The same repo, recorded before it joined: never re-attributed from today's membership.
+    record({ jobId: "gh-before", project: null, dollars: { reservedMicros: 1, settledMicros: 900_000, basis: "metered", modelBasis: null } }),
+    record({ jobId: "gh-other", project: "tools", dollars: { reservedMicros: 1, settledMicros: 800_000, basis: "metered", modelBasis: null } }),
+    record({ jobId: "gh-ctor", project: "constructor", dollars: { reservedMicros: 1, settledMicros: 50_000, basis: "metered", modelBasis: null } }),
+  ];
+  const [shop, ctor] = dollarWindowRows({ specs, counters: {}, records });
+  assert.equal(shop.unattributed, undefined, "attributed now, no longer marked");
+  assert.equal(shop.records.runs, 2, "the github and the local run of shop, nothing else");
+  assert.equal(shop.records.settledMicros, 650_000);
+  assert.deepEqual([shop.records.basis.metered, shop.records.basis.floor], [1, 1]);
+  assert.equal(ctor.records.runs, 1, "an id that is a prototype key is still just an id");
+  assert.equal(ctor.records.settledMicros, 50_000);
+  assert.ok(!("project" in UNATTRIBUTED), "no project sentence left to show");
 });
 
 test("issue #498: a qualified repo row folds only its own forge's runs; a bare row folds every forge's", () => {

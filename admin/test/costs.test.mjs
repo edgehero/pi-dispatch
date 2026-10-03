@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { COST_CLASSES, COSTS_WINDOWS, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts, recordInRepo, repoKeyOf } from "../src/costs.mjs";
+import { COST_CLASSES, COSTS_WINDOWS, PROJECT_KEY_RE, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts, projectKeyOf, recordInProject, recordInRepo, repoKeyOf } from "../src/costs.mjs";
+import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { parseSubscriptions } from "@edgehero/pi-dispatch/subscriptions";
 
 test("costs.mjs is pure: no fs, no redis, no queue, no env, no console -- records and opinions in, typed dollars out", () => {
@@ -484,6 +485,50 @@ test("issue #498: one repo on two forges is two byRepo rows; a bare repo filter 
   assert.equal(recordInRepo(rec({ target: "local:site" }), "local:site"), true, "a local target still filters by its key");
   assert.equal(recordInRepo(gh, "gitlab:acme/web"), false);
   assert.equal(recordInRepo(gh, ""), false);
+});
+
+// ---- byProject (issue #499 part C) ----
+
+test("byProject folds by the project id each record carries, with typed dollars and a (no project) bucket", () => {
+  const priced = (jobId, project, cost, over = {}) => rec({ jobId, project, tokens: tok(cost), usage: usage([row("anthropic", "claude-sonnet-4", { cost })]), provider: "anthropic", model: "claude-sonnet-4", ...over });
+  const a = priced("p1", "shop", 0.5, { kind: "github", target: "acme/web#1" });
+  const b = priced("p2", "shop", 0.25, { kind: "local", target: "local:site" });
+  const c = priced("p3", "tools", 0.1);
+  const none = priced("p4", null, 0.05);
+  const old = priced("p5", undefined, 0.02); // recorded before the field existed
+  delete old.project;
+  const junk = priced("p6", "Not An Id", 0.01); // a hand-edited value is not an id: no project
+  const f = fold([a, b, c, none, old, junk]);
+  assert.deepEqual(f.byProject.map((r) => [r.key, r.label, r.runs]), [["shop", "shop", 2], ["tools", "tools", 1], [null, "(no project)", 3]]);
+  assert.deepEqual(f.byProject[0].cost, { usd: 0.75, class: "metered", floor: false }, "the same typed dollars as every bucket");
+  assert.equal(f.byProject[2].tokens, 3 * 1500, "tokens summed per bucket");
+  const total = f.byProject.reduce((sum, r) => sum + r.cost.usd, 0);
+  assert.ok(Math.abs(total - 0.93) < 1e-9, "every run lands in exactly one bucket");
+});
+
+test("byProject is a Map fold: an id that is a prototype key keeps its own row", () => {
+  const priced = (jobId, project, cost) => rec({ jobId, project, tokens: tok(cost), usage: usage([row("anthropic", "claude-sonnet-4", { cost })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const f = fold([priced("c1", "constructor", 0.5), priced("c2", "constructor", 0.25), priced("t1", "tostring", 0.1), priced("v1", "valueof", 0.05)]);
+  assert.deepEqual(f.byProject.map((r) => [r.key, r.runs]), [["constructor", 2], ["tostring", 1], ["valueof", 1]]);
+  assert.equal(f.byProject[0].cost.usd, 0.75);
+});
+
+test("byProject never re-attributes: a member's old record stays (no project), whatever the projects file says now", () => {
+  // The fold takes no projects argument at all: the record's own field is the only input.
+  const before = rec({ jobId: "o1", kind: "github", target: "acme/web#1", project: null, tokens: tok(0.5) });
+  assert.deepEqual(fold([before]).byProject.map((r) => [r.key, r.runs]), [[null, 1]]);
+});
+
+test("the project filter and key: an id selects its runs, anything else none; the rule matches the worker's", () => {
+  assert.equal(PROJECT_KEY_RE.source, PROJECT_ID_RE.source, "the restated rule is the worker's rule");
+  const r = rec({ project: "shop" });
+  assert.equal(projectKeyOf(r), "shop");
+  assert.equal(projectKeyOf(rec({ project: null })), null);
+  assert.equal(projectKeyOf(rec({ project: "Shop" })), null);
+  assert.equal(recordInProject(r, "shop"), true);
+  assert.equal(recordInProject(r, "tools"), false);
+  assert.equal(recordInProject(rec({ project: null }), "(no project)"), false, "the display label is never a key");
+  assert.equal(recordInProject(r, ""), false);
 });
 
 test("repoOfTarget strips exactly the forge issue/MR tail and nothing else", () => {
