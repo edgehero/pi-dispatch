@@ -529,10 +529,11 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
 - **Corrected (2026-10-03, issue #500), three sentences this row carried, each refuted by a measurement
   below.** (1) "pi's own SDK example spawns a `pi` subprocess": in a job it spawns the runner itself (M1).
   (2) "no in-process hook can close it, in any language": true of the runner's process, false of the child's.
-  A `NODE_OPTIONS` preload runs in every Node child of the job, and an extension injected with `-e` runs inside a
+  A `NODE_OPTIONS` preload runs in every Node child that keeps the inherited environment, and an extension
+  injected with `-e` runs inside a
   pi CLI child and reaches that child's own `ModelRuntime` (M3). (3) The sampler's counts were never logged.
 - **Measured at the pi 0.99.1 pin (2026-10-03, issue #500, part 1), zero spend.** Docker Desktop 27.4 with the
-  worker's isolation flags and a job image built at e07a5d38, the laptop, and rootless podman 4.9.3 on a lab VM.
+  worker's isolation flags and a job image built at e07a5d38, a macOS host, and rootless podman 4.9.3 on a lab VM.
   Every provider call went to a local fake. The decision these feed lands with the rest of #500; until then this
   row stays as it is.
   - **M1, the stock subagent example in a job.** It runs `process.execPath` with `process.argv[1]`, which in a job
@@ -553,18 +554,30 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
     (issue #503).
   - **M3, the injection.** A `NODE_OPTIONS=--import` preload ran in the root runner, the nested runner (both
     `runner-node`) and a pi CLI child. Spliced in FRONT of the child's arguments, `-e <file>` loaded before
-    every other extension, explicit or discovered, for the bundle and for `dist/cli.js`, with and without `-ne`
-    and `--`. Appended at the END after a `--`, it became two more prompts (3 calls instead of 1) and never
+    every other extension, explicit or discovered. The lab rows cover the bundle (plain, `-ne`, `--`) and
+    `dist/cli.js` (plain); a second run on a macOS host covered `dist/cli.js` with `-ne` and with `--` too, with the
+    same order. Appended at the END after a `--`, it became two more prompts (3 calls instead of 1) and never
     loaded. In both CLIs, `Object.getPrototypeOf(ctx.modelRegistry.runtime).constructor` was the child's own
-    `ModelRuntime`. jiti (bundled, `tryNative: false`) loading `usage-meter.mjs` from that extension returned a
-    different namespace object but the same `createUsageMeter` function as the preload's native import, so the
-    module was evaluated once. A `globalThis` handoff from the preload is still the safer seam: it does not rest
+    `ModelRuntime`. jiti loads `.mjs` natively: despite the bundle's `tryNative: false`, `usage-meter.mjs` imported
+    from that extension returned a different namespace object but the same `createUsageMeter` function as the
+    preload's native import, so the module was evaluated once. A `globalThis` handoff from the preload is still the safer seam: it does not rest
     on jiti's handling of `.mjs`. A `module.registerHooks` load hook in the preload also saw pi's
     `dist/core/model-runtime.js` load in an SDK-only child (the pi-subagents background shape), on Node 22.23.1.
-  - **M4, /proc.** After `setupCli()` a pi CLI child's `cmdline` is exactly `pi` and its `comm` is `pi`, so the
-    cli path is gone. Before it, `cmdline` names `dist/bundle/cli.js` and `comm` is `node`. A nested runner
-    started from the exec-only `runner-node` is not dumpable: its full `cmdline` and its `comm` stayed readable to
-    the same uid, while `environ` and `exe` were denied (Docker and rootless podman alike). A backgrounded child
+    `module.registerHooks` does not exist before Node 22.15: on 22.13 a static import of it is a SyntaxError, and a
+    preload in `NODE_OPTIONS` that throws stops every Node child from starting. So a preload must test
+    `typeof module.registerHooks === "function"` and catch everything (a design note for the preload).
+    **Two more entry points run a full session**: the package export `./rpc-entry` (`dist/bundle/rpc-entry.js`) and
+    the unbundled `dist/rpc-entry.js`. Each calls `main` in rpc mode and sets `process.title` to `pi-rpc`. A second
+    run on a macOS host found that `dist/bundle/rpc-entry.js` got neither the CLI-path injection nor the load hook
+    (the hook sees `dist/core/model-runtime.js` only in unbundled code), while `dist/rpc-entry.js` was seen by the
+    hook. With the bundle's rpc entry added to the preload's path list, front injection worked there too. So the
+    preload must recognise both rpc entries, and a detector must match them and `pi-rpc`.
+  - **M4, /proc.** After `setupCli()` a pi CLI child's `cmdline` is `pi` followed by NUL bytes up to the
+    original length (argv[0] is `pi` once the file is split on NUL and empty fields dropped), and its `comm` is
+    `pi`, so the cli path is gone. Before it, `cmdline` names `dist/bundle/cli.js` and `comm` is `node`. An rpc
+    entry shows `pi-rpc` instead. A nested runner started from the exec-only `runner-node` is not dumpable on
+    Docker: its full `cmdline` and its `comm` stayed readable to the same uid, while `environ` and `exe` were
+    denied. On rootless podman an exec-only node binary (the same mode as `runner-node`) gave the same result. A backgrounded child
     whose shell exited was reparented to the init process (PPid 1) and stayed visible in the `/proc` scan.
   - **M5, cold start, container with 2 CPUs.** From spawn: the preload runs at about 13 ms. The extension
     factory runs at 172 ms (max 247) for the bundle and 323 ms (max 328) for `dist/cli.js`. `session_start`
@@ -573,14 +586,15 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
     **Decided grace: 10 s, measured from the preload's `starting` write to the child meter's install at factory
     time.** A child that has not reached `session_start` is not unmetered for that alone.
   - **M6, what a child loads, and `-ne`.** A pi CLI child loads the explicit `-e` paths first, then the
-    project's `.pi/extensions` (only when the project is trusted, for example `-a`), then the agent dir's, then
+    project's `.pi/extensions` (only when the project is trusted, for example `-a`), then the agent dir's, and
     pi's built-ins (tools `codemode` and `tool_search`, commands `llama` and `mcp`), none of which the runner
     loads. `-ne` drops discovery and the built-ins and keeps every `-e`. **Decided: no `-ne`.** The meter loads
     first without it, and `-ne` would take away the discovery a subagent package may rely on.
-  - **M7, subcommands.** The eight subcommands pi dispatches on `args[0]` (`auth`, `config`, `install`, `list`,
-    `mcp`, `remove`, `uninstall`, `update`) ran as themselves with no injection. With `-e` forced in front, each
-    became a chat turn on the default model ("No API key found" here; a paid call where a key exists). So a
-    preload must leave them alone. `--version`, `--help`, `--list-models`, `--export` and `--mode rpc` were
+  - **M7, subcommands.** pi dispatches eight subcommands on `args[0]` (`auth`, `config`, `install`, `list`,
+    `mcp`, `remove`, `uninstall`, `update`). Three were run (`auth check`, `list`, `mcp list`): each ran as itself
+    with no injection, and with `-e` forced in front each became a chat turn on the default model ("No API key
+    found" here; a paid call where a key exists). The other five were not run: `main()` dispatches them the same
+    way before `parseArgs` (read from the code, pinned by the test). So a preload must leave all eight alone. `--version`, `--help`, `--list-models`, `--export` and `--mode rpc` were
     unharmed by the injection.
   - **M8, the temp dir and the preload per venue.** On Docker and rootless podman, `/tmp` in the job is the
     image's own directory (mode 1777, no tmpfs). `mkdtemp` there gives mode 0700 for uid 1001 and for an
@@ -1856,3 +1870,4 @@ adversarial passes did.
 | 2026-10-03 | Issue #545. **`OQ-003` AMENDED**: the adversarial half of the forged exit line is closed on an image declaring `exitAuth` by a line the agent cannot sign (a per-run key on stdin, an exec-only runner node, a worker that reads only verified lines), measured on Docker Desktop, rootful Docker and rootless Podman 4.9 and 5.8. It stays open on an image without `exitAuth` and for code inside the runner process. Status UNCHANGED: the row's own question (whether the prefix survives compaction) is not answered by this. |
 | 2026-10-03 | Issue #501, part 7. **`OQ-010` AMENDED**, its final wording, in "Why it mattered": the dollar ceilings are four and all in place (the per-job cap with its long-context tier and `longContext` floor, the deployment windows, the scoped and per-model windows, and the provider's own limit), the operator surfaces and `docs/costs.md` are named, and spend outside the meter (`OQ-011`) is said to stay outside every ceiling. Written as prose rather than a numbered list, which rendered with the following paragraph run into its last item, and "a true bound" became "bounds what the runner meters" (PR #550's review); the long-context tier is named by its two apis. The lagging-control constraint is UNCHANGED, checked: it describes the token caps. Status and answer UNCHANGED. **`OQ-011` UNCHANGED, checked**: a `pi` subprocess is still unmetered (issue #500), now also listed in `docs/costs.md`. |
 | 2026-10-03 | Issue #500, part 1 (measurements and pins, no behaviour change). **`OQ-011` CORRECTED in three sentences, each refuted by a measurement, and AMENDED with what was measured.** The stock subagent example does not spawn `pi` in a job: it spawns `runner-node run-job.mjs`, a second runner that re-runs the whole job prompt (M1). "No in-process hook can close it, in any language" is true of the runner's process and false of the child's: a `NODE_OPTIONS` preload runs in every Node child, and an extension spliced in front of a pi CLI child's arguments loads first and reaches that child's own `ModelRuntime` (M3). The child sampler's counts were never logged. The row also records what the design still has to answer: pi-subagents 0.73.1's background child is not a pi CLI at all but a detached Node runner using pi's SDK in process (M2), so a route that recognises only the CLI and the runner would neither meter nor detect it. Decided here and nowhere else yet: the detector's grace is 10 s from the preload's `starting` write to the child meter's install at factory time, because a `pi -p` child with an open stdin waits before `session_start` without spending (M5); and no `-ne` (M6). The re-decision of the row itself lands with the rest of #500. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked**: its compaction sentence (`otherTotal`, a fresh session id per summary call) is now pinned by a behavioural test and by source needles at the pin. |
+| 2026-10-03 | Issue #500, part 1, after review. **`OQ-011` AMENDED, its measurement notes narrowed to the evidence.** M3 and M4 now name the two rpc entry points (`./rpc-entry` and `dist/rpc-entry.js`, title `pi-rpc`) that the preload and the detector must also cover, and the guard a preload needs because `module.registerHooks` is absent before Node 22.15. M4 says the cmdline after `setupCli` is `pi` padded with NUL bytes. M7 says three subcommands were run and five read from the code. M3 says which CLI variants each run covered. No decision moves. |
