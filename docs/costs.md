@@ -392,7 +392,7 @@ the provider key and runs as the same user as the runner. Named gaps:
 - a child with no working meter that finishes quickly is taken for one that ended before its meter started, and
   is not counted. Quickly means under 3 seconds of CPU and under 60 seconds, and before the job ends. Such a child
   can still make calls in that time;
-- a `pi` child that the runner first sees in its final check, as the job ends, with no ledger yet, is not counted:
+- a `pi` child with no ledger that the runner first saw less than 2 seconds before the job ended is not counted:
   an honest child looks the same in its first moments;
 - a child that lives and spends inside one second, and whose ledger is deleted before the runner reads it;
 - a forged ledger that keeps reporting less than the child spent;

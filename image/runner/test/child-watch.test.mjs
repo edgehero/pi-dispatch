@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CMDLINE_BYTES, createChildWatch, ENVIRON_BYTES, isPiProcess, linuxProc, NO_LEDGER_TICKS, PF_FORKNOEXEC, PRELOAD_FLAG, STARTING_CPU_MS, STARTING_FINAL_MS, STARTING_WALL_MS } from "../src/child-watch.mjs";
+import { CMDLINE_BYTES, createChildWatch, ENVIRON_BYTES, isPiProcess, linuxProc, NO_LEDGER_FINAL_MS, NO_LEDGER_TICKS, PF_FORKNOEXEC, PRELOAD_FLAG, STARTING_CPU_MS, STARTING_FINAL_MS, STARTING_WALL_MS } from "../src/child-watch.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
 import { childLedger, CHILD_LEDGER_MAX_FILES, createCostGuard, createPolicyGuard, createUsageMeter, foldChildLedgers, writeFileAtomic } from "../src/usage-meter.mjs";
 import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
@@ -343,35 +343,50 @@ test("an unmetered child's stop: cost-cap under a dollar cap, else token_budget 
 	}
 });
 
-test("a pi process first seen in the teardown pass with no ledger is not counted; one a tick before is (issue #500 part F)", () => {
-	// An honest child caught at teardown in its first milliseconds, before its preload wrote the stub, looks the same.
-	const fresh = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
-	const late = fakeProc({ live: [] });
-	const first = watch({ meter: fresh, proc: late });
-	first.hook.sample();
-	late.table.live = [58];
-	late.table.alive.add(58);
-	assert.deepEqual(first.hook.teardown(), { distinct: 1, peak: 1, unmetered: 0 });
-	assert.equal(fresh.state.stopReason, null, "the job's exit is its own");
-	// Seen by the last tick before teardown, still with no ledger: counted, and the capped job stops.
-	const seenOnce = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
-	const second = watch({ meter: seenOnce, proc: fakeProc({ live: [59] }) });
-	second.hook.sample();
-	assert.equal(second.hook.teardown().unmetered, 1);
-	assert.equal(seenOnce.state.stopReason, TOKEN_BUDGET);
+test("at teardown a pi process with no ledger counts only when first seen 2 s or more before (issue #500 part F)", () => {
+	assert.equal(NO_LEDGER_FINAL_MS, 2_000);
+	/** A pi process with no ledger, first seen by a tick `age` ms before teardown (null: first seen by teardown itself). */
+	function endAfter(age) {
+		let clock = 0;
+		const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+		const proc = fakeProc({ live: [] });
+		const { hook } = watch({ meter, proc, now: () => clock });
+		hook.sample();
+		clock = 10_000;
+		proc.table.live = [58];
+		proc.table.alive.add(58);
+		if (age !== null) hook.sample();
+		clock += age ?? 0;
+		return { torn: hook.teardown(), meter };
+	}
+	// An honest child caught in its first milliseconds, before its preload wrote the stub, looks the same.
+	for (const age of [null, 0, 1_000, 1_999]) {
+		const { torn, meter } = endAfter(age);
+		assert.equal(torn.unmetered, 0, `first seen ${age ?? "at teardown"}`);
+		assert.equal(meter.state.stopReason, null, "the job's exit is its own");
+	}
+	// Seen a tick before teardown and younger than 2 s: not counted. Seen 3 s before: counted, and the capped job stops.
+	const old = endAfter(3_000);
+	assert.equal(old.torn.unmetered, 1);
+	assert.equal(old.meter.state.stopReason, TOKEN_BUDGET);
+	assert.equal(endAfter(2_000).torn.unmetered, 1, "2 s exactly");
 });
 
 test("a pi process seen alive whose ledger never appeared counts at teardown, even when it lived less than two ticks (issue #500)", () => {
+	let clock = 0;
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	const proc = fakeProc({ live: [50] });
-	const { hook } = watch({ meter, proc });
+	const { hook } = watch({ meter, proc, now: () => clock });
 	hook.sample();
 	proc.table.live = [];
 	proc.table.alive.delete(50);
+	clock = 1_000;
 	hook.sample();
+	clock = 2_000;
 	hook.sample();
 	assert.equal(meter.snapshot().unmeteredChildren, 0, "gone before its two ticks");
-	assert.deepEqual(hook.teardown(), { distinct: 1, peak: 1, unmetered: 1 });
+	clock = 3_000;
+	assert.deepEqual(hook.teardown(), { distinct: 1, peak: 1, unmetered: 1 }, "first seen 3 s before teardown");
 	assert.equal(meter.snapshot().unmeteredChildren, 1);
 });
 

@@ -17,7 +17,8 @@
  *        NODE_OPTIONS: a ledger named after its pid is then not its own (a spawner can write one), whatever it says;
  *      - no ledger names its pid two ticks after it was first seen, if it is still alive then, whether or not it still
  *        looks like a pi process (a title can be changed after the fact);
- *      - it was seen alive, by a pass before teardown, and no ledger ever named it: counted at teardown;
+ *      - it was seen alive and no ledger ever named it: counted at teardown, when this parent first saw it
+ *        NO_LEDGER_FINAL_MS or more before;
  *      - its ledger is still `starting` (its meter never installed) after STARTING_CPU_MS of the process's own CPU, or
  *        STARTING_WALL_MS since this parent first saw it; an honest child installs at about 0.3 s of CPU, and was seen
  *        at 0.67 s under load on arm64. Un-counted once it is no longer `starting`. At teardown, a live `starting`
@@ -72,6 +73,12 @@ export const STARTING_WALL_MS = 60_000;
 export const STARTING_FINAL_MS = 10_000;
 /** How many ticks a pi process may live with no ledger before it is unmetered. */
 export const NO_LEDGER_TICKS = 2;
+/**
+ * At teardown, how long before it this parent must have first seen a pi process with no ledger for it to count as
+ * unmetered: two ticks. An honest child's preload writes its stub about 13 ms after spawn (M5), so a child seen only
+ * in its first moments, by the final pass or by the last tick, must not fail the job.
+ */
+export const NO_LEDGER_FINAL_MS = 2_000;
 /** The command-line titles pi gives itself (setupCli: `pi`; the rpc entries: `pi-rpc`). */
 export const PI_TITLES = Object.freeze(["pi", "pi-rpc"]);
 /** How much of a command line is read: the markers sit in argv[0] and argv[1]. */
@@ -287,6 +294,8 @@ export function createChildWatch({
 	let peak = 0;
 	/** pid -> the tick it was first seen alive as a pi process. */
 	const seen = new Map();
+	/** pid -> when (monotonic) it was first seen alive as a pi process. */
+	const seenAt = new Map();
 	/** pids seen with no ledger yet, still to be judged. */
 	const pending = new Set();
 	/** pids of pi processes judged unmetered by the detector. */
@@ -472,6 +481,7 @@ export function createChildWatch({
 		for (const pid of live) {
 			if (!seen.has(pid)) {
 				seen.set(pid, ticks);
+				seenAt.set(pid, now());
 				if (!ledgered.has(pid)) pending.add(pid);
 			}
 			if (needle !== null && !noLedger.has(pid)) {
@@ -485,9 +495,10 @@ export function createChildWatch({
 				continue;
 			}
 			if (final) {
-				// Only one a pass BEFORE teardown saw: a pid first seen in this pass may be an honest child in its first
-				// milliseconds, before its preload wrote the stub (the `starting` rule's shape, part F's review).
-				if (seen.get(pid) < ticks) unmeteredPid(pid, "no-ledger");
+				// Only one first seen NO_LEDGER_FINAL_MS or more ago: a pid seen just now, or by the last tick in its first
+				// milliseconds, may be an honest child whose preload has not written the stub yet (the `starting` rule's
+				// shape, a time floor rather than a pass count, part F's review).
+				if (now() - seenAt.get(pid) >= NO_LEDGER_FINAL_MS) unmeteredPid(pid, "no-ledger");
 				continue;
 			}
 			// Still alive two ticks on, whether or not it still looks like pi: a title can be changed after the fact.
