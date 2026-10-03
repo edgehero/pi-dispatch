@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "./outcome.mjs";
@@ -149,9 +149,13 @@ export const STOP_MESSAGES = Object.freeze({
 	[MODEL_NOT_ALLOWED]: "pi-dispatch: model not allowed",
 });
 
-/** Coerce a possibly-absent numeric usage field. Never propagates NaN into the totals. */
+/**
+ * Coerce a possibly-absent numeric usage field. Never propagates NaN into the totals, and never a negative (issue
+ * #500): an extension's provider may report one, and a negative amount would make the totals fall, which a child
+ * ledger's fold reads as a shrink and counts the child unmetered. pi-ai's own providers already clamp at 0.
+ */
 function finite(value) {
-	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 /**
@@ -209,7 +213,8 @@ function foldRow(into, row) {
  *
  * `onChange()` (issue #500) fires after every change a child ledger must carry: when a call is observed (so
  * `calls` and `unresolved` rise before the provider answers, and a child killed mid-call leaves `unresolved`
- * behind) and when it settles. It never fires on setChildren(): the parent folds on its own tick. A throw from
+ * behind), when it settles, and when the meter stops (a guard refusal raises a ledger counter). It never fires on
+ * setChildren(): the parent folds on its own tick. A throw from
  * it is swallowed: it is the caller's I/O (a ledger write), and a failed write must not fail a provider call.
  *
  * `setChildren(fold)` (issue #500) hands the meter the children's totals (foldChildLedgers). From then on the
@@ -277,6 +282,9 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		if (state.stopReason !== null) return false;
 		state.stopReason = reason;
 		onStop?.(reason, detail);
+		// A stop is a change a child ledger carries (issue #500): every guard refusal stops the meter, so this is also
+		// where a raised costRefused or modelRefused reaches the ledger at once, not at the next call.
+		changed();
 		return true;
 	}
 
@@ -330,8 +338,10 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		const billed = finite(u.totalTokens);
 		state.total += billed;
 
-		const price = u.cost?.total;
-		const priced = typeof price === "number" && Number.isFinite(price);
+		const given = u.cost?.total;
+		const priced = typeof given === "number" && Number.isFinite(given);
+		// Priced at 0 when negative, never unpriced: the call did report a price (see finite()).
+		const price = priced ? Math.max(0, given) : 0;
 		if (priced) state.cost += price;
 		else state.unpriced += 1;
 
@@ -456,26 +466,42 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	}
 
 	/**
-	 * Hand over the children's totals (issue #500): a foldChildLedgers result, cumulative, so each call REPLACES the
-	 * last one. Only the fields the snapshot and the ledger read are kept, each coerced like a usage field, so a fold
-	 * can never put NaN into the totals. The token cap is judged on parent plus children here too, because a
-	 * child's spend reaches the parent only through this call.
+	 * Hand over the children's totals (issue #500): a foldChildLedgers result, cumulative. Two rules keep a bad fold
+	 * from ever reading as less spend:
+	 *   - SATURATE, never zero. A number the meter cannot carry (not a number, negative, not finite, or above
+	 *     Number.MAX_SAFE_INTEGER) is taken as MAX_SAFE_INTEGER: "too much to count" must read as a lot, never as
+	 *     nothing, or two forged ledgers whose sum overflows would erase a real child's spend.
+	 *   - A HIGH-WATER MARK per field. Every total but `unresolved` is the larger of the last one and this one, and so
+	 *     is every row field by pair, so a fold that lost its `prev` (a caught throw, a bug) cannot forget spend.
+	 *     `unresolved` follows the fold: a call that settled is no longer in flight.
+	 * The token cap is judged on parent plus children here too, because a child's spend reaches the parent only
+	 * through this call.
 	 */
 	function setChildren(fold) {
-		const count = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
+		const carry = (value) => (typeof value === "number" && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? value : Number.MAX_SAFE_INTEGER);
 		const totals = fold?.totals ?? {};
+		const held = children;
+		const high = (key, value) => Math.max(held?.[key] ?? 0, carry(value));
+		const rows = new Map((held?.rows ?? []).map((row) => [rowKey(row), { ...row }]));
+		for (const given of Array.isArray(fold?.rows) ? fold.rows : []) {
+			const named = typeof given?.provider === "string" && typeof given?.model === "string";
+			const row = { provider: named ? given.provider : null, model: named ? given.model : null };
+			const into = rows.get(rowKey(row)) ?? { ...row, ...emptyRow() };
+			for (const key of Object.keys(emptyRow())) into[key] = Math.max(into[key], carry(given[key]));
+			rows.set(rowKey(row), into);
+		}
 		children = {
-			input: finite(totals.input),
-			output: finite(totals.output),
-			total: finite(totals.total),
-			cost: finite(totals.cost),
-			calls: count(totals.calls),
-			unresolved: count(totals.unresolved),
-			unpriced: count(totals.unpriced),
-			sessions: count(totals.sessions),
-			processes: count(fold?.processes),
-			unmetered: count(fold?.unmetered),
-			rows: Array.isArray(fold?.rows) ? fold.rows.map((row) => ({ ...row })) : [],
+			input: high("input", totals.input),
+			output: high("output", totals.output),
+			total: high("total", totals.total),
+			cost: high("cost", totals.cost),
+			calls: high("calls", totals.calls),
+			unresolved: carry(totals.unresolved),
+			unpriced: high("unpriced", totals.unpriced),
+			sessions: high("sessions", totals.sessions),
+			processes: high("processes", fold?.processes),
+			unmetered: high("unmetered", fold?.unmetered),
+			rows: [...rows.values()],
 		};
 		if (cap !== null && combinedTotal() > cap) stop(TOKEN_BUDGET, combinedTotal());
 	}
@@ -493,7 +519,7 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		const kept = [];
 		const bucket = { ...other };
 		for (const row of byModel.values()) {
-			const recordable = USAGE_ID_PATTERN.test(row.provider.toLowerCase()) && USAGE_ID_PATTERN.test(row.model.toLowerCase());
+			const recordable = recordableId(row.provider) && recordableId(row.model);
 			if (recordable && kept.length < CHILD_LEDGER_ROWS - 1) kept.push({ ...row });
 			else foldRow(bucket, row);
 		}
@@ -1073,6 +1099,13 @@ export async function installProcessUsageMeter({
 	// needs a hard stop to answer the parent's STOP with.
 	const armed = brake === true || meter.cap !== null || meter.costCap !== null || meter.allowed !== null;
 	const hardStop = armed && createStream ? makeHardStopStream({ createStream }) : null;
+	// A meter that was ASKED for a brake (`brake: true`, or an outside stop to answer, `isStopped`) and cannot build
+	// one is not a meter (issue #500): judge() never asks isStopped without a hard stop, so a parent's STOP would be
+	// silently ignored. ok:false, so the child records itself `metered: false` and the parent counts it unmetered.
+	if ((brake === true || isStopped !== null) && hardStop === null) {
+		log("usage_meter_unavailable", { reason: "no-hard-stop" });
+		return { ok: false, arm: () => {}, uninstall: () => {} };
+	}
 
 	// --- the runtime half: THE choke point. Without it there is no process-wide meter. ---
 	const methodsPresent = typeof ModelRuntime?.prototype?.streamSimple === "function" && typeof ModelRuntime?.prototype?.stream === "function";
@@ -1124,13 +1157,20 @@ export async function installProcessUsageMeter({
 	const children = childrenHook ?? createChildSampler(platform);
 	// The hook runs on a timer, where a throw is an uncaught exception that ends the runner with no exit line. So a
 	// throw is caught and logged, by name only and once, and the hook owns what a failed tick means.
-	let hookFailed = false;
+	// FAIL CLOSED under a policy: in a parent the hook IS the children's fold and detector, and a tick that threw has
+	// folded and detected nothing, so the job would run on with its children uncounted. With any policy the meter
+	// stops, for the stop an unmetered child gets (cost-cap under a dollar cap, else token_budget under a token cap,
+	// else model-not-allowed under a list). With none there is nothing to enforce, and the failure is only logged.
+	// Failures are counted on the teardown line (`childrenFailed`).
+	let hookFailures = 0;
 	function tick(run) {
 		try {
 			return run();
 		} catch (error) {
-			if (!hookFailed) log("usage_meter_children_failed", { reason: reasonOf(error) });
-			hookFailed = true;
+			if (hookFailures === 0) log("usage_meter_children_failed", { reason: reasonOf(error) });
+			hookFailures += 1;
+			const reason = meter.costCap !== null ? COST_CAP : meter.cap !== null ? TOKEN_BUDGET : meter.allowed !== null ? MODEL_NOT_ALLOWED : null;
+			if (reason !== null) meter.stop(reason);
 			return null;
 		}
 	}
@@ -1223,7 +1263,10 @@ export async function installProcessUsageMeter({
 		// the same line, and `rearmMs` with it because the window's width is the other half of any estimate.
 		// The hook's teardown runs FIRST, so its last fold is in the meter before the caller reads the snapshot.
 		const extra = typeof childrenHook?.teardown === "function" ? tick(() => childrenHook.teardown()) : null;
-		log("usage_meter_teardown", { rearms: handle.rearms, apis: handle.apis.length, rearmMs, ...(extra !== null && typeof extra === "object" ? extra : {}) });
+		// The meter's own fields are never the hook's to set: a colliding key from the hook is dropped.
+		const own = { rearms: handle.rearms, apis: handle.apis.length, rearmMs, ...(childrenHook === null ? {} : { childrenFailed: hookFailures }) };
+		const added = extra !== null && typeof extra === "object" ? Object.fromEntries(Object.entries(extra).filter(([key]) => !Object.hasOwn(own, key))) : {};
+		log("usage_meter_teardown", { ...own, ...added });
 	}
 
 	arm();
@@ -1756,22 +1799,19 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		else failed();
 	}
 
-	/**
-	 * The exit line's cost fields, present only when a cap is set (run-job spreads them into `tokens`). A guard built
-	 * with `external` (issue #500) adds `spentMicros` and `inflightMicros`, the two numbers a child ledger carries and a
-	 * parent's SPENT is made of; a guard without one keeps the exit line exactly as before.
-	 */
+	/** The exit line's cost fields, present only when a cap is set (run-job spreads them into `tokens`). */
 	function snapshot() {
 		flushPending();
-		return {
-			costCapMicros: capMicros,
-			costRefused: state.refused,
-			boundExceeded: state.boundExceeded,
-			longContext: state.longContext,
-			costUnjudged: state.unjudged,
-			costUnanswered: state.unanswered,
-			...(external === null ? {} : { spentMicros: state.spent, inflightMicros: state.inflight }),
-		};
+		return { costCapMicros: capMicros, costRefused: state.refused, boundExceeded: state.boundExceeded, longContext: state.longContext, costUnjudged: state.unjudged, costUnanswered: state.unanswered };
+	}
+
+	/**
+	 * What this guard holds (issue #500): `spentMicros` settled and `inflightMicros` admitted but not settled. The two
+	 * numbers a child ledger carries and a parent's SPENT is made of. An accessor, NOT part of snapshot(), so the exit
+	 * line stays exactly as it was. It settles no pending slot: a pending admission is already in `inflight`.
+	 */
+	function spend() {
+		return { spentMicros: state.spent, inflightMicros: state.inflight };
 	}
 
 	/** The installer's report of compat entries found displaced under the cap: calls there may have run unjudged. */
@@ -1779,7 +1819,7 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		state.unjudged += count;
 	}
 
-	return { enforces: Object.freeze([COST_CAP]), admit, bind, snapshot, unjudged, state };
+	return { enforces: Object.freeze([COST_CAP]), admit, bind, snapshot, spend, unjudged, state };
 }
 
 // ── Issue #502, part 4: the allowed-model list, checked before every provider call ────────────────────────
@@ -2128,6 +2168,10 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 		unjudged(count) {
 			cost?.unjudged(count);
 		},
+		/** The cost guard's spend() (issue #500), zeros without a cap. */
+		spend() {
+			return cost ? cost.spend() : { spentMicros: 0, inflightMicros: 0 };
+		},
 		snapshot() {
 			return { ...(cost ? cost.snapshot() : {}), ...(model ? model.snapshot() : {}) };
 		},
@@ -2154,12 +2198,19 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 //         "spentMicros", "inflightMicros", "costRefused", "modelRefused" }
 //     `starting` is the preload's stub (zeros, `metered: true`), written before the meter installs; `running` once
 //     it has; `done` at exit. `metered: false` says the child's meter did not install. `totals` is the child meter's
-//     snapshot, `rows` its rows() (first-seen order, at most CHILD_LEDGER_MAX_ROWS, a model-less row with both ids
-//     null), the last four its cost guard's and model guard's counters (0 without one).
-//   - Numbers only. Token amounts and `cost` are finite and at least 0; `calls`, `unresolved`, `unpriced`,
-//     `sessions` and the four guard counters are safe integers at least 0. Ids match USAGE_ID_PATTERN after
-//     lowercasing, the worker's rule. The rows partition the totals: their calls sum to `calls - unresolved`, and
-//     every other amount sums to its total.
+//     snapshot, `rows` its rows() (first-seen order, at most CHILD_LEDGER_ROWS written and CHILD_LEDGER_MAX_ROWS
+//     read, a model-less row with both ids null), the last four its cost guard's spend() and both guards' refusal
+//     counters (0 without a guard). childLedger() builds exactly this object.
+//   - Numbers only. Token amounts and `cost` are numbers from 0 to Number.MAX_SAFE_INTEGER; `calls`, `unresolved`,
+//     `unpriced`, `sessions` and the four guard counters are safe integers at least 0. Ids are printable ASCII and
+//     match USAGE_ID_PATTERN after lowercasing, the worker's rule. The rows partition the totals: their calls sum to
+//     `calls - unresolved`, and every other amount sums to its total.
+//   - A fold reads at most CHILD_LEDGER_MAX_FILES names; any further name counts as unmetered unread.
+//
+// THE SPENT FILE (spentFile, externalFor). The parent tells each child what the rest of the job has spent, so a child's
+// cost guard can judge the whole job without counting itself twice: `{ "v": 1, "total", "byLedger": { <name>: micros } }`,
+// where `total` is the parent's own spend plus every ledger's `spentMicros + inflightMicros`, and `byLedger` is each
+// ledger's part. A child's external spend is `total - byLedger[its own name]`.
 //
 // What the fold trusts, and why it is cooperative accounting rather than a boundary: the agent holds the provider key
 // and shares the runner's uid, so it can delete or forge these files. The rules make that fail toward a floor or an
@@ -2173,10 +2224,17 @@ export const CHILD_LEDGER_MAX_BYTES = 64 * 1024;
 /** The most rows a ledger may carry. More is malformed. */
 export const CHILD_LEDGER_MAX_ROWS = 256;
 /**
- * The most rows a child meter WRITES (rows()): half the read cap, so a ledger of worst-case rows (two 64-character ids,
- * every number at its longest) stays under CHILD_LEDGER_MAX_BYTES. child-ledger.test.mjs builds that ledger and checks.
+ * The most rows a child meter WRITES (rows()): under half the read cap, so a ledger of worst-case rows (two 64-character
+ * ids, every number at its longest) stays under CHILD_LEDGER_MAX_BYTES with 8 KiB to spare. child-ledger.test.mjs
+ * builds that ledger through childLedger() and checks.
  */
-export const CHILD_LEDGER_ROWS = 128;
+export const CHILD_LEDGER_ROWS = 120;
+/**
+ * The most ledger names one fold reads. A job runs at most `--pids-limit=512` processes at once, so 512 ledgers is
+ * every child a busy job can have alive; a name past it counts as unmetered without being opened. It bounds the tick's
+ * synchronous reads and the marks held in memory against a flood of files in the directory.
+ */
+export const CHILD_LEDGER_MAX_FILES = 512;
 export const CHILD_LEDGER_STATES = Object.freeze(["starting", "running", "done"]);
 /**
  * A COPY of the worker's id rule (worker/src/model-ref.mjs MODEL_REF_PATTERN, which run-history.mjs imports as
@@ -2185,6 +2243,15 @@ export const CHILD_LEDGER_STATES = Object.freeze(["starting", "running", "done"]
  * admits must be a row the worker admits.
  */
 export const USAGE_ID_PATTERN = /^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$/;
+
+/**
+ * Whether an id may name a ledger row: printable ASCII first, then the worker's rule after lowercasing. ASCII first
+ * because lowercasing is not closed over ASCII (U+212A KELVIN SIGN lowercases to `k`), so a check after lowercasing
+ * alone passes a 3-byte character per letter and a row three times the size the byte budgets assume.
+ */
+function recordableId(id) {
+	return typeof id === "string" && /^[!-~]+$/.test(id) && USAGE_ID_PATTERN.test(id.toLowerCase());
+}
 
 const LEDGER_AMOUNTS = Object.freeze(["input", "output", "total", "cost"]);
 const LEDGER_COUNTS = Object.freeze(["calls", "unresolved", "unpriced", "sessions"]);
@@ -2195,7 +2262,12 @@ const ROW_COUNTS = Object.freeze(["calls", "unpriced"]);
 const MONOTONE_TOTALS = Object.freeze(["input", "output", "total", "cost", "calls", "unpriced", "sessions"]);
 const MONOTONE_GUARD = Object.freeze(["spentMicros", "costRefused", "modelRefused"]);
 
-const amount = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+/**
+ * An amount a ledger may carry: a number from 0 to Number.MAX_SAFE_INTEGER. The upper bound is what keeps a fold's
+ * sums finite: two forged files at 1e308 would otherwise sum to Infinity, which no coercion can turn back into the
+ * real children's spend. A larger number is malformed, so the file counts as unmetered (a floor).
+ */
+const amount = (value) => typeof value === "number" && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
 const whole = (value) => Number.isSafeInteger(value) && value >= 0;
 /** Two sums of the same floats in another order agree to rounding, not to the bit. */
 const agrees = (a, b) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
@@ -2241,7 +2313,7 @@ export function parseChildLedger(text) {
 		if (!isPlain(given)) return null;
 		const { provider, model } = given;
 		const modelless = provider === null && model === null;
-		const named = typeof provider === "string" && typeof model === "string" && USAGE_ID_PATTERN.test(provider.toLowerCase()) && USAGE_ID_PATTERN.test(model.toLowerCase());
+		const named = recordableId(provider) && recordableId(model);
 		if (!modelless && !named) return null;
 		const row = { provider: modelless ? null : provider, model: modelless ? null : model, ...emptyRow() };
 		for (const key of ROW_AMOUNTS) {
@@ -2278,14 +2350,30 @@ function reached(high, next) {
 
 const GONE = Symbol("gone");
 const BAD = Symbol("bad");
+const UNCHANGED = Symbol("unchanged");
 
 /**
- * One file's text, or GONE (it vanished after the listing) or BAD. Opened without following a symlink and without
- * blocking (a FIFO opened for reading would hang the runner's event loop, and with it every brake), then held to a
- * regular file of at most CHILD_LEDGER_MAX_BYTES, read through the descriptor so a swap after the check reads nothing
- * new. Strict UTF-8.
+ * A file's identity and version, from a bigint stat: inode, size, and the change and modify times in nanoseconds.
+ * A rename (the format's only way to write) changes the inode; an in-place write changes the ctime, which no user can
+ * set back. Equal signatures mean the bytes the last read saw.
  */
-function readLedgerText(fs, path) {
+function signature(stat) {
+	return `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+}
+
+/**
+ * One file's `{ text, sig }`, or GONE (it vanished after the listing), BAD, or UNCHANGED (its signature is `known`, so
+ * there is nothing new to read). Stat'ed first without following a link, so an unchanged file costs one lstat. Then
+ * opened without following a symlink and without blocking (a FIFO opened for reading would hang the runner's event
+ * loop, and with it every brake), held to a regular file of at most CHILD_LEDGER_MAX_BYTES, and read through the
+ * descriptor so a swap after the check reads nothing new. Strict UTF-8.
+ */
+function readLedger(fs, path, known) {
+	try {
+		if (known !== null && signature(fs.lstatSync(path, { bigint: true })) === known) return UNCHANGED;
+	} catch (error) {
+		return error?.code === "ENOENT" ? GONE : BAD;
+	}
 	let fd;
 	try {
 		fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
@@ -2293,8 +2381,8 @@ function readLedgerText(fs, path) {
 		return error?.code === "ENOENT" ? GONE : BAD;
 	}
 	try {
-		const stat = fs.fstatSync(fd);
-		if (!stat.isFile() || stat.size > CHILD_LEDGER_MAX_BYTES) return BAD;
+		const stat = fs.fstatSync(fd, { bigint: true });
+		if (!stat.isFile() || stat.size > BigInt(CHILD_LEDGER_MAX_BYTES)) return BAD;
 		const buffer = Buffer.alloc(CHILD_LEDGER_MAX_BYTES + 1);
 		let length = 0;
 		while (length < buffer.length) {
@@ -2303,7 +2391,7 @@ function readLedgerText(fs, path) {
 			length += read;
 		}
 		if (length > CHILD_LEDGER_MAX_BYTES) return BAD;
-		return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
+		return { text: new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length)), sig: signature(stat) };
 	} catch {
 		return BAD;
 	} finally {
@@ -2315,7 +2403,7 @@ function readLedgerText(fs, path) {
 	}
 }
 
-const DEFAULT_LEDGER_FS = { readdirSync, openSync, fstatSync, readSync, closeSync, constants };
+const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSync, closeSync, constants };
 
 /**
  * Fold every child ledger in `dir` (issue #500): PURE apart from the injected `fs`, and cumulative through `prev`, the
@@ -2325,13 +2413,18 @@ const DEFAULT_LEDGER_FS = { readdirSync, openSync, fstatSync, readSync, closeSyn
  *     every row, the guard counters but `inflightMicros`) replaces it;
  *   - a file that is malformed in any part, says `metered: false`, shrank in anything, or vanished is counted
  *     unmetered ONCE, keeps the mark it had (nothing, if it was never good) and is never read again;
- *   - a file that vanished between the listing and the read is a vanished file if it was known, and unseen if not.
- * Returns `{ processes, unmetered, totals, rows, spentMicros, inflightMicros, costRefused, modelRefused, missing,
- * files }`: `processes` the ledger files ever seen, `unmetered` those counted unmetered, `totals` and the four
- * counters summed over every file's mark, `rows` merged by pair (the model-less row last, ids null), `missing` true
- * when the directory could not be listed, and `files` the per-file state for the next call (a Map by name of
- * `{ pid, state, unmetered, why, high }`, `why` one of `malformed`, `unmetered`, `shrank`, `vanished`), which the
- * detector reads for a file's pid and state. `meter.setChildren()` takes the result as it is.
+ *   - a file that vanished between the listing and the read is a vanished file if it was known, and unseen if not;
+ *   - a file whose mark is `done`, or whose signature has not changed since its last read, is not read again (it is
+ *     still listed, so it can still vanish); a forged larger number in a `done` file would only have overcharged;
+ *   - at most CHILD_LEDGER_MAX_FILES names are ever tracked; a new name past that is counted in `flooded`, unmetered
+ *     and unread. `flooded` is a high-water mark of how many such names one listing held.
+ * Returns `{ processes, unmetered, flooded, totals, rows, spentMicros, inflightMicros, costRefused, modelRefused,
+ * missing, files }`: `processes` the ledger files ever seen (flooded ones included), `unmetered` those counted
+ * unmetered (flooded ones included), `totals` and the four counters summed over every file's mark, `rows` merged by
+ * pair (the model-less row last, ids null), `missing` true when the directory could not be listed, and `files` the
+ * per-file state for the next call (a Map by name of `{ pid, state, unmetered, why, high, sig }`, `why` one of
+ * `malformed`, `unmetered`, `shrank`, `vanished`), which the detector reads for a file's pid and state.
+ * `meter.setChildren()` takes the result as it is.
  */
 export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null } = {}) {
 	const files = new Map(prev?.files ?? []);
@@ -2343,33 +2436,40 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null } = 
 		missing = true;
 	}
 	const present = new Set();
+	let beyond = 0;
 	for (const name of names) {
 		const match = CHILD_LEDGER_NAME.exec(name);
 		if (!match) continue;
 		const before = files.get(name) ?? null;
-		if (before?.unmetered) {
+		if (before === null && files.size >= CHILD_LEDGER_MAX_FILES) {
+			beyond += 1;
+			continue;
+		}
+		if (before?.unmetered || before?.state === "done") {
 			present.add(name);
 			continue;
 		}
-		const text = readLedgerText(fs, join(dir, name));
-		if (text === GONE) continue;
+		const read = readLedger(fs, join(dir, name), before?.sig ?? null);
+		if (read === GONE) continue;
 		present.add(name);
-		const ledger = text === BAD ? null : parseChildLedger(text);
+		if (read === UNCHANGED) continue;
+		const ledger = read === BAD ? null : parseChildLedger(read.text);
 		const high = before?.high ?? emptyLedger();
 		const pid = Number(match[1]);
 		const why = ledger === null ? "malformed" : !ledger.metered ? "unmetered" : before !== null && !reached(high, ledger) ? "shrank" : null;
 		files.set(name, why === null
-			? { pid, state: ledger.state, unmetered: false, why: null, high: ledger }
-			: { pid, state: ledger?.state ?? before?.state ?? null, unmetered: true, why, high });
+			? { pid, state: ledger.state, unmetered: false, why: null, high: ledger, sig: read.sig }
+			: { pid, state: ledger?.state ?? before?.state ?? null, unmetered: true, why, high, sig: null });
 	}
 	for (const [name, entry] of files) {
 		if (!present.has(name) && !entry.unmetered) files.set(name, { ...entry, unmetered: true, why: "vanished" });
 	}
+	const flooded = Math.max(prev?.flooded ?? 0, beyond);
 
 	const totals = { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 };
 	const counters = { spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0 };
 	const merged = new Map();
-	let unmetered = 0;
+	let unmetered = flooded;
 	for (const entry of files.values()) {
 		if (entry.unmetered) unmetered += 1;
 		const { high } = entry;
@@ -2385,5 +2485,67 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null } = 
 	const modelless = merged.get("");
 	merged.delete("");
 	const rows = [...merged.values(), ...(modelless ? [modelless] : [])];
-	return { processes: files.size, unmetered, totals, rows, ...counters, missing, files };
+	return { processes: files.size + flooded, unmetered, flooded, totals, rows, ...counters, missing, files };
+}
+
+/**
+ * The SPENT file the parent writes for its children (issue #500; the ledger comment above has the format): `total` is
+ * `parentMicros` (the parent's own spent plus in-flight) plus every ledger's `spentMicros + inflightMicros`, and
+ * `byLedger` each ledger's part, by file name. A number that cannot be carried saturates at Number.MAX_SAFE_INTEGER.
+ */
+export function spentFile(fold, parentMicros) {
+	const carry = (value) => (typeof value === "number" && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? value : Number.MAX_SAFE_INTEGER);
+	const byLedger = {};
+	let total = carry(parentMicros);
+	for (const [name, entry] of fold?.files ?? []) {
+		const part = carry(entry.high.spentMicros + entry.high.inflightMicros);
+		byLedger[name] = part;
+		total = Math.min(Number.MAX_SAFE_INTEGER, total + part);
+	}
+	return { v: 1, total, byLedger };
+}
+
+/**
+ * A child's external spend from a parsed SPENT file: the job's total less its own ledger's part, so the child's cost
+ * guard never counts its own spend twice (once as its own, once a tick late through SPENT). Anything malformed is
+ * Infinity, which the cost guard refuses: a SPENT that cannot be read is no licence to spend. A missing file is the
+ * caller's case (nothing written yet), not this one.
+ */
+export function externalFor(spent, ownName) {
+	const whole = (value) => Number.isSafeInteger(value) && value >= 0;
+	if (!isPlain(spent) || spent.v !== 1 || !whole(spent.total) || !isPlain(spent.byLedger)) return Infinity;
+	const own = Object.hasOwn(spent.byLedger, ownName) ? spent.byLedger[ownName] : 0;
+	if (!whole(own) || own > spent.total) return Infinity;
+	return spent.total - own;
+}
+
+/**
+ * A child ledger object, ready for JSON.stringify (issue #500; the format in the ledger comment above), built from the
+ * child's meter and its policy guard (or null). `metered` false is the record of a meter that did not install, written
+ * with zeros. Every number comes from the meter and the guard as they are: the writer adds nothing of its own.
+ */
+export function childLedger({ state, metered = true, meter = null, guard = null }) {
+	const snap = metered && meter ? meter.snapshot() : null;
+	const spend = metered && guard?.spend ? guard.spend() : { spentMicros: 0, inflightMicros: 0 };
+	const refused = metered && guard ? guard.snapshot() : {};
+	return {
+		v: 1,
+		state,
+		metered,
+		totals: {
+			input: snap?.input ?? 0,
+			output: snap?.output ?? 0,
+			total: snap?.total ?? 0,
+			cost: snap?.cost ?? 0,
+			calls: snap?.calls ?? 0,
+			unresolved: snap?.unresolved ?? 0,
+			unpriced: snap?.unpriced ?? 0,
+			sessions: snap?.sessions ?? 0,
+		},
+		rows: snap ? meter.rows() : [],
+		spentMicros: spend.spentMicros,
+		inflightMicros: spend.inflightMicros,
+		costRefused: refused.costRefused ?? 0,
+		modelRefused: refused.modelRefused ?? 0,
+	};
 }

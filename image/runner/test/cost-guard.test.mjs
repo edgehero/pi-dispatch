@@ -859,7 +859,7 @@ test("external fails closed: a non-number, NaN, Infinity, a negative or a throw 
 	assert.throws(() => createCostGuard({ capMicros: 1, external: 5 }), /external must be a function/);
 });
 
-test("external: the snapshot adds spentMicros and inflightMicros, and only for a guard that has one", async () => {
+test("spend() reports spent and in-flight; the snapshot, and so the exit line, is unchanged with or without external", async () => {
 	const guard = createCostGuard({ capMicros: 10_000, bound: () => 600, external: () => 0 });
 	guard.admit(call());
 	const done = new FakeStream();
@@ -868,10 +868,13 @@ test("external: the snapshot adds spentMicros and inflightMicros, and only for a
 	guard.bind(new FakeStream());
 	done.end(message(0.000_25));
 	await flush();
-	assert.deepEqual(guard.snapshot(), { costCapMicros: 10_000, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, spentMicros: 250, inflightMicros: 600 });
-	const plain = createCostGuard({ capMicros: 10_000, bound: () => 600 });
-	assert.equal(JSON.stringify(plain.snapshot()), '{"costCapMicros":10000,"costRefused":0,"boundExceeded":0,"longContext":0,"costUnjudged":0,"costUnanswered":0}', "the exit line is unchanged without one");
+	assert.deepEqual(guard.spend(), { spentMicros: 250, inflightMicros: 600 });
+	const line = '{"costCapMicros":10000,"costRefused":0,"boundExceeded":0,"longContext":0,"costUnjudged":0,"costUnanswered":0}';
+	assert.equal(JSON.stringify(guard.snapshot()), line, "external set: the exit line's cost fields are byte-identical");
+	assert.equal(JSON.stringify(createCostGuard({ capMicros: 10_000, bound: () => 600 }).snapshot()), line);
 	const policy = createPolicyGuard({ maxCostMicros: 1000, external: () => 2000, env: {} });
 	assert.equal(policy.admit({ method: "streamSimple", model: { ...FLAT, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, args: [{}, {}] }), COST_CAP, "createPolicyGuard hands external to the cost guard");
-	assert.deepEqual(Object.keys(policy.snapshot()).slice(-2), ["spentMicros", "inflightMicros"]);
+	assert.deepEqual(Object.keys(policy.snapshot()), ["costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered"]);
+	assert.deepEqual(policy.spend(), { spentMicros: 0, inflightMicros: 0 });
+	assert.deepEqual(createPolicyGuard({ allowedModels: [{ provider: "p", model: "m" }] }).spend(), { spentMicros: 0, inflightMicros: 0 }, "zeros without a cap");
 });

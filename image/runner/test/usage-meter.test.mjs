@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
 	assertPoliciesEnforceable,
 	CHILD_LEDGER_ROWS,
+	createPolicyGuard,
 	createUsageMeter,
 	defaultHardStopResult,
 	installProcessUsageMeter,
@@ -1744,7 +1745,7 @@ test("install: brake:true arms the hard stop with no policy, and isStopped then 
 	assert.equal(plain.brake, false, "without brake:true or a policy there is still no brake");
 });
 
-test("install: the children hook replaces the sampler, runs on the tick, and adds its teardown fields; a throw is logged once", async () => {
+test("install: the children hook replaces the sampler, runs on the tick, and adds its teardown fields; with no policy a throw is logged once", async () => {
 	const copy = fakeCopy([]);
 	const logged = [];
 	let samples = 0;
@@ -1761,5 +1762,120 @@ test("install: the children hook replaces the sampler, runs on the tick, and add
 	handle.uninstall();
 	assert.ok(samples >= 2, "sample() runs on every tick, and a throw does not stop the timer");
 	assert.deepEqual(logged.filter((line) => line.event === "usage_meter_children_failed"), [{ event: "usage_meter_children_failed", fields: { reason: "EACCES" } }], "once, by code, never the message");
-	assert.deepEqual(logged.at(-1), { event: "usage_meter_teardown", fields: { rearms: 0, apis: 0, rearmMs: 5, distinct: 2, peak: 1, unmetered: 0 } });
+	assert.deepEqual(logged.at(-1).event, "usage_meter_teardown");
+	const { childrenFailed, ...rest } = logged.at(-1).fields;
+	assert.ok(childrenFailed >= 2, "every failed tick is counted on the teardown line");
+	assert.deepEqual(rest, { rearms: 0, apis: 0, rearmMs: 5, distinct: 2, peak: 1, unmetered: 0 });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #500, review fixes: saturation, high-water, fail-closed hook and brake, onChange on a stop
+// ---------------------------------------------------------------------------------------------
+
+test("setChildren saturates a number it cannot carry at MAX_SAFE_INTEGER, never at 0", () => {
+	const meter = createUsageMeter({ maxTokens: 500 });
+	const M = Number.MAX_SAFE_INTEGER;
+	meter.setChildren(childFold({
+		totals: { input: Infinity, output: Number.NaN, total: 1e308, cost: -1, calls: M * 2, unresolved: M + 2, unpriced: "3", sessions: undefined },
+		rows: [ledgerRow("p", "m", { calls: 1, total: Infinity, cost: 1e308 })],
+	}));
+	const snap = meter.snapshot();
+	for (const key of ["input", "output", "total", "cost", "calls", "unresolved", "unpriced", "sessions"]) assert.equal(snap[key], M, key);
+	assert.equal(meter.state.stopReason, TOKEN_BUDGET, "too much to count is over any cap");
+	const [row] = meter.usageSnapshot().models;
+	assert.deepEqual([row.total, row.cost], [M, M]);
+	for (const r of meter.usageSnapshot().models) for (const [key, value] of Object.entries(r)) if (typeof value === "number") assert.ok(Number.isFinite(value), `${key}: no Infinity reaches the exit line as null`);
+});
+
+test("setChildren keeps a high-water mark: a fold with less never lowers the totals or a row, but unresolved may fall", () => {
+	const meter = createUsageMeter({ maxTokens: 1000 });
+	meter.setChildren(childFold({ processes: 2, unmetered: 1, totals: { input: 900, total: 900, cost: 5, calls: 3, unresolved: 1, sessions: 1 }, rows: [ledgerRow("p", "m", { calls: 2, input: 900, total: 900, cost: 5 })] }));
+	meter.setChildren(childFold({ processes: 0, unmetered: 0 }));
+	const snap = meter.snapshot();
+	assert.deepEqual([snap.total, snap.cost, snap.calls, snap.unresolved, snap.childProcesses, snap.unmeteredChildren], [900, 5, 3, 0, 2, 1]);
+	assert.deepEqual(meter.usageSnapshot().models.map((row) => [row.model, row.total, row.cost]), [["m", 900, 5]]);
+});
+
+test("record clamps a negative usage field or price at 0, still priced", () => {
+	const meter = createUsageMeter({ maxTokens: null });
+	meter.record({ input: -5, output: 3, totalTokens: -2, cacheRead: -1, cost: { total: -0.5 } }, { provider: "p", modelId: "m" });
+	assert.deepEqual([meter.state.input, meter.state.output, meter.state.total, meter.state.cost, meter.state.unpriced], [0, 3, 0, 0, 0]);
+	const [row] = meter.rows();
+	assert.deepEqual([row.input, row.cacheRead, row.cost, row.unpriced], [0, 0, 0, 0]);
+});
+
+test("rows() folds an id that is not printable ASCII (U+212A KELVIN SIGN lowercases to k) into the model-less row", () => {
+	const meter = createUsageMeter({ maxTokens: null });
+	meter.record(usage({ input: 4 }), { provider: "p", modelId: "\u212Aimi" });
+	meter.record(usage({ input: 1 }), { provider: "p", modelId: "kimi" });
+	assert.deepEqual(meter.rows().map((row) => [row.model, row.total]), [["kimi", 1], [null, 4]]);
+});
+
+test("a stop fires onChange, so a guard refusal reaches the child ledger with its counter already raised", () => {
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const seen = [];
+	const meter = createUsageMeter({ allowedModels: [{ provider: "anthropic", model: "ok" }], onChange: () => seen.push(guard.snapshot().modelRefused) });
+	const guard = createPolicyGuard({ allowedModels: [{ provider: "anthropic", model: "ok" }] });
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard });
+	try {
+		new FakeRuntime().streamSimple(MODEL, [], {});
+		assert.equal(calls.length, 0);
+		assert.deepEqual(seen, [1], "one change, fired after modelRefused rose");
+	} finally {
+		layer.restore();
+	}
+	const stops = [];
+	const plain = createUsageMeter({ maxTokens: null, onChange: () => stops.push(plain.state.stopReason) });
+	plain.stop(COST_CAP);
+	plain.stop(TOKEN_BUDGET);
+	assert.deepEqual(stops, [COST_CAP], "only the stop that wins");
+});
+
+test("install: brake:true or isStopped with no hard stop to build is a failed install, not a silent one", async () => {
+	for (const extra of [{ brake: true }, { isStopped: () => null }]) {
+		const copy = fakeCopy(["anthropic-messages"]);
+		delete copy.module.createAssistantMessageEventStream;
+		const logged = [];
+		const args = installArgs({ copy });
+		const before = args.ModelRuntime.prototype.streamSimple;
+		const handle = await installProcessUsageMeter({ ...args, ...extra, log: (event, fields) => logged.push({ event, fields }) });
+		assert.equal(handle.ok, false, Object.keys(extra)[0]);
+		assert.deepEqual(logged, [{ event: "usage_meter_unavailable", fields: { reason: "no-hard-stop" } }]);
+		assert.equal(args.ModelRuntime.prototype.streamSimple, before, "nothing was wrapped");
+	}
+	const wrong = await installProcessUsageMeter({ ...installArgs({ copy: fakeCopy([]) }), compat: { module: {} }, brake: true });
+	assert.equal(wrong.ok, false, "an injected copy that is not compat has no stream factory either");
+});
+
+test("install: a throwing children hook stops a meter with a policy, by the unmetered-child rule; teardown fields never overwrite the meter's", async () => {
+	const cases = [
+		[{ maxCostMicros: 100, maxTokens: 10 }, COST_CAP],
+		[{ maxTokens: 10, allowedModels: [{ provider: "p", model: "m" }] }, TOKEN_BUDGET],
+		[{ allowedModels: [{ provider: "p", model: "m" }] }, MODEL_NOT_ALLOWED],
+	];
+	for (const [policy, reason] of cases) {
+		const meter = createUsageMeter({ maxTokens: null, ...policy });
+		const logged = [];
+		const handle = await installProcessUsageMeter({
+			...installArgs({ copy: fakeCopy([]) }),
+			meter,
+			rearmMs: 5,
+			children: { sample: () => {
+				throw new Error("fold");
+			}, teardown: () => ({ rearms: 99, apis: 99, rearmMs: 1, childrenFailed: 0, unmetered: 3 }) },
+			log: (event, fields) => logged.push({ event, fields }),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		handle.uninstall();
+		assert.equal(meter.state.stopReason, reason, JSON.stringify(policy));
+		const teardown = logged.at(-1).fields;
+		assert.deepEqual([teardown.rearms, teardown.apis, teardown.rearmMs, teardown.unmetered], [0, 0, 5, 3], "the hook's colliding keys are dropped, its own kept");
+		assert.ok(teardown.childrenFailed >= 1);
+	}
+	const throwingTeardown = createUsageMeter({ maxTokens: 10 });
+	const handle = await installProcessUsageMeter({ ...installArgs({ copy: fakeCopy([]) }), meter: throwingTeardown, children: { sample: () => {}, teardown: () => {
+		throw new Error("last fold");
+	} } });
+	handle.uninstall();
+	assert.equal(throwingTeardown.state.stopReason, TOKEN_BUDGET, "the last fold failing at teardown fails closed too");
 });

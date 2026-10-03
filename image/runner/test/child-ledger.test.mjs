@@ -5,12 +5,17 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
 	CHILD_LEDGER_MAX_BYTES,
+	CHILD_LEDGER_MAX_FILES,
 	CHILD_LEDGER_MAX_ROWS,
 	CHILD_LEDGER_NAME,
 	CHILD_LEDGER_ROWS,
+	childLedger,
+	createPolicyGuard,
 	createUsageMeter,
+	externalFor,
 	foldChildLedgers,
 	parseChildLedger,
+	spentFile,
 	USAGE_ID_PATTERN,
 } from "../src/usage-meter.mjs";
 import { MODEL_REF_PATTERN } from "../../../worker/src/model-ref.mjs";
@@ -52,7 +57,12 @@ function ledger({ calls = 1, each = 10, cost = 0.5, unresolved = 0, state = "run
  */
 function fakeFs(files, { listError = null } = {}) {
 	const opened = [];
+	const lstats = [];
 	const fds = new Map();
+	const statOf = (name, entry) => {
+		const isFile = typeof entry === "string" || Buffer.isBuffer(entry);
+		return { isFile: () => isFile, ino: 1n, size: BigInt(isFile ? Buffer.byteLength(entry) : 0), mtimeNs: 0n, ctimeNs: `${name}:${isFile ? Buffer.from(entry).toString("base64") : "x"}` };
+	};
 	let next = 3;
 	return {
 		files,
@@ -69,13 +79,22 @@ function fakeFs(files, { listError = null } = {}) {
 			if (entry === undefined || entry?.vanish) throw Object.assign(new Error("gone"), { code: "ENOENT" });
 			if (entry?.kind === "symlink") throw Object.assign(new Error("loop"), { code: "ELOOP" });
 			const fd = next++;
-			fds.set(fd, { entry, offset: 0 });
+			fds.set(fd, { name, entry, offset: 0 });
 			return fd;
 		},
+		// Bigint stats, as the fold asks for. The content stands in for the change time, so a rewrite is a new
+		// signature and an untouched file is the same one; `stats` counts the lstat calls.
+		lstatSync(path) {
+			const name = path.split("/").at(-1);
+			lstats.push(name);
+			const entry = files[name];
+			if (entry === undefined || entry?.vanish) throw Object.assign(new Error("gone"), { code: "ENOENT" });
+			return statOf(name, entry);
+		},
+		lstats,
 		fstatSync(fd) {
-			const { entry } = fds.get(fd);
-			const isFile = typeof entry === "string" || Buffer.isBuffer(entry);
-			return { isFile: () => isFile, size: isFile ? Buffer.byteLength(entry) : 0 };
+			const { name, entry } = fds.get(fd);
+			return statOf(name, entry);
 		},
 		readSync(fd, buffer, offset, length) {
 			const handle = fds.get(fd);
@@ -304,4 +323,141 @@ test("on a real directory: a FIFO does not hang the fold, a symlink is not follo
 	const result = foldChildLedgers({ dir });
 	assert.deepEqual([result.processes, result.unmetered, result.totals.total], [3, 2, 20]);
 	assert.deepEqual([result.files.get(NAME_B).why, result.files.get(fifo).why], ["malformed", "malformed"]);
+});
+
+// ── Review fixes: bounded numbers, ASCII ids, the file cap, skipped reads, SPENT, the writer ──────────────────────
+
+/** A ledger whose rows are given and whose totals are their sums (the adversarial review's shape). */
+function forged({ rows, calls, unresolved = 0 }) {
+	const t = { input: 0, output: 0, total: 0, cost: 0 };
+	for (const r of rows) for (const k of Object.keys(t)) t[k] += r[k];
+	const settled = rows.reduce((sum, r) => sum + r.calls, 0);
+	return { v: 1, state: "running", metered: true, totals: { ...t, calls: calls ?? settled + unresolved, unresolved, unpriced: 0, sessions: 1 }, rows, spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0 };
+}
+const FORGED_A = "900.aaaaaaaaaaaaaaaa.json";
+const FORGED_B = "901.bbbbbbbbbbbbbbbb.json";
+
+test("parseChildLedger refuses any amount above MAX_SAFE_INTEGER, and a fractional count", () => {
+	const M = Number.MAX_SAFE_INTEGER;
+	assert.ok(parseChildLedger(json(forged({ rows: [row("p", "m", { calls: 1, input: M, total: M, cost: M })] }))), "MAX_SAFE_INTEGER itself is carried");
+	assert.equal(parseChildLedger(json(forged({ rows: [row("p", "m", { calls: 1, input: 1e308, total: 1e308, cost: 1 })] }))), null);
+	assert.equal(parseChildLedger(json(forged({ rows: [row("p", "m", { calls: 1, input: 1, total: 1, cost: M + 2 })] }))), null);
+	assert.equal(parseChildLedger(json({ ...ledger(), costRefused: 0.5 })), null);
+	assert.equal(parseChildLedger(json({ ...ledger(), spentMicros: M + 2 })), null);
+});
+
+test("two forged ledgers whose sum would overflow cannot erase a real child's spend or dodge the cap", () => {
+	const dir = tempDir("pi-dispatch-ledger-");
+	writeFileSync(join(dir, NAME_A), json(forged({ rows: [row("anthropic", "claude-x", { calls: 1, input: 1000, total: 1000, cost: 2 })] })));
+	writeFileSync(join(dir, FORGED_A), json(forged({ rows: [row("forged", "a", { calls: 1, input: 1e308, total: 1e308, cost: 1e308 })] })));
+	writeFileSync(join(dir, FORGED_B), json(forged({ rows: [row("forged", "b", { calls: 1, input: 1e308, total: 1e308, cost: 1e308 })] })));
+	const result = foldChildLedgers({ dir });
+	assert.deepEqual([result.unmetered, result.totals.total, result.totals.cost], [2, 1000, 2], "the forged files are malformed, so unmetered: a floor");
+	let stopped = null;
+	const meter = createUsageMeter({ maxTokens: 500, onStop: (reason) => (stopped = reason) });
+	meter.setChildren(result);
+	assert.deepEqual([meter.snapshot().total, meter.snapshot().cost, stopped], [1000, 2, "token_budget"]);
+});
+
+test("one forged ledger at MAX_SAFE_INTEGER calls cannot hide a real child's unresolved call or its usage block", () => {
+	const dir = tempDir("pi-dispatch-ledger-");
+	const M = Number.MAX_SAFE_INTEGER;
+	writeFileSync(join(dir, NAME_A), json(forged({ rows: [row("anthropic", "claude-x", { calls: 1, input: 10, total: 10, cost: 1 })], unresolved: 1 })));
+	writeFileSync(join(dir, FORGED_A), json(forged({ rows: [], calls: M, unresolved: M })));
+	const meter = createUsageMeter({});
+	meter.setChildren(foldChildLedgers({ dir }));
+	const snap = meter.snapshot();
+	assert.ok(snap.unresolved >= 1 && snap.calls >= 2, `unresolved ${snap.unresolved}, calls ${snap.calls}: saturated, never zeroed`);
+	assert.notEqual(meter.usageSnapshot(), null, "the child's call keeps the usage block");
+});
+
+test("two forged rows on one pair cannot put Infinity (JSON null) into the usage block", () => {
+	const dir = tempDir("pi-dispatch-ledger-");
+	writeFileSync(join(dir, FORGED_A), json(forged({ rows: [row("forged", "a", { calls: 1, input: 1e308, total: 1e308, cost: 1 })] })));
+	writeFileSync(join(dir, FORGED_B), json(forged({ rows: [row("forged", "a", { calls: 1, input: 1e308, total: 1e308, cost: 1 })] })));
+	const meter = createUsageMeter({});
+	meter.setChildren(foldChildLedgers({ dir }));
+	const line = JSON.stringify(meter.usageSnapshot() ?? {});
+	assert.ok(!/:null[,}]/.test(line.replace('"piAi":null', "")), line.slice(0, 200));
+});
+
+test("a row id must be printable ASCII before the worker's rule: U+212A KELVIN SIGN lowercases to k and is refused", () => {
+	const kelvin = String.fromCharCode(0x212a);
+	assert.equal(`${kelvin}imi`.toLowerCase(), "kimi", "the premise: it passes the rule after lowercasing");
+	const text = (model) => json(forged({ rows: [row("p", model, { calls: 1, input: 1, total: 1 })] }));
+	assert.ok(parseChildLedger(text("kimi")));
+	assert.equal(parseChildLedger(text(`${kelvin}imi`)), null);
+	assert.equal(parseChildLedger(text("k\u00e9mi")), null);
+});
+
+test("at most CHILD_LEDGER_MAX_FILES names are tracked; the rest count as unmetered without being opened", () => {
+	const files = {};
+	const total = CHILD_LEDGER_MAX_FILES + 88;
+	for (let i = 0; i < total; i += 1) files[`${i + 1}.${i.toString(16).padStart(16, "0")}.json`] = json(ledger());
+	const fs = fakeFs(files);
+	const first = fold(fs);
+	assert.equal(fs.opened.length, CHILD_LEDGER_MAX_FILES, "only the tracked names are opened");
+	assert.deepEqual([first.files.size, first.flooded, first.unmetered, first.processes], [CHILD_LEDGER_MAX_FILES, 88, 88, total]);
+	assert.equal(first.totals.total, CHILD_LEDGER_MAX_FILES * 10);
+	delete fs.files[Object.keys(files).at(-1)];
+	const second = fold(fs, first);
+	assert.deepEqual([second.flooded, second.unmetered], [88, 88], "a high-water mark: fewer extra names later does not undo the count");
+});
+
+test("a file is not read again when its signature is unchanged, nor once it is done", () => {
+	const fs = fakeFs({ [NAME_A]: json(ledger({ calls: 1 })), [NAME_B]: json(ledger({ calls: 1, state: "done" })) });
+	const first = fold(fs);
+	fs.opened.length = 0;
+	fs.lstats.length = 0;
+	const second = fold(fs, first);
+	assert.deepEqual([fs.opened, fs.lstats], [[], [NAME_A]], "unchanged: one lstat, no open; done: neither");
+	assert.equal(second.totals.total, 20);
+	fs.files[NAME_A] = json(ledger({ calls: 3 }));
+	fs.files[NAME_B] = json(ledger({ calls: 9, state: "done" }));
+	const third = fold(fs, second);
+	assert.deepEqual([third.totals.total, fs.opened], [40, [NAME_A]], "a changed file is read; a done one keeps its mark");
+	delete fs.files[NAME_B];
+	assert.equal(fold(fs, third).files.get(NAME_B).why, "vanished", "a done file can still vanish");
+});
+
+test("SPENT: the parent's spend plus each ledger's spent and in-flight, and a child's external spend excludes its own", () => {
+	const fs = fakeFs({ [NAME_A]: json({ ...ledger({ calls: 1 }), spentMicros: 300, inflightMicros: 50 }), [NAME_B]: json({ ...ledger({ calls: 1 }), spentMicros: 1000, inflightMicros: 0 }) });
+	const spent = spentFile(fold(fs), 2000);
+	assert.deepEqual(spent, { v: 1, total: 3350, byLedger: { [NAME_A]: 350, [NAME_B]: 1000 } });
+	const read = JSON.parse(JSON.stringify(spent));
+	assert.equal(externalFor(read, NAME_A), 3000, "the rest of the job, not counting itself twice");
+	assert.equal(externalFor(read, NAME_B), 2350);
+	assert.equal(externalFor(read, "999.0000000000000000.json"), 3350, "a child the parent has not folded yet carries no part");
+	for (const bad of [null, [], { v: 2, total: 1, byLedger: {} }, { v: 1, total: -1, byLedger: {} }, { v: 1, total: 1.5, byLedger: {} }, { v: 1, total: 5, byLedger: [] }, { v: 1, total: 5, byLedger: { [NAME_A]: 9 } }, { v: 1, total: 5, byLedger: { [NAME_A]: "1" } }]) {
+		assert.equal(externalFor(bad, NAME_A), Infinity, JSON.stringify(bad));
+	}
+	assert.equal(spentFile({ files: new Map() }, Infinity).total, Number.MAX_SAFE_INTEGER, "saturates, never 0");
+});
+
+test("childLedger: the writer's object round-trips through the fold; a meter that did not install writes zeros and metered:false", async () => {
+	assert.deepEqual(parseChildLedger(json(childLedger({ state: "starting" }))).totals.total, 0, "the preload's stub");
+	const off = fold(fakeFs({ [NAME_A]: json(childLedger({ state: "running", metered: false })) }));
+	assert.deepEqual([off.unmetered, off.files.get(NAME_A).why], [1, "unmetered"]);
+	const meter = createUsageMeter({ maxTokens: null });
+	const guard = createPolicyGuard({ maxCostMicros: 10_000_000, allowedModels: [{ provider: "anthropic", model: "claude-x" }], env: {} });
+	meter.observe({ result: () => Promise.resolve({ usage: { input: 5, totalTokens: 5, cost: { total: 0.1 } } }) }, { provider: "anthropic", modelId: "claude-x" });
+	await new Promise((resolve) => setImmediate(resolve));
+	const written = childLedger({ state: "done", meter, guard });
+	assert.deepEqual([written.totals.total, written.rows.length, written.costRefused, written.modelRefused, written.spentMicros], [5, 1, 0, 0, 0]);
+	assert.equal(fold(fakeFs({ [NAME_A]: json(written) })).totals.total, 5);
+});
+
+test("a worst-case ledger written by childLedger() stays under 64 KiB with at least 8 KiB to spare", () => {
+	const meter = createUsageMeter({ maxTokens: null });
+	const tiny = 1.2345678901234567e-300;
+	const id = (prefix, i) => `${prefix}${String(i).padStart(3, "0")}`.padEnd(64, "x");
+	for (let i = 0; i < CHILD_LEDGER_ROWS + 20; i += 1) {
+		meter.observe({ result: () => Promise.resolve({ usage: { input: tiny, output: tiny, cacheRead: tiny, cacheWrite: tiny, cacheWrite1h: tiny, reasoning: tiny, totalTokens: tiny, cost: { total: tiny } } }) }, { provider: id("p", i), modelId: id("m", i) });
+	}
+	return new Promise((resolve) => setImmediate(resolve)).then(() => {
+		const text = json(childLedger({ state: "running", meter }));
+		const rows = JSON.parse(text).rows;
+		assert.equal(rows.length, CHILD_LEDGER_ROWS);
+		assert.ok(Buffer.byteLength(text) <= CHILD_LEDGER_MAX_BYTES - 8192, `${Buffer.byteLength(text)} bytes`);
+	});
 });
