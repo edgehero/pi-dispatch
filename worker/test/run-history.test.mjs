@@ -360,7 +360,7 @@ test("parseExitTokens round-trips a conformant runner's object BYTE-IDENTICALLY"
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`)), JSON.stringify(metered));
 	const fallback = { input: 1, output: 2, total: 3, cost: 0.5, metered: false };
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)), JSON.stringify(fallback));
-	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the nineteen, and
+	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the twenty-two, and
 	// a null would read as "measured zero" for a number nobody measured.
 	assert.ok(!("otherTotal" in parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)));
 });
@@ -378,6 +378,20 @@ test("the policy counters (issues #501, #502) survive the rebuild, in emission o
 	for (const key of Object.keys(policy)) assert.equal(out[key], policy[key], key);
 	assert.equal(parseExitTokens('{"event":"exit","tokens":{"total":1,"costRefused":"many"}}').costRefused, undefined, "a string in a policy slot is dropped like any other");
 	assert.ok(Object.isFrozen(TOKEN_KEYS));
+});
+
+test("the child keys (issue #500 part F) survive the rebuild, between unpriced and the policy counters, each by name", () => {
+	// A metered runner from issue #500 part E on writes all three on every line, zeros with no children. A key missing
+	// from TOKEN_KEYS is DROPPED, and `unmeteredChildren` is a floor counter: dropped, it would read as an honest zero.
+	const child = { childTotal: 700, childProcesses: 2, unmeteredChildren: 1 };
+	const at = TOKEN_KEYS.indexOf("unpriced");
+	assert.deepEqual(TOKEN_KEYS.slice(at + 1, at + 4), Object.keys(child), "after unpriced, in the runner's emission order");
+	const metered = { input: 1, output: 2, total: 703, cost: 0.5, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 3, calls: 4, unresolved: 0, unpriced: 0, ...child, costCapMicros: 2_000_000, costRefused: 0 };
+	const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`);
+	assert.equal(JSON.stringify(out), JSON.stringify(metered), "byte-identical round trip, key order included");
+	for (const key of Object.keys(child)) assert.equal(out[key], child[key], key);
+	assert.equal(out.rootTotal + out.otherTotal + out.looseTotal + out.childTotal, out.total);
+	assert.equal(parseExitTokens('{"event":"exit","tokens":{"total":1,"unmeteredChildren":"none"}}').unmeteredChildren, undefined, "numbers only");
 });
 
 test("parseExitSession refuses a reason outside the CLOSED enum", () => {

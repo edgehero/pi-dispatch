@@ -2943,12 +2943,20 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   const cost = typeof r.tokens?.cost === "number" ? ` · $${r.tokens.cost.toFixed(4)}` : "";
   out.push(kv("tokens", `${show(r.tokens?.total)}${cost}`));
 
-  // The share of that total spent by subagent sessions a staged package spawned in-process, from the
-  // runner's process-wide metering. Records written BEFORE metering carry no `otherTotal`, so the line
-  // appears only for a positive number -- never a NaN, and never a bare 0 on a pre-metering record.
+  // The share of that total spent outside the root session, from the runner's process-wide metering. "other
+  // sessions", not "subagents": since the 0.99.1 pin `otherTotal` also holds compaction and branch summaries, each
+  // under a fresh session id. "subprocesses" is `childTotal` (issue #500), the pi child processes the runner metered
+  // through their ledgers. Records written before either key carry none, so each line appears only for a positive
+  // number -- never a NaN, and never a bare 0 on an older record. A child the runner could not meter is named, since
+  // the run's numbers are then a floor.
+  const positive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
   const otherTotal = r.tokens?.otherTotal;
-  if (typeof otherTotal === "number" && Number.isFinite(otherTotal) && otherTotal > 0) {
-    out.push(kv("of which", `subagents: ${otherTotal}`, "dim"));
+  if (positive(otherTotal)) out.push(kv("of which", `other sessions: ${otherTotal}`, "dim"));
+  const childTotal = r.tokens?.childTotal;
+  const unmetered = r.tokens?.unmeteredChildren;
+  if (positive(childTotal) || positive(unmetered)) {
+    const counted = positive(childTotal) ? childTotal : 0;
+    out.push(kv("of which", `subprocesses: ${counted}${positive(unmetered) ? ` · ${unmetered} unmetered` : ""}`, "dim"));
   }
 
   // chain: root vs child, depth, spawned children (scanned from the run window -- best-effort, no new I/O),

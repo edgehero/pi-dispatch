@@ -862,8 +862,9 @@ refactor apart.
   `usage` rows merge theirs, and so do the guard counters the parent writes (`costRefused`, `boundExceeded`,
   `longContext`, `costUnjudged`, `costUnanswered`, `modelRefused`, each only where the parent's own guard writes it),
   so a child's partial count floors the settlement as the parent's would. Every exit line of a metered run carries the
-  children's final fold, the SIGTERM line and the outer catch's included. The worker's closed key list does not admit the three yet (part F): it
-  drops them, and the `total` it keeps already includes the children. The fallback line carries `metered: false` and the four
+  children's final fold, the SIGTERM line and the outer catch's included. The worker's closed key list admits the three
+  (part F), and `unmeteredChildren` is a floor counter of the dollar settlement (`DES-DOLLAR-RESERVE-AND-SETTLE`); a
+  worker from before part F drops them, and the `total` it keeps already includes the children. The fallback line carries `metered: false` and the four
   originals only. The sibling `usage` key (the per-model ledger, `REQ-TOKEN-ACCOUNTING-AND-CAPS`) is the
   same class of read-only telemetry: recovered by its own validating parser (`parseExitUsage`), absent on
   the fallback line and on a catch-path line from before the meter installed, and **feeding classification exactly as much as `tokens` does:
@@ -4432,8 +4433,9 @@ validator rather than a second copy of it.
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
                    "metered": <bool>,                                                          // true = process-wide meter; false = the subscribe() fallback (then the keys below are absent)
-                   "rootTotal": <int>, "otherTotal": <int>, "looseTotal": <int>,                // attribution split; sums to `total`
+                   "rootTotal": <int>, "otherTotal": <int>, "looseTotal": <int>,                // attribution split; with childTotal sums to `total`
                    "sessions": <int>, "calls": <int>, "unresolved": <int>, "unpriced": <int>,
+                   "childTotal": <int>, "childProcesses": <int>, "unmeteredChildren": <int>,  // issue #500: pi child processes; on every metered line from part E
                    "costCapMicros": <int>, "costRefused": <int>, "boundExceeded": <int>,         // issue #501: written only when a cost cap was set
                    "longContext": <int>, "costUnjudged": <int>, "costUnanswered": <int>,         // issue #501: written only when a cost cap was set
                    "modelRefused": <int> } | null,                                             // issue #502: written only when a model list was set
@@ -4814,6 +4816,16 @@ validator rather than a second copy of it.
   Absent means no cap, never zero refusals. The meaning of `unpriced` WIDENED with them: a call whose result
   rejected now counts as unpriced (its cost is unknown), where before it was counted in `calls` and nowhere
   else; a run record from before this change can carry such a call in neither.
+  **The child keys (issue #500 part F)** ride between `unpriced` and the cost guard's counters, on the same closed
+  key list, the runner's emission order: `childTotal` (the billed tokens of the job's pi child processes, already
+  inside `total`, so `rootTotal + otherTotal + looseTotal + childTotal` is `total`), `childProcesses` (child ledger
+  files, plus pi processes the detector found with none) and `unmeteredChildren` (pi children whose spend the runner
+  could not count, plus its own lost ledger directory or failed control write, so it can exceed `childProcesses`). A
+  runner from issue #500 part E on writes all three on every metered line, zeros with no children; a record from an
+  older image, or from the fallback meter, carries none. A non-zero `unmeteredChildren` says `cost` is not the whole
+  truth, and the dollar settlement reads it as a floor counter: present and 0, or the floor. With children, `input`,
+  `output`, `total`, `cost`, `sessions`, `calls`, `unresolved`, `unpriced`, the guard counters and the `usage` rows
+  include theirs. The record classifies nothing on them.
   **The model guard's `modelRefused` (issue #502)** rides after them, on the same closed key list, and only on a
   run that had a model list: the calls the guard refused before dispatch because their requested
   `provider/model` was not on the list (normally `1`, the call that stopped the job). Absent means no list,
@@ -6916,3 +6928,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #499, part C (the operator surfaces). **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: a host row gains `fpProjects`, the digest of the host's live projects as ids and the hash of each member, never a name or a member in clear; a separate field rather than a part of `fpUsd`, because membership decides the job-count project rows and the recorded project as well as the dollar rows, so it matters on a fleet with no dollar cap, and a projects warning names the file to copy; it never abstains (no projects file is the digest of no projects); doctor warns on a peer that differs, and on one that publishes none while projects are in use (`fleetProjectsChecks`). Ships with part B's project rows in one release. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin's project tools are producers (the file `PI_PROJECTS_FILE` names, refused while it is unset, the worker's parser, tmp and rename); the name rule says where a name renders and that it is escaped and isolated there; the Caps bullet says how the tools hold the pair rule; a Fleet bullet names `fpProjects`; the Residuals say old records fold into `(no project)`, one project per scope, webhook triggers not grouped, the project is per attempt, and one forge kind on two instances is one member. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the `project` field is read, not changed. **Code evidence**: worker/src/projects.mjs -> projectsFingerprint, projectsFingerprintInput; worker/src/start.mjs -> fpProjects; worker/src/doctor.mjs -> fleetProjectsChecks. |
 | 2026-10-03 | Issue #499, part C, PR #569's review. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin writer's rules (only `ENOENT` is missing, a unique tmp file, the mode kept, a symlink written through, both judged files re-checked before the rename, the two-writer race as a residual); every refusal escapes a C1, bidi or zero-width character a member may hold (`escapeControls`), so `projects_reload_invalid`, doctor and a tool error never carry one raw; a folder mounted at different paths is listed under each in the one shared file. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: doctor makes no `fpProjects` comparison when this host's own projects file does not load (it fails on that already). **Code evidence**: worker/src/projects.mjs -> escapeControls; worker/src/start.mjs -> reloadProjects; worker/src/doctor.mjs. |
 | 2026-10-03 | Issue #499, part C, PR #569's second review. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin writer refuses a symlinked projects file, keeps the owner and group (or refuses), and re-checks against the snapshot taken before the confirm; the worker's `escapeControls` escapes exactly the panel's `escapeInterpreted` set (every format character but the two joiners, the blanks and fillers, the unassigned code points drawn as nothing), held equal over every code point by a test. **`INT-SCOPED-LIMITS-FILE-CONTRACT` UNCHANGED, checked**: the file is the same; only the admin's writer is stricter. **Code evidence**: worker/src/projects.mjs -> escapeControls; admin/src/read-model.mjs -> replaceFile. |
+| 2026-10-03 | Issue #500, part F (closes #500). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens` gains `childTotal`, `childProcesses` and `unmeteredChildren` between `unpriced` and the cost guard's counters, on the closed key list in the runner's emission order, with a paragraph on what each means, that a non-zero `unmeteredChildren` makes the dollar settlement a floor, and that an older image's record carries none; the attribution comment now says root, other and loose sum to `total` with `childTotal`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, its child keys paragraph: the worker's closed key list admits the three, and `unmeteredChildren` is a floor counter. Exit codes and reasons UNCHANGED, checked: an unmetered child still stops `cost-cap`, `token_budget` or `model-not-allowed`. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: the two reserved names `PI_DISPATCH_CHILD_LEDGER` and `PI_DISPATCH_RUNNER_PID` are as part C wrote them, and no mount, flag or capability token changed. |

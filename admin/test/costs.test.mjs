@@ -285,6 +285,18 @@ test("floor propagation: unpriced calls, the fallback meter, and a pre-#25 recor
   assert.deepEqual(pre.provenance.total, { usd: 0, class: "estimated", floor: true, coverage: 0 }, "tokens:null spent something and measured nothing");
 });
 
+test("floor: an unmetered pi child, and the cost guard's short-count counters, floor the run; boundExceeded and absent keys do not (issue #500 part F)", () => {
+  const run = (extra) => rec({ jobId: "c-1", tokens: { ...tok(0.5), ...extra }, usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]) });
+  const floorOf = (extra) => fold([run(extra)]).provenance.total.floor;
+  // A metered child's spend is in the run's cost: not a floor.
+  assert.equal(floorOf({ childTotal: 900, childProcesses: 2, unmeteredChildren: 0 }), false);
+  assert.equal(floorOf({ childTotal: 900, childProcesses: 2, unmeteredChildren: 1 }), true, "a pi child the runner could not count");
+  for (const key of ["longContext", "costUnjudged", "costUnanswered"]) assert.equal(floorOf({ [key]: 1 }), true, key);
+  assert.equal(floorOf({ boundExceeded: 1 }), false, "a call past its bound is still metered at pi's full price");
+  // A record from before the keys, or a run with no cap, carries none of them: measured nothing missing.
+  assert.equal(floorOf({}), false);
+});
+
 // ---- daily buckets ----
 
 test("daily: UTC dayKey buckets over endedAt -- 23:59Z and 00:01Z land on different days -- with gap days present", () => {

@@ -702,7 +702,7 @@ test("Enter on a run opens its detail dump, and Esc backs out to the list withou
   assert.equal(closed, 0, "Esc from a sub-view never closes the overlay");
 });
 
-test("RUN_DETAIL breaks out the subagent token share, and shows nothing for a pre-metering record", async () => {
+test("RUN_DETAIL breaks out other sessions and subprocesses, and shows nothing for a pre-metering record", async () => {
   const openRun = async (tokens) => {
     const comp = makeDashboard({
       paths: {},
@@ -721,18 +721,27 @@ test("RUN_DETAIL breaks out the subagent token share, and shows nothing for a pr
 
   const metered = await openRun({ input: 4000, output: 1000, total: 5000, cost: 0.0523, otherTotal: 1200 });
   assert.match(metered, /tokens\s+5000/, "the existing tokens line is unchanged");
-  assert.match(metered, /of which\s+subagents: 1200/, "the process-wide meter's subagent share");
+  // "other sessions", not "subagents": otherTotal also holds compaction and branch summaries since the 0.99.1 pin.
+  assert.match(metered, /of which\s+other sessions: 1200/, "the process-wide meter's other-session share");
+  assert.doesNotMatch(metered, /subagents|subprocesses/);
+
+  // Issue #500: the pi child processes the runner metered, and any it could not.
+  const children = await openRun({ total: 5000, cost: 0.05, rootTotal: 3000, otherTotal: 1200, looseTotal: 0, childTotal: 800, childProcesses: 2, unmeteredChildren: 0 });
+  assert.match(children, /of which\s+other sessions: 1200/);
+  assert.match(children, /of which\s+subprocesses: 800\s+│/, "of which subprocesses, from childTotal");
+  assert.match(await openRun({ total: 5000, cost: 0.05, otherTotal: 0, childTotal: 800, unmeteredChildren: 1 }), /of which\s+subprocesses: 800 · 1 unmetered/);
+  assert.match(await openRun({ total: 5000, cost: 0.05, childTotal: 0, unmeteredChildren: 2 }), /of which\s+subprocesses: 0 · 2 unmetered/, "an unmetered child with nothing counted is still named");
 
   // A record written before the runner metered process-wide has no `otherTotal` at all: no line, and
   // certainly no NaN or a misleading bare 0.
   const preMetering = await openRun({ input: 4000, output: 1000, total: 5000, cost: 0.0523 });
   assert.match(preMetering, /tokens\s+5000/);
-  assert.doesNotMatch(preMetering, /subagents/, "an older record renders nothing extra");
+  assert.doesNotMatch(preMetering, /of which/, "an older record renders nothing extra");
   assert.doesNotMatch(preMetering, /NaN/);
 
-  // A metered run that spawned no subagent reports 0 -- also nothing, rather than a noise line.
-  assert.doesNotMatch(await openRun({ total: 5000, cost: 0.01, otherTotal: 0 }), /subagents/);
-  assert.doesNotMatch(await openRun(null), /subagents|NaN/, "a run with no usage at all still renders");
+  // A metered run with no other session and no child reports zeros -- also nothing, rather than a noise line.
+  assert.doesNotMatch(await openRun({ total: 5000, cost: 0.01, otherTotal: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0 }), /of which/);
+  assert.doesNotMatch(await openRun(null), /of which|NaN/, "a run with no usage at all still renders");
 });
 
 test("Enter on a cron trigger opens a detail with next/health/stalls from the scheduler", async () => {

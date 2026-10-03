@@ -43,7 +43,7 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 | rendering        | meaning |
 |---|---|
 | `$4.12`          | metered — the stream-time price pi-ai computed when the run happened |
-| `≥$4.12`         | a floor — some spend was unpriced/unresolved, the run fell back to the in-session meter (which cannot see subagent spend), or the run pre-dates the meter |
+| `≥$4.12`         | a floor: some spend was unpriced/unresolved, a `pi` child process could not be metered, the run fell back to the in-session meter (which cannot see subagent spend), or the run pre-dates the meter |
 | `plan:kimi`      | covered by a declared subscription — prepaid, **never shown as $0.00** |
 | `$0 (unrated)`   | a model the rate table prices at $0, with **no** declared subscription covering it: unrated, never "free" |
 | `~$4.12 est.`    | an estimate (what-if, API-equivalent, or a sum containing any estimate) |
@@ -195,7 +195,7 @@ parser the worker uses before they ask, and write version 1 until a row needs ve
   - the runner's own meter counted the run (`tokens.metered` is `true`, not the fallback meter);
   - `tokens.costCapMicros` is present and not above the reservation;
   - every "not fully counted" counter is present and 0: `unresolved`, `unpriced`, `boundExceeded`,
-    `longContext`, `costUnjudged` and `costUnanswered`;
+    `longContext`, `costUnjudged`, `costUnanswered` and `unmeteredChildren`;
   - a per-model usage ledger is present, unless the run made no model call at all.
 - `floor`: the cost was not fully known. The windows keep at least the whole hold, and more when the measured
   part already costs more.
@@ -259,8 +259,11 @@ token is at least one byte for every tokenizer pi prices; that count is the evid
 These are known gaps. Most are named in the specs ([DES](../specs/design.md#des-dollar-reserve-and-settle)); #544
 is an open issue.
 
-- **A `pi` subprocess** that a package starts inside a job spends outside the runner's meter (issue #500,
-  `OQ-011`). Neither the per-job cap nor the windows see it, so a window can undercount such jobs.
+- **A `pi` child process that hides from the meter** is not counted. A child that keeps the job's environment is
+  metered and capped ([pi child processes](#pi-child-processes)). One that clears the environment and hides every
+  sign of pi, a client that is not pi, and a direct API call are not.
+- **A new worker with an old image settles every capped job at the floor.** The worker reads `unmeteredChildren`,
+  and an image built before issue #500 does not write it. Rebuild the image when you upgrade the worker.
 - **A Node older than 18.19 in a job does not start.** To meter `pi` child processes, the runner adds
   `--import=<child preload>` to `NODE_OPTIONS` for every process in the job (issue #500), and such a Node refuses that
   flag. The image ships Node 22. An agent that installs an older Node in a job must clear `NODE_OPTIONS` for it.
@@ -344,10 +347,71 @@ Specs: [`REQ-SPEND-CAPS-MULTI-WINDOW`](../specs/requirements.md#req-spend-caps-m
 [`OQ-010`](../specs/open-questions.md#oq-010--does-pinned-pi-0807-emit-per-turn-token-usage-on-the-subscribe-stream),
 [`OQ-011`](../specs/open-questions.md#oq-011--a-package-that-spawns-a-pi-subprocess-is-unmetered).
 
+## pi child processes
+
+A staged package may start `pi` as a child process: pi's own subagent example does, and so does pi-subagents in
+its background mode. Each child has its own copy of pi, so the runner's meter cannot see its calls from outside.
+Since issue #500 the runner meters them from inside.
+
+**What is metered.** The runner adds a small preload to `NODE_OPTIONS` and names a private ledger folder under
+`/tmp`. Every Node child inherits both. In a `pi` child the preload loads a meter first, before any other
+extension. That meter counts every call the child makes, writes it to the child's ledger file before the call
+goes out, and applies the job's model list and cost cap. Every second, and when the job ends, the runner adds
+all the ledgers to the job's own numbers. So the per-job token cap, the cost cap and the model list hold for the
+job as a whole, and a stop reaches every child before its next call. This covers:
+
+- a `pi` started from PATH or by path, in any of pi's session modes;
+- pi's stock subagent example. In a job it starts the runner itself; that child now runs as a metered `pi` and
+  never runs the job a second time;
+- pi-subagents: its foreground runs happen inside the runner's own process and land in "other sessions"; its
+  background runs are separate processes and land in "subprocesses".
+
+**Where it shows.** The run record's `tokens` gains three numbers. `childTotal` is the children's tokens, already
+inside `total`. `childProcesses` is how many children reported, plus any found without a report.
+`unmeteredChildren` is how many could not be counted. The run detail in `/dispatch` shows "of which other
+sessions" (subagents in the same process, and compaction) and "of which subprocesses" (`childTotal`), and names
+any unmetered children. Their per-model spend is in the run's model rows like the parent's.
+
+**The floor.** On Linux the runner also looks through the running processes for a `pi` that writes no ledger,
+for example one started with an empty environment. Such a child counts in `unmeteredChildren`. Then:
+
+- under a dollar cap the job stops with `cost-cap`, under a token cap with `token_budget`, under a model list
+  alone with `model-not-allowed`. The job log says `unmetered_child`;
+- with no cap the job runs on, and its record is a floor;
+- a dollar window settles such a job at the floor: at least its reservation;
+- the cost views show its dollar with `≥`.
+
+**What is not covered.** This is honest accounting of code that cooperates. It is not a wall: the agent holds
+the provider key and runs as the same user as the runner. Named gaps:
+
+- a child that clears its environment and also hides every sign that it is `pi` (a renamed copy, a changed
+  process title) is not seen. Nor is a client that is not `pi`, or a direct call to the provider's API;
+- a child that lives and spends inside one second, and whose ledger is deleted before the runner reads it;
+- a forged ledger that keeps reporting less than the child spent;
+- several children can each start a call against the same headroom, up to a second old, so together they can pass
+  a cap. That spend is still charged in full;
+- off Linux there is no process scan, so only the ledgers count;
+- a child whose meter is still starting when the job ends, and that started in the job's last 10 seconds, is not
+  counted;
+- a lot of output from a background child can push the job's exit line out of the part of the log the worker
+  reads. The run then settles at the floor;
+- children do not see the overlay `models.json` (issue #503).
+
+**pi-subagents in a job.** It needs `PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT` set to pi's package folder, or it
+fails before any child runs. Its children do not see the overlay `models.json` (issue #503), so a model defined
+only there is not available to them.
+
+**Cache warming.** The runner turns pi's cache warming off for its own session. A child builds its own pi
+settings, and pi's default there is on (`streaming`), so a child's warm re-sends are paid. pi-dispatch does not
+turn it off for children it did not start: the meter counts those calls, and a cost cap bounds them. pi reads this
+setting from its global settings file only, `settings.json` in the agent folder the child uses (set
+`"cacheWarming": "off"` there). A project's `.pi/settings.json` does not change it.
+
 ## Honest limits
 
-- Totals are **floors**: a `pi` subprocess spawned by a staged package is unmetered (`OQ-011`), and a
-  retried job's sidecar keeps only the last attempt's spend.
+- A `pi` child process that the runner could not meter makes its run a **floor**, and so does a run that
+  pre-dates the meter. A child that hides from the meter entirely is not seen at all (`OQ-011`). A retried
+  job's sidecar keeps only the last attempt's spend.
 - Runs recorded before the per-model ledger landed cannot be re-priced; they are counted and named in
   the provenance line, never guessed at.
 - A run that fans out past the meter's 8-row ledger cap folds the overflow into an `other/other` row:

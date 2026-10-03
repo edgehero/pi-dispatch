@@ -169,6 +169,20 @@ function attributionRows(record) {
 }
 
 /**
+ * The exit-line counters that say this run's metered cost is short of what it spent, so its dollar is a floor
+ * (REQ-COST-ANALYTICS (d)). `unresolved` and `unpriced`: calls the meter could not finish or price. The cost guard's
+ * `longContext` (pi priced a call at base rates the provider bills higher), `costUnjudged` (legacy calls may have run
+ * unmetered) and `costUnanswered` (a lost answer may still have been billed). `unmeteredChildren` (issue #500): pi child
+ * processes whose spend the runner could not count. Each counts only when above 0: a record from before the counter
+ * existed, or a run with no cap, carries no key and measured nothing missing.
+ *
+ * `boundExceeded` is NOT here. It says a call cost more than its pre-call bound, which is the worker's settlement concern
+ * (the reservation did not bound the run, so `dollarSettlement` floors it); the metered cost itself is pi's full price,
+ * so this fold's dollar is not short.
+ */
+const FLOOR_KEYS = Object.freeze(["unresolved", "unpriced", "longContext", "costUnjudged", "costUnanswered", "unmeteredChildren"]);
+
+/**
  * One run's contribution to every aggregate: its classified rows, its metered dollars, the set of
  * classes it carries, and whether its number is a floor.
  */
@@ -180,7 +194,7 @@ function runContribution(record, subscriptions, pricing) {
   // Floor rule: unpriced or unresolved calls are dollars the meter could not price, and the fallback
   // meter (metered:false) missed subagent/compaction spend entirely. Either way this run's number is a
   // floor, and floors are sticky -- any aggregate containing one is a floor.
-  const floor = (tokens.unpriced ?? 0) > 0 || (tokens.unresolved ?? 0) > 0 || tokens.metered === false;
+  const floor = tokens.metered === false || FLOOR_KEYS.some((key) => (tokens[key] ?? 0) > 0);
   const rows = attributionRows(record).map((row) => ({ ...row, ...classifyRow(row, subscriptions, pricing), floor }));
   // Metered truth: the run's stream-time cost IS the number -- never re-priced here -- except that
   // plan-covered rows contribute $0 metered to totals: the plan already paid, and their recorded cost

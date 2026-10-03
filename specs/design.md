@@ -2990,8 +2990,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     before its first call (`cost-cap-unenforceable`, `model-policy-unenforceable`), because both are enforced
     before a call or not at all.
 - **Child processes (issue #500; the seams, which part E wires into the runner)**: a `pi` child process has its own
-  copy of pi, so its calls reach neither this meter nor its guards (`OQ-011`). The plan is a meter in each child
-  that reports through a file, and a parent that folds those files. The pieces in `usage-meter.mjs`:
+  copy of pi, so its calls reach neither this meter nor its guards on their own (`OQ-011`). The answer is a meter in
+  each child that reports through a file, and a parent that folds those files. The pieces in `usage-meter.mjs`:
   - **The child's meter.** `createUsageMeter({ onChange })` calls `onChange` when a call is observed, when it
     settles, and when the meter stops (every guard refusal stops it, so a raised `costRefused` or `modelRefused`
     reaches the ledger at once). A child killed mid-call leaves `unresolved` behind. `record()` clamps a negative
@@ -3281,13 +3281,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
       - No ledger names its pid two ticks after it was first seen, if it is still alive then, whether or not it still
         looks like a pi process (a title can be changed after the fact).
       - It was seen alive and no ledger ever named it: counted at teardown (a child that lived less than two ticks).
-      - Its ledger is still `starting` (its meter never installed) once its process has used more than 1 s of CPU
+      - Its ledger is still `starting` (its meter never installed) once its process has used more than 3 s of CPU
         (`STARTING_CPU_MS`, utime plus stime) OR 60 s have passed since this parent first saw it so (`STARTING_WALL_MS`,
-        monotonic). An honest child installs its meter at about 0.3 s of CPU (measured, five runs), from the
+        monotonic). An honest child installs its meter at about 0.3 s of CPU (measured, five runs), and at 0.67 s
+        under load on arm64 (part E's final check), so the first grace of 1 s was widened to 3 s in part F; from the
         preload's stub to the extension factory, not to `session_start`, because a `pi -p` waiting on stdin has spent
         nothing (M5). CPU first, because a 10 s wall grace counted 20 of 40 starved children at one CPU; the wall bound
         catches a meterless child that does I/O at little CPU (measured before it: 31 calls in 37 s at 720 ms of CPU,
-        never counted). At teardown, a live `starting` ledger first seen two ticks or more before is unmetered too. It
+        never counted). At teardown, a live `starting` ledger is unmetered too, but only when this parent first saw it
+        10 s or more before (`STARTING_FINAL_MS`, the M5 grace; part F): an honest job that ends while fresh children
+        are still starting must not exit 2 for them. Until part F the teardown rule was two ticks. It
         is un-counted once the ledger is no longer `starting` (which is why `setChildren` takes `unmetered` as given,
         not as a high-water mark). Where the proc has no CPU reading, the wall bound alone applies. Offline children
         cannot spend that CPU on package installs before the meter loads: the runner forces `PI_OFFLINE=1` and children
@@ -3316,13 +3319,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     byte-identical (`child-watch.test.mjs` pins it). `childProcesses` counts ledger files plus pi processes the
     detector found with none. `unmeteredChildren` also counts the parent's own losses (a lost directory, a failed
     control write), so it can exceed `childProcesses`.
-  - **Release coupling.** The worker's closed key list drops the three keys until part F, and only part F's
-    `FLOOR_COUNTERS += unmeteredChildren` makes an unmetered child floor the dollar settlement. This part must not be
-    released without part F.
+  - **Release coupling.** The worker's closed key list dropped the three keys until part F, and only part F's
+    `FLOOR_COUNTERS += unmeteredChildren` makes an unmetered child floor the dollar settlement. Parts E and F ship in
+    one release: a worker from before part F running this runner settles a capped job with an unmetered child as
+    metered (an undercharge), and a worker from part F running an image from before part E settles every capped job
+    at the floor (an overcharge, `DES-DOLLAR-RESERVE-AND-SETTLE`).
   - **Rejected**: scanning only the runner's own children (`/proc/self/task/*/children`: a background child is
     reparented to init and drops out); matching any argument (an image read such as `tail -f run-job.mjs` stopped
     honest jobs, measured); stopping on in-flight bounds (premature, above); a SPENT written for an uncapped job;
-    a 10 s `starting` grace in wall time, and one in CPU time alone (above); counting every ledger ever seen against the file cap (an honest job's
+    a 10 s `starting` grace in wall time, and one in CPU time alone (above); a 1 s CPU grace (an honest child reached
+    0.67 s under load, part F); counting a live `starting` ledger at teardown once it was seen for two ticks (an honest
+    job that ended while children started exited 2, part F); counting every ledger ever seen against the file cap (an honest job's
     513th short child stopped it, measured); trusting a ledger by its pid alone (a forged zero `done` file hid an
     env-scrubbed child completely, measured); removing the directory at teardown (above).
   - **Residuals added**:
@@ -3354,8 +3361,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     - a ZERO-USAGE ANSWER: pi turns a provider answer with no usage block into zeros, so the call is priced at 0, the
       guard charges its bound with no floor counter, and the job settles metered at the reported cost. This holds for a
       parent call and a child call alike (measured in a child); a follow-up issue covers it;
-    - a meterless child that ends before either grace (under 1 s of CPU and 60 s) and before teardown is taken for one
-      that never started (done), whatever it did in between;
+    - a meterless child that ends before either grace (under 3 s of CPU and 60 s) and before teardown is taken for one
+      that never started (done), whatever it did in between; and one still alive at teardown that this parent first
+      saw less than 10 s before, under the CPU grace, is not counted (part F);
     - pid reuse around a dead `starting` stub: if its pid is reused before the parent's next tick sees the death, the
       new process's liveness and CPU are read as the stub's (a quiet new owner hides the death until the wall grace; a
       busy one is counted unmetered, fail closed);
@@ -3365,6 +3373,28 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     (`?pi-dispatch-real=1`) loads the real module unwrapped (deliberate, the same class as a renamed copy of pi); a
     `require()` of pi's `dist/core/model-runtime.js` by absolute path throws (not in pi's exports map), which fails
     closed.
+- **The worker and the panel (issue #500 part F)**: the run record keeps what the runner reports.
+  - **The record.** The worker's closed key list (`TOKEN_KEYS`, `worker/src/run-history.mjs`) admits `childTotal`,
+    `childProcesses` and `unmeteredChildren` between `unpriced` and the cost fields, the runner's emission order, so
+    a runner's `tokens` round-trips byte-identically (a test feeds the runner's own exit fields through the worker's
+    parser). A record from an older image carries none of them.
+  - **The settlement.** `unmeteredChildren` is a floor counter (`FLOOR_COUNTERS`): present and 0, or the dollar
+    windows settle at the floor (`DES-DOLLAR-RESERVE-AND-SETTLE`).
+  - **The cost views.** `admin/src/costs.mjs` makes a run with `unmeteredChildren` above 0 a floor (`≥`), beside
+    `unresolved`, `unpriced`, the fallback meter and, from part F, the cost guard's `longContext`, `costUnjudged` and
+    `costUnanswered`, which it used to ignore. `boundExceeded` stays out: the metered cost is still pi's full price,
+    and the reservation it escaped is the worker's concern. An absent key is not a floor there: an old record
+    measured nothing missing, and the analytics never re-judge history.
+  - **The run detail** labels `otherTotal` "other sessions" (it holds compaction and branch summaries since the
+    0.99.1 pin, not only subagents) and adds "subprocesses" from `childTotal`, naming any unmetered children.
+  - **No cache-warming pin.** A child builds its own pi settings (a pi CLI child, a pi-subagents foreground or
+    background child), and pi reads `cacheWarming` from its global settings only, default `"streaming"`
+    (`settings-manager.js` `getCacheWarmingMode`), so warming is on there; a project's `.pi/settings.json` does not
+    change it. pi-dispatch does not pin it off for children it did not create: the meter counts those calls and a
+    cost cap bounds them (`docs/costs.md`, #500's recommendation).
+  - **Rejected**: an absent `unmeteredChildren` read as 0 in the settlement (an image from before part E would then
+    settle a job whose children it never looked at as complete); a new reason token for an unmetered child
+    (`token_budget` or `cost-cap` with the `unmetered_child` log line names the cause, as #500 recommended).
 - **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `REQ-RUNNER-TURN-BUDGET`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-PI-VERSION-PINNED`, `INT-SDK-SESSION-OPTIONS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `OQ-010`, `OQ-011`
@@ -3560,8 +3590,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
      gains is a real token record. Then `metered` only when the count
      is complete: `tokens.metered` is `true`; `costCapMicros` is present and
      not above the reservation (a runner that ran under a wider cap than was reserved was not bounded by it); each
-     of `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged` and `costUnanswered` is PRESENT and
-     `0`; and the per-model `usage` ledger is not null, OR the run made no provider call at all (`calls: 0` and a cost
+     of `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered` and
+     `unmeteredChildren` (issue #500 part F: pi child processes whose spend the runner could not count) is PRESENT
+     and `0`; and the per-model `usage` ledger is not null, OR the run made no provider call at all (`calls: 0` and a cost
      of 0: the runner omits the ledger when it observed no call, and a call the cost guard refuses answers with the
      hard stop without calling the provider and is never counted as a call, so `costRefused` may be above 0). Then the
      windows are charged `meteredMicros(tokens.cost)`, `Math.ceil(cost x 1e6)`: the exit line's cost is a float of
@@ -3728,8 +3759,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     That bounds what the window is charged afterwards, not what the provider may have billed during the run;
   - **a call cut after hidden reasoning** (a reasoning model that streamed no visible content before the cut) is
     unstarted by this rule: metered, counted, settled at the floor;
-  - **a `pi` subprocess** a package spawns spends outside this process, so outside the cap and outside the meter
-    (`OQ-011`; detecting it is issue #500);
+  - **a `pi` subprocess** a package spawns is metered by its own child meter and folded into the job's cap and
+    totals (issue #500, `OQ-011`); one the runner could not meter is counted in `unmeteredChildren`, which floors
+    the settlement. What stays outside is a child that hides from both (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`,
+    the residuals);
   - **a provider that forwards to another model through the legacy API is counted for both calls** (PR #547's final review): its own runtime call and the forward are both bounded while in flight and
     both counted, so a pure passthrough proxy's usage is counted twice. That errs on the safe side for money, but such
     a proxy can reach a token or cost cap early;
@@ -3755,9 +3788,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     clocks disagree around midnight UTC (or a Monday, or a month's end) reserve into different day keys for the same
     instant, and a window can briefly admit up to two days' worth across the boundary. The skew is the hosts' NTP
     error, normally milliseconds; the settlement is unaffected, since it uses the hold's own keys;
-  - **a pi subprocess's spend is not seen** (`OQ-011`, issue #500): a package that spawns `pi` spends outside the
-    runner's meter, so outside the per-job cap and outside `tokens.cost`. A window can therefore undercount such
-    jobs, and a metered settlement of one is lower than its bill;
+  - **a pi subprocess's spend is seen when it cooperates** (`OQ-011`, issue #500): a metered child's spend is in
+    `tokens.cost` and the per-model rows, and an unmetered one floors the job. A child that scrubs the environment
+    and hides every marker, a non-pi client and a direct API call are not seen, so a window can still undercount a
+    job that spawns one;
+  - **a new worker with an old image floors every capped job** (issue #500 part F): `unmeteredChildren` joined
+    `FLOOR_COUNTERS`, and an absent counter is a floor, so a worker from part F running an image from before part E
+    settles every capped job at its reservation or more, the `costUnjudged` precedent. That is an overcharge, never
+    an undercharge, and it ends when the image is rebuilt. The reverse pairing, an older worker with a newer image,
+    drops the key and settles a job with an unmetered child as metered, which is why parts E and F ship in one
+    release;
   - **a model call made while extensions load** is no longer a residual (issue #543): the runner installs the meter
     and the guards before it loads extensions, so such a call is judged and counted like any other. That makes the
     zero-call rule in **Basis** safe for it: a run whose extension spent at load reports `calls` of at least 1, so it
@@ -7719,3 +7759,4 @@ a tunnel.
 | 2026-10-03 | Issue #499, part C (the operator surfaces). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the tool enumeration gains `dispatch_projects`, `dispatch_project_add`, `dispatch_project_edit` and `dispatch_project_delete`, and the Decision says how they write (`planProjectsWrite` and `writeProjects`: the worker's `parseProjects` judges the result, the pair rule held from the projects side, tmp and rename), why an edit cannot rename an id (its row would dangle), how a name is shown (`escapeInterpreted`: the panel's control class ESCAPED as visible text rather than substituted, last on its panel line, in a `<bdi>` on the page), and that the PROJECTS view reads the month's fold by project once on entry through an injected seam. Rejected: reusing `g` for the view (the removed graph key is pinned inert), and substituting a name's bidi override as the panel does for record fields (the operator then cannot see why a name looks wrong). **`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` UNCHANGED, checked**: the by-project arm uses the same `combineContributions` typed dollars as every bucket, and no plan classification depends on a project. **`DES-COST-FOLD-BY-SCAN` UNCHANGED, checked**: still one scan per call, nothing stored. **Code evidence**: admin/src/read-model.mjs -> planProjectsWrite, writeProjects, readProjects; admin/src/panel.mjs -> escapeInterpreted; admin/src/insights-html.mjs -> normProjectNames, projectNamesHtml. |
 | 2026-10-03 | Issue #499, part C, PR #569's review. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the two money-file writers (projects and scoped limits) share one `replaceFile`: a tmp file of its own (`<file>.<pid>.<random>.tmp`, exclusive), the mode kept, a symlink written through, the judged files re-read right before the rename (a change refuses), and only `ENOENT` read as missing (an unreadable file refuses; the admin's projects reader says `unreadable`). A lock across the two files was rejected (the worker takes none, and a crashed admin would leave one behind); the race left between the re-check and the rename is a stated residual. The PROJECTS view also lists every id the month's records carry that the file no longer defines, marked, so its rows add up to the month. The insights page's id rule is bolted to the worker's, and a non-id key joins the one `(no project)` bar. **Code evidence**: admin/src/read-model.mjs -> replaceFile, fileSnapshot; admin/src/dashboard.ts -> projectRows; admin/src/insights-html.mjs -> INSIGHTS_PROJECT_ID_RE. |
 | 2026-10-03 | Issue #499, part C, PR #569's second review. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the money-file writers now REFUSE a symlinked file (a write through the link never reached the worker's directory watch, so "applied live" was false; writing over it severs a shared copy), keep the file's owner and group beside its mode (refusing when the owner cannot be restored, so a writer running as another user cannot lock the worker out of its own file), turn a tmp file that cannot be created into a plain refusal, and compare the re-read before the rename with the snapshot the change was built from before the confirm (every project and scoped-limit tool and dialog), so an edit made while a confirm is open refuses. Rejected: write-through plus a second worker watch on the link's target. **Code evidence**: admin/src/read-model.mjs -> replaceFile, symlinkRefusal, writeInputs; admin/src/index.ts. |
+| 2026-10-03 | Issue #500, part F (closes #500). **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: a new bullet, the worker and the panel (the record keeps `childTotal`, `childProcesses` and `unmeteredChildren` in the runner's emission order; `unmeteredChildren` is a floor counter; the cost views floor a run with `unmeteredChildren`, `longContext`, `costUnjudged` or `costUnanswered` above 0, `boundExceeded` deliberately not; the run detail says other sessions and subprocesses; no cache-warming pin, with the fact that pi reads `cacheWarming` from global settings only; rejected: absent read as 0, a new reason token). Two detector corrections from part E's final check: the `starting` CPU grace widens from 1 s to 3 s (an honest child reached 0.67 s under load on arm64), and at teardown a live `starting` ledger counts only when first seen 10 s or more before (`STARTING_FINAL_MS`, the M5 grace; the two-tick rule failed an honest job ending while children started), both in Rejected and in the residuals. The release coupling now says parts E and F ship in one release, both directions named. The child processes bullet's 'The plan is' becomes 'The answer is'. The two residuals from part C's final check (the marker query, a `require()` by absolute path) were already named: UNCHANGED, checked. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: `unmeteredChildren` joins the floor counters in the settlement rule; the two pi-subprocess residuals now say a cooperating child is metered and an unmetered one floors; a new residual names that a new worker with an image from before part E settles every capped job at the floor (the `costUnjudged` precedent, an overcharge) and why the reverse pairing makes parts E and F one release. |
