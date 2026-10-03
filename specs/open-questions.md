@@ -514,9 +514,13 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
     absent `unmeteredChildren` settles a dollar window at the floor (`DES-DOLLAR-RESERVE-AND-SETTLE`). The cost
     views show such a run as a floor (`REQ-COST-ANALYTICS`).
 - **What stays an accepted risk** (each named in `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`): the ledger is
-  cooperative accounting, not a boundary. The agent holds the provider key and shares the runner's uid. So a
-  spawner that scrubs the environment AND hides every marker the detector reads, a renamed copy of pi, a client
-  that is not pi, a direct API call, and a forged small ledger kept rewritten are not counted. Children may
+  cooperative accounting, not a boundary. The agent holds the provider key and shares the runner's uid. These are
+  not counted: a pi CLI child whose spawner scrubs the environment and also leaves no marker in its command line
+  (pi started through `node -e` or a copy of the package, with its title kept from changing); a child that runs pi
+  as a LIBRARY whose spawner clears `NODE_OPTIONS` (its command line never names pi, so clearing the environment
+  alone hides it); a renamed copy of pi; a meterless child that ends before either `starting` grace (under 3 s of
+  CPU and 60 s) and before teardown; a client that is not pi; a direct API call; and a forged small ledger kept
+  rewritten. Children may
   overshoot a cap by up to a tick of headroom each, charged in full. The detector reads `/proc`, so off Linux there
   is none. Children do not see the overlay `models.json` (#503).
 - **Why this row was a risk and not a constraint** (kept, and narrowed): no hook in the runner's own process can
@@ -844,7 +848,8 @@ build does not.
   refuse/report by name; doctor additionally **warns** when a named image's entrypoint does not look like
   the runner. Neither inspects the image's contents. (`doctor --live` reads back what the worker's argv does
   to `PI_JOB_IMAGE`, which is not its contents either; see the #278 bullet below.) Naming a conformance verdict that had not been computed
-  would be worse than reporting none — the same honesty as `OQ-011`'s child-process sampler.
+  would be worse than reporting none. (The comparison this sentence made, to `OQ-011`'s child-process sampler, is
+  gone with that sampler, issue #500.)
 - **AMENDED (issue #227, the container-backend registry): a remote backend takes BOTH load-bearing
   mitigations away, and the row survives only because none is blessed yet.** The first is
   *"the isolation surface is the worker's argv, not the image's"* -- true exactly while the worker builds
@@ -887,7 +892,8 @@ build does not.
   conformance, because an image can assert any label it likes. The only non-lying check is *running* the
   assertions, which costs a container start per distinct image — cacheable per image ID, but a real cost and
   a real complication, and not worth building before anyone runs a second image.
-- **Related risks**: `OQ-004` (unrestricted egress) and `OQ-011` (unmetered `pi` subprocess) — both
+- **Related risks**: `OQ-004` (unrestricted egress) and `OQ-011` (a `pi` subprocess: metered since issue #500 by
+  the runner an image ships, with a residual). Both are
   unchanged by this entry, and both now additionally **per-image**, since an operator's image could ship
   neither the meter nor `PI_OFFLINE`'s in-process re-assertion.
 - **Needs**: maintainer ratification that shipping per-trigger images with presence-only verification is
@@ -1900,3 +1906,4 @@ adversarial passes did.
 | 2026-10-03 | Issue #500, part D. **`OQ-011` AMENDED**, one note under M1: the nested runner no longer re-runs the job. It runs as the pi CLI, metered into the job runner's ledger directory, and exits 2 when that directory is missing. Status stays ACCEPTED RISK until the rest of #500 re-decides the row. |
 | 2026-10-03 | Issue #500, part E. **`OQ-011` CORRECTED**, its What detection ships today bullet: the diagnostic sampler it described is replaced by the runner's children hook, which folds child ledgers and, on Linux, counts a pi child with no ledger as unmetered and stops a job under any policy, so "can never fail a job" no longer holds. Status UNCHANGED; the row is re-decided in part F. |
 | 2026-10-03 | Issue #500, part F (closes #500). **`OQ-011` RE-DECIDED: RESOLVED** for the cooperative path, with the residual kept as an accepted risk that wants ratification. New Status and Decision bullets (the preload, the child meter, the ledgers, the parent's fold and stops, the `/proc` detector, the nested runner, and the worker and panel of part F); a What stays an accepted risk bullet (a child that hides from both, a renamed copy of pi, a non-pi client, a direct API call, a forged small ledger, overshoot by a tick of headroom, no detector off Linux, the overlay `models.json` for children, #503); the risk-not-constraint bullet narrowed to the runner's own process; What would close it becomes What would close the rest; the graduation bullet's sampler sentence marked superseded; What bounds it, Related risk and Needs rewritten for the residual. The heading keeps its wording so links to it still work. The measurements M1 to M10 and the earlier corrections are UNCHANGED, checked, apart from their header sentence, which now points at the decision. |
+| 2026-10-03 | Issue #500, part F, PR #570's review. **`OQ-011` AMENDED**, its What stays an accepted risk bullet, worded as the DES residuals are: a pi CLI child whose spawner scrubs the environment and leaves no marker in its command line, a library-mode child whose spawner clears `NODE_OPTIONS` (clearing that alone hides it), and a meterless child that ends before either `starting` grace and before teardown. **`OQ-012` AMENDED, wording only**: its comparison to `OQ-011`'s child-process sampler (gone with issue #500) is marked as such, and its related-risk note says a `pi` subprocess is metered since issue #500 with a residual. |

@@ -17,7 +17,7 @@
  *        NODE_OPTIONS: a ledger named after its pid is then not its own (a spawner can write one), whatever it says;
  *      - no ledger names its pid two ticks after it was first seen, if it is still alive then, whether or not it still
  *        looks like a pi process (a title can be changed after the fact);
- *      - it was seen alive and no ledger ever named it, counted at teardown;
+ *      - it was seen alive, by a pass before teardown, and no ledger ever named it: counted at teardown;
  *      - its ledger is still `starting` (its meter never installed) after STARTING_CPU_MS of the process's own CPU, or
  *        STARTING_WALL_MS since this parent first saw it; an honest child installs at about 0.3 s of CPU, and was seen
  *        at 0.67 s under load on arm64. Un-counted once it is no longer `starting`. At teardown, a live `starting`
@@ -485,7 +485,9 @@ export function createChildWatch({
 				continue;
 			}
 			if (final) {
-				unmeteredPid(pid, "no-ledger");
+				// Only one a pass BEFORE teardown saw: a pid first seen in this pass may be an honest child in its first
+				// milliseconds, before its preload wrote the stub (the `starting` rule's shape, part F's review).
+				if (seen.get(pid) < ticks) unmeteredPid(pid, "no-ledger");
 				continue;
 			}
 			// Still alive two ticks on, whether or not it still looks like pi: a title can be changed after the fact.

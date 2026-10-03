@@ -43,7 +43,7 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 | rendering        | meaning |
 |---|---|
 | `$4.12`          | metered — the stream-time price pi-ai computed when the run happened |
-| `≥$4.12`         | a floor: some spend was unpriced/unresolved, a `pi` child process could not be metered, the run fell back to the in-session meter (which cannot see subagent spend), or the run pre-dates the meter |
+| `≥$4.12`         | a floor: some spend was unpriced/unresolved, a `pi` child process could not be metered, a call was priced past a long-context threshold (`longContext`), legacy calls may have run unjudged (`costUnjudged`), a failed call may have been billed (`costUnanswered`), the run fell back to the in-session meter (which cannot see subagent spend), or the run pre-dates the meter |
 | `plan:kimi`      | covered by a declared subscription — prepaid, **never shown as $0.00** |
 | `$0 (unrated)`   | a model the rate table prices at $0, with **no** declared subscription covering it: unrated, never "free" |
 | `~$4.12 est.`    | an estimate (what-if, API-equivalent, or a sum containing any estimate) |
@@ -260,8 +260,8 @@ These are known gaps. Most are named in the specs ([DES](../specs/design.md#des-
 is an open issue.
 
 - **A `pi` child process that hides from the meter** is not counted. A child that keeps the job's environment is
-  metered and capped ([pi child processes](#pi-child-processes)). One that clears the environment and hides every
-  sign of pi, a client that is not pi, and a direct API call are not.
+  metered and capped ([pi child processes](#pi-child-processes)). The gaps are listed there: for example a child
+  that runs pi as a library with `NODE_OPTIONS` cleared, a client that is not pi, and a direct API call.
 - **A new worker with an old image settles every capped job at the floor.** The worker reads `unmeteredChildren`,
   and an image built before issue #500 does not write it. Rebuild the image when you upgrade the worker.
 - **A Node older than 18.19 in a job does not start.** To meter `pi` child processes, the runner adds
@@ -384,8 +384,16 @@ for example one started with an empty environment. Such a child counts in `unmet
 **What is not covered.** This is honest accounting of code that cooperates. It is not a wall: the agent holds
 the provider key and runs as the same user as the runner. Named gaps:
 
-- a child that clears its environment and also hides every sign that it is `pi` (a renamed copy, a changed
-  process title) is not seen. Nor is a client that is not `pi`, or a direct call to the provider's API;
+- a `pi` child whose spawner clears its environment and also hides every sign that it is `pi` (a renamed copy, a
+  changed process title) is not seen. Nor is a client that is not `pi`, or a direct call to the provider's API;
+- a child that runs pi as a library inside its own Node program (pi-subagents' background mode does), when its
+  spawner clears `NODE_OPTIONS`. Its command line never names pi, so clearing that one variable is enough to hide
+  it;
+- a child with no working meter that finishes quickly is taken for one that ended before its meter started, and
+  is not counted. Quickly means under 3 seconds of CPU and under 60 seconds, and before the job ends. Such a child
+  can still make calls in that time;
+- a `pi` child that the runner first sees in its final check, as the job ends, with no ledger yet, is not counted:
+  an honest child looks the same in its first moments;
 - a child that lives and spends inside one second, and whose ledger is deleted before the runner reads it;
 - a forged ledger that keeps reporting less than the child spent;
 - several children can each start a call against the same headroom, up to a second old, so together they can pass
@@ -404,8 +412,10 @@ only there is not available to them.
 **Cache warming.** The runner turns pi's cache warming off for its own session. A child builds its own pi
 settings, and pi's default there is on (`streaming`), so a child's warm re-sends are paid. pi-dispatch does not
 turn it off for children it did not start: the meter counts those calls, and a cost cap bounds them. pi reads this
-setting from its global settings file only, `settings.json` in the agent folder the child uses (set
-`"cacheWarming": "off"` there). A project's `.pi/settings.json` does not change it.
+setting only from the global `settings.json` in the agent folder the child uses. A project's `.pi/settings.json`
+does not change it, and neither does the pi-dispatch overlay, which a job mounts somewhere else. In a job that agent
+folder is part of the job image (`/home/pi/.pi/agent`). So turning warming off for children takes a custom job
+image with `"cacheWarming": "off"` in that file, or a spawning package that sets it for the children it starts.
 
 ## Honest limits
 

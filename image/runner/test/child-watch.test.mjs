@@ -343,6 +343,24 @@ test("an unmetered child's stop: cost-cap under a dollar cap, else token_budget 
 	}
 });
 
+test("a pi process first seen in the teardown pass with no ledger is not counted; one a tick before is (issue #500 part F)", () => {
+	// An honest child caught at teardown in its first milliseconds, before its preload wrote the stub, looks the same.
+	const fresh = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const late = fakeProc({ live: [] });
+	const first = watch({ meter: fresh, proc: late });
+	first.hook.sample();
+	late.table.live = [58];
+	late.table.alive.add(58);
+	assert.deepEqual(first.hook.teardown(), { distinct: 1, peak: 1, unmetered: 0 });
+	assert.equal(fresh.state.stopReason, null, "the job's exit is its own");
+	// Seen by the last tick before teardown, still with no ledger: counted, and the capped job stops.
+	const seenOnce = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const second = watch({ meter: seenOnce, proc: fakeProc({ live: [59] }) });
+	second.hook.sample();
+	assert.equal(second.hook.teardown().unmetered, 1);
+	assert.equal(seenOnce.state.stopReason, TOKEN_BUDGET);
+});
+
 test("a pi process seen alive whose ledger never appeared counts at teardown, even when it lived less than two ticks (issue #500)", () => {
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	const proc = fakeProc({ live: [50] });

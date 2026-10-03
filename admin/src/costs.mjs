@@ -173,8 +173,12 @@ function attributionRows(record) {
  * (REQ-COST-ANALYTICS (d)). `unresolved` and `unpriced`: calls the meter could not finish or price. The cost guard's
  * `longContext` (pi priced a call at base rates the provider bills higher), `costUnjudged` (legacy calls may have run
  * unmetered) and `costUnanswered` (a lost answer may still have been billed). `unmeteredChildren` (issue #500): pi child
- * processes whose spend the runner could not count. Each counts only when above 0: a record from before the counter
- * existed, or a run with no cap, carries no key and measured nothing missing.
+ * processes whose spend the runner could not count. Each counts only when above 0, and an ABSENT key is not a floor,
+ * unlike the worker's settlement. For the guard counters absent mostly means a run with no cap, which measured nothing
+ * missing. For `unmeteredChildren` it means an image from before issue #500 part E, which never looked at children:
+ * reading that as a floor would put `≥` on all history, so such a record that did spawn a pi child shows as exact (a
+ * named residual, DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY). Records that carry the guard counters ARE judged anew
+ * by this list; only unreleased images wrote them, and a plan-only bucket holding one reads as an estimate.
  *
  * `boundExceeded` is NOT here. It says a call cost more than its pre-call bound, which is the worker's settlement concern
  * (the reservation did not bound the run, so `dollarSettlement` floors it); the metered cost itself is pi's full price,

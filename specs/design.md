@@ -3280,7 +3280,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
         (a large variable in front, measured as a false stop): both keep the ledger rule.
       - No ledger names its pid two ticks after it was first seen, if it is still alive then, whether or not it still
         looks like a pi process (a title can be changed after the fact).
-      - It was seen alive and no ledger ever named it: counted at teardown (a child that lived less than two ticks).
+      - It was seen alive and no ledger ever named it: counted at teardown (a child that lived less than two ticks),
+        but only when a pass BEFORE teardown saw it (part F's review). A pi process first seen in the teardown pass
+        itself may be an honest child in its first milliseconds, before its preload wrote the stub, and counting it
+        would fail an honest job, the shape of the `starting` rule below.
       - Its ledger is still `starting` (its meter never installed) once its process has used more than 3 s of CPU
         (`STARTING_CPU_MS`, utime plus stime) OR 60 s have passed since this parent first saw it so (`STARTING_WALL_MS`,
         monotonic). An honest child installs its meter at about 0.3 s of CPU (measured, five runs), and at 0.67 s
@@ -3383,15 +3386,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **The cost views.** `admin/src/costs.mjs` makes a run with `unmeteredChildren` above 0 a floor (`≥`), beside
     `unresolved`, `unpriced`, the fallback meter and, from part F, the cost guard's `longContext`, `costUnjudged` and
     `costUnanswered`, which it used to ignore. `boundExceeded` stays out: the metered cost is still pi's full price,
-    and the reservation it escaped is the worker's concern. An absent key is not a floor there: an old record
-    measured nothing missing, and the analytics never re-judge history.
+    and the reservation it escaped is the worker's concern. An absent key is not a floor there, unlike the
+    settlement: reading it as one would put `≥` on every record from before the key. The price is a residual: a record
+    from an image before part E whose job did spawn a pi child undercounts with no mark. The new list does re-judge
+    records that carry `longContext`, `costUnjudged` or `costUnanswered` (only unreleased images wrote them): their
+    dollar gains `≥`, no amount moves, and a plan-only bucket holding one reads as an estimate, not `plan:<id>`.
   - **The run detail** labels `otherTotal` "other sessions" (it holds compaction and branch summaries since the
     0.99.1 pin, not only subagents) and adds "subprocesses" from `childTotal`, naming any unmetered children.
   - **No cache-warming pin.** A child builds its own pi settings (a pi CLI child, a pi-subagents foreground or
     background child), and pi reads `cacheWarming` from its global settings only, default `"streaming"`
     (`settings-manager.js` `getCacheWarmingMode`), so warming is on there; a project's `.pi/settings.json` does not
     change it. pi-dispatch does not pin it off for children it did not create: the meter counts those calls and a
-    cost cap bounds them (`docs/costs.md`, #500's recommendation).
+    cost cap bounds them (`docs/costs.md`, #500's recommendation). In a job a child's agent folder is the image's
+    (`/home/pi/.pi/agent`), not the read-only overlay, so an operator turns it off only with a custom image or
+    through the spawning package.
   - **Rejected**: an absent `unmeteredChildren` read as 0 in the settlement (an image from before part E would then
     settle a job whose children it never looked at as complete); a new reason token for an unmetered child
     (`token_budget` or `cost-cap` with the `unmetered_child` log line names the cause, as #500 recommended).
@@ -3956,8 +3964,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     (`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`), not the list's;
   - the list names physical models only. A virtual entry on the list admits only that entry's own unrouted
     calls, which pi fails before any provider;
-  - a `pi` subprocess a package spawns, including a stock subagent's child `pi`, is outside this process and
-    outside the list (`OQ-011`);
+  - **a `pi` subprocess** a package spawns, including a stock subagent's child, is inside the list since issue #500
+    (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`): its child meter builds a model guard from the inherited
+    `PI_ALLOWED_MODELS`, and the parent judges every folded child row against the PARENT's list (a spawner can widen
+    the child's own) and stops `model-not-allowed`, also on a pi child it finds with no ledger under a list alone.
+    Residuals: a child that hides from both the child meter and the detector (`OQ-011`); a model-less child row (an
+    id the row rule refuses) is not judged against the parent's list, only by the child's own guard on the list it
+    inherited; a call off the list in a child is stopped by the child's guard before it goes out only when the
+    spawner kept the list, else the parent stops the job after the fold, so that call was made;
   - **a provider that forwards to another model through the legacy API is counted for both calls**: both calls are
     judged on the list and counted, so a passthrough proxy's usage is counted twice (`DES-DOLLAR-RESERVE-AND-SETTLE`).
 - **Traces to**: `REQ-MODEL-POLICY`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT`,
@@ -7760,3 +7774,4 @@ a tunnel.
 | 2026-10-03 | Issue #499, part C, PR #569's review. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the two money-file writers (projects and scoped limits) share one `replaceFile`: a tmp file of its own (`<file>.<pid>.<random>.tmp`, exclusive), the mode kept, a symlink written through, the judged files re-read right before the rename (a change refuses), and only `ENOENT` read as missing (an unreadable file refuses; the admin's projects reader says `unreadable`). A lock across the two files was rejected (the worker takes none, and a crashed admin would leave one behind); the race left between the re-check and the rename is a stated residual. The PROJECTS view also lists every id the month's records carry that the file no longer defines, marked, so its rows add up to the month. The insights page's id rule is bolted to the worker's, and a non-id key joins the one `(no project)` bar. **Code evidence**: admin/src/read-model.mjs -> replaceFile, fileSnapshot; admin/src/dashboard.ts -> projectRows; admin/src/insights-html.mjs -> INSIGHTS_PROJECT_ID_RE. |
 | 2026-10-03 | Issue #499, part C, PR #569's second review. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the money-file writers now REFUSE a symlinked file (a write through the link never reached the worker's directory watch, so "applied live" was false; writing over it severs a shared copy), keep the file's owner and group beside its mode (refusing when the owner cannot be restored, so a writer running as another user cannot lock the worker out of its own file), turn a tmp file that cannot be created into a plain refusal, and compare the re-read before the rename with the snapshot the change was built from before the confirm (every project and scoped-limit tool and dialog), so an edit made while a confirm is open refuses. Rejected: write-through plus a second worker watch on the link's target. **Code evidence**: admin/src/read-model.mjs -> replaceFile, symlinkRefusal, writeInputs; admin/src/index.ts. |
 | 2026-10-03 | Issue #500, part F (closes #500). **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: a new bullet, the worker and the panel (the record keeps `childTotal`, `childProcesses` and `unmeteredChildren` in the runner's emission order; `unmeteredChildren` is a floor counter; the cost views floor a run with `unmeteredChildren`, `longContext`, `costUnjudged` or `costUnanswered` above 0, `boundExceeded` deliberately not; the run detail says other sessions and subprocesses; no cache-warming pin, with the fact that pi reads `cacheWarming` from global settings only; rejected: absent read as 0, a new reason token). Two detector corrections from part E's final check: the `starting` CPU grace widens from 1 s to 3 s (an honest child reached 0.67 s under load on arm64), and at teardown a live `starting` ledger counts only when first seen 10 s or more before (`STARTING_FINAL_MS`, the M5 grace; the two-tick rule failed an honest job ending while children started), both in Rejected and in the residuals. The release coupling now says parts E and F ship in one release, both directions named. The child processes bullet's 'The plan is' becomes 'The answer is'. The two residuals from part C's final check (the marker query, a `require()` by absolute path) were already named: UNCHANGED, checked. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: `unmeteredChildren` joins the floor counters in the settlement rule; the two pi-subprocess residuals now say a cooperating child is metered and an unmetered one floors; a new residual names that a new worker with an image from before part E settles every capped job at the floor (the `costUnjudged` precedent, an overcharge) and why the reverse pairing makes parts E and F one release. |
+| 2026-10-03 | Issue #500, part F, PR #570's review. **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` AMENDED**, its residuals: a `pi` subprocess is inside the list since issue #500 (the child meter's guard from the inherited `PI_ALLOWED_MODELS`, the parent's check of every folded child row against its own list, and `model-not-allowed` on a pi child with no ledger under a list alone); the residuals are a child that hides from both, a model-less child row, and a call off the list in a child whose spawner widened its list, which the parent stops only after the fold. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the detector counts a pi process with no ledger at teardown only when a pass before teardown saw it (an honest child in its first milliseconds looks the same); the cost views bullet now says why an absent key is not a floor there (it would mark all history), names the residual (a record from an image before part E that spawned a pi child shows as exact), and says the guard counters do re-judge records that carry them (only unreleased images wrote them; a plan-only bucket holding one reads as an estimate); the cache-warming bullet says a job's child agent folder is the image's, so turning warming off takes a custom image or the spawning package. |
