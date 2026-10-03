@@ -4563,8 +4563,8 @@ validator rather than a second copy of it.
   gate, from one read of the projects file beside the scoped-limits snapshot, and carried to that attempt's record, so
   an edit of `projects.json` while the attempt runs cannot make the record disagree with what it was gated and counted
   against. A retry or a deferred job is picked up again and resolves again, so a later attempt may record a different
-  project, and its record overwrites the earlier attempt's. A record written BEFORE the pickup gate (the wait gate's refusals) resolves it from the live file with
-  the same function. `null` when no projects file is set, when the job's scope is in no project, and in every record
+  project, and its record overwrites the earlier attempt's. A record written BEFORE the pickup gate (the wait gate's
+  refusals) resolves it from the live file with the same function. `null` when no projects file is set, when the job's scope is in no project, and in every record
   written before issue #499. Records are never re-attributed from current membership: an old record keeps `null`.
 
   **`dollar-cap`** (issue #501) is a pre-spend refusal: a dollar window had no room for the job's per-job cap. It is

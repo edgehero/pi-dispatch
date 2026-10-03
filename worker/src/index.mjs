@@ -547,8 +547,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const limits = scopedLimits();
 		// The job's project (issue #499, INT-PROJECTS-FILE-CONTRACT), resolved ONCE here from one read of the projects ref,
 		// beside the limits snapshot and for its reason: the gate, the ledger and the record agree for this attempt,
-		// whatever an operator does to projects.json mid-run. A retry or a deferral is a new pickup and resolves again. Every `recordRun` below this line carries it; a record
-		// written before this gate carries none and is resolved from the live ref (start.mjs). An id or null, never a name.
+		// whatever an operator does to projects.json mid-run. A retry or a deferral is a new pickup and resolves again.
+		// Every record below this line carries it (through `recordAfterGate`); a record written before this gate carries
+		// none and is resolved from the live ref (start.mjs). An id or null, never a name.
 		const project = projectOf(job.data, projects());
 		// THE ONE RECORDER BELOW THE GATE, bound once, so the pickup project is a property of the path and not of each call
 		// site: every record from here on goes through it, and none can drop the field and fall back to the live ref in

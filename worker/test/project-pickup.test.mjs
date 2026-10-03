@@ -154,7 +154,12 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project });");
 	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project");
 	assert.ok(at > src.indexOf("const project = projectOf(job.data, projects());"), "and after the pickup resolution");
-	const below = src.slice(src.indexOf("\n", at), src.indexOf("export function createWorker("));
-	assert.deepEqual(below.match(/\brecordRun\(\{/g) ?? [], [], "no bare recordRun call below the gate");
-	assert.ok((below.match(/recordAfterGate\(\{/g) ?? []).length >= 8, "every post-gate record path uses it");
+	// Comments stripped first (they name `recordRun` in prose), then NO `recordRun` identifier at all: that refuses a
+	// bare call, an optional call (`recordRun?.(`) and an alias (`const rec = recordRun`) alike.
+	const code = src
+		.slice(src.indexOf("\n", at), src.indexOf("export function createWorker("))
+		.replace(/\/\*[\s\S]*?\*\//g, "")
+		.replace(/\/\/[^\n]*/g, "");
+	assert.deepEqual(code.match(/\brecordRun\b/g) ?? [], [], "no recordRun reference below the gate");
+	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 8, "exactly the 8 post-gate record paths use it; a new one must be counted here");
 });

@@ -27,13 +27,11 @@ import { canonicalScope } from "./scoped-limits.mjs";
 /** The highest schema version this build reads. A file declaring a higher one is refused loudly. */
 export const PROJECTS_VERSION = 1;
 
-
 // The id rule lives in an import-free module, so the run record can check an id without this module's graph.
 export { PROJECT_ID_RE, isProjectId };
 
 /** The longest `name` accepted, in UTF-16 code units. A display label, not a document. */
 const NAME_MAX = 120;
-
 
 /**
  * Parse, validate and normalize the projects file TEXT. Returns the normalized list: each project rebuilt as an

@@ -419,8 +419,8 @@ export async function runUp(argv = [], deps = {}) {
 		//
 		// THREE get the deployment folder and TWO get the RESOLVED ACCOUNT DEFAULT, and the split is the
 		// sharpest edge in this change rather than an inconsistency. `pause-windows.json`,
-		// `scoped-limits.json` and (issue #499) `projects.json` are scaffolded by `init` into this folder, and the panel defaults to this
-		// folder, so pointing the worker here is what makes the three agree. `PI_LOGS_DIR` and
+		// `scoped-limits.json` and (issue #499) `projects.json` are scaffolded by `init` into this folder, and the
+		// panel defaults to this folder, so pointing the worker here is what makes the three agree. `PI_LOGS_DIR` and
 		// `PI_SETTINGS_FILE` are different in kind: `makeLogReaper` unlinks EVERY `.log` and `.json` in
 		// `PI_LOGS_DIR` past the window with no name shape and no ownership check, so a deployment folder
 		// there would eat `triggers.json`, `pause-windows.json`, `scoped-limits.json`, `projects.json` and

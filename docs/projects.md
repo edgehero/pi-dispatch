@@ -42,8 +42,9 @@ The file is refused when two projects share an id, when one scope is in two proj
 
 The worker decides a job's project when it picks the job up, and writes that id into the run record as `project`. An
 edit of the file while the job runs does not change it. A retry, or a job deferred and picked up again, is decided
-again: after an edit it may record the new project, and its record replaces the earlier attempt's. A run outside every project records `null`, and so does
-every run recorded before projects existed. Old records are never moved into a project.
+again: after an edit it may record the new project, and its record replaces the earlier attempt's. A run outside every
+project records `null`, and so does every run recorded before projects existed. Old records are never moved into a
+project.
 
 Only a run is grouped. A webhook trigger fires for whichever repo delivers, so the trigger itself belongs to no
 project.
