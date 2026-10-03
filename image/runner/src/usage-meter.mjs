@@ -2414,8 +2414,9 @@ const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSyn
  *   - a file that is malformed in any part, says `metered: false`, shrank in anything, or vanished is counted
  *     unmetered ONCE, keeps the mark it had (nothing, if it was never good) and is never read again;
  *   - a file that vanished between the listing and the read is a vanished file if it was known, and unseen if not;
- *   - a file whose mark is `done`, or whose signature has not changed since its last read, is not read again (it is
- *     still listed, so it can still vanish); a forged larger number in a `done` file would only have overcharged;
+ *   - a file whose signature has not changed since its last read is not read again (one lstat; it is still listed,
+ *     so it can still vanish). A `done` file is read like any other: `state` is not a number the mark holds, so a
+ *     forged `done` with unchanged numbers would otherwise blind the fold to a live child's later writes;
  *   - at most CHILD_LEDGER_MAX_FILES names are ever tracked; a new name past that is counted in `flooded`, unmetered
  *     and unread. `flooded` is a high-water mark of how many such names one listing held.
  * Returns `{ processes, unmetered, flooded, totals, rows, spentMicros, inflightMicros, costRefused, modelRefused,
@@ -2445,7 +2446,7 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null } = 
 			beyond += 1;
 			continue;
 		}
-		if (before?.unmetered || before?.state === "done") {
+		if (before?.unmetered) {
 			present.add(name);
 			continue;
 		}
@@ -2494,7 +2495,9 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null } = 
  * `byLedger` each ledger's part, by file name. A number that cannot be carried saturates at Number.MAX_SAFE_INTEGER.
  */
 export function spentFile(fold, parentMicros) {
-	const carry = (value) => (typeof value === "number" && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? value : Number.MAX_SAFE_INTEGER);
+	// Whole micro-dollars, rounded UP: externalFor() reads only safe integers, so the writer must never emit a file its
+	// own reader refuses, and rounding up only overcharges.
+	const carry = (value) => (typeof value === "number" && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? Math.ceil(value) : Number.MAX_SAFE_INTEGER);
 	const byLedger = {};
 	let total = carry(parentMicros);
 	for (const [name, entry] of fold?.files ?? []) {

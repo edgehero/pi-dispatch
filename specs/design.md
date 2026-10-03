@@ -3001,15 +3001,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     partition the totals.
   - **The SPENT file.** The parent tells each child what the rest of the job spent: `spentFile(fold, parentMicros)`
     gives `{ v: 1, total, byLedger }`, with `total` the parent's spent and in-flight plus every ledger's, and
-    `byLedger` each ledger's part by file name. `externalFor(spent, ownName)` is the total less the child's own
-    part, so a child never counts its own spend twice. A malformed SPENT gives Infinity, which the cost guard
-    refuses.
+    `byLedger` each ledger's part by file name, in whole micro-dollars rounded up. `externalFor(spent, ownName)`
+    is the total less the child's own part, so a child never counts its own spend twice. A malformed SPENT gives
+    Infinity, which the cost guard refuses.
   - **The fold.** `foldChildLedgers({ dir, fs, prev })` keeps a high-water mark per file. A good file that reached
     its mark in everything that only grows replaces it (`unresolved` and `inflightMicros` may fall). A file that
     is malformed in any part, says `metered: false`, shrank in anything (a row included) or vanished counts
     once as unmetered, keeps the mark it had, and is not read again. A file is opened without following a
     symlink and without blocking, and must be a regular file, so a FIFO cannot hang the runner. A file whose
-    inode, size and change times are unchanged, or whose mark is `done`, is not read again. At most 512 names
+    inode, size and change times are unchanged is not read again; a `done` file is read like any other, so a
+    forged `done` cannot hide a live child's later writes. At most 512 names
     are tracked (`CHILD_LEDGER_MAX_FILES`, the job's pids limit); a further name counts as unmetered without
     being opened (`flooded`), which bounds the tick and the memory a flood of files can cost.
   - **The parent's totals.** `meter.setChildren(fold)` makes the snapshot's totals include the children and adds
@@ -3024,7 +3025,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     overcharge. Named residuals, so far: a child whose file is deleted before the parent's first read of it; a
     forged small file kept rewritten; a forger that rewrites a live child's file with `unresolved` at 0 and then
     kills the child mid-call hides that call's floor signal (`unresolved` may fall, so the fold cannot tell); a
-    provider that reports a negative amount is clamped to 0, which can under-count by that amount.
+    provider that reports a negative amount is clamped to 0, which can under-count by that amount; a forged
+    smaller SPENT, or a deleted STOP, only weakens a child's pre-call check, because the parent never reads SPENT
+    and a child's overshoot lands in its own ledger, charged in full.
 - **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `REQ-RUNNER-TURN-BUDGET`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-PI-VERSION-PINNED`, `INT-SDK-SESSION-OPTIONS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-010`, `OQ-011`
@@ -7295,3 +7298,4 @@ a tunnel.
 | 2026-10-03 | The leftovers of the #501 and #502 round's reviews. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: the `model-not-allowed` sentence also names a request change the trigger does not allow, the case of a hook rewrite or routing sampling settings. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked**: doctor's dead-folder line now says a CLI or local job may still run in a folder no trigger names, wording only. **Code evidence**: worker/src/processor.mjs; worker/src/doctor.mjs; admin/src/read-model.mjs -> mergedDollarProblem. |
 | 2026-10-03 | Issue #500, part B: the meter's seams for child processes, pure and not wired into the runner yet. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, a new Child processes bullet: `onChange` on observe and on settle, `rows()`, `setChildren()` with `childTotal`, `childProcesses` and `unmeteredChildren` (root, other and loose stay the parent's, the four parts sum to total, the token cap on parent plus children), the child rows merged before the 8-row cut, `isStopped` asked before every call on both halves (fail closed), the install options `compat`, `brake` and `children`, the cost guard's `external` (fail closed) with `spentMicros` and `inflightMicros`, the ledger file format, the fold's rules (a high-water mark per file; malformed, `metered: false`, a shrink or a vanished file counts once as unmetered and is never partly trusted; no symlink, no FIFO, 64 KiB, 256 rows; ids held to the worker's rule by a copy and a test), and the first residuals. With no children the exit line and the install and teardown lines are UNCHANGED, checked by test. `DES-DOLLAR-RESERVE-AND-SETTLE`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked: nothing emits the new keys yet. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/usage-meter.test.mjs, cost-guard.test.mjs, child-ledger.test.mjs. |
 | 2026-10-03 | Issue #500, part B, the review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the Child processes bullet: ledger amounts are bounded at `Number.MAX_SAFE_INTEGER` and ids must be printable ASCII; `setChildren` saturates instead of zeroing and keeps a high-water mark per field; the fold tracks at most 512 names (the excess counts as unmetered unread) and skips a file that is unchanged or `done`; the SPENT file and `externalFor`, so a child never counts its own spend twice; the cost guard's `spend()` replaces the snapshot keys, so the exit line is byte-identical with `external` set; a throwing children hook stops a meter with a policy; an install asked for a brake it cannot build fails; `onChange` fires on a stop; `record()` clamps negative usage at 0; the `isStopped` sentences corrected (null, undefined and false mean go, and it is asked only while a hard stop exists); a new residual, a forger that zeroes `unresolved` and then kills a child mid-call. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/usage-meter.test.mjs, cost-guard.test.mjs, child-ledger.test.mjs. |
+| 2026-10-03 | Issue #500, part B, the second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the Child processes bullet: a `done` ledger is read like any other (only an unchanged signature skips a read), because a forged `done` with unchanged numbers froze a live child's ledger; the SPENT file's parts are whole micro-dollars rounded up, so `externalFor` never refuses its own writer's file; a new residual, a forged smaller SPENT or a deleted STOP only weakens a child's pre-call check. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/child-ledger.test.mjs. |

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { symlinkSync, writeFileSync } from "node:fs";
+import { renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -404,20 +404,40 @@ test("at most CHILD_LEDGER_MAX_FILES names are tracked; the rest count as unmete
 	assert.deepEqual([second.flooded, second.unmetered], [88, 88], "a high-water mark: fewer extra names later does not undo the count");
 });
 
-test("a file is not read again when its signature is unchanged, nor once it is done", () => {
+test("a file is not read again while its signature is unchanged; a done file is read like any other", () => {
 	const fs = fakeFs({ [NAME_A]: json(ledger({ calls: 1 })), [NAME_B]: json(ledger({ calls: 1, state: "done" })) });
 	const first = fold(fs);
 	fs.opened.length = 0;
 	fs.lstats.length = 0;
 	const second = fold(fs, first);
-	assert.deepEqual([fs.opened, fs.lstats], [[], [NAME_A]], "unchanged: one lstat, no open; done: neither");
+	assert.deepEqual([fs.opened, fs.lstats.sort()], [[], [NAME_A, NAME_B]], "unchanged: one lstat each, no open");
 	assert.equal(second.totals.total, 20);
 	fs.files[NAME_A] = json(ledger({ calls: 3 }));
 	fs.files[NAME_B] = json(ledger({ calls: 9, state: "done" }));
 	const third = fold(fs, second);
-	assert.deepEqual([third.totals.total, fs.opened], [40, [NAME_A]], "a changed file is read; a done one keeps its mark");
+	assert.deepEqual([third.totals.total, fs.opened.sort()], [120, [NAME_A, NAME_B]], "a changed file is read, done or not");
 	delete fs.files[NAME_B];
-	assert.equal(fold(fs, third).files.get(NAME_B).why, "vanished", "a done file can still vanish");
+	assert.equal(fold(fs, third).files.get(NAME_B).why, "vanished");
+});
+
+test("a forged done with unchanged numbers cannot freeze a live child's ledger (real directory)", () => {
+	const dir = tempDir("pi-dispatch-ledger-");
+	const put = (value) => {
+		writeFileSync(join(dir, "tmp.write"), json(value));
+		renameSync(join(dir, "tmp.write"), join(dir, NAME_A));
+	};
+	const spend = (tokens, cost) => forged({ rows: [row("anthropic", "claude-x", { calls: 1, input: tokens, total: tokens, cost })] });
+	put(spend(100, 1));
+	let result = foldChildLedgers({ dir });
+	put({ ...spend(100, 1), state: "done" });
+	result = foldChildLedgers({ dir, prev: result });
+	assert.equal(result.files.get(NAME_A).state, "done", "the premise: the forgery is a good file");
+	put(spend(10_000, 50));
+	result = foldChildLedgers({ dir, prev: result });
+	let stopped = null;
+	const meter = createUsageMeter({ maxTokens: 5000, onStop: (reason) => (stopped = reason) });
+	meter.setChildren(result);
+	assert.deepEqual([meter.snapshot().total, meter.snapshot().cost, stopped], [10_000, 50, "token_budget"], "the child's later write is read");
 });
 
 test("SPENT: the parent's spend plus each ledger's spent and in-flight, and a child's external spend excludes its own", () => {
@@ -432,6 +452,9 @@ test("SPENT: the parent's spend plus each ledger's spent and in-flight, and a ch
 		assert.equal(externalFor(bad, NAME_A), Infinity, JSON.stringify(bad));
 	}
 	assert.equal(spentFile({ files: new Map() }, Infinity).total, Number.MAX_SAFE_INTEGER, "saturates, never 0");
+	const fractional = JSON.parse(JSON.stringify(spentFile(fold(fs), 1999.25)));
+	assert.equal(fractional.total, 3350, "a fractional parent spend rounds up to a whole micro-dollar");
+	assert.equal(externalFor(fractional, NAME_A), 3000, "so the writer never emits a file its own reader refuses");
 });
 
 test("childLedger: the writer's object round-trips through the fold; a meter that did not install writes zeros and metered:false", async () => {
