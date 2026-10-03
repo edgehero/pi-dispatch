@@ -77,7 +77,13 @@ scaffolds the empty form.
   than being read with its new fields silently dropped (a dropped cap field would be a silently widened
   spend limit). The tools refuse to write over a newer or version-less file for the same reason.
 - `scope` — a forge `"owner/name"` or a local folder path, matched **exactly** against the job's scope.
-  No globs (a scope containing `*` is refused at parse), no prefixes, no org-level matching. Write local
+  No globs (a scope containing `*` is refused at parse), no org-level matching. A bare `"acme/web"` covers that
+  repo on every forge as one shared limit. To limit one forge's repo, qualify it: `"github:acme/web"`,
+  `"gitlab:..."`, `"forgejo:..."` or `"azure:..."`. Then a GitHub job and a Forgejo job for `acme/web` count
+  separately. An unknown prefix such as `"gitub:acme/web"` refuses the file, and so does a bare row beside a
+  qualified row for the same repo: keep one form. A bare row keeps the count it had before qualified scopes
+  existed. Rewriting a row's scope (bare to qualified, or any rename) starts a new count; the old one expires on
+  its own. Doctor warns about a bare row when your triggers use more than one forge. Write local
   folder scopes as **absolute paths**: the worker resolves a job's folder before matching, so a relative
   row can never match a local job (doctor flags dead folder scopes, when `PI_SCOPED_LIMITS_FILE` is
   set). Spelling variants of one directory (trailing slash, `..` segments) collapse onto one scope.

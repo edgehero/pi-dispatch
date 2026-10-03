@@ -80,7 +80,7 @@ wrapper do not agree about quoting, inline comments or spacing, and printing one
 
 | Field | Required | Meaning |
 |---|---|---|
-| `scope` | **yes** | What the window applies to: the job's **repo path** on **any** forge (GitHub, GitLab, Forgejo, Azure DevOps), the **folder** host path for a local/cron job, or `"*"` for **all** scopes. Matched exactly, so mind the segment count: GitHub and Forgejo are `owner/name`, but a GitLab project is `group/subgroup/project` and Azure DevOps is `org/project/repo`. The rule is just local → folder, anything else → repo, so a forge added later is scoped automatically. |
+| `scope` | **yes** | What the window applies to: the job's **repo path** on **any** forge (GitHub, GitLab, Forgejo, Azure DevOps), the **folder** host path for a local/cron job, or `"*"` for **all** scopes. Prefix the repo with its forge (`"github:acme/web"`, `"forgejo:acme/web"`) to pause it on that forge only; a bare repo pauses it on every forge, and an unknown prefix refuses the file. Matched exactly, so mind the segment count: GitHub and Forgejo are `owner/name`, but a GitLab project is `group/subgroup/project` and Azure DevOps is `org/project/repo`. The rule is just local → folder, anything else → repo, so a forge added later is scoped automatically. |
 | `from` | **yes** | Pause **start**, `"HH:MM"` 24-hour. |
 | `to` | **yes** | Resume time, `"HH:MM"` 24-hour. If `from > to` the window is **overnight** (spans midnight). `from == to` is rejected — a 24h pause isn't expressible; remove the trigger instead. |
 | `tz` | no (default `UTC`) | IANA timezone, e.g. `"Europe/Amsterdam"`, `"America/New_York"`. `from`/`to` are that zone's wall clock, DST-correct. |

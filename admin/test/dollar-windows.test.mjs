@@ -137,6 +137,26 @@ test("a repo row folds its own forge runs; a folder or model row says why its ru
   assert.equal(foldWindowRecords(records, specs[2]).unattributed, UNATTRIBUTED.model);
 });
 
+test("issue #498: a qualified repo row folds only its own forge's runs; a bare row folds every forge's", () => {
+  const limits = [
+    { scope: "github:acme/web", day: null, week: null, month: null, concurrent: null, dayUsd: "5.00", weekUsd: null, monthUsd: null },
+    { scope: "acme/api", day: null, week: null, month: null, concurrent: null, dayUsd: "5.00", weekUsd: null, monthUsd: null },
+  ];
+  const specs = dollarWindowSpecs({ caps: {}, limits, now: NOW });
+  assert.equal(specs[0].keyPrefix, scopeDollarKeyPrefix("github:acme/web"), "the row's own key");
+  const records = [
+    record(),
+    record({ jobId: "fj-web", kind: "forgejo", dollars: { reservedMicros: 1, settledMicros: 900_000, basis: "metered", modelBasis: null } }),
+    record({ jobId: "gh-api", target: "acme/api#3", dollars: { reservedMicros: 1, settledMicros: 100_000, basis: "metered", modelBasis: null } }),
+    record({ jobId: "fj-api", kind: "forgejo", target: "acme/api#4", dollars: { reservedMicros: 1, settledMicros: 200_000, basis: "metered", modelBasis: null } }),
+  ];
+  const rows = dollarWindowRows({ specs, counters: {}, records });
+  assert.equal(rows[0].records.runs, 1, "the Forgejo run on acme/web is not the GitHub row's");
+  assert.equal(rows[0].records.settledMicros, 400_000);
+  assert.equal(rows[1].records.runs, 2, "a bare row folds the repo on every forge");
+  assert.equal(rows[1].records.settledMicros, 300_000);
+});
+
 test("only numbers, fixed tokens and the operator's own scope and model names leave the rows", () => {
   const specs = dollarWindowSpecs({ caps: { day: 10_000_000 }, limits: LIMITS, now: NOW });
   const poisoned = record({ flow: "SECRET-FLOW", target: "acme/web#12", jobId: "SECRET-JOB", reason: "SECRET-REASON" });

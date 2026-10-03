@@ -810,6 +810,25 @@ test("manageLimits: Edit blank-keeps-current; Delete removes on confirm; a decli
   assert.deepEqual(read(path).limits, []);
 });
 
+test("issue #498: an edit that rewrites a bare scope to a qualified one says the count starts over, in the tool confirm and the dialog", async () => {
+  const path = tmpLimits({ version: 1, limits: [{ scope: "acme/web", day: 10 }] });
+  const { ctx, shown } = toolCtx({ answer: true });
+  textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, scope: "github:acme/web" }, undefined, undefined, ctx));
+  assert.match(shown[0].message, /starts a NEW count under a new key/);
+  assert.deepEqual(read(path).limits[0], { scope: "github:acme/web", day: 10 });
+  // A count-only edit says nothing about it.
+  const { ctx: ctx2, shown: shown2 } = toolCtx({ answer: true });
+  textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, day: 4 }, undefined, undefined, ctx2));
+  assert.doesNotMatch(shown2[0].message, /NEW count/);
+  // The panel dialog asks before a scope change, and a decline writes nothing.
+  const declineUi = mockUi({ select: ["Edit a scoped limit", "#1  github:acme/web  day 4"], input: ["forgejo:acme/web", "", "", "", ""], confirm: [false] });
+  await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: path }, { ui: declineUi });
+  assert.equal(read(path).limits[0].scope, "github:acme/web");
+  const okUi = mockUi({ select: ["Edit a scoped limit", "#1  github:acme/web  day 4"], input: ["forgejo:acme/web", "", "", "", ""], confirm: [true] });
+  await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: path }, { ui: okUi });
+  assert.equal(read(path).limits[0].scope, "forgejo:acme/web");
+});
+
 test("a stored field cannot reach pi's dialogs raw, on EVERY dialog (#404)", async () => {
   // THE FOURTH FUNNEL. #382 gated the three that RENDER -- pane lines, the frame, and the model-visible
   // `send`. pi's dialogs are none of those: `select`, `input`, `confirm` and `notify` take strings this

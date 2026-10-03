@@ -17,7 +17,9 @@ import {
 	modelDollarKeyPrefix,
 	dollarKeyPrefixFor,
 	scopedLimitsVersionFor,
+	rowScopeFor,
 } from "../src/scoped-limits.mjs";
+import { FORGE_KINDS } from "../src/forges.mjs";
 import { createHash } from "node:crypto";
 
 const wrap = (limits, version = 1) => JSON.stringify({ version, limits });
@@ -176,11 +178,12 @@ test("canonicalScope returns null when the job has no scope", () => {
 
 test("limitFor is exact-match only", () => {
 	const limits = parse([{ scope: "acme/web", day: 10 }]);
-	assert.equal(limitFor(limits, "acme/web").day, 10);
-	assert.equal(limitFor(limits, "acme/other"), null);
-	assert.equal(limitFor(limits, "acme"), null);
-	assert.equal(limitFor([], "acme/web"), null);
+	assert.equal(limitFor(limits, ghJob("acme/web")).day, 10);
+	assert.equal(limitFor(limits, ghJob("acme/other")), null);
+	assert.equal(limitFor(limits, ghJob("acme")), null);
+	assert.equal(limitFor([], ghJob("acme/web")), null);
 	assert.equal(limitFor(limits, null), null);
+	assert.equal(limitFor(limits, { kind: "github" }), null);
 });
 
 test("budgetCapsFor returns null for a concurrency-only row and for an unmatched scope", () => {
@@ -319,7 +322,7 @@ test("v2 model rows: model:<provider>/<model> with *Usd fields only; counts and 
 
 test("model rows are never a job's scope: limitFor, budgetCapsFor and concurrencyFor ignore them", () => {
 	const limits = parse2([{ scope: "model:openai/gpt-x", dayUsd: "1" }]);
-	assert.equal(limitFor(limits, "model:openai/gpt-x"), null);
+	assert.equal(limitFor(limits, ghJob("model:openai/gpt-x")), null);
 	assert.equal(budgetCapsFor(ghJob("model:openai/gpt-x"), limits), null);
 	assert.equal(concurrencyFor(ghJob("model:openai/gpt-x"), limits), Infinity);
 });
@@ -384,4 +387,73 @@ test("a NEAR MISS of a model row is refused, never read as an inert repo row; pr
 
 test("a case-colliding duplicate model row names the FIRST row's index (PR #549's review)", () => {
 	assert.throws(() => parse2([{ scope: "acme/web", day: 1 }, { scope: "model:openai/gpt-x", dayUsd: "1" }, { scope: "model:OpenAI/gpt-x", weekUsd: "1" }]), /\(first at index 1\)/);
+});
+
+// ── forge-qualified scopes (issue #498) ─────────────────────────────────────────────────────────────────
+
+const fjJob = (repo) => ({ kind: "forgejo", repo });
+
+test("a qualified row parses for every forge kind (derived from FORGE_KINDS) and stores <kind>:<repo>", () => {
+	const limits = parse(FORGE_KINDS.map((kind) => ({ scope: ` ${kind}:acme/web `, day: 1 })));
+	assert.deepEqual(limits.map((l) => l.scope), FORGE_KINDS.map((kind) => `${kind}:acme/web`));
+	// Two forges' qualified rows for one repo are two rows, not a duplicate.
+	assert.equal(limits.length, FORGE_KINDS.length);
+});
+
+test("an unknown forge prefix is refused naming the known kinds; a drive letter keeps today's handling", () => {
+	assert.throws(() => parse([{ scope: "gitub:acme/web", day: 1 }]), (e) => /index 0/.test(e.message) && /unknown prefix "gitub:"/.test(e.message) && FORGE_KINDS.every((k) => e.message.includes(k)));
+	assert.throws(() => parse([{ scope: "GitHub:acme/web", day: 1 }]), /unknown prefix "GitHub:"/);
+	assert.throws(() => parse([{ scope: "github:", day: 1 }]), /names a forge and no repo/);
+	// A one-letter drive prefix is a folder, stored verbatim on a POSIX worker exactly as before.
+	assert.equal(parse([{ scope: "C:\\srv\\site", day: 1 }])[0].scope, "C:\\srv\\site");
+});
+
+test("a bare row and a qualified row for one repo refuse the file, naming both indexes (count rows)", () => {
+	assert.throws(() => parse([{ scope: "acme/web", day: 5 }, { scope: "github:acme/web", concurrent: 1 }]), (e) => /index 1/.test(e.message) && /at index 0/.test(e.message) && /same repo/.test(e.message));
+	// Order does not matter: the qualified row first is refused the same way.
+	assert.throws(() => parse([{ scope: "forgejo:acme/web", week: 2 }, { scope: "acme/web", month: 9 }]), (e) => /index 0/.test(e.message) && /at index 1/.test(e.message));
+	// Two forges' qualified rows, or a bare row for ANOTHER repo, are fine.
+	assert.equal(parse([{ scope: "github:acme/web", day: 1 }, { scope: "forgejo:acme/web", day: 1 }, { scope: "acme/api", day: 1 }]).length, 3);
+});
+
+test("a bare row and a qualified row for one repo refuse the file when both carry dollar windows only", () => {
+	assert.throws(() => parse2([{ scope: "acme/web", dayUsd: "5" }, { scope: "gitlab:acme/web", monthUsd: "50" }]), (e) => /index 1/.test(e.message) && /at index 0/.test(e.message) && /same repo/.test(e.message));
+});
+
+test("limitFor matches the qualified row first, then the bare row; the other forge falls through", () => {
+	const qualified = parse([{ scope: "github:acme/web", day: 3 }]);
+	assert.equal(limitFor(qualified, ghJob("acme/web")).scope, "github:acme/web");
+	assert.equal(limitFor(qualified, fjJob("acme/web")), null);
+	const bare = parse([{ scope: "acme/web", day: 3 }]);
+	assert.equal(limitFor(bare, ghJob("acme/web")).scope, "acme/web");
+	assert.equal(limitFor(bare, fjJob("acme/web")).scope, "acme/web");
+	// A job with no kind matches only the bare row.
+	assert.equal(limitFor(qualified, { repo: "acme/web" }), null);
+	assert.equal(limitFor(bare, { repo: "acme/web" }).scope, "acme/web");
+});
+
+test("every key comes from the MATCHED ROW: budgetCapsFor, dollarCapsFor and rowScopeFor return the row's scope", () => {
+	const limits = parse2([{ scope: "forgejo:acme/web", day: 1, dayUsd: "2" }, { scope: "acme/api", concurrent: 1, weekUsd: "3" }]);
+	assert.deepEqual(budgetCapsFor(fjJob("acme/web"), limits), { scope: "forgejo:acme/web", caps: { day: 1, week: null, month: null } });
+	assert.equal(budgetCapsFor(ghJob("acme/web"), limits), null, "the GitHub job has no row");
+	assert.equal(dollarCapsFor(fjJob("acme/web"), limits).keyPrefix, scopeDollarKeyPrefix("forgejo:acme/web"));
+	assert.equal(dollarCapsFor(ghJob("acme/api"), limits).keyPrefix, scopeDollarKeyPrefix("acme/api"));
+	assert.equal(rowScopeFor(fjJob("acme/web"), limits), "forgejo:acme/web");
+	assert.equal(rowScopeFor(ghJob("acme/api"), limits), "acme/api");
+	assert.equal(rowScopeFor(fjJob("acme/api"), limits), "acme/api", "a bare row is one key for every forge");
+	// No row: the job's canonical scope, so the folder mutex keeps its key.
+	assert.equal(rowScopeFor(ghJob("acme/other"), limits), "acme/other");
+	assert.equal(rowScopeFor(localJob("/srv//site/"), limits), "/srv/site");
+	assert.equal(concurrencyFor(ghJob("acme/api"), limits), 1);
+	assert.equal(concurrencyFor(fjJob("acme/api"), limits), 1);
+});
+
+test("the migration pin: a bare row keeps the exact key it had before qualified scopes (literal, not recomputed)", () => {
+	// Written out by hand on purpose: `printf %s acme/web | shasum -a 256 | cut -c1-16`. Any change to how a key is
+	// derived (a prefix in the hash, a qualified scope for a bare row) moves every live counter and fails here first.
+	assert.equal(scopeKeyPrefix("acme/web"), "budget:s:86f279ce9c29f106");
+	assert.equal(scopeDollarKeyPrefix("acme/web"), "budget:usd:s:86f279ce9c29f106");
+	const limits = parse([{ scope: "acme/web", day: 5 }]);
+	for (const job of [ghJob("acme/web"), fjJob("acme/web")]) assert.equal(scopeKeyPrefix(budgetCapsFor(job, limits).scope), "budget:s:86f279ce9c29f106");
+	assert.equal(scopeKeyPrefix(budgetCapsFor(ghJob("acme/web"), parse([{ scope: "github:acme/web", day: 5 }])).scope), "budget:s:ae5b3b31a94b074d");
 });

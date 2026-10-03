@@ -474,12 +474,46 @@ export function repoOfTarget(target) {
   return repo === "" ? null : repo;
 }
 
+/**
+ * A record's by-repo key (issue #498): `<kind>:<repo>` for a forge record (`github:acme/web`), so one repo served by two
+ * forges is two rows, and the target's repo shape otherwise (`local:site`); null when the record has no target. The
+ * same spelling a qualified scoped-limits row or pause window uses. "Forge" is every kind but `local`, the rule
+ * `scopeOf` uses: this module may import nothing from the worker but `dayKey`, and a kind list here could miss a forge.
+ */
+export function repoKeyOf(record) {
+  const repo = repoOfTarget(record?.target);
+  if (repo === null) return null;
+  return isForgeRecordKind(record?.kind) ? `${record.kind}:${repo}` : repo;
+}
+
+/** Every record kind but `local` is a forge's (`repoKeyOf` says why this is not `isForgeKind`). */
+function isForgeRecordKind(kind) {
+  return typeof kind === "string" && kind !== "" && kind !== "local";
+}
+
+/**
+ * Does this record belong to `repo` as an operator wrote it (issue #498)? A qualified `github:acme/web` selects that
+ * forge's records only; a bare `acme/web` selects the repo on every forge (what it always selected), and any other
+ * spelling (`local:site`) compares with the target's repo shape. NFC on both sides, the scoped limits' rule. A prefix
+ * that names no forge a record carries (`gitub:`) selects nothing, which is what a filter for an unknown forge means.
+ */
+export function recordInRepo(record, repo) {
+  if (typeof repo !== "string" || repo === "") return false;
+  const want = repo.normalize("NFC");
+  const have = repoOfTarget(record?.target);
+  if (have === null) return false;
+  const colon = want.indexOf(":");
+  if (colon > 0 && isForgeRecordKind(want.slice(0, colon))) return record?.kind === want.slice(0, colon) && have.normalize("NFC") === want.slice(colon + 1);
+  return have.normalize("NFC") === want;
+}
+
 /** Per-repo/target rollup. `key` null (with the "(no target)" display label) for records carrying no
- * target at all; `kind` is the records' uniform kind or null when a repo saw mixed kinds. */
+ * target at all; a forge record keys and labels as `<kind>:<repo>` (`repoKeyOf`, issue #498), so its `kind` is
+ * uniform; `kind` is still null for a key that saw mixed kinds. */
 function buildByRepo(runs) {
   const groups = new Map();
   for (const r of runs) {
-    const repo = repoOfTarget(r.record.target);
+    const repo = repoKeyOf(r.record);
     const mapKey = repo ?? "\u0000none";
     if (!groups.has(mapKey)) groups.set(mapKey, { key: repo, label: repo ?? "(no target)", kinds: new Set(), members: [] });
     const g = groups.get(mapKey);

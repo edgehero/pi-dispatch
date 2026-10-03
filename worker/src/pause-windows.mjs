@@ -14,7 +14,9 @@
  */
 
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { configError } from "./config.mjs";
+import { FORGE_KINDS, isForgeKind } from "./forges.mjs";
 
 // Sunday-first to match JS getUTCDay() and the Intl weekday index used in zonedParts().
 const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -77,6 +79,18 @@ function normalizeWindow(w, index, path) {
 	const at = `pause window at index ${index}`;
 	if (w === null || typeof w !== "object") throw configError(`${at}: must be an object: ${path}`);
 	if (!isNonEmptyString(w.scope)) throw configError(`${at}: scope must be a non-empty string: ${path}`);
+	// Issue #498: a qualified scope (`github:acme/web`) pauses one forge's repo, and a near miss (`gitub:acme/web`)
+	// is refused rather than kept as a window that pauses nothing. A bare or folder scope is stored exactly as it was.
+	let scope = w.scope.trim();
+	if (scope !== "*") {
+		let parsed;
+		try {
+			parsed = parseScopeString(scope);
+		} catch (error) {
+			throw configError(`${at}: ${error.message}: ${path}`);
+		}
+		if (parsed.type === "qualified") scope = `${parsed.kind}:${parsed.repo}`;
+	}
 
 	const fromMin = parseHHMM(w.from, "from", at, path);
 	const toMin = parseHHMM(w.to, "to", at, path);
@@ -105,7 +119,7 @@ function normalizeWindow(w, index, path) {
 	if (w.dateTo !== undefined) { assertDate(w.dateTo, "dateTo", at, path); dateTo = String(w.dateTo).trim(); }
 	if (dateFrom && dateTo && dateFrom > dateTo) throw configError(`${at}: dateFrom must be <= dateTo: ${path}`);
 
-	const norm = { scope: w.scope.trim(), from: w.from.trim(), to: w.to.trim(), fromMin, toMin, tz };
+	const norm = { scope, from: w.from.trim(), to: w.to.trim(), fromMin, toMin, tz };
 	if (days) norm.days = days;
 	if (dateFrom) norm.dateFrom = dateFrom;
 	if (dateTo) norm.dateTo = dateTo;
@@ -200,17 +214,65 @@ export function scopeOf(job) {
 }
 
 /**
+ * The forge-qualified scope of a job (issue #498): `<kind>:<repo>` (NFC) for a forge job, such as `github:acme/web` or
+ * `forgejo:acme/web`, the folder unchanged for a local job, and null when a forge job has no `kind` or no `repo`.
+ * `scopeOf` keeps returning the bare repo, because existing pause windows and scoped-limit rows match on it; this is
+ * the second spelling a row may use to name exactly one forge's repo.
+ */
+export function qualifiedScopeOf(job) {
+	if (job?.kind === "local") return job?.folder ?? null;
+	if (!isNonEmptyString(job?.kind) || !isNonEmptyString(job?.repo)) return null;
+	return `${job.kind}:${job.repo}`.normalize("NFC");
+}
+
+/**
+ * Classify a scope as written in an operator file (issue #498): `{ type, kind, repo }` where `type` is
+ *   - `local`: an absolute folder path (platform-native `isAbsolute`), or a path with a one-letter drive prefix
+ *     (`C:\srv`), which keeps the handling it always had: verbatim, and inert on a POSIX worker;
+ *   - `qualified`: `<forge kind>:<repo>`, `kind` one of `FORGE_KINDS` and `repo` the NFC rest;
+ *   - `bare`: anything else, such as `owner/name`, which matches that repo on every forge.
+ * A `<word>:` prefix (no `/` before the first `:`) that is not a forge kind THROWS a `configError` naming the known
+ * kinds: `gitub:acme/web` would otherwise be a row that guards nothing while it reads as a cap. The split is at the
+ * FIRST `:`, which is safe because no forge allows `:` in a repo or project path: GitHub, GitLab and Forgejo names
+ * are `[A-Za-z0-9._-]` segments, and Azure DevOps refuses `:` in project and repository names. `"*"` is the caller's
+ * business (pause windows accept it, scoped limits refuse it) and is not classified here. The message carries no path:
+ * the caller adds which entry and which file.
+ */
+export function parseScopeString(text) {
+	const scope = String(text).trim().normalize("NFC");
+	if (isAbsolute(scope) || /^[A-Za-z]:/.test(scope)) return { type: "local", kind: null, repo: null };
+	const m = /^([^/\\:]+):(.*)$/s.exec(scope);
+	if (m === null) return { type: "bare", kind: null, repo: null };
+	if (!isForgeKind(m[1])) throw configError(`scope ${JSON.stringify(scope)} starts with an unknown prefix "${m[1]}:" (a forge-qualified scope starts with one of ${FORGE_KINDS.join(", ")}, such as github:owner/name)`);
+	if (m[2].trim() === "") throw configError(`scope ${JSON.stringify(scope)} names a forge and no repo (write ${m[1]}:owner/name)`);
+	return { type: "qualified", kind: m[1], repo: m[2].trim() };
+}
+
+/**
+ * A row scope as a forge comment names it (issue #498): the repo without its forge prefix, so a refusal posted on
+ * `acme/web` reads "acme/web" whether the row was written bare or qualified. Any other scope is returned unchanged.
+ */
+export function unqualifiedScope(scope) {
+	if (typeof scope !== "string") return scope;
+	const colon = scope.indexOf(":");
+	return colon > 0 && isForgeKind(scope.slice(0, colon)) ? scope.slice(colon + 1) : scope;
+}
+
+/**
  * When, in epoch ms, the current pause for this job's scope ends — or `null` when the job is not paused. A
  * job is paused if `now` falls inside any scope-matching window (`scope === "*"` matches every scope); the
  * latest end among active windows is returned so a single deferral clears them all (re-checked on wake).
+ * A window matches on the RAW `scopeOf` value (so every existing bare window keeps matching every forge, as before)
+ * or on the job's `qualifiedScopeOf` (issue #498: `github:acme/web` pauses the GitHub job and not the Forgejo one).
  */
 export function pauseUntilMs(windows, job, nowMs) {
 	if (!Array.isArray(windows) || windows.length === 0) return null;
 	const scope = scopeOf(job);
 	if (!isNonEmptyString(scope)) return null;
+	const qualified = qualifiedScopeOf(job);
 	let end = null;
 	for (const w of windows) {
-		if (w.scope !== "*" && w.scope !== scope) continue;
+		if (w.scope !== "*" && w.scope !== scope && w.scope !== qualified) continue;
 		const e = windowEndAt(w, nowMs);
 		if (e !== null && (end === null || e > end)) end = e;
 	}

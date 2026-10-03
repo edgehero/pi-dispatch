@@ -20,7 +20,9 @@ topology uses). Runs no trigger claims stay visible as their own rows, never ble
 `run.command` trigger is a `triggers.json` entry like any other: its row reads `/name` and its jobs'
 spend folds the same way — dispatching a workflow extension is not cheaper by classification. The
 **by-repo** breakdown groups spend by the target repository (issue and MR numbers stripped), with
-`local:<folder>` targets as their own rows.
+`local:<folder>` targets as their own rows. A forge row is named with its forge, `github:acme/web`, so one repo
+served by two forges is two rows. The `repo` filter of `dispatch_costs` takes either form: `acme/web` selects
+that repo on every forge, `github:acme/web` one forge.
 
 ## How to read the numbers
 

@@ -3931,6 +3931,29 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   a dollar row keeps a file every worker in a mixed fleet reads. **Why a model row lives here** and not in the
   overlay or the triggers file: it is a runtime money control over a shared counter, the same class as a repo's
   window, and it must be editable live without a reviewed trigger change.
+- **Forge-qualified scopes, row-keyed counters** (issue #498): a scope was the bare repo, so a GitHub `acme/web` and
+  a Forgejo `acme/web` shared one limit, one lease, one pause and one cost row. A row may now say `<kind>:owner/name`
+  (`qualifiedScopeOf`, `parseScopeString`, both beside `scopeOf` in `pause-windows.mjs`), and a job matches its
+  qualified row first, then its bare row. **Every key comes from the MATCHED ROW** (`budgetCapsFor`,
+  `dollarCapsFor`, `rowScopeFor` for the pickup slot and lease), never from the job. That is the whole migration:
+  a bare row hashes the same string it always did, so its counters, its lease keys and the admin's reads carry
+  over with no key moved, and a qualified row counts on its own. The boot sweeper already hashed row scopes, and
+  until now only agreed with the gate because matching was exact; the gate and the sweeper are now one rule.
+  `scopeOf` is unchanged, because the pause matcher and every existing bare window depend on its value.
+  **Rejected**:
+  - *Key counters by the job's qualified scope.* Every bare row's counter would reset at upgrade, and a bare row
+    meant as one shared cap would silently split into one cap per forge.
+  - *A precedence ladder where a qualified row beats a bare one.* One row applies to a job; with both present the
+    file reads as two caps while only one counts. Refusing the mixed file, naming both indexes, is the simpler
+    rule, and it is loud. It applies to dollar rows exactly as to count rows.
+  - *The instance host in the scope* (`forgejo:git.example.org/acme/web`). One worker serves one instance per
+    forge kind, so the host adds nothing there, and it would put a hostname into operator files and comments.
+    The residual, two fleet hosts on different instances of one kind sharing one Valkey, is recorded in
+    `INT-SCOPED-LIMITS-FILE-CONTRACT`.
+  - *Rewriting existing keys to the new form.* Keys are hashes the admin recomputes from rows; a rewrite script is
+    a new way to lose counts. A row an operator rewrites starts a new count, and the edit confirm says so.
+  - *Refusing bare rows.* That would stop existing workers from booting. Doctor warns about a bare row or a bare
+    pause window instead, when the triggers name more than one forge kind.
 - **Why a file and not the overlay**: the deferral gate runs ABOVE the per-job settings read, so
   gate-read config must come from a watched mutable ref; and `KNOWN_KEYS` is a flat scalar list whose
   one map-shaped resident (`secretProfiles`) is deliberately model-unreachable — the opposite of the
@@ -7299,3 +7322,4 @@ a tunnel.
 | 2026-10-03 | Issue #500, part B: the meter's seams for child processes, pure and not wired into the runner yet. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, a new Child processes bullet: `onChange` on observe and on settle, `rows()`, `setChildren()` with `childTotal`, `childProcesses` and `unmeteredChildren` (root, other and loose stay the parent's, the four parts sum to total, the token cap on parent plus children), the child rows merged before the 8-row cut, `isStopped` asked before every call on both halves (fail closed), the install options `compat`, `brake` and `children`, the cost guard's `external` (fail closed) with `spentMicros` and `inflightMicros`, the ledger file format, the fold's rules (a high-water mark per file; malformed, `metered: false`, a shrink or a vanished file counts once as unmetered and is never partly trusted; no symlink, no FIFO, 64 KiB, 256 rows; ids held to the worker's rule by a copy and a test), and the first residuals. With no children the exit line and the install and teardown lines are UNCHANGED, checked by test. `DES-DOLLAR-RESERVE-AND-SETTLE`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked: nothing emits the new keys yet. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/usage-meter.test.mjs, cost-guard.test.mjs, child-ledger.test.mjs. |
 | 2026-10-03 | Issue #500, part B, the review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the Child processes bullet: ledger amounts are bounded at `Number.MAX_SAFE_INTEGER` and ids must be printable ASCII; `setChildren` saturates instead of zeroing and keeps a high-water mark per field; the fold tracks at most 512 names (the excess counts as unmetered unread) and skips a file that is unchanged or `done`; the SPENT file and `externalFor`, so a child never counts its own spend twice; the cost guard's `spend()` replaces the snapshot keys, so the exit line is byte-identical with `external` set; a throwing children hook stops a meter with a policy; an install asked for a brake it cannot build fails; `onChange` fires on a stop; `record()` clamps negative usage at 0; the `isStopped` sentences corrected (null, undefined and false mean go, and it is asked only while a hard stop exists); a new residual, a forger that zeroes `unresolved` and then kills a child mid-call. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/usage-meter.test.mjs, cost-guard.test.mjs, child-ledger.test.mjs. |
 | 2026-10-03 | Issue #500, part B, the second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the Child processes bullet: a `done` ledger is read like any other (only an unchanged signature skips a read), because a forged `done` with unchanged numbers froze a live child's ledger; the SPENT file's parts are whole micro-dollars rounded up, so `externalFor` never refuses its own writer's file; a new residual, a forged smaller SPENT or a deleted STOP only weakens a child's pre-call check. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/child-ledger.test.mjs. |
+| 2026-10-03 | Issue #498, forge-qualified scopes. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: a bullet on qualified scopes and row-keyed counters (every key, the pickup slot and lease included, comes from the matched row, so a bare row keeps its key and the gate and the boot sweeper are one rule) with five rejected alternatives: keying by the job's qualified scope, a precedence ladder, the instance host in the scope, rewriting keys, and refusing bare rows. **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` UNCHANGED, checked**: the lease key keeps its shape `slot:s:<hash16>:<i>`, now hashed from the matched row's scope, which is what the sweeper already hashed. |
