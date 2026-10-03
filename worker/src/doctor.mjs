@@ -60,9 +60,8 @@ import { randomBytes } from "node:crypto";
 import { DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
-import { parseModelsJson } from "./models-json.mjs";
-import { overlayProviderProblem } from "./model-catalog.mjs";
-import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
+import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
+import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -240,6 +239,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// addresses for the measured route table, both for tests. The real reads are the defaults where they are used.
 		declaredEndpoints,
 		hostAddresses,
+		// Issue #552: the overlay models.json's read for the credential-free line, for tests that need an errno a real
+		// file cannot give (EIO, EMFILE). The real read is the default where it is used.
+		readOverlayFile,
 		// Issue #484: how a copy of the proxy's rules is read, and the installed package's copy it is compared with.
 		readProxyConf,
 		readPackagedProxyConf: readPackagedConf,
@@ -354,7 +356,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -659,7 +661,7 @@ export const STEERING_SERVICE_KEYS = Object.freeze({
 	PI_JOB_IMAGE: "the image doctor inspects and runs (the canary, the gh probe, --live): the worker's `||` default and the one image rule its boot applies (image-ref.mjs: blank, padded, a leading dash, a control character), a refused value named and not used",
 	GITHUB_AUTH_SOURCE: "whether doctor runs gh on this host: the worker's own three values",
 	GITHUB_PAT_VAR: "which variable is the service's PAT: resolved and never printed; set by the file (or its PAT only in the file), the in-image gh probe is not run, since no program doctor starts is handed anything from .env",
-	PI_GLOBAL_PI_DIR: "the directory `--fix` restages into and removes auth.json from (prompt tier, the command shown first): the worker's rule, unset or empty is off, set must exist",
+	PI_GLOBAL_PI_DIR: "the directory `--fix` restages into and removes auth.json from (prompt tier, the command shown first): the worker's rule, unset or empty is off, set must be an absolute path that exists",
 	PI_TRIGGERS_FILE: "the file whose images, repos and folders doctor probes: a regular file only, parsed by the worker's own parser before any of its values is used",
 	PI_SESSIONS_DIR: "the directory `--fix` creates: silent only for this shell's own value; a value from .env is offered at the prompt tier, shown first",
 	PI_JOBS_DIR: "where --live makes its fixture: the jobs dir owner rule the worker applies at boot (#464)",
@@ -2402,13 +2404,15 @@ export async function collectChecks(shellVars, seams) {
 	const keylessEndpoints = unknownToPi ? (seams.declaredEndpoints ?? ((a) => declaredEndpointsIn({ ...a, fs: keylessIo })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform, valkeyUrl: keylessValkey }) : [];
 	let keylessModels = null;
 	let keylessUnreadable = null;
-	if (keylessEndpoints.length > 0 && typeof env.PI_GLOBAL_PI_DIR === "string" && env.PI_GLOBAL_PI_DIR !== "") {
+	// The worker's rule (config.mjs `resolveGlobalPiDir`, PR #553's review): only an absolute PI_GLOBAL_PI_DIR is an
+	// overlay; a relative one refuses the worker's boot, and the overlay section below says so. Both reads take the
+	// value as it is, so they read the same folder.
+	if (keylessEndpoints.length > 0 && typeof env.PI_GLOBAL_PI_DIR === "string" && isAbsolute(env.PI_GLOBAL_PI_DIR)) {
 		try {
-			// Relative to the deployment folder, which is the worker's working directory, never to doctor's own.
-			keylessModels = readOverlayModels(resolve(seams.cwd, env.PI_GLOBAL_PI_DIR), keylessIo);
+			keylessModels = readOverlayModels(env.PI_GLOBAL_PI_DIR, keylessIo);
 		} catch (error) {
-			// The reader's one rule (PR #520 round 2): an errno it rethrows is a read that may succeed later, and the worker
-			// retries such a job rather than refusing it, so doctor says that rather than calling the provider unknown.
+			// The reader's one rule (PR #520 round 2): an errno it rethrows is not a verdict on the provider, so doctor
+			// names the code rather than calling the provider unknown (retried or refused by `isTransientOverlayRead`).
 			// Invalid JSON is the overlay check's line below; here it only means nothing is keyless.
 			if (typeof error?.code === "string") keylessUnreadable = error.code;
 		}
@@ -2447,7 +2451,15 @@ export async function collectChecks(shellVars, seams) {
 	// Global pi overlay (REQ-GLOBAL-PI-OVERLAY), only when configured. The overlay is mounted :ro into an
 	// adversarial-input container, so the load-bearing checks are that it holds NO credential.
 	const overlay = env.PI_GLOBAL_PI_DIR;
-	if (overlay) {
+	if (overlay && !isAbsolute(overlay)) {
+		// PR #553's review: the worker refuses to boot on it (config.mjs `resolveGlobalPiDir`), since a relative value is
+		// resolved differently by the worker and the container runtime.
+		checks.push({
+			ok: false,
+			label: `PI_GLOBAL_PI_DIR is ${JSON.stringify(overlay)}, which is not an absolute path, so the worker refuses to boot${fromFileNote(fileSays("PI_GLOBAL_PI_DIR"))}`,
+			fix: "set PI_GLOBAL_PI_DIR to the overlay folder's absolute path; a relative value is resolved differently by the worker and the container runtime",
+		});
+	} else if (overlay) {
 		const dirOk = fileExists(overlay);
 		checks.push({ ok: dirOk, label: `Global overlay dir exists (${envValueShown(overlay)})${fromFileNote(fileSays("PI_GLOBAL_PI_DIR"))}`, fix: "run `pi-dispatch import-pi`, or fix PI_GLOBAL_PI_DIR" });
 		if (dirOk) {
@@ -2471,16 +2483,25 @@ export async function collectChecks(shellVars, seams) {
 			const modelsPath = join(overlay, "models.json");
 			// Through the one reader (`readOverlayModels`, PR #520): an exists test answered false for a file under an
 			// unreadable directory, so this line passed in silence on a file nobody had read. Absent is a pass (nothing to
-			// leak); an errno the reader rethrows is ⚠ naming the code, a read that may succeed later and that the worker
-			// retries; text that does not parse, or is not an object, is ✗.
+			// leak); a transient errno (`isTransientOverlayRead`) is ⚠ naming the code, a read the worker retries once; any
+			// other errno, EACCES among them, is ✗, since the job loads none of the file and the worker refuses every job
+			// (issue #552); so is a models.json that is a link (PR #553's review); text that does not parse, or is
+			// not an object, is ✗.
 			let overlayModels = null;
 			let modelsRead = null;
 			try {
-				overlayModels = readOverlayModels(overlay, { readFileSync: (p, enc) => readFileSync(p, enc) });
+				overlayModels = readOverlayModels(overlay, { readFileSync: seams.readOverlayFile ?? ((p, enc) => readFileSync(p, enc)) });
 			} catch (error) {
 				modelsRead = error;
 			}
-			if (modelsRead?.code === "EISDIR") {
+			if (modelsRead?.overlayLink === true) {
+				// PR #553's review: the job's read-only mount does not resolve a link the way the host does.
+				checks.push({
+					ok: false,
+					label: "Overlay models.json is a link, so every job is refused as model-unknown (overlay-link)",
+					fix: `${OVERLAY_LINK_FIX}: ${modelsPath}; no job runs until then`,
+				});
+			} else if (modelsRead?.code === "EISDIR") {
 				// Issue #539: pi fails to read a directory the same way, so it loads no models.json, and the worker refuses
 				// every job (not retried: no retry turns a directory into a file).
 				checks.push({
@@ -2488,12 +2509,22 @@ export async function collectChecks(shellVars, seams) {
 					label: "Overlay models.json is a directory, so pi loads none of it and every job is refused as model-unknown (overlay-is-a-directory)",
 					fix: `replace ${modelsPath} with a models.json file, or remove it; no job runs until then`,
 				});
-			} else if (typeof modelsRead?.code === "string") {
+			} else if (isTransientOverlayRead(modelsRead?.code)) {
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `Overlay models.json could not be read (${modelsRead.code}), so whether it is credential-free is not known`,
-					fix: `make ${modelsPath} readable by the account the worker runs as, then re-run doctor`,
+					label: `Overlay models.json could not be read just now (${modelsRead.code}), so whether it is credential-free is not known; the worker retries each job once, then fails it`,
+					fix: `check the disk or file handles behind ${modelsPath}, then re-run doctor`,
+				});
+			} else if (typeof modelsRead?.code === "string") {
+				// Issue #552: the job reads the file through the read-only mount, and pi in the job loads none of it (the
+				// existence check in image/runner/run-job.mjs, or pi's own read, fails), so a builtin provider the
+				// file routes would go to its public endpoint. The worker refuses every job instead.
+				const permission = modelsRead.code === "EACCES" || modelsRead.code === "EPERM";
+				checks.push({
+					ok: false,
+					label: `Overlay models.json cannot be read by the worker (${modelsRead.code}), so a job loads none of it and every job is refused as model-unknown (overlay-unreadable)`,
+					fix: permission ? `make ${modelsPath} and its folder readable by the account the worker runs as; every job is refused until then` : `check ${modelsPath} on the worker host (the read failed with ${modelsRead.code}); every job is refused until the worker can read it`,
 				});
 			} else {
 				let modelsOk = true;
@@ -2528,14 +2559,10 @@ export async function collectChecks(shellVars, seams) {
 			// Issue #503: a model whose baseUrl is localhost or a loopback literal can never be reached from a job, egress on
 			// or off, because inside a job that address is the job's own container. Said whatever is declared: an overlay
 			// pointed at localhost is the first thing an operator tries, and the fix is the declaration. Nothing when the file
-			// is absent or does not parse (the line above names that).
-			if (fileExists(modelsPath)) {
-				let loopback = [];
-				try {
-					loopback = overlayLoopbackModels(parseModelsJson(readFileSync(modelsPath, "utf8")).value ?? null);
-				} catch {
-					// The line above says it is not valid JSON.
-				}
+			// is absent, does not parse, or is a file the job does not load (the line above names that): judged on the one
+			// reader's result, so a models.json link is not read here around it.
+			if (overlayModels !== null) {
+				const loopback = overlayLoopbackModels(overlayModels);
 				if (loopback.length > 0) {
 					checks.push({
 						ok: false,
@@ -3931,10 +3958,12 @@ function noKeyVariableCheck(provider, oracle, keyless = null) {
 	// the credential gate (no key variable, not in pi's catalog), so this line and the worker cannot disagree.
 	const endpoints = Array.isArray(keyless?.endpoints) ? keyless.endpoints : [];
 	if (endpoints.length > 0 && typeof keyless?.unreadable === "string") {
+		// Issue #552: only a transient errno is retried; any other refuses every job at the model gate, before this one.
+		const retried = isTransientOverlayRead(keyless.unreadable);
 		return {
 			ok: false,
-			warn: true,
-			label: `Provider key: could not read models.json (${keyless.unreadable}), so whether ${JSON.stringify(provider)} is keyless is not known; the worker retries such a job until it can read it`,
+			warn: retried,
+			label: `Provider key: could not read models.json (${keyless.unreadable}), so whether ${JSON.stringify(provider)} is keyless is not known; ${retried ? "the worker retries such a job once, then fails it" : "the worker refuses every job until it can read it (overlay-unreadable)"}`,
 			fix: "make the overlay's models.json readable by the account the worker runs as, then re-run doctor",
 		};
 	}

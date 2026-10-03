@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -278,6 +278,63 @@ test("a file pi drops sends every builtin provider's entry to the public endpoin
 	rmSync(file);
 	assert.equal((await ModelConfig.load(file)).getError(), undefined);
 	assert.deepEqual(checkModelsKnown([{ provider: "openai", id: "gpt-4o", main: true }], { readOverlay: () => readOverlayModels(dir) }), { ok: true });
+});
+
+test("a file the job cannot read loads none of it; the worker refuses a permission error or a link and reads what the job reads as no file as absent (issue #552)", { skip: skip || (typeof process.getuid === "function" && process.getuid() === 0 ? "root reads a mode-000 file" : false) }, async () => {
+	// The JOB's view, asked of pi's own loader at the pin: the runner picks the overlay with existsSync (run-job.mjs)
+	// and otherwise points pi at an agent-dir models.json that is absent, then pi's ModelConfig.load reads it. An entry
+	// routing openai through a proxy, made unreadable each way. In every case the job loads none of the file and gpt-4o
+	// would run on its public endpoint. The worker refuses where the operator's content exists (a permission error),
+	// and reads as absent what the job reads as no file (existsSync false: no content is lost).
+	const proxy = "http://proxy.lan:8080/v1";
+	const body = JSON.stringify({ providers: { openai: { baseUrl: proxy } } });
+	const gpt = { provider: "openai", id: "gpt-4o" };
+	const jobView = async (dir) => {
+		const modelsPath = existsSync(join(dir, "models.json")) ? join(dir, "models.json") : join(tempDir("pi-agent-"), "models.json");
+		const runtime = await ModelRuntime.create({ modelsPath, authPath: join(dir, "auth.json"), refreshOnCreate: false });
+		return { error: (await ModelConfig.load(modelsPath)).getError(), routed: runtime.getModel("openai", "gpt-4o")?.baseUrl === proxy };
+	};
+	const cases = [
+		["a mode-000 file", { exists: true, error: /^Failed to load models\.json: EACCES/ }, { unknown: gpt, why: "overlay-unreadable" }, (dir) => {
+			writeFileSync(join(dir, "models.json"), body);
+			chmodSync(join(dir, "models.json"), 0o000);
+			return { dir, undo: () => chmodSync(join(dir, "models.json"), 0o600) };
+		}],
+		["a folder without search permission", { exists: false }, { unknown: gpt, why: "overlay-unreadable" }, (dir) => {
+			const inner = join(dir, "overlay");
+			mkdirSync(inner);
+			writeFileSync(join(inner, "models.json"), body);
+			chmodSync(inner, 0o600);
+			return { dir: inner, undo: () => chmodSync(inner, 0o700) };
+		}],
+		// PR #553's review: models.json is never a link (the job's mount resolves links differently), so a dangling one
+		// is refused as a link; ELOOP and ENOTDIR come only from the folder's path, which the job reads as no overlay.
+		["a dangling models.json link", { exists: false }, { unknown: gpt, why: "overlay-link" }, (dir) => {
+			symlinkSync("nowhere.json", join(dir, "models.json"));
+			return { dir };
+		}],
+		["a folder path that loops", { exists: false }, { ok: true }, (dir) => {
+			symlinkSync(join(dir, "loop"), join(dir, "loop"));
+			return { dir: join(dir, "loop") };
+		}],
+		["a folder path through a file", { exists: false }, { ok: true }, (dir) => {
+			writeFileSync(join(dir, "plain"), body);
+			return { dir: join(dir, "plain") };
+		}],
+	];
+	for (const [label, job, verdict, make] of cases) {
+		const { dir, undo } = make(tempDir("pi-models-unreadable-"));
+		try {
+			assert.equal(existsSync(join(dir, "models.json")), job.exists, `${label}: the runner's existsSync`);
+			const seen = await jobView(dir);
+			if (job.error) assert.match(String(seen.error), job.error, `${label}: pi's own read fails`);
+			else assert.equal(seen.error, undefined, `${label}: pi is pointed at no overlay, silently`);
+			assert.equal(seen.routed, false, `${label}: the job runs gpt-4o on its public endpoint`);
+			assert.deepEqual(checkModelsKnown([{ ...gpt, main: true }], { readOverlay: () => readOverlayModels(dir) }), verdict, label);
+		} finally {
+			undo?.();
+		}
+	}
 });
 
 // Adversarial inputs for the strip: the shapes that made pi's regex strip quadratic, and the edges of its

@@ -25,7 +25,7 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync, statSync, copyFileSync, renameSync, rmSync } from "node:fs";
 import { execFile } from "node:child_process";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { FROM_HOST, PACKAGES_SUBDIR, RESOURCE_DIRS, STAGE_MANIFEST, mergeHostPackages, parsePackagesFile } from "./packages.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
@@ -121,7 +121,9 @@ export async function runImportPi(argv = [], deps = {}) {
 	// `--host-packages` is accepted as a no-op for symmetry with `--with-extensions`.
 	const withHostPackages = withPackages && !argv.includes("--no-host-packages");
 	const from = flagValue(argv, "--from") ?? defaultFrom(env);
-	const to = flagValue(argv, "--to") ?? join(cwd, "pi-global");
+	// Absolute, always (PR #553's review): the next steps print it as the PI_GLOBAL_PI_DIR to set, and the worker
+	// refuses a relative one, since the worker and the container runtime resolve it differently.
+	const to = resolve(cwd, flagValue(argv, "--to") ?? "pi-global");
 	const packagesFile = flagValue(argv, "--packages-file") ?? env.PI_PACKAGES_FILE ?? join(cwd, "pi-packages.json");
 
 	if (!fs.existsSync(from)) {

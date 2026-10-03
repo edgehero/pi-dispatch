@@ -24,13 +24,12 @@
  * Custom: model endpoints validated inline per scoped-limits.mjs precedent; zod not in deps
  */
 
-import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
+import { existsSync as fsExistsSync, lstatSync as fsLstatSync, readFileSync as fsReadFileSync } from "node:fs";
 import { isIPv4 } from "node:net";
 import { join, resolve } from "node:path";
 import { PROXY_LOCAL_ADDRESSES, isProxyLocalHost } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
-import { isDeterminateFsCode } from "./transient.mjs";
 import { parseModelsJson } from "./models-json.mjs";
 
 /** The schema version this build reads. A file declaring a higher one is refused loudly. */
@@ -245,28 +244,55 @@ export function loadModelEndpoints(config, { readFileSync = fsReadFileSync, exis
 }
 
 /**
+ * The errnos a read of the overlay `models.json` reads as NO FILE, the way the job sees it (PR #553's review). The
+ * runner picks the overlay with `existsSync("/opt/pi-global/models.json")` (image/runner/run-job.mjs) and pi reads
+ * no overlay at all when that answers false, with no error. With `models.json` itself never a link (below), ELOOP,
+ * ENOTDIR and ENAMETOOLONG can come only from the folder's own path, and there is no file content to lose.
+ */
+const OVERLAY_ABSENT_CODES = new Set(["ENOENT", "ELOOP", "ENOTDIR", "ENAMETOOLONG"]);
+
+/** The fixed text of the refusal for a `models.json` that is a link: what to do, and why. */
+export const OVERLAY_LINK_FIX = "models.json in the overlay folder is a link; replace it with the file itself (the job's read-only mount cannot follow links reliably)";
+
+/** The determinate fault of a `models.json` that is a link of any kind; `overlayLink` marks it. */
+function overlayLinkError(path) {
+	const error = configError(`${OVERLAY_LINK_FIX}: ${path}`);
+	error.overlayLink = true;
+	return error;
+}
+
+/**
  * The overlay's `models.json` (`<globalPiDir>/models.json`), parsed as JSON and nothing else: no `$VAR` expansion,
  * because the host's environment is not the job's, and a derivation that expanded one would describe a server the
- * job never dials. ONE rule for every caller (the pickup snapshot in index.mjs, doctor), in three outcomes:
- *   - `null` when there is no overlay, or the read fails with an errno `isDeterminateFsCode` calls absence (ENOENT,
- *     ENOTDIR, ELOOP, ENAMETOOLONG);
- *   - ANY other fs error is RETHROWN as-is, its `code` intact (EACCES, EIO, EMFILE, EISDIR...): the file may be readable
- *     in a minute, so a caller must be able to tell this from a verdict, and the keyless gate retries on it;
+ * job never dials. ONE rule for every caller (the pickup snapshot in index.mjs, doctor), judged as the JOB sees the
+ * file (PR #553's review), in four outcomes:
+ *   - `null` when the job has no overlay: `models.json` is missing, or the folder's path fails with ELOOP, ENOTDIR or
+ *     ENAMETOOLONG, which the runner's `existsSync` (image/runner/run-job.mjs) answers false for;
+ *   - a `configError` marked `overlayLink` when `models.json` is a link of ANY kind, dangling included (`lstat`). The
+ *     job's read-only mount resolves a link differently from the host (an absolute target, a target outside the
+ *     folder, a trailing `/` or a `..` through a file each differ), and two rounds of following links the way the
+ *     mount does kept finding cases, so the rule is the simple one: the file itself, never a link. The overlay FOLDER
+ *     may be a link: the runtime follows it when it mounts the folder, and both sides then read the same file;
+ *   - ANY other fs error is RETHROWN as-is, its `code` intact (EACCES, EPERM, EISDIR, EIO...), so a caller can tell
+ *     it from a verdict. The caller classifies the code: `isTransientOverlayRead` (model-catalog.mjs) names the few
+ *     that may pass, and in the job pi loads none of the file for all the rest (the runner's existence check, or
+ *     pi's own read, fails);
  *   - text pi would not load is a `configError`: a determinate fault the operator fixes. "Would not load" is pi's own
  *     rule since issue #502 (`parseModelsJson`): a BOM, `//` comments and trailing commas are fine, and a schema
  *     error anywhere in the document refuses all of it, because pi drops the whole file over one.
  * The read is NOT inside the parse's try, and there is no `existsSync` first. Both were here (PR #520 round 2): the
- * try turned EACCES and EIO into "not valid JSON", a permanent public refusal, and `existsSync` answers false for a
- * file under an unreadable directory, which read as absence. A read that throws is the only honest question.
+ * try turned EACCES and EIO into "not valid JSON", and `existsSync` answers false for a file under an unreadable
+ * directory, which read as absence. A `lstat` or read that throws is the only honest question.
  */
-export function readOverlayModels(globalPiDir, { readFileSync = fsReadFileSync } = {}) {
+export function readOverlayModels(globalPiDir, { readFileSync = fsReadFileSync, lstatSync = fsLstatSync } = {}) {
 	if (typeof globalPiDir !== "string" || globalPiDir === "") return null;
 	const path = join(globalPiDir, "models.json");
 	let text;
 	try {
+		if (lstatSync(path).isSymbolicLink()) throw overlayLinkError(path);
 		text = String(readFileSync(path, "utf8"));
 	} catch (error) {
-		if (isDeterminateFsCode(error?.code)) return null;
+		if (OVERLAY_ABSENT_CODES.has(error?.code)) return null;
 		throw error;
 	}
 	// Parsed the way pi parses it (issue #502, `models-json.mjs`): a BOM, `//` comments and trailing commas are

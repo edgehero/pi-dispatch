@@ -121,6 +121,12 @@ test("globalPiDir: unset is null; set-but-missing fails loud; set-and-existing r
 		"a PI_GLOBAL_PI_DIR that does not exist must refuse boot, not silently drop the operator's setup",
 	);
 	assert.equal(loadConfig({ PI_GLOBAL_PI_DIR: "/opt/pi-global" }, { fileExists: () => true }).globalPiDir, "/opt/pi-global");
+	// PR #553's review: a relative value is the source of the job's `-v <dir>:/opt/pi-global:ro`, and it is resolved
+	// differently by the worker and the container runtime. Refused at boot, naming the variable, even when a folder of
+	// that name exists here.
+	for (const dir of ["pi-global", "./pi-global", "../overlay"]) {
+		assert.throws(() => loadConfig({ PI_GLOBAL_PI_DIR: dir }, { fileExists: () => true }), (e) => e.piDispatchConfig === true && /PI_GLOBAL_PI_DIR must be an absolute path/.test(e.message), dir);
+	}
 });
 
 test("allowGlobalExtensions is ON by default -- the operator staged those extensions, so they load", () => {

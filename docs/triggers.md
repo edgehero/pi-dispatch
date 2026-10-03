@@ -234,8 +234,14 @@ empty file makes pi drop the whole file. pi then also loses the file's entries f
 as a `baseUrl` for `openai`, and would run their models against the provider's public endpoint. So while
 the overlay `models.json` is broken, the worker refuses every job (`model-unknown`, with
 `overlay-unparseable` in the worker log), whichever model it runs or lists. The same holds when
-`models.json` is a directory (`overlay-is-a-directory`). `pi-dispatch doctor` says so. Fix the file, or
-remove it: a missing `models.json` is no overlay, and jobs run. pi also drops a provider it cannot put
+`models.json` is a directory (`overlay-is-a-directory`), and when the worker cannot read it because of the
+permissions on the file or its folder (`overlay-unreadable`): pi in the job then loads none of the file,
+because the runner's existence check, or pi's own read, fails. It also holds when `models.json` is a link
+(`overlay-link`), since the job's read-only mount does not follow links the way your host does: replace the
+link with the file itself. `pi-dispatch doctor` says so. Fix the file, make it
+readable by the account the worker runs as, or remove it: a missing `models.json` is no overlay, and jobs run.
+A read that fails for a moment (a disk error, too many open files) is not a refusal: the job is retried once,
+then failed. pi also drops a provider it cannot put
 together: a model with no `api` or `baseUrl` to be found, a `contextWindow` or `maxTokens` of zero or less, or
 `oauth` without a `baseUrl`. pi then ignores that provider's whole entry, its `baseUrl` and headers
 included. So every job that runs or lists a model of that provider is refused (`overlay-provider-invalid`),

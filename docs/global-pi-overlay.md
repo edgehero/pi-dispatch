@@ -113,6 +113,20 @@ its main model exists in pi's catalog or in this `models.json` (and every model 
 but if pi would drop the file (one wrong-typed field anywhere, a block comment, a UTF-16 save, an empty file), the
 worker refuses every job until the file is fixed. pi would lose every entry with the rest of the file, and send
 even a builtin model, such as `openai` behind a `baseUrl`, to the provider's public endpoint.
+The same holds when the worker cannot read the file, for example mode `0600` owned by another user, or a folder
+the worker's account cannot enter. pi in the job loads none of the file either: the runner's existence check, or
+pi's own read, fails. Every job is refused until the file is readable by the account the worker runs as, and
+`pi-dispatch doctor` says so. A read that fails for a moment (a disk error, too many open files) retries the job
+once, then fails it.
+
+`models.json` must be the file itself, not a link. The job's read-only mount does not follow links the way your
+host does, so a link can leave the job with no overlay while the worker reads your routing. The worker refuses
+every job while `models.json` is a link of any kind (`overlay-link`), and `pi-dispatch doctor` says so. The overlay
+folder itself may be a link.
+
+**Upgrade: a `models.json` that is a symlink is now refused; copy the file in.** And `PI_GLOBAL_PI_DIR` must be an
+absolute path: with a relative one the worker refuses to start, since the worker and the container runtime would
+resolve it differently. `pi-dispatch import-pi` prints the absolute path to set.
 A main model that only an extension defines (`pi.registerProvider`) was already refused inside the container,
 after the budget slot; it is now refused for free. Declare it here. A virtual model cannot be the main model:
 set `PI_MODEL` or `run.model` to a physical one.

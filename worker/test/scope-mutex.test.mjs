@@ -836,7 +836,12 @@ test("PR #520 round 2: end to end with the REAL overlay reader: unreadable retri
 		chmodSync(dir, 0o000);
 		return { read: () => readOverlayModels(dir), restore: () => chmodSync(dir, 0o700) };
 	};
-	const eio = () => ({ read: () => readOverlayModels("/overlay", { readFileSync: () => { throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" }); } }), restore: () => {} });
+	// A real folder and file: the reader walks the path as the job's mount does before it reads (PR #553's review).
+	const eio = () => {
+		const dir = tempDir("pi-overlay-eio-");
+		writeFileSync(join(dir, "models.json"), KEYLESS);
+		return { read: () => readOverlayModels(dir, { readFileSync: () => { throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" }); } }), restore: () => {} };
+	};
 	const invalid = () => {
 		const dir = tempDir("pi-overlay-bad-");
 		writeFileSync(join(dir, "models.json"), "{ nope");

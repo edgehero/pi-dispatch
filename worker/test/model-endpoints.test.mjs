@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { builtinModel } from "../src/model-catalog.mjs";
 import {
@@ -190,8 +190,8 @@ test("readOverlayModels parses <globalPiDir>/models.json as pi does, null with n
 	assert.throws(() => readOverlayModels(dir), (e) => e.piDispatchConfig === true && !/big/.test(e.message));
 });
 
-// PR #520 round 2: the READ is outside the parse's try and has no existsSync before it, so an unreadable file is a
-// transient error carrying its code (the keyless gate retries on it), never "not valid JSON" and never absence.
+// PR #520 round 2: the READ is outside the parse's try and has no existsSync before it, so an unreadable file is an
+// error carrying its code (the caller judges it, issue #552), never "not valid JSON" and never absence.
 const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
 test("readOverlayModels: absence is null, every other read error is rethrown with its code, only a parse error is a configError", { skip: asRoot ? "root reads a mode-000 file" : false }, () => {
 	const dir = tmp();
@@ -215,10 +215,45 @@ test("readOverlayModels: absence is null, every other read error is rethrown wit
 	}
 	const eio = Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
 	assert.throws(() => readOverlayModels(dir, { readFileSync: () => { throw eio; } }), (e) => e === eio, "rethrown as-is");
+	// What the job reads as NO FILE is absence (PR #553's review): the runner's existsSync (run-job.mjs) answers
+	// false for each of these, and pi then runs with no overlay. A permission error is the operator's file, rethrown.
 	for (const code of ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]) {
 		assert.equal(readOverlayModels(dir, { readFileSync: () => { throw Object.assign(new Error(code), { code }); } }), null, code);
 	}
+	for (const code of ["EACCES", "EPERM", "EROFS"]) {
+		assert.throws(() => readOverlayModels(dir, { readFileSync: () => { throw Object.assign(new Error(code), { code }); } }), (e) => e.code === code && e.piDispatchConfig !== true, code);
+	}
 	assert.throws(() => readOverlayModels(dir, { readFileSync: () => "{ nope" }), (e) => e.piDispatchConfig === true && /not valid JSON/.test(e.message));
+});
+
+test("readOverlayModels refuses a models.json that is a link of any kind; the folder may be a link (PR #553's review)", () => {
+	// The job's read-only mount does not resolve a link the way the host does (measured in the job image: an absolute
+	// target, one outside the folder, a trailing "/" and a ".." through a file each read on the host and not in the
+	// job), so models.json must be the file itself. A dangling link is refused too: it is a link, not absence.
+	const body = JSON.stringify({ providers: { openai: { baseUrl: "http://proxy.lan:8080/v1" } } });
+	const root = tmp();
+	writeFileSync(join(root, "outside.json"), body);
+	const overlay = join(root, "overlay");
+	mkdirSync(overlay);
+	writeFileSync(join(overlay, "real.json"), body);
+	for (const [label, target] of [["absolute", join(overlay, "real.json")], ["relative inside", "real.json"], ["relative outside", "../outside.json"], ["dangling", "nowhere.json"], ["a trailing slash", "real.json/"], ["a loop", "models.json"]]) {
+		try {
+			unlinkSync(join(overlay, "models.json"));
+		} catch {}
+		symlinkSync(target, join(overlay, "models.json"));
+		assert.throws(() => readOverlayModels(overlay), (e) => e.overlayLink === true && e.piDispatchConfig === true && e.code === undefined && /replace it with the file itself/.test(e.message), label);
+	}
+	// The file itself is read, and so is a folder reached through a link: the runtime follows it at mount time.
+	unlinkSync(join(overlay, "models.json"));
+	writeFileSync(join(overlay, "models.json"), body);
+	assert.deepEqual(readOverlayModels(overlay), JSON.parse(body));
+	symlinkSync(overlay, join(root, "overlay-link"));
+	assert.deepEqual(readOverlayModels(join(root, "overlay-link")), JSON.parse(body));
+	// ELOOP, ENOTDIR and ENAMETOOLONG can now come only from the folder's path: no overlay in the job, as here.
+	symlinkSync(join(root, "loop"), join(root, "loop"));
+	assert.equal(readOverlayModels(join(root, "loop")), null, "ELOOP on the folder");
+	assert.equal(readOverlayModels(join(root, "outside.json")), null, "ENOTDIR: the folder is a file");
+	assert.equal(readOverlayModels(join(root, "x".repeat(300))), null, "ENAMETOOLONG");
 });
 
 // ── derivation ─────────────────────────────────────────────────────────────────────────────────────────
