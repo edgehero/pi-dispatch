@@ -106,7 +106,10 @@ test("terminate writes a terminated line with the caller's counts and exits 143;
 
 test("run-job.mjs reads the key and installs the SIGTERM handler before main, and writes every exit line through the writer", () => {
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	const handler = src.indexOf('process.on("SIGTERM", () => exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() }));');
+	const handler = src.indexOf('process.on("SIGTERM", () => {');
+	// The meter's teardown (issue #500 part E's review) runs first, caught, so the line carries the final fold and is
+	// written whatever the teardown did.
+	assert.match(src, /process\.on\("SIGTERM", \(\) => \{\n\t\ttry \{\n\t\t\tfinishMeter\(\);\n\t\t\} catch \{\n[^}]*\}\n\t\texitWriter\.terminate\(\{ \.\.\.liveExitFields\(\), \.\.\.meteredExitFields\(\) \}\);\n\t\}\);/);
 	const keyRead = src.indexOf("\texitKey = readExitKey(process.env);");
 	const mainCall = src.indexOf("\n\tmain()");
 	assert.ok(keyRead !== -1 && handler !== -1 && mainCall !== -1, "the key read, the handler and the main call are all there");

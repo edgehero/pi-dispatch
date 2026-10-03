@@ -793,6 +793,16 @@ jobs:
                 console.log(\"OK: a nested runner is one metered child ledger, 777 tokens, done\");" "$L"' \
             || { echo "::error::A nested runner in the image did not run as a metered pi CLI. Check, in order: run-job.mjs calls isNestedRunner before anything else, child-route.mjs runAsPiCli loads pi's dist/cli.js, and child-preload.mjs gives a nested runner the pi CLI's route (image/runner/test/child-meter.integration.test.mjs runs the same route outside the image)."; exit 1; }
 
+      # Issue #500 part E: the parent's children hook in the image, with real pi children, as an arbitrary uid. The test
+      # file ships in the image (image/runner is copied whole). On Linux its detector tests run too, so `skipped 0` is the
+      # proof that /proc was read: a pi child whose spawner cleared the environment is found and counted unmetered.
+      - name: "RUNNER: the parent folds a pi child's ledger, stops it at the cap and finds an unmetered pi child, as an arbitrary uid"
+        run: |
+          docker run --rm --network none --user 4242:4242 -e HOME=/tmp -e TMPDIR=/tmp -e PI_DISPATCH_REQUIRE_LOADER_TESTS=1 \
+            --entrypoint node "$IMAGE_REF" --test --test-reporter=tap /app/image/runner/test/child-watch.integration.test.mjs > watch.tap 2>&1 \
+            && grep -qx "# fail 0" watch.tap && grep -qx "# skipped 0" watch.tap \
+            || { cat watch.tap; echo "::error::The parent's children hook did not fold, stop or detect in the image. Check, in order: run-job.mjs hands createChildWatch to installProcessUsageMeter, child-watch.mjs still matches pi's titles (pi, pi-rpc) and entry files, and the child meter still reads STOP (image/runner/test/child-watch.test.mjs and child-watch.integration.test.mjs run the same rules outside the image)."; exit 1; }
+
   admin-extension-canary:
     # The admin extension is the default front door (issue #96): it is TESTED against an exact pi
     # (SUPPORTED_PI_VERSION, locked to the admin devDependency pin by admin/test/load.test.mjs) but

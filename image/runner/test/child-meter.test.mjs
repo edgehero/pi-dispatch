@@ -450,7 +450,7 @@ test("the resolve hook: every other resolution passes untouched; model-runtime.j
 	assert.equal(bundles, 2);
 });
 
-test("preload: nothing without a ledger directory; an entry is injected and stubbed; a subcommand is not; any other process gets the hook", async () => {
+test("preload: nothing without a ledger directory; an entry is injected and stubbed; a subcommand gets a done ledger and no -e; any other process gets the hook", async () => {
 	const realpath = fakeRealpath();
 	const packageDir = () => ROOT;
 	const noHooks = () => assert.fail("no hook may be registered here");
@@ -470,8 +470,14 @@ test("preload: nothing without a ledger directory; an entry is injected and stub
 	assert.deepEqual(JSON.parse(readFileSync(join(dir, stub), "utf8")), usageMeter.childLedger({ state: "starting" }));
 
 	const sub = ["node", `${ROOT}/dist/cli.js`, "install", "npm:x"];
-	assert.equal(await preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv: sub, global: {}, packageDir, realpath, registerHooks: noHooks }), "subcommand");
-	assert.deepEqual(sub.slice(2), ["install", "npm:x"]);
+	const subDir = tempDir("pi-dispatch-preload-sub-");
+	assert.equal(await preload({ env: { PI_DISPATCH_CHILD_LEDGER: subDir }, argv: sub, pid: 78, global: {}, packageDir, realpath, registerHooks: noHooks, loadMeter: () => usageMeter }), "subcommand");
+	assert.deepEqual(sub.slice(2), ["install", "npm:x"], "no -e in front of a subcommand");
+	// But a ledger for its pid, `done` with zeros (issue #500 part E): once setupCli has run, its command line reads only
+	// `pi`, and the parent's detector would count a pi process with no ledger as unmetered.
+	const [subStub] = readdirSync(subDir);
+	assert.match(subStub, /^78\.[0-9a-f]{16}\.json$/);
+	assert.deepEqual(JSON.parse(readFileSync(join(subDir, subStub), "utf8")), usageMeter.childLedger({ state: "done" }));
 
 	const hooks = [];
 	const plain = {};

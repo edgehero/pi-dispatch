@@ -265,10 +265,10 @@ test("run-job installs the meter and the guards before any extension loads, and 
 	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields");
 	assert.match(src, /const tokens = usageMeter\.ok \? meteredExitFields\(\)\.tokens :/, "the success line reads the same fields");
 	// `usage` rides only when a call was observed: a run with none keeps the key absent, never `usage: null`.
-	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? policyGuard\.snapshot\(\) : \{\}\) \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");
+	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\) \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");
 	// A throw after a stop (a refused load-time call, then command-unregistered) exits with the stop, as decideExit ranks it.
 	assert.match(src, /meterStopAtExit = \(\) => \(meter\.state\.stopReason === null \? null : decideExit\(\{ budgetAborted: false, meterStop: meter\.state\.stopReason \}\)\);/, "the stop is decided by decideExit");
-	assert.match(src, /const thrown = classifyThrow\(error\);\n\t\t\tconst stopped = meterStopAtExit\(\);/, "the throw is classified and the stop read");
+	assert.match(src, /const thrown = classifyThrow\(error\);\n(?:[^\n]*\n){0,6}?\t\t\tconst stopped = meterStopAtExit\(\);/, "the throw is classified and the stop read");
 	assert.match(src, /const outcome = stopped \?\? thrown;/, "the stop wins the catch path's exit reason");
 	// The outranked throw keeps a trace: its classified reason and its class, never its message.
 	assert.match(src, /if \(stopped !== null\) log\("throw_after_stop", \{ reason: thrown\.reason, error: typeof error\?\.name === "string" \? error\.name : null \}\);/, "the second cause is logged, names only");
@@ -287,14 +287,16 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	// The verdict comes from policyEnforcement, whose ok:false and brake rules usage-meter.test.mjs drives.
 	assert.match(src, /assertPoliciesEnforceable\(\{\s*maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*\.\.\.policyEnforcement\(usageMeter\),\s*\}\);/, "the fallback bus meter (ok:false) can only see a call after it was paid for");
 	// Issue #501, PR 3 (PR #533's review): the stop handler is the tested one, so a cost stop cannot log token_budget_exceeded.
-	assert.match(src, /onStop: meterStopHandler\(\{ onTokenAbort, abort: \(\) => void session\?\.abort\(\) \}\),/, "the meter's stop goes through meterStopHandler");
+	assert.match(src, /const stopHandler = meterStopHandler\(\{ onTokenAbort, abort: \(\) => void session\?\.abort\(\) \}\);/, "the meter's stop goes through meterStopHandler");
+	// And then, issue #500 part E, to the children: STOP is written the moment the meter stops.
+	assert.match(src, /\t\tonStop: \(reason, detail\) => \{\n\t\t\tstopHandler\(reason, detail\);\n\t\t\tchildWatch\?\.stopped\(reason\);\n\t\t\},\n/, "the stop handler first, then STOP for the children");
 	assert.doesNotMatch(src, /reason === TOKEN_BUDGET/, "no second, untested copy of the token-only rule");
 	// The policy guard (issues #501, #502): built from both policies (null when neither is set, its order and its
 	// snapshot driven in model-guard.test.mjs), handed to the install, and its fields spread only when it exists.
-	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log \}\);/);
+	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log, external: \(\) => childWatch\.external\(\) \}\);/);
 	assert.ok(src.indexOf("const policyGuard =") < install, "the guard exists before the install that hands it to both halves");
-	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard \}\)/);
-	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? policyGuard\.snapshot\(\) : \{\}\) \}/, "the policy fields ride the exit line only when a policy is set");
+	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch \}\)/);
+	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\) \}/, "the policy fields ride the exit line only when a policy is set, the children's counters added");
 	assert.doesNotMatch(src, /createCostGuard|createModelGuard/, "no guard built beside the policy guard, which fixes their order");
 	assert.match(src, /maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*rootSessionId/, "the meter carries both policies, so the brake is armed for them");
 	assert.match(src, /meterStop: usageMeter\.ok \? meter\.state\.stopReason : null,/, "the exit decision reads the meter's stop by reason");
@@ -313,6 +315,32 @@ test("run-job takes PI_EXIT_AUTH out of its environment right after reading the 
 	assert.ok(ledger < src.indexOf("await buildLoadedResourceLoader("), "before any extension loads");
 	assert.ok(ledger < src.indexOf("await createAgentSession("), "before the session exists");
 	assert.match(src, /if \(childLedger\.error !== undefined\) log\("child_ledger_unavailable", \{ reason: childLedger\.error \}\);/, "a ledger that could not be opened is said, by code");
+});
+
+test("run-job hands the meter the children hook on the ledger directory, and the guard's external is the children's spend (issue #500 part E)", () => {
+	// Source-guard tactic: child-watch.test.mjs drives the hook itself. This pins the wiring a run cannot show here.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const ledger = src.indexOf("const childLedger = openChildLedger(");
+	const meter = src.indexOf("const meter = createUsageMeter({");
+	const watch = src.indexOf("childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });");
+	const guard = src.indexOf("const policyGuard = createPolicyGuard(");
+	const install = src.indexOf("await installProcessUsageMeter(");
+	assert.ok(ledger > 0 && meter > ledger && watch > meter && guard > watch && install > guard, "the ledger, the meter, the hook (which sets the empty fold, so the three keys are on every exit line), the guard, the install");
+	assert.match(src, /\tlet childWatch = null;\n/, "declared before the meter, whose onStop writes STOP through it");
+	assert.equal(src.split("createChildWatch(").length, 2, "one hook");
+});
+
+test("the outer catch and the SIGTERM handler tear the meter down before they read its fields (issue #500 part E's review)", () => {
+	// Source-guard tactic: the runner's module top cannot be run in-process. The final fold and the detector's teardown
+	// rule must reach every exit line a metered run writes, and a stop the final pass makes must rank the catch's exit.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /\n\t\tfinishMeter = \(\) => usageMeter\.uninstall\(\);\n/, "armed with the exit fields, once the meter installed");
+	const catchAt = src.indexOf(".catch((error) => {");
+	const finish = src.indexOf("finishMeter();", catchAt);
+	assert.ok(catchAt > 0 && finish > catchAt && finish < src.indexOf("const stopped = meterStopAtExit();", catchAt), "the catch tears down before it reads the stop");
+	assert.ok(finish < src.indexOf("...meteredExitFields() });", catchAt), "and before it reads the fields");
+	const sigterm = src.indexOf('process.on("SIGTERM", () => {');
+	assert.ok(sigterm > 0 && src.indexOf("finishMeter();", sigterm) < src.indexOf("exitWriter.terminate(", sigterm), "SIGTERM tears down before it writes");
 });
 
 test("run-job decides nested or not FIRST, and a nested runner never reaches the key read, the SIGTERM handler or main (issue #500 part D)", () => {

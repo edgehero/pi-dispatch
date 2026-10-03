@@ -18,6 +18,21 @@ export const CHILD_METER_PATH = join(HERE, "child-meter.ts");
 /** The runner itself, which a nested copy runs as its argv[1]. */
 export const RUN_JOB_PATH = join(HERE, "..", "run-job.mjs");
 
+/**
+ * The files that run a full pi session, relative to the pi package root, and how each reads its arguments. Here, not in
+ * child-preload.mjs, because the parent's detector (child-watch.mjs) matches the same five and must not load the
+ * preload, which runs on import.
+ */
+export const PI_ENTRIES = Object.freeze([
+	Object.freeze({ path: "dist/bundle/cli.js", kind: "cli" }),
+	// cli.js only loads this one, where setupCli and main live; run directly it is the same CLI.
+	Object.freeze({ path: "dist/bundle/cli-runtime.js", kind: "cli" }),
+	Object.freeze({ path: "dist/cli.js", kind: "cli" }),
+	// The rpc entries prepend `--mode rpc` themselves, so no subcommand can follow: every argument list is a session.
+	Object.freeze({ path: "dist/bundle/rpc-entry.js", kind: "rpc" }),
+	Object.freeze({ path: "dist/rpc-entry.js", kind: "rpc" }),
+]);
+
 /** The pi subcommands, dispatched on args[0] before any option is parsed (pinned in pinned-api.test.mjs). */
 export const PI_SUBCOMMANDS = Object.freeze(["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"]);
 

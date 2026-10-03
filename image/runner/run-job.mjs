@@ -33,6 +33,7 @@ import { createExitWriter, readExitKey, writeAllSync } from "./src/exit-line.mjs
 import { createJobModelRuntime } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { isNestedRunner, runAsPiCli } from "./src/child-route.mjs";
+import { createChildWatch } from "./src/child-watch.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown } from "./src/tools.mjs";
@@ -99,6 +100,14 @@ let meterStopAtExit = () => null;
  * until the turn budget is attached; then set, so a line written on a stop carries what the decided line would have.
  */
 let liveExitFields = () => ({});
+/**
+ * The meter's teardown (issue #500 part E's review): the children hook's final fold, its STOP and its teardown rule, and
+ * the teardown line. Empty until the meter installs; idempotent. The prompt's finally runs it, and so do the SIGTERM
+ * handler and the outer catch before they write their exit line, so every line a metered run writes carries the final
+ * fold and every unmetered child the detector would count. Bounded: the fold reads at most CHILD_LEDGER_MAX_FILES open
+ * files and the /proc scan stops at its time budget, well inside the stop's grace period.
+ */
+let finishMeter = () => {};
 
 /** The exit line's key (issue #545) and its one writer, both set in the job runner's block at the end of this file before main runs. */
 let exitKey;
@@ -214,11 +223,14 @@ async function main() {
 	// The child ledger (issue #500), opened BEFORE the meter installs and before any extension loads, because a child
 	// can be spawned from the first extension factory on. Every descendant inherits the directory, this runner's pid and
 	// a NODE_OPTIONS --import of the child preload, which meters a pi child in the child and reports through a file in
-	// the directory (openChildLedger). Not removed at exit: the container's filesystem goes with the container, and the
-	// parent's last fold reads the directory at teardown. With no directory the children are not pointed anywhere and a
-	// pi child runs unmetered; said here, by code only (a path never ships in a log).
+	// the directory (openChildLedger). The meter's children hook (child-watch.mjs) folds the files on every tick and at
+	// teardown, and removes the directory after its final fold. With no directory the children are not pointed anywhere
+	// and a pi child runs unmetered, which the hook's detector counts; said here, by code only (a path never ships in a log).
 	const childLedger = openChildLedger({ env: process.env, pid: process.pid, preloadUrl: new URL("./src/child-preload.mjs", import.meta.url).href });
 	if (childLedger.error !== undefined) log("child_ledger_unavailable", { reason: childLedger.error });
+	// Declared before the meter so its onStop can write STOP at once (the hook rewrites it on every tick anyway).
+	let childWatch = null;
+	const stopHandler = meterStopHandler({ onTokenAbort, abort: () => void session?.abort() });
 
 	const meter = createUsageMeter({
 		maxTokens: cfg.maxTokens,
@@ -230,18 +242,28 @@ async function main() {
 		// (meterStopHandler). Same synchronous-abort discipline as attachTokenBudget's
 		// onAbort: abort() flips the AbortController before its first await, so the signal is set the instant we
 		// call it. Awaiting here would let the next turn start under a cap we already know is blown.
-		onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }),
+		onStop: (reason, detail) => {
+			stopHandler(reason, detail);
+			childWatch?.stopped(reason);
+		},
 	});
 	// The allowed-model list (issue #502) and the per-job cost cap (issue #501): judged BEFORE every provider call by
 	// the one guard both meter halves consult, the list first. Each part is built only when its policy is set, and
 	// with neither there is no guard, so such a job runs exactly as before.
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log });
-	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard });
+	// The parent's children hook (issue #500 part E, child-watch.mjs): folds the child ledgers into this meter, writes
+	// SPENT and STOP, judges the stops on the job's whole spend, and detects pi processes that report through no ledger.
+	// Built before the guard, whose `external` is every child's spend and in-flight bound as of the last fold. From here
+	// on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no children.
+	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external() });
+	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
 	if (usageMeter.ok) {
 		meteredExitFields = () => {
 			const usage = meter.usageSnapshot();
-			return { tokens: { ...meter.snapshot(), ...(policyGuard ? policyGuard.snapshot() : {}) }, ...(usage ? { usage } : {}) };
+			// The guard's counters with the children's added (childWatch.guardFields): a child's partial count floors the job.
+			return { tokens: { ...meter.snapshot(), ...(policyGuard ? childWatch.guardFields(policyGuard.snapshot()) : {}) }, ...(usage ? { usage } : {}) };
 		};
+		finishMeter = () => usageMeter.uninstall();
 		meterStopAtExit = () => (meter.state.stopReason === null ? null : decideExit({ budgetAborted: false, meterStop: meter.state.stopReason }));
 	}
 	// A cost cap or a model list must be enforced BEFORE each call, so a runner that cannot do that refuses
@@ -565,7 +587,14 @@ if (!nestedRunner) {
 	// init process, which forwards it here. Without a handler node died at once and no genuine exit line followed, so a
 	// line a tool wrote earlier was the last one in the log. Now the real line is written, with what the meter counted,
 	// and the runner exits 143 well inside the stop's grace period. A line already written is not written again.
-	process.on("SIGTERM", () => exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() }));
+	process.on("SIGTERM", () => {
+		try {
+			finishMeter();
+		} catch {
+			// The line is written whatever the teardown did.
+		}
+		exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() });
+	});
 
 	// Preflight throws; the agent loop swallows. Both paths are real and cover disjoint failure sets
 	// -- see INT-RUNNER-EXIT-CODE-PROTOCOL. Without this catch, a missing API key is an unhandled
@@ -578,6 +607,12 @@ if (!nestedRunner) {
 		.catch((error) => {
 			// The meter's fields ride here too once it installed (issue #543); before that there is nothing to report.
 			const thrown = classifyThrow(error);
+			// The final fold first, so a stop it makes ranks this exit and its counts are on the line.
+			try {
+				finishMeter();
+			} catch {
+				// The line is written whatever the teardown did.
+			}
 			const stopped = meterStopAtExit();
 			// The stop wins the exit reason, and the throw it outranked is named on its own line so the second cause is not
 			// lost: its classified reason and the error's class, never its message (names only).

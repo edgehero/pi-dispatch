@@ -553,6 +553,14 @@ test("meterStopHandler: every stop aborts, and only a token stop logs token_budg
 		meterStopHandler({ onTokenAbort: (detail) => tokenAborts.push(detail), abort: () => (aborts += 1) })(reason, 42);
 		assert.deepEqual([tokenAborts, aborts], [logged, 1], reason);
 	}
+	// A token stop with a cause (issue #500 part E: an unmetered child, a failed children hook) is not the cap being
+	// passed: its own line says why, so token_budget_exceeded is not logged. It still aborts.
+	for (const cause of ["unmetered-child", "children-hook"]) {
+		const tokenAborts = [];
+		let aborts = 0;
+		meterStopHandler({ onTokenAbort: (detail) => tokenAborts.push(detail), abort: () => (aborts += 1) })(TOKEN_BUDGET, { cause });
+		assert.deepEqual([tokenAborts, aborts], [[], 1], cause);
+	}
 });
 
 test("policyEnforcement: the brake counts only on an installed meter", () => {
