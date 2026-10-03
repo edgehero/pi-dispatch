@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
@@ -699,6 +700,77 @@ test("an extension factory runs inside the resource loader's reload(), with no c
 	walk(join(core, "core"));
 	assert.deepEqual(resetting, [join("core", "agent-session.js")], "a second caller of resetApiProviders() appeared");
 	assert.match(agentDistFile("core", "agent-session.js"), /\n {8}resetApiProviders\(\);\n {8}await this\._resourceLoader\.reload\(\);/, "AgentSession.reload() no longer resets the registry before it reloads");
+});
+
+// ── Issue #544: the extension discovery rule loader.mjs restates ─────────────────────────────────────────────
+//
+// discoverExtensionEntries lists the overlay's extensions/ by the rule pi applies to ~/.pi/agent/extensions,
+// because pi reads an explicit directory path as a package root instead. A restated rule is pinned or it drifts:
+// each step is a needle here, and the five functions it restates are held by hash, so a pin bump that changes any
+// of them fails this test and the fix is to re-read pi and re-port, never to update the hash alone.
+
+/** The text of one top-level `function name(...) {...}` in a pi dist file. */
+function piFunction(source, name) {
+	const start = source.indexOf(`function ${name}(`);
+	assert.ok(start >= 0, `pi no longer defines ${name}`);
+	return source.slice(start, source.indexOf("\n}\n", start) + 2);
+}
+
+const sha256 = (text) => createHash("sha256").update(text).digest("hex");
+
+test("pi's extension discovery rule is the one discoverExtensionEntries restates (issue #544)", { skip }, () => {
+	const pm = agentDistFile("core", "package-manager.js");
+	// The rule pi applies to its own agent dir's extensions/, which import-pi copies the overlay from.
+	assert.match(pm, /addResources\("extensions", collectAutoExtensionEntries\(userDirs\.extensions\)/, "~/.pi/agent/extensions is no longer read by collectAutoExtensionEntries");
+	const auto = piFunction(pm, "collectAutoExtensionEntries");
+	assert.match(auto, /const rootEntries = resolveExtensionEntries\(dir\);\n\s*if \(rootEntries\) \{\n\s*return rootEntries;/, "a folder's own entries no longer win outright");
+	assert.match(auto, /addIgnoreRules\(ig, dir, dir\);/, "the root's ignore files are no longer read");
+	assert.match(auto, /if \(entry\.name\.startsWith\("\."\)\)\n\s*continue;\n\s*if \(entry\.name === "node_modules"\)\n\s*continue;/, "dotfiles or node_modules are no longer skipped");
+	assert.match(auto, /if \(isFile && \(entry\.name\.endsWith\("\.ts"\) \|\| entry\.name\.endsWith\("\.js"\)\)\) \{\n\s*entries\.push\(fullPath\);/, "loose .ts/.js files are no longer extensions");
+	assert.match(auto, /else if \(isDir\) \{\n\s*const resolvedEntries = resolveExtensionEntries\(fullPath\);/, "a subfolder no longer contributes its own entries");
+	const entries = piFunction(pm, "resolveExtensionEntries");
+	assert.match(entries, /manifest\?\.extensions\?\.length/, "a package.json pi.extensions list is no longer read");
+	assert.match(entries, /if \(existsSync\(indexTs\)\) \{\n\s*return \[indexTs\];\n\s*\}\n\s*if \(existsSync\(indexJs\)\) \{\n\s*return \[indexJs\];/, "index.ts no longer wins over index.js");
+	assert.match(pm, /const IGNORE_FILE_NAMES = \[".gitignore", ".ignore", ".fdignore"\];/);
+	assert.match(pm, /\nimport ignore from "ignore";\n/, "pi's package manager no longer uses the ignore package the runner borrows");
+	assert.deepEqual(
+		{
+			collectAutoExtensionEntries: sha256(auto),
+			resolveExtensionEntries: sha256(entries),
+			prefixIgnorePattern: sha256(piFunction(pm, "prefixIgnorePattern")),
+			addIgnoreRules: sha256(piFunction(pm, "addIgnoreRules")),
+			readPiManifest: sha256(piFunction(agentDistFile("core", "pi-manifest.js"), "readPiManifest")),
+		},
+		{
+			collectAutoExtensionEntries: "93953e6669ea6b77e1b6344ffd36792441e4d5c3f781fa2b4ab4c389620d9d00",
+			resolveExtensionEntries: "e2c7c741df8de29a3320a2ea9fc5698db51754c279d07d0688218753af74b3bd",
+			prefixIgnorePattern: "279c9086c694d7d6d5afcb80e04d2e650d1a04898753fcbcbe3784e4e7d978ad",
+			addIgnoreRules: "ea9a382bddaebd6a1e4a86ca9bc2386d6aa80b2abee946cdf0a100f96524b333",
+			readPiManifest: "487feb8648a9bcd9a12351b1d8021bd784ebeaeb079de1b7c5325eb4c73bb3bb",
+		},
+		"a function discoverExtensionEntries restates changed at this pin: re-read it and re-port the rule",
+	);
+	// Why the directory cannot be passed: an explicit DIRECTORY path is a package root, and with neither a manifest nor
+	// a resource subfolder pi adds the directory itself as the one extension.
+	assert.match(pm, /const resources = this\.collectPackageResources\(resolved, accumulator, filter, metadata\);\n\s*if \(!resources\) \{\n\s*this\.addResource\(accumulator\.extensions, resolved, metadata, true\);/, "an explicit directory path is no longer one extension when it holds no package resources");
+	// legacyOverlayLayout names what that package-root reading loaded before: the manifest's four fields, else the
+	// four resource subfolders. MANIFEST_FIELDS restates both lists.
+	assert.match(agentDistFile("core", "pi-manifest.js"), /const RESOURCE_FIELDS = \["extensions", "skills", "prompts", "themes"\];/);
+	assert.match(pm, /const RESOURCE_TYPES = \["extensions", "skills", "prompts", "themes"\];/);
+	assert.match(pm, /const manifest = readPiManifest\(join\(packageRoot, "package\.json"\)\);\n\s*if \(manifest\) \{/, "a root manifest no longer decides the package's resources");
+	// MANIFEST_PATTERN_RE restates what the package reading expanded in a manifest's entries: globs and overrides.
+	assert.match(pm, /function isOverridePattern\(s\) \{\n\s*return s\.startsWith\("!"\) \|\| s\.startsWith\("\+"\) \|\| s\.startsWith\("-"\);\n\}/);
+	assert.match(pm, /function hasGlobPattern\(s\) \{\n\s*return s\.includes\("\*"\) \|\| s\.includes\("\?"\);\n\}/);
+	// And a FILE path is loaded as that one extension, which is what the runner hands it.
+	assert.match(pm, /if \(stats\.isFile\(\)\) \{\n\s*metadata\.baseDir = dirname\(resolved\);\n\s*this\.addResource\(accumulator\.extensions, resolved, metadata, true\);/);
+	// The load errors the runner reports: pi's own { path, error } list, complete when extensionsOverride sees it.
+	const loader = agentDistFile("core", "extensions", "loader.js");
+	assert.match(loader, /errors\.push\(\{ path: extPath, error \}\);/, "a failed load is no longer recorded by its path");
+	assert.match(
+		agentDistFile("core", "resource-loader.js"),
+		/extensionsResult\.errors\.push\(\{ path: resolved, error: `Extension path does not exist: \$\{resolved\}` \}\);\n\s*\}\n\s*\}\n\s*\}\n\s*this\.extensionsResult = this\.extensionsOverride \? this\.extensionsOverride\(extensionsResult\) : extensionsResult;/,
+		"extensionsOverride no longer sees the finished error list",
+	);
 });
 
 // ── Issue #291: run.excludeTools' pin surface ─────────────────────────────────────────────────────

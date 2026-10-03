@@ -156,6 +156,44 @@ present but dormant is a deployment missing the setup its flows were written aga
    reports it, the runner refuses the job — because the damaging misreading is now "I thought I had turned
    these off", where before a typo merely left them dormant.
 
+**What in `extensions/` loads.** The same files pi loads from `~/.pi/agent/extensions` on your machine:
+
+- every `*.js` and `*.ts` file directly in the folder;
+- every subfolder's `index.ts`, or its `index.js` when there is no `index.ts`;
+- a subfolder with a `package.json` whose `pi.extensions` lists entries loads those entries instead.
+
+pi skips names that start with `.`, `node_modules`, and what a `.gitignore`, `.ignore` or `.fdignore`
+directly in `extensions/` excludes. If `extensions/` itself holds an `index.ts`, an `index.js` or a
+`package.json` whose `pi.extensions` lists entries that exist, only that loads, as on your machine. Glob and
+exclude patterns in that list are not expanded in the overlay. Until issue #544 only
+`extensions/index.js` loaded: a folder of loose files failed to load, and nothing said so.
+
+One difference from your machine: a `pi.extensions` entry that names a **folder** is skipped in a job and
+logged (`extension_load_failed`, kind `manifest-dir`). List the folder's entry file instead. If an ignore file
+is present and pi's own matcher cannot be loaded, no overlay extension loads, and the run log says
+`overlay_extensions_withheld`.
+
+**Upgrade.** Three things change for an overlay that worked before issue #544:
+
+- Layouts that loaded as a pi package now load nothing: `extensions/extensions/`, `extensions/skills/`,
+  `extensions/prompts/` and `extensions/themes/`, and the `skills`, `prompts` and `themes` fields of a
+  `package.json` in `extensions/`. Each job logs `overlay_extensions_layout` naming them once. Move skills to
+  the overlay's `skills/` and prompts to its `prompts/`, or stage the folder as a package.
+- A `package.json` in `extensions/` whose `pi.extensions` used globs (`./src/*.js`) or excludes (`!b.js`)
+  loaded what they matched. Now each entry is a plain path: a glob matches nothing, and an exclude no longer
+  keeps a file out. When none of the entries exists, the loose files in `extensions/` load instead. The job
+  logs `overlay_extensions_layout` with `package.json pi.extensions patterns`. List each entry file by name.
+- Loose files in `extensions/` that never ran (helpers, tests, scratch files) now load in every job. Check
+  the folder, and move or ignore what is not an extension.
+
+**A failed load is logged.** An extension that fails to load (a syntax error, a missing import, a throw
+while it loads) is skipped, the job runs without it, and the run log has an `extension_load_failed` line.
+The line names each failed extension by its path inside `extensions/` (for example `broken.js`) and the
+folder it came from. It never carries the file's content or pi's error text. `kind` is `load` for a failed
+load, `conflict` for an extension that loaded but shares a tool or flag name with another, and
+`manifest-dir` for a `pi.extensions` entry naming a folder, which is skipped.
+The line covers the repo's extensions and staged packages too.
+
 **Three sources of extension code reach a job, and only one of them is this overlay.** Worth stating in one
 place, because two of them are easy to forget and #58 originally called the third a non-goal:
 
@@ -171,7 +209,9 @@ merge-gated content and never a fork's branch on a pull-request job — which is
 fork-adversarial hole #58 closed. Precedence runs repo mount, then overlay, then staged packages, then
 whatever discovery finds under `/workspace`, first path wins, so a discovered repo extension is last of all
 and shadows nothing you staged. The recursion guard drops any extension named like the admin console or
-registering a `dispatch_*` tool, wherever it came from.
+registering a `dispatch_*` tool, wherever it came from. "Named like" covers the folder too: an extension
+inside a folder directly under `extensions/` whose name contains `pi-dispatch` or `dispatch-admin` is
+dropped, and the run log says `extension_dropped`.
 
 The rule of thumb inverted with the default: what you would not want running in a job container should not
 be in the overlay. Never place the admin extension there (it can enqueue paid jobs — a recursion vector;

@@ -40,7 +40,7 @@ function stripComments(text) {
 // Every way this codebase could open a Valkey connection, and the ONE file allowed to do each. Gate round 3: the
 // libraries are matched as ANY string literal naming them, in any quote style, subpaths included, so a backtick import,
 // a `require` or a specifier held in a variable are caught alike; `createRequire` only where pi's own packages are
-// loaded by path, and a dynamic import whose specifier is not a plain literal (a computed one) only in the files that
+// loaded by path (the runner's loader takes pi's `ignore` from pi's install, issue #544), and a dynamic import whose specifier is not a plain literal (a computed one) only in the files that
 // load a module by variable for their own reasons (the runner's pi loaders, and doctor's canary script, which is a
 // string it hands a container).
 const LIB = (name) => new RegExp(`["'\`]${name}(?:/[^"'\`]*)?["'\`]`);
@@ -48,7 +48,7 @@ const RULES = [
 	{ what: "the ioredis driver", re: LIB("ioredis"), allowed: ["worker/src/connection.mjs"] },
 	{ what: "the bullmq library", re: LIB("bullmq"), allowed: ["worker/src/queue.mjs", "worker/src/index.mjs"] },
 	// The two that load pi's own packages (undici, pi-coding-agent's keys) by pi's install path; neither names a Valkey library.
-	{ what: "createRequire", re: /\bcreateRequire\b/, allowed: ["admin/src/keys.mjs", "image/runner/src/env-proxy.mjs"] },
+	{ what: "createRequire", re: /\bcreateRequire\b/, allowed: ["admin/src/keys.mjs", "image/runner/src/env-proxy.mjs", "image/runner/src/loader.mjs"] },
 	{ what: "a computed dynamic import", re: /\bimport\(\s*(?:[^"'`\s)]|`[^`]*\$\{)/, allowed: ["image/runner/src/env-proxy.mjs", "image/runner/src/usage-meter.mjs", "image/runner/src/outcome.mjs", "worker/src/doctor.mjs"] },
 	{ what: "an ioredis client constructor", re: /new\s+(Redis|IORedis|ioredis|Cluster)\s*\(|\bcreateClient\s*\(/, allowed: ["worker/src/connection.mjs"] },
 	{ what: "a BullMQ Queue, QueueEvents or FlowProducer", re: /new\s+(Queue|QueueEvents|FlowProducer)\s*\(/, allowed: ["worker/src/queue.mjs"] },

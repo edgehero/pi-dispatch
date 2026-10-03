@@ -1,6 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join, relative, resolve, sep } from "node:path";
 import { DefaultResourceLoader, getAgentDir, loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
-import { isUnderAnyRoot, partitionAdminExtensions } from "./packages.mjs";
+import { extensionEntryName, isUnderAnyRoot, owningRoot, partitionAdminExtensions } from "./packages.mjs";
 
 /** Where the image bakes the guardrails. Outside agentDir, on purpose -- see buildResourceLoader. */
 export const GUARDRAILS_PATH = "/opt/pi-dispatch/HARD_RULES.md";
@@ -87,6 +89,284 @@ export function dropAdminExtensions(base, { roots = [], log = defaultLog } = {})
 	// built by partitionAdminExtensions to carry nothing else, so this line cannot grow a path by edit.
 	log("extension_dropped", { reason: "admin-recursion-guard", extensions: dropped });
 	return { ...base, extensions: kept };
+}
+
+/**
+ * The ignore files pi reads at the top of an extensions directory, in pi's order (IGNORE_FILE_NAMES in
+ * core/package-manager.js at the 0.99.1 pin; pinned-api.test.mjs holds the needle).
+ */
+export const EXTENSION_IGNORE_FILES = [".gitignore", ".ignore", ".fdignore"];
+
+const nodeFs = { existsSync, readdirSync, readFileSync, statSync };
+
+/**
+ * pi's own gitignore matcher: the `ignore` package pi's package manager imports, resolved from pi's
+ * package so it is the copy pi uses rather than a second reader of the same syntax. Loaded only when
+ * an ignore file is present, so the common overlay never touches it.
+ */
+function piIgnoreMatcher() {
+	const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	const ignore = piRequire("ignore");
+	return (ignore.default ?? ignore)();
+}
+
+const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The four resource fields pi's readPiManifest keeps (RESOURCE_FIELDS in core/pi-manifest.js at the pin). */
+const MANIFEST_FIELDS = ["extensions", "skills", "prompts", "themes"];
+
+/**
+ * pi's readPiManifest: null unless package.json parses (a leading BOM stripped) and carries a `pi` object;
+ * then each resource field that is an array of strings, and only those.
+ */
+function readManifest(packageJsonPath, fs) {
+	try {
+		const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8").replace(/^\uFEFF/, ""));
+		if (!isObject(pkg) || !isObject(pkg.pi)) return null;
+		const manifest = {};
+		for (const field of MANIFEST_FIELDS) {
+			const entries = pkg.pi[field];
+			if (Array.isArray(entries) && entries.every((entry) => typeof entry === "string")) manifest[field] = entries;
+		}
+		return manifest;
+	} catch {
+		return null;
+	}
+}
+
+/** True when the path is a directory (a symlink to one included), false when it is not or cannot be read. */
+function isDirectoryPath(path, fs) {
+	try {
+		return fs.statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * pi's resolveExtensionEntries: a directory's declared entries (a package.json `pi.extensions` list, the
+ * ones that exist), else `index.ts`, else `index.js`, else null.
+ *
+ * One deliberate difference (issue #544's review): a declared entry that is a DIRECTORY is skipped and
+ * recorded in `skipped` as `manifest-dir`. pi's own discovery hands that directory to its module loader,
+ * which imports it as a module; the runner can only hand pi paths, and pi reads a directory PATH as a
+ * package root instead, which is a different load. Skipping it and saying so beats loading something else.
+ * The other declared entries still count, and the index fallback is still closed, as in pi, because pi's
+ * list was non-empty.
+ */
+function directoryExtensionEntries(dir, fs, skipped = []) {
+	const packageJsonPath = join(dir, "package.json");
+	if (fs.existsSync(packageJsonPath)) {
+		const declared = (readManifest(packageJsonPath, fs)?.extensions ?? [])
+			.map((entry) => resolve(dir, entry))
+			.filter((entry) => fs.existsSync(entry));
+		if (declared.length > 0) {
+			const entries = [];
+			for (const entry of declared) {
+				if (isDirectoryPath(entry, fs)) skipped.push({ path: entry, kind: "manifest-dir" });
+				else entries.push(entry);
+			}
+			return entries;
+		}
+	}
+	for (const index of ["index.ts", "index.js"]) {
+		const path = join(dir, index);
+		if (fs.existsSync(path)) return [path];
+	}
+	return null;
+}
+
+/** pi's prefixIgnorePattern with an empty prefix: the patterns of one ignore file at the root. */
+function ignorePatterns(content) {
+	const patterns = [];
+	for (const line of content.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		if (trimmed.startsWith("#") && !trimmed.startsWith("\\#")) continue;
+		let pattern = line;
+		let negated = false;
+		if (pattern.startsWith("!")) {
+			negated = true;
+			pattern = pattern.slice(1);
+		} else if (pattern.startsWith("\\!")) {
+			pattern = pattern.slice(1);
+		}
+		if (pattern.startsWith("/")) pattern = pattern.slice(1);
+		patterns.push(negated ? `!${pattern}` : pattern);
+	}
+	return patterns;
+}
+
+/**
+ * The extension entries in one extensions directory, by pi 0.99.1's own discovery rule: the rule pi
+ * applies to `~/.pi/agent/extensions` (collectAutoExtensionEntries in core/package-manager.js), which is
+ * the directory `import-pi` copies the overlay's `extensions/` from (issue #544).
+ *
+ * Why the runner lists the entries instead of handing pi the directory. pi reads an explicit DIRECTORY
+ * path as a package root: a `pi` manifest, else `extensions/ skills/ prompts/ themes/` subfolders, else
+ * the directory ITSELF is one extension. A plain folder of loose files is the last case, so pi imports
+ * the folder, fails "Cannot find module", and records it only in getExtensions().errors. Only a folder
+ * holding `index.js` ever loaded. A FILE path is loaded as that one extension, so listing the entries
+ * gives the overlay exactly what the same folder gives pi on the operator's own machine.
+ *
+ * The rule, in pi's order: the directory's own entries win outright (a package.json `pi.extensions`
+ * list, else `index.ts`, else `index.js`); otherwise each entry not starting with `.`, not
+ * `node_modules`, and not matched by the root's `.gitignore`/`.ignore`/`.fdignore`: a `*.ts` or `*.js`
+ * file is an extension, and a subdirectory contributes its own entries by the same first step. One
+ * level only. Symlinks are followed; a dangling one is skipped. Directory order is readdir's, as in pi.
+ * A manifest entry that names a directory is the one difference: it is skipped into `skipped` (see
+ * directoryExtensionEntries). An ignore file with no matcher to read it throws (see overlayExtensionEntries).
+ * An absent or unreadable directory yields none. Each step is pinned against pi's source in
+ * pinned-api.test.mjs and checked against pi's own discovery in loader.test.mjs.
+ *
+ * `fs` and `makeIgnore` are injected only so the rule is unit-testable without pi or a disk.
+ */
+export function discoverExtensionEntries(dir, { fs = nodeFs, makeIgnore = piIgnoreMatcher, skipped = [] } = {}) {
+	const entries = [];
+	if (!fs.existsSync(dir)) return entries;
+	const own = directoryExtensionEntries(dir, fs, skipped);
+	if (own) return own;
+	let matcher = null;
+	for (const name of EXTENSION_IGNORE_FILES) {
+		const ignorePath = join(dir, name);
+		if (!fs.existsSync(ignorePath)) continue;
+		let patterns = [];
+		try {
+			patterns = ignorePatterns(fs.readFileSync(ignorePath, "utf8"));
+		} catch {}
+		if (patterns.length === 0) continue;
+		// OUTSIDE the read's catch, on purpose: an ignore file pi would honour with no matcher to honour it is
+		// not a file to skip quietly. The throw reaches overlayExtensionEntries, which withholds the overlay.
+		matcher ??= makeIgnore();
+		matcher.add(patterns);
+	}
+	try {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			if (entry.name.startsWith(".")) continue;
+			if (entry.name === "node_modules") continue;
+			const fullPath = join(dir, entry.name);
+			let isDir = entry.isDirectory();
+			let isFile = entry.isFile();
+			if (entry.isSymbolicLink()) {
+				try {
+					const stats = fs.statSync(fullPath);
+					isDir = stats.isDirectory();
+					isFile = stats.isFile();
+				} catch {
+					continue;
+				}
+			}
+			const relPath = relative(dir, fullPath).split(sep).join("/");
+			if (matcher?.ignores(isDir ? `${relPath}/` : relPath)) continue;
+			if (isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) {
+				entries.push(fullPath);
+			} else if (isDir) {
+				const nested = directoryExtensionEntries(fullPath, fs, skipped);
+				if (nested) entries.push(...nested);
+			}
+		}
+	} catch {}
+	return entries;
+}
+
+/**
+ * A root `pi.extensions` entry pi's package reading would have expanded and the discovery rule takes as a plain
+ * path: a glob (`*`, `?`) or an override pattern (`!`, `+`, `-`, pi's isOverridePattern prefixes).
+ */
+const MANIFEST_PATTERN_RE = /[*?]|^[!+-]/;
+
+/**
+ * What an extensions folder holds that loaded before issue #544 and does not now, or loads differently: pi
+ * read the folder as a package root, so a root `pi` manifest's skills, prompts and themes loaded, its
+ * `pi.extensions` globs and `!` excludes were expanded, and without a manifest the `extensions/ skills/
+ * prompts/ themes/` subfolders loaded. pi's discovery rule loads extensions only, from files, and reads a
+ * manifest's entries as paths. Returns the parts, in a fixed order, so the runner can say once what changed.
+ *
+ * Only parts that loaded something are named: a manifest field must list at least one entry, a convention
+ * folder must be a directory, and a folder the discovery rule still loads an extension from (a
+ * `themes/index.js`, say) is not unused.
+ */
+export function legacyOverlayLayout(dir, { fs = nodeFs } = {}) {
+	if (!fs.existsSync(dir)) return [];
+	const packageJsonPath = join(dir, "package.json");
+	const manifest = fs.existsSync(packageJsonPath) ? readManifest(packageJsonPath, fs) : null;
+	if (manifest) {
+		const parts = [];
+		const declared = manifest.extensions ?? [];
+		// Patterns are not expanded, and a list none of whose entries exists falls through to the loose files.
+		const patterned = declared.some((entry) => MANIFEST_PATTERN_RE.test(entry));
+		const noneExist = declared.length > 0 && !declared.some((entry) => fs.existsSync(resolve(dir, entry)));
+		if (patterned || noneExist) parts.push("package.json pi.extensions patterns");
+		for (const field of MANIFEST_FIELDS) {
+			if (field !== "extensions" && manifest[field]?.length) parts.push(`package.json pi.${field}`);
+		}
+		return parts;
+	}
+	return MANIFEST_FIELDS.filter((field) => {
+		const folder = join(dir, field);
+		if (!isDirectoryPath(folder, fs)) return false;
+		return !(directoryExtensionEntries(folder, fs)?.length > 0);
+	}).map((field) => `${field}/`);
+}
+
+/**
+ * The overlay's extension entries as the runner hands them to pi, plus what it has to say about them.
+ *
+ * - `entries`: discoverExtensionEntries' list.
+ * - `skipped`: manifest entries that name a directory, reported by reportExtensionLoadErrors as
+ *   `manifest-dir` in the same `extension_load_failed` line as pi's own failures.
+ * - One `overlay_extensions_layout` line when the folder holds a layout that loaded before issue #544
+ *   and is not used now (legacyOverlayLayout), naming the parts only.
+ * - FAIL CLOSED when an ignore file is present and pi's matcher cannot be loaded: no entry is passed, and
+ *   one `overlay_extensions_withheld` line says why. Loading every file an ignore file excludes would run
+ *   code the operator marked as not an extension.
+ */
+export function overlayExtensionEntries(dir, { log = defaultLog, fs = nodeFs, makeIgnore = piIgnoreMatcher } = {}) {
+	const skipped = [];
+	let entries;
+	try {
+		entries = discoverExtensionEntries(dir, { fs, makeIgnore, skipped });
+	} catch {
+		log("overlay_extensions_withheld", { reason: "ignore-matcher-unavailable", root: dir });
+		return { entries: [], skipped: [] };
+	}
+	const unused = legacyOverlayLayout(dir, { fs });
+	if (unused.length > 0) log("overlay_extensions_layout", { root: dir, unused });
+	return { entries, skipped };
+}
+
+/**
+ * Say which extensions failed to load (issue #544). pi records a load failure only in
+ * `getExtensions().errors` (`{ path, error }`, the LoadExtensionsResult the loader hands
+ * extensionsOverride), and nothing read it, so a job ran without an extension and nothing said so.
+ *
+ * One `extension_load_failed` line per load, naming each entry by its path RELATIVE to the root that
+ * holds it (its entry name when no known root does), plus that root and a fixed `kind`: `conflict` when
+ * the entry did load but pi reports a tool or flag name it shares with another, `load`
+ * otherwise, and `manifest-dir` for a manifest entry naming a directory, which the runner skipped before
+ * pi saw it (`skipped`, from overlayExtensionEntries). Never the error text: pi's message can quote the module's source or a stack, and a run log
+ * is shipped. An error for a path that does not exist is not a failed extension: it is pi's note on a
+ * configured root that is absent, which `/job/pi/extensions` is on every job, so it is left out rather
+ * than logged on every run.
+ */
+export function reportExtensionLoadErrors(base, { roots = [], log = defaultLog, exists = existsSync, skipped = [] } = {}) {
+	const loaded = new Set((base?.extensions ?? []).map((extension) => extension?.path));
+	const failed = [];
+	const named = (path) => {
+		const root = owningRoot(path, roots);
+		const inRoot = root ? relative(root, path).split(sep).join("/") : "";
+		return { entry: inRoot || extensionEntryName(path), root };
+	};
+	// What the runner skipped before pi saw it (a manifest entry naming a directory), on the same line.
+	for (const { path, kind } of skipped) failed.push({ ...named(path), kind });
+	for (const error of base?.errors ?? []) {
+		const path = error?.path;
+		if (typeof path !== "string" || path === "") continue;
+		if (!path.startsWith("builtin:") && !exists(path)) continue;
+		failed.push({ ...named(path), kind: loaded.has(path) ? "conflict" : "load" });
+	}
+	if (failed.length > 0) log("extension_load_failed", { extensions: failed });
+	return base;
 }
 
 /**
@@ -272,6 +552,8 @@ export function buildResourceLoader({
 	// under the overlay, so an overlay-first list would report a package's extension as the operator's.
 	// The workspace is last because it is the catch-all -- a discovered repo extension is anywhere in it.
 	const extensionRoots = [...packagePaths, `${jobPiDir}/extensions`, globalExtensions, cwd];
+	// Read ONCE, here, so the layout and withheld lines are written once per job (issue #544).
+	const overlay = allowGlobalExtensions ? overlayExtensionEntries(globalExtensions, { log }) : { entries: [], skipped: [] };
 
 	return new DefaultResourceLoader({
 		cwd,
@@ -327,15 +609,23 @@ export function buildResourceLoader({
 		// The jobPiDir entry stays for symmetry and is normally absent -- the materialiser writes only
 		// APPEND_SYSTEM.md and skills -- which is why pi reports one "path does not exist" extension
 		// error on an ordinary job. Harmless, and load-bearing for tests that scope errors by root.
+		// The overlay's extensions/ is passed as its ENTRIES, not as the directory (issue #544): pi reads a
+		// directory path as a package root and a plain folder of loose files as ONE extension, which fails to
+		// import and was never reported. discoverExtensionEntries applies pi's own rule for
+		// ~/.pi/agent/extensions instead, so what loads is what the same folder loads on the operator's machine.
+		// An absent dir lists nothing, as the existsSync gate did.
 		additionalExtensionPaths: [
 			`${jobPiDir}/extensions`,
-			...(allowGlobalExtensions && existsSync(globalExtensions) ? [globalExtensions] : []),
+			...overlay.entries,
 			...packagePaths,
 		],
 		// The recursion guard (REQ-ADMIN-VIA-PI-EXTENSION Scope), run on the loaded extension set before
 		// the loader stores it -- so the admin surface a serviced repo can now ship through discovery
 		// never reaches the session's ExtensionRunner. See dropAdminExtensions.
-		extensionsOverride: (loaded) => dropAdminExtensions(loaded, { roots: extensionRoots, log }),
+		// Load failures are reported first, on the set pi loaded, so an admin-named entry that also failed is
+		// named once as failed and never as dropped (it never loaded). See reportExtensionLoadErrors.
+		extensionsOverride: (loaded) =>
+			dropAdminExtensions(reportExtensionLoadErrors(loaded, { roots: extensionRoots, log, skipped: overlay.skipped }), { roots: extensionRoots, log }),
 		// REQ-GLOBAL-PI-OVERLAY's "repo wins on conflict", made true rather than merely asserted. This
 		// is the loader's own declared seam, run on loadSkills' result before anything is stored, so the
 		// precedence pi's path ordering hands to a staged package is taken back here. Without it the

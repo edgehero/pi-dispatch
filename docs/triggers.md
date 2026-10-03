@@ -322,6 +322,14 @@ Inside the container the runner checks every call before it is sent:
   that edits those same settings is refused, because hooks are denied by default: `samplingParams` is
   checked against a short list of keys that route, a hook against a short list of keys it may change.
 
+Two things about a hook that changes the model, which an operator reading the usage ledger should know:
+
+- With no list, nothing judges the hook. A `before_provider_request` hook that rewrites the request's model
+  sends the call to that other model, but the ledger records it under the model the job asked for. A list
+  refuses the same rewrite before it is sent.
+- A rewrite the list refuses still counts as 1 call with 0 tokens on the requested model's usage row,
+  though nothing was sent. The call reached the provider function, which then refused it.
+
 The list reaches the container only on a job image that declares the `modelPolicy` capability. On an
 older image a job with a list is refused before it spends (`job-image-model-policy-unsupported`), never
 run without its limit.

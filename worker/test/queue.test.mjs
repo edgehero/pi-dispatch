@@ -27,6 +27,43 @@ test("field separation is unambiguous -- concatenation collisions cannot occur",
 	assert.notEqual(x, y);
 });
 
+test("the model fields are part of the id -- the same task on another model is not swallowed (issue #544)", () => {
+	const base = { folder: "/proj", flow: "tidy", task: "dedupe", minute: "2026-07-16T12:00" };
+	const plain = localJobId(base);
+	// A job that names no model keeps the id it always had: main's formula before issue #544, as a literal.
+	assert.equal(plain, "local-7a008793c28bba35");
+	assert.equal(localJobId({ ...base, provider: undefined, model: undefined, models: undefined }), "local-7a008793c28bba35");
+	// Any one model field moves the id, the provider alone included.
+	assert.notEqual(localJobId({ ...base, provider: "local" }), plain, "provider alone");
+	assert.notEqual(localJobId({ ...base, model: "a" }), plain, "model alone");
+	assert.notEqual(localJobId({ ...base, models: [] }), plain, "models alone");
+	const a = localJobId({ ...base, provider: "local", model: "a" });
+	assert.notEqual(a, plain);
+	assert.notEqual(a, localJobId({ ...base, provider: "local", model: "b" }), "model");
+	assert.notEqual(a, localJobId({ ...base, provider: "other", model: "a" }), "provider");
+	assert.notEqual(a, localJobId({ ...base, provider: "local", model: "a", models: [{ provider: "local", model: "a" }] }), "models");
+	assert.notEqual(
+		localJobId({ ...base, models: ["a", "b"] }),
+		localJobId({ ...base, models: ["a,b"] }),
+		"a list cannot collide with a differently split one",
+	);
+	assert.equal(a, localJobId({ ...base, provider: "local", model: "a" }), "and a double-invoke still dedups");
+});
+
+test("two CLI enqueues differing only in model are both queued (issue #544)", async () => {
+	const { enqueueLocalJobReporting } = await import("../src/queue.mjs");
+	const queue = dedupFakeQueue();
+	const args = { folder: "/proj", flow: "tidy", task: "t", provider: "local", now: new Date("2026-07-16T12:00:00Z") };
+	const first = await enqueueLocalJobReporting(queue, { ...args, model: "a" });
+	const second = await enqueueLocalJobReporting(queue, { ...args, model: "b" });
+	assert.equal(first.existing, null);
+	assert.equal(second.existing, null, "the second model's job was swallowed as a duplicate");
+	assert.notEqual(first.id, second.id);
+	const again = await enqueueLocalJobReporting(queue, { ...args, model: "b" });
+	assert.equal(again.id, second.id);
+	assert.notEqual(again.existing, null, "the same model twice in a minute still dedups");
+});
+
 // deliveryJobId is pure -- runs everywhere. It is the exact-per-delivery dedup key for GitHub jobs
 // (REQ-DEDUP-BY-DELIVERY-GUID): the X-GitHub-Delivery GUID, prefixed.
 
@@ -83,7 +120,7 @@ test("enqueueLocalJob keeps a non-chained job byte-identical -- no chainDepth/pa
 	const jobId = await enqueueLocalJob(fakeQueue, { folder: "/proj", flow: "tidy", task: "t", provider: "anthropic", model: "m", maxTurns: 5, now });
 
 	assert.deepEqual(Object.keys(captured.data), NON_CHAINED_KEYS);
-	assert.equal(jobId, localJobId({ folder: "/proj", flow: "tidy", task: "t", minute: "2026-07-16T12:00" }));
+	assert.equal(jobId, localJobId({ folder: "/proj", flow: "tidy", task: "t", minute: "2026-07-16T12:00", provider: "anthropic", model: "m" }));
 	assert.equal(captured.opts.jobId, jobId);
 });
 
@@ -821,7 +858,7 @@ test("excludeTools rides local and forge job data only when supplied, and never 
 	assert.equal(captured.opts.deduplication.id, dedupFlagged, "the semantic window coalesces flagged and unflagged alike");
 });
 
-test("models and maxCostUsd ride local and forge job data, as written, only when supplied, and never move a dedup key (#502, #501)", async () => {
+test("models and maxCostUsd ride local and forge job data, as written, only when supplied, and never move a forge dedup key (#502, #501, #544)", async () => {
 	const { enqueueLocalJob, enqueueGitHubJob } = await import("../src/queue.mjs");
 	let captured;
 	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
@@ -834,7 +871,9 @@ test("models and maxCostUsd ride local and forge job data, as written, only when
 	await enqueueLocalJob(fakeQueue, localBase);
 	assert.equal("models" in captured.data, false, "an unflagged job's data keeps exactly the keys it has today");
 	assert.equal("maxCostUsd" in captured.data, false);
-	assert.equal(captured.opts.jobId, flaggedLocalId, "the list is not identity");
+	// Issue #544 reversed this for the minute-windowed local id: the model fields are part of a local run's identity,
+	// so a run with a list is not a duplicate of the same run without one. The forge dedup below is unchanged.
+	assert.notEqual(captured.opts.jobId, flaggedLocalId, "the list is part of a local job's identity");
 
 	const forgeBase = {
 		repo: "owner/repo",

@@ -6,14 +6,19 @@ import { forgeSpec } from "./forges.mjs";
  * A deterministic jobId for a local job. BullMQ's dedup is `EXISTS jobId`, so a double-invoke of
  * the same task within the same minute produces the same id and the duplicate is ignored -- the
  * local equivalent of REQ-DEDUP-BY-DELIVERY-GUID, guarding against a hasty second Enter
- * double-spending, without blocking a deliberate re-run a minute later.
+ * double-spending, without blocking a deliberate re-run a minute later. The model fields (provider, model,
+ * models) are part of the task's identity: the same task on another model is a different run.
  *
  * Kept free of any bullmq import so the dedup logic is testable everywhere, not only where the
  * queue's dependencies are installed.
  */
-export function localJobId({ folder, flow, task, minute }) {
+export function localJobId({ folder, flow, task, minute, provider, model, models }) {
+	// The model fields join the key (issue #544): two runs that differ only in the model are two runs, and with the
+	// key blind to them the second was dropped as a duplicate. Appended only when one is set, so a job that names no
+	// model keeps the id it always had. `models` is JSON so a list cannot collide with a differently split one.
+	const modelFields = provider === undefined && model === undefined && models === undefined ? [] : [provider ?? "", model ?? "", models === undefined ? "" : JSON.stringify(models)];
 	// NUL-delimited so {folder:'a',task:'bc'} and {folder:'ab',task:'c'} cannot collide.
-	const digest = createHash("sha256").update([folder, flow ?? "", task ?? "", minute].join("\0")).digest("hex");
+	const digest = createHash("sha256").update([folder, flow ?? "", task ?? "", minute, ...modelFields].join("\0")).digest("hex");
 	return `local-${digest.slice(0, 16)}`;
 }
 
