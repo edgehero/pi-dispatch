@@ -643,6 +643,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   registered nowhere — so every name is spelled in full, and a tool discussed as rejected belongs in
   **Why**, which the scan does not read. There is deliberately **no count word** beside the list: a number
   is a second claim the pin does not check, and this entry said "eleven" while twenty-one shipped.
+  Issue #504 adds tools that are named in this list in the change that registers them: a read of the allocation, a
+  confirm-gated write of the envelope, and a new kind, the **delegated allocation write**, which sets a
+  priorities plan with no confirm, works with no interactive operator, and can change nothing but the split inside
+  the envelope (`REQ-DELEGATED-ALLOCATION`). It is the one exception to the confirm rule below.
   A write tool applies
   its change **only after a human operator approves a `ctx.ui.confirm` dialog showing the concrete
   before→after**, and **refuses — writing nothing — when no interactive operator is present** (`ctx.hasUI`
@@ -681,6 +685,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   **with an operator's approval**: a settings write (dailyCap and maxCostUsd included) is either operator-typed or a
   confirm-gated tool the model **cannot self-approve** — the model emits the call, the human answers the
   confirm — so a prompt-injected session cannot raise the cap without a human keypress it cannot forge.
+  One model-callable write needs no keypress: `dispatch_priorities_set` moves headroom between projects inside the
+  operator's envelope. It cannot change the envelope, a floor, a cap, a trigger or a setting. A prompt-injected
+  session can therefore shift spend between projects, bounded by the floors, the step and interval rules and the
+  envelope total. It still cannot raise any ceiling without a human keypress it cannot forge
+  (`REQ-DELEGATED-ALLOCATION`). The envelope itself is written by hand or through `dispatch_envelope_set`, which is
+  confirm-gated like every other write; `dispatch_allocations` reads the split and returns no reason text.
   The three dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`) are settings keys too, behind the
   same operator-typed or confirm-gated write, and are enforced since issue #501's part 3.
   A project write is confirm-gated for the same reason: which project a repo is in decides which project row counts
@@ -700,16 +710,16 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   enters model context (`CONST-ISSUE-TEXT-IS-DATA`, one layer down).
 - **Traces to**: `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AI-TRIGGER-FLOW-GATE`, `DES-JOB-OUTBOX-CHAINING`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-DURABLE-RUN-HISTORY`,
-  `REQ-AI-TRIGGERED-RUNS`
+  `REQ-AI-TRIGGERED-RUNS`, `REQ-DELEGATED-ALLOCATION`
 - **Acceptance**: Given the extension is loaded, when the operator runs `/dispatch status`, then queue
   counts, paused state, and budget render with no model involvement; given a project tool with no interactive
   operator, then it refuses and writes nothing; given `dispatch_project_delete` for a project a scoped-limits row
   names, then it refuses before any confirm and the file is untouched; given an approved project write, then the
   file is written by tmp and rename and parses with the worker's loader; given a project name holding a bidi
-  override, then the panel, the insights page, a confirm and a tool result show it escaped; given a model-invoked settings OR
-  trigger write tool, when no interactive operator is present (`ctx.hasUI` false), then it refuses and writes
-  nothing; when an operator is present but declines the confirm, then it writes nothing and reports
-  `applied:false`; when the operator approves, then it writes exactly the change the confirm showed; given an
+  override, then the panel, the insights page, a confirm and a tool result show it escaped; given a model-invoked
+  settings, trigger, limit or envelope write tool, when no interactive operator is present (`ctx.hasUI` false),
+  then it refuses and writes nothing; when an operator is present but declines the confirm, then it writes nothing and
+  reports `applied:false`; when the operator approves, then it writes exactly the change the confirm showed; given an
   operator trigger edit through the overlay OR an approved write tool, when it is written, then it validates
   through the shared `parseTriggers` (a bad edit is rejected, the file untouched) and both services apply it
   without a restart; given `dispatch_run`, when
@@ -735,7 +745,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the confirm, naming the key and not the value; given a scoped-limit write whose rows carry no dollar field and
   no model row, then the file is written as version 1; given a dollar window, then the panel and
   `dispatch_costs` show its counter as spent and held, never the records' sum, and a window whose counter cannot
-  be read shows no number rather than 0.
+  be read shows no number rather than 0; given `dispatch_priorities_set` with or without an interactive operator,
+  then it applies or refuses under `REQ-DELEGATED-ALLOCATION` and never shows a confirm (issue #504 part C).
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -887,10 +898,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   scope with nothing naming the culprit, and nothing serialized a working tree — two same-folder jobs ran
   containers concurrently in one read-write bind mount, reachable by a single cron trigger with no
   operator mistake (`DES-CRON-VIA-BULLMQ-SCHEDULER`, corrected). A cap is a bound, not a capability, which
-  is why live editability is allowed here while `run.image`/`run.packages`/`run.secrets` stay file-only:
-  a limit only ever narrows what may spend.
+  is why live editability is allowed here while `run.image`/`run.packages`/`run.secrets` stay file-only.
+  An operator edit may narrow or widen a limit, behind the operator's keypress. A delegated allocation may move
+  headroom between projects without one, but never above the envelope total, never below a floor, and never above
+  a limit the operator wrote (`REQ-DELEGATED-ALLOCATION`).
 - **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `REQ-SPEND-CAPS-MULTI-WINDOW`,
-  `REQ-SCOPED-PAUSE-WINDOWS`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-CONCURRENCY-3`,
+  `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-DELEGATED-ALLOCATION`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-CONCURRENCY-3`,
   `INT-SCOPED-LIMITS-FILE-CONTRACT`
 - **Acceptance**: Given a scoped daily cap of N on repo X, when X's N+1th job of the day starts, then it
   is refused `scope-cap` before any provider token is spent or slot reserved on the global ledger, X's own counter
@@ -922,6 +935,75 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   job defers while the first runs. Given a project `dayUsd` window with no room, then the job is refused `dollar-cap`.
   Given a row naming a project the projects file does not define, then the worker refuses to start, a live edit that
   would create one is kept out, the admin refuses to write it and `doctor` fails naming it.
+
+## REQ-DELEGATED-ALLOCATION
+
+- **Statement**: The worker shall apply a **priorities plan** (`INT-PRIORITIES-PLAN-CONTRACT`) with no human
+  keypress, inside an operator **envelope** (`INT-ENVELOPE-FILE-CONTRACT`), under fixed rules, and shall record
+  every attempt. The envelope is the operator's: a dollar total for one window (day, week or month), a floor per
+  project, default weights, and the delegation rules (who may write a plan, the largest step, the shortest
+  interval, the longest plan life). A plan is an agent's: an integer weight from 0 to 1000 per project, and
+  optionally per member repo, with an optional short reason. The agent never writes a dollar number.
+  pi-dispatch turns the weights into micro-dollars by one deterministic rule (`allocate`,
+  `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`): every floor first, the rest by weight with largest remainder and ties
+  by id, and no project moved by more than the step from what is applied now. All weights 0 leave the headroom
+  unallocated. A plan is refused, with a fixed reason and nothing changed, when delegation is off, when its writer
+  is not allowed, when it repeats the applied plan (a no-op), when its `basis` is not the applied plan's id, when
+  it comes sooner than the interval allows, when it leaves out an envelope project, or when another apply holds the
+  lock, in that order. A plan that is not well formed is refused before that ladder, naming one field from a fixed
+  list. For the envelope's window, a project's dollar cap becomes the smaller of the operator's row and its
+  allocation, a repo's the smaller of its row and its repo share, and the deployment's window the smaller of the
+  operator's cap and the envelope total.
+- **Scope**: Dollars only, in one window, for the projects of `projects.json` and `_other` (every scope in no
+  envelope project). The job-count ledgers are untouched. A project in `projects.json` that the envelope does not
+  name counts in `_other`. With no envelope file (`PI_ENVELOPE_FILE` unset) nothing in this entry applies, and every
+  cap is exactly what the operator's rows and windows set. This issue part ships the contracts and the pure
+  arithmetic (`worker/src/priorities.mjs`, `worker/src/envelope.mjs`); the apply path, the enforcement and the
+  operator tools follow in issue #504's later parts.
+- **Why**: The owner wants an agent to move budget between projects on its own, more for the project that
+  matters this week, while the operator sets the outer limits once. Models reason poorly about a shared budget,
+  so the agent writes priorities and pi-dispatch does the arithmetic, where every invariant (the sum, the floors,
+  the step) is checkable. The bound is arithmetic, not presence: a prompt-injected writer can at worst move
+  `maxStepPct` of the total per `minIntervalHours`, never below a floor and never above the total. So a keypress
+  would buy nothing, and it would make the unattended portfolio job (issue #505) impossible.
+  `CONST-BUDGET-BEFORE-TOKENS` is untouched: the ordering is the same, and only the values the dollar reserve
+  compares against change. `REQ-ADMIN-VIA-PI-EXTENSION` records the one model-callable write that needs no
+  keypress.
+- **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
+  `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-SCOPED-LIMITS`, `REQ-SPEND-CAPS-MULTI-WINDOW`,
+  `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`, `DES-DOLLAR-RESERVE-AND-SETTLE`, `INT-ENVELOPE-FILE-CONTRACT`,
+  `INT-PRIORITIES-PLAN-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT`
+- **Acceptance**: Given $100 a week, floors of $10 for `shop` and `platform`, `_other` at its default weight of 1,
+  and no plan applied, then the neutral split is 36,666,666 for `shop`, 36,666,667 for `platform` and 26,666,667 for
+  `_other` (micro-dollars; the odd ones by id). Given that neutral split applied and weights 3:1:0 with a 25% step,
+  then the plan is clamped to 61,666,666, 31,666,667 and 6,666,667: the binding move is `shop` going up by 33.33%
+  of the total, past the 25% step, so every entry moves three quarters of its way to the target.
+  Given the same envelope, weights 3:1 with `_other` at 0 and no applied vector, then the split is $70 and $30.
+  Given three projects of weight 1 and a $70 remainder, then the split is 23,333,334, 23,333,333 and 23,333,333
+  micro-dollars, the extra one to the lowest id. Given 50/50 applied with `_other` at 0, weights 1:0:0 and a 25%
+  step, then the result is 75/25 and it is recorded as clamped. Given any envelope, weights and applied vector, then
+  the result sums to the total when any weight is above 0, keeps every floor, moves no entry (the unallocated money
+  included) by more than
+  `floor(total * maxStepPct / 100)`, never exceeds the total, and does not depend on the order the inputs list their
+  entries. Given all weights 0, then every project gets its floor and the rest stays unallocated. Given a plan with
+  an unknown key, a weight outside 0 to 1000, a reason over 200 characters or with a control character, or a
+  `validUntil` past the plan life, then it is refused as `plan-invalid` naming the field, and no refusal quotes what
+  the plan said. Given a plan that leaves out an envelope project, then it is refused as `plan-incomplete`. Given an
+  envelope that is newer than this build, names a floor for a project `projects.json` does not have, has floors
+  above its total, sets a floor above the project's operator dollar row for the same or a longer window, sets
+  `maxStepPct` to 0, or comes with no per-job cost cap, then it is refused naming the field. Given an envelope path
+  inside a cron `run.folder`, a `PI_DISPATCH_RUN_ROOTS` root, a `run.skillsDir` or `PI_GLOBAL_PI_DIR`, by identity,
+  then the check names that path; given an envelope path that is not its own canonical path (a symlink anywhere on the
+  way, a `.` or `..`, a case variant, a relative path), a directory, or a file with more than one hard link, then it
+  is refused, naming the canonical path to write when there is one; given a job path spelled `./shop` or
+  `/srv/a/link/../b`, then it is judged where the kernel resolves it, where a container runtime mounts it (the textual
+  reading), and for a relative path also against the shell's working directory the runtime CLI uses; the envelope is
+  refused when it lies in any of them, the path is never refused for its spelling, and it is skipped only when no
+  reading exists;
+  containment is judged by file identity (device and inode), so a firmlink or bind-mount alias of a job path is that
+  job path; given a relative `PI_DISPATCH_RUN_ROOTS` entry with an envelope set, then it is refused, naming the entry.
+  Given an envelope edit, then the applied vector is projected onto the new envelope
+  by its current shares, so a clamped plan never reaches its target through the edit.
 
 ## REQ-WAIT-FOR
 
@@ -3007,6 +3089,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-04 | Issue #504, part A (the doctrine and the pure modules). **`REQ-DELEGATED-ALLOCATION` NEW**: the worker applies a priorities plan with no keypress, inside an operator envelope, under fixed rules (floors first, the rest by weight with largest remainder and ties by id, a step of at most `floor(total * maxStepPct / 100)` from the applied vector, all weights 0 leaving the headroom unallocated), refuses in a fixed order (delegation off, writer not allowed, duplicate, stale, too soon, incomplete, busy) and records every attempt; the worked cases are stated with `_other` at its default weight of 1 (neutral 36,666,666, 36,666,667 and 26,666,667, and 3:1:0 from it clamped to 61,666,666, 31,666,667 and 6,666,667) and with `_other` at 0 where the issue's 70/30 and 75/25 apply; for the envelope's window a project's cap becomes the smaller of its row and its allocation. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Why keeps the daily cap sentence and adds that one model-callable write needs no keypress, `dispatch_priorities_set`, bounded by the floors, the step and interval rules and the envelope total; the Statement describes the three tools issue #504 adds in prose only, because the scan in `admin/test/wiring.test.mjs` matches the registered tools exactly and their names join the list in part C, which registers them; the Acceptance reads a settings, trigger, limit or envelope write tool, and adds that the priorities write applies or refuses with or without an operator and never shows a confirm. **`REQ-SCOPED-LIMITS` AMENDED**, the Why: the sentence that a limit only ever narrows what may spend was already loose (a confirm-gated limit edit can raise a cap), and now says an operator edit may narrow or widen behind a keypress, and a delegated allocation moves headroom with none but never above the envelope total, below a floor, or above a limit the operator wrote. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the ordering is untouched, and only the values the dollar reserve compares against change. |
 | 2026-10-04 | Issue #571. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: a call whose answer carries broken usage is not priced; the meter counts it `costUnreported` on every run, capped or not, a child's included, a zero-rated model and a forwarding router's own call never; Acceptance clauses for the capped and uncapped cases, the output-0 answer, the zero-rated model, the async router and the guard-less child. **`REQ-COST-ANALYTICS` AMENDED**, rule (d) and Acceptance: a run with `costUnreported` above 0 is a floor with or without a cap, so is a capped run that lacks `costUnreported` or one of the guard's three short-count counters, and so is a present floor counter that is not a whole number at least 0; an uncapped record with no `costUnreported` stays exact. **`REQ-SPEND-CAPS-MULTI-WINDOW` AMENDED**, Acceptance only: `costUnreported` joins the floor counters. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the new doctor line is a cost warning, recorded in `INT-MODEL-ENDPOINTS-FILE-CONTRACT`. |
 | 2026-10-03 | Issue #500, part F, PR #570's second review. **`REQ-MODEL-POLICY` AMENDED, wording only**: a pi child found with no ledger stops the job `model-not-allowed` only under a model list alone; under a dollar cap the stop is `cost-cap`, else under a token cap `token_budget`. |
 | 2026-10-03 | Issue #500, part F, PR #570's review. **`REQ-MODEL-POLICY` AMENDED**: a `pi` subprocess is no longer out of scope. Each pi child judges its own calls by a guard built from the list it inherits, and the runner judges every child's folded usage against the job's own list and stops `model-not-allowed` on a call off it or on a pi child with no ledger (Linux). What stays out is a pi child that hides from the child meter and the detector (`OQ-011`). |

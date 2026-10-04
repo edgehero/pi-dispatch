@@ -45,6 +45,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | **Cron** — a schedule | **Nobody, at the time it runs.** It fires unattended. | As above |
 | **AI tool** — `dispatch_run` (operator session) | Whoever can prompt-inject the operator's model | **Nothing** — it enqueues a paid run that edits a folder in place |
 | **Outbox chain** — a completed job container | A completed local job's agent, after host-side validation | As the folder row above — a same-folder follow-up, no undo |
+| **Priorities plan** (operator session tool or portfolio job) | Whoever can prompt-inject either | Revert in the panel. A plan starts no job: it moves spend between projects inside the operator's envelope, at most `maxStepPct` of the total per interval, never below a floor and never above the total |
 
 ## Trust boundaries
 
@@ -57,6 +58,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A trigger's `run.secrets` and `run.secretsProfile` | **Operator — the same trust as the triggers file, plus a host exec** | The references are named in the reviewed file; the resolver that reads them is a script the operator wrote and declared. The job receives VALUES and never a manager credential, so it cannot enumerate a vault, but it can spend what it was given. |
 | A trigger's `run.skillsDir` and `run.instructions` | **Operator — the same trust as the triggers file** | Both are instructions, and both come from the reviewed `triggers.json` on the worker host rather than from any payload. Nothing reachable from a webhook, an issue or comment body, or `dispatch_run` can set either, and no panel key or AI tool writes them. The skills are copied per job into `/job` (adding no mount) and are layered UNDER the repo's own `.pi/`, so a serviced repo still wins a name collision; the instruction text lands in the user prompt above the issue text and never in the system prompt |
 | The job image (`PI_JOB_IMAGE`, or a trigger's `run.image`) | **Operator, the same trust as baking it** | It *is* the code every job executes: the pi version, the runner and its exit codes, the guardrail floor, the loader's discovery posture and, where the argv carries no `--user` (Docker Desktop, or a worker running as uid 1001), the non-root user all come from it. Nothing here verifies an image this project did not build. The isolation flags are applied by the worker's argv and hold for **any** image; the **contents** do not. |
+| The allocation envelope (`PI_ENVELOPE_FILE`) | **Operator, the same trust as the scoped-limits file** | It bounds what a priorities plan may move: the total, the floors and the step. The worker refuses to boot when the file lies inside any path a job container can see, and the plan itself, which is agent text, gets no trust |
 | The job container | **None** — it is the untrusted side | It runs the agent |
 | A job container's `/outbox` request file | **None** — agent-authored | An agent-initiated signal channel back to the host; validated host-side before anything is enqueued. **Local jobs only** — a github job has no `/outbox` mount at all |
 | A job container's `/session` transcript | **None** — agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges |
@@ -458,6 +460,23 @@ Stated openly rather than discovered later:
   silently applied. The residual is therefore an operator who approves a dialog without reading it, which
   is a real residual and is named rather than argued away.
 
+- **One model-callable write needs no keypress, and it moves money between projects.** The priorities write
+  (`dispatch_priorities_set`, issue #504) applies a plan of weights with no confirm, also headless, and a
+  portfolio job's plan (issue #505) does the same with no session at all. It cannot change the envelope, a floor,
+  a cap, a trigger or a setting, so it raises no ceiling. What it can do is shift spend between projects, and that
+  is bounded by arithmetic, not by a keypress: no project below its floor, no total above the envelope's, and no
+  project moved by more than `maxStepPct` of the total per `minIntervalHours`. Worked: with $100 a week, floors of
+  $10, a 25% step and a 24-hour interval, a prompt injection can push one project to $90 and the other to $10 in
+  four days, and total spend stays at or under $100. A Valkey flush resets the interval, which buys one extra step.
+  A compromised portfolio flow (a malicious skill in its folder) has the same bound, and it cannot write the
+  envelope: the worker refuses to boot when the envelope lies inside any path a job container can see. The session
+  tool is for your own instructions. A model that reads issue text in your session breaks the premise that the
+  operator's session processes no adversarial input; that judgement belongs in a portfolio job (issue #505), whose
+  plan meets the same rules. Reasons in a plan are agent text: they show in the panel only, escaped, and never reach
+  a tool result, a record or a log line. Every attempt, applied or refused, is in the audit log, and the panel
+  reverts to any row in its history (the last 500) (`REQ-DELEGATED-ALLOCATION`,
+  `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`).
+
 - **A resumed session hands one job's transcript to the next job on the same key.** With
   `"resume": true` on a trigger, the agent's full working history — tool output, file contents, its own
   reasoning — is written to `PI_SESSIONS_DIR` and replayed into the next job for the same repository and
@@ -642,6 +661,11 @@ Stated openly rather than discovered later:
   of that package and every transitive dependency would run AS YOU, ON YOUR HOST**, at install time, which is
   a host compromise and not a job one. So: no port, no harness credential, and still the same trust as shell
   access, which is where `/dispatch setup` stops being theoretical.
+  **The model in that session has a shell too, and the envelope guard cannot see it.** The admin extension blocks
+  pi's `write` and `edit` tools on the envelope file and `projects.json` (issue #504 part C), but `bash`, and
+  `powershell` (a built-in tool since pi 0.99.1, registered but not active by default), can write any file your
+  account can, and neither can be filtered reliably. That residual is named, not closed: an edit outside the panel
+  is detected by the envelope's digest and shown as a banner and an `envelope-changed-externally` audit row.
 - **The graph export writes one static HTML file, on your keystroke, to a temp path it names.** What
   crosses into it: trigger configuration you authored, skill names and frontmatter from the repos you
   service, and the PII-free run-record fields the panel already shows. What never does: raw job log
