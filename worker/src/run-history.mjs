@@ -488,7 +488,7 @@ function rebuildUsage(u) {
  * path stay out of the record -- for local jobs only the folder's `basename` is kept, because the full
  * path embeds the operator's OS account name.
  *
- * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | unprotected-branch |
+ * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | unprotected-branch |
  * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.

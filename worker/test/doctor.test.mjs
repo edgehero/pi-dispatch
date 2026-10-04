@@ -6,7 +6,8 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
+import { dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
+import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
@@ -21,6 +22,8 @@ import { loadConfig, underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { usdFingerprint } from "../src/dollar-fingerprint.mjs";
 import { projectsFingerprint } from "../src/projects.mjs";
+import { appliedSplitChecks, envelopeChecks, fleetEnvelopeChecks, loadEnvelopeAsTheWorker } from "../src/doctor.mjs";
+import { envelopeDigest, parseEnvelope } from "../src/envelope.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { quotedShown } from "../src/backend-local.mjs";
 
@@ -1945,7 +1948,8 @@ test("doctor: a deployment with no command triggers prints no command line at al
  * bounded spawn.
  */
 function doctorInChild(env, cwd, { timeoutMs = 20000 } = {}) {
-	const doctorUrl = new URL("../src/doctor.mjs", import.meta.url).href;
+	// The test helper, never the source module: a child doctor must not read a real Valkey's alloc:plan either.
+	const doctorUrl = new URL("./helpers/doctor.mjs", import.meta.url).href;
 	const script = `
 		const { runDoctor } = await import(${JSON.stringify(doctorUrl)});
 		let out = "";
@@ -3464,6 +3468,8 @@ const collectSeams = (plan, extra = {}) => ({
 	readHosts: async () => ({ hosts: [] }),
 	// PR #551's review: never the default, which opens a Valkey connection to scan for dollar counters.
 	dollarKeysExist: async () => false,
+	// Issue #504 part B: never the default, which reads alloc:plan off a Valkey.
+	readAppliedSplit: async () => null,
 	fileExists: existsSync,
 	nodeVersion: "20.10.0",
 	...extra,
@@ -7467,7 +7473,7 @@ test("doctor: a line the reader cannot model is said ONCE for the file, naming b
 	assert.doesNotMatch(onLinux.text(), /cannot be read off/, "systemd ignores the line rather than stopping at it, so there is nothing to warn about");
 	assert.ok(lines[0].includes(` or `), "and joins them, rather than naming one");
 	// The limit sentence rides the FIX line, not the label, so it is matched against the whole report.
-	assert.match(text(), new RegExp(`reads only the ${["zero", "one", "two", "three", "four"][ENV_FILE_READABLE_KEYS.length] ?? String(ENV_FILE_READABLE_KEYS.length)} it names`), "the count in the limit sentence matches the frozen set");
+	assert.match(text(), new RegExp(`reads only the ${["zero", "one", "two", "three", "four", "five"][ENV_FILE_READABLE_KEYS.length] ?? String(ENV_FILE_READABLE_KEYS.length)} it names`), "the count in the limit sentence matches the frozen set");
 	// AND BY SHAPE, because with exactly two keys a frozen literal produces the same string and every
 	// assertion above passes on it -- measured. The risk the derivation exists for is a THIRD boot file, at
 	// which point the literal would keep naming two while the sentence beside it kept saying "the two it
@@ -7494,7 +7500,7 @@ test("doctor: a line systemd reads differently is named with its shape, once, an
 		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
 		const lines = text().split("\n").filter((l) => /cannot be read off/.test(l));
 		assert.equal(lines.length, 1, `one line for the file: ${JSON.stringify(hazard)}\n${text()}`);
-		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
+		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE or PI_ENVELOPE_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
 		assert.match(lines[0], what);
 		assert.match(text(), new RegExp(`on line ${line} of that file, ${fix.source}`), "the fix names the line and what to change");
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/, "and no reading of a file systemd splits differently");
@@ -7521,7 +7527,7 @@ test("doctor: a .env systemd will not LOAD fails on Linux, naming the line and t
 		writeFileSync(join(cwd, ".env"), Buffer.concat([Buffer.from(`PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`), tail]));
 		const { out, text } = capture();
 		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
-		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE reaches the service cannot be read off .*: ${what.source}`));
+		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE or PI_ENVELOPE_FILE reaches the service cannot be read off .*: ${what.source}`));
 		assert.match(text(), fix);
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/);
 		assert.equal(code, 1, "a service that cannot start fails doctor");
@@ -7575,7 +7581,8 @@ test("doctor: removing a regular-file guard REDDENS this file instead of hanging
 	const cwd = scaffoldedCwd();
 	const fifo = join(cwd, "fifo.json");
 	if (spawnSync("mkfifo", [fifo]).status !== 0) return; // no mkfifo on this host: nothing to say
-	const doctorUrl = new URL("../src/doctor.mjs", import.meta.url).href;
+	// The test helper, never the source module: a child doctor must not read a real Valkey's alloc:plan either.
+	const doctorUrl = new URL("./helpers/doctor.mjs", import.meta.url).href;
 	const script = `
 		const { runDoctor } = await import(${JSON.stringify(doctorUrl)});
 		const code = await runDoctor({ PI_JOB_IMAGE: "pi-job:latest", PI_PAUSE_WINDOWS_FILE: ${JSON.stringify(fifo)} }, {
@@ -7952,6 +7959,8 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
@@ -7998,6 +8007,8 @@ const MIXED_PIN = {
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -8054,6 +8065,8 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
@@ -8109,6 +8122,8 @@ const MIXED_PIN = {
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -9230,7 +9245,8 @@ test("without PI_TRIGGERS_FILE the worker schedules no cron, so no cron trigger 
 test("doctor places a cron trigger by the worker's own predicate, not a copy (#433)", () => {
 	const doctorSource = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	const schedulesSource = readFileSync(new URL("../src/schedules.mjs", import.meta.url), "utf8");
-	assert.match(doctorSource, /^import \{ cronPlacement \} from "\.\/schedules\.mjs";$/m);
+	// The worker's predicate, imported from the worker's module (issue #504 part B imports envelopeJobPaths beside it).
+	assert.match(doctorSource, /^import \{ cronPlacement(, envelopeJobPaths)? \} from "\.\/schedules\.mjs";$/m);
 	assert.match(schedulesSource, /const placement = cronPlacement\(run, \{ existsSync, fleet \}\);/, "the worker's loader places by the same function");
 	assert.doesNotMatch(doctorSource, /existsSync\(run\.folder\)|fileExists\(t\.run\.folder\)/, "and doctor keeps no folder rule of its own");
 });
@@ -9996,6 +10012,8 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
@@ -10064,6 +10082,8 @@ const DOCKER_CANARY_PIN = {
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -10139,6 +10159,8 @@ const DOCKER_CANARY_PIN = {
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -10219,6 +10241,8 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
@@ -10297,6 +10321,8 @@ const DOCKER_CANARY_PIN = {
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_ENVELOPE_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for the allocation envelope cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -11683,4 +11709,146 @@ test("doctor: scoped-limits dollar rows WARN with no per-job cap, and a row wind
 	writeFileSync(settings, JSON.stringify({ maxCostUsd: "2" }));
 	const capped = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: path, PI_SETTINGS_FILE: settings }), seams);
 	assert.ok(!capped.some((c) => /no per-job cost cap \(maxCostUsd\) --/.test(c.label)), "the overlay's cap is seen");
+});
+
+// ── PI_ENVELOPE_FILE, the fifth boot file (issue #504 part B) ─────────────────────────────────────────────
+
+/** A canonical deployment folder (realpath: a macOS temp dir is a /var symlink) with projects.json and an envelope. */
+function envelopeDeployment({ floors = { shop: "10" }, cap = "2", extra = {} } = {}) {
+	const dir = realpathSync.native(tempDir("pi-envelope-doc-"));
+	const projects = join(dir, "projects.json");
+	writeFileSync(projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }, { id: "tools", members: ["github:acme/tools"] }] }));
+	const envelope = join(dir, "envelope.json");
+	writeFileSync(envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: floors }));
+	return { dir, envelope, env: imgEnv({ PI_PROJECTS_FILE: projects, PI_ENVELOPE_FILE: envelope, PI_MAX_COST_USD: cap, PI_SETTINGS_FILE: noOverlay(), ...extra }) };
+}
+
+test("doctor: an EMPTY PI_ENVELOPE_FILE fails as a refused boot, and a good one loads as the worker loads it (#504)", async () => {
+	const dir = tempDir("pi-envelope-empty-");
+	const empty = capture();
+	const code = await runDoctor(imgEnv({ PI_ENVELOPE_FILE: "" }), scaffoldDeps(empty.out, dir));
+	assert.match(empty.text(), /✗ PI_ENVELOPE_FILE is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and REFUSES TO START/);
+	assert.notEqual(code, 0);
+	const ok = envelopeDeployment();
+	const checks = await collectChecks(ok.env, collectSeams(green, { cwd: ok.dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	assert.ok(!checks.some((c) => c.ok === false && !c.warn && /PI_ENVELOPE_FILE/.test(c.label)), "a loadable envelope fails nothing");
+	const facts = checks.find((c) => /^Allocation envelope [0-9a-f]{16}: 100\.00 a week/.test(c.label));
+	assert.ok(facts, "one line of facts, with the digest an operator copies into alloc:envelope:expected");
+	assert.ok(facts.label.includes(envelopeDigest(loadEnvelopeAsTheWorker(ok.envelope, {}, ok.env))));
+});
+
+test("doctor: an envelope the worker would refuse fails: no per-job cap, a floor naming no project, a path inside a job path (#504)", async () => {
+	const seams = (dir) => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true });
+	const failing = (checks) => checks.find((c) => c.ok === false && !c.warn && /PI_ENVELOPE_FILE is set in this shell to a file the worker cannot load/.test(c.label));
+	const noCap = envelopeDeployment({ cap: undefined });
+	delete noCap.env.PI_MAX_COST_USD;
+	assert.match(failing(await collectChecks(noCap.env, seams(noCap.dir))).label, /needs a per-job cost cap: set PI_MAX_COST_USD/);
+	const unknown = envelopeDeployment({ floors: { nope: "1" } });
+	assert.match(failing(await collectChecks(unknown.env, seams(unknown.dir))).label, /floorsUsd\.nope names a project that is not in the projects file/);
+	// The envelope inside a run root: the worker's boot refusal, through the worker's own function.
+	const inside = envelopeDeployment({ extra: {} });
+	inside.env.PI_DISPATCH_RUN_ROOTS = inside.dir;
+	const c = failing(await collectChecks(inside.env, seams(inside.dir)));
+	assert.match(c.label, /lies inside a job path \(run-root /);
+	assert.match(c.label, /REFUSES TO START/);
+});
+
+test("envelopeChecks: a floor below the per-job cap admits no job, and a project outside the envelope joins _other; both WARN (#504)", () => {
+	const projects = [{ id: "shop", members: ["github:acme/web"] }, { id: "tools", members: ["github:acme/tools"] }];
+	const envelope = parseEnvelope(JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "1", _other: "0" } }), "/e", { projects, maxCostMicros: 2_000_000 });
+	const checks = envelopeChecks(envelope, projects, 2_000_000);
+	const low = checks.find((c) => /below the per-job cost cap/.test(c.label));
+	assert.ok(low && low.warn === true);
+	assert.match(low.label, /shop \(1\.00\)/);
+	assert.doesNotMatch(low.label, /_other/, "a floor of 0 is no guaranteed share, never a warning");
+	const absent = checks.find((c) => /not in the envelope/.test(c.label));
+	assert.ok(absent && absent.warn === true);
+	assert.match(absent.label, /project\(s\) tools are in projects\.json and not in the envelope, so their jobs count in _other's share/);
+	assert.equal(envelopeChecks(envelope, [projects[0]], 500_000).filter((c) => c.ok === false).length, 0, "a floor at or above the cap, every project named: facts only");
+});
+
+test("fleetEnvelopeChecks names the hosts whose envelope differs, and an old worker only while an envelope is in use (#504)", () => {
+	const mine = "0123456789abcdef";
+	assert.deepEqual(fleetEnvelopeChecks(mine, [{ name: "mini2", fpEnvelope: mine }]), [], "one envelope: nothing");
+	const differ = fleetEnvelopeChecks(mine, [{ name: "mini2", fpEnvelope: "fedcba9876543210" }, { name: "mini3", fpEnvelope: "none" }, { name: "mini4", fpEnvelope: mine }]);
+	assert.equal(differ.length, 1);
+	assert.equal(differ[0].warn, true);
+	assert.match(differ[0].label, /^Hosts disagree about the allocation envelope: mini2, mini3 have/);
+	assert.match(differ[0].label, /envelope-mismatch/);
+	assert.ok(!differ[0].label.includes("mini4"));
+	const old = fleetEnvelopeChecks(mine, [{ name: "mini2" }]);
+	assert.match(old[0].label, /^mini2 publishes no envelope digest/);
+	assert.deepEqual(fleetEnvelopeChecks("none", [{ name: "mini2" }, { name: "mini3", fpEnvelope: "none" }]), [], "no envelope anywhere: nothing new on upgrade");
+	assert.match(fleetEnvelopeChecks("none", [{ name: "mini2", fpEnvelope: mine }])[0].label, /and this host has none/);
+	assert.match(differ[0].fix, /SET alloc:envelope:expected/, "the fix names the key, not a panel that does not exist yet");
+});
+
+test("issue #504 part B: doctor compares this host's envelope digest with its peers', from the service's own file", async () => {
+	const ok = envelopeDeployment();
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const env = { ...ok.env, VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" };
+	const digest = envelopeDigest(loadEnvelopeAsTheWorker(ok.envelope, {}, ok.env));
+	const agree = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpEnvelope: digest }]));
+	assert.ok(!agree.some((c) => /allocation envelope:|no envelope digest/.test(c.label)));
+	const differ = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpEnvelope: "none" }]));
+	assert.ok(differ.some((c) => c.warn === true && /^Hosts disagree about the allocation envelope: mini2/.test(c.label)));
+});
+
+test("appliedSplitChecks: the applied split's digest and the hosts matching it; every host that differs FAILS, a host with no envelope too (#504)", () => {
+	const d = "0123456789abcdef";
+	const ok = appliedSplitChecks({ digest: d }, d, "mini1", [{ name: "mini2", fpEnvelope: d }]);
+	assert.deepEqual(ok.map((c) => c.ok), [true]);
+	assert.match(ok[0].label, /made for envelope 0123456789abcdef: mini1, mini2 match it/);
+	const bad = appliedSplitChecks({ digest: d }, "fedcba9876543210", "mini1", [{ name: "mini2", fpEnvelope: d }, { name: "mini3", fpEnvelope: "none" }, { name: "old" }]);
+	assert.match(bad[0].label, /mini2 matches it/);
+	assert.equal(bad[1].ok, false);
+	assert.notEqual(bad[1].warn, true, "a failure: this host refuses its governed jobs");
+	assert.match(bad[1].fix, /SET alloc:envelope:expected fedcba9876543210/);
+	assert.match(bad[2].label, /^mini3 carries no envelope, not the one the applied budget split was made for/);
+	const none = appliedSplitChecks({ digest: d }, "none", "mini1", []);
+	assert.match(none[1].label, /no envelope while the fleet has an applied budget split/);
+	assert.match(none[1].fix, /DEL alloc:plan/);
+});
+
+test("doctor reads the applied split when this host has an envelope, and fails a host whose envelope is not it (#504)", async () => {
+	const ok = envelopeDeployment();
+	const digest = envelopeDigest(loadEnvelopeAsTheWorker(ok.envelope, {}, ok.env));
+	const asked = [];
+	const read = async (url) => (asked.push(url), { digest: "fedcba9876543210" });
+	const checks = await collectChecks(ok.env, collectSeams(green, { cwd: ok.dir, nodeVersion: "22.19.0", probeValkey: async () => true, readAppliedSplit: read }));
+	assert.equal(asked.length, 1);
+	const fail = checks.find((c) => /is not the one the applied budget split was made for/.test(c.label));
+	assert.ok(fail && fail.ok === false && fail.warn !== true);
+	assert.ok(fail.label.includes(digest));
+});
+
+test("doctor reads the applied split on a single host with NO envelope too, and fails it; a key that does not decode is governed; no match is not green (#504)", async () => {
+	const dir = tempDir("pi-no-envelope-");
+	const seams = (read) => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true, readAppliedSplit: read });
+	const bare = imgEnv({ PI_SETTINGS_FILE: noOverlay() });
+	const governed = await collectChecks(bare, seams(async () => ({ digest: "0123456789abcdef" })));
+	const fail = governed.find((c) => /this host has no envelope while the fleet has an applied budget split/.test(c.label));
+	assert.ok(fail && fail.ok === false && fail.warn !== true, "a host that refuses every job is a failure");
+	assert.match(fail.fix, /DEL alloc:plan alloc:envelope:expected/);
+	const summary = governed.find((c) => /^Applied budget split/.test(c.label));
+	assert.equal(summary.ok, false, "no host matches the split, so the summary is no green tick");
+	assert.equal(summary.warn, true);
+	const garbled = await collectChecks(bare, seams(async () => ({ undecodable: true })));
+	assert.ok(garbled.some((c) => /alloc:plan exists but is not a budget split/.test(c.label) && c.warn === true));
+	assert.ok(garbled.some((c) => /this host has no envelope/.test(c.label)), "the worker's EXISTS counts it as governed");
+	const never = await collectChecks(bare, seams(async () => null));
+	assert.ok(!never.some((c) => /alloc:plan|budget split/.test(c.label)), "a deployment that never delegated hears nothing");
+});
+
+test("no doctor test reaches a real Valkey for the applied split: every runDoctor and collectChecks comes from the test helper (#504)", () => {
+	// The rule, not the site: the helper defaults `readAppliedSplit` to no split. A test file importing either entry point
+	// from the source module would read the developer's real `alloc:plan` on 127.0.0.1:6379 again.
+	const dir = new URL("./", import.meta.url);
+	const offenders = readdirSync(dir)
+		.filter((f) => f.endsWith(".test.mjs"))
+		.filter((f) => {
+			const src = readFileSync(new URL(f, dir), "utf8");
+			return [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\.\/src\/doctor\.mjs"/g)].some((m) => /\b(runDoctor|collectChecks)\b/.test(m[1]));
+		});
+	assert.deepEqual(offenders, []);
 });

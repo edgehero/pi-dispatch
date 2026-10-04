@@ -17,6 +17,7 @@ Both exist because getting them wrong is silent.
 | Pause windows | `./pause-windows.json` | `PI_PAUSE_WINDOWS_FILE` | Quiet hours |
 | Scoped limits | `./scoped-limits.json` | `PI_SCOPED_LIMITS_FILE` | Per repo and per folder caps, and per scope concurrency |
 | Projects | `./projects.json` | `PI_PROJECTS_FILE` | Which repos and folders form a project. Run records keep the project id either way |
+| Allocation envelope | (none: set it) | `PI_ENVELOPE_FILE` | The dollar total and the floors a priorities plan splits inside. **Losing it refuses the worker's start** while the key names it; unset, delegation is off. The applied split itself lives in Valkey (`alloc:plan`), the audit in `PI_LOGS_DIR/allocations/` |
 | Subscriptions | `./subscriptions.json` | `PI_SUBSCRIPTIONS_FILE` | The plan prices the cost analytics read. Nothing about routing or spend enforcement |
 | Staged pi packages | `./pi-packages.json` | `PI_PACKAGES_FILE` | Which packages a job may load |
 | Egress allowlist | `./egress-allowlist.conf` | (path is passed to the proxy) | The egress policy |

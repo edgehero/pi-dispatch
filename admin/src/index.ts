@@ -943,7 +943,10 @@ function registerTools(pi: ExtensionAPI): void {
       "model across every scope and takes the three dollar fields only. A scope of project:<id> (an id from " +
       "projects.json) caps every member of that project as one: a job over its day/week/month is refused " +
       "project-cap, over its dollar window dollar-cap, and its `concurrent` defers; the id must already be in " +
-      "projects.json. A bare row and a qualified row for the same " +
+      "projects.json. Under an allocation envelope (PI_ENVELOPE_FILE) a project's or a repo's share of the split " +
+      "narrows its dollar window further, and the envelope total the deployment's: a job refused by a share or the " +
+      "envelope total is allocation-cap, not dollar-cap. " +
+      "A bare row and a qualified row for the same " +
       "repo are refused together: keep one form. A dollar window needs a per-job cap " +
       "(maxCostUsd). The file stays version 1 unless a row needs version 2. The operator MUST approve a confirm " +
       "dialog showing the entry; refused with no interactive operator.",

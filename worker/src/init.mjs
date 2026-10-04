@@ -124,6 +124,10 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 		scaffold(fs, results, join(cwd, "subscriptions.json"), EMPTY_SUBSCRIPTIONS, "empty subscription list (declare plan prices for the admin's cost analytics)");
 		scaffold(fs, results, join(cwd, "scoped-limits.json"), EMPTY_SCOPED_LIMITS, "empty scoped-limits list (per repo/folder caps; the folder mutex needs no file)");
 		scaffold(fs, results, join(cwd, "projects.json"), EMPTY_PROJECTS, "empty projects list (group repos and folders into a project, recorded per run)");
+		// Issue #504 part B: NO envelope.json. Unset is no delegation, the safe default, and an envelope is a decision (a
+		// total, a floor per project, the delegation rules) with no neutral empty form: a scaffold would either govern every
+		// job or refuse the boot. The .env written above documents PI_ENVELOPE_FILE (from .env.example), and
+		// docs/allocation.md the file.
 		scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; the egress policy is on unless PI_EGRESS=0)");
 		// Issue #503: the declared model endpoints, empty, and the proxy include rendered from them, which is the empty
 		// render (its header only). squid refuses to start on a missing include file and starts on a comments-only one

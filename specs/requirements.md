@@ -938,28 +938,35 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-DELEGATED-ALLOCATION
 
-- **Statement**: The worker shall apply a **priorities plan** (`INT-PRIORITIES-PLAN-CONTRACT`) with no human
-  keypress, inside an operator **envelope** (`INT-ENVELOPE-FILE-CONTRACT`), under fixed rules, and shall record
-  every attempt. The envelope is the operator's: a dollar total for one window (day, week or month), a floor per
-  project, default weights, and the delegation rules (who may write a plan, the largest step, the shortest
-  interval, the longest plan life). A plan is an agent's: an integer weight from 0 to 1000 per project, and
-  optionally per member repo, with an optional short reason. The agent never writes a dollar number.
-  pi-dispatch turns the weights into micro-dollars by one deterministic rule (`allocate`,
-  `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`): every floor first, the rest by weight with largest remainder and ties
-  by id, and no project moved by more than the step from what is applied now. All weights 0 leave the headroom
-  unallocated. A plan is refused, with a fixed reason and nothing changed, when delegation is off, when its writer
-  is not allowed, when it repeats the applied plan (a no-op), when its `basis` is not the applied plan's id, when
-  it comes sooner than the interval allows, when it leaves out an envelope project, or when another apply holds the
-  lock, in that order. A plan that is not well formed is refused before that ladder, naming one field from a fixed
-  list. For the envelope's window, a project's dollar cap becomes the smaller of the operator's row and its
-  allocation, a repo's the smaller of its row and its repo share, and the deployment's window the smaller of the
-  operator's cap and the envelope total.
+- **Statement**: The worker shall apply a **priorities plan** (`INT-PRIORITIES-PLAN-CONTRACT`) with no human keypress,
+  inside an operator **envelope** (`INT-ENVELOPE-FILE-CONTRACT`), under fixed rules, and shall record every attempt. The
+  envelope is the operator's: a dollar total for one window (day, week or month), a floor per project, default weights,
+  and the delegation rules (who may write a plan, the largest step, the shortest interval, the longest plan life). A
+  plan is an agent's: an integer weight from 0 to 1000 per project, and optionally per member repo, with an optional
+  short reason. The agent never writes a dollar number. pi-dispatch turns the weights into micro-dollars by one
+  deterministic rule (`allocate`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`): every floor first, the rest by weight
+  with largest remainder and ties by id, and no project moved by more than the step from what is applied now. All
+  weights 0 leave the headroom unallocated. A plan is refused, with a fixed reason and nothing changed, when delegation
+  is off, when its writer is not allowed, when this host's envelope is not the one the applied split was made for, when
+  it repeats the applied plan (a no-op), when its `basis` is not the applied plan's id, when it comes sooner than the
+  interval allows, when it leaves out an envelope project, or when another apply holds the lock, in that order. A plan
+  that is not well formed is refused before that ladder, naming one field from a fixed list. For the envelope's window,
+  a project's dollar cap becomes the smaller of the operator's row and its allocation, a repo's the smaller of its row
+  and its repo share, and the deployment's window the smaller of the operator's cap and the envelope total. A job that
+  does not fit a window whose binding number came from the split or the envelope total is refused before any spend as
+  `allocation-cap`, apart from the operator's own `dollar-cap`; a host whose envelope is not the applied split's refuses
+  every governed job before any spend as `envelope-mismatch`. The applied split is shared by every host (Valkey), and
+  every attempt is recorded in an audit file on the host that made it.
 - **Scope**: Dollars only, in one window, for the projects of `projects.json` and `_other` (every scope in no
   envelope project). The job-count ledgers are untouched. A project in `projects.json` that the envelope does not
-  name counts in `_other`. With no envelope file (`PI_ENVELOPE_FILE` unset) nothing in this entry applies, and every
-  cap is exactly what the operator's rows and windows set. This issue part ships the contracts and the pure
-  arithmetic (`worker/src/priorities.mjs`, `worker/src/envelope.mjs`); the apply path, the enforcement and the
-  operator tools follow in issue #504's later parts.
+  name counts in `_other`. With no envelope file (`PI_ENVELOPE_FILE` unset) on any host nothing in this entry
+  applies, and every cap is exactly what the operator's rows and windows set; a host without one in a fleet that has
+  an applied split (`alloc:plan`) refuses its jobs as `envelope-mismatch`, so turning delegation off for a fleet is
+  removing the envelope from every host and deleting `alloc:plan` and `alloc:envelope:expected`. Part A of issue #504
+  shipped the contracts and the
+  pure
+  arithmetic (`worker/src/priorities.mjs`, `worker/src/envelope.mjs`); part B the apply path, the shared state, the
+  audit, the enforcement and the fleet digest (`worker/src/allocation.mjs`); the operator tools follow in part C.
 - **Why**: The owner wants an agent to move budget between projects on its own, more for the project that
   matters this week, while the operator sets the outer limits once. Models reason poorly about a shared budget,
   so the agent writes priorities and pi-dispatch does the arithmetic, where every invariant (the sum, the floors,
@@ -1004,6 +1011,33 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   job path; given a relative `PI_DISPATCH_RUN_ROOTS` entry with an envelope set, then it is refused, naming the entry.
   Given an envelope edit, then the applied vector is projected onto the new envelope
   by its current shares, so a clamped plan never reaches its target through the edit.
+  Given no applied state (a first boot, a flush), then the first host to look persists the neutral split, writer
+  `default`, and a first plan with `basis: null` applies. Given two writers racing on one basis, against a live
+  Valkey, then exactly one applies and the other is refused `plan-stale` or `plan-busy`, and the state is the
+  winner's. Given a plan's row written to the audit file and a compare-and-set that then loses, then an
+  `apply-failed` row follows and nothing changed. Given an expired plan seen by two hosts at once, then exactly one
+  `expired` row is written and the neutral split applies. Given an envelope edit whose digest is not
+  `alloc:envelope:expected`, then the split is not re-based, the host refuses governed jobs as `envelope-mismatch`
+  and writes one `envelope-changed-externally` row; given the matching digest, then the split is re-based with no
+  step. Given a project with no operator row, then its jobs reserve against its share in a ledger keyed as its row
+  would be, and settle to their cost; given a job in no envelope project, then it reserves in `_other`'s ledger.
+  Given a window whose cap is the share, below the operator's row, and no room, then the job is refused
+  `allocation-cap` before its container, every slot and dollar it took given back; given a tie, then `dollar-cap`.
+  Given a shrink while a job runs, then that job's reservation stands and settles, and only the next start is
+  refused. Given an operator revert, then it applies in full, skipping the interval and the step. Given the envelope
+  file inside a job path after a reload, then the last good envelope stands. Given a local job whose folder is
+  named inside a run root or a cron folder and now resolves outside it, or resolves to the envelope's folder or
+  above it, then it is refused before the reserve (`local-folder-escaped`, `local-folder-holds-envelope`), and a
+  folder that passes is mounted by its resolved path; given a case variant of a run root on a case-insensitive volume,
+  then it is named inside that root; given a resolved folder that is a member of another project than the one decided
+  at pickup, then it is refused (`local-folder-project-changed`); given a chained child, then it is enqueued on the
+  folder as its parent named it. Given a Valkey fault, a reply error or an unwritable audit file while the pickup
+  reads the split, then the job is retried as infrastructure with nothing spent, never dropped. Given a first boot or
+  a flush and two hosts with different envelopes, then `alloc:envelope:expected` is the digest of the split that was
+  seeded, whichever host looked first, and the differing host refuses `envelope-mismatch`. Given a host with no
+  envelope while `alloc:plan` exists, then its jobs refuse `envelope-mismatch`. Given a stored state with an amount
+  that is not a safe non-negative integer of micro-dollars, then it is replaced by the neutral split; given one a
+  newer build wrote, then it is left as it is and governed jobs refuse.
 
 ## REQ-WAIT-FOR
 
@@ -2580,8 +2614,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   judges), **and, since issue #471, every other key the worker or the receiver reads that doctor judges**
   (`WORKER_SERVICE_KEYS`, `RECEIVER_SERVICE_KEYS`: the job image, the triggers file, the logs and settings paths, the
   session store and its bounds, the overlay and its extensions knob, the forwarded names, the backend floor, the
-  secret and wait profiles, the retention window, the PAT variable and the PAT it names, and the forge and receiver
-  settings), each taken from a plain line with
+  secret and wait profiles, the retention window, the PAT variable and the PAT it names, the run roots
+  `PI_DISPATCH_RUN_ROOTS` (since issue #504 part B: the envelope's containment check reads them), and the forge and
+  receiver settings), each taken from a plain line with
   the service's loader only where this shell does not set it, and each said with its source. **Since issue #481 an EMPTY value is left
   off a line that says the file set a key only where every reader of that key is PROVEN to take empty as unset**
   (`EMPTY_READ_AS_UNSET`, an allowlist, some entries also covering a whitespace-only value where the reader trims): a
@@ -3089,6 +3124,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-04 | Issue #504, part B (apply, state, enforcement and the fleet). **`REQ-DELEGATED-ALLOCATION` AMENDED**: the Statement adds `envelope-mismatch` to the plan ladder after the writer rung, `allocation-cap` and `envelope-mismatch` as pre-spend refusals, the shared applied split and the audit file; the Scope says what part B ships, and that a host with no envelope in a fleet with an applied split refuses its jobs (turning delegation off for a fleet is removing the envelope everywhere and deleting `alloc:plan` and `alloc:envelope:expected`); the Acceptance adds the persisted neutral seed, the live two-writer race (one applies, the other `plan-stale` or `plan-busy`), the `apply-failed` row after a lost compare-and-set, one `expired` row across two hosts, the re-base gated on `alloc:envelope:expected` with one `envelope-changed-externally` row otherwise, `expected` seeded with the applied digest whichever host looks first (PR #574's review: the lazy seed let the first differing host re-base the fleet), the no-envelope host, a pickup fault retried as infrastructure, a corrupt or newer stored state, the synthetic ledger for a project with no row and `_other`'s own ledger, `allocation-cap` against `dollar-cap` (a tie is `dollar-cap`), a shrink that never touches a running job, the operator revert, the last good envelope kept on a reload inside a job path, and the local folder resolved at prepare (`local-folder-escaped` judged by identity, `local-folder-holds-envelope`, `local-folder-project-changed`, a chained child on the named folder). **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: doctor's list of the worker keys it resolves from `.env` names `PI_DISPATCH_RUN_ROOTS`, read for the envelope's containment check. **`REQ-SCOPED-LIMITS`** UNCHANGED, checked: its Why already bounds a delegated allocation by the operator's own limits, which `min(row, allocation)` keeps. **`REQ-SPEND-CAPS-MULTI-WINDOW`** UNCHANGED, checked: the operator's windows behave as before; a deployment window narrowed by an envelope total refuses `allocation-cap` under `REQ-DELEGATED-ALLOCATION`, not under this entry. **`REQ-OPERATOR-FAILURE-NOTIFICATION`** UNCHANGED, checked: every new reason is a pre-spend refusal and pages nobody. **`REQ-ADMIN-VIA-PI-EXTENSION`** UNCHANGED, checked: no tool lands in this part. **`CONST-BUDGET-BEFORE-TOKENS`** UNCHANGED, checked: `envelope-mismatch` is a free gate placed with the others before the mint, `local-folder-project-changed` is decided after prepare and before the token-cap read and every reserve, and `allocation-cap` is decided where `dollar-cap` is. |
 | 2026-10-04 | Issue #504, part A (the doctrine and the pure modules). **`REQ-DELEGATED-ALLOCATION` NEW**: the worker applies a priorities plan with no keypress, inside an operator envelope, under fixed rules (floors first, the rest by weight with largest remainder and ties by id, a step of at most `floor(total * maxStepPct / 100)` from the applied vector, all weights 0 leaving the headroom unallocated), refuses in a fixed order (delegation off, writer not allowed, duplicate, stale, too soon, incomplete, busy) and records every attempt; the worked cases are stated with `_other` at its default weight of 1 (neutral 36,666,666, 36,666,667 and 26,666,667, and 3:1:0 from it clamped to 61,666,666, 31,666,667 and 6,666,667) and with `_other` at 0 where the issue's 70/30 and 75/25 apply; for the envelope's window a project's cap becomes the smaller of its row and its allocation. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Why keeps the daily cap sentence and adds that one model-callable write needs no keypress, `dispatch_priorities_set`, bounded by the floors, the step and interval rules and the envelope total; the Statement describes the three tools issue #504 adds in prose only, because the scan in `admin/test/wiring.test.mjs` matches the registered tools exactly and their names join the list in part C, which registers them; the Acceptance reads a settings, trigger, limit or envelope write tool, and adds that the priorities write applies or refuses with or without an operator and never shows a confirm. **`REQ-SCOPED-LIMITS` AMENDED**, the Why: the sentence that a limit only ever narrows what may spend was already loose (a confirm-gated limit edit can raise a cap), and now says an operator edit may narrow or widen behind a keypress, and a delegated allocation moves headroom with none but never above the envelope total, below a floor, or above a limit the operator wrote. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the ordering is untouched, and only the values the dollar reserve compares against change. |
 | 2026-10-04 | Issue #571. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: a call whose answer carries broken usage is not priced; the meter counts it `costUnreported` on every run, capped or not, a child's included, a zero-rated model and a forwarding router's own call never; Acceptance clauses for the capped and uncapped cases, the output-0 answer, the zero-rated model, the async router and the guard-less child. **`REQ-COST-ANALYTICS` AMENDED**, rule (d) and Acceptance: a run with `costUnreported` above 0 is a floor with or without a cap, so is a capped run that lacks `costUnreported` or one of the guard's three short-count counters, and so is a present floor counter that is not a whole number at least 0; an uncapped record with no `costUnreported` stays exact. **`REQ-SPEND-CAPS-MULTI-WINDOW` AMENDED**, Acceptance only: `costUnreported` joins the floor counters. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the new doctor line is a cost warning, recorded in `INT-MODEL-ENDPOINTS-FILE-CONTRACT`. |
 | 2026-10-03 | Issue #500, part F, PR #570's second review. **`REQ-MODEL-POLICY` AMENDED, wording only**: a pi child found with no ledger stops the job `model-not-allowed` only under a model list alone; under a dollar cap the stop is `cost-cap`, else under a token cap `token_budget`. |

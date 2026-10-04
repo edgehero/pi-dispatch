@@ -59,6 +59,10 @@ export function makePrepareWorkspace({
 	// construction -- prepares exactly what it always did: no /session mount, nothing on disk.
 	resolveSession = () => null,
 	prepareLocal = prepareLocalWorkspace,
+	// Issue #504 part B: where a local job's resolved folder may lie. `{ jobPaths, envelopeFile }`: `jobPaths()` gives the
+	// run roots and cron folders a folder named inside must stay inside, and `envelopeFile` the file whose folder no job
+	// may mount. Null (a bare dispatcher) passes neither, and prepareLocal then judges nothing but the folder itself.
+	localPlacement = null,
 	// Keyed by `job.kind`, so a new forge is one entry rather than a new `if`. A kind with no entry falls
 	// through to the throw below, which is what makes an unrouted job loud instead of a silent no-op.
 	preparers = { github: prepareGithubWorkspace },
@@ -149,7 +153,7 @@ export function makePrepareWorkspace({
 					? `Use the "${job.flow}" skill for this task.\n\n${pointer}${job.task ?? ""}`
 					: `${pointer}${job.task ?? ""}`;
 			const event = localEventContext(job, queueJobId, findPreviousRun);
-			return discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event }), sandbox), jobDir);
+			return discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null } : {}) }), sandbox), jobDir);
 		}
 		const prepare = preparers[job.kind];
 		if (prepare) {

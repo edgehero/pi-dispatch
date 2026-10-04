@@ -93,6 +93,10 @@ coverage/
 # operator's real file must never land in a checkout by accident. Resolved only via PI_PROJECTS_FILE.
 /projects.json
 
+# The allocation envelope (issue #504): an operator's dollar total and floors per project. Its own file, never a
+# template: an envelope with no total has no neutral form, so init scaffolds none. Resolved only via PI_ENVELOPE_FILE.
+/envelope.json
+
 # The egress allowlist (issue #202): the hosts THIS deployment's jobs may reach. init scaffolds it into
 # the cwd, so without this rule the scaffold is committable by accident. There is no committed template
 # beside it, deliberately: the shipped default lives in init.mjs, and an example file here would be one

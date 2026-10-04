@@ -12,6 +12,10 @@ import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
+import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mjs";
+
+/** The refusal of a local job whose resolved folder belongs to another project than the one decided at pickup (issue #504 part B). */
+export const LOCAL_FOLDER_PROJECT_CHANGED = "local-folder-project-changed";
 import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
 import { zeroRatedVerdict } from "./model-endpoints.mjs";
 
@@ -324,6 +328,20 @@ export async function runJob(job, deps) {
 		// `projectDollarCapsFor` with the project resolved at pickup, or null. Reserved after the repo or folder row's.
 		projectDollars = null,
 		modelDollars = [],
+		// Issue #504 part B (DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE): under an envelope, `governedDollars` narrows the
+		// ledgers above by the applied split, and these three ride beside them. `otherDollars` is `_other`'s ledger
+		// (`{ scope, keyPrefix, caps, capSource }`), for a job in no envelope project; `dollarCapSource` says, per window,
+		// whether the deployment cap came from the operator or the envelope total (`scopedDollars` and `projectDollars`
+		// carry their own `capSource`). `envelopeMismatch` is the pickup's verdict that this host's envelope is not the
+		// applied split's (true), or that it has none while one is applied ("no-envelope"). All default to nothing, so a deployment with no envelope is byte-identical.
+		otherDollars = null,
+		dollarCapSource = null,
+		envelopeMismatch = false,
+		// Issue #504 part B: the project decided at pickup on the folder as named, and a function giving the project of a
+		// folder from the same projects snapshot. A local job whose RESOLVED folder belongs to another project is refused
+		// after prepare, before any reserve. Absent on a bare wiring, which checks nothing.
+		pickupProject = null,
+		folderProject = null,
 		// Issue #503 part 7: the builtin catalog's model object for (provider, id), or null (model-catalog.mjs
 		// `builtinModel`). Read only by the zero-rated check; the default knows no builtin model, so an unwired
 		// processor judges overlay models alone and reserves for every other.
@@ -728,6 +746,26 @@ export async function runJob(job, deps) {
 		// `modelEndpoints` is the pickup's snapshot (issue #503), handed to the gate and to runContainer alike, so a
 		// keyless provider passes here and gets its PI_DISPATCH_KEYLESS there from ONE read of the declaration. runContainer
 		// is handed it only when an endpoint is declared, so with none its context is byte-identical to before.
+		// THE ENVELOPE GATE (issue #504 part B, DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE): this host's envelope digest is not
+		// the applied split's, so the split this job would be judged against was computed for another envelope. FREE and
+		// determinate (the pickup read decided it), so it sits with the free gates, before the mint, the clone, the
+		// token-cap read and every reserve (CONST-BUDGET-BEFORE-TOKENS), and it RETURNS: a retry meets the same envelope
+		// until the operator makes the hosts agree (CONST-RETRY-INFRA-ONLY). Refusing is loud and money-safe; judging one
+		// split against two envelopes is neither.
+		// `envelopeMismatch` is true (this host's envelope is another one) or "no-envelope" (it has none while the fleet has
+		// an applied split): one reason, two texts, since the fix differs.
+		if (envelopeMismatch === true || envelopeMismatch === "no-envelope") {
+			const absent = envelopeMismatch === "no-envelope";
+			await comment(
+				job,
+				absent
+					? "Refused: this worker has no budget envelope while the other workers share an applied budget split, so no container was started and nothing was spent. Ask the operator to install the envelope on this worker, or to turn delegated allocation off for every worker (`pi-dispatch doctor` says how). Not run."
+					: "Refused: this worker's budget envelope differs from the one the current budget split was made for, so no container was started and nothing was spent. Ask the operator to run `pi-dispatch doctor`. Not run.",
+			);
+			log("refused_envelope_mismatch", absent ? { envelope: "none" } : {});
+			return { outcome: "policy", reason: ENVELOPE_MISMATCH_REASON, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
 		const credential = await checkProviderCredential(job, { modelEndpoints });
 		if (credential.unavailable) {
 			// Issue #503: the overlay models.json could not be read at this pickup for a transient reason, so the gate has no
@@ -1001,6 +1039,21 @@ export async function runJob(job, deps) {
 			return { ...prepared, provider: job.provider ?? null, model: job.model ?? null };
 		}
 
+		// THE RESOLVED FOLDER'S PROJECT (issue #504 part B). The pickup decided the project, and so the share a job reserves
+		// against, from the folder AS NAMED; the container mounts the folder prepare RESOLVED. A link or a case variant
+		// inside a run root that leads into ANOTHER project's member would bill that work to the named project's share.
+		// Refused here, after prepare and before the token-cap read and every reserve: free, determinate, never retried. A
+		// resolved folder in no project is not refused, because the named spelling is the operator's own membership
+		// (a symlinked member is listed by the path the triggers use, docs/projects.md).
+		if (job.kind === "local" && typeof folderProject === "function" && typeof prepared?.workspace === "string") {
+			const resolvedProject = folderProject(prepared.workspace);
+			if (resolvedProject !== null && resolvedProject !== pickupProject) {
+				await comment(job, "Refused: this job's folder now leads into another project's folder, so no container was started and nothing was spent. Not run.");
+				log("refused_local_folder_project_changed", { pickup: pickupProject, resolved: resolvedProject });
+				return { outcome: "policy", reason: LOCAL_FOLDER_PROJECT_CHANGED, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+		}
+
 		// Daily TOKEN cap (issue #25): the deliberate check-AFTER control. Token cost is only known
 		// post-run, so this cannot check-and-increment before the spend the way the job-count cap does
 		// (CONST-BUDGET-BEFORE-TOKENS). It is a read-only GET of prior jobs' recorded spend -- it consumes
@@ -1087,11 +1140,12 @@ export async function runJob(job, deps) {
 		// Every dollar ledger this job reserves in: the deployment's windows, its repo or folder row's, and each model
 		// row it may reach (scoped-limits.json version 2). ONE reservation over all of them, so a refusal in any window
 		// gives back every key, the deployment's included.
-		const ledgers = dollarLedgers(dollarCaps, { scope: scopedDollars, project: projectDollars, models: modelDollars });
+		const ledgers = dollarLedgers(dollarCaps, { scope: scopedDollars, project: projectDollars, other: otherDollars, models: modelDollars });
 		const modelPrefixes = new Map((modelDollars ?? []).map((m) => [m.keyPrefix, m.ref]));
 		// The ledgers that settle to the JOB's cost (the deployment's, the repo or folder row's, the project row's), named
 		// rather than derived as "not a model", so a ledger kind added later settles nowhere until it is put on a list.
-		const jobCostPrefixes = new Set([DOLLAR_KEY_PREFIX, scopedDollars?.keyPrefix, projectDollars?.keyPrefix].filter((p) => typeof p === "string"));
+		// `_other`'s ledger (issue #504 part B) settles to the job's cost too: its counter is what the unassigned work spent.
+		const jobCostPrefixes = new Set([DOLLAR_KEY_PREFIX, scopedDollars?.keyPrefix, projectDollars?.keyPrefix, otherDollars?.keyPrefix].filter((p) => typeof p === "string"));
 		if (ledgers.length > 0) {
 			// A window needs a per-job cap (the settings invariant, `checkDollarInvariant`; for a scoped or model row, the
 			// same rule), so a job with none here is a defect, a hand-built queue entry, or a dollar row in
@@ -1126,7 +1180,13 @@ export async function runJob(job, deps) {
 					// rule, see dollar-budget.mjs; a key that could not be is logged and the record says floor). Every held
 					// job-count slot goes back too, last first: a ledger that did not issue the refusal gives back, the rule
 					// the count ledgers follow among themselves above.
-					const refunded = await refundLedgers(DOLLAR_CAP_REASON);
+					// WHOSE NUMBER bound (issue #504 part B): `allocation-cap` when the refusing window's cap came from the applied split
+					// or the envelope total (`capSource`), `dollar-cap` when it was the operator's own (a tie is the operator's). One
+					// ledger and one window refused, and the reservation names both.
+					const capSourceOf = (prefix) => (prefix === DOLLAR_KEY_PREFIX ? dollarCapSource : [scopedDollars, projectDollars, otherDollars].find((l) => l?.keyPrefix === prefix)?.capSource);
+					const byAllocation = capSourceOf(reservation.ledger)?.[reservation.window] === "allocation";
+					const refusalReason = byAllocation ? ALLOCATION_CAP_REASON : DOLLAR_CAP_REASON;
+					const refunded = await refundLedgers(refusalReason);
 					// The window is named and the amounts are not: the comment's reader may be an issue author, and the
 					// amounts are the operator's, which the log carries. Which ledger refused is named too: the deployment,
 					// the repo (a forge scope IS the repo the comment posts on), "this folder" (a local scope is a host path,
@@ -1137,18 +1197,26 @@ export async function runJob(job, deps) {
 					// such job until the operator changes a setting, which "no room left" would hide behind a wait that never ends.
 					const capBelowJob = reservation.capMicros < job.maxCostMicros;
 					// A project window (issue #499 part B) is "this project", for the job-count refusal's reason.
-					const refusedBy = reservation.ledger === DOLLAR_KEY_PREFIX ? "deployment" : modelPrefixes.has(reservation.ledger) ? "model" : reservation.ledger === projectDollars?.keyPrefix ? "project" : "scope";
-					const whose = refusedBy === "deployment" ? "this deployment" : refusedBy === "model" ? `the model ${modelPrefixes.get(reservation.ledger)}` : refusedBy === "project" ? "this project" : job.kind === "local" ? "this folder" : unqualifiedScope(scopedDollars.scope);
+					const refusedBy = reservation.ledger === DOLLAR_KEY_PREFIX ? "deployment" : modelPrefixes.has(reservation.ledger) ? "model" : reservation.ledger === projectDollars?.keyPrefix ? "project" : reservation.ledger === otherDollars?.keyPrefix ? "other" : "scope";
+					const whose = refusedBy === "deployment" ? "this deployment" : refusedBy === "model" ? `the model ${modelPrefixes.get(reservation.ledger)}` : refusedBy === "project" ? "this project" : refusedBy === "other" ? "the work outside the budget split's projects" : job.kind === "local" ? "this folder" : unqualifiedScope(scopedDollars.scope);
+					// The allocation's own words (issue #504 part B): the number that bound is the split inside the operator's envelope,
+					// which moves with the next priorities plan or an envelope edit, so this text never tells its reader to raise a budget.
+					const adjective = { day: "daily", week: "weekly", month: "monthly" }[reservation.window] ?? "";
+					const allocationText = capBelowJob
+						? `Refused: the ${adjective} share of the budget split for ${whose} is smaller than this run's cost limit, so no container was started and nothing was spent. The split changes with the next priorities plan or an envelope change. Not run.`
+						: `Refused: ${period} share of the budget split for ${whose} has no room left for this run's cost limit, so no container was started and nothing was spent. Not run.`;
 					await comment(
 						job,
-						capBelowJob
+						byAllocation
+							? allocationText
+							: capBelowJob
 							? `Refused: the ${{ day: "daily", week: "weekly", month: "monthly" }[reservation.window] ?? ""} dollar budget for ${whose} is smaller than this run's cost limit, so no run with this limit can start until the operator raises the budget or lowers the limit. No container was started and nothing was spent. Not run.`
 							: `Refused: ${period} dollar budget for ${whose} has no room left for this run's cost limit, so no container was started and nothing was spent. Not run.`,
 					);
-					log("over_dollar_budget", { ledger: refusedBy, ...(refusedBy === "deployment" ? {} : { key: reservation.ledger }), ...(refusedBy === "model" ? { model: modelPrefixes.get(reservation.ledger) } : {}), window: reservation.window, reservedMicros: reservation.reservedMicros, capMicros: reservation.capMicros, amountMicros: job.maxCostMicros, ...(capBelowJob ? { capBelowJob: true } : {}), refunded });
+					log("over_dollar_budget", { ledger: refusedBy, ...(refusedBy === "deployment" ? {} : { key: reservation.ledger }), ...(refusedBy === "model" ? { model: modelPrefixes.get(reservation.ledger) } : {}), window: reservation.window, reservedMicros: reservation.reservedMicros, capMicros: reservation.capMicros, amountMicros: job.maxCostMicros, ...(capBelowJob ? { capBelowJob: true } : {}), ...(byAllocation ? { source: "allocation" } : {}), refunded });
 					const stranded = reservation.stranded > 0;
 					const modelBasis = modelPrefixes.size === 0 ? null : stranded ? "floor" : "refunded";
-					return { outcome: "policy", reason: DOLLAR_CAP_REASON, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: globalHeld(), dollars: stranded ? dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: 0, basis: "refunded", modelBasis }) }; // return => not retried
+					return { outcome: "policy", reason: refusalReason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: globalHeld(), dollars: stranded ? dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: 0, basis: "refunded", modelBasis }) }; // return => not retried
 				}
 				dollarHold = reservation.hold;
 				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis: modelPrefixes.size > 0 ? "floor" : null });

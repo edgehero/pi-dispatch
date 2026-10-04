@@ -190,12 +190,21 @@ export function loadProjects(config, { readFileSync = fsReadFileSync, existsSync
  */
 export function projectOf(job, projects) {
 	if (!Array.isArray(projects) || projects.length === 0) return null;
-	const scope = job?.kind === "local" ? canonicalScope(job) : qualifiedScopeOf(job);
+	const scope = memberScopeOf(job);
 	if (typeof scope !== "string" || scope === "") return null;
 	for (const project of projects) {
 		if (Array.isArray(project?.members) && project.members.includes(scope)) return project.id;
 	}
 	return null;
+}
+
+/**
+ * The scope a job is matched to a member by (`projectOf`): its forge-qualified scope, or for a local job its resolved
+ * folder. When `projectOf` found a project, this IS the member it matched, in the stored spelling a priorities plan
+ * names by `scopeRef` (issue #504 part B), so the repo share a plan gave it needs no second matching rule.
+ */
+export function memberScopeOf(job) {
+	return job?.kind === "local" ? canonicalScope(job) : qualifiedScopeOf(job);
 }
 
 /**

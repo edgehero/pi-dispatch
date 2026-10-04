@@ -76,6 +76,23 @@ export function authoredCron(config, { readFileSync = fsReadFileSync, existsSync
 }
 
 /**
+ * The host paths a job container can see (issue #504 part B), for `envelopeInsideJobPaths`: every cron trigger's
+ * `run.folder` and every trigger's `run.skillsDir` in the triggers file, the `PI_DISPATCH_RUN_ROOTS` roots and
+ * `PI_GLOBAL_PI_DIR`. Read from the FILE, not from this host's served schedules: a folder another host serves today may
+ * be this host's after an edit, and the check costs nothing to be wide. Throws when the triggers file does not parse.
+ */
+export function envelopeJobPaths(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync } = {}) {
+	const out = { cronFolders: [], runRoots: [...(config.dispatchRunRoots ?? [])], skillsDirs: [], globalPiDir: config.globalPiDir ?? null };
+	const path = config.triggersFile;
+	if (path === null || path === undefined || !existsSync(path)) return out;
+	for (const t of parseTriggers(readFileSync(path, "utf8"), path)) {
+		if (t?.on?.type === "cron" && typeof t.run?.folder === "string") out.cronFolders.push(t.run.folder);
+		if (typeof t?.run?.skillsDir === "string") out.skillsDirs.push(t.run.skillsDir);
+	}
+	return out;
+}
+
+/**
  * Split a schedule set into the triggers THIS host serves and the ones it does not (issue #57).
  *
  * `loadSchedules` already refused everything a pure validator could refuse and everything the filesystem

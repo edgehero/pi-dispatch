@@ -62,14 +62,15 @@ export function dollarWindowCaps(settings) {
 
 /**
  * The ledgers for one job, in reservation order: the deployment's (when it has any window), then its repo or folder
- * row's (`dollarCapsFor`), then its project row's (`projectDollarCapsFor`, issue #499 part B), then each model row it
- * reserves in (`modelDollarRows`). One `reserveDollars` call over all of them, so a refusal in any window gives back
- * every key, the deployment's included.
+ * row's (`dollarCapsFor`), then its project row's (`projectDollarCapsFor`, issue #499 part B), then `_other`'s under an
+ * envelope (issue #504 part B: a job in no envelope project), then each model row it reserves in (`modelDollarRows`).
+ * One `reserveDollars` call over all of them, so a refusal in any window gives back every key, the deployment's included.
  */
-export function dollarLedgers(caps, { scope = null, project = null, models = [] } = {}) {
+export function dollarLedgers(caps, { scope = null, project = null, other = null, models = [] } = {}) {
 	const out = caps ? [{ keyPrefix: DOLLAR_KEY_PREFIX, caps }] : [];
 	if (scope) out.push({ keyPrefix: scope.keyPrefix, caps: scope.caps });
 	if (project) out.push({ keyPrefix: project.keyPrefix, caps: project.caps });
+	if (other) out.push({ keyPrefix: other.keyPrefix, caps: other.caps });
 	for (const m of models ?? []) out.push({ keyPrefix: m.keyPrefix, caps: m.caps });
 	return out;
 }

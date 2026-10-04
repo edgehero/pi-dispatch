@@ -360,7 +360,9 @@ export async function runUp(argv = [], deps = {}) {
 	// `loadPauseWindows`/`loadScopedLimits` unconditionally at boot, which throw on a path that does not
 	// exist: the worker does not ignore the feature, it refuses to start. `PI_LOGS_DIR` and
 	// `PI_SETTINGS_FILE` use `||` and fall back to the account default; `WEBHOOK_SECRET` reads as absent.
-	const EMPTY_REFUSES_BOOT = new Set(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE"]);
+	// Issue #504 part B: PI_ENVELOPE_FILE refuses the boot on an empty value too, and joins this set ONLY: up never writes
+	// it (unset means no delegation, the safe default), so it is said below only when the operator's line is blank.
+	const EMPTY_REFUSES_BOOT = new Set(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE"]);
 	const emptyNote = (key) =>
 		EMPTY_REFUSES_BOOT.has(key)
 			? `left untouched: the line is there and its value is EMPTY, which is not the same as no line -- a shell that sources this file exports it as "", the worker keeps it and REFUSES TO BOOT. up never clobbers a key an operator wrote, so fill it in or delete the line`
@@ -502,6 +504,8 @@ export async function runUp(argv = [], deps = {}) {
 				summary.push([key, writtenButEmpty(key) ? emptyNote(key) : "already set — left untouched"]);
 			}
 		}
+		// Never written, never defaulted: only a blank line the operator left is worth a word, since it refuses the boot.
+		if (writtenButEmpty("PI_ENVELOPE_FILE")) summary.push(["PI_ENVELOPE_FILE", emptyNote("PI_ENVELOPE_FILE")]);
 	} else {
 		summary.push(["WEBHOOK_SECRET", "no .env here — skipped (set it wherever your env lives)"]);
 		for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {

@@ -15,7 +15,8 @@ import { splitModelEntry } from "./model-ref.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
 import { dollarWindowCaps } from "./dollar-budget.mjs";
 import { concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, projectDollarCapsFor, projectRowFor, rowScopeFor, scopedLedgers } from "./scoped-limits.mjs";
-import { projectOf } from "./projects.mjs";
+import { memberScopeOf, projectOf } from "./projects.mjs";
+import { governedDollars } from "./allocation.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 
@@ -174,7 +175,7 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -550,7 +551,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// whatever an operator does to projects.json mid-run. A retry or a deferral is a new pickup and resolves again.
 		// Every record below this line carries it (through `recordAfterGate`); a record written before this gate carries
 		// none and is resolved from the live ref (start.mjs). An id or null, never a name.
-		const project = projectOf(job.data, projects());
+		const pickupProjects = projects();
+		const project = projectOf(job.data, pickupProjects);
 		// THE ONE RECORDER BELOW THE GATE, bound once, so the pickup project is a property of the path and not of each call
 		// site: every record from here on goes through it, and none can drop the field and fall back to the live ref in
 		// start.mjs, which would disagree with the pickup value exactly when projects.json was edited mid-run. A bolt in
@@ -960,6 +962,31 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// stays quiet, so it is reported once per pickup.
 			const effectiveJob = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields }));
 
+			// THE ENVELOPE (issue #504 part B, DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE). With one loaded, every job is governed:
+			// its project's, or `_other`'s, share of the applied split narrows the dollar ledgers below, read ONCE here
+			// beside the limits snapshot and the pickup project, so the gate and the reservation judge one split. The read
+			// also brings the state in line (the neutral seed, expiry, a re-base) and says when this host's envelope is not
+			// the applied split's, which the processor refuses as `envelope-mismatch` before anything is spent. A Valkey
+			// fault throws here, inside the try, and is retried like any reserve fault: nothing has started.
+			const operatorDollars = { dollarCaps: dollarWindowCaps(settings), scopedDollars: dollarCapsFor(job.data, limits), projectDollars: projectDollarCapsFor(limits, project) };
+			let dollarInputs = { ...operatorDollars };
+			const governing = allocation?.current?.() ?? null;
+			try {
+				if (governing?.envelope) {
+					const { state, mismatch } = await allocation.reconcile({ envelope: governing.envelope, digest: governing.digest, now: new Date(nowMs) });
+					dollarInputs = mismatch ? { ...operatorDollars, envelopeMismatch: true } : governedDollars({ envelope: governing.envelope, state, member: project === null ? null : { id: project, member: memberScopeOf(job.data) }, operator: operatorDollars });
+				} else if (typeof allocation?.fleetGoverned === "function" && (await allocation.fleetGoverned())) {
+					// A host with no envelope in a fleet with an applied split: ungoverned, so refused like a differing envelope.
+					dollarInputs = { ...operatorDollars, envelopeMismatch: "no-envelope" };
+				}
+			} catch (error) {
+				// INFRASTRUCTURE, never a verdict (CONST-RETRY-INFRA-ONLY): Valkey did not answer, replied with an error, or the
+				// audit file could not be written. Nothing has been reserved or started, so the job is retried rather than
+				// dropped as the UnrecoverableError a plain throw would become below.
+				deps?.log?.("allocation_read_failed", { jobId: job.id, code: typeof error?.code === "string" ? error.code : "error" });
+				throw new InfraRetry("the allocation state could not be read", { cause: error, reason: "container-never-started", provider: effectiveJob.provider ?? null, model: effectiveJob.model ?? null, budgetReserved: false });
+			}
+
 			const result = await runJob(effectiveJob, {
 				redis,
 				// The three spend windows (week/month null when disabled) and the soft-hold band, resolved this
@@ -976,13 +1003,23 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				scopedLedgers: scopedLedgers(job.data, limits, project),
 				// Issue #501: the deployment's dollar windows in micro-dollars, resolved this job-start under overlay > env
 				// like the caps above, or null when none is set (then nothing is reserved and no dollar key is written).
-				dollarCaps: dollarWindowCaps(settings),
+				dollarCaps: dollarInputs.dollarCaps,
 				// Issues #501 part 5 and #502 part 6: this job's repo or folder dollar windows and the model dollar windows it
 				// reserves in, from the SAME limits snapshot. The model rows follow the job's EFFECTIVE list (the trigger's,
 				// else PI_ALLOWED_MODELS); a job with none reserves in every model row (`modelDollarRows` says why).
-				scopedDollars: dollarCapsFor(job.data, limits),
+				scopedDollars: dollarInputs.scopedDollars,
 				// Issue #499 part B: the project row's dollar windows, keyed by the project row's scope, for the pickup project.
-				projectDollars: projectDollarCapsFor(limits, project),
+				projectDollars: dollarInputs.projectDollars,
+				// Issue #504 part B: the project was decided on the folder AS NAMED; prepare mounts the
+				// folder it RESOLVES. The processor asks which project the resolved folder belongs to, from the same projects
+				// snapshot, and refuses before any reserve when it is another project's.
+				pickupProject: project,
+				folderProject: (folder) => projectOf({ kind: "local", folder }, pickupProjects),
+				// Issue #504 part B: `_other`'s ledger, the deployment cap's source and the envelope verdict, under an envelope;
+				// absent without one, so the processor's defaults keep such a deployment byte-identical.
+				...(dollarInputs.otherDollars ? { otherDollars: dollarInputs.otherDollars } : {}),
+				...(dollarInputs.dollarCapSource ? { dollarCapSource: dollarInputs.dollarCapSource } : {}),
+				...(dollarInputs.envelopeMismatch ? { envelopeMismatch: dollarInputs.envelopeMismatch } : {}),
 				modelDollars: modelDollarRows(limits, effectiveJob.models ?? null),
 				// The endpoint gate's snapshot (issue #503): the declared endpoints, the overlay models and this job's
 				// derived set, read once at pickup. Absent on a wiring with no endpoint seam, so a bare processor's
@@ -1279,7 +1316,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, projects, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [] }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, projects, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [] }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1336,6 +1373,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// independent maps would double every one of them exactly as two Workers double concurrency.
 			scopedLimits,
 			projects,
+			allocation,
 			inFlight,
 			hostBound,
 			scopeLease,

@@ -3727,7 +3727,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
        `dollar-cap`. The log names the refusing ledger (`deployment`, `scope`, `project` or `model`) with its key
        prefix, a hash, and a model's ref; the comment names the repo for a forge job, "this folder" for a local one,
        "this project" for a project row, or the model. A scoped or model
-       window needs a per-job cap like a deployment window, so a job with none is `config-refused`.
+       window needs a per-job cap like a deployment window, so a job with none is `config-refused`. Under an
+       allocation envelope item 10 adds `_other`'s ledger after the project's (log `ledger: "other"`), and a refusal
+       whose binding cap was the split or the envelope total is `allocation-cap` with `source: "allocation"`.
      - **Which model windows**: a job with an effective allowed-model list reserves in the windows of its listed
        models, compared ignoring case. A job with NO list reserves in EVERY model window: it may switch model
        mid-run (`setModel`, a second session, an extension's direct call), so it could spend in any of them. This
@@ -3751,6 +3753,27 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
        each reload, and `doctor` names both (env and overlay merged), by row index and kind. Warnings, because a
        trigger's own `run.maxCostUsd` can supply or lower the cap. A refusal by a window below the job's cap says
        so, apart from "no room left", which a wait would cure and this would not.
+  10. **Under an allocation envelope** (issue #504 part B, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`), the pickup
+     narrows the ledgers of item 9 by the applied split, for the envelope's window only (`governedDollars`), and
+     nothing else about the reserve or the settle changes:
+     - **min, never replace**: a project's cap for that window is `min(operator row, allocation)`, a repo's
+       `min(operator row, repo share)` when the plan gives repo shares, and the deployment window
+       `min(operator cap, envelope total)`. A missing row or setting counts as no cap, so the allocation alone binds.
+     - **Synthetic ledgers**: a project with no row reserves in a ledger keyed `scopeDollarKeyPrefix("project:<id>")`,
+       the key its row would have, through the `projectDollars` slot; a repo share with no row in one keyed
+       `scopeDollarKeyPrefix(<member scope>)` through the `scopedDollars` slot; a job in no envelope project in
+       `_other`'s, keyed `scopeDollarKeyPrefix("project:_other")`, through a slot of its own, `otherDollars`, reserved
+       after the project ledger. Each joins the job-cost prefixes, so it settles to the job's cost through `holdPart`
+       like a row's; `dollarLedgers` and `holdPart` are otherwise unchanged. `_other` has its own slot rather than the
+       project slot because a project the envelope does not name keeps its own row's ledger AND counts in `_other`.
+     - **Whose number**: each of those ledgers carries `capSource: { day, week, month }` (`operator` or `allocation`
+       per window, null where it has none), and the deployment's rides as `dollarCapSource`. The refusal reads the
+       refusing ledger and window off the reservation: `allocation-cap` when that window's source is `allocation`,
+       else `dollar-cap`; a tie is the operator's. Its comment names the split and never says "raise the budget".
+     - **A shrink refuses new starts only**: a reservation already made is never taken back and a running job runs on,
+       because the narrowed caps are read at each pickup and a hold settles on its own keys.
+     - **`envelope-mismatch`** is a free gate with the others, before the mint: the pickup's reconcile found this
+       host's envelope digest is not the applied split's, so no narrowed ledger is computed at all.
 - **Why**: one call's dollars are not bounded by the cap's scale. On the default model one call can cost
   several dollars, so a cap checked after a call is a soft limit one call can pass by more than the cap. The
   in-flight sum is what makes parallel sessions safe: each is judged against the other's worst case, not
@@ -3927,9 +3950,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Decision**: An agent may split the dollar budget between projects with no keypress, inside an envelope the
   operator writes (issue #504, `REQ-DELEGATED-ALLOCATION`). The agent writes **weights**, never dollars, and
   pi-dispatch does the arithmetic in one pure module, `worker/src/priorities.mjs`, which the worker and the admin
-  both import. The envelope is parsed by `worker/src/envelope.mjs`. Part A of the issue ships those two modules and
-  this doctrine; the apply path, the enforcement and the operator tools are parts B and C, and the sentences below
-  that describe them describe those parts.
+  both import. The envelope is parsed by `worker/src/envelope.mjs`. Part A of the issue shipped those two modules and
+  this doctrine; part B ships the apply path, the Valkey state, the audit and the enforcement
+  (`worker/src/allocation.mjs`, wired in `start.mjs`, `index.mjs` and `processor.mjs`) and the fleet digest; the
+  operator tools are part C, and the sentences below that describe them describe that part.
   - **The envelope** is an operator file, `PI_ENVELOPE_FILE`, a sibling of `scoped-limits.json`
     (`INT-ENVELOPE-FILE-CONTRACT`): a total for one window, a floor per project of `projects.json` or `_other`, default
     weights, and the delegation rules. Unset means no delegation anywhere. It is version-checked, refused rather than
@@ -3970,53 +3994,114 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     digest. The neutral state (the default weights, no step) is **persisted** too: the first host to find no
     `alloc:plan` writes it with `SET NX`, writer `default`, carrying the digest, so a reference always exists. After a
     Valkey flush the interval resets and `basis: null` is accepted again.
-  - **Writes are compare-and-set.** `alloc:plan` changes only through a Lua script that compares the current plan id
-    and envelope digest and writes in one step. `alloc:lock` (`SET NX PX 5000`, the `fleet-lease.mjs` idiom) exists
-    only so a concurrent apply refuses as `plan-busy` rather than as `plan-stale`. Expiry (writer `expiry`), re-base
-    (writer `envelope-change`) and a revert (writer `operator-revert`) are CAS state changes too, and only the CAS
-    winner writes their audit row, so two hosts that both see an expired plan write one `expired` row.
-  - **The ladder**, in order: `delegation-off`, `writer-not-allowed`, `plan-duplicate` (the applied plan's own id: a
-    no-op), `plan-stale` (the basis is not the applied plan's id), `plan-too-soon` (less than `minIntervalHours`
-    since a writer's plan last applied), `plan-incomplete`, `plan-busy`. `planRefusal` is that ladder as a pure
-    function, minus the lock. A revert skips the interval and the step, being an operator act. Expiry, and turning
-    delegation off, apply neutral at once.
-  - **Re-base across a fleet.** The first host to reload a changed envelope CASes `alloc:plan` from the old digest to
-    the new one through `rebase`, but only when its new digest equals `alloc:envelope:expected`, the digest the admin
-    writer stores before it writes the file. Otherwise the host reports `envelope-mismatch` and an
-    `envelope-changed-externally` audit row, so a hand edit on one host cannot re-base the fleet. An absent
-    `expected` (a first boot, or after a flush) is seeded silently. A host whose envelope digest differs from
-    `alloc:plan`'s refuses governed jobs before any spend as `envelope-mismatch`, never retried.
+  - **Writes are compare-and-set.** `alloc:plan` changes only through a Lua script (`CAS_SCRIPT`) that decodes the
+    stored state with `cjson`, compares its plan id (null read as the empty string) and its envelope digest with the
+    ones the writer read, and writes in one step; a stored value that does not decode is never overwritten by it. The
+    neutral seed is a second script (`SEED_SCRIPT`). A FRESH seed (`SET NX` on an absent plan) sets
+    `alloc:envelope:expected` to the seed's digest UNCONDITIONALLY in the same step, so a stale `expected` left by an
+    earlier split (deleted with `alloc:plan` alone) never survives a new seed. A REPLACEMENT of a stored value that does
+    not decode (only while it is still exactly what was read) sets `expected` only when it is absent: the unreadable
+    plan's `expected` still names the fleet's envelope, so a stale host that happens to reconcile first does not take
+    the fleet; the fleet's hosts then re-base the replaced split. `alloc:lock` (`SET NX PX 5000`, the `fleet-lease.mjs`
+    idiom) exists only so a concurrent apply refuses as `plan-busy` rather than as `plan-stale`. Expiry (writer
+    `expiry`), re-base (writer `envelope-change`) and a revert (writer `operator-revert`) are CAS state changes too. For
+    the system's own changes (the neutral seed, expiry, a re-base) only the CAS winner writes the audit row, AFTER it
+    won, so two hosts that both see an expired plan write one `expired` row. A writer's change (a plan, a revert) writes
+    its row BEFORE the CAS instead, and a lost CAS adds an `apply-failed` row.
+  - **The ladder**, in order: `delegation-off`, `writer-not-allowed`, `envelope-mismatch` (this host's envelope is not
+    the applied split's: the arithmetic would be another envelope's), `plan-duplicate` (the applied plan's own id: a
+    no-op), `plan-stale` (the basis is not the applied plan's id), `plan-too-soon` (less than `minIntervalHours` since a
+    writer's plan last applied), `plan-incomplete`, `plan-busy`. A plan that is not well formed is refused before it as
+    `plan-invalid`, naming one field. `planRefusal` is that ladder as a pure function, minus the mismatch (which needs
+    Valkey) and the lock; `applyPlan` adds both. A revert skips the interval and the step, being an operator act.
+    Expiry, and turning delegation off, apply neutral at once.
+  - **Re-base across a fleet.** Every host RECONCILES the state with its own envelope at boot, on every envelope reload
+    and at each pickup (`reconcile`: two GETs, and a write only when something is due: the neutral seed, an expiry,
+    delegation turned off, a re-base). A host whose digest differs from the state's CASes `alloc:plan` from the old
+    digest to the new one through `rebase` only when its new digest equals `alloc:envelope:expected`, the digest the
+    admin writer stores before it writes the file. Because the pickup reconciles too, setting that key to the new digest
+    by any means heals a mismatched host at its next job. Otherwise the host reports `envelope-mismatch` and one
+    `envelope-changed-externally` audit row per digest (written before it is remembered, so a row that failed is tried
+    again), so a hand edit on one host cannot re-base the fleet once a split exists. **The first host to reconcile
+    defines the split**: at a first start, or after `alloc:plan` was deleted or Valkey flushed, the host whose seed
+    lands writes the neutral split from ITS envelope and sets `expected` to that digest in the same step, so if it
+    carried a stale copy, that copy is the fleet's from then on and every other host refuses; doctor names every host
+    whose envelope is not the applied split's. After that, `expected` always names the applied split's envelope: a host
+    that agrees seeds it when it is absent, and a differing host that finds it absent seeds it with the stored state's
+    digest, then mismatches. A neutral state, or one under an envelope with delegation off, is re-based to the NEW
+    envelope's neutral split rather than projected, since neutral is a function of the envelope; a plan keeps its id,
+    its `lastPlanAt` and its expiry through a re-base, so a writer's basis still names it and no interval starts. A host
+    whose envelope digest differs from `alloc:plan`'s refuses governed jobs before any spend as `envelope-mismatch`,
+    never retried.
+  - **A host with no envelope in a governed fleet** (an `alloc:plan` exists) refuses its jobs as `envelope-mismatch`
+    too, asked with one `EXISTS` at each pickup and said loudly once, at the first pickup it refuses
+    (`envelope_absent_fleet_governed`; doctor names the host ahead of any job, since it reads `alloc:plan` whenever it
+    may talk to the Valkey, and the boot makes no extra Valkey round trip for it): otherwise it would reserve against
+    the operator's caps alone beside hosts enforcing the split. A key that exists but does not decode counts as governed
+    here (the `EXISTS`), and doctor says so. Turning delegation off for a fleet is therefore two steps: remove
+    `PI_ENVELOPE_FILE` from every host, and `DEL alloc:plan alloc:envelope:expected` (both: a stale `expected` would
+    otherwise name the old envelope). Doctor says so.
+  - **A fault while the pickup reads the split is infrastructure**: a Valkey that does not answer or replies with an
+    error, or an audit file that cannot be written, throws `InfraRetry` (`container-never-started`, nothing reserved),
+    so the job is retried, never dropped (`CONST-RETRY-INFRA-ONLY`).
+  - **The stored state is checked before it is trusted**: every amount (each allocation, the unallocated money, each
+    repo share) must be a safe non-negative integer of micro-dollars and `_other` must be present, or the state is
+    corrupt and the next reconcile replaces it with the neutral split through an exact-value compare. A state a NEWER
+    build wrote (a higher `version`) is neither trusted nor overwritten: this host's governed jobs refuse as
+    `envelope-mismatch` until it is upgraded, the money-safe direction.
   - **Enforcement**: for the envelope's window, a project's dollar cap is `min(operator row, allocation)`, a repo's
-    `min(operator row, repo share)`, and the deployment window `min(operator cap, envelope total)`. A missing row
-    counts as no cap, so a project with no row still reserves against its allocation. Each ledger carries where its
-    cap came from, and the refusal is `allocation-cap` when the allocation bound, `dollar-cap` when the operator's
-    number did (a tie says `dollar-cap`). A reservation already made is never taken back, and a running job runs on:
-    a shrink refuses new starts only.
-  - **The audit**: the file is the record, `PI_LOGS_DIR/allocations/YYYY-MM.jsonl` on the host that applied or
-    refused, written FIRST; then the CAS; a CAS that fails after its row was written adds an `apply-failed` row.
-    Valkey `alloc:log` is a view across hosts, `LPUSH` then `LTRIM` to 500 entries, carrying weights and
-    micro-dollars and never reasons. That list idiom is new here (`run-mirror.mjs` mirrors with SET and ZADD); a
-    capped list is the simplest shape for "the last N outcomes, newest first", and it is a view, so losing it loses
-    nothing the file does not hold. The panel's history reads `alloc:log`, because the files are per host.
+    `min(operator row, repo share)`, and the deployment window `min(operator cap, envelope total)`. A missing row counts
+    as no cap, so a project with no row still reserves against its allocation, in a synthetic ledger keyed as its row
+    would be. `_other` reserves in a ledger of its own (`otherDollars`), not through the project slot: a project in
+    `projects.json` that the envelope does not name keeps its own row's ledger and counts in `_other` as well. Each
+    ledger carries where its cap came from (`capSource`), and the refusal is `allocation-cap` when the allocation or the
+    envelope total bound, `dollar-cap` when the operator's number did (a tie says `dollar-cap`);
+    `DES-DOLLAR-RESERVE-AND-SETTLE` item 10 has the mechanics. A reservation already made is never taken back, and a
+    running job runs on: a shrink refuses new starts only.
+  - **The audit**: the file is the record, `PI_LOGS_DIR/allocations/YYYY-MM.jsonl` on the host that applied or refused.
+    A writer's change (a plan, a revert) writes its row FIRST, then the CAS, and a CAS that fails after its row was
+    written adds an `apply-failed` row; the system's own changes (the neutral seed, expiry, a re-base) are written by
+    the CAS winner after it won. Two residuals, named: a system change whose row the file then refuses has happened
+    anyway, so the row is lost for good (logged as `allocation_audit_row_lost` with the outcome, the plan id and both
+    digests, never a reason, and still pushed to `alloc:log`), since a retry cannot write it back; and when a writer's
+    CAS itself throws (Valkey gone mid-apply) after its applied row was written, no `apply-failed` row follows, so the
+    file shows an applied row whose change may not have happened. Valkey `alloc:log` is a view across hosts, `LPUSH`
+    then `LTRIM` to 500 entries, carrying weights and micro-dollars and never reasons. That list idiom is new here
+    (`run-mirror.mjs` mirrors with SET and ZADD); a capped list is the simplest shape for "the last N outcomes, newest
+    first", and it is a view, so losing it loses nothing the file does not hold. The panel's history reads `alloc:log`,
+    because the files are per host.
   - **Reasons** are agent text. They live in `alloc:plan` and the audit file only, are shown in the panel through the
     control-byte gate, and never enter a tool result, a run record or a log line.
   - **The boot refuses an envelope inside a job-visible path**: a cron `run.folder`, a `PI_DISPATCH_RUN_ROOTS` root, a
     `run.skillsDir` or `PI_GLOBAL_PI_DIR` (`envelopeInsideJobPaths`). The envelope path must be its own canonical path
     (absolute and equal to its `realpath`: no symlink, `.`, `..`, case variant or alias on the way), else the check
-    refuses naming the path to write; and the file must have one link. A symlink anywhere on the way could sit in a
-    job path where the job can repoint it, and every attempt to judge each link by where it lives found another edge
-    (a link in the middle of a chain), so the rule removes the links instead of walking them. Containment is decided
-    by file identity (device and inode, from `stat`), not by comparing path strings, so a symlink, a case variant, a
-    firmlink or a bind-mount alias of a job path is that directory; equality counts as inside. A job path is judged
-    where the kernel resolves it (the raw string, a link followed before `..`), where a container runtime mounts it
-    (the textual reading: Docker cleans a bind source as text, so `T/link/../b` mounts `T/b`), and for a relative path
-    also against the shell's working directory the runtime CLI uses: `$PWD`, when it has the cwd's identity, Go's own
-    `SameFile` test, which is exactly when `filepath.Abs` uses it. The envelope refuses when it lies in any of them, a
-    job path is skipped only when none exists, and its spelling never refuses a boot. With an envelope set, a relative
-    `PI_DISPATCH_RUN_ROOTS` entry refuses, since the admin resolves it in another process's working directory. The
-    check runs with every successful load and again on every reload (part B wires it). Residual, named: a host bind
-    mount of the envelope's folder placed under a job path is a second view this check cannot see; an operator must
-    not make one.
+    refuses naming the path to write; and the file must have one link. A symlink anywhere on the way could sit in a job
+    path where the job can repoint it, and every attempt to judge each link by where it lives found another edge (a link
+    in the middle of a chain), so the rule removes the links instead of walking them. Containment is decided by file
+    identity (device and inode, from `stat`), not by comparing path strings, so a symlink, a case variant, a firmlink or
+    a bind-mount alias of a job path is that directory; equality counts as inside. A job path is judged where the kernel
+    resolves it (the raw string, a link followed before `..`), where a container runtime mounts it (the textual reading:
+    Docker cleans a bind source as text, so `T/link/../b` mounts `T/b`), and for a relative path also against the
+    shell's working directory the runtime CLI uses: `$PWD`, when it has the cwd's identity, Go's own `SameFile` test,
+    which is exactly when `filepath.Abs` uses it. The envelope refuses when it lies in any of them, a job path is
+    skipped only when none exists, and its spelling never refuses a boot. With an envelope set, a relative
+    `PI_DISPATCH_RUN_ROOTS` entry refuses, since the admin resolves it in another process's working directory. The check
+    runs with every successful load (`loadEnvelopeChecked`): at boot, on every envelope reload, and when a projects or
+    scoped-limits reload re-judges the envelope; a reload that fails it keeps the last good copy, which is therefore
+    never a file a job could have written. A triggers reload that adds a job path around the file logs
+    `envelope_inside_job_path` and refuses nothing, for that reason. Residual, named: a host bind mount of the
+    envelope's folder placed under a job path is a second view this check cannot see; an operator must not make one.
+  - **A local job's folder is judged where it is mounted.** It is resolved at prepare and mounted resolved
+    (`INT-CONTAINER-JOB-INPUTS`). A folder NAMED inside a run root or a cron folder (by its text, or by the identity of
+    an ancestor of its text, so a case variant or a firmlink spelling counts) that now resolves outside every such job
+    path is `local-folder-escaped`: a job can write inside its job path, so a link planted there must not carry another
+    job's folder out of it. So a run root used as a symlink farm (`root/x -> /elsewhere`) is refused too; list the real
+    folder as a run root or a cron folder instead. A folder that is the envelope's folder or above it is
+    `local-folder-holds-envelope`. A folder whose resolved path is a member of ANOTHER project than the one decided at
+    pickup from the named spelling is `local-folder-project-changed`, so a link cannot bill one project's work to
+    another's share; a resolved folder in no project keeps the named membership. A chained child is enqueued on the
+    folder as its parent NAMED it, so it matches the parent's rows, member and mutex, and its own prepare judges it
+    again.
   - **An envelope needs a per-job cost cap** (`PI_MAX_COST_USD`): every governed job reserves its per-job cap against
     its allocation, and without one every governed job would be a configuration refusal. A floor below the per-job
     cap admits no job of its own, so doctor warns on one (issue #504 part B); the parser does not refuse it, because
@@ -4065,6 +4150,13 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     with no error; the CAS makes the write itself the check.
   - *Unknown plan keys dropped, as the outbox does.* A plan is a money file; a dropped key could be a misspelled
     weight read as absent.
+  - *`_other` through the project slot.* A project the envelope does not name may carry its own row, and its jobs
+    must reserve in that row AND in `_other`'s share; one slot cannot hold both.
+  - *Refusing a triggers reload whose new job path holds the envelope.* The live envelope is already safe, because
+    every envelope reload re-runs the check; refusing the triggers edit would couple two files for no money effect.
+  - *Holding a local folder to the run roots by a flag set at enqueue.* No job data carries such a flag, a queued job
+    from before it would carry none, and the operator's own `pi-dispatch run` is not held to the roots. The folder is
+    judged by where it is NAMED: inside a job path, it must resolve inside it.
 - **Traces to**: `REQ-DELEGATED-ALLOCATION`, `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-SCOPED-LIMITS`,
   `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
   `DES-DOLLAR-RESERVE-AND-SETTLE`, `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-HOST-REGISTRY`,
@@ -5455,8 +5547,15 @@ a tunnel.
     so only an UNRESTRICTED job's mid-run switch to another declared model goes uncounted; a job holds one slot
     per endpoint for its whole run, so fan-out inside one job can exceed `slots` (the server then queues);
     fleet-wide only with a declared worker name.
+- **The allocation lock borrows the idiom and bounds nothing** (issue #504 part B,
+  `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`): `alloc:lock` is one `SET NX PX 5000` key with a per-apply holder,
+  released through this entry's `RELEASE_IF_MINE`, so a lock that expired mid-apply and was taken by another host
+  stays theirs. Unlike the leases above it keeps no two writes apart: the compare-and-set on `alloc:plan` does that,
+  and the lock exists only so a concurrent apply is told `plan-busy` rather than `plan-stale`. It claims no container,
+  so `OQ-008`'s refusal does not reach it. The leases above are UNCHANGED, checked.
 - **Traces to**: `DES-CONCURRENCY-3`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `INT-SCOPED-LIMITS-FILE-CONTRACT`,
-  `INT-WAIT-PROFILES-CONTRACT`, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`, `OQ-008`, `OQ-030`
+  `INT-WAIT-PROFILES-CONTRACT`, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`, `OQ-008`, `OQ-030`,
+  `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`
 
 
 ## DES-CONTAINER-BACKEND-REGISTRY
@@ -8015,3 +8114,4 @@ a tunnel.
 | 2026-10-03 | Issue #500, part F, PR #570's second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the teardown rule for a pi process with no ledger is a time floor, like the `starting` rule: it counts only when this parent first saw it 2 s or more before teardown (`NO_LEDGER_FINAL_MS`, monotonic), replacing the one-pass rule, which still let a child the last tick caught at spawn fail an honest job; an environment read whole without the ledger directory or the preload still counts at any age. The teardown paragraph lists what a final-pass stop can come from, and the Residuals added list names the new window (a no-ledger child younger than 2 s at teardown whose environment cannot be read). |
 | 2026-10-04 | Issue #571. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: a new paragraph, a call whose answer carries broken usage: pi fills a missing usage block with zeros, so the METER counts `costUnreported` on every run, capped or not, and in every child, for a call on a priced model (`pricedModel`: a rate above 0 in the table, a tier or an allowed fallback) whose settled answer has a finite cost and broken usage (`unreportedUsage`: no input side unless it never started, a failure after it started, or answer content with an output count of 0, or at most 1 on `anthropic-messages`), and that did not forward (no other model call dispatched under its dispatch token); the guard charges every such call at least its bound by the same predicate and counts nothing for it, one counter. An admitted call whose dispatch threw synchronously or returned no answer object counts `costUnanswered` on a bound above 0; a stream method answered with a promise of a stream is metered and settled from the stream it resolves to, its rejection `unpriced`; a slot flushed by a synchronous forward is not counted. The settlement rule lists `costUnreported` among the counters that must be present and 0. Residuals: started failed streams settle at the floor; a forwarding call is trusted for its own usage, a hook's call included; broken usage pi fills with plausible numbers is not detected; a server that never sends usage floors every call on a priced model (a false floor, which `doctor` warns about); the deploy order (upgrade the image before the worker, since a new worker reads the absent key as a floor). **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the child ledger is version 3 and carries the meter's `costUnreported` beside the guard's four floor counters, written with or without a guard, an older version counting as unmetered; the parent meter adds the children's count through setChildren; a stream method answered with a promise of a stream (pi-ai's legacy calls hand an async registry entry's answer on as it is) is counted at dispatch and settled from the stream it resolves to, by the meter and the guard alike; the cost views read a present counter that is not 0 as a floor, `costUnreported` with or without a cap, an absent `costUnreported` or guard counter as a floor only on a record with `costCapMicros`, and an absent `unresolved`, `unpriced` or `unmeteredChildren` as exact. **Code evidence**: image/runner/src/usage-meter.mjs -> pricedModel, unreportedUsage, createUsageMeter, wrapModelRuntime, wrapProviderStreams, dispatchToken, createCostGuard, CHILD_LEDGER_VERSION, childLedger; image/runner/src/child-watch.mjs; worker/src/dollar-budget.mjs -> FLOOR_COUNTERS; worker/src/run-history.mjs -> TOKEN_KEYS; worker/src/model-endpoints.mjs -> unreportedUsageModels; worker/src/model-catalog.mjs -> builtinChatModels; worker/src/doctor.mjs; admin/src/costs.mjs. |
 | 2026-10-04 | Issue #504, part A. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` NEW**: the decision (weights from the agent, arithmetic in `priorities.mjs`, the envelope an operator file), the algorithm (floors, largest remainder with ties by id, the step `S = floor(total * maxStepPct / 100)` with `D = 0` applying the target, the blend by `S / D` re-rounded with the unallocated money as one more entry so `after - before` stays within S exactly, repo shares), the re-base that projects the effective vector by its current above-floor shares (the unallocated money weighing what it holds) and never re-targets a plan's weights, a floor refused under an operator row of its window or any longer one, the boot check requiring the envelope path to be its own canonical path and the file to have one hard link (removing every symlink on the way rather than walking them), deciding containment by file identity (device and inode, never path strings), naming the host bind-mount residual, and judging each job path both where the kernel resolves it and where a container runtime mounts it (the textual reading) and, for a relative path, against the shell's working directory the runtime CLI uses, so its spelling never refuses a boot, a relative run root refused, `_other` keyed `project:_other` with projects absent from the envelope joining it, the applied vector and a persisted neutral record in Valkey `alloc:plan`, writes by compare-and-set with `alloc:lock` only for `plan-busy`, the fleet re-base gated on `alloc:envelope:expected`, the audit file first and the `alloc:log` LPUSH and LTRIM view (a new idiom, named), the threat model with the $100, 25% and 24-hour worked example and one extra step per flush, and the rejected approaches. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: a fourth residual, bounded by arithmetic rather than a keypress, with those worst-case numbers; the Decision describes the three new tools in prose only until part C registers them. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**. **Code evidence**: worker/src/priorities.mjs -> parsePlan, planId, scopeRef, planRefusal, allocate, neutralAllocation, rebase; worker/src/envelope.mjs -> parseEnvelope, loadEnvelope, envelopeDigest, envelopeInsideJobPaths. |
+| 2026-10-04 | Issue #504, part B. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**: part B is named as shipped (`worker/src/allocation.mjs`); the compare-and-set is spelled out (`CAS_SCRIPT` decodes with `cjson`, a null id is the empty string, the neutral seed is `SEED_SCRIPT`, which on a fresh seed sets `alloc:envelope:expected` to the seed's digest unconditionally in the same step, so a stale one left by a turn-off never survives a new seed, and on replacing a state that does not decode sets it only when absent, so a stale host cannot take the fleet through an unreadable plan); the audit order is split, the system's own changes (seed, expiry, re-base) written by the CAS winner after it won, a writer's change (plan, revert) written before the CAS with an `apply-failed` row after a lost one; the ladder gains `envelope-mismatch` after the writer rung and names `plan-invalid` before it; the host role in a re-base: every host reconciles at boot, on every envelope reload and at each pickup, so setting `alloc:envelope:expected` heals a mismatched host at its next job; `expected` names the APPLIED split's envelope (set by the seed's winner, by a host that agrees, and by a differing host that finds it absent), PR #574's review having found that the lazy seed let the first differing host re-base the fleet; the first host to reconcile at a first start or after the keys were deleted defines the split, and doctor names every host that differs; a changed-externally row is remembered only after it was written; a neutral state re-bases to the new envelope's neutral split, a plan keeps its id, `lastPlanAt` and expiry; a host with no envelope in a governed fleet refuses its jobs (one `EXISTS` per pickup), so delegation is turned off for a fleet by removing the envelope everywhere and deleting `alloc:plan` and `alloc:envelope:expected`; a fault while the pickup reads the split is `InfraRetry`, never a dropped job; two audit residuals are named (a system change whose row the file refuses stands, logged as `allocation_audit_row_lost` and still pushed to `alloc:log`; a writer's CAS that throws leaves its applied row with no `apply-failed` row); a stored state whose amounts are not safe non-negative integers is corrupt, one a newer build wrote is neither trusted nor overwritten; enforcement names the synthetic ledger and `_other`'s own `otherDollars` slot (a deviation from the plan's "through the project slot": a project the envelope does not name keeps its own row and counts in `_other`), with `capSource`; the containment check is wired with every load and reload; a local job's folder is judged where it is mounted: named inside a job path by text or by an ancestor's identity, a symlink farm refused with the configuration to use instead, the envelope's folder refused, a resolved folder in another project refused, a chained child enqueued on the named folder. Three Rejected entries: `_other` through the project slot, refusing a triggers reload whose new job path holds the envelope, and holding a local folder to the run roots by a flag set at enqueue. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: item 9 names `_other`'s ledger and `allocation-cap`; a new item 10, the worker half under an envelope: `min` per window, never replace; the synthetic project, repo and `_other` ledgers join the job-cost prefixes and settle through `holdPart`; `capSource` per ledger and `dollarCapSource` for the deployment decide `allocation-cap` against `dollar-cap` (a tie is the operator's); a shrink refuses new starts only; `envelope-mismatch` is a free gate before the mint. **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED**: `alloc:lock` borrows the `SET NX PX` idiom and `RELEASE_IF_MINE` and bounds nothing; the leases are UNCHANGED, checked. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`** UNCHANGED, checked: the new refusals comment once, pre-spend, and stay out of the hook's policy set. **Code evidence**: `worker/src/allocation.mjs`, `worker/src/processor.mjs` (the envelope gate, the resolved folder's project, `capSourceOf`), `worker/src/index.mjs` (`governedDollars` and the `InfraRetry` at pickup), `worker/src/start.mjs` (`reloadEnvelope`, `afterCommit`, `fpEnvelope`, the reaper), `worker/src/prepare-local.mjs` (`judgePlacement`), `worker/src/outbox.mjs`; tests `allocation-apply`, `allocation.integration`, `index-allocation`, `processor-allocation`, `prepare-local`, `outbox`, `start-wiring`, `doctor`. |

@@ -108,6 +108,18 @@ test("happy path: one valid request enqueues one child on the parent's folder", 
 	assert.equal(args.jobId, chainedJobId({ parentJobId: "parent-1", flow: "ok", task: "do it" }));
 });
 
+test("a chained child is enqueued on the folder AS THE PARENT NAMED IT, never the folder prepare resolved (#504)", async () => {
+	// Prepare now returns the RESOLVED folder as `workspace`. The child must match the parent's scoped-limits row, project
+	// member and folder mutex, which are keyed by the named spelling; its own prepare resolves and judges it again.
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it" }) } } });
+	const cap = makeCapture();
+	const gate = makeGate();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: gate.gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+	await collect({ job: localJob({ folder: "/srv/link/shop" }), prepared: { jobDir: "/job", workspace: "/srv/real/shop", sha: "abcsha" } });
+	assert.equal(cap.enqueued[0].args.folder, "/srv/link/shop");
+	assert.equal(gate.calls[0].folder, "/srv/real/shop", "the flow gate reads the folder that was judged and mounted");
+});
+
 test("a chained child inherits the PARENT'S image, and never the request file's", async () => {
 	// A chained child runs the parent's OWN folder, so it needs the parent's toolchain by definition -- unlike
 	// provider/model, where a fallback still runs the flow. A child in the wrong image cannot find its tools,

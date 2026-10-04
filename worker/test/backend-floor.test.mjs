@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, RUNTIME_ADDS_NO_MOUNTS, backendRefusals, floorShortfall, observationRefusalIsTransient, observationRefusals, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "../src/backends.mjs";
 import { loadConfig } from "../src/config.mjs";
-import { backendChecks, runDoctor } from "../src/doctor.mjs";
+import { backendChecks } from "../src/doctor.mjs";
+import { runDoctor } from "./helpers/doctor.mjs";
 
 // PI_EGRESS=0 in the base env so these tests are about the FLOOR and not about the egress ladder, which
 // has its own tests below. Every other variable is left unset on purpose: the defaults are the subject.
