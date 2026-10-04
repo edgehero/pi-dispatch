@@ -448,7 +448,7 @@ test("the CLI's VALKEY_URL is this shell's, else the deployment .env's, a disagr
 		assert.doesNotMatch(code, /env\.VALKEY_URL \?\?/, f);
 	}
 	const cli = readFileSync(join(REPO, "worker", "src", "cli.mjs"), "utf8");
-	assert.equal((cli.match(/cliValkeyUrl\(env\)/g) ?? []).length, 1, "run");
+	assert.equal((cli.match(/cliValkeyUrl\(env\)/g) ?? []).length, 2, "run, and run --trigger (#505)");
 	assert.equal((cli.match(/await killSwitchUrls\(argv\.slice\(\d\), env\)/g) ?? []).length, 2, "pause/resume/status, and cancel (round 2: both URLs on a disagreement)");
 	// And end to end: `pi-dispatch status` from that folder dials the folder's Valkey (nothing answers there, so it says
 	// where it tried), not 6379.

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { EXIT_POLICY, installRejectionPrinter, installStdoutPipeGuard } from "./exit-code.mjs";
 import { isEntryModule } from "./entry.mjs";
 import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
+import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 
 /** How long the kill switch waits on the host registry before acting on the shared queue alone. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
@@ -27,6 +28,12 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
 
   pi-dispatch run <folder> --task "<what to do>" [--flow <name>]
                            [--provider <p>] [--model <m>] [--max-turns <n>] [--image <ref>] [--force]
+  pi-dispatch run --trigger <cron id>
+                           fire one cron trigger now, once, exactly as its schedule would: its folder, flow,
+                           task and every other field come from the triggers file (PI_TRIGGERS_FILE, else
+                           ./triggers.json here); a second call in the same minute queues nothing.
+                           Both run forms take PI_WORKER_NAME (and --trigger PI_TRIGGERS_FILE and
+                           PI_MAX_COST_USD) from this shell, else from ./.env here, refusing a disagreement
   pi-dispatch sandbox <jobId>
                            re-open a finished run's sandbox as a shell — same image, same workspace,
                            no credentials  [--publish <port>[:<containerPort>]] [--pin]
@@ -127,8 +134,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 				"max-turns": { type: "string" },
 				image: { type: "string" }, // the container image for this one job; blank/absent = PI_JOB_IMAGE
 				force: { type: "boolean", default: false },
+				trigger: { type: "string" }, // issue #505: fire this cron trigger once, by hand
 			},
 		});
+		if (values.trigger !== undefined) return runTrigger(values, positionals, env, { write, valkeyRefusal, now });
 		const folder = positionals[0] && resolve(positionals[0]);
 		if (!folder || !existsSync(folder)) return fail(`folder not found: ${positionals[0] ?? "(none given)"}`);
 		if (!values.task) return fail("a --task is required");
@@ -154,7 +163,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			if (dirty) return fail(`${folder} has uncommitted changes. Commit or stash them, or pass --force.`);
 		}
 
-		const config = loadConfig(env);
+		// Which host queue (review of PR #575): PI_WORKER_NAME by the deployment's rule, as VALKEY_URL below is, so `run`
+		// from the deployment folder queues where that folder's worker drains even when this shell does not export it.
+		const deployment = cliDeploymentEnv(env, ["PI_WORKER_NAME"]);
+		if (deployment.problem) return fail(`${deployment.problem}. Nothing was queued.`);
+		const config = loadConfig(deployment.env);
 		const { cliValkeyUrl, parseConnection } = await import("./connection.mjs");
 		// PR #475's review: VALKEY_URL as the password is read, this shell's else the deployment .env's (a disagreement
 		// named), not the shell's alone: from the folder of a Valkey on another port, `run` dialled 6379.
@@ -257,6 +270,120 @@ async function killSwitchUrls(args, env) {
 	if (picked.error) return picked;
 	if (picked.note) process.stderr.write(`warning: ${picked.note}\n`);
 	return { ...picked, positionals: parsed.positionals };
+}
+
+/**
+ * `pi-dispatch run --trigger <cron id>` (issue #505): fire one cron trigger now, once, as its schedule would. Typed by
+ * an operator only; no tool calls it. It is the way to run a `run.portfolio` job without waiting for its schedule
+ * (`pi-dispatch run <folder>` makes a manual job, which never carries the flag).
+ *
+ * WHICH FILE: `PI_TRIGGERS_FILE`, else `./triggers.json` in this directory, doctor's rule (`triggersPath`) and the
+ * one-shot rule the worker's own live checks read by, so the command and the worker's check of the portfolio flag
+ * read one file. Not `config.triggersFile`, whose null means "the worker schedules no cron": a trigger fired by hand
+ * does not need the worker's scheduler.
+ *
+ * WHAT IS QUEUED: the trigger's own scheduler entry, from `loadSchedules` over that file (so a file the worker would
+ * refuse is refused here, with the loader's message), and its data passed through whole. Nothing on the command line
+ * can change it, so every other `run` flag is refused beside `--trigger`. The job id is `manual:<id>:<minute>`,
+ * deduplicated through the same read back as `pi-dispatch run`.
+ *
+ * WHERE: on the queue the worker of this host schedules the trigger on (its own host queue when the deployment
+ * declares a name, else the shared one), because the trigger's folder is on this machine. A trigger whose folder is
+ * not here belongs to another host, and is refused with the command to run there: queued here, no worker could run it.
+ */
+async function runTrigger(values, positionals, env, { write, valkeyRefusal, now }) {
+	const id = values.trigger;
+	const extra = ["task", "flow", "provider", "model", "max-turns", "image"].filter((k) => values[k] !== undefined);
+	if (values.force) extra.push("force");
+	if (positionals.length > 0 || extra.length > 0) {
+		return fail(`--trigger takes no folder and no other flag (got ${[...positionals.map((p) => JSON.stringify(p)), ...extra.map((k) => `--${k}`)].join(" ")}): the trigger's own fields are what runs. Nothing was queued.`);
+	}
+	// PI_TRIGGERS_FILE and PI_WORKER_NAME by the deployment's rule (review of PR #575), the one VALKEY_URL is read by
+	// below: which file and which host queue are the deployment's facts, and a shell that does not export them must not
+	// read ./triggers.json or queue on the shared queue while the service uses the `.env`'s. PI_MAX_COST_USD too: it is
+	// the one other config value the worker's trigger loader (`loadSchedules`) accepts or refuses a file by (a trigger's
+	// `run.maxCostUsd` above it), so this command refuses exactly the files the worker refuses. `fleet` is the declared
+	// PI_WORKER_NAME, already here. Keep this list equal to the loader's config inputs.
+	const deployment = cliDeploymentEnv(env, TRIGGER_LOADER_ENV_KEYS);
+	if (deployment.problem) return fail(`${deployment.problem}. Nothing was queued.`);
+	const { triggersPath } = await import("./doctor.mjs");
+	const path = triggersPath(deployment.env, process.cwd());
+	if (path === "" || !existsSync(path)) return fail(`no triggers file at ${path === "" ? "(PI_TRIGGERS_FILE is empty)" : path}. Set PI_TRIGGERS_FILE or run this from the deployment folder. Nothing was queued.`);
+
+	const config = loadConfig(deployment.env);
+	const { loadSchedules } = await import("./schedules.mjs");
+	let schedule;
+	try {
+		// One read, validated whole by the shared loader (so a file the worker would refuse is refused here, with its
+		// message). The cron schedule is looked up FIRST: only when no cron trigger has this id is the raw file asked
+		// whether a webhook entry carries it, so a webhook entry spelling the same id never hides the cron trigger.
+		const text = readFileSync(path, "utf8");
+		schedule = loadSchedules({ ...config, triggersFile: path }, { readFileSync: () => text, fleet: config.workerNameDeclared }).find((s) => s.schedulerId === id);
+		if (!schedule) {
+			const named = JSON.parse(text).triggers.find((t) => t?.on?.id === id && t.on.type !== "cron");
+			if (named) return fail(`trigger "${id}" is a ${String(named.on.type)} trigger: only a cron trigger can be fired by hand. Nothing was queued.`);
+		}
+	} catch (error) {
+		return fail(`${error?.message ?? error}. Nothing was queued.`);
+	}
+	if (!schedule) return fail(`no cron trigger with id "${id}" in ${path}. Nothing was queued.`);
+	if (schedule.unserved) return fail(`cron trigger "${id}" runs on another host: its folder is not on this machine. Run this command on the host that has the folder. Nothing was queued.`);
+	// The worker's folder rule, `run <folder>`'s check (issue #524): `.git` at the folder and a commit at HEAD, or the job
+	// is refused at pickup. Uncommitted changes stay allowed, as they are for every scheduled tick.
+	const notARepo = localRepoProblem(schedule.data.folder);
+	if (notARepo) return fail(`cron trigger "${id}": ${notARepo} Nothing was queued.`);
+
+	const { cliValkeyUrl, parseConnection } = await import("./connection.mjs");
+	const valkeyUrl = cliValkeyUrl(env);
+	const { makeQueue, enqueueTriggerRunReporting, hostQueueName, swallowedRunSentence } = await import("./queue.mjs");
+	// The queue the worker of this host schedules this trigger on (start.mjs: `cronQueue`).
+	const hq = config.workerNameDeclared ? hostQueueName(config.workerName) : null;
+	const refused = await valkeyRefusal(valkeyUrl, env);
+	if (refused) return fail(refused);
+	const queue = makeQueue(parseConnection(valkeyUrl, { failFast: true }), { ...(hq ? { name: hq } : {}) });
+	try {
+		const { id: jobId, existing } = await enqueueTriggerRunReporting(queue, schedule, { now: now() });
+		const hint = existing ? null : await workerHint(queue);
+		write(runQueuedLine({ jobId, existing, trigger: id, hint }, { swallowedRunSentence }));
+	} catch (error) {
+		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(valkeyUrl)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(valkeyUrl)}\n  ${error.message}`);
+	} finally {
+		await queue.close().catch(() => {});
+	}
+	return 0;
+}
+
+/**
+ * The env keys `run --trigger` resolves from the deployment: the file, the host, and every config value the worker's
+ * trigger loader (`loadSchedules`: `triggersFile`, `maxCostUsd`, and `fleet` from a declared worker name) judges a file by.
+ */
+export const TRIGGER_LOADER_ENV_KEYS = Object.freeze(["PI_TRIGGERS_FILE", "PI_WORKER_NAME", "PI_MAX_COST_USD"]);
+
+/**
+ * Deployment keys for a CLI verb that acts for the deployment (review of PR #575): `keys` resolved by issue #471's rule
+ * (`resolveServiceEnv`, service-env.mjs), the one doctor and `up` read the service's keys by. This shell's value where
+ * it sets the key, else the `.env` in `cwd` from a line the service's loader reads as written. Where the two disagree,
+ * or a line naming the key cannot be read as the loader reads it, or the file cannot be read and this shell sets none,
+ * the answer is unknown and the verb refuses (`problem`), as `up` refuses on a PI_JOB_IMAGE disagreement: a job queued
+ * on a queue no worker drains, or from a triggers file the worker does not read, is a silent no-op. Returns
+ * `{ env }` (this shell's with the file's values filled in) or `{ problem }`.
+ */
+export function cliDeploymentEnv(env, keys, { cwd = process.cwd(), platform = process.platform, readFile = (p) => readFileSync(p) } = {}) {
+	const envPath = join(cwd, ".env");
+	let file;
+	try {
+		file = serviceEnvFileOf(readFile(envPath), envPath, serviceEnvLoader(platform));
+	} catch (error) {
+		const unset = keys.filter((k) => typeof env[k] !== "string");
+		if (error?.code !== "ENOENT" && unset.length > 0) return { problem: `${envPath} could not be read (${error?.code ?? "error"}), so ${unset.join(" and ")} cannot be told` };
+		return { env };
+	}
+	const read = resolveServiceEnv({ env, file, keys });
+	const [d] = read.disagreements;
+	if (d) return { problem: `${d.key} is ${JSON.stringify(d.shell)} in this shell and ${JSON.stringify(d.file)} in ${envPath}: make them agree (the service runs the file's)` };
+	const unread = [...read.unread.map((u) => u.key), ...read.hazardSkipped];
+	if (unread.length > 0) return { problem: `${envPath} has a line for ${unread.join(" and ")} that the service's loader may read differently, so it cannot be told (pi-dispatch doctor names the line)` };
+	return { env: read.env };
 }
 
 /** `workerHint`'s line when the queue cannot say, true whether or not a worker runs. */
@@ -399,10 +526,11 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
  * The sentence itself is `queue.mjs`'s, shared with the admin's `/dispatch run`, and handed in because this module
  * imports the queue lazily. `hint` is `workerHint`'s closing line (issue #530); without one, the line true either way.
  */
-export function runQueuedLine({ jobId, existing, folder, hint = WORKER_HINT_UNKNOWN }, { swallowedRunSentence }) {
-	if (existing) return `${swallowedRunSentence(jobId, existing)}\nthe same folder and task queue a new run from the next minute on.\n`;
+export function runQueuedLine({ jobId, existing, folder, trigger, hint = WORKER_HINT_UNKNOWN }, { swallowedRunSentence }) {
+	// `trigger` (issue #505) is `run --trigger`'s cron id, said in place of the folder.
+	if (existing) return `${swallowedRunSentence(jobId, existing)}\n${trigger !== undefined ? "the same trigger queues" : "the same folder and task queue"} a new run from the next minute on.\n`;
 	const unknown = existing === undefined ? "could not check whether an identical run from this minute already held this id.\n" : "";
-	return `queued ${jobId} for folder ${folder}\n${unknown}${hint}\n`;
+	return `queued ${jobId} for ${trigger !== undefined ? `cron trigger ${trigger}` : `folder ${folder}`}\n${unknown}${hint}\n`;
 }
 
 function fail(message) {

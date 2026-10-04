@@ -1260,6 +1260,24 @@ test("once wiring: deps.checkOnceSpent reads PI_TRIGGERS_FILE when set, and excu
 	}
 });
 
+test("portfolio wiring: deps.checkPortfolioFlag reads the live PI_TRIGGERS_FILE by cron id, so removing the flag takes effect (#505)", { skip }, async () => {
+	const dir = tempDir("pi-portfolio-path-");
+	try {
+		const triggersPath = join(dir, "triggers.json");
+		const entry = (run) => ({ on: { type: "cron", id: "pm-weekly", pattern: "0 6 * * 1" }, run: { kind: "local", folder: dir, flow: "pm", task: "plan", ...run } });
+		writeFileSync(triggersPath, JSON.stringify({ triggers: [entry({ portfolio: true })] }));
+		const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+		const { deps } = await runStart({ env: { PI_TRIGGERS_FILE: triggersPath }, makeAuth, makeHost: () => fakeHost() });
+		const job = { kind: "local", folder: dir, flow: "pm", task: "plan", portfolio: true, trigger: { id: "pm-weekly", pattern: "0 6 * * 1" } };
+		assert.equal(typeof deps.checkPortfolioFlag, "function", "the live-flag check must be wired into deps");
+		assert.equal(await deps.checkPortfolioFlag(job), true);
+		writeFileSync(triggersPath, JSON.stringify({ triggers: [entry({})] }));
+		assert.equal(await deps.checkPortfolioFlag(job), false, "read live, never from the boot copy");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("once wiring: with PI_TRIGGERS_FILE unset the fallback is <cwd>/triggers.json -- doctor's own default", { skip }, async () => {
 	// Deliberately NOT config.triggersFile, whose null means "cron disabled" and must keep meaning that:
 	// under that knob the DEFAULT single-host deployment would have a firing receiver and a worker that

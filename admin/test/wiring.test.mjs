@@ -982,6 +982,32 @@ test("NO tool exposes a secrets parameter, and none can reach the overlay key ei
   assert.equal(/secretProfiles/.test(set.description ?? ""), false);
 });
 
+test("run.portfolio is reviewed-file-only: no tool parameter, and buildTriggerEntry cannot produce it on any kind (#505)", async () => {
+  // Budget authority, `run.secrets`' reasoning one field over: a model-callable writer that could flag a cron trigger
+  // would let the model grant itself the plan channel. Two doors again. The schema door: no tool takes a `portfolio`
+  // parameter. The builder door: even a call that sends one anyway (top level or inside `run`, as an extra field the
+  // schema would strip) gets an entry with no `portfolio` key, because every arm writes fixed keys.
+  const { calls, mod } = await loadRegistered();
+  for (const tool of calls.registerTool) {
+    const keys = Object.keys(tool.parameters?.properties ?? {});
+    assert.equal(keys.includes("portfolio"), false, `${tool.name} must expose no portfolio parameter (got ${keys.join(", ")})`);
+  }
+  const { buildTriggerEntry } = mod;
+  const cases = [
+    ["cron", { id: "n", pattern: "0 3 * * *", folder: "/p", flow: "f", task: "t" }],
+    ["label", { labels: ["pi"], flow: "f" }],
+    ["comment", { phrase: "@pi", flow: "f" }],
+    ["pull_request", { action: ["opened"], flow: "f" }],
+    ["issue", { action: ["closed"], flow: "f" }],
+  ];
+  for (const [kind, params] of cases) {
+    const entry = buildTriggerEntry(kind, { ...params, portfolio: true, run: { portfolio: true } });
+    assert.equal("portfolio" in entry.run, false, `${kind} must not carry run.portfolio`);
+    assert.equal("portfolio" in entry, false);
+    assert.equal(JSON.stringify(entry).includes("portfolio"), false, `${kind}: no portfolio key anywhere in the entry`);
+  }
+});
+
 test("buildTriggerEntry carries run.backend on EVERY kind it is offered for (#227)", async () => {
   // The bug this pins: `forgeRun` was extended with `backend`, but the `pull_request` and `issue` arms do
   // not use `forgeRun` -- they build `run` inline. So the tool VALIDATED the name against PI_BACKENDS,

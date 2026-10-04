@@ -1553,3 +1553,48 @@ test("INT-TRIGGERS-FILE-CONTRACT states every forge's action vocabulary, in the 
 		);
 	}
 });
+
+// --- run.portfolio (issue #505): a cron trigger whose job may send a priorities plan back ---
+
+test("run.portfolio is accepted on a cron trigger, true and false both carried at run level", () => {
+	assert.equal(parse([withRun(CRON, { portfolio: true })])[0].run.portfolio, true);
+	assert.equal(parse([withRun(CRON, { portfolio: false })])[0].run.portfolio, false, "today's default, stated, is carried (run.resume's rule)");
+});
+
+test("run.portfolio that is not a boolean is refused at load, naming the trigger and the field", () => {
+	for (const bad of ["true", 1, 0, null, {}, []]) {
+		assert.throws(
+			() => parse([withRun(CRON, { portfolio: bad })]),
+			(e) => isConfigError(e) && e.message === `cron trigger "nightly-tidy": run.portfolio must be true or false when present: ${PATH}`,
+			`portfolio ${JSON.stringify(bad)} must refuse`,
+		);
+	}
+});
+
+test("run.portfolio is refused on every webhook kind on every forge, false included", () => {
+	const ISSUE = { on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "deploy" } };
+	const entries = [LABEL, COMMENT, PR_LABELED, PR_AUTO, ISSUE, ...FORGE_ENTRIES.map((f) => f.entry)];
+	for (const entry of entries) {
+		for (const value of [true, false]) {
+			assert.throws(
+				() => parse([withRun(entry, { portfolio: value })]),
+				(e) => isConfigError(e) && e.message.startsWith("trigger at index 0: run.portfolio is only available on a cron trigger") && e.message.endsWith(PATH),
+				`${entry.run.kind} ${entry.on.type} must refuse portfolio ${value}`,
+			);
+		}
+	}
+});
+
+test("run.portfolio: true beside run.command is refused at load; false beside one loads", () => {
+	assert.throws(
+		() => parse([withRun(withCommand(CRON), { portfolio: true })]),
+		(e) => isConfigError(e) && e.message === `cron trigger "nightly-tidy": run.portfolio cannot be set beside run.command: a budget plan is written by a flow's judgement, and a command has no committed skill to review: ${PATH}`,
+	);
+	assert.equal(parse([withRun(withCommand(CRON), { portfolio: false })])[0].run.portfolio, false);
+});
+
+test("run.portfolio absent stays ABSENT: an unflagged cron entry normalizes byte-identically to before the feature", () => {
+	const [t] = parse([CRON]);
+	assert.equal("portfolio" in t.run, false);
+	assert.equal(JSON.stringify(t.run), JSON.stringify({ kind: "local", folder: "/proj", flow: "tidy", task: "run the tidy pass", provider: undefined, model: undefined, maxTurns: undefined, github: undefined, packages: undefined, image: undefined, resume: undefined }));
+});

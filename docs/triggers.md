@@ -192,6 +192,37 @@ changes what code runs or what it costs.
 - `"github": true` on a cron trigger gets the same per-job GitHub token the webhook path gets. A
   scheduled flow can use `gh`.
 
+- `"portfolio": true` on a cron trigger makes its jobs portfolio jobs: the one kind of job that may send a
+  budget priorities plan back ([`docs/allocation.md`](allocation.md)). Cron only. The file refuses it on a webhook
+  trigger, and beside `"command"`, because a plan should come from a flow you reviewed. It must be `true` or `false`.
+  When such a job starts, the worker reads the triggers file again. If the flag is gone, or the entry with that
+  id now has another folder, flow, command or task, the job runs as an ordinary cron job. If the flag is there and this worker's envelope does not let `portfolio-job` write a plan (no
+  envelope, `delegation.enabled` false, or `portfolio-job` not in `delegation.writers`), the job is refused as
+  `portfolio-no-envelope` before it costs anything. A chained child never inherits the flag.
+
+## Firing a cron trigger by hand
+
+`pi-dispatch run --trigger <id>` runs one cron trigger now, once, exactly as its schedule would. Its folder,
+flow, task and every other field come from the triggers file, so the command takes no other flag. This is how
+you test a `portfolio` trigger without waiting for its schedule. `pi-dispatch run <folder>` makes a manual job,
+which never carries the flag.
+
+- It reads `PI_TRIGGERS_FILE`, `PI_WORKER_NAME` and `PI_MAX_COST_USD` from your shell, or else from the `.env` in
+  the folder you run it from, as it reads `VALKEY_URL`. With no `PI_TRIGGERS_FILE` anywhere it reads
+  `./triggers.json` there. That is the file the worker checks the `portfolio` flag in, so run it from the deployment
+  folder. It refuses when your shell and the `.env` disagree on one of them, or when the `.env` cannot be read and
+  your shell does not set it. `PI_MAX_COST_USD` is read so that a trigger whose `maxCostUsd` the worker refuses is
+  refused here too. `pi-dispatch run <folder>` reads `PI_WORKER_NAME` the same way.
+- It refuses an id that is not a cron trigger in that file, and it refuses a file the worker would refuse.
+- The trigger's folder must be a git repository with a commit, as for `pi-dispatch run <folder>`. Uncommitted
+  changes are fine, as they are for a scheduled run.
+- The job id is `manual:<id>:<minute>`. A second call in the same minute queues nothing and says so. A later
+  minute queues a new run.
+- The job's `/job/event.json` says `"source": "cron"` with the trigger's id and pattern, and `scheduledFor` and
+  `previousRunAt` are `null`. It counts as a run of the trigger: the next scheduled run's `previousRunAt` can name it.
+- On a fleet it queues on this host's own queue, because the trigger's folder is here. If the folder is on
+  another machine, it refuses and tells you to run it there.
+
 ## Local folders behind a link
 
 A local job's folder is resolved when the job is prepared, and the container mounts the resolved folder, not the

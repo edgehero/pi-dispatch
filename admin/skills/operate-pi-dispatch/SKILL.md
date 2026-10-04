@@ -211,6 +211,21 @@ trigger's `flow`; and `pi-dispatch doctor` lists every declared profile, fails l
 one that is not declared, and warns when a **local** trigger binds secrets, because a local job edits the
 operator's own folder in place and a credential the agent writes into `.env` lands in their real repository.
 
+## Portfolio jobs: `run.portfolio`, and why you cannot set it
+
+A cron trigger may carry `"portfolio": true`. Its jobs are then portfolio jobs, the one kind of job that may
+send a budget priorities plan back. It is cron only, and never beside `run.command`.
+
+**You cannot set it, in either direction.** No `dispatch_*` tool has a `portfolio` parameter, and the panel
+never asks for it. It is budget authority, so it is a reviewed edit to `triggers.json`, `run.secrets`' rule.
+`dispatch_trigger_edit` keeps a flag that is already there.
+
+When such a job starts, the worker reads the triggers file again. If the flag is gone, the job runs as an
+ordinary cron job. If this worker's envelope does not let `portfolio-job` write a plan (no envelope,
+delegation off, or `portfolio-job` not in `delegation.writers`), the job is refused as `portfolio-no-envelope`
+before anything is spent. The operator can fire such a trigger once by hand with
+`pi-dispatch run --trigger <id>` in a terminal; no tool does that.
+
 ## The forge a trigger listens to — `run.kind`
 
 A webhook trigger names its forge: `"kind"` is `github`, `gitlab`, `forgejo` or `azure`. Everything else
@@ -332,6 +347,8 @@ A `project:<id>` row caps every repo and folder of one project (projects.json) t
 its own repo or folder row first, then its project's row, then the global caps. A full project window refuses
 with reason `project-cap` (the repo's slot is given back); a full project dollar window refuses `dollar-cap`,
 or `allocation-cap` when the project's share of an allocation envelope is the number that bound.
+A portfolio job on a worker whose envelope does not let `portfolio-job` write a plan refuses
+`portfolio-no-envelope`, pre-spend and never retried (see the portfolio section above).
 A row naming an id that projects.json does not define stops the worker from starting, so add the project first.
 
 Separate from all of that, **local jobs carry a built-in one-job-per-folder mutex: at most one job per

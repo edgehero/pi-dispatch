@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
-import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId } from "./job-id.mjs";
+import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
 
@@ -63,7 +63,7 @@ export function fleetQueueNames(hosts) {
 /** The name charset, duplicated from `config.mjs` deliberately: this module imports nothing. */
 const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId };
+export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualTriggerJobId };
 
 /**
  * A queue handle. `name` defaults to the shared queue, so every existing caller is unchanged and a
@@ -107,8 +107,8 @@ export async function enqueueLocalJob(queue, fields) {
  * BEFORE the add has the same flaw by construction, since every concurrent caller can see nothing.
  *
  * The nonce is on job data, never inside `trigger`, which is the object copied into /job/event.json: it is the
- * producer's bookkeeping and the agent has no use for it. Only this function adds it, so a job from the outbox
- * collector or a cron tick keeps exactly the data it had.
+ * producer's bookkeeping and the agent has no use for it. Only the two reporting producers add it (this one and
+ * `enqueueTriggerRunReporting`), so a job from the outbox collector or a cron tick keeps exactly the data it had.
  *
  * A separate function rather than a change to `enqueueLocalJob`'s return, because the outbox collector consumes
  * that as a bare id and prints nothing to a person. It also keeps its one Valkey round trip: only this function
@@ -120,8 +120,33 @@ export async function enqueueLocalJob(queue, fields) {
  * call queued anything is then unknown, and the caller says so instead of guessing either way.
  */
 export async function enqueueLocalJobReporting(queue, fields) {
+	return addReporting(queue, (enqueueNonce) => addLocalJob(queue, { ...fields, enqueueNonce }));
+}
+
+/**
+ * Fire one cron trigger by hand (`pi-dispatch run --trigger <id>`, issue #505), reporting like
+ * `enqueueLocalJobReporting` and through the same nonce and read back, so a second call in the same minute says
+ * the first job was already queued instead of announcing one it did not make.
+ *
+ * `schedule` is the trigger's own scheduler entry from `loadSchedules`, and its `data` is passed through WHOLE, with
+ * only the nonce added: the folder, the flow or command, the task, `github`, `packages`, `resume`, the model fields,
+ * `trigger: { id, pattern }` and a job-level `portfolio`. Field by field through `addLocalJob` was the other way, and
+ * it is the one that drops a field the next issue adds to the schedule. The options are the schedule's too, so the
+ * job is not retried, as a scheduled tick is not (a scheduler job carries no `attempts`). The id is
+ * `manualTriggerJobId`'s, so `localEventContext` reports `source: "cron"` with `scheduledFor: null`.
+ */
+export async function enqueueTriggerRunReporting(queue, schedule, { now = new Date() } = {}) {
+	const jobId = manualTriggerJobId({ triggerId: schedule.schedulerId, now });
+	return addReporting(queue, async (enqueueNonce) => {
+		await queue.add(schedule.name, { ...schedule.data, enqueueNonce }, { ...schedule.opts, jobId });
+		return { id: jobId };
+	});
+}
+
+/** The add, then the read back that says whether THIS call's add is the one stored (see `enqueueLocalJobReporting`). */
+async function addReporting(queue, add) {
 	const enqueueNonce = randomUUID();
-	const { id } = await addLocalJob(queue, { ...fields, enqueueNonce });
+	const { id } = await add(enqueueNonce);
 	let stored;
 	try {
 		stored = await queue.getJob(id);

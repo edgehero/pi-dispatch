@@ -23,6 +23,24 @@ export function localJobId({ folder, flow, task, minute, provider, model, models
 }
 
 /**
+ * The jobId of a cron trigger fired by hand (`pi-dispatch run --trigger <id>`, issue #505): `manual:<id>:<millis>`,
+ * the millis floored to the minute. Floored so the same command twice inside one minute is the same id, and the
+ * queue keeps the first: the dedup `localJobId` gives `pi-dispatch run`, for the same reason (a hasty second Enter
+ * must not pay twice). A later minute is a new id, so a deliberate re-run is never blocked.
+ *
+ * The shape is BullMQ's, not a choice: a custom id that holds a `:` is refused unless it splits into exactly three
+ * parts (bullmq `Job.addJob`, "Custom Id cannot contain :"), which is how its own `repeat:<id>:<millis>` passes. A cron
+ * id can hold no `:` (the triggers loader refuses one), so this always splits into three. An ISO time would add two
+ * more. The `manual:` prefix keeps it apart from a scheduled run's `repeat:` id, which is what tells the event writer
+ * (`localEventContext`) there is no scheduled instant to report.
+ */
+export function manualTriggerJobId({ triggerId, now }) {
+	if (typeof triggerId !== "string" || triggerId === "" || triggerId.includes(":")) throw new TypeError("a cron trigger id is a non-empty string with no ':'");
+	const millis = Math.floor(now.getTime() / 60_000) * 60_000;
+	return `manual:${triggerId}:${millis}`;
+}
+
+/**
  * The retry-idempotent jobId for a chained (outbox-requested) child job: `parent id + content-hash of
  * (flow, task)`, with NO time component. BullMQ's dedup is `EXISTS jobId`, so a retried parent
  * re-collects its outbox and re-enqueues IDENTICAL child ids -- the duplicate follow-up is rejected,

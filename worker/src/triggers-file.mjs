@@ -541,6 +541,35 @@ export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {
 	};
 }
 
+/**
+ * Issue #505: `(job) => boolean`, whether the LIVE triggers file still flags the job's cron trigger
+ * `run.portfolio: true`. A portfolio job is queued with the flag on its data (a scheduler tick, or
+ * `pi-dispatch run --trigger`), and the flag is budget authority, so the data alone is never trusted: the operator
+ * removing the flag from the reviewed file must take effect for a job already queued.
+ *
+ * The same file the one-shot checks read (`PI_TRIGGERS_FILE`, else `./triggers.json` in the worker's working
+ * directory), parsed by the shared validator rather than read raw, because the answer gives authority and an entry
+ * the loader would refuse grants none. Found by the cron id, which the loader keeps unique, never by an index, and then
+ * held to the job: the entry's `folder`, `flow`, `command` and `task` must equal the job's. An id is a name, and a
+ * name can be reused: a job queued from an old entry must not borrow the flag of a different entry that took its id
+ * later (review of PR #575). Every doubt (no path, no file, a file that does not parse, no cron entry with that id, an
+ * entry that is not the one the job came from) answers false: the job then runs as an ordinary cron job, the direction
+ * that grants nothing. Never throws.
+ */
+export function makeCheckPortfolioFlag({ triggersPath, fs = nodeFs }) {
+	return function checkPortfolioFlag(job) {
+		const id = job?.trigger?.id;
+		if (typeof triggersPath !== "string" || triggersPath === "" || typeof id !== "string") return false;
+		try {
+			const entry = parseTriggers(fs.readFileSync(triggersPath, "utf8"), triggersPath).find((t) => t.on.type === "cron" && t.on.id === id);
+			if (entry?.run?.portfolio !== true) return false;
+			return ["folder", "flow", "command", "task"].every((k) => entry.run[k] === job[k]);
+		} catch {
+			return false;
+		}
+	};
+}
+
 export function readDisarmState({ triggersPath, index, number, flow, command, fs = nodeFs }) {
 	let raw;
 	try {
