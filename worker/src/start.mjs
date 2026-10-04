@@ -26,7 +26,7 @@ import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { createWorker, JOB_TIMEOUT_MS } from "./index.mjs";
+import { createWorker, JOB_TIMEOUT_MS, STALLED_FAILED_REASON } from "./index.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { makeCollectPlan } from "./outbox-plan.mjs";
@@ -60,8 +60,8 @@ import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootf
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, RUNNER_POLICY_REASONS, sanitizeJobId } from "./run-history.mjs";
-import { makeRunMirror } from "./run-mirror.mjs";
+import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RUNNER_POLICY_REASONS, sanitizeJobId } from "./run-history.mjs";
+import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
 import { authoredCron, envelopeJobPaths, loadSchedules, servedSchedules } from "./schedules.mjs";
@@ -584,6 +584,8 @@ export async function startWorker(
 		makeLogSink: makeLogSinkFn = makeLogSink,
 		makeRecordWriter: makeRecordWriterFn = makeRecordWriter,
 		makeRunMirror: makeRunMirrorFn = makeRunMirror,
+		// The fleet copy's by-id read, seamed so a wiring test can answer it without a live mirror.
+		readMirroredRecord: readMirroredRecordFn = readMirroredRecord,
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
 		makeSandboxNetworkSweeper: makeSandboxNetworkSweeperFn = makeSandboxNetworkSweeper,
@@ -1345,6 +1347,13 @@ export async function startWorker(
 		// the disarm -- the same chosen direction, met at shutdown instead of a crash.
 		void disarmOnce({ job, endedAt });
 	};
+	// The record read back, for a job the queue lost the lock of after it finished (DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK,
+	// CONST-RETRY-INFRA-ONLY): this host's own file first, then the fleet's copy where a mirror is armed, because the
+	// host that meets the stalled job need not be the one that ran it. A single host has no mirror and needs none.
+	const settledRecord = makeSettledRecord({
+		readRecord: makeReadRecord({ logsDir: config.logsDir }),
+		readMirrored: runMirror ? (jobId) => readMirroredRecordFn(redis, sanitizeJobId(jobId)) : null,
+	});
 
 	// INT-CONFIG-OVERLAY-CONTRACT: the worker reads the runtime-settings overlay at EACH job start, so this
 	// closure -- not a value frozen at boot -- is what the processor calls per job. It resolves the fourteen
@@ -1889,6 +1898,9 @@ export async function startWorker(
 	// `operator-cancel`, because the operator initiated it and a push telling them what they just did is
 	// noise with a pager attached.
 	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy", ...RUNNER_POLICY_REASONS]);
+	// One predicate for the completed listener and the lost-lock path below, so a record replays exactly the page its
+	// result would have sent.
+	const pagesAsPolicy = (result) => Boolean(onFailure) && result?.outcome === "policy" && HOOK_POLICY_REASONS.has(result.reason) && result.budgetReserved !== false;
 	// The infra-terminal sentence (issue #288). FIXED, never err.message: the message classes that reach
 	// a failedReason carry host paths and library words (the #310 record), and for a local job this text
 	// lands verbatim in the service log through the adapter's stdout fallthrough. The worker log already
@@ -1925,6 +1937,7 @@ export async function startWorker(
 		getSettings,
 		redis,
 		recordRun,
+		settledRecord,
 		extraClosers,
 		// REQ-SCOPED-PAUSE-WINDOWS: the processor defers a job whose folder/repo is inside an active window.
 		// Reads the live-reloaded ref, so an operator edit takes effect on the next job without a restart.
@@ -2198,11 +2211,13 @@ export async function startWorker(
 			// `budgetReserved !== false` (issue #502): `model-not-allowed` is both a runner stop (paid, pages) and a
 			// pre-spend refusal of a main model outside the job's list (free, comments, pages nobody), and the reason
 			// alone cannot tell them apart. Every paid terminal above carries `budgetReserved: true`.
-			if (onFailure && result?.outcome === "policy" && HOOK_POLICY_REASONS.has(result.reason) && result.budgetReserved !== false) {
+			if (pagesAsPolicy(result)) {
 				onFailure({ jobId: job?.id, outcome: "policy", reason: result.reason });
 			}
 		});
-		for (const w of allWorkers) w.on("failed", (job, err) => {
+		// The failed listener's body, for a failure the queue decided. Split out only so the lost-lock check below can
+		// run it after an await; a failure of any other reason runs it synchronously, exactly as before.
+		const onFailed = (job, err) => {
 			log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) });
 			// The one reason whose sentence is the fix itself (issue #458): logged WHOLE, beside the cut line above.
 			if (err?.reason === NETNS_KEEPER_NOT_HOLDING || err?.reason === NETNS_KEEPER_CRASH_LOOP) log("job_failed_netns_keeper", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? "") });
@@ -2217,6 +2232,29 @@ export async function startWorker(
 				void comment({ ...job.data, id: job.id }, (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason) ? FAILED_COMMENT_BY_REASON[err.reason] : null) ?? FAILED_COMMENT);
 				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
 			}
+		};
+		// A job that FINISHED, then lost its lock (DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK). When Valkey is unreachable
+		// for longer than the lock renewal window while a processor finishes, the record is written, BullMQ refuses the
+		// completion ("Missing lock"), and its stall check (`maxStalledCount: 0`) fails the job at the next pickup with
+		// STALLED_FAILED_REASON. Without this check that job posted the failure comment and paged the operator for a run
+		// that ended. So a terminal stall failure first asks the run record: when the record says this attempt finished
+		// without failing, the job's terminal line is `job_lost_lock_after_completion` and nothing is posted. The page
+		// the completed listener would have sent for that record (a paid policy stop) is sent here instead, because
+		// that listener never saw the first finish. No record, an earlier attempt's, a `failed` one, or a lookup fault
+		// keeps the failure path below: the comment and the page.
+		for (const w of allWorkers) w.on("failed", (job, err) => {
+			if (!(job?.finishedOn && err?.message === STALLED_FAILED_REASON)) return onFailed(job, err);
+			void (async () => {
+				// `attemptsMade` is read AFTER BullMQ's moveToFailed added one, so it equals the attempt number the
+				// record carries (`buildRecord`'s `attemptsMade + 1`, written while the job was processing).
+				// A record found and refused is said, with its fixed reason, so an operator reading the failure comment
+				// can see why the record did not suppress it (a clock skew past the tolerance reads `older-than-job`).
+				const onReject = (reason, source) => log("job_lost_lock_record_rejected", { jobId: job.id, reason, source });
+				const record = await settledRecord(job.id, { attempt: job.attemptsMade, since: job.timestamp, onReject });
+				if (!record) return onFailed(job, err);
+				log("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(record.reason ? { reason: record.reason } : {}) });
+				if (pagesAsPolicy(record)) onFailure({ jobId: job.id, outcome: "policy", reason: record.reason });
+			})().catch(() => {}); // `settledRecord` never rejects; this only keeps a throwing log line from going unhandled
 		});
 
 		// CONST-RETRY-INFRA-ONLY money backstop: BullMQ's maxStalledCount does not bound scheduler jobs, so a

@@ -26,6 +26,17 @@ export const QUEUE = "pi-jobs";
 /** The key the host-wide in-flight count lives under. One machine, one counter, whatever the queue. */
 export const HOST_SLOT_KEY = "host";
 export const JOB_TIMEOUT_MS = 30 * 60 * 1000; // REQ-JOB-TIMEOUT-30M
+
+/**
+ * The failed reason BullMQ gives a job its stall check failed (`maxStalledCount: 0` below): the literal in the pinned
+ * bullmq's `moveStalledJobsToWait`, stored as the job's deferred failure and thrown as an UnrecoverableError at the
+ * next pickup. Matched EXACTLY by start.mjs's failed listener, and pinned against the installed bullmq source by a
+ * test, so a bullmq bump that rewords it fails that test rather than silently turning the lost-lock check off.
+ */
+export const STALLED_FAILED_REASON = "job stalled more than allowable limit";
+
+/** How many (job, stall count, attempt, source) keys the processor remembers having logged a refused record for. */
+export const REJECTED_SEEN_MAX = 1000;
 // The scope-busy re-check (issue #242): a held scope has no natural "until" (the holder may run to
 // JOB_TIMEOUT_MS), so a deferred job re-tests on a fixed cadence. 5s keeps the worst case trivial
 // (<=360 wakes across a 30-minute hold, each ~1ms of synchronous predicate briefly occupying a slot)
@@ -175,8 +186,44 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
+	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
+	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
+	// is about 360 of them. The verdict cannot change between them (same record, same attempt), so one line says it.
+	// Bounded, oldest out first, so a long-lived worker holds at most REJECTED_SEEN_MAX keys.
+	const rejectedSeen = new Set();
+	const firstRejection = (key) => {
+		if (rejectedSeen.has(key)) return false;
+		rejectedSeen.add(key);
+		if (rejectedSeen.size > REJECTED_SEEN_MAX) rejectedSeen.delete(rejectedSeen.values().next().value);
+		return true;
+	};
 	return async function processor(job, token, signal) {
+		// THE LOST-LOCK GATE, first because it is free and because it can only ever stop a run (CONST-RETRY-INFRA-ONLY).
+		// BullMQ hands a job to the processor again after its stall check took it back. That happens to a job whose
+		// processor FINISHED when Valkey was unreachable for longer than the lock renewal window: the record was
+		// written, the completion was refused ("Missing lock"), and the job stayed active without a lock. A plain job
+		// then carries a deferred failure and never reaches here (start.mjs's failed listener handles it), but a
+		// scheduled job is moved back to wait and would run again, PAID, with its second record overwriting the
+		// first. So a job that has stalled (`stalledCounter > 0`) and whose record says this same attempt finished
+		// without failing ends as that record says, without a container. `budgetReserved` is the record's own: the
+		// completed listener then pages exactly when it would have for the first finish, which never reached it.
+		// No record (a worker that died mid-run, a lookup fault) keeps today's path: the job runs, and the stall
+		// guard bounds how often.
+		if (Number(job.stalledCounter) > 0 && typeof settledRecord === "function") {
+			const attempt = (Number.isInteger(job.attemptsMade) && job.attemptsMade >= 0 ? job.attemptsMade : 0) + 1;
+			// A record found and refused is said, with its fixed reason, because the job then RUNS again (paid).
+			const onReject = (reason, source) => {
+				if (firstRejection(`${job.id}\u0000${job.stalledCounter}\u0000${attempt}\u0000${source}`)) deps?.log?.("job_lost_lock_record_rejected", { jobId: job.id, reason, source });
+			};
+			const record = await settledRecord(job.id, { attempt, since: job.timestamp, onReject });
+			if (record) {
+				deps?.log?.("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(record.reason ? { reason: record.reason } : {}) });
+				return { outcome: record.outcome, reason: record.reason ?? null, exitCode: record.exitCode ?? null, turns: record.turns ?? null, tokens: record.tokens ?? null, budgetReserved: record.budgetReserved ?? null };
+			}
+		}
+
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
 		// auto-resumes when re-picked. This is FIRST, before the kill timer, the settings read, and the budget
@@ -1322,7 +1369,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, projects, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [] }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, limiter, pauseUntil, scopedLimits, projects, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [] }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1407,6 +1454,9 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			maxFaults,
 			deps,
 			recordRun,
+			// The run-record lookup a stalled job is checked against before it can run again (see the processor's
+			// first gate). `null` in a bare wiring, which keeps today's behaviour: the job runs.
+			settledRecord,
 		});
 
 		// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
