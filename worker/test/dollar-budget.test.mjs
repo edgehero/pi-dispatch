@@ -256,14 +256,14 @@ test("the give-back on refusal is best effort PER KEY: a failing DECRBY is logge
 
 // ---- the settlement basis ----
 
-const COMPLETE = { input: 10, output: 5, total: 15, cost: 0.123456, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
+const COMPLETE = { input: 10, output: 5, total: 15, cost: 0.123456, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costUnreported: 0 };
 const LEDGER = { v: 1, piAi: null, truncated: 0, models: [] };
 
 test("metered only when the count is complete: metered, under the cap, every floor counter present and 0, a ledger", () => {
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: COMPLETE, usage: LEDGER, reservedMicros: 2 * USD }), { settledMicros: 123_456, basis: "metered" });
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...COMPLETE, cost: 0 }, usage: LEDGER, reservedMicros: 2 * USD }), { settledMicros: 0, basis: "metered" }, "a complete count of $0");
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...COMPLETE, cost: 2.5 }, usage: LEDGER, reservedMicros: 2 * USD }), { settledMicros: 2_500_000, basis: "metered" }, "an overshoot is returned whole");
-	assert.deepEqual(FLOOR_COUNTERS, ["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "unmeteredChildren"]);
+	assert.deepEqual(FLOOR_COUNTERS, ["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "costUnreported", "unmeteredChildren"]);
 	assert.deepEqual(DOLLAR_BASIS, ["metered", "floor", "refunded", "unreserved"]);
 });
 
@@ -273,6 +273,15 @@ test("a real 401 before any answer (one call, no content, costUnanswered 1, cost
 	// and a container-written label must not lower what a window is charged, so the floor stands.
 	const tokens = { ...COMPLETE, calls: 1, cost: 0, costUnanswered: 1 };
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens, usage: LEDGER, reservedMicros: 2 * USD }), { settledMicros: 2 * USD, basis: "floor" });
+});
+
+test("a call whose answer reported no usage (costUnreported 1) settles at the FLOOR, and so does an image that predates the key (issue #571)", () => {
+	const floor = { settledMicros: 2 * USD, basis: "floor" };
+	// pi records the call at $0, so the metered cost is short: the reservation, not the reported cost.
+	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...COMPLETE, calls: 1, cost: 0, costUnreported: 1 }, usage: LEDGER, reservedMicros: 2 * USD }), floor);
+	// A runner from before issue #571 never writes the key: the floor, the costUnjudged precedent. Upgrade the image first.
+	const { costUnreported: _r, ...older } = COMPLETE;
+	assert.deepEqual(dollarSettlement({ trusted: true, tokens: older, usage: LEDGER, reservedMicros: 2 * USD }), floor);
 });
 
 test("a run that made NO provider call (no ledger, calls 0, cost 0, every counter 0) settles metered at 0, costRefused allowed", () => {

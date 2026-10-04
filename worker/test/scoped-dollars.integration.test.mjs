@@ -31,7 +31,7 @@ test("a per-model window refuses the second job with dollar-cap, and every other
 	const scopeDay = `${scope.keyPrefix}:2091-03-14`;
 	const written = [modelDay, scopeDay, "budget:2091-03-14"];
 	const job = { kind: "github", repo, provider: "pdtest", model, maxTurns: 5, maxCostMicros: 2 * USD };
-	const tokens = { input: 1, output: 1, total: 2, cost: 1.25, calls: 1, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
+	const tokens = { input: 1, output: 1, total: 2, cost: 1.25, calls: 1, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costUnreported: 0 };
 	const usage = { v: 1, piAi: null, truncated: 0, models: [{ provider: "pdtest", model, calls: 1, input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 2, cost: 1.25, unpriced: 0 }] };
 	const deps = (runContainer) => ({
 		redis,

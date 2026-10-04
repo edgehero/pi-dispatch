@@ -455,6 +455,54 @@ export function zeroRatedVerdict({ models, endpoints, refs, builtinModel = () =>
 	return { zeroRated: true };
 }
 
+/**
+ * The models the overlay makes report no usage while they cost money (issue #571), as `[{ provider, modelId }]`: the
+ * calls on such a model reach the meter with pi's zero usage, so it counts every one as `costUnreported` and the job
+ * settles at the floor. pi's openai-completions api asks for usage in the stream unless the model's composed
+ * `compat.supportsUsageInStreaming` is `false`, and most servers then send none. Composed as pi 0.99.1's
+ * provider-composer.js does:
+ *   - a model the overlay DEFINES (`providers.<p>.models`): the provider's `compat`, then the model's own, then its
+ *     `modelOverrides` entry, each key overriding the one before; its cost is composedCost's;
+ *   - a BUILTIN chat model of that provider the overlay does not redefine (`builtinChatModels(provider)`, injected so
+ *     this module never imports pi): the catalog's compat, then the provider's `compat`, then the `modelOverrides`
+ *     entry; only when the overlay itself sets the flag `false` (the catalog's own value is pi's, not the operator's);
+ *     its cost is the catalog's with the override's applied.
+ * A model whose api is set to another api is skipped, since only openai-completions reads the flag; a defined model
+ * with no api of its own or its provider's is kept. In the overlay's order, defined models before builtin ones.
+ */
+export function unreportedUsageModels(models, { builtinModel = () => null, builtinChatModels = () => [] } = {}) {
+	const providers = models?.providers;
+	if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return [];
+	const found = [];
+	const flag = (compat) => (compat !== null && typeof compat === "object" ? compat.supportsUsageInStreaming : undefined);
+	for (const provider of Object.keys(providers)) {
+		const entry = providerOf(models, provider);
+		if (entry === null) continue;
+		const overrides = entry.modelOverrides !== null && typeof entry.modelOverrides === "object" && !Array.isArray(entry.modelOverrides) ? entry.modelOverrides : {};
+		const overrideOf = (id) => (Object.hasOwn(overrides, id) ? overrides[id] : undefined);
+		const defined = modelsOf(entry);
+		for (const model of defined) {
+			const api = model.api ?? entry.api;
+			if (typeof api === "string" && api !== "openai-completions") continue;
+			const usage = flag(overrideOf(model.id)?.compat) ?? flag(model.compat) ?? flag(entry.compat);
+			if (usage !== false) continue;
+			const cost = composedCost({ models, provider, modelId: model.id, builtinModel });
+			if (cost !== null && isZeroCost(cost)) continue;
+			found.push({ provider, modelId: model.id });
+		}
+		const listed = typeof builtinChatModels === "function" ? builtinChatModels(provider) : [];
+		for (const builtin of Array.isArray(listed) ? listed : []) {
+			if (builtin === null || typeof builtin !== "object" || typeof builtin.id !== "string") continue;
+			if (defined.some((m) => m.id === builtin.id) || builtin.api !== "openai-completions") continue;
+			if ((flag(overrideOf(builtin.id)?.compat) ?? flag(entry.compat)) !== false) continue;
+			const cost = composedCost({ models, provider, modelId: builtin.id, builtinModel: () => builtin });
+			if (cost !== null && isZeroCost(cost)) continue;
+			found.push({ provider, modelId: builtin.id });
+		}
+	}
+	return found;
+}
+
 /** The exact `apiKey` a keyless provider's models.json entry carries: pi resolves `$NAME` from the job's environment. */
 export const KEYLESS_API_KEY = `$${KEYLESS_ENV_NAME}`;
 

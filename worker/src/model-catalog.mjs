@@ -65,6 +65,16 @@ export function builtinModel(provider, id) {
 	return getAllBuiltinModels(provider).find((m) => m?.id === id) ?? null;
 }
 
+/**
+ * The builtin catalog's CHAT models of `provider` (the ones pi applies an overlay's provider `compat` and `modelOverrides`
+ * to), or [] for a provider the catalog does not know (issue #571: doctor's no-usage check reads their api, compat and
+ * cost). Copies of the list, never the catalog's own array.
+ */
+export function builtinChatModels(provider) {
+	if (typeof provider !== "string" || !getBuiltinProviders().includes(provider)) return [];
+	return [...getBuiltinModels(provider)];
+}
+
 /** Does the overlay `models.json` (already parsed, or null) declare `provider`/`id`? Own keys only. */
 export function isOverlayModel(overlay, provider, id) {
 	return overlayDeclares(overlay, provider, id) && overlayProviderProblem(overlay.providers[provider], provider) === null;

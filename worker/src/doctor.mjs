@@ -65,7 +65,7 @@ import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs"
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
-import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
+import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows, parseScopeString } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -2643,6 +2643,23 @@ export async function collectChecks(shellVars, seams) {
 						warn: true,
 						label: `Overlay models.json points ${loopback.join(", ")} at a loopback address, which inside a job is the job's own container, so no job reaches that server`,
 						fix: "serve the model on an address the egress proxy reaches, declare it in model-endpoints.json (host.docker.internal on Docker, host.containers.internal on Podman), and point the baseUrl there: docs/egress.md, \"Local model servers\"",
+					});
+				}
+				// Issue #571: a model that costs money but asks for no usage in the stream. pi records each of its calls as
+				// zeros, so the meter counts it `costUnreported` and every job on it settles at the floor (`≥` in the cost
+				// views). Judged on the same reader's result: the overlay's own models, and the builtin models a provider-level
+				// compat or a modelOverrides entry turns off, priced from the worker's catalog (none when it cannot load).
+				const usageCatalog = await (seams.modelCatalog ?? defaultModelCatalog)();
+				const unreported = unreportedUsageModels(overlayModels, { builtinModel: usageCatalog?.builtinModel, builtinChatModels: usageCatalog?.builtinChatModels });
+				if (unreported.length > 0) {
+					const SHOWN = 5;
+					const named = unreported.slice(0, SHOWN).map((m) => `${quotedShown(m.provider)}/${quotedShown(m.modelId)}`).join(", ");
+					const more = unreported.length > SHOWN ? ` and ${unreported.length - SHOWN} more` : "";
+					checks.push({
+						ok: false,
+						warn: true,
+						label: `Overlay models.json sets compat.supportsUsageInStreaming to false on ${named}${more} with a nonzero cost table, so those calls report no usage: each counts as costUnreported, and every job that calls one settles at the floor`,
+						fix: "remove supportsUsageInStreaming: false if the server sends usage when asked (stream_options.include_usage), or set the model's cost to zeros if it is free: docs/costs.md, \"A call that reports no usage\"",
 					});
 				}
 			}

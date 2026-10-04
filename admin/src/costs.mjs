@@ -170,21 +170,40 @@ function attributionRows(record) {
 
 /**
  * The exit-line counters that say this run's metered cost is short of what it spent, so its dollar is a floor
- * (REQ-COST-ANALYTICS (d)). `unresolved` and `unpriced`: calls the meter could not finish or price. The cost guard's
- * `longContext` (pi priced a call at base rates the provider bills higher), `costUnjudged` (legacy calls may have run
- * unmetered) and `costUnanswered` (a lost answer may still have been billed). `unmeteredChildren` (issue #500): pi child
- * processes whose spend the runner could not count. Each counts only when above 0, and an ABSENT key is not a floor,
- * unlike the worker's settlement. For the guard counters absent mostly means a run with no cap, which measured nothing
- * missing. For `unmeteredChildren` it means an image from before issue #500 part E, which never looked at children:
- * reading that as a floor would put `≥` on all history, so such a record that did spawn a pi child shows as exact (a
- * named residual, DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY). Records that carry the guard counters ARE judged anew
- * by this list; only unreleased images wrote them, and a plan-only bucket holding one reads as an estimate.
+ * (REQ-COST-ANALYTICS (d)). `unresolved` and `unpriced`: calls the meter could not finish or price. `unmeteredChildren`
+ * (issue #500): pi child processes whose spend the runner could not count. `costUnreported` (issue #571): calls on a
+ * priced model whose answer carried broken usage, which pi records at about $0; the meter writes it on every line.
+ * Then the cost guard's (GUARD_FLOOR_KEYS): `longContext` (pi priced a call at base rates the provider bills higher),
+ * `costUnjudged` (legacy calls may have run unmetered) and `costUnanswered` (a lost answer may still have been billed).
+ *
+ * The rule, per key:
+ *   - PRESENT: a floor unless it is a whole number at least 0 and equal to 0. A negative, fractional or non-number
+ *     value is a floor, as the worker's settlement reads anything but 0 (PR #572's review).
+ *   - ABSENT: not a floor for `unresolved`, `unpriced` and `unmeteredChildren`: absent means an image that never
+ *     looked (for `unmeteredChildren`, one from before issue #500 part E), and reading that as a floor would put `≥`
+ *     on all history, so such a record that did spawn a pi child shows as exact (a named residual,
+ *     DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY).
+ *   - ABSENT, for `costUnreported` and the guard's three: a floor ONLY when the record carries `costCapMicros`. A
+ *     capped record is from an image with the cost guard, and such an image that does not write one of them did not
+ *     measure it (before issue #571 a capped call with no usage settled at $0 with no counter). A record with no
+ *     `costCapMicros` (one from before the guard, or uncapped from an image before issue #571) stays exact, so
+ *     history keeps its exact dollars. Only unreleased images wrote the guard counters, and a plan-only bucket
+ *     holding one reads as an estimate.
  *
  * `boundExceeded` is NOT here. It says a call cost more than its pre-call bound, which is the worker's settlement concern
  * (the reservation did not bound the run, so `dollarSettlement` floors it); the metered cost itself is pi's full price,
  * so this fold's dollar is not short.
  */
-const FLOOR_KEYS = Object.freeze(["unresolved", "unpriced", "longContext", "costUnjudged", "costUnanswered", "unmeteredChildren"]);
+const FLOOR_KEYS = Object.freeze(["unresolved", "unpriced", "unmeteredChildren"]);
+const GUARD_FLOOR_KEYS = Object.freeze(["costUnreported", "longContext", "costUnjudged", "costUnanswered"]);
+
+/** Whether a run's exit-line counters make its dollar a floor (FLOOR_KEYS and GUARD_FLOOR_KEYS above). */
+function floorCounted(tokens) {
+  const short = (value) => !(Number.isSafeInteger(value) && value >= 0) || value > 0;
+  if (FLOOR_KEYS.some((key) => tokens[key] !== undefined && short(tokens[key]))) return true;
+  const guarded = tokens.costCapMicros !== undefined;
+  return GUARD_FLOOR_KEYS.some((key) => (tokens[key] === undefined ? guarded : short(tokens[key])));
+}
 
 /**
  * One run's contribution to every aggregate: its classified rows, its metered dollars, the set of
@@ -198,7 +217,7 @@ function runContribution(record, subscriptions, pricing) {
   // Floor rule: unpriced or unresolved calls are dollars the meter could not price, and the fallback
   // meter (metered:false) missed subagent/compaction spend entirely. Either way this run's number is a
   // floor, and floors are sticky -- any aggregate containing one is a floor.
-  const floor = tokens.metered === false || FLOOR_KEYS.some((key) => (tokens[key] ?? 0) > 0);
+  const floor = tokens.metered === false || floorCounted(tokens);
   const rows = attributionRows(record).map((row) => ({ ...row, ...classifyRow(row, subscriptions, pricing), floor }));
   // Metered truth: the run's stream-time cost IS the number -- never re-priced here -- except that
   // plan-covered rows contribute $0 metered to totals: the plan already paid, and their recorded cost

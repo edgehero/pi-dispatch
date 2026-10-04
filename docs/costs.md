@@ -43,7 +43,7 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 | rendering        | meaning |
 |---|---|
 | `$4.12`          | metered — the stream-time price pi-ai computed when the run happened |
-| `≥$4.12`         | a floor: some spend was unpriced/unresolved, a `pi` child process could not be metered, a call was priced past a long-context threshold (`longContext`), legacy calls may have run unjudged (`costUnjudged`), a failed call may have been billed (`costUnanswered`), the run fell back to the in-session meter (which cannot see subagent spend), or the run pre-dates the meter |
+| `≥$4.12`         | a floor: some spend was unpriced/unresolved, a `pi` child process could not be metered, a call was priced past a long-context threshold (`longContext`), legacy calls may have run unjudged (`costUnjudged`), a failed call may have been billed (`costUnanswered`), a call's answer reported no usage (`costUnreported`), the run fell back to the in-session meter (which cannot see subagent spend), or the run pre-dates the meter |
 | `plan:kimi`      | covered by a declared subscription — prepaid, **never shown as $0.00** |
 | `$0 (unrated)`   | a model the rate table prices at $0, with **no** declared subscription covering it: unrated, never "free" |
 | `~$4.12 est.`    | an estimate (what-if, API-equivalent, or a sum containing any estimate) |
@@ -195,7 +195,7 @@ parser the worker uses before they ask, and write version 1 until a row needs ve
   - the runner's own meter counted the run (`tokens.metered` is `true`, not the fallback meter);
   - `tokens.costCapMicros` is present and not above the reservation;
   - every "not fully counted" counter is present and 0: `unresolved`, `unpriced`, `boundExceeded`,
-    `longContext`, `costUnjudged`, `costUnanswered` and `unmeteredChildren`;
+    `longContext`, `costUnjudged`, `costUnanswered`, `costUnreported` and `unmeteredChildren`;
   - a per-model usage ledger is present, unless the run made no model call at all.
 - `floor`: the cost was not fully known. The windows keep at least the whole hold, and more when the measured
   part already costs more.
@@ -209,6 +209,7 @@ Some cases worth knowing:
 - **A 401 before any answer settles at the floor.** The failed call counts as `costUnanswered`, because a request
   that got no answer may still have been billed. A bad key therefore costs one per-job cap in each window.
 - **A run the worker stopped** (timeout, cancel, shutdown) settles at the floor: its exit line is not believed.
+- **A call whose answer reported no usage settles at the floor.** See [A call that reports no usage](#a-call-that-reports-no-usage).
 - **A retried job** keeps only its last attempt's record. The window counters are the truth for every attempt.
 
 `dollars.modelBasis` says how the model windows settled. It is `floor` when the per-model split is not known: the
@@ -225,6 +226,42 @@ them at that tier during the run. pi meters them at base rates, so the metered c
 `longContext` above 0 therefore settles at the floor. Because the tier follows the API, a gateway model or a
 non-Anthropic Bedrock model on one of those APIs can floor this way too
 ([DES](../specs/design.md#des-dollar-reserve-and-settle)).
+
+### A call that reports no usage
+
+Some answers carry no usage numbers, or only part of them. pi then records the call as zero tokens and $0, or
+with the part it saw, so the meter cannot tell it from a free call. The runner's meter counts such a call in
+`costUnreported`, on every run, with or without a dollar cap, and in every `pi` child process. A run with
+`costUnreported` above 0 settles at the floor, and the cost views show it as `≥`. Under a dollar cap the runner
+also charges such a call its bound during the run.
+
+The meter counts a call on a model that costs money when its answer has:
+
+- no input at all, unless the call failed before anything came back;
+- a failure after the answer had started (a stream cut after content arrived). Its usage is partial, even when
+  the provider reported the input first, as Anthropic does;
+- content but an output count of 0. On the Anthropic API an output count of 1 counts too: pi keeps the first
+  event's count when a proxy drops the final one.
+
+So a genuine one-token answer on the Anthropic API floors its run too, and so does a chat call there capped at
+one output token (`maxTokens: 1`). Under a dollar cap such a call is also charged its bound during the run, so a
+capped job of genuine one-token answers reaches its cap far sooner than its real cost would. That is the safe side:
+the meter cannot tell such an answer from one whose count was dropped. A classify call has no answer content, so
+this rule never applies to it.
+
+A call that failed before anything came back is counted in `costUnanswered` instead, never in both. A model whose
+rates are all zero is never counted: a free call costs nothing whatever it reports. A router or proxy provider
+that passes a call on to another model is not counted for its own call: the call it passed on is metered.
+
+**Local servers.** Many OpenAI-compatible servers send usage only when asked, and pi asks unless the model sets
+`compat.supportsUsageInStreaming: false`. A model with that setting and a nonzero `cost` table reports no usage on
+every call, so every job on it settles at the floor. `pi-dispatch doctor` warns about such a model in the overlay
+`models.json`, including a builtin model whose provider `compat` or `modelOverrides` entry sets it. Remove the
+setting if the server sends usage when asked, or set the model's `cost` to zeros if it is free to you.
+
+**Upgrade order.** A worker that knows `costUnreported` reads it as missing on an exit line from an older image,
+and settles every capped job at the floor. That overcharges and never undercharges. Upgrade the image before the
+worker. An older worker with a new image drops the key, so ship them together.
 
 ### Prepaid plans
 
@@ -262,8 +299,12 @@ is an open issue.
 - **A `pi` child process that hides from the meter** is not counted. A child that keeps the job's environment is
   metered and capped ([pi child processes](#pi-child-processes)). The gaps are listed there: for example a child
   that runs pi as a library with `NODE_OPTIONS` cleared, a client that is not pi, and a direct API call.
-- **A new worker with an old image settles every capped job at the floor.** The worker reads `unmeteredChildren`,
-  and an image built before issue #500 does not write it. Rebuild the image when you upgrade the worker.
+- **A new worker with an old image settles every capped job at the floor.** The worker reads `unmeteredChildren`
+  and `costUnreported`, and an image built before issue #500 (or #571) does not write them. Upgrade the image before
+  the worker ([upgrade order](#a-call-that-reports-no-usage)).
+- **Usage that pi fills with plausible numbers** is not detected. The meter counts answers with no input, a cut
+  stream, or content with no output count. A partial count above those marks reads as the whole cost. A call that
+  passed another call on is trusted for its own usage, even when an extension's hook made that other call.
 - **A Node older than 18.19 in a job does not start.** To meter `pi` child processes, the runner adds
   `--import=<child preload>` to `NODE_OPTIONS` for every process in the job (issue #500), and such a Node refuses that
   flag. The image ships Node 22. An agent that installs an older Node in a job must clear `NODE_OPTIONS` for it.
@@ -286,8 +327,9 @@ is an open issue.
   fingerprint differs from this one's, or that publishes none while dollar caps are in use. Nothing refuses a job
   over it, so keep the dollar settings the same on every host.
 - **Uncatalogued fees** (server-side tools, Bedrock regional pricing) are outside both the bound and pi's cost.
-- **A failed stream** counts at its bound only against the per-job cap during the run. The windows settle from
-  pi's partial cost, which can be below what the provider billed: an undercount, not an overcharge.
+- **A failed stream** that had started counts at its bound against the per-job cap during the run, and counts in
+  `costUnreported`, so the windows settle at the floor. A stream that failed before it started
+  settles at the floor through `costUnanswered`.
 - **A provider's server-side fallback** is billed on the requested model's row.
 - **The bound trusts the api id** an overlay or extension model declares. A model that names a priced api but is
   billed differently is bounded by the table it declares.

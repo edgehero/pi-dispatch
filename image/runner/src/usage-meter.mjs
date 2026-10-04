@@ -95,9 +95,20 @@ import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, MODEL_NOT_ALLOWED, MODEL
 /** Where a runtime call's options carry its dispatch token (trap #5 above): a symbol, so it is never serialised. */
 export const DISPATCH_MARK = Symbol("pi-dispatch.usage-meter.dispatch");
 
-/** A runtime call's dispatch token: the model it dispatches, and whether its one compat re-entry has been seen. */
+/**
+ * A runtime call's dispatch token: the model it dispatches, whether its one compat re-entry has been seen, and whether
+ * it FORWARDED (issue #571): another model call was dispatched under it (a router or proxy provider calling an
+ * upstream, through either half). A forwarded call's own zero usage is the router's, not a lost count, so the meter
+ * does not count it `costUnreported`; the upstream call is metered on its own.
+ */
 export function dispatchToken(model) {
-	return { provider: model?.provider, id: model?.id, api: model?.api, used: false };
+	return { provider: model?.provider, id: model?.id, api: model?.api, used: false, forwarded: false };
+}
+
+/** Mark the dispatch the current context runs under as forwarded (dispatchToken), when there is one. */
+function markForwarded(dispatch) {
+	const outer = dispatch?.getStore?.();
+	if (outer !== undefined && outer !== null && typeof outer === "object") outer.forwarded = true;
 }
 
 /** The call's arguments with its options (the second argument after the model, in all three stream methods) marked. */
@@ -124,6 +135,20 @@ function claimReentry(token, model, options) {
 	if (model?.provider !== token.provider || model?.id !== token.id || model?.api !== token.api) return false;
 	token.used = true;
 	return true;
+}
+
+/**
+ * Run an admitted call's dispatch, and when it THROWS synchronously, bind `undefined` before rethrowing (issue #571):
+ * the guard then settles that call's slot at its bound and counts it `costUnanswered`, rather than a later admit
+ * flushing it uncounted. The throw itself is not swallowed: a throw in here is still a provider's or our bug to see.
+ */
+function dispatchBinding(guard, verdict, run) {
+	try {
+		return run();
+	} catch (error) {
+		if (verdict === ADMITTED) guard.bind?.(undefined);
+		throw error;
+	}
 }
 
 /** The sourceId the compat half's per-api registrations are filed under in pi-ai's registry. */
@@ -265,6 +290,9 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		// Calls whose usage carried no finite cost.total. Counted, never guessed: a silent 0 would read
 		// as "this call was free", which is the one thing a spend control must never claim.
 		unpriced: 0,
+		// Calls on a priced model whose answer carried broken usage (issue #571, unreportedUsage): pi recorded them as
+		// zeros or a partial count, so `cost` is short. Counted on every run, capped or not; a forward's outer call is not.
+		unreported: 0,
 		// The first stop's reason (a STOP_MESSAGES key), or null. Set once by stop(), never overwritten.
 		stopReason: null,
 		// The pre-#501 flag, kept as a read-only view: true exactly when the stop was the token cap.
@@ -392,6 +420,19 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	}
 
 	/**
+	 * Count `costUnreported` (issue #571) for a settled answer, BEFORE record() writes the change, so a child ledger
+	 * written on the settle carries it. Only for a call whose `ctx.model` is priced (pricedModel), and never for a call
+	 * that forwarded (`ctx.forwarded()` true: under its dispatch another model call went out, which is metered on its
+	 * own, so the outer call's zeros are a router's, not a lost count). A ctx with no model (a caller outside the two
+	 * wrappers) is never counted.
+	 */
+	function judgeUsage(message, ctx) {
+		if (ctx.model === undefined || !pricedModel(ctx.model)) return;
+		if (typeof ctx.forwarded === "function" && ctx.forwarded()) return;
+		if (unreportedUsage(message, ctx.model?.api)) state.unreported += 1;
+	}
+
+	/**
 	 * Attach accounting to a provider stream WITHOUT consuming it.
 	 *
 	 * `EventStream.result()` is a memoised promise resolved from push()/end() on the terminal event,
@@ -400,7 +441,14 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	 * `instanceof` checks downstream in pi keep working.
 	 */
 	function observe(stream, ctx = {}) {
-		if (!stream || typeof stream.result !== "function") return stream;
+		if (!stream) return stream;
+		// A PROMISE of a stream (issue #571): pi-ai's legacy `streamSimple`/`stream` (compat.js) return a registry
+		// entry's answer as it is, so an extension's entry that answers with `Promise<stream>` reaches its caller as a
+		// promise, and a caller that awaits it (a router forwarding to it) gets a working stream. pi's own paths never
+		// hand one on: ModelRuntime and the provider composer wrap every provider call in lazyStream, which awaits it.
+		// Counted at once, settled from the resolved stream's result(); a rejection, or a value with no result(), is a
+		// call with no usage, `unpriced`, as a rejected result() is.
+		if (typeof stream.result !== "function") return typeof stream.then === "function" ? observePending(stream, ctx) : stream;
 		if (observed.has(stream)) return stream;
 		observed.add(stream);
 		state.calls += 1;
@@ -409,6 +457,7 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		stream.result().then(
 			(message) => {
 				state.unresolved -= 1;
+				judgeUsage(message, ctx);
 				record(message?.usage, ctx);
 			},
 			() => {
@@ -421,6 +470,41 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			},
 		);
 		return stream;
+	}
+
+	/** observe() for a promise of a stream (see there): the call counts now and settles from the stream it resolves to. */
+	function observePending(promise, ctx) {
+		if (observed.has(promise)) return promise;
+		observed.add(promise);
+		state.calls += 1;
+		state.unresolved += 1;
+		changed();
+		promise
+			.then((resolved) => {
+				if (typeof resolved?.result !== "function") return { message: undefined };
+				// A stream already observed (an async entry that forwards and resolves to the forward's own stream, which
+				// this meter counted when it was dispatched): its usage is that call's. This call settles as a priced zero,
+				// and is not judged for broken usage either, so the spend is counted once.
+				if (observed.has(resolved)) return { counted: true };
+				observed.add(resolved);
+				return resolved.result().then((message) => ({ message }));
+			})
+			.then(
+				({ message, counted }) => {
+					state.unresolved -= 1;
+					if (counted) {
+						record(zeroUsage(), ctx);
+						return;
+					}
+					judgeUsage(message, ctx);
+					record(message?.usage, ctx);
+				},
+				() => {
+					state.unresolved -= 1;
+					record(undefined, ctx);
+				},
+			);
+		return promise;
 	}
 
 	/**
@@ -437,6 +521,7 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		promise.then(
 			(result) => {
 				state.unresolved -= 1;
+				judgeUsage(result, ctx);
 				record(result?.usage, ctx);
 			},
 			() => {
@@ -465,6 +550,8 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			unresolved: state.unresolved + child.unresolved,
 			unpriced: state.unpriced + child.unpriced,
 			...(children === null ? {} : { childTotal: children.total, childProcesses: children.processes, unmeteredChildren: children.unmetered }),
+			// Issue #571: on every metered line, the children's included (their ledgers carry it).
+			costUnreported: state.unreported + (children?.unreported ?? 0),
 		};
 	}
 
@@ -507,6 +594,8 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			// Not a high-water mark (issue #500 part E's review): the hook's count only grows, except for a child it held
 			// `starting` too long and then saw install its meter, which it un-counts.
 			unmetered: carry(fold?.unmetered ?? 0),
+			// Issue #571: the children's broken-usage calls, a high-water mark like the totals.
+			unreported: high("unreported", fold?.costUnreported ?? 0),
 			rows: [...rows.values()],
 		};
 		if (cap !== null && combinedTotal() > cap) stop(TOKEN_BUDGET, combinedTotal());
@@ -690,8 +779,9 @@ function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = 
  *      provider is free to normalise, alias or omit.
  *
  * `this` is preserved on every call, because the originals read instance state (credentials, providers).
- * There is deliberately NO try/catch: a throw in here is OUR bug, and swallowing it would turn a metering
- * defect into a silent provider outage that looks like a model error.
+ * There is deliberately NO swallowing try/catch: a throw in here is OUR bug, and swallowing it would turn a metering
+ * defect into a silent provider outage that looks like a model error. The one catch (dispatchBinding) rethrows: it
+ * only tells the guard that an admitted dispatch threw before it answered.
  *
  * `restore()` puts back each original only while the prototype still holds OUR wrapper, so a wrapper a
  * later install layered on top is never torn out from under it; in that case this layer is switched to
@@ -702,7 +792,8 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	const originals = new Map();
 	const wrappers = new Map();
 	let active = true;
-	const ctxOf = (model, options) => ({ sessionId: options?.sessionId, provider: model?.provider, modelId: model?.id });
+	// `model` and `forwarded` (issue #571) let the meter judge the settled answer's usage (judgeUsage).
+	const ctxOf = (model, options, token) => ({ sessionId: options?.sessionId, provider: model?.provider, modelId: model?.id, model, forwarded: () => token.forwarded });
 	// Steps 1 and 3 above, shared by every method: the stop reason that ends this call, or null to dispatch it
 	// unjudged, or ADMITTED when the guard judged it and let it through (it is then bound to its settle below).
 	// Only streamSimple re-enters with the physical model (trap #4); a virtual model on any other method is judged as
@@ -715,6 +806,7 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	// answer the guard with one id and the provider with another. Only while a guard can judge, so a job with no
 	// policy dispatches the caller's own object exactly as before.
 	const judgedModel = (model) => (guard !== null && hardStop ? snapshotModel(model) : model);
+	const dispatchOrUnanswered = (verdict, run) => dispatchBinding(guard, verdict, run);
 
 	for (const name of RUNTIME_STREAM_METHODS) {
 		const original = proto?.[name];
@@ -728,12 +820,14 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			// options carry the token, so the compat half can tell this call's re-entry from any other call there.
 			const token = dispatchToken(model);
 			const rest = markOptions(prepareFor(verdict, name, model, given), token);
-			const stream = dispatch.run(token, () => original.call(this, model, ...rest));
+			// A call dispatched under another runtime call's dispatch is that call's forward (issue #571).
+			markForwarded(dispatch);
+			const stream = dispatchOrUnanswered(verdict, () => dispatch.run(token, () => original.call(this, model, ...rest)));
 			if (verdict === ADMITTED) guard.bind?.(stream);
 			if (model?.api === VIRTUAL_MODEL_API) return stream;
 			// streamSimple/stream take (model, context, options); streamDeferred takes (model, handle, options).
 			// Options are the LAST argument in all three.
-			return meter.observe(stream, ctxOf(model, rest.at(-1)));
+			return meter.observe(stream, ctxOf(model, rest.at(-1), token));
 		};
 		originals.set(name, original);
 		wrappers.set(name, wrapper);
@@ -748,10 +842,12 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
 			const [, options] = prepareFor(verdict, name, model, [context, given]);
 			// A token too, though no result method re-enters the compat half: a legacy call made inside it is never its own.
-			const promise = dispatch.run(dispatchToken(model), () => original.call(this, model, context, options));
+			const token = dispatchToken(model);
+			markForwarded(dispatch);
+			const promise = dispatchOrUnanswered(verdict, () => dispatch.run(token, () => original.call(this, model, context, options)));
 			if (verdict === ADMITTED) guard.bind?.(promise);
 			if (model?.api === VIRTUAL_MODEL_API) return promise;
-			return meter.observeResult(promise, ctxOf(model, options));
+			return meter.observeResult(promise, ctxOf(model, options, token));
 		};
 		originals.set(name, original);
 		wrappers.set(name, wrapper);
@@ -806,9 +902,10 @@ export function defaultHardStopResult(method, model, message = STOP_MESSAGES[TOK
  * inside a runtime call's context (a hook, an onPayload, a timer scheduled there) or outside any, is guarded and
  * observed here exactly as wrapModelRuntime's step 3 guards a runtime call (issue #543).
  *
- * There is deliberately NO try/catch, for the reason wrapModelRuntime gives.
+ * There is deliberately NO swallowing try/catch, for the reason wrapModelRuntime gives (dispatchBinding rethrows).
  */
 export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null, isStopped = null }) {
+	const dispatchOrUnanswered = (verdict, run) => dispatchBinding(guard, verdict, run);
 	function route(kind, requested, context, given) {
 		// One copy, judged and dispatched (wrapModelRuntime's judgedModel has the why).
 		const model = guard !== null && hardStop ? snapshotModel(requested) : requested;
@@ -820,14 +917,19 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 		const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason) })[1] : given;
 		const provider = fallbackModels?.getProvider?.(model.provider);
 		const builtin = provider?.getModels?.().some((candidate) => candidate.api === model.api) ? provider : null;
-		const stream = builtin
-			? model.provider.startsWith("cloudflare-")
-				? fallbackModels[kind](model, context, options)
-				: builtin[kind](model, context, options)
-			: inner[kind](model, context, options);
+		// Any call other than the runtime call's own re-entry, made under a runtime call's dispatch, is that call's forward
+		// (issue #571), marked BEFORE it is dispatched as the runtime half does, so a forward that throws marks it too.
+		if (!reentry) markForwarded(dispatch);
+		const stream = dispatchOrUnanswered(verdict, () =>
+			builtin
+				? model.provider.startsWith("cloudflare-")
+					? fallbackModels[kind](model, context, options)
+					: builtin[kind](model, context, options)
+				: inner[kind](model, context, options),
+		);
 		if (verdict === ADMITTED) guard.bind?.(stream);
 		if (reentry) return stream;
-		return meter.observe(stream, { sessionId: options?.sessionId, provider: model.provider, modelId: model.id });
+		return meter.observe(stream, { sessionId: options?.sessionId, provider: model.provider, modelId: model.id, model });
 	}
 	return {
 		stream: (model, context, options) => route("stream", model, context, options),
@@ -1682,6 +1784,59 @@ function started(message) {
 	return blocks(message?.content) || blocks(message?.output);
 }
 
+const PRICE_RATES = Object.freeze(["input", "output", "cacheRead", "cacheWrite"]);
+
+/**
+ * Does a call on this model cost money (issue #571)? True when any rate of its cost table, of one of its tiers, or of
+ * an allowed fallback model's table (anthropic-messages bills a fallback answer at the fallback's rates) is above 0.
+ * The Model object a call is dispatched on carries the cost pi composed (overlay entry, override and tiers applied),
+ * so this reads it as it is. Through pi a table is never missing: pi's composer gives a model with no `cost` all zeros
+ * (provider-composer.js, modelFromJson), so such a model is zero-rated here as it is in pi's own pricing. A Model
+ * object built by hand with no table, or with a rate that is not a number, counts as priced: its price cannot be read,
+ * which is not proof of a free call. An absent rate is 0, as pi's own tables never omit one.
+ */
+export function pricedModel(model) {
+	const rateOf = (value) => value === undefined || (typeof value === "number" && value <= 0) ? 0 : 1;
+	const priced = (table) => table === null || typeof table !== "object" || PRICE_RATES.some((key) => rateOf(table[key]) > 0);
+	const cost = model?.cost;
+	if (priced(cost)) return true;
+	if (Array.isArray(cost.tiers) && cost.tiers.some(priced)) return true;
+	const fallbacks = model?.compat?.allowedFallbackModels;
+	return Array.isArray(fallbacks) && fallbacks.some((entry) => priced(entry?.cost) || (Array.isArray(entry?.cost?.tiers) && entry.cost.tiers.some(priced)));
+}
+
+/** An answer block that holds something the model produced: non-empty text or thinking, or a tool call. */
+function answerContent(message) {
+	if (!Array.isArray(message?.content)) return false;
+	return message.content.some((block) => (block?.type === "text" && typeof block.text === "string" && block.text.length > 0) || (block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.length > 0) || block?.type === "toolCall");
+}
+
+/**
+ * Did this settled answer carry BROKEN usage (issue #571)? pi fills a missing usage block with zeros, and keeps the
+ * part of a usage it did see, so a priced call's cost reads as about $0 though the provider billed it. True when the
+ * answer has a finite `cost.total` (a missing one is the meter's `unpriced`, already a floor) and:
+ *   (a) its input side (input + cacheRead + cacheWrite) is 0, and it is not a failed call that never started (that is
+ *       the cost guard's `costUnanswered`: nothing came back, and nothing may have been billed);
+ *   (b) it failed (`error` or `aborted`) after it started: its usage is partial (openai-completions and
+ *       openai-responses report usage only at the stream's end, anthropic-messages what message_start carried);
+ *   (c) it succeeded with answer content (answerContent) but an output count of 0, or of at most 1 on
+ *       `anthropic-messages`, where pi keeps message_start's `output_tokens` (Anthropic sends 1) when a proxy's
+ *       message_delta carries no output count (anthropic-messages.js at the pin). A genuine one-token answer there is
+ *       floored too: the safe side.
+ * Pure: `api` is the api of the model the call was dispatched on.
+ */
+export function unreportedUsage(message, api) {
+	const usage = message?.usage;
+	if (usage === null || typeof usage !== "object") return false;
+	if (typeof usage.cost?.total !== "number" || !Number.isFinite(usage.cost.total)) return false;
+	const failed = message?.stopReason === "error" || message?.stopReason === "aborted";
+	if (failed) return started(message);
+	if (finite(usage.input) + finite(usage.cacheRead) + finite(usage.cacheWrite) === 0) return true;
+	if (!answerContent(message)) return false;
+	const output = finite(usage.output);
+	return output === 0 || (api === "anthropic-messages" && output <= 1);
+}
+
 /**
  * THE COST GUARD (issue #501; REQ-TOKEN-ACCOUNTING-AND-CAPS (d), DES-DOLLAR-RESERVE-AND-SETTLE). A guard for the
  * meter's seam: `{ enforces: [COST_CAP], admit, bind, snapshot }`.
@@ -1710,7 +1865,12 @@ function started(message) {
  * counts it unpriced; a call that ended `error` or `aborted` after it STARTED (any content block) is charged at
  * least its bound, because its usage is partial, and one that never started is charged its metered cost and counted
  * as `costUnanswered`; a successful call that reports no input at all is charged its bound. A charge is never below zero. `costUnjudged` counts the compat entries the
- * installer found displaced under the cap (calls there may have run unjudged and unmetered).
+ * installer found displaced under the cap (calls there may have run unjudged and unmetered). A call whose dispatch
+ * threw synchronously (the wrappers bind `undefined` for it) or returned neither a stream nor a promise stays charged
+ * at its bound and, on a bound above 0, counts `costUnanswered` (issue #571): it was never answered, and the meter never
+ * saw it. A slot merely flushed by the next admit (a synchronous forward) is charged its bound and not counted. A call
+ * whose answer carries broken usage (unreportedUsage, the meter's own predicate) is charged at least its bound; the
+ * guard keeps no counter for it: the meter counts it as `costUnreported` on every run, capped or not.
  */
 export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null }) {
 	if (!Number.isSafeInteger(capMicros) || capMicros < 0) throw new Error(`invalid PI_MAX_COST_MICROS: ${capMicros}`);
@@ -1761,11 +1921,15 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		// rate-limited job as cost-cap at $0 spent, and the counter tells a settlement the cost may be a floor, because
 		// a provider that accepted the request and lost the answer may still bill it. One rule, every api.
 		//
-		// A SUCCESSFUL call that reports no input at all is broken usage reporting, and is charged its bound.
+		// Any other call whose usage is BROKEN is charged its bound too: the same predicate the meter counts
+		// `costUnreported` by (unreportedUsage, issue #571: no input, a failure after it started, or answer content with
+		// no output count), so what the cap charges and what the settlement floors cannot drift apart. The lift is not
+		// counted here: the meter's counter is the one. A forwarding call is lifted all the same, though the meter does
+		// not count it: the cap judges each call on its own worst case, and a router that answers itself after a failed
+		// forward must not run under the cap at $0.
 		const failed = message?.stopReason === "error" || message?.stopReason === "aborted";
-		const noInput = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) === 0;
 		if (failed && !started(message)) state.unanswered += 1;
-		else if (failed || noInput) charged = Math.max(charged, ticket.bound);
+		else if (failed || unreportedUsage(message, ticket.model?.api)) charged = Math.max(charged, ticket.bound);
 		const catalogTiers = ticket.model?.cost?.tiers ?? [];
 		const inputSide = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
 		if (ANTHROPIC_PRICED_APIS.has(ticket.model?.api) && catalogTiers.length === 0 && inputSide > LONG_CONTEXT_TOKENS) {
@@ -1778,7 +1942,12 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		state.spent += charged;
 	}
 
-	/** A slot left by a dispatch that threw: its call stays charged at its bound. */
+	/**
+	 * A slot still held at the next admit or the snapshot: charged at its bound, and NOT counted. A call that dispatches
+	 * another synchronously (a router's forward) leaves its own slot here when the forward is admitted, and that call
+	 * is answered and metered like any other. Only a dispatch that threw, or returned no answer object, is counted
+	 * (`bind`, issue #571).
+	 */
 	function flushPending() {
 		if (pending === null) return;
 		const ticket = pending;
@@ -1795,7 +1964,7 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		if (!Number.isFinite(outside)) return refuse({ why: "external" });
 		if (state.spent + state.inflight + outside + b > capMicros) return refuse(external === null ? { bound: b } : { bound: b, external: outside });
 		state.inflight += b;
-		pending = { bound: b, model };
+		pending = { bound: b, model, stream: !RUNTIME_RESULT_METHODS.includes(method) };
 		return null;
 	}
 
@@ -1805,9 +1974,21 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		if (ticket === null) return;
 		const done = (value) => settle(ticket, value);
 		const failed = () => settle(ticket, null);
+		// A stream method whose dispatch answered with a PROMISE of a stream (issue #571, observe() has where it comes
+		// from) settles from that stream's result(). Its rejection is charged the bound, like a rejected result(), and the
+		// meter counts the call `unpriced`, as it does for a result method's rejection: not counted here as well.
+		// A stream ticket whose promise resolves to anything but a stream has no usage to settle from: the bound, as the
+		// meter counts it `unpriced`.
+		const settled = (value) => (!ticket.stream ? done(value) : typeof value?.result === "function" ? value.result().then(done, failed) : failed());
 		if (typeof result?.result === "function") result.result().then(done, failed);
-		else if (typeof result?.then === "function") result.then(done, failed);
-		else failed();
+		else if (typeof result?.then === "function") result.then(settled, failed);
+		else {
+			// No answer object (issue #571): the wrappers bind `undefined` when the dispatch threw synchronously, and a
+			// dispatch may return neither a stream nor a promise. Charged its bound and, on a bound above 0, counted as
+			// `costUnanswered`: it was never answered, the meter never saw it, and a provider may still have received it.
+			if (ticket.bound > 0) state.unanswered += 1;
+			settle(ticket, null);
+		}
 	}
 
 	/** The exit line's cost fields, present only when a cap is set (run-job spreads them into `tokens`). */
@@ -2200,23 +2381,25 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 //     temporary file of an atomic write (it must not end in `.json`).
 //   - Written whole, by rename, as compact JSON of at most CHILD_LEDGER_MAX_BYTES (64 KiB).
 //   - Every field is required, in every state:
-//       { "v": 2,
+//       { "v": 3,
 //         "state": "starting" | "running" | "done",
 //         "metered": true | false,
 //         "totals": { "input", "output", "total", "cost", "calls", "unresolved", "unpriced", "sessions" },
 //         "rows": [ { "provider", "model", "calls", "input", "output", "cacheRead", "cacheWrite", "cacheWrite1h",
 //                     "reasoning", "total", "cost", "unpriced" } ],
 //         "spentMicros", "inflightMicros", "costRefused", "modelRefused",
-//         "boundExceeded", "costUnanswered", "longContext", "costUnjudged" }
+//         "boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged" }
 //     `starting` is the preload's stub (zeros, `metered: true`), written before the meter installs; `running` once
 //     it has; `done` at exit. `metered: false` says the child's meter did not install. `totals` is the child meter's
 //     snapshot, `rows` its rows() (first-seen order, at most CHILD_LEDGER_ROWS written and CHILD_LEDGER_MAX_ROWS
-//     read, a model-less row with both ids null), then its cost guard's spend(), both guards' refusal counters and the
+//     read, a model-less row with both ids null), then its cost guard's spend(), both guards' refusal counters, the
 //     cost guard's four floor counters (0 without a guard; the parent adds them to its own on the exit line, so a
-//     child's partial count floors the job as the parent's would). childLedger() builds exactly this object. Version 2
-//     added the four floor counters; a version 1 file is malformed (unmetered).
+//     child's partial count floors the job as the parent's would) and the METER's `costUnreported` (issue #571,
+//     written with or without a guard; the parent's meter adds it through setChildren). childLedger() builds exactly
+//     this object. Version 2 added the four guard counters, version 3 `costUnreported`; a file of an older version is
+//     malformed (unmetered), so a child from an older image floors the job rather than hiding a call it did not count.
 //   - Numbers only. Token amounts and `cost` are numbers from 0 to Number.MAX_SAFE_INTEGER; `calls`, `unresolved`,
-//     `unpriced`, `sessions` and the four guard counters are safe integers at least 0. Ids are printable ASCII and
+//     `unpriced`, `sessions` and the guard counters are safe integers at least 0. Ids are printable ASCII and
 //     match USAGE_ID_PATTERN after lowercasing, the worker's rule. The rows partition the totals: their calls sum to
 //     `calls - unresolved`, and every other amount sums to its total.
 //   - A fold reads at most CHILD_LEDGER_MAX_FILES names; any further name counts as unmetered unread.
@@ -2250,8 +2433,8 @@ export const CHILD_LEDGER_ROWS = 120;
  */
 export const CHILD_LEDGER_MAX_FILES = 512;
 export const CHILD_LEDGER_STATES = Object.freeze(["starting", "running", "done"]);
-/** The ledger format's version. 2 since the four floor counters (issue #500 part E's review). */
-export const CHILD_LEDGER_VERSION = 2;
+/** The ledger format's version. 2 since the four floor counters (issue #500 part E's review), 3 since `costUnreported` (issue #571). */
+export const CHILD_LEDGER_VERSION = 3;
 /**
  * A COPY of the worker's id rule (worker/src/model-ref.mjs MODEL_REF_PATTERN, which run-history.mjs imports as
  * USAGE_ID_PATTERN), because the image does not carry the worker. A copy is held to its source by a test that reads
@@ -2271,9 +2454,9 @@ function recordableId(id) {
 
 const LEDGER_AMOUNTS = Object.freeze(["input", "output", "total", "cost"]);
 const LEDGER_COUNTS = Object.freeze(["calls", "unresolved", "unpriced", "sessions"]);
-const LEDGER_GUARD_COUNTS = Object.freeze(["spentMicros", "inflightMicros", "costRefused", "modelRefused", "boundExceeded", "costUnanswered", "longContext", "costUnjudged"]);
-/** The cost guard's floor counters a ledger carries (version 2), the exit line's names. */
-export const CHILD_FLOOR_COUNTERS = Object.freeze(["boundExceeded", "costUnanswered", "longContext", "costUnjudged"]);
+const LEDGER_GUARD_COUNTS = Object.freeze(["spentMicros", "inflightMicros", "costRefused", "modelRefused", "boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged"]);
+/** The floor counters a ledger carries (version 3), the exit line's names: the cost guard's four and the meter's `costUnreported`. */
+export const CHILD_FLOOR_COUNTERS = Object.freeze(["boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged"]);
 const ROW_AMOUNTS = Object.freeze(["input", "output", "cacheRead", "cacheWrite", "cacheWrite1h", "reasoning", "total", "cost"]);
 const ROW_COUNTS = Object.freeze(["calls", "unpriced"]);
 /** What only ever grows in a live child: everything but `unresolved` and `inflightMicros`. */
@@ -2294,7 +2477,7 @@ const rowKey = (row) => (row.provider === null ? "" : `${row.provider}\u0000${ro
 
 /** A ledger with nothing in it: the contribution of a file that was never good. */
 function emptyLedger() {
-	return { state: null, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: new Map(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, longContext: 0, costUnjudged: 0 };
+	return { state: null, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: new Map(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0 };
 }
 
 /**
@@ -2445,7 +2628,7 @@ const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSyn
  *     that is counted in `flooded`, unmetered and unread. `flooded` is a high-water mark of how many such names one
  *     listing held.
  * Returns `{ processes, unmetered, flooded, totals, rows, spentMicros, inflightMicros, costRefused, modelRefused,
- * boundExceeded, costUnanswered, longContext, costUnjudged, settledMicros, chargeMicros, missing, files, retired }`:
+ * boundExceeded, costUnanswered, costUnreported, longContext, costUnjudged, settledMicros, chargeMicros, missing, files, retired }`:
  * `processes` the ledger files ever seen (flooded and retired ones included), `unmetered` those counted unmetered
  * (flooded ones included), `totals` and the counters summed over every file's mark and the retired aggregate, `rows`
  * merged by pair (the model-less row last, ids null), `settledMicros` the sum of each ledger's ledgerSettled() and
@@ -2639,6 +2822,7 @@ export function childLedger({ state, metered = true, meter = null, guard = null 
 		modelRefused: refused.modelRefused ?? 0,
 		boundExceeded: refused.boundExceeded ?? 0,
 		costUnanswered: refused.costUnanswered ?? 0,
+		costUnreported: snap?.costUnreported ?? 0,
 		longContext: refused.longContext ?? 0,
 		costUnjudged: refused.costUnjudged ?? 0,
 	};
