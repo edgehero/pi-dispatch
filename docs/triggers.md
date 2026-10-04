@@ -198,7 +198,8 @@ changes what code runs or what it costs.
   When such a job starts, the worker reads the triggers file again. If the flag is gone, or the entry with that
   id now has another folder, flow, command or task, the job runs as an ordinary cron job. If the flag is there and this worker's envelope does not let `portfolio-job` write a plan (no
   envelope, `delegation.enabled` false, or `portfolio-job` not in `delegation.writers`), the job is refused as
-  `portfolio-no-envelope` before it costs anything. A chained child never inherits the flag.
+  `portfolio-no-envelope` before it costs anything. A chained child never inherits the flag. A working flow to
+  copy is in [`docs/portfolio-manager.md`](portfolio-manager.md).
 
 ## Firing a cron trigger by hand
 

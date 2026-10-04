@@ -1,0 +1,11 @@
+{
+  "triggers": [
+    { "on": { "type": "cron", "id": "pm-weekly", "pattern": "0 6 * * 1" },
+      "run": { "kind": "local", "folder": "/absolute/path/to/portfolio-manager",
+               "flow": "portfolio-manager", "task": "Plan this week's budget split and report it. Follow the steps of the flow in order.",
+               "portfolio": true, "model": "claude-haiku-4-5", "maxTurns": 15,
+               "excludeTools": ["edit"],
+               "secrets": { "REPORT_GH_TOKEN": "op://ops/pm-report/token",
+                            "REPORT_WEBHOOK_URL": "op://ops/pm-report/webhook" } } }
+  ]
+}

@@ -265,6 +265,13 @@ a floor. The panel shows the split on `b` and reverts it ([`docs/allocation.md`]
 script says go. The script gets only the job's target id, never a title or a body
 ([`docs/wait-for.md`](docs/wait-for.md)).
 
+### A budget split a flow can plan
+
+Set a dollar total per week and a floor per project, and let a weekly flow move the rest between projects by
+weight. The worker does the arithmetic, bounds each move and keeps an audit log you can revert from
+([`docs/allocation.md`](docs/allocation.md)). The portfolio manager example plans the week and reports what
+it asked for ([`docs/portfolio-manager.md`](docs/portfolio-manager.md)).
+
 ### More than one machine
 
 Several machines can share one queue, one budget and one panel once each worker has a name

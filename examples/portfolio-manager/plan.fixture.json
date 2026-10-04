@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "basis": null,
+  "projects": [
+    { "id": "_other", "weight": 0, "reason": "Fixture: nothing outside a project runs this week." },
+    { "id": "ops", "weight": 1, "reason": "Fixture: the manager itself, kept above its floor." },
+    { "id": "platform", "weight": 2, "reason": "Fixture: steady work." },
+    { "id": "shop", "weight": 3, "reason": "Fixture: the checkout deadline." }
+  ]
+}
