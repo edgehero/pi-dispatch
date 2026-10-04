@@ -34,6 +34,7 @@ import { createJobModelRuntime } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { isNestedRunner, runAsPiCli } from "./src/child-route.mjs";
 import { createChildWatch } from "./src/child-watch.mjs";
+import { precheckAtExit } from "./src/plan-check.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown } from "./src/tools.mjs";
@@ -558,6 +559,12 @@ async function main() {
 	// `usage` is, so an exit line with nothing to say stays byte-identical to what every existing consumer
 	// already parses -- and the host gate reads that absence as "no measurement" rather than as zero.
 	const context = Number.isFinite(contextUsage?.tokens) && Number.isFinite(contextUsage?.contextWindow) && contextUsage.contextWindow > 0 ? { tokens: contextUsage.tokens, window: contextUsage.contextWindow } : null;
+	// Issue #505: a read-only look at /outbox/priorities.json, logged as enum tokens so the job's log says what the host
+	// is likely to make of the plan. Its result is DISCARDED and it never throws: the host decides after exit, and nothing
+	// a plan file holds may change this exit code or this exit line.
+	try {
+		precheckAtExit({ log });
+	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
 	exitWriter.writeExit({ ...capExitMessage(outcome), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });

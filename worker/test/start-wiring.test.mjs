@@ -1278,6 +1278,19 @@ test("portfolio wiring: deps.checkPortfolioFlag reads the live PI_TRIGGERS_FILE 
 	}
 });
 
+test("portfolio wiring: the plan collector is wired into deps beside collectChain, and a job with no plan file collects nothing (#505)", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+	assert.equal(typeof deps.collectPlan, "function", "the plan collector must be wired into deps.collectPlan");
+	const jobDir = tempDir("pi-portfolio-collect-");
+	assert.equal(await deps.collectPlan({ job: { id: "j", data: { kind: "local" } }, prepared: { jobDir }, portfolio: false }), null);
+	const start = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	assert.match(start, /checkPortfolioFlag,\n/, "the gate's check is the one the collector and the snapshot share");
+	assert.match(start, /\n\t\t\t\tportfolioSnapshot,\n/, "prepare is handed the snapshot builder");
+	const index = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
+	assert.match(index, /collectPlan: \(ctx\) => deps\.collectPlan\(\{ \.\.\.ctx, job \}\)/, "the collector gets the REAL job, for its id and its data as queued");
+});
+
 test("once wiring: with PI_TRIGGERS_FILE unset the fallback is <cwd>/triggers.json -- doctor's own default", { skip }, async () => {
 	// Deliberately NOT config.triggersFile, whose null means "cron disabled" and must keep meaning that:
 	// under that knob the DEFAULT single-host deployment would have a firing receiver and a worker that

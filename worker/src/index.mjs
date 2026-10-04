@@ -1091,6 +1091,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// mirroring the name/signal injection above. Omitted when unwired so a bare processor falls back
 				// to runJob's no-op default (a chain fault can never flip a completed outcome either way).
 				...(deps.collectChain ? { collectChain: (ctx) => deps.collectChain({ ...ctx, job }) } : {}),
+				// The plan collector (issue #505) the same way and for the same reason: the writer it records is the REAL job's
+				// `.id`, and the authority it checks is `.data` as queued. The pickup's `portfolio` decision rides in `ctx`.
+				...(deps.collectPlan ? { collectPlan: (ctx) => deps.collectPlan({ ...ctx, job }) } : {}),
 				// prepareWorkspace needs the REAL BullMQ job's `.id` to derive a cron job's scheduled-for
 				// instant from the deterministic repeat:<id>:<millis> jobId (DES-CRON-VIA-BULLMQ-SCHEDULER)
 				// for the local /job/event.json. runJob's own `job` is the effectiveJob -- a spread of

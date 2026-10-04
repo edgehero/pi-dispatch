@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
-import { authenticExitLines, buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, PLAN_RECORD_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 
@@ -277,9 +277,9 @@ test("the record carries a host, in tail position, and null when nobody named on
 	const withHost = buildRecord({ ...args, host: "mac-mini-1" });
 	const keys = Object.keys(withHost);
 	// `host` was the tail when it landed; `backend` (#277) took the tail after it, `dollars` (#501) after that, and
-	// `why` after that, and `project` (#499) after that.
-	assert.equal(keys.at(-5), "host", "tail position when it landed: field order is the contract");
-	assert.equal(keys.length, 29);
+	// `why` after that, `project` (#499) after that, and `plan` (#505) after that.
+	assert.equal(keys.at(-6), "host", "tail position when it landed: field order is the contract");
+	assert.equal(keys.length, 30);
 	assert.equal(withHost.host, "mac-mini-1");
 
 	// UNCONDITIONAL. `tokens`/`usage`/`session` set the precedent that null-with-the-key-present is this
@@ -302,7 +302,7 @@ test("the record names the RESOLVED venue in tail position, read from the job DA
 	const record = (job, over = {}) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...at, ...over });
 
 	const unflagged = record(wrap(data), { defaultBackend: "local" });
-	assert.equal(Object.keys(unflagged).at(-4), "backend", "tail position when it landed; `dollars` (#501), `why` and `project` (#499) took the tail after it");
+	assert.equal(Object.keys(unflagged).at(-5), "backend", "tail position when it landed; `dollars` (#501), `why`, `project` (#499) and `plan` (#505) took the tail after it");
 	assert.equal(unflagged.backend, "local", "a trigger that names no venue records the default it resolved to, never an absent key");
 	assert.equal(record(wrap({ ...data, backend: "far" }), { defaultBackend: "local" }).backend, "far", "a named venue wins over the default");
 	assert.equal(
@@ -329,12 +329,13 @@ test("a deployment that never names a backend keeps the first twenty-five fields
 		"triggerIndex", "triggerType", "session", "host",
 	]);
 	// Byte-level: everything a pre-#277 reader parsed serialises identically, and the new fields are appended.
-	const { backend, dollars, why, project, ...before } = rec;
+	const { backend, dollars, why, project, plan, ...before } = rec;
 	assert.equal(backend, "local");
 	assert.equal(dollars, null);
 	assert.equal(why, null);
 	assert.equal(project, null, "no projects file: the new key is present and null");
-	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local","dollars":null,"why":null,"project":null}`);
+	assert.equal(plan, null, "no priorities.json: the new key (#505) is present and null");
+	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local","dollars":null,"why":null,"project":null,"plan":null}`);
 });
 
 test("parseExitTokens REBUILDS: a key the runner never had no reach into the record", () => {
@@ -1526,14 +1527,14 @@ test("the record's dollars (#501) is REBUILT from named fields: four keys, integ
 	assert.equal(rec({ reservedMicros: 1, settledMicros: 1, basis: "floor", modelBasis: "unreserved" }).modelBasis, null);
 	for (const bad of [undefined, null, "x", { reservedMicros: 1.5, settledMicros: 0, basis: "floor" }, { reservedMicros: 1, settledMicros: -1, basis: "floor" }, { reservedMicros: 1, settledMicros: 1, basis: "free" }]) assert.equal(rec(bad), null, JSON.stringify(bad));
 	assert.equal(buildRecord({ job, error: Object.assign(new Error("x"), { dollars: { reservedMicros: 1, settledMicros: 1, basis: "floor" } }) }).dollars.basis, "floor", "read off a throw too");
-	assert.equal(Object.keys(buildRecord({ job, result: { outcome: "completed" } })).at(-3), "dollars", "the tail when it landed; `why` and `project` took it after");
+	assert.equal(Object.keys(buildRecord({ job, result: { outcome: "completed" } })).at(-4), "dollars", "the tail when it landed; `why`, `project` and `plan` took it after");
 });
 
 test("the record carries the refusal's why: a fixed token, in tail position, else null", () => {
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
 	const rec = (result) => buildRecord({ job, result });
 	const refused = rec({ outcome: "policy", reason: "model-unknown", why: "overlay-link", budgetReserved: false });
-	assert.equal(Object.keys(refused).at(-2), "why", "the tail when it landed; `project` (#499) took it after");
+	assert.equal(Object.keys(refused).at(-3), "why", "the tail when it landed; `project` (#499) and `plan` (#505) took it after");
 	assert.deepEqual([refused.reason, refused.why], ["model-unknown", "overlay-link"]);
 	for (const why of ["overlay-not-a-file", "overlay-unreadable", "not-in-catalog", "fallback-unlisted"]) assert.equal(rec({ outcome: "policy", reason: "model-unknown", why }).why, why);
 	// Never a free string: the record stays PII-free by construction.
@@ -1545,7 +1546,7 @@ test("the record carries the job's project id in tail position after why, charse
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
 	const rec = (project) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...(project === undefined ? {} : { project }) });
 	const keys = Object.keys(rec("shop"));
-	assert.deepEqual(keys.slice(-2), ["why", "project"], "the newest field takes the tail, after why");
+	assert.deepEqual(keys.slice(-3, -1), ["why", "project"], "the tail when it landed, after why; `plan` (#505) took it after");
 	assert.equal(rec("shop").project, "shop");
 	assert.equal(rec("0-a").project, "0-a");
 	assert.equal(rec(undefined).project, null, "no project passed: the key is present and null");
@@ -1663,4 +1664,26 @@ test("makeFindPreviousRun counts a hand fire (manual:<id>:<millis>) as a run of 
 	assert.equal(findPreviousRun({ schedulerId: "pm", beforeMillis: 400 }), "2026-10-05T03:00:00.000Z", "the hand fire is the previous run");
 	assert.equal(findPreviousRun({ schedulerId: "pm", beforeMillis: 600 }), "2026-10-05T05:09:00.000Z", "a tick and a hand fire in one minute: the later end");
 	assert.equal(findPreviousRun({ schedulerId: "pm", beforeMillis: 250 }), "2026-10-05T01:00:00.000Z", "manual_pm_1_200 is trigger pm_1's");
+});
+
+test("the record carries a collected plan in tail position after project: enums and a hash only, else null (#505)", () => {
+	const job = { id: "repeat:pm:1", name: "local", attemptsMade: 0, data: { kind: "local", folder: "/srv/pm", trigger: { id: "pm", pattern: "0 6 * * 1" }, portfolio: true } };
+	const rec = (plan) => buildRecord({ job, result: { outcome: "completed", exitCode: 0, ...(plan === undefined ? {} : { plan }) } });
+	assert.deepEqual(Object.keys(rec(undefined)).slice(-2), ["project", "plan"], "the newest field takes the tail");
+	assert.equal(rec(undefined).plan, null, "no plan file: present and null");
+	assert.deepEqual(rec({ outcome: "applied", reason: null, planId: "0123456789abcdef", clamped: true }).plan, { outcome: "applied", reason: null, planId: "0123456789abcdef", clamped: true });
+	assert.deepEqual(rec({ outcome: "duplicate", reason: "plan-duplicate", planId: "0123456789abcdef", clamped: false }).plan, { outcome: "duplicate", reason: "plan-duplicate", planId: "0123456789abcdef", clamped: false });
+	for (const reason of PLAN_RECORD_REASONS) assert.equal(rec({ outcome: "refused", reason, planId: null, clamped: false }).plan.reason, reason);
+	// Rebuilt from named fields: anything else in the source never reaches the record, and a malformed one is null.
+	const leaky = rec({ outcome: "refused", reason: "plan-too-soon", planId: "Fix the login bug", clamped: "yes", weights: { shop: 3 }, reasons: { shop: "Fix the login bug" } });
+	assert.deepEqual(leaky.plan, { outcome: "refused", reason: "plan-too-soon", planId: null, clamped: false });
+	assert.ok(!JSON.stringify(leaky).includes("Fix the"));
+	for (const bad of [null, "applied", { outcome: "won" }, { outcome: "refused", reason: "Fix the login bug" }, { outcome: "refused", reason: null }, { outcome: "applied", reason: "plan-stale" }]) assert.equal(rec(bad).plan, null, JSON.stringify(bad));
+});
+
+test("PLAN_RECORD_REASONS is the collector's rungs, plan-invalid, envelope-mismatch and the apply ladder, nothing else (#505)", async () => {
+	const { PLAN_COLLECT_REASONS } = await import("../src/outbox-plan.mjs");
+	const { PLAN_LADDER, PLAN_INVALID } = await import("../src/priorities.mjs");
+	const { ENVELOPE_MISMATCH_REASON } = await import("../src/allocation.mjs");
+	assert.deepEqual([...PLAN_RECORD_REASONS].sort(), [...new Set([...PLAN_COLLECT_REASONS, PLAN_INVALID, ENVELOPE_MISMATCH_REASON, ...PLAN_LADDER])].sort());
 });

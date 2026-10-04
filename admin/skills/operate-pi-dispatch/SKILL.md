@@ -226,6 +226,12 @@ delegation off, or `portfolio-job` not in `delegation.writers`), the job is refu
 before anything is spent. The operator can fire such a trigger once by hand with
 `pi-dispatch run --trigger <id>` in a terminal; no tool does that.
 
+A portfolio job reads `/job/portfolio.json` (ids, numbers and operator labels only) and may write `/outbox/priorities.json`. The
+worker applies that plan after the job completes, under the same rules as an operator's own plan. Its run
+record's `plan` field says what happened: `applied`, `duplicate`, or `refused` with a fixed reason
+(`plan-not-portfolio`, `plan-too-soon`, `plan-stale`, `plan-invalid` and the rest). A refused plan never makes
+the job failed. A snapshot too large for the job refuses it as `portfolio-snapshot-oversize`, pre-spend.
+
 ## The forge a trigger listens to — `run.kind`
 
 A webhook trigger names its forge: `"kind"` is `github`, `gitlab`, `forgejo` or `azure`. Everything else

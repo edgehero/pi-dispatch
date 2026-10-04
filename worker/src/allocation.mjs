@@ -33,11 +33,11 @@
 
 import { randomUUID } from "node:crypto";
 import * as nodeFs from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { envelopeDigest } from "./envelope.mjs";
 import { RELEASE_IF_MINE } from "./fleet-lease.mjs";
 import { OTHER, allocate, envelopeEntries, neutralAllocation, parsePlan, planRefusal, rebase, repoShares, scopeRef } from "./priorities.mjs";
-import { scopeDollarKeyPrefix } from "./scoped-limits.mjs";
+import { dollarCapsFor, scopeDollarKeyPrefix } from "./scoped-limits.mjs";
 
 export const ALLOC_PLAN_KEY = "alloc:plan";
 export const ALLOC_LOCK_KEY = "alloc:lock";
@@ -608,7 +608,61 @@ export function makeAllocationState({ redis, host = "", audit, log = () => {}, l
 		}
 	}
 
-	return { reconcile, applyPlan, revert, fleetGoverned };
+	/**
+	 * A plan refused BEFORE `applyPlan` could judge it (issue #505): the job-side collector's own rungs
+	 * (`plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`, `plan-parse-error`). One row in
+	 * the file and one in `alloc:log`, like every refusal `applyPlan` writes, so none of them is silent. The reason is a
+	 * fixed token and the plan body is never read into it: a refused file may not even be a plan. Throws like `record`
+	 * on an infrastructure fault; the collector catches it.
+	 */
+	async function recordRefusal({ writer, reason, field = null, rule = null, digest = null, now }) {
+		await record(auditRow({ at: iso(now), host, writer, outcome: "refused", reason, field, rule, envelopeDigest: digest }));
+	}
+
+	/**
+	 * The newest `alloc:log` row a writer of `kind` wrote for the trigger `triggerId` (issue #505, the snapshot's
+	 * `lastAttempt`), or null. `alloc:log` is newest first and carries no reasons, so the row holds only what a snapshot
+	 * may show. A row that does not parse is skipped. Throws on a Valkey fault.
+	 */
+	async function lastAttempt({ kind = "portfolio-job", triggerId }) {
+		const rows = await redis.lrange(LOG, 0, ALLOC_LOG_MAX - 1);
+		for (const text of Array.isArray(rows) ? rows : []) {
+			let row;
+			try {
+				row = JSON.parse(text);
+			} catch {
+				continue;
+			}
+			if (row?.writer === kind && row?.triggerId === triggerId) return row;
+		}
+		return null;
+	}
+
+	return { reconcile, applyPlan, revert, fleetGoverned, recordRefusal, lastAttempt };
+}
+
+/**
+ * The job a project member stands for: a folder member is a local job on that folder, a forge member
+ * (`<kind>:<repo>`, as projects.json stores it) a job of that kind on that repo. Used to find the scoped-limits row a
+ * member's jobs match, by the job matcher itself (`dollarCapsFor`), rather than by comparing strings a second way.
+ */
+export function memberJob(member) {
+	if (typeof member !== "string" || member === "") return null;
+	if (isAbsolute(member)) return { kind: "local", folder: member };
+	const at = member.indexOf(":");
+	return at > 0 ? { kind: member.slice(0, at), repo: member.slice(at + 1) } : null;
+}
+
+/**
+ * THE key prefix a member's repo share reserves and settles in (issue #505 review): the operator row its jobs match
+ * when that row has dollar windows (`dollarCapsFor`, so a bare `acme/web` row is the key of the member
+ * `github:acme/web`), else the synthetic ledger keyed by the member scope. `governedDollars` (enforcement) and the
+ * portfolio snapshot (what a manager reads) both call this, so the counter read is always the counter written. Pass
+ * `row` when the matched ledger is already in hand (null for none), else `limits` to match it here.
+ */
+export function memberDollarKeyPrefix(member, { row, limits = null } = {}) {
+	const ledger = row !== undefined ? row : dollarCapsFor(memberJob(member), limits);
+	return ledger?.keyPrefix ?? scopeDollarKeyPrefix(member);
 }
 
 /**
@@ -635,8 +689,8 @@ export function governedDollars({ envelope, state, member = null, operator = {} 
 	const entries = envelopeEntries(envelope);
 	const entry = member && entries.includes(member.id) && member.id !== OTHER ? member.id : OTHER;
 	const sourceOf = (caps) => ({ day: caps?.day == null ? null : "operator", week: caps?.week == null ? null : "operator", month: caps?.month == null ? null : "operator" });
-	const narrow = (ledger, scope, amount) => {
-		const base = ledger ?? { scope, keyPrefix: scopeDollarKeyPrefix(scope), caps: { day: null, week: null, month: null } };
+	const narrow = (ledger, scope, amount, keyPrefix = scopeDollarKeyPrefix(scope)) => {
+		const base = ledger ?? { scope, keyPrefix, caps: { day: null, week: null, month: null } };
 		const caps = { day: base.caps?.day ?? null, week: base.caps?.week ?? null, month: base.caps?.month ?? null };
 		const capSource = sourceOf(caps);
 		if (caps[w] === null || amount < caps[w]) {
@@ -661,6 +715,6 @@ export function governedDollars({ envelope, state, member = null, operator = {} 
 	}
 	out.projectDollars = narrow(operator.projectDollars ?? null, `project:${entry}`, state.allocations[entry] ?? 0);
 	const share = state.repos?.[entry]?.[scopeRef(member.member)];
-	if (Number.isSafeInteger(share)) out.scopedDollars = narrow(operator.scopedDollars ?? null, member.member, share);
+	if (Number.isSafeInteger(share)) out.scopedDollars = narrow(operator.scopedDollars ?? null, member.member, share, memberDollarKeyPrefix(member.member, { row: operator.scopedDollars ?? null }));
 	return out;
 }

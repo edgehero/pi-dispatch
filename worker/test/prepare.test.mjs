@@ -680,3 +680,34 @@ test("a job dir that cannot be removed never replaces the preparer's own error (
 		cleanup();
 	}
 });
+
+test("the portfolio snapshot builder is handed to prepareLocal only for a confirmed portfolio job with a cron event (#505)", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const asked = [];
+		const make = () => {
+			const calls = [];
+			const prepareWorkspace = makePrepareWorkspace({
+				jobsDir,
+				forgeFor: () => ({}),
+				prepareLocal: async (arg) => (calls.push(arg), { outcome: "ok" }),
+				portfolioSnapshot: async (job) => (asked.push(job.trigger?.id ?? null), { body: "{}" }),
+			});
+			return { calls, prepareWorkspace };
+		};
+		const cron = { kind: "local", folder: "/f", task: "x", trigger: { id: "pm", pattern: "0 6 * * 1" }, portfolio: true };
+		const flagged = make();
+		await flagged.prepareWorkspace(cron, undefined, { queueJobId: "repeat:pm:1", portfolio: true });
+		assert.equal(typeof flagged.calls[0].portfolio, "function");
+		assert.deepEqual(await flagged.calls[0].portfolio(), { body: "{}" });
+		assert.deepEqual(asked, ["pm"]);
+		// Not confirmed by the processor, a chained child and a manual run: no builder, whatever the data says.
+		for (const [job, opts] of [[cron, {}], [{ ...cron, parentJobId: "p", chainDepth: 1 }, { portfolio: true }], [{ kind: "local", folder: "/f", task: "x", portfolio: true }, { portfolio: true }]]) {
+			const m = make();
+			await m.prepareWorkspace(job, undefined, opts);
+			assert.equal("portfolio" in m.calls[0], false, JSON.stringify(job));
+		}
+	} finally {
+		cleanup();
+	}
+});

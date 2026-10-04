@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -430,6 +430,48 @@ test("guardrails precede outbox precede persona when all three are present", { s
 		appended.indexOf(OUTBOX_SENTINEL) < appended.indexOf(PERSONA_SENTINEL),
 		"the outbox protocol must precede the project persona",
 	);
+});
+
+// --- issue #505: the portfolio protocol, composed only when the worker wrote /job/portfolio.json ---
+const PORTFOLIO_SENTINEL = "pi-dispatch-portfolio-v1";
+/** The REAL baked files, so a test that passes here passes on what the image carries. */
+const REAL_OUTBOX_PROTOCOL = new URL("../../../guardrails/OUTBOX_PROTOCOL.md", import.meta.url).pathname;
+const REAL_PORTFOLIO_PROTOCOL = new URL("../../../guardrails/PORTFOLIO_PROTOCOL.md", import.meta.url).pathname;
+
+/** A job dir holding a snapshot, and the loader overrides that point the gate at it. */
+function portfolioFixture({ present = true } = {}) {
+	const dir = tempDir("pi-dispatch-portfolio-");
+	const portfolioPath = join(dir, "portfolio.json");
+	if (present) writeFileSync(portfolioPath, "{\"version\":1}");
+	return { portfolioPath, portfolioProtocolPath: REAL_PORTFOLIO_PROTOCOL, outboxProtocolPath: REAL_OUTBOX_PROTOCOL, outboxMount: tempDir("pi-dispatch-outbox-") };
+}
+
+test("the portfolio protocol layers in when /job/portfolio.json exists, after the outbox protocol and before the personas (#505)", { skip }, async () => {
+	const { loader } = await load(portfolioFixture());
+	const appended = loader.getAppendSystemPrompt().join("\n\n");
+	assert.ok(appended.includes(PORTFOLIO_SENTINEL), "the portfolio protocol is missing when the snapshot is there");
+	assert.ok(appended.includes(OUTBOX_SENTINEL), "the real outbox protocol is composed too");
+	assert.ok(appended.indexOf(GUARDRAIL_SENTINEL) < appended.indexOf(OUTBOX_SENTINEL), "guardrails first");
+	assert.ok(appended.indexOf(OUTBOX_SENTINEL) < appended.indexOf(PORTFOLIO_SENTINEL), "the outbox protocol before the portfolio one, whose channel it is");
+	assert.ok(appended.indexOf(PORTFOLIO_SENTINEL) < appended.indexOf(PERSONA_SENTINEL), "the portfolio protocol before the project persona");
+});
+
+test("the portfolio protocol is absent without /job/portfolio.json, whatever else is mounted (#505)", { skip }, async () => {
+	const { loader } = await load(portfolioFixture({ present: false }));
+	const appended = loader.getAppendSystemPrompt().join("\n\n");
+	assert.ok(!appended.includes(PORTFOLIO_SENTINEL), "the portfolio protocol reached a job with no snapshot");
+	assert.ok(appended.includes(OUTBOX_SENTINEL), "an ordinary local job still gets the outbox protocol");
+});
+
+test("the portfolio gate is read once at loader build: the prompt is byte-identical across turns (#505, CONST-PERSONA-IN-CACHED-PREFIX)", { skip }, async () => {
+	const f = portfolioFixture();
+	const { loader } = await load(f);
+	const first = loader.getAppendSystemPrompt().join("\n\n");
+	// The file going away mid-job (it cannot: /job is read-only; this is the strongest form of the claim) changes nothing.
+	rmSync(f.portfolioPath);
+	const second = loader.getAppendSystemPrompt().join("\n\n");
+	assert.equal(second, first);
+	assert.ok(first.includes(PORTFOLIO_SENTINEL));
 });
 
 // --- REQ-GLOBAL-PI-OVERLAY: the operator global overlay, layered UNDER the per-repo .pi/ ---

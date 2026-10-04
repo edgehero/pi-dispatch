@@ -1031,6 +1031,8 @@ refactor apart.
                                    WHOLE            ┘  <oid>`, never `fs.readFile`
   /job/trigger-skills/<name>/**    the trigger's INJECTED skills, copied from the worker-host directory
                                    `run.skillsDir` names. Present only when the trigger set it.
+  /job/portfolio.json              a portfolio job's snapshot (issue #505), 0444. Present only for a job the
+                                   processor confirmed as a portfolio job and the live triggers file still flags.
   ```
   **The guardrails are baked into the image** at a path outside `agentDir` and are **not** mounted.
 - **What the container additionally reads from `/workspace`, and why it is not a `/job` input.** A job's
@@ -1187,6 +1189,57 @@ refactor apart.
     is skipped rather than guessed. The job's `portfolio` flag rides at job level and never reaches this file.
     A hand fire is a run of its trigger: the next tick's `previousRunAt` looks at `manual:<id>:<millis>` records
     beside `repeat:` ones (a hand fire and a tick in one minute: the later end).
+- **`/job/portfolio.json`, the portfolio snapshot (issue #505)**: the facts a portfolio job's agent reads to write a
+  priorities plan (`INT-PRIORITIES-PLAN-CONTRACT`), since the container is queue-blind (`DES-JOB-OUTBOX-CHAINING`).
+  Written by `prepareLocalWorkspace` through an injected builder (`worker/src/portfolio-snapshot.mjs`), `0o444` beside
+  `event.json`, so it reaches the container on the existing read-only `/job` mount with no new mount. Built only when
+  the processor's pickup decision says portfolio (`job.data.portfolio === true`, a cron `trigger`, no chain field, and
+  the live triggers file flags the same entry) AND the live file still flags it at prepare; a chained child and a
+  manual run never get one, and neither does a job whose flag was removed or whose host lost its envelope in between
+  (that job runs as an ordinary cron job). Shape, integers in micro-dollars:
+  ```json
+  { "version": 1, "generatedAt": "<ISO>",
+    "window": { "kind": "day|week|month", "start": "YYYY-MM-DD", "end": "YYYY-MM-DD" },
+    "envelope": { "digest": "<16 hex>", "totalMicros": 0, "maxStepPct": 0, "minIntervalHours": 0, "maxPlanDays": 0,
+                  "planAllowedAfter": "<ISO>" | null },
+    "plan": { "id": "<16 hex>", "writer": "<STATE_WRITERS token>", "appliedAt": "<ISO>", "validUntil": "<ISO>",
+              "clamped": false } | null,
+    "lastAttempt": { "at": "<ISO>", "outcome": "<audit outcome>", "reason": "<token>" | null, "planId": "<16 hex>" | null,
+                     "field"?: "<PLAN_FIELDS>", "rule"?: "<PLAN_RULES>" } | null,
+    "projects": [ { "id": "<envelope entry, _other included>", "floorMicros": 0, "weight": 0, "allocationMicros": 0,
+                    "spentMicros": 0,
+                    "members": [ { "ref": "<8 hex>", "label": "github:acme/web | local:<basename>",
+                                   "weight"?: 0, "allocationMicros"?: 0, "spentMicros"?: 0 } ],
+                    "runs7d": { "completed": 0, "policy": 0, "failed": 0, "byReason": { "<token>": 0 } } } ],
+    "fleet": { "runsComplete": true } }
+  ```
+  - **The content rule**: ids, digests, integers, ISO instants and fixed enum tokens, plus two kinds of operator
+    configuration: project ids and a member's label (a forge member as `projects.json` stores it, a folder as
+    `local:<basename>`, the `targetFor` rule; a label holding a control, format, bidi or unassigned character, or
+    longer than 200 code points, is replaced by the member's ref). No issue text, no title, no task, no plan `reason`
+    and no path: the next manager run reads this file as facts. Every value is rebuilt from named fields; a run record's `reason` that is
+    not a plain token counts under `other`.
+  - `plan` is null while the neutral split applies; then a plan's `basis` is null, else it is `plan.id`.
+    `planAllowedAfter` is the last writer's plan plus `minIntervalHours`, null when none applied. `lastAttempt` is the
+    newest `alloc:log` row a `portfolio-job` writer wrote for this trigger, null when there is none.
+  - **Money comes from the fleet-wide counters**, the `budget:usd:s:<hash16>` keys of the envelope's window that every
+    host reserves and settles in, so it is complete on every host. A member's key is `memberDollarKeyPrefix`, the one
+    enforcement uses: the scoped-limits row its jobs match (a bare `acme/web` row for the member `github:acme/web`),
+    else the member's own scope. `spentMicros` is the counter: what was spent plus
+    what running jobs still hold, the number the next job is admitted against. (#505's sketch also named a
+    `reservedMicros`; the counters cannot split held from spent, so the snapshot carries the one honest number.) A
+    member's `weight`, `allocationMicros` and `spentMicros` appear only when the applied plan gave that member a share.
+  - `runs7d` counts the last 7 days from the local run history merged with the Valkey run mirror (`readMirroredRuns`,
+    `mergeRuns`), by the record's `project` (a project the envelope does not name counts under `_other`).
+    `fleet.runsComplete` is false when `PI_WORKER_NAME` is unset (no mirror), when the mirror could not be read or was
+    cut short, or when a local record could not be read.
+  - A Valkey fault while building it (the reconcile, `alloc:log`, the counters) throws InfraRetry: nothing is reserved
+    yet. Over 64 KiB, the job is refused as `portfolio-snapshot-oversize` (`INT-RUN-HISTORY-FILE-CONTRACT`) before the
+    reserve. It is built at prepare and the plan is collected at most `JOB_TIMEOUT_MS` later; the plan's `basis` makes
+    any change in between a refusal (`plan-stale`), never a silent overwrite.
+  - Its presence is what composes the baked portfolio protocol (`/opt/pi-dispatch/PORTFOLIO_PROTOCOL.md`) into the
+    prompt, read once at loader build, in the order guardrails, outbox protocol, portfolio protocol, the overlay
+    persona, the project persona (`CONST-PERSONA-IN-CACHED-PREFIX`).
 - **Why the worker materialises `.pi/` instead of letting pi discover it**: not because the checkout is
   untrusted — it is the default-branch sha either way — but because materialising buys two properties
   discovery cannot. **The agent cannot rewrite them mid-run**, since `/job` is `:ro` while `/workspace` is
@@ -1224,7 +1277,9 @@ refactor apart.
   `/job/pi/skills/<name>/`, `0444`, with its executable blobs absent. Given a `.pi/skills/<x>/` that
   declares no `SKILL.md` anywhere beneath it, nothing under it arrives. Given a `.pi/` over any cap, the
   job is refused with a `pi-` reason, **no file is written and no blob is read**, no budget slot is
-  burned, and the refusal is not retried.
+  burned, and the refusal is not retried. Given a portfolio job (issue #505), `/job/portfolio.json` exists, `0444`,
+  holding no issue title, plan reason or path; given any other job, or a portfolio job whose flag was removed from
+  the live file before prepare, it does not exist and the portfolio protocol is not in the prompt.
 
 ## INT-CONTAINER-RUNTIME-CONTRACT
 
@@ -4500,7 +4555,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -4540,7 +4595,10 @@ validator rather than a second copy of it.
                  "basis": "metered" | "floor" | "refunded" | "unreserved",
                  "modelBasis": "metered" | "floor" | "refunded" | null } | null,              // modelBasis: how the model windows settled (#502 part 6); null = none held
     "why":     "<fixed token: the refusal's detail, e.g. overlay-link under model-unknown>" | null,
-    "project": "<project id from projects.json, ^[a-z0-9][a-z0-9-]{0,31}$>" | null }   // issue #499; never the name
+    "project": "<project id from projects.json, ^[a-z0-9][a-z0-9-]{0,31}$>" | null,   // issue #499; never the name
+    "plan":    { "outcome": "applied" | "duplicate" | "refused",                         // issue #505: a collected plan
+                 "reason": "<fixed enum: plan-not-portfolio|plan-oversize|plan-not-regular-file|plan-unreadable|plan-parse-error|plan-collect-error|plan-invalid|delegation-off|writer-not-allowed|envelope-mismatch|plan-duplicate|plan-stale|plan-too-soon|plan-incomplete|plan-busy>" | null,
+                 "planId": "<16 lowercase hex>" | null, "clamped": <bool> } | null }
   ```
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
@@ -4663,6 +4721,26 @@ validator rather than a second copy of it.
   project, and its record overwrites the earlier attempt's. A record written BEFORE the pickup gate (the wait gate's
   refusals) resolves it from the live file with the same function. `null` when no projects file is set, when the job's scope is in no project, and in every record
   written before issue #499. Records are never re-attributed from current membership: an old record keeps `null`.
+
+  **`plan` (issue #505) is what became of the priorities plan a completed portfolio job wrote** to
+  `/outbox/priorities.json` (`INT-OUTBOX-CONTRACT`), and is additive, nullable, an explicit literal REBUILT from named
+  fields, and TAIL position after `project`, UNCONDITIONAL like `project`. `outcome` is `applied`, `duplicate` (the
+  same plan id again: a no-op) or `refused`; `reason` is null exactly when the plan applied and otherwise one of the
+  fixed tokens above (the collector's own rungs, `plan-invalid`, and the apply ladder of
+  `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`; a compare-and-set lost to another writer records `refused` with
+  `plan-stale`); `plan-collect-error` means the outcome is unknown and the plan may have applied (see `alloc:plan` and the
+  audit file); `planId` is the plan's 16-hex content hash when one was computed, else null; `clamped` says the step
+  bound held the plan short of its target. A source that breaks those rules records `null`. It never holds the plan's
+  weights or its per-project `reason` (agent text): those are in the allocation audit file. `null` for every run that
+  left no plan file, which is every run of a deployment with no portfolio trigger and every record written before
+  issue #505. A refused plan never changes `outcome`: the job completed, and the refusal is a recorded outcome of it.
+
+  **`portfolio-snapshot-oversize`** (issue #505) is a prepare-stage policy refusal of a portfolio job: the snapshot
+  `/job/portfolio.json` (`INT-CONTAINER-JOB-INPUTS`) would be larger than 64 KiB, so the job is refused before the
+  reserve rather than run on a cut snapshot. The worker log line `refused_portfolio_snapshot_oversize` names the
+  project count and the bytes. `budgetReserved` is not set (returned from prepare, before the reserve), no `dollars`.
+  Never retried; it pages nobody (`HOOK_POLICY_REASONS` UNCHANGED, checked: like every pre-reserve refusal it has
+  nothing spent to page about). Fewer projects, or fewer members per project, fix it.
 
   **`project-cap`** (issue #499 part B) is a pre-spend policy refusal: a `project:<id>` row's day, week or month
   window in `INT-SCOPED-LIMITS-FILE-CONTRACT` is full. It is decided after the repo or folder ledger and before the
@@ -5059,6 +5137,42 @@ validator rather than a second copy of it.
   channel does not exist for it, so an untrusted issue author cannot chain.
 - **Ro shadow**: the agent can re-read its own requests via the `/job:ro` tree (`/job/outbox/…`) —
   harmless, since the file is agent-authored and the worker trusts nothing in it.
+- **The second file, `/outbox/priorities.json` (issue #505)**: a portfolio job's priorities plan, exactly
+  `INT-PRIORITIES-PLAN-CONTRACT`, at most 16 KiB. A separate NAME, never a `request-<n>.json` with a `type` key: it
+  uses no chain slot (`PI_CHAIN_MAX_PER_JOB`), it is never enqueued, and a worker that predates it never opens it
+  (`DES-JOB-OUTBOX-CHAINING`). Collected by `makeCollectPlan` (`worker/src/outbox-plan.mjs`) on the completed branch
+  only, after the chain requests; a policy, abort or infra exit collects nothing. Validation order, host-side,
+  fail-closed at the first miss, each refusal a fixed token:
+  1. No file (or no outbox, as for a forge job): nothing happens, and the record's `plan` is `null`. Only ENOENT and
+     ENOTDIR mean "no file"; any other error is judged after rung 2: a job the pickup never confirmed then has no
+     plan (`null`), and a confirmed one meets rung 4.
+  2. `plan-not-portfolio`: the pickup did not confirm the job as a portfolio job (the flag on its data, a cron
+     `trigger`, no `parentJobId` or `chainDepth`, and the live triggers file flagging the same entry), or its data no
+     longer has that shape, or prepare wrote no snapshot (`prepared.portfolio`), or the LIVE triggers file no longer
+     flags that entry at collection. All three decisions must agree: removing the flag while the job runs is obeyed,
+     a job that ran without the snapshot writes no plan, and a flag added back mid-run grants nothing to a job that
+     started as an ordinary one. A manual run and a chained child always land here.
+  3. `plan-oversize`: over 16 KiB by `lstat`, before anything is opened.
+  4. `plan-not-regular-file`: `lstat` says it is no regular file (a symlink is refused on its own inode). The file is
+     then opened with `O_NOFOLLOW` (a link swapped in after the lstat fails as ELOOP) and `O_NONBLOCK` (a FIFO cannot
+     hang the worker), and the OPEN descriptor is `fstat`ed for both rules again, so what is read is what was judged;
+     at most 16 KiB plus one byte is read, so a file that grows is still `plan-oversize`. Any other fs fault is
+     `plan-unreadable`.
+  5. `plan-parse-error`: not JSON, or a root that is not an object.
+  6. `applyPlan` (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`) with the writer `{ kind: "portfolio-job", jobId,
+     triggerId }`: `plan-invalid` naming one field, then `delegation-off` through `plan-busy`.
+  Rungs 2 to 5 are recorded like the apply ladder's own refusals, one audit-file row and one `alloc:log` row with the
+  token and nothing of the body, so none is silent and the next snapshot's `lastAttempt` can name it, with one
+  exception: a job the pickup never confirmed (a manual run, a chained child, an unflagged cron job) is refused in its
+  run record and its log line only, never in the audit file or `alloc:log`, which holds 500 rows and is the panel's
+  revert history. The collector **never throws**: a fault inside it (Valkey, the audit file, a defect) is logged by
+  its code and recorded as `plan-collect-error`, and the completed job stays completed (`CONST-RETRY-INFRA-ONLY`).
+  `plan-collect-error` means the outcome is unknown: the plan may have applied (a reply lost after the
+  compare-and-set was sent), so the record carries its `planId` when it could be computed; see `alloc:plan` and the
+  audit file. Its log line is
+  `plan_collected { jobId, outcome, reason }`. The runner also pre-checks the file at exit with a vendored copy of
+  `parsePlan`'s structural half and logs `plan_precheck` with enum tokens; that check decides nothing and can change
+  neither the exit code nor the exit line.
 - **Why**: The `/outbox` file is the container's only signal channel back to the host and is **untrusted**;
   every field is allowlist-validated host-side before an enqueue, the child folder is forced, and depth is
   host-computed, so a queue-blind container can neither forge a shallow chain to evade the cap nor escape
@@ -5078,7 +5192,12 @@ validator rather than a second copy of it.
   dedups and no second child is enqueued; given a parent whose data carries `excludeTools`, when a valid
   request is collected, then the child's data carries the parent's exclusions verbatim and no value from
   the request file's own `excludeTools` key appears anywhere in it. Given a parent whose data carries `maxCostUsd`, then the child's data
-  carries it verbatim, and a request file's own `maxCostUsd` key changes nothing.
+  carries it verbatim, and a request file's own `maxCostUsd` key changes nothing. Given a completed portfolio job
+  with a valid `priorities.json` (issue #505), then `applyPlan` judges it with the writer `portfolio-job` and the record
+  carries `plan`; given the same file from a manual, chained or no-longer-flagged job, then it is refused as
+  `plan-not-portfolio` and recorded; given a symlink, a FIFO or an oversize file, then it is refused without being
+  read; given a policy or infra exit, then nothing is collected; given any fault, then the job's outcome stays
+  `completed`.
 
 ## INT-SESSION-STORE-CONTRACT
 
@@ -6109,8 +6228,9 @@ judge, shared by the worker and the admin; issue #505 reuses this contract uncha
     neutral split is applied: no plan yet, after a flush, after expiry, or with delegation turned off. A writer that
     forgot the field is told so rather than read as a first plan.
   - `validUntil` (optional): a UTC instant as `toISOString` writes it (seconds required, milliseconds optional, `Z`
-    only), after now and no later than now plus `maxPlanDays`: the caller's, else the envelope's, else 14 (with no
-    envelope, the runner's pre-check), and never more than 366. Absent, it resolves to now plus `maxPlanDays`. A
+    only), after now and no later than now plus `maxPlanDays`: the caller's, else the envelope's, else 14, and never
+    more than 366. The runner's pre-check (issue #505) has no envelope and passes the snapshot's
+    `envelope.maxPlanDays` as the caller's, 14 when it cannot read one. Absent, it resolves to now plus `maxPlanDays`. A
     written instant enters the canonical plan as `toISOString` writes it, so `...00Z` and `...00.000Z` are one plan.
   - `projects` (required): at most 256 entries, ids unique. With an envelope, each id must be one of its entries,
     and **every entry must be named, else `plan-incomplete`**.
@@ -7243,3 +7363,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-04 | Issue #504, part A. **`INT-ENVELOPE-FILE-CONTRACT` NEW**: `PI_ENVELOPE_FILE` (unset is no delegation), version required and a newer one refused, unknown keys refused (counted, never quoted), `window` one of day, week, month, dollars to integer micro-dollars with more than 6 decimals refused, floors keyed to `projects.json` ids or `_other` (always an entry, floor 0 and weight 1 when absent; a project the file does not name counts in `_other`), floors not above the total, a project's operator dollar row for the same window or a longer one below its floor refused naming both, a key written twice following `JSON.parse` (the last wins), `maxStepPct` 1 to 100 when delegation is on (0 refused), writers from `operator-session` and `portfolio-job`, a per-job cost cap required (naming `PI_MAX_COST_USD`), the path refused inside any job-visible path by file identity (device and inode, never path strings, so a firmlink or bind alias is the directory it names, and `$PWD` used exactly when it has the cwd's identity) with equality inside, the envelope path required to be its own canonical path (absolute and equal to its realpath: no symlink, `.`, `..`, case variant or alias on the way; the refusal names the path to write) and to name a regular file with one hard link, the residual of a host bind mount of the envelope's folder under a job path named, while a job path is judged where the kernel resolves it, where a container runtime mounts it (the textual reading), and for a relative path also against the shell's working directory the runtime CLI uses, skipped only when no reading exists, a relative run root refused, and never refused for its spelling, the check run with every load and reload, and the normalized form that `envelopeDigest` hashes. **`INT-PRIORITIES-PLAN-CONTRACT` NEW**: the plan shape, unknown keys refused, weights 0 to 1000, every envelope project named or `plan-incomplete`, `repos` complete by `ref` (8 hex of sha256 over the canonical scope), a reason of at most 200 code points with controls, format characters, lone surrogates, private-use and unassigned code points and line separators refused, `validUntil` defaulting to and capped at `maxPlanDays` (14 with no envelope, never above 366) and canonicalized by `toISOString`, `basis` 16 hex or null and required, refusals as a fixed reason, field and rule that never carry plan text, and the plan id over the canonical plan. Issue #505 reuses it unchanged. **Code evidence**: worker/src/envelope.mjs -> parseEnvelope, envelopeInsideJobPaths; worker/src/priorities.mjs -> parsePlan, planId, scopeRef, PLAN_FIELDS, PLAN_RULES. |
 | 2026-10-04 | Issue #504, part B. **`INT-ENVELOPE-FILE-CONTRACT` AMENDED**: the worker reads the file at boot with `loadEnvelopeChecked` (the merged per-job cap, before any Valkey contact) and holds it in a watched ref with a last good copy; a reload is judged against the live projects and scoped limits, and a projects or scoped-limits reload that commits re-judges the envelope from disk, so an edit needing both files applies in either save order; the containment check runs with every load and every reload against the job paths read from the triggers FILE (`envelopeJobPaths`), a reload that fails it keeps the last good envelope, and a triggers reload that adds a job path around it logs `envelope_inside_job_path`; every host must agree, a host without the key in a fleet with an applied split refusing its jobs; a named residual: an edit to projects, scoped limits or the per-job cap can leave the live envelope invalid (last good kept, doctor fails, the next boot refuses; part C's writers cross-check); doctor loads it through the same function, `up` never writes the key and says so when its line is blank, `init` scaffolds no file. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: five reasons, `allocation-cap` (the dollar refusal whose binding cap was the split or the envelope total; a tie is `dollar-cap`; its own comment, never "raise the budget"; it joins the `refunded` lists), `envelope-mismatch` (a free gate before the mint, a no-envelope host in a governed fleet included; a fault reading the split is `container-never-started` instead), `local-folder-escaped`, `local-folder-holds-envelope` and `local-folder-project-changed` (prepare-stage refusals of a local job); each pages nobody. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: the dollar hold names `_other`'s ledger (log `ledger: "other"`) and the `allocation-cap` refusal with `source: "allocation"`. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: a host row gains `fpEnvelope`, the live envelope's digest or `none`, read by doctor only, never by the refusal, which compares the host's digest with `alloc:plan`'s; doctor reads the applied split whenever it may talk to the Valkey, prints its digest, names the hosts matching it (a warning when none does), fails for each host that does not (a host with no envelope included), and counts a key that does not decode as governed (`appliedSplitChecks`), else it warns on disagreeing peers and on a peer that publishes no `fpEnvelope` field (`fleetEnvelopeChecks`). **`INT-CONTAINER-JOB-INPUTS` AMENDED**: a local job's `/workspace` is its folder resolved at prepare (`realpathSync.native`), the path everything at prepare reads and the bind mount names; the raw string used to be mounted, so a link a job swapped below a job path after the folder was checked mounted its target read-write; a folder named inside a run root or a cron folder (by text or by an ancestor's identity) that resolves outside it, a symlink farm included, one that is the envelope's folder or above it, and one whose resolved folder is another project's member are refused before the reserve; a chained child is enqueued on the folder as its parent named it; the residual (a link above the resolved folder swapped before the mount) is named. **`INT-ON-FAILURE-HOOK-CONTRACT`** UNCHANGED, checked: `allocation-cap`, `envelope-mismatch`, `local-folder-escaped`, `local-folder-holds-envelope` and `local-folder-project-changed` are pre-spend refusals and stay out of `HOOK_POLICY_REASONS`. **`INT-PRIORITIES-PLAN-CONTRACT`** UNCHANGED, checked: the apply path reuses `parsePlan` and `planRefusal` as they are. **Code evidence**: `worker/src/allocation.mjs`, `worker/src/envelope.mjs` (`loadEnvelopeChecked`, `envelopeProtectedIdentities`), `worker/src/start.mjs` (`reloadEnvelope`, `fpEnvelope`), `worker/src/prepare-local.mjs` (`judgePlacement`), `worker/src/outbox.mjs`, `worker/src/doctor.mjs` (`appliedSplitChecks`, `fleetEnvelopeChecks`, `BOOT_FILES`). |
 | 2026-10-04 | Issue #505, part A. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a `run.portfolio` bullet and contract line (cron only, strictly boolean, refused at load on every webhook type with `false` included and when `true` sits beside `run.command`; carried at job level, never inside `trigger`; not inherited by an outbox child; re-read from the live file at pickup by `on.id`, a flag no longer there or an unreadable file making the job an ordinary cron job; reviewed-file-only: no tool parameter, `buildTriggerEntry` cannot produce it, the panel never asks, both edits keep it), and `pi-dispatch run --trigger <id>` (the same path rule as the one-shot checks, an unknown or webhook id refused, the scheduler data passed through whole, not retried, as a tick is not, id `manual:<id>:<minute millis>` because BullMQ takes a custom id with `:` only in three parts, a second call in the same minute queues nothing, queued on this host's cron queue, another host's folder refused). The cron byte-match acceptance admits `portfolio` on `command`'s terms. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `portfolio-no-envelope`, a free pre-spend refusal after `envelope-mismatch` (no envelope, delegation off, or `portfolio-job` not among the writers), never retried, paging nobody. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: a trigger fired by hand is a `cron` event with `scheduledFor` and `previousRunAt` both null. Review of PR #575: the live check holds the entry found by id to the job's `folder`, `flow`, `command` and `task`; `run --trigger` reads `PI_TRIGGERS_FILE`, `PI_WORKER_NAME` and `PI_MAX_COST_USD` (the loader's config inputs) by issue #471's service-key rule (a disagreement, or an unreadable `.env` the shell does not cover, refused), as `run <folder>` now reads `PI_WORKER_NAME`, looks the cron trigger up before any webhook entry spelling its id, and refuses a folder that is not a git repository; a hand fire counts as a run of its trigger for the next tick's `previousRunAt`. `INT-OUTBOX-CONTRACT`, `INT-ENVELOPE-FILE-CONTRACT`, `INT-PRIORITIES-PLAN-CONTRACT` and `INT-ON-FAILURE-HOOK-CONTRACT` UNCHANGED, checked. |
+| 2026-10-04 | Issue #505, part B. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/portfolio.json`, a confirmed portfolio job's snapshot, `0444` beside `event.json` on the existing `/job` mount, built at prepare only when the pickup decided portfolio AND the live triggers file still flags the entry; its shape, its content rule (ids, digests, integers, ISO instants, enum tokens, project ids and member labels, a label with a control, format or bidi character replaced by its ref, never issue text, a title, a plan reason or a path), money from the fleet-wide counters of the envelope's window (a member's key the one enforcement uses, `memberDollarKeyPrefix`, so a bare row's key; `spentMicros` is spent plus held, the counter the next job is admitted against; the issue's sketch also named a `reservedMicros`, which the counters cannot give), `runs7d` from the local history merged with the run mirror and `runsComplete` false without one, InfraRetry on a Valkey fault, and the portfolio persona it composes. **`INT-OUTBOX-CONTRACT` AMENDED**: a second file, `/outbox/priorities.json`, with its own ladder (no file, `plan-not-portfolio` from the pickup decision, prepare and the live file together, recorded only in the run record and the log line for a job the pickup never confirmed, `plan-oversize` and `plan-not-regular-file` by `lstat` and again on the `O_NOFOLLOW` and `O_NONBLOCK` descriptor's `fstat`, `plan-unreadable`, `plan-parse-error`, then `applyPlan` with the `portfolio-job` writer); every refusal recorded, completed-only, never throws (`plan-collect-error`, outcome unknown, the plan id carried), and the runner's log-only pre-check. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the tail field `plan` (`outcome`, `reason`, `planId`, `clamped`) after `project`, rebuilt and enum-checked, and the reason `portfolio-snapshot-oversize` (prepare-stage policy, before the reserve, `HOOK_POLICY_REASONS` UNCHANGED, checked: nothing is spent to page about). **`INT-PRIORITIES-PLAN-CONTRACT` AMENDED**, one sentence: the runner's pre-check passes the snapshot's `maxPlanDays` as the caller's. `INT-TRIGGERS-FILE-CONTRACT`, `INT-ENVELOPE-FILE-CONTRACT` and `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked (the pre-check changes neither the exit code nor the exit line). |

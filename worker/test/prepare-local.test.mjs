@@ -481,3 +481,28 @@ test("'named inside' is judged by identity: a case variant of a run root on a ca
 	const result = await prepareLocalWorkspace({ folder: join(upper, "away"), task: "x", jobDir: join(tempDir("j-"), "job"), jobPaths: { runRoots: [root], cronFolders: [] } });
 	assert.deepEqual(result, { outcome: "policy", reason: LOCAL_FOLDER_ESCAPED });
 });
+
+test("a portfolio snapshot lands at /job/portfolio.json read-only beside event.json; a refusal writes nothing; null writes no file (#505)", async () => {
+	const folder = localRepo();
+	const body = '{\n  "version": 1\n}';
+	const jobDir = tempDir("pi-job-");
+	const written = await prepareLocalWorkspace({ folder, task: "plan", jobDir, event: { source: "cron", trigger: { id: "pm" } }, portfolio: async () => ({ body }) });
+	assert.equal(written.portfolio, true, "prepare says it agreed: the collector requires it");
+	const path = join(jobDir, "portfolio.json");
+	assert.equal(readFileSync(path, "utf8"), body);
+	assert.equal(statSync(path).mode & 0o777, 0o444);
+
+	const refusedDir = join(tempDir("pi-job-parent-"), "job");
+	const r = await prepareLocalWorkspace({ folder, task: "plan", jobDir: refusedDir, portfolio: async () => ({ outcome: "policy", reason: "portfolio-snapshot-oversize" }) });
+	assert.deepEqual(r, { outcome: "policy", reason: "portfolio-snapshot-oversize" });
+	assert.equal(existsSync(refusedDir), false, "refused before anything is written");
+
+	const plainDir = tempDir("pi-job-");
+	const plain = await prepareLocalWorkspace({ folder, task: "plan", jobDir: plainDir, portfolio: async () => null });
+	assert.equal("portfolio" in plain, false, "no snapshot, no agreement");
+	assert.equal(existsSync(join(plainDir, "portfolio.json")), false, "the live file no longer flags it: no snapshot");
+	assert.ok(existsSync(join(plainDir, "event.json")));
+	const unwired = tempDir("pi-job-");
+	await prepareLocalWorkspace({ folder, task: "plan", jobDir: unwired });
+	assert.deepEqual(readdirSync(unwired).sort(), readdirSync(plainDir).sort(), "no option, no difference");
+});

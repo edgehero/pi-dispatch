@@ -488,7 +488,7 @@ function rebuildUsage(u) {
  * path stay out of the record -- for local jobs only the folder's `basename` is kept, because the full
  * path embeds the operator's OS account name.
  *
- * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | unprotected-branch |
+ * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | portfolio-snapshot-oversize | unprotected-branch |
  * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
@@ -622,7 +622,48 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// PII-free by construction; the name is free text and has no path here. Passed in, resolved at the pickup gate
 		// (start.mjs `recordRun`), so `buildRecord` stays pure. Anything that is not a well-formed id records null.
 		project: isProjectId(project) ? project : null,
+		// The priorities plan a completed portfolio job wrote (issue #505, INT-RUN-HISTORY-FILE-CONTRACT). Additive, nullable,
+		// an explicit literal REBUILT here, TAIL position after `project` on the same contract. `{ outcome, reason, planId,
+		// clamped }`: a fixed outcome, a fixed reason or null, a 16-hex content hash or null, a boolean. Null for every
+		// run that left no `/outbox/priorities.json`, which is every run of a deployment with no portfolio trigger. Never
+		// the plan's weights or its reasons: those are in the allocation audit file, and a reason is agent text.
+		plan: planOf(source.plan),
 	};
+}
+
+/** What became of a collected plan. */
+export const PLAN_RECORD_OUTCOMES = Object.freeze(["applied", "duplicate", "refused"]);
+/**
+ * Every reason a record's `plan` may carry: the collector's own rungs (outbox-plan.mjs `PLAN_COLLECT_REASONS`), the
+ * plan's judgement (`plan-invalid`) and the apply ladder (priorities.mjs `PLAN_LADDER`, with `envelope-mismatch`).
+ * Restated here so this module imports neither, and pinned to them by a test.
+ */
+export const PLAN_RECORD_REASONS = Object.freeze([
+	"plan-not-portfolio",
+	"plan-oversize",
+	"plan-not-regular-file",
+	"plan-unreadable",
+	"plan-parse-error",
+	"plan-collect-error",
+	"plan-invalid",
+	"delegation-off",
+	"writer-not-allowed",
+	"envelope-mismatch",
+	"plan-duplicate",
+	"plan-stale",
+	"plan-too-soon",
+	"plan-incomplete",
+	"plan-busy",
+]);
+const PLAN_ID_RE = /^[0-9a-f]{16}$/;
+
+/** The record's `plan`, rebuilt from named fields, or null when the source carries none or a malformed one. */
+function planOf(p) {
+	if (p === null || typeof p !== "object" || !PLAN_RECORD_OUTCOMES.includes(p.outcome)) return null;
+	const reason = PLAN_RECORD_REASONS.includes(p.reason) ? p.reason : null;
+	// An applied plan has no reason, and a duplicate or a refusal always has one; a source that breaks that is not trusted.
+	if ((p.outcome === "applied") !== (reason === null)) return null;
+	return { outcome: p.outcome, reason, planId: typeof p.planId === "string" && PLAN_ID_RE.test(p.planId) ? p.planId : null, clamped: p.clamped === true };
 }
 
 /** The charset a record's `why` must match: a lowercase token, the shape of every `why` the processor returns. */
