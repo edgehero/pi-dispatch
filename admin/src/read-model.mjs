@@ -22,16 +22,23 @@ import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:p
 import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensureAccountTempRoot, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
-import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant } from "@edgehero/pi-dispatch/money";
+import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
 // write goes through the exact parser the worker boot-loads, so the sides cannot disagree on the schema.
-import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, parseScopedLimits, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
+import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, parseScopedLimits, scopeDollarKeyPrefix, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 // The projects parser, for the same anti-drift reason: a `project:<id>` row is written only when the id is a project the
 // worker would load (issue #499 part B).
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
+// The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
+// envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
+// `revert`, so the ladder, the step and the compare-and-set are one implementation.
+import { ENVELOPE_VERSION, envelopeDigest, parseEnvelope } from "@edgehero/pi-dispatch/envelope";
+import { OTHER, PLAN_VERSION, envelopeEntries, scopeRef } from "@edgehero/pi-dispatch/priorities";
+import { ALLOC_EXPECTED_KEY, ALLOC_LOG_KEY, ALLOC_PLAN_KEY, makeAllocationAudit, makeAllocationState, parseState } from "@edgehero/pi-dispatch/allocation";
+import { DOLLAR_KEY_PREFIX } from "@edgehero/pi-dispatch/dollar-budget";
 import { removeHeldJob } from "@edgehero/pi-dispatch/cancel-state";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
@@ -96,6 +103,10 @@ export function resolvePaths(env = process.env) {
     // when the key is unset, which the worker reads as no projects. Not the panel's cwd default above, which would let
     // the panel accept a row against a file the worker never loads.
     projectsFile: env.PI_PROJECTS_FILE ?? null,
+    // Issue #504 part C: the allocation envelope AS THE WORKER READS IT, `projectsFile`'s rule: null when the key is
+    // unset, which the worker reads as no envelope and no delegation. No cwd default: an envelope the worker never
+    // loads is not one the panel may show or write.
+    envelopeFile: env.PI_ENVELOPE_FILE ?? null,
     subscriptionsPath: env.PI_SUBSCRIPTIONS_FILE ?? "./subscriptions.json",
     // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY), where the staged third-party pi
     // packages live under `packages/`. `|| null` so unset AND empty both read as "no overlay" -- the
@@ -159,11 +170,11 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 // The dollar settings (issue #501) are among them: `dispatch_set`'s confirm states a dollar key's effective value, and
 // in a pointer deployment the cap the worker runs under lives in the deployment's `.env`, not in pi's environment.
 // Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
-const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
+const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
 
 /**
  * Issue #471: the environment `resolvePaths` should see, by the rule `doctor` judges the service by
@@ -812,8 +823,12 @@ export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
  * unchanged, is not re-judged, so a row left dangling by a projects.json edit can still be deleted, and other rows
  * edited, while doctor names it; such a write returns `pending`, which says the worker applies it once its LIVE projects
  * define the id (the admin cannot see those, so it claims neither way).
+ *
+ * Issue #504 part C: with `envelope` (`{ file, maxCostMicros }`, the allocation envelope the worker reads and the merged
+ * per-job cap), a write that would leave that envelope invalid is refused and names the conflict (`envelopeRefusal`):
+ * a row lowered below a floor. `dryRun` judges everything and writes nothing, so a tool can refuse BEFORE its confirm.
  */
-export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, expect = null, fs = nodeFs }) {
+export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, expect = null, envelope = null, dryRun = false, fs = nodeFs }) {
   const link = symlinkRefusal(fs, scopedLimitsPath, "PI_SCOPED_LIMITS_FILE");
   if (link) return { invalid: link };
   let current = [];
@@ -844,6 +859,9 @@ export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutat
   const pairText = projectsPath === null || projectsPath === undefined ? null : fileSnapshot(fs, projectsPath);
   const judged = judgeProjectRows(current, written, projectsPath, fs);
   if (judged.refusal) return { invalid: judged.refusal };
+  const broken = envelope ? envelopeRefusal({ envelopeFile: envelope.file, projectsPath, scopedLimitsPath, maxCostMicros: envelope.maxCostMicros, next: { limits: written }, fs }) : null;
+  if (broken) return { invalid: broken };
+  if (dryRun) return judged.pending ? { ok: true, dryRun: true, pending: judged.pending } : { ok: true, dryRun: true };
   const inputs = [{ path: scopedLimitsPath, text: existing }];
   if (projectsPath !== null && projectsPath !== undefined) inputs.push({ path: projectsPath, text: pairText });
   const replaced = replaceFile({ path: scopedLimitsPath, text, inputs, expect, envName: "PI_SCOPED_LIMITS_FILE", fs });
@@ -1072,7 +1090,7 @@ export function readProjects({ projectsPath, fs = nodeFs }) {
  *
  * Returns `{ text, projects, pending? }` or `{ invalid }`. No message quotes a `name`.
  */
-export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutate, fs = nodeFs }) {
+export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutate, envelope = null, fs = nodeFs }) {
   if (projectsPath === null || projectsPath === undefined) return { invalid: PROJECTS_UNSET };
   const link = symlinkRefusal(fs, projectsPath, "PI_PROJECTS_FILE");
   if (link) return { invalid: link };
@@ -1124,6 +1142,10 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutat
   // The two files this plan was judged against, as read: `writeProjects` re-reads both right before its rename.
   const inputs = [{ path: projectsPath, text: existing }];
   if (scopedLimitsPath !== null && scopedLimitsPath !== undefined) inputs.push({ path: scopedLimitsPath, text: raw });
+  // Issue #504 part C: a project removed or renamed that the allocation envelope floors would leave the envelope
+  // invalid (`envelopeRefusal`), so it is refused here, before the confirm and again after it, naming the conflict.
+  const broken = envelope ? envelopeRefusal({ envelopeFile: envelope.file, projectsPath, scopedLimitsPath, maxCostMicros: envelope.maxCostMicros, next: { projects: written }, fs }) : null;
+  if (broken) return { invalid: broken };
   const dangling = danglingProjectRows(limits, written);
   const blocking = dangling.filter((d) => removed.includes(d.id));
   if (blocking.length > 0) {
@@ -1143,12 +1165,454 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutat
  * tool's pre-confirm plan's `inputs`), so the worker's live-reload watcher never reads half a file. Reached only from
  * the confirm-gated `dispatch_project_*` tools. Returns `{ ok, pending? }` or `{ invalid }`.
  */
-export function writeProjects({ projectsPath, scopedLimitsPath = null, mutate, expect = null, fs = nodeFs }) {
-  const plan = planProjectsWrite({ projectsPath, scopedLimitsPath, mutate, fs });
+export function writeProjects({ projectsPath, scopedLimitsPath = null, mutate, expect = null, envelope = null, fs = nodeFs }) {
+  const plan = planProjectsWrite({ projectsPath, scopedLimitsPath, mutate, envelope, fs });
   if (plan.invalid) return { invalid: plan.invalid };
   const replaced = replaceFile({ path: projectsPath, text: plan.text, inputs: plan.inputs, expect, envName: "PI_PROJECTS_FILE", fs });
   if (replaced.invalid) return replaced;
   return plan.pending ? { ok: true, pending: plan.pending } : { ok: true };
+}
+
+// ── the allocation envelope and the applied split (issue #504 part C) ───────────────────────────────────────────────
+//
+// The admin's half of delegated allocation (`REQ-DELEGATED-ALLOCATION`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`).
+// Every rule is the WORKER's: the envelope goes through its `parseEnvelope`, a plan through its `applyPlan` (the ladder,
+// the step, the compare-and-set, the audit row first), a revert through its `revert`. This module only finds the files
+// and the Valkey, and never re-derives a number.
+
+/** Why an envelope write cannot happen with PI_ENVELOPE_FILE unset: the worker reads no envelope then. */
+const ENVELOPE_UNSET = "PI_ENVELOPE_FILE is unset, so the worker reads no envelope and delegation is off; set it in the deployment's .env (docs/allocation.md) and restart the worker. Nothing was written";
+
+/** The Valkey keys of the applied split; `prefix` exists for the live tests alone, as in `makeAllocationState`. */
+function allocKeys(prefix) {
+  return prefix ? { plan: `${prefix}:plan`, log: `${prefix}:log`, expected: `${prefix}:envelope:expected` } : { plan: ALLOC_PLAN_KEY, log: ALLOC_LOG_KEY, expected: ALLOC_EXPECTED_KEY };
+}
+
+/**
+ * The per-job cost cap the worker judges the envelope against (its `envelopeCap`): the settings overlay's `maxCostUsd`
+ * over `PI_MAX_COST_USD`, in integer micro-dollars, or null. `overlay` overrides the file's, for a write being judged.
+ */
+export function envelopeJobCap({ settingsFile, env = {}, overlay = undefined, fs = nodeFs }) {
+  const ov = overlay !== undefined ? overlay : readSettingsView({ settingsFile, fs })?.overlay;
+  return deploymentDollarCaps(ov ?? {}, env).jobCapMicros;
+}
+
+/**
+ * The projects and scoped limits an envelope is judged against, read the way the worker reads them: a file that is
+ * missing, unreadable or invalid counts as empty (its own reader says why; the envelope parse then names the floor it
+ * can no longer place).
+ */
+function envelopeContext({ projectsPath, scopedLimitsPath, fs }) {
+  const parsed = (path, parse) => {
+    if (path === null || path === undefined) return [];
+    const text = fileSnapshot(fs, path);
+    if (text === null || isUnreadable(text)) return [];
+    try {
+      return parse(text, path);
+    } catch {
+      return [];
+    }
+  };
+  return { projects: parsed(projectsPath, parseProjects), limits: parsed(scopedLimitsPath, parseScopedLimits) };
+}
+
+/**
+ * Read + validate the envelope file (INT-ENVELOPE-FILE-CONTRACT) through the worker's own `parseEnvelope`, judged
+ * against the projects and scoped limits on disk and the merged per-job cap. `{ unset }` when PI_ENVELOPE_FILE is
+ * unset (no delegation anywhere), `{ missing }`, `{ unreadable }`, `{ invalid }` (the parser's message, which names the
+ * field and never a value), else `{ envelope, digest, projects }`.
+ */
+export function readEnvelope({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, fs = nodeFs }) {
+  if (envelopeFile === null || envelopeFile === undefined) return { unset: true };
+  const text = fileSnapshot(fs, envelopeFile);
+  if (text === null) return { missing: true };
+  if (isUnreadable(text)) return { unreadable: unreadableCode(text) };
+  const ctx = envelopeContext({ projectsPath, scopedLimitsPath, fs });
+  try {
+    const envelope = parseEnvelope(text, envelopeFile, { ...ctx, maxCostMicros });
+    return { envelope, digest: envelopeDigest(envelope), projects: ctx.projects };
+  } catch (e) {
+    return { invalid: e?.message ?? String(e) };
+  }
+}
+
+/**
+ * The admin writers' cross-check of the envelope (issue #504 part C): would `next` (`{ projects?, limits?,
+ * maxCostMicros? }`, the parsed result of a projects, scoped-limits or per-job cap write) leave the LIVE envelope
+ * invalid? A floored project removed, an id the floors name gone, a project row lowered below its floor, the per-job cap
+ * removed: each makes the worker keep its last good envelope, doctor fail and the next start refuse. Returns the
+ * refusal, naming the conflict in the parser's words, or null.
+ *
+ * Only a write that BREAKS a loading envelope is refused. With no envelope, or one that does not load from the files as
+ * they are, null: that envelope is broken already, doctor names it, and refusing every unrelated edit would only keep
+ * the operator from the edit that fixes it.
+ */
+export function envelopeRefusal({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, next = {}, fs = nodeFs }) {
+  if (envelopeFile === null || envelopeFile === undefined) return null;
+  const text = fileSnapshot(fs, envelopeFile);
+  if (text === null || isUnreadable(text)) return null;
+  const cur = envelopeContext({ projectsPath, scopedLimitsPath, fs });
+  try {
+    parseEnvelope(text, envelopeFile, { ...cur, maxCostMicros });
+  } catch {
+    return null;
+  }
+  const after = {
+    projects: next.projects ?? cur.projects,
+    limits: next.limits ?? cur.limits,
+    maxCostMicros: next.maxCostMicros !== undefined ? next.maxCostMicros : maxCostMicros,
+  };
+  try {
+    parseEnvelope(text, envelopeFile, after);
+    return null;
+  } catch (e) {
+    return `this change would leave the allocation envelope invalid (${e?.message ?? String(e)}), and the worker would keep its last good envelope and refuse to start on it; change the envelope first (dispatch_envelope_set) or in the same edit. Nothing was written`;
+  }
+}
+
+/** A plain JSON object (not an array, not null). */
+function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/** The envelope's raw keys a write may set, in the file's own order (INT-ENVELOPE-FILE-CONTRACT). */
+const ENVELOPE_DELEGATION_FIELDS = Object.freeze(["enabled", "writers", "maxStepPct", "minIntervalHours", "maxPlanDays"]);
+
+/**
+ * `raw` (the envelope file's JSON) with `change` applied: `window` and `totalUsd` replace; `floorsUsd` and
+ * `defaultWeights` merge per id (null removes the id); each delegation field replaces its own. Nothing else is touched,
+ * so the file keeps every key and its order. The parser judges the result; this function judges nothing.
+ */
+function applyEnvelopeChange(raw, change) {
+  const next = { ...raw };
+  if (change.window !== undefined) next.window = change.window;
+  if (change.totalUsd !== undefined) next.totalUsd = change.totalUsd;
+  for (const field of ["floorsUsd", "defaultWeights"]) {
+    if (change[field] === undefined) continue;
+    const merged = isPlainObject(raw[field]) ? { ...raw[field] } : {};
+    for (const [id, value] of Object.entries(change[field] ?? {})) {
+      if (value === null) delete merged[id];
+      else merged[id] = value;
+    }
+    next[field] = merged;
+  }
+  const delegation = isPlainObject(change.delegation) ? change.delegation : {};
+  if (ENVELOPE_DELEGATION_FIELDS.some((f) => delegation[f] !== undefined)) {
+    const merged = isPlainObject(raw.delegation) ? { ...raw.delegation } : {};
+    for (const f of ENVELOPE_DELEGATION_FIELDS) if (delegation[f] !== undefined) merged[f] = delegation[f];
+    next.delegation = merged;
+  }
+  return next;
+}
+
+/**
+ * The lines a confirm shows for an envelope change: each normalized field that differs, before and after, in dollars
+ * and plain numbers. Every value is the PARSER's (ids that matched the id charset, integers, micro-dollars), so no text
+ * an editor typed reaches the dialog.
+ */
+export function envelopeChangeLines(before, after) {
+  const usd = (m) => (Number.isSafeInteger(m) ? `$${formatMicros(m)}` : "-");
+  const lines = [];
+  const say = (label, a, b) => {
+    if (a !== b) lines.push(`${label}: ${a} -> ${b}`);
+  };
+  say("window", before?.window ?? "-", after.window);
+  say("total", before ? usd(before.totalMicros) : "-", usd(after.totalMicros));
+  const ids = [...new Set([...Object.keys(before?.floors ?? {}), ...Object.keys(after.floors)])].sort();
+  for (const id of ids) say(`floor ${id}`, before?.floors?.[id] === undefined ? "-" : usd(before.floors[id]), after.floors[id] === undefined ? "-" : usd(after.floors[id]));
+  for (const id of ids) say(`default weight ${id}`, String(before?.defaultWeights?.[id] ?? "-"), String(after.defaultWeights[id] ?? "-"));
+  const d0 = before?.delegation ?? {};
+  const d1 = after.delegation;
+  say("delegation", d0.enabled === undefined ? "-" : d0.enabled ? "on" : "off", d1.enabled ? "on" : "off");
+  say("writers", (d0.writers ?? []).join(", ") || "-", (d1.writers ?? []).join(", ") || "-");
+  for (const f of ["maxStepPct", "minIntervalHours", "maxPlanDays"]) say(f, String(d0[f] ?? "-"), String(d1[f] ?? "-"));
+  return lines;
+}
+
+/**
+ * Plan an envelope write without writing (issue #504 part C, `dispatch_envelope_set`): the file's JSON with `change`
+ * applied, judged by the worker's `parseEnvelope` against the projects and scoped limits on disk and `maxCostMicros`.
+ * A missing file starts from `{ "version": 1 }`; a file that is there but does not parse as JSON, or is not an object,
+ * refuses (a money file is never rebuilt from a guess). Returns `{ text, envelope, digest, before, beforeDigest, lines,
+ * inputs }` or `{ invalid }`. `inputs` are the files as judged, for the re-check before the rename.
+ */
+export function planEnvelopeWrite({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, change = {}, fs = nodeFs }) {
+  if (envelopeFile === null || envelopeFile === undefined) return { invalid: ENVELOPE_UNSET };
+  const link = symlinkRefusal(fs, envelopeFile, "PI_ENVELOPE_FILE");
+  if (link) return { invalid: link };
+  const existing = fileSnapshot(fs, envelopeFile);
+  if (isUnreadable(existing)) return { invalid: `the envelope file ${envelopeFile} could not be read (${unreadableCode(existing)}); nothing was written` };
+  let raw = { version: ENVELOPE_VERSION };
+  if (existing !== null) {
+    try {
+      raw = JSON.parse(existing);
+    } catch {
+      return { invalid: `the envelope file ${envelopeFile} is not valid JSON; fix it by hand first. Nothing was written` };
+    }
+    if (!isPlainObject(raw)) return { invalid: `the envelope file ${envelopeFile} is not a JSON object; fix it by hand first. Nothing was written` };
+  }
+  const ctx = envelopeContext({ projectsPath, scopedLimitsPath, fs });
+  const text = `${JSON.stringify(applyEnvelopeChange(raw, change), null, 2)}\n`;
+  let envelope;
+  try {
+    envelope = parseEnvelope(text, envelopeFile, { ...ctx, maxCostMicros });
+  } catch (e) {
+    return { invalid: `${e?.message ?? String(e)}. Nothing was written` };
+  }
+  let before = null;
+  if (existing !== null) {
+    try {
+      before = parseEnvelope(existing, envelopeFile, { ...ctx, maxCostMicros });
+    } catch {
+      // A file that does not load now: the confirm shows every field as new.
+    }
+  }
+  const inputs = [{ path: envelopeFile, text: existing }];
+  for (const p of [projectsPath, scopedLimitsPath]) if (p !== null && p !== undefined) inputs.push({ path: p, text: fileSnapshot(fs, p) });
+  const digest = envelopeDigest(envelope);
+  return { text, envelope, digest, before, beforeDigest: before ? envelopeDigest(before) : null, lines: envelopeChangeLines(before, envelope), inputs };
+}
+
+/**
+ * Write the envelope (issue #504 part C), after the operator's confirm. The order is the point:
+ *
+ *   1. plan again (the files as they are now);
+ *   2. `alloc:envelope:expected` := the new digest, in Valkey, BEFORE the file. A host re-bases the fleet's split onto a
+ *      changed envelope only when its digest equals that key (`reconcile`), so a file written first would be read by
+ *      the hosts as a hand edit: `envelope-mismatch` and an `envelope-changed-externally` row on every host;
+ *   3. the file, by `replaceFile` (tmp of its own, mode and owner kept, a symlink refused, the judged files re-checked
+ *      against `expect`, the pre-confirm plan's inputs);
+ *   4. if the file was not written, the key is put back as it was, so the hosts keep enforcing the old envelope as
+ *      their own, by a compare-and-set (`RESTORE_EXPECTED_SCRIPT`): only while the key still holds this write's digest,
+ *      so a second confirmed write that landed meanwhile keeps its own.
+ *
+ * A Valkey that cannot be reached refuses before the file is touched: an envelope the fleet would refuse is worse than
+ * no change. Returns `{ ok, digest, previousDigest, unchanged? }` or `{ invalid }`.
+ */
+export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, change = {}, expect = null, url, redisFn = makeRedisClient, prefix = null, fs = nodeFs, afterExpected = null }) {
+  const plan = planEnvelopeWrite({ envelopeFile, projectsPath, scopedLimitsPath, maxCostMicros, change, fs });
+  if (plan.invalid) return plan;
+  if (plan.digest === plan.beforeDigest) return { ok: true, unchanged: true, digest: plan.digest, previousDigest: plan.beforeDigest };
+  const keys = allocKeys(prefix);
+  const key = keys.expected;
+  let redis;
+  try {
+    redis = await writeClient(url, redisFn);
+  } catch (err) {
+    return { invalid: `could not reach Valkey to record the new envelope's digest in ${key} (${err?.message ?? String(err)}), so the file was not written: the fleet would read it as a hand edit and refuse its jobs` };
+  }
+  try {
+    // SET with GET: the value this write REPLACED, read in the same step, so a rollback puts back what was there when
+    // this writer took the key, never a value another writer has since replaced.
+    let previous;
+    try {
+      previous = await redis.set(key, plan.digest, "GET");
+    } catch (err) {
+      // A SET that failed on the client side may still have been applied by the server (a timeout after the write).
+      return { invalid: `could not record the new envelope's digest in ${key} (${err?.message ?? String(err)}), so the file was not written; ${key} may already hold the new digest ${plan.digest}, in which case set it back to the envelope digest the hosts run (doctor prints it) by hand (docs/allocation.md)` };
+    }
+    await afterExpected?.(); // a test seam: the window between the key and the file, where a second writer can land
+    let replaced;
+    try {
+      replaced = replaceFile({ path: envelopeFile, text: plan.text, inputs: plan.inputs, expect, envName: "PI_ENVELOPE_FILE", fs });
+    } catch (e) {
+      replaced = { invalid: `${envelopeFile} could not be replaced (${typeof e?.code === "string" ? e.code : "error"}); nothing was written` };
+    }
+    if (replaced.invalid) {
+      // Put the key back ONLY while it still holds THIS write's digest (a compare-and-set): a second confirmed write
+      // that set its own digest meanwhile, and wrote its file, must keep its key, or the fleet would refuse that file
+      // as a hand edit. A key another writer moved is left as it is, and said.
+      let restored;
+      try {
+        restored = Number(await redis.eval(RESTORE_EXPECTED_SCRIPT, 1, key, plan.digest, previous ?? ""));
+      } catch (err) {
+        return { invalid: `${replaced.invalid}; and ${key} could not be put back to ${previous ?? "absent"} (${err?.message ?? String(err)}): it may hold ${plan.digest}, a digest no file has; set it by hand (docs/allocation.md)` };
+      }
+      return restored === 1 ? replaced : { invalid: `${replaced.invalid}; ${key} was not put back, because another write changed it meanwhile` };
+    }
+    return { ok: true, digest: plan.digest, previousDigest: plan.beforeDigest };
+  } finally {
+    try {
+      redis?.disconnect();
+    } catch {
+      // already closed
+    }
+  }
+}
+
+/**
+ * The rollback of `alloc:envelope:expected` (`writeEnvelope`): KEYS[1] the key, ARGV[1] the digest this writer set,
+ * ARGV[2] what it held before (`""` for absent: a digest is never empty). Restores only while the key still holds
+ * ARGV[1]; returns 1 when it did, else 0.
+ */
+export const RESTORE_EXPECTED_SCRIPT = `if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if ARGV[2] == '' then redis.call('DEL', KEYS[1]) else redis.call('SET', KEYS[1], ARGV[2]) end
+return 1`;
+
+/**
+ * A client for an allocation WRITE, connected before the first command: fail-fast (an unreachable Valkey refuses
+ * rather than queueing the write behind reconnects) AND connected first, because a fail-fast client has no offline
+ * queue, so a command sent before its socket is up fails with "Stream isn't writeable" (measured in the lab against a
+ * live Valkey, where every write refused that way while the fake answered).
+ */
+async function writeClient(url, redisFn) {
+  parseConnection(url, { failFast: true });
+  const redis = redisFn(url, { failFast: true, lazyConnect: true });
+  redis.on?.("error", () => {});
+  if (typeof redis.connect === "function" && redis.status === "wait") await redis.connect();
+  return redis;
+}
+
+/** The fields of an applied state a reader may see. An ALLOWLIST, so a field added later is not shown by accident. */
+const STATE_FIELDS = Object.freeze(["planId", "basis", "writer", "jobId", "triggerId", "appliedAt", "lastPlanAt", "validUntil", "envelopeDigest", "weights", "repoWeights", "allocations", "unallocated", "repos", "clamped"]);
+/** The fields of an `alloc:log` row a reader may see. `reasons` is not one: agent text never reaches a tool result. */
+const LOG_FIELDS = Object.freeze(["at", "host", "writer", "jobId", "triggerId", "outcome", "reason", "field", "rule", "planId", "basis", "weights", "repoWeights", "before", "after", "clamped", "envelopeDigest"]);
+
+function pick(obj, fields) {
+  const out = {};
+  for (const f of fields) if (obj?.[f] !== undefined) out[f] = obj[f];
+  return out;
+}
+
+/**
+ * The applied split, its history and the spend, from Valkey (issue #504 part C). Reads only: GETs, one LRANGE, one
+ * MGET. `{ state, stateProblem?, expected, log, spend? }` or `{ unreachable }`:
+ *   - `state`: `alloc:plan` through the worker's `parseState`, shown through an allowlist of fields; null when absent
+ *     (no host has looked yet), with `stateProblem` `newer` or `unreadable` when it is there but not this build's;
+ *   - `reasons` (the plan's per-project reason text, agent-authored) ONLY with `withReasons`, which the panel alone
+ *     passes, so it is drawn through the control-byte gate and never reaches a tool result or a message;
+ *   - `expected`: `alloc:envelope:expected`, the digest the fleet re-bases onto;
+ *   - `log`: the newest `limit` rows of `alloc:log`, newest first, through an allowlist (no `reasons`);
+ *   - `spend` (with an `envelope`): the envelope window's counters, spent and held, under the worker's own keys:
+ *     the deployment, each envelope entry (`project:<id>`, `_other` included) and each project member's repo ledger,
+ *     with each key's NAME, so an operator can find it in `valkey-cli`.
+ */
+export async function readAllocations({ url, envelope = null, projects = [], now = new Date(), withReasons = false, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, prefix = null } = {}) {
+  let redis;
+  try {
+    parseConnection(url, { failFast: true });
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    const keys = allocKeys(prefix);
+    const work = (async () => {
+      const [planText, expected, logRaw] = await Promise.all([redis.get(keys.plan), redis.get(keys.expected), redis.lrange(keys.log, 0, Math.max(0, limit - 1))]);
+      const parsed = parseState(planText);
+      const out = { state: null, expected: expected ?? null, log: [] };
+      if (parsed?.newer) out.stateProblem = "newer";
+      else if (parsed && parsed.corrupt !== undefined) out.stateProblem = "unreadable";
+      else if (parsed) out.state = { ...pick(parsed, STATE_FIELDS), ...(withReasons ? { reasons: isPlainObject(parsed.reasons) ? { ...parsed.reasons } : {} } : {}) };
+      for (const text of Array.isArray(logRaw) ? logRaw : []) {
+        try {
+          const row = JSON.parse(text);
+          if (isPlainObject(row)) out.log.push(pick(row, LOG_FIELDS));
+        } catch {
+          // a row that does not decode is skipped; the audit file holds the record
+        }
+      }
+      if (envelope) out.spend = await envelopeSpend(redis, envelope, projects, now);
+      return out;
+    })().catch((err) => ({ unreachable: err?.message ?? String(err) }));
+    return await withTimeout(work, timeoutMs, { unreachable: "timed out reaching the queue" });
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    if (redis) {
+      try {
+        redis.disconnect();
+      } catch {
+        // already closed
+      }
+    }
+  }
+}
+
+/** The window key builder of an envelope window, the worker's own (budget.mjs). */
+const WINDOW_KEY = Object.freeze({ day: dayKey, week: weekKey, month: monthKey });
+
+/**
+ * The envelope window's dollar counters (micro-dollars spent and held), under the keys the worker reserves in
+ * (`governedDollars`): the deployment's, each entry's `project:<id>` ledger (a row's and the allocation's are one key)
+ * and each member's repo ledger, by `scopeRef`. One MGET; an absent key is an honest 0.
+ */
+async function envelopeSpend(redis, envelope, projects, now) {
+  const keyOf = WINDOW_KEY[envelope.window];
+  const deployment = keyOf(now, DOLLAR_KEY_PREFIX);
+  const entries = envelopeEntries(envelope);
+  const projectKeys = Object.fromEntries(entries.map((id) => [id, keyOf(now, scopeDollarKeyPrefix(`project:${id}`))]));
+  const repoKeys = {};
+  for (const p of Array.isArray(projects) ? projects : []) {
+    if (!entries.includes(p?.id) || p.id === OTHER) continue;
+    repoKeys[p.id] = Object.fromEntries((Array.isArray(p.members) ? p.members : []).map((m) => [scopeRef(m), keyOf(now, scopeDollarKeyPrefix(m))]));
+  }
+  const all = [deployment, ...Object.values(projectKeys), ...Object.values(repoKeys).flatMap((r) => Object.values(r))];
+  const values = await redis.mget(...all);
+  const at = new Map(all.map((k, i) => [k, Number(values?.[i] ?? 0) || 0]));
+  return {
+    window: envelope.window,
+    deployment: { key: deployment, micros: at.get(deployment) },
+    projects: Object.fromEntries(Object.entries(projectKeys).map(([id, key]) => [id, { key, micros: at.get(key) }])),
+    repos: Object.fromEntries(Object.entries(repoKeys).map(([id, refs]) => [id, Object.fromEntries(Object.entries(refs).map(([ref, key]) => [ref, { key, micros: at.get(key) }]))])),
+  };
+}
+
+/** The micro-dollars of a state, for a result's before and after: amounts only, never a reason. */
+function amountsShown(state) {
+  return state ? { allocations: { ...(state.allocations ?? {}) }, unallocated: state.unallocated ?? 0, repos: state.repos ?? {} } : null;
+}
+
+/**
+ * Apply a priorities plan as the operator's session (issue #504 part C, `dispatch_priorities_set` and `/dispatch
+ * priorities set`): the worker's `applyPlan`, unchanged, with writer `operator-session`. `plan` is the plan WITHOUT its
+ * basis (`{ projects, validUntil? }`): the basis is filled in here from the applied state this call reconciled to, so
+ * a caller never has to read it first and a model cannot name a stale one. The audit row goes to this host's
+ * `PI_LOGS_DIR/allocations/`, the file the worker's own rows use.
+ *
+ * Returns `{ outcome, reason, planId?, field?, rule?, clamped?, basis, kept?, before, after }`: the ladder's enum and the
+ * micro-dollars before and after, never a reason text. Throws on infrastructure (Valkey, the audit file), as the
+ * worker does: such a plan has not applied.
+ */
+export async function applyPriorities({ url, envelope, digest = envelopeDigest(envelope), projects = [], plan, keepOther = false, host, logsDir, now = new Date(), writer = { kind: "operator-session" }, redisFn = makeRedisClient, prefix = null, fs = nodeFs }) {
+  const redis = await writeClient(url, redisFn);
+  try {
+    const state = makeAllocationState({ redis, host, audit: makeAllocationAudit({ logsDir, fs }), prefix });
+    const seen = await state.reconcile({ envelope, digest, now });
+    const basis = seen?.state?.planId ?? null;
+    // `keepOther`: a plan that leaves `_other` out keeps its CURRENT weight (the applied state's, else the envelope's
+    // default), so an operator typing `shop=3 platform=1` is not refused for the pseudo-project they did not think of.
+    // Any other project left out is still `plan-incomplete`: which project to starve is a decision, `_other` a default.
+    const given = Array.isArray(plan?.projects) ? plan.projects : [];
+    const kept = keepOther && !given.some((p) => p?.id === OTHER) ? [{ id: OTHER, weight: seen?.state?.weights?.[OTHER] ?? envelope?.defaultWeights?.[OTHER] ?? 0 }] : [];
+    const text = JSON.stringify({ version: PLAN_VERSION, basis, ...plan, projects: [...given, ...kept] });
+    const result = await state.applyPlan({ envelope, digest, projects, text, writer, now });
+    const after = parseState(await redis.get(allocKeys(prefix).plan));
+    const afterState = after && after.corrupt === undefined && !after.newer ? after : null;
+    return { ...result, basis, ...(kept.length > 0 ? { kept: [OTHER] } : {}), before: amountsShown(seen?.state ?? null), after: amountsShown(afterState) };
+  } finally {
+    try {
+      redis.disconnect();
+    } catch {
+      // already closed
+    }
+  }
+}
+
+/**
+ * The operator's revert to an `alloc:log` row (issue #504 part C, the panel's `r`): the worker's `revert`, writer
+ * `operator-revert`, which skips the interval and the step rules but is still a compare-and-set and still refused while
+ * delegation is off, the envelope differs or another apply holds the lock. Returns its `{ outcome, reason, planId? }`.
+ */
+export async function revertAllocation({ url, envelope, digest = envelopeDigest(envelope), target, host, logsDir, now = new Date(), redisFn = makeRedisClient, prefix = null, fs = nodeFs }) {
+  const redis = await writeClient(url, redisFn);
+  try {
+    const state = makeAllocationState({ redis, host, audit: makeAllocationAudit({ logsDir, fs }), prefix });
+    return await state.revert({ envelope, digest, target, now });
+  } finally {
+    try {
+      redis.disconnect();
+    } catch {
+      // already closed
+    }
+  }
 }
 
 /**
@@ -2117,7 +2581,8 @@ export const GRAPH_LIMITS = Object.freeze({
 /**
  * Fold run counts and the last outcome per cron scheduler id from already-parsed records.
  *
- * The join is the RAW jobId (`repeat:<id>:<millis>`, INT-RUN-HISTORY-FILE-CONTRACT keeps it raw in
+ * The join is the RAW jobId (`repeat:<id>:<millis>`, or `manual:<id>:<millis>` for a hand-fired run of the trigger,
+ * INT-RUN-HISTORY-FILE-CONTRACT keeps it raw in
  * the body) against each scheduler id, with the digits-only tail as the disambiguator -- the same
  * doctrine as the worker's makeFindPreviousRun filename scan: scheduler `a` must not swallow
  * `a:1`-shaped siblings, and a millis tail is all digits while a foreign id segment is not. Pure over
@@ -2128,7 +2593,9 @@ export function cronRunStats({ records, schedulerIds } = {}) {
   if (!Array.isArray(records) || !Array.isArray(schedulerIds)) return { byId };
   for (const id of schedulerIds) {
     if (typeof id !== "string" || id === "") continue;
-    const re = new RegExp(`^repeat:${escapeRegExp(id)}:(\\d+)$`);
+    // A hand-fired run of the trigger (`pi-dispatch run --trigger`, issue #505) is `manual:<id>:<minute millis>`, and
+    // the worker counts it as a run of its trigger; the panel does too, by the same digits-tail rule.
+    const re = new RegExp(`^(?:repeat|manual):${escapeRegExp(id)}:(\\d+)$`);
     let runs = 0;
     let lastMillis = -1;
     let last = null;
@@ -2201,7 +2668,7 @@ export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {})
 /**
  * Per-jobId trigger attribution over one scanned window -- the COST fold's join (issue #175),
  * produced HERE so the index+type agreement doctrine (joinRunsToTriggers above) and the raw
- * `repeat:<id>:<millis>` jobId grammar (cronRunStats above) are never re-derived by a second module;
+ * `repeat:<id>:<millis>` (or `manual:<id>:<millis>`) jobId grammar (cronRunStats above) are never re-derived by a second module;
  * costs.mjs stays fs-free and worker-import-free by taking this result as an argument. Pure over its
  * inputs. Returns `{ byJobId: { [jobId]: { key, index, type, label } } }` where `key` for a joined
  * run IS the graph node id (`trigger:<index>` -- graph-model mints exactly this), so a spend map
@@ -2216,7 +2683,8 @@ export function attributeRunsToTriggers({ records, triggers } = {}) {
   if (!Array.isArray(records) || !Array.isArray(triggers)) return { byJobId };
   const cronRes = triggers
     .filter((t) => t?.type === "cron" && typeof t.id === "string" && t.id !== "" && Number.isInteger(t.index))
-    .map((t) => ({ t, re: new RegExp(`^repeat:${escapeRegExp(t.id)}:(\\d+)$`) }));
+    // `manual:<id>:<millis>` too: a hand-fired run of the trigger (issue #505) is its run, so its cost is the trigger's.
+    .map((t) => ({ t, re: new RegExp(`^(?:repeat|manual):${escapeRegExp(t.id)}:(\\d+)$`) }));
   const byIndex = new Map(triggers.filter((t) => Number.isInteger(t?.index)).map((t) => [t.index, t]));
   for (const record of records) {
     const jobId = typeof record?.jobId === "string" && record.jobId !== "" ? record.jobId : null;

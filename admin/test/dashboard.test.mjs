@@ -3284,3 +3284,128 @@ test("PR #569's review: an unreadable projects file is said to be unreadable, no
   assert.ok(!/missing/.test(out));
   assert.match(out, /shop {2}not in projects\.json {2}\$1\.20 · 4 runs/, "its recorded spend still shows");
 });
+
+// ── the ALLOCATION view (issue #504 part C, key `b`) ───────────────────────────────────────────────────────────────
+
+const M504 = 1_000_000;
+const ALLOC_ENVELOPE = {
+  version: 1,
+  window: "week",
+  totalMicros: 100 * M504,
+  floors: { _other: 0, platform: 10 * M504, shop: 10 * M504 },
+  defaultWeights: { _other: 0, platform: 1, shop: 1 },
+  delegation: { enabled: true, writers: ["operator-session", "portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 },
+};
+const APPLIED_ROW = { at: "2026-10-05T12:00:00.000Z", host: "mini1", writer: "operator-session", outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67", basis: null, weights: { _other: 0, platform: 1, shop: 3 }, repoWeights: {}, clamped: false };
+const NEUTRAL_ROW = { at: "2026-10-05T11:00:00.000Z", host: "mini1", writer: "default", outcome: "neutral", reason: null, planId: null, weights: { _other: 0, platform: 1, shop: 1 }, clamped: false };
+const REFUSED_ROW = { at: "2026-10-05T12:30:00.000Z", host: "mini1", writer: "operator-session", outcome: "refused", reason: "plan-too-soon", planId: "aaaaaaaaaaaaaaaa", weights: null };
+
+function allocInfo({ log = [REFUSED_ROW, APPLIED_ROW, NEUTRAL_ROW], reasons = { shop: "launch on Friday" } } = {}) {
+  return {
+    envelope: ALLOC_ENVELOPE,
+    digest: "d1d1d1d1d1d1d1d1",
+    alloc: {
+      state: { planId: "3f9a0c1d2e4b5a67", writer: "operator-session", appliedAt: "2026-10-05T12:00:00.000Z", validUntil: "2026-10-19T12:00:00.000Z", envelopeDigest: "d1d1d1d1d1d1d1d1", weights: { _other: 0, platform: 1, shop: 3 }, allocations: { _other: 0, platform: 30 * M504, shop: 70 * M504 }, unallocated: 0, clamped: false, reasons },
+      expected: "d1d1d1d1d1d1d1d1",
+      log,
+      spend: { window: "week", deployment: { key: "budget:usd:w:2026-10-05", micros: 0 }, projects: { shop: { key: "budget:usd:s:00112233aabbccdd:w:2026-10-05", micros: 76 * M504 }, platform: { key: "budget:usd:s:4455667788990011:w:2026-10-05", micros: 0 }, _other: { key: "budget:usd:s:ffeeddccbbaa9988:w:2026-10-05", micros: 0 } }, repos: {} },
+    },
+  };
+}
+
+test("`b` opens the ALLOCATION view: envelope, each project's split and spend with its key, the plan's reasons, the history", async () => {
+  let reads = 0;
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => (reads++, allocInfo()) }) });
+  await flush();
+  comp.handleInput("b");
+  await flush();
+  const out = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.equal(reads, 1, "read once, when the view opens");
+  assert.match(out, /allocation · week · total \$100\.00/);
+  assert.match(out, /shop\s+floor \$10\.00\s+weight 3\s+\$70\.00\s+spent \$76\.00/);
+  assert.match(out, /budget:usd:s:00112233aabbccdd:w:2026-10-05/, "the key an operator seeds or reads with valkey-cli");
+  assert.match(out, /plan 3f9a0c1d2e4b5a67 · operator-session/);
+  assert.match(out, /shop: launch on Friday/, "the plan's reason, drawn here and nowhere else");
+  assert.match(out, /› 2026-10-05T12:30\s+operator-session\s+refused plan-too-soon/, "the history, newest first, the cursor on the first row");
+  assert.match(out, /r revert/);
+});
+
+test("ALLOCATION: `r` asks a y/n in the frame; `n` stands down, `y` reverts to the CAPTURED row and says operator-revert", async () => {
+  const reverted = [];
+  let info = allocInfo();
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({ allocationInfo: async () => info, revertAllocation: async ({ target }) => (reverted.push(target), { outcome: "reverted", reason: null, planId: target.planId }) }),
+  });
+  await flush();
+  comp.handleInput("b");
+  await flush();
+  comp.handleInput("r");
+  await flush();
+  assert.match(stripAnsi(comp.render(100).join("\n")), /no split to go back to/, "a refused row carries no weights: inert, and said");
+  comp.handleInput("\u001b[B"); // down, to the applied row
+  comp.handleInput("r");
+  await flush();
+  assert.match(stripAnsi(comp.render(100).join("\n")), /revert to plan 3f9a0c1d2e4b5a67 as operator-revert\? it skips the\s*│?\s*│?\s*interval and the step[\s\S]*y revert\s+·\s+n cancel/);
+  comp.handleInput("q");
+  comp.handleInput("n");
+  await flush();
+  assert.deepEqual(reverted, [], "n stands down; q while armed is inert");
+  assert.doesNotMatch(stripAnsi(comp.render(100).join("\n")), /as operator-revert\?/);
+  comp.handleInput("r");
+  info = allocInfo({ log: [NEUTRAL_ROW] }); // a reload between the question and the y cannot retarget it
+  comp.handleInput("y");
+  await flush();
+  await flush();
+  assert.equal(reverted.length, 1);
+  assert.equal(reverted[0].planId, "3f9a0c1d2e4b5a67", "the row captured when r armed the question");
+  assert.match(stripAnsi(comp.render(100).join("\n")), /reverted to 3f9a0c1d2e4b5a67 \(operator-revert\)/);
+  comp.handleInput("\u001b");
+  await flush();
+  assert.match(stripAnsi(comp.render(100).join("\n")), /pi-dispatch/, "Esc backs out to the LIST");
+  await comp.dispose();
+});
+
+test("ALLOCATION: the banner says the envelope changed outside the panel when an envelope-changed-externally row is newer than the last rebase or applied plan", async () => {
+  const outside = { at: "2026-10-05T13:00:00.000Z", host: "mini2", writer: "envelope-change", outcome: "envelope-changed-externally", reason: "envelope-mismatch", planId: "3f9a0c1d2e4b5a67", weights: null };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [outside, APPLIED_ROW] }) }) });
+  await flush();
+  comp.handleInput("b");
+  await flush();
+  const out = stripAnsi(comp.render(100).join("\n"));
+  assert.match(out, /changed outside the panel/);
+  const quiet = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [APPLIED_ROW, outside] }) }) });
+  await flush();
+  quiet.handleInput("b");
+  await flush();
+  assert.doesNotMatch(stripAnsi(quiet.render(100).join("\n")), /changed outside the panel/, "an edit the fleet has since agreed past (an applied row after it) raises nothing");
+  const buried = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [REFUSED_ROW, outside, APPLIED_ROW] }) }) });
+  await flush();
+  buried.handleInput("b");
+  await flush();
+  assert.match(stripAnsi(buried.render(100).join("\n")), /changed outside the panel/, "a refused plan logged after the edit does not hide it");
+  await buried.dispose();
+  await comp.dispose();
+  await quiet.dispose();
+});
+
+test("ALLOCATION: with no seam the view says so; an unset envelope says why; `b split` rides the spend divider only with an envelope", async () => {
+  const bare = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  assert.doesNotMatch(stripAnsi(bare.render(100).join("\n")), /b split/, "no envelope, no hint: the LIST is byte-identical");
+  bare.handleInput("b");
+  await flush();
+  assert.match(stripAnsi(bare.render(100).join("\n")), /not wired in this panel/);
+  await bare.dispose();
+  const unset = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, envelopeSet: true }), allocationInfo: async () => ({ envelope: null, problem: "PI_ENVELOPE_FILE is unset: there is no envelope, so delegation is off" }) }) });
+  await flush();
+  assert.match(stripAnsi(unset.render(100).join("\n")), /jobs & tokens\/day · s set · b split/);
+  unset.handleInput("b");
+  await flush();
+  assert.match(stripAnsi(unset.render(100).join("\n")), /PI_ENVELOPE_FILE is unset/);
+  await unset.dispose();
+});

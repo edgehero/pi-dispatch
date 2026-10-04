@@ -469,6 +469,9 @@ export function createDashboardDeps(
         // file read like the ones above, whose fs access lives in read-model.mjs. For the projects view and for the
         // limits view's project rows; a `name` in it is escaped and isolated wherever a pane draws it.
         projects: readProjects({ projectsPath: paths.projectsFile }),
+        // Issue #504 part C: whether the deployment names an allocation envelope, for the `b split` hint alone. The view
+        // reads the envelope and the split itself, through `allocationInfo`, when it opens.
+        envelopeSet: typeof paths.envelopeFile === "string" && paths.envelopeFile !== "",
         // The operator's staged third-party pi packages (REQ-GLOBAL-PI-OVERLAY), for the armed triggers'
         // trust model. Like the four reads above it is a plain file read whose fs access lives entirely in
         // read-model.mjs -- this module never touches the filesystem -- and it degrades to a safe empty
@@ -593,6 +596,22 @@ export function makeDashboard({
   let projectsSelected = 0;
   let projectsInfo: any = null;
   let runProject: any = ALL_RUNS;
+  // The ALLOCATION view (issue #504 part C, key `b`): the envelope and the applied split, read through the injected
+  // `allocationInfo` seam when the view opens and again after a revert, never per tick (index.ts holds the Valkey and
+  // file reads). `allocSelected` is the history cursor; `pendingRevert` the history ROW captured when `r` armed the
+  // in-frame y/n, so a reload between the question and the `y` cannot retarget it; `allocNote` the revert's outcome.
+  let allocInfo: any = null;
+  let allocSelected = 0;
+  let pendingRevert: any = null;
+  let allocNote: any = null;
+  const loadAllocation = async () => {
+    try {
+      allocInfo = typeof deps?.allocationInfo === "function" ? await deps.allocationInfo() : { unwired: true };
+    } catch (err: any) {
+      allocInfo = { unreachable: err?.message ?? String(err) };
+    }
+    tui?.requestRender?.();
+  };
   const refresh = async () => {
     if (fetching || disposed) return;
     fetching = true;
@@ -683,6 +702,10 @@ export function makeDashboard({
         runProject,
         projectsSelected,
         projectsInfo,
+        allocInfo,
+        allocSelected,
+        pendingRevert,
+        allocNote,
         copiedNote,
         copyAvailable: typeof deps?.copyText === "function",
         // Height through the injected seam, read per frame (a resize changes it): null (seam absent, or
@@ -839,6 +862,65 @@ export function makeDashboard({
         // FAILED_LIMIT rows is the same floor the held section takes, and redis-cli holds the rest.
         if (matchesKey(data, "escape")) {
           view = "LIST";
+          tui?.requestRender?.();
+        }
+        return;
+      }
+      if (view === "ALLOCATION") {
+        // The allocation view (issue #504 part C). With a revert armed, the question eats every key: `y` reverts to the
+        // CAPTURED row (writer operator-revert, through the worker's own `revert`: no interval, no step, still a
+        // compare-and-set), `n` or Esc stands down. Otherwise Esc backs out, the arrows move the history cursor, and
+        // `r` arms the question on the cursor's row when that row carries a split to go back to.
+        const rows: any[] = Array.isArray(allocInfo?.alloc?.log) ? allocInfo.alloc.log : [];
+        if (pendingRevert) {
+          if (data === "y" || data === "Y") {
+            const target = pendingRevert;
+            pendingRevert = null;
+            void (async () => {
+              try {
+                const res = typeof deps?.revertAllocation === "function" ? await deps.revertAllocation({ target }) : { outcome: "refused", reason: "no revert wired" };
+                allocNote = revertNote(res);
+              } catch (err: any) {
+                allocNote = `revert failed: ${cellOf(err?.message ?? String(err))}`;
+              }
+              await loadAllocation();
+            })();
+            tui?.requestRender?.();
+            return;
+          }
+          if (data === "n" || data === "N" || matchesKey(data, "escape")) {
+            pendingRevert = null;
+            tui?.requestRender?.();
+          }
+          return;
+        }
+        allocNote = null;
+        if (matchesKey(data, "escape")) {
+          view = "LIST";
+          allocInfo = null;
+          allocSelected = 0;
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "up")) {
+          allocSelected = Math.max(0, allocSelected - 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "down")) {
+          allocSelected = Math.min(Math.max(0, rows.length - 1), allocSelected + 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (data === "r" || data === "R") {
+          const row = rows[allocSelected];
+          if (!row) return;
+          if (!revertible(row)) {
+            allocNote = "this row holds no split to go back to";
+            tui?.requestRender?.();
+            return;
+          }
+          pendingRevert = row;
           tui?.requestRender?.();
         }
         return;
@@ -1107,6 +1189,18 @@ export function makeDashboard({
         tui?.requestRender?.();
         return;
       }
+      // `b` opens the ALLOCATION view (issue #504 part C): `p` and `r` are pause and resume here, and `c`/`g` stay dead
+      // for the removed views. The split is read once, here, through the injected seam, and again after a revert.
+      if (data === "b" || data === "B") {
+        allocSelected = 0;
+        pendingRevert = null;
+        allocNote = null;
+        allocInfo = { loading: true };
+        view = "ALLOCATION";
+        void loadAllocation();
+        tui?.requestRender?.();
+        return;
+      }
       // `j` opens the PROJECTS view (issue #499 part C) -- the runs divider names it. Not `g`: that was the removed graph
       // view's key, pinned inert so an old habit opens nothing. The spend is read once, here,
       // through the injected seam; a panel wired without one shows the projects and their members without spend.
@@ -1307,6 +1401,22 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     if (Number(failed.more) > 0) lines.push(styler.cell(`↓ ${failed.more} more (redis-cli holds the rest)`, iw, { color: "dim" }));
     if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "esc back"];
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: fitLine(styler.fg("accent", "esc") + " " + styler.fg("dim", "back"), iw, styler) });
+    return centerBlock(boxed, Math.trunc(width), dw);
+  }
+
+  if (view === "ALLOCATION") {
+    const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
+    const iw = framed ? dw - 4 : 24;
+    const { title: detailTitle, lines } = allocationView(state.allocInfo, state.allocSelected ?? 0, iw, styler);
+    // The armed question is a BODY line (wrapped, never clipped: it names what a `y` does), and the footer the keys.
+    const question = state.pendingRevert ? `revert to ${revertTargetName(state.pendingRevert)} as operator-revert? it skips the interval and the step` : null;
+    if (question) lines.push(...wrapColumns(question, iw, styler).map((l) => styler.cell(l, iw, { color: "warning" })));
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", question ? "y/n" : (state.allocNote ? `${cellOf(state.allocNote)} · ` : "") + "↑↓ select · r revert · esc back"];
+    const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
+    const footer = question
+      ? fitLine([k("y", "revert"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")), iw, styler)
+      : fitLine((state.allocNote ? styler.fg("warning", cellOf(state.allocNote)) + styler.fg("dim", " · ") : "") + [k("↑↓", "select"), k("r", "revert"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
+    const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer });
     return centerBlock(boxed, Math.trunc(width), dw);
   }
 
@@ -1516,7 +1626,9 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   // constant and the runs viewport already bounds itself.
   const sections: any[] = [
     { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt), ...delayedBreakdownLine(snapshot, inner, styler)] },
-    { key: "spend", head: ["spend & limits", "jobs & tokens/day · s set"], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
+    // `b split` rides this divider's meta when the deployment has an allocation envelope (issue #504 part C): the footer
+    // has no headroom for another hint (`keyHints`' arithmetic), the `j projects` precedent on the runs divider.
+    { key: "spend", head: ["spend & limits", `jobs & tokens/day · s set${snapshot.envelopeSet ? " · b split" : ""}`], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
     ...dollarSection(snapshot.dollars, inner, styler),
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
@@ -2220,6 +2332,114 @@ function projectsView(snapshot: any, info: any, selected: number, runProject: an
     const name = typeof p.name === "string" && p.name !== "" ? styler.fg("dim", ` · ${escapeInterpreted(p.name)}`) : "";
     lines.push(fitLine(`${cursor} ${styler.fg("accent", cellOf(p.id))}  ${styler.fg("muted", `${n} member${n === 1 ? "" : "s"}`)}  ${styler.fg("text", money)}${filtering}${name}`, iw, styler));
     for (const m of Array.isArray(p.members) ? p.members : []) lines.push(fitLine(`    ${styler.fg("dim", cellOf(escapeInterpreted(String(m))))}`, iw, styler));
+  });
+  return { title, lines };
+}
+
+/**
+ * A cell of the ALLOCATION view read back from Valkey (a history row, a reason and its key): `cellOf` (a control byte
+ * becomes a space) over `escapeInterpreted` (a bidi or format character becomes visible `\u{...}` text). The worker
+ * writes these rows from enums and ids, so this is defence in depth against a key another writer set.
+ */
+function textCell(v: any): string {
+  return v === null || v === undefined ? "-" : cellOf(escapeInterpreted(String(v)));
+}
+
+/**
+ * An `alloc:log` row a revert can go back to: one that carries the weights of a split (applied, reverted, neutral,
+ * expired, rebased). A refusal, a duplicate, a lost apply and an outside edit carry none.
+ */
+function revertible(row: any): boolean {
+  const w = row?.weights;
+  return w !== null && typeof w === "object" && !Array.isArray(w) && Object.keys(w).length > 0;
+}
+
+/** How the revert question names its target: the plan id, or the outcome and time of a split that had none. */
+function revertTargetName(row: any): string {
+  return row?.planId ? `plan ${cellOf(row.planId)}` : `the ${cellOf(row?.outcome)} split of ${cellOf(row?.at)}`;
+}
+
+/** One sentence for the footer from a revert's result: every branch names what happened, never a reason text. */
+function revertNote(res: any): string {
+  if (res?.outcome === "reverted") return `reverted to ${res.planId ? cellOf(res.planId) : "the neutral weights"} (operator-revert)`;
+  if (res?.outcome === "apply-failed") return `revert lost a race (${cellOf(res.reason)}): the split changed meanwhile, look again`;
+  return `revert refused: ${cellOf(res?.reason ?? "unknown")}`;
+}
+
+/**
+ * The ALLOCATION view (issue #504 part C): the envelope, each entry's floor, weight, allocation and spend in the
+ * envelope window (with the Valkey key it counts under, which is what an operator seeds or reads with valkey-cli), the
+ * applied plan, its per-project REASONS, and the history from `alloc:log`, newest first, with a cursor for `r`.
+ *
+ * THE REASONS are agent text (`REQ-DELEGATED-ALLOCATION`) and this is the one surface that draws them: read from
+ * `alloc:plan` only (`readAllocations` with reasons, which no tool passes), ESCAPED (`escapeInterpreted`: a bidi
+ * override or an invisible character becomes visible `\u{...}` text) and gated (`cellOf`), and ISOLATED: the last
+ * thing on its line, after the id it belongs to, so it has nothing to reorder. The banner says when the newest outcome
+ * is an edit no admin write announced (`envelope-changed-externally`).
+ */
+function allocationView(info: any, selected: number, iw: number, styler: any): { title: string; lines: string[] } {
+  const e = info?.envelope;
+  const title = e ? `allocation · ${cellOf(e.window)} · total ${usd(e.totalMicros)}` : "allocation";
+  const dim = (t: string) => styler.cell(t, iw, { color: "dim" });
+  const wrapped = (t: string, color: string) => wrapColumns(t, iw, styler).map((l) => styler.cell(l, iw, { color }));
+  if (!info || info.loading) return { title, lines: [dim("reading the split")] };
+  if (info.unwired) return { title, lines: [dim("not wired in this panel (no allocation reader)")] };
+  if (info.unreachable) return { title, lines: wrapped(`unreadable (${cellOf(info.unreachable)})`, "error") };
+  if (!e) return { title, lines: wrapped(cellOf(info.problem ?? "no envelope"), "dim") };
+  const lines: string[] = [];
+  const a = info.alloc ?? {};
+  const log: any[] = Array.isArray(a.log) ? a.log : [];
+  // Any outside edit since the fleet last agreed on an envelope (a re-base or an applied plan), not only the newest
+  // row: a refused plan logged after the edit must not hide it.
+  const agreedAt = log.findIndex((r: any) => r?.outcome === "rebased" || r?.outcome === "applied");
+  const sinceAgreed = agreedAt === -1 ? log : log.slice(0, agreedAt);
+  if (sinceAgreed.some((r: any) => r?.outcome === "envelope-changed-externally")) {
+    lines.push(...wrapped("changed outside the panel: the envelope was edited by hand on a host, which then refuses governed jobs as envelope-mismatch until alloc:envelope:expected names its digest (docs/allocation.md)", "warning"));
+  }
+  if (a.unreachable) lines.push(...wrapped(`split unreadable (${cellOf(a.unreachable)})`, "error"));
+  const d = e.delegation ?? {};
+  lines.push(dim(d.enabled ? `delegation on · ${(d.writers ?? []).join(", ")} · step ${d.maxStepPct}% · every ${d.minIntervalHours}h · plans up to ${d.maxPlanDays}d` : "delegation off: the neutral split applies"));
+  if (a.stateProblem === "newer") lines.push(...wrapped("the applied split was written by a newer pi-dispatch: upgrade this console", "warning"));
+  else if (a.stateProblem === "unreadable") lines.push(...wrapped("the applied split does not decode; the next pickup replaces it with the neutral split", "warning"));
+  const st = a.state ?? null;
+  if (st && st.envelopeDigest !== info.digest) lines.push(...wrapped(`the split was made for envelope ${cellOf(st.envelopeDigest)}, not this host's ${cellOf(info.digest)}: governed jobs here refuse as envelope-mismatch`, "warning"));
+  const spend = a.spend ?? null;
+  for (const id of Object.keys(e.floors ?? {})) {
+    const weight = st?.weights?.[id] ?? e.defaultWeights?.[id];
+    const bits = [
+      styler.fg("accent", cellOf(id)),
+      styler.fg("muted", `floor ${usd(e.floors[id])}`),
+      styler.fg("muted", `weight ${weight ?? "-"}`),
+      styler.fg("text", `${usd(st?.allocations?.[id])}`),
+      styler.fg("dim", `spent ${usd(spend?.projects?.[id]?.micros)}`),
+    ];
+    lines.push(fitLine(bits.join("  "), iw, styler));
+    if (spend?.projects?.[id]?.key) lines.push(fitLine(`    ${styler.fg("dim", cellOf(spend.projects[id].key))}`, iw, styler));
+  }
+  if (st) lines.push(dim(`unallocated ${usd(st.unallocated)} · deployment spent ${usd(spend?.deployment?.micros)}`));
+  if (st) {
+    const plan = st.planId ? `plan ${cellOf(st.planId)}` : "neutral, no plan";
+    lines.push(fitLine(styler.fg("text", `${plan} · ${cellOf(st.writer)} · ${cellOf(String(st.appliedAt ?? "-").slice(0, 16))}${st.validUntil ? ` · until ${cellOf(String(st.validUntil).slice(0, 10))}` : ""}${st.clamped ? " · clamped" : ""}`), iw, styler));
+    const reasons = st.reasons && typeof st.reasons === "object" ? st.reasons : {};
+    for (const id of Object.keys(reasons).sort()) {
+      lines.push(fitLine(`  ${styler.fg("accent", textCell(id))}${styler.fg("dim", ": ")}${styler.fg("text", textCell(reasons[id]))}`, iw, styler));
+    }
+  } else if (!a.unreachable && !a.stateProblem) {
+    lines.push(dim("no split applied yet: the first host to look writes the neutral one"));
+  }
+  lines.push(dim("history, newest first (alloc:log)"));
+  if (log.length === 0) lines.push(dim("(no outcomes yet)"));
+  log.forEach((h: any, i: number) => {
+    const cursor = i === selected ? styler.fg("accent", "›") : " ";
+    const why = h.reason ? ` ${textCell(h.reason)}` : "";
+    const bits = [
+      `${cursor} ${styler.fg("dim", textCell(String(h.at ?? "-").slice(0, 16)))}`,
+      styler.fg("muted", textCell(h.writer)),
+      styler.fg(h.outcome === "refused" || h.outcome === "apply-failed" || h.outcome === "envelope-changed-externally" ? "warning" : "text", `${textCell(h.outcome)}${why}`),
+      ...(h.planId ? [styler.fg("dim", textCell(h.planId))] : []),
+      ...(h.clamped ? [styler.fg("dim", "clamped")] : []),
+    ];
+    lines.push(fitLine(bits.join("  "), iw, styler));
   });
   return { title, lines };
 }

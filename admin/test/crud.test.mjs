@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { fakeAllocRedis } from "./helpers/fake-alloc-redis.mjs";
+import { envelopeDigest, parseEnvelope } from "@edgehero/pi-dispatch/envelope";
 
 // The command-side CRUD driver (index.ts `handleDashboardAction`) runs pi's ctx.ui dialogs and calls the
 // validated/atomic writeTriggers/writeSettings. Loaded through pi's jiti (the extension is erasable TS).
@@ -1018,4 +1020,293 @@ test("dispatch_set: a window that would leave no maxCostUsd anywhere is warned i
     if (saved === undefined) delete process.env.PI_MAX_COST_USD;
     else process.env.PI_MAX_COST_USD = saved;
   }
+});
+
+// ── delegated allocation (issue #504 part C) ────────────────────────────────────────────────────────────────────────
+//
+// The three tools and the cross-checks against a real deployment folder and the fake Valkey of
+// `helpers/fake-alloc-redis.mjs` (the worker's own Lua semantics), with an injected clock. Worked numbers, real ones
+// (not the issue's 50/50 shorthand): $100 a week, floors $10 / $10 / $0, default weights shop 1, platform 1, _other 0,
+// so neutral is $50 / $50 / $0, and 3:1 (with _other 0) is $70 / $30 / $0, a move of $20, inside the 25% step.
+
+const ALLOC_NOW = Date.parse("2026-10-05T12:00:00Z");
+const M = 1_000_000;
+const ALLOC_ENV_KEYS = ["PI_PROJECTS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_ENVELOPE_FILE", "PI_SETTINGS_FILE", "PI_LOGS_DIR", "PI_MAX_COST_USD", "VALKEY_URL", "PI_WORKER_NAME"];
+const ALLOC_PROJECTS = [
+  { id: "shop", members: ["github:acme/web", "github:acme/api"] },
+  { id: "platform", members: ["github:acme/infra"] },
+];
+function envelopeBody(over = {}) {
+  return {
+    version: 1,
+    window: "week",
+    totalUsd: "100",
+    floorsUsd: { shop: "10", platform: "10", _other: "0" },
+    defaultWeights: { shop: 1, platform: 1, _other: 0 },
+    delegation: { enabled: true, writers: ["operator-session", "portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 },
+    ...over,
+  };
+}
+
+/** A deployment with an envelope, the env pointed at it, and the allocation seams on the fake; restored after. */
+async function withAllocation(fn, { envelope = envelopeBody(), limits = null, settings = { maxCostUsd: "2" }, redis = fakeAllocRedis() } = {}) {
+  const saved = Object.fromEntries(ALLOC_ENV_KEYS.map((k) => [k, process.env[k]]));
+  const dir = tempDir("pd-504c-");
+  const files = {
+    projects: join(dir, "projects.json"),
+    limits: join(dir, "scoped-limits.json"),
+    envelope: join(dir, "envelope.json"),
+    settings: join(dir, "settings.json"),
+    logs: join(dir, "logs"),
+  };
+  writeFileSync(files.projects, JSON.stringify({ version: 1, projects: ALLOC_PROJECTS }));
+  if (limits) writeFileSync(files.limits, JSON.stringify({ version: 2, limits }));
+  writeFileSync(files.envelope, typeof envelope === "string" ? envelope : JSON.stringify(envelope, null, 2));
+  writeFileSync(files.settings, JSON.stringify(settings));
+  process.env.PI_PROJECTS_FILE = files.projects;
+  process.env.PI_SCOPED_LIMITS_FILE = files.limits;
+  process.env.PI_ENVELOPE_FILE = files.envelope;
+  process.env.PI_SETTINGS_FILE = files.settings;
+  process.env.PI_LOGS_DIR = files.logs;
+  process.env.VALKEY_URL = "redis://127.0.0.1:6390"; // never dialled: the fake answers every call
+  process.env.PI_WORKER_NAME = "mini1";
+  delete process.env.PI_MAX_COST_USD;
+  let clock = ALLOC_NOW;
+  indexMod._setAllocationSeamsForTests({ redisFn: () => redis, now: () => new Date(clock) });
+  try {
+    await fn({ dir, files, redis, advance: (ms) => (clock += ms) });
+  } finally {
+    indexMod._setAllocationSeamsForTests({});
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+/** A headless ctx whose confirm, if anything ever called it, would be recorded. */
+function headless() {
+  const asked = [];
+  return { asked, ctx: { hasUI: false, ui: { confirm: async (t, m) => (asked.push({ t, m }), true), select: async () => (asked.push("select"), undefined), input: async () => (asked.push("input"), undefined) } } };
+}
+const planOf = (redis) => JSON.parse(redis.store.get("alloc:plan"));
+const auditRows = (files) => readFileSync(join(files.logs, "allocations", "2026-10.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+
+test("dispatch_priorities_set applies 3:1 with hasUI false, shows no dialog, and returns no reason text (#504)", async () => {
+  await withAllocation(async ({ files, redis }) => {
+    const { asked, ctx } = headless();
+    const res = await toolByName("dispatch_priorities_set").execute("id", { projects: [{ id: "shop", weight: 3, reason: "launch on Friday" }, { id: "platform", weight: 1, reason: "maintenance only" }] }, undefined, undefined, ctx);
+    const out = textOf(res);
+    assert.deepEqual(asked, [], "no confirm, no dialog of any kind");
+    assert.equal(out.outcome, "applied");
+    assert.equal(out.reason, null);
+    assert.equal(out.clamped, false, "a $20 move is inside the 25% ($25) step");
+    assert.deepEqual(out.kept, ["_other"], "_other, left out, kept its current weight");
+    assert.equal(out.basis, null, "the basis was filled in: the neutral split carries no plan id");
+    assert.deepEqual(out.before.allocations, { _other: 0, platform: 50 * M, shop: 50 * M }, "neutral with _other at weight 0 is 50/50");
+    assert.deepEqual(out.after.allocations, { _other: 0, platform: 30 * M, shop: 70 * M });
+    assert.ok(!/launch|maintenance/.test(res.content[0].text), "the reasons never reach the tool result");
+    // The plan's reasons are kept where the panel reads them, and the row names the session as its writer.
+    assert.deepEqual(planOf(redis).reasons, { shop: "launch on Friday", platform: "maintenance only" });
+    assert.equal(planOf(redis).writer, "operator-session");
+    const applied = auditRows(files).filter((r) => r.outcome === "applied");
+    assert.equal(applied.length, 1);
+    assert.equal(applied[0].writer, "operator-session");
+    assert.equal(applied[0].host, "mini1");
+    assert.ok(!JSON.parse(redis.lists.get("alloc:log")[0]).reasons, "alloc:log carries no reasons");
+
+    // At once again: refused by the interval, recorded, and nothing changes.
+    const again = textOf(await toolByName("dispatch_priorities_set").execute("id", { projects: [{ id: "shop", weight: 1 }, { id: "platform", weight: 1 }] }, undefined, undefined, ctx));
+    assert.equal(again.outcome, "refused");
+    assert.equal(again.reason, "plan-too-soon");
+    assert.deepEqual(again.after.allocations, { _other: 0, platform: 30 * M, shop: 70 * M }, "the split is unchanged");
+    assert.equal(auditRows(files).at(-1).reason, "plan-too-soon");
+  });
+});
+
+test("dispatch_priorities_set: a project left out (other than _other) is plan-incomplete, and an unknown id is plan-invalid", async () => {
+  await withAllocation(async () => {
+    const { ctx } = headless();
+    const missing = textOf(await toolByName("dispatch_priorities_set").execute("id", { projects: [{ id: "shop", weight: 3 }] }, undefined, undefined, ctx));
+    assert.equal(missing.outcome, "refused");
+    assert.equal(missing.reason, "plan-incomplete");
+    const unknown = textOf(await toolByName("dispatch_priorities_set").execute("id", { projects: [{ id: "shop", weight: 1 }, { id: "platform", weight: 1 }, { id: "ops", weight: 1 }] }, undefined, undefined, ctx));
+    assert.equal(unknown.reason, "plan-invalid");
+    assert.equal(unknown.field, "projects.id");
+  });
+});
+
+test("dispatch_allocations: envelope numbers, the split, spend under the worker's keys, the history, and no reason text", async () => {
+  await withAllocation(async ({ redis }) => {
+    const { ctx } = headless();
+    await toolByName("dispatch_priorities_set").execute("id", { projects: [{ id: "shop", weight: 3, reason: "launch on Friday" }, { id: "platform", weight: 1 }] }, undefined, undefined, ctx);
+    assert.ok(redis.store.has("alloc:plan"));
+    const res = await toolByName("dispatch_allocations").execute("id", {}, undefined, undefined, ctx);
+    const text = res.content[0].text;
+    assert.ok(!/launch|reasons/.test(text), "no reason text, and no reasons key at all");
+    const out = JSON.parse(text);
+    assert.equal(out.envelope.totalMicros, 100 * M);
+    assert.equal(out.envelope.window, "week");
+    assert.equal(out.state.writer, "operator-session");
+    assert.deepEqual(out.state.allocations, { _other: 0, platform: 30 * M, shop: 70 * M });
+    assert.match(out.spend.projects.shop.key, /^budget:usd:s:[0-9a-f]{16}:w:2026-10-05$/, "the envelope week's key, Monday-keyed");
+    assert.equal(out.spend.projects.shop.micros, 0);
+    assert.deepEqual(out.log.map((r) => r.outcome), ["applied", "neutral"], "newest first");
+  });
+});
+
+test("dispatch_envelope_set is refused headless and writes nothing; a declined confirm writes nothing either (#504)", async () => {
+  await withAllocation(async ({ files, redis }) => {
+    const before = readFileSync(files.envelope, "utf8");
+    await assert.rejects(() => toolByName("dispatch_envelope_set").execute("id", { minIntervalHours: 0 }, undefined, undefined, { hasUI: false, ui: {} }), /interactive operator/);
+    assert.equal(readFileSync(files.envelope, "utf8"), before, "headless: the file is untouched");
+    const no = toolCtx({ answer: false });
+    const out = textOf(await toolByName("dispatch_envelope_set").execute("id", { minIntervalHours: 0 }, undefined, undefined, no.ctx));
+    assert.equal(out.applied, false);
+    assert.equal(readFileSync(files.envelope, "utf8"), before, "declined: the file is untouched");
+    assert.deepEqual(redis.ops, [], "and alloc:envelope:expected was never written");
+  });
+});
+
+test("dispatch_envelope_set: an approved change sets alloc:envelope:expected BEFORE the file, then writes it through the parser", async () => {
+  let fileWhenExpectedSet = null;
+  let files0 = null;
+  const redis = fakeAllocRedis({ onSet: (key) => { if (key === "alloc:envelope:expected") fileWhenExpectedSet = readFileSync(files0.envelope, "utf8"); } });
+  await withAllocation(async ({ files }) => {
+    files0 = files;
+    const before = readFileSync(files.envelope, "utf8");
+    const { ctx, shown } = toolCtx({ answer: true });
+    const out = textOf(await toolByName("dispatch_envelope_set").execute("id", { minIntervalHours: 0 }, undefined, undefined, ctx));
+    assert.equal(out.applied, true);
+    assert.match(shown[0].message, /minIntervalHours: 24 -> 0/, "the confirm shows the before and after");
+    assert.equal(fileWhenExpectedSet, before, "the expected digest was stored while the file still held the old envelope");
+    const written = readFileSync(files.envelope, "utf8");
+    const parsed = parseEnvelope(written, files.envelope, { projects: ALLOC_PROJECTS.map((p) => ({ ...p, name: null })), limits: [], maxCostMicros: 2 * M });
+    assert.equal(parsed.delegation.minIntervalHours, 0);
+    assert.equal(redis.store.get("alloc:envelope:expected"), envelopeDigest(parsed), "expected names the new file's digest");
+    assert.equal(out.digest, envelopeDigest(parsed));
+    assert.equal(JSON.parse(written).floorsUsd.shop, "10", "every other key is kept as written");
+  }, { redis });
+});
+
+test("dispatch_envelope_set refuses BEFORE the confirm what the worker's parser would refuse", async () => {
+  await withAllocation(async ({ files, redis }) => {
+    const before = readFileSync(files.envelope, "utf8");
+    const { ctx, shown } = toolCtx({ answer: true });
+    await assert.rejects(() => toolByName("dispatch_envelope_set").execute("id", { floorsUsd: { shop: "95" } }, undefined, undefined, ctx), /floors add up to 105\.00, above totalUsd 100\.00/);
+    await assert.rejects(() => toolByName("dispatch_envelope_set").execute("id", { floorsUsd: { ops: "1" } }, undefined, undefined, ctx), /floorsUsd\.ops names a project that is not in the projects file/);
+    await assert.rejects(() => toolByName("dispatch_envelope_set").execute("id", {}, undefined, undefined, ctx), /nothing to change/);
+    assert.equal(shown.length, 0, "the operator is never asked to approve an envelope the worker would refuse");
+    assert.equal(readFileSync(files.envelope, "utf8"), before);
+    assert.deepEqual(redis.ops, []);
+  });
+});
+
+test("the project, limit and per-job cap writers refuse a change that would leave the live envelope invalid (#504)", async () => {
+  await withAllocation(
+    async ({ files }) => {
+      const { ctx, shown } = toolCtx({ answer: true });
+      const limitsBefore = readFileSync(files.limits, "utf8");
+      // A floored project removed: the envelope's floor would name a project that is gone.
+      await assert.rejects(() => toolByName("dispatch_project_delete").execute("id", { id: "platform" }, undefined, undefined, ctx), /allocation envelope invalid \(envelope file: floorsUsd\.platform names a project that is not in the projects file/);
+      // A project row added, edited or left below its floor.
+      await assert.rejects(() => toolByName("dispatch_limit_add").execute("id", { scope: "project:platform", weekUsd: "5" }, undefined, undefined, ctx), /floorsUsd\.platform \(10\.00\) is above the scoped-limits row project:platform weekUsd \(5\.00\)/);
+      await assert.rejects(() => toolByName("dispatch_limit_edit").execute("id", { index: 0, weekUsd: "5" }, undefined, undefined, ctx), /floorsUsd\.shop \(10\.00\) is above the scoped-limits row project:shop weekUsd \(5\.00\)/);
+      // The per-job cap removed: an envelope needs one.
+      await assert.rejects(() => toolByName("dispatch_set").execute("id", { key: "maxCostUsd" }, undefined, undefined, ctx), /needs a per-job cost cap/);
+      assert.equal(shown.length, 0, "every refusal comes before the confirm");
+      assert.equal(readFileSync(files.limits, "utf8"), limitsBefore, "nothing was written");
+      assert.deepEqual(read(files.settings), { maxCostUsd: "2" });
+      assert.deepEqual(read(files.projects).projects.map((p) => p.id), ["shop", "platform"]);
+      // A change that keeps the envelope loadable passes to the confirm as before.
+      await toolByName("dispatch_limit_edit").execute("id", { index: 0, weekUsd: "40" }, undefined, undefined, ctx);
+      assert.equal(shown.length, 1);
+      assert.equal(read(files.limits).limits[0].weekUsd, "40.00");
+    },
+    { limits: [{ scope: "project:shop", weekUsd: "50" }] },
+  );
+});
+
+test("an envelope that already fails to load does not block an unrelated write (the write is not what broke it)", async () => {
+  await withAllocation(
+    async ({ files }) => {
+      const { ctx, shown } = toolCtx({ answer: true });
+      const out = textOf(await toolByName("dispatch_limit_add").execute("id", { scope: "project:platform", weekUsd: "5" }, undefined, undefined, ctx));
+      assert.equal(out.applied, true);
+      assert.equal(shown.length, 1);
+      assert.equal(read(files.limits).limits.length, 1);
+    },
+    { envelope: "{ not json" },
+  );
+});
+
+/** A pi that records the command and what `sendMessage` carried, for `/dispatch priorities`. */
+function commandPi() {
+  const sent = [];
+  let def = null;
+  const pi = new Proxy({}, {
+    get: (_t, k) => (k === "registerCommand" ? (_n, d) => (def = d) : k === "sendMessage" ? (m) => sent.push(m.content) : () => {}),
+  });
+  indexMod.default(pi);
+  return { sent, run: (args) => { const notes = []; return def.handler(args, { hasUI: true, ui: { notify: (m, t) => notes.push({ m, t }) } }).then(() => notes); } };
+}
+
+test("/dispatch priorities shows the split with no reason text; `priorities set` applies a plan as operator-session", async () => {
+  await withAllocation(async ({ redis }) => {
+    const { sent, run } = commandPi();
+    const notes = await run("priorities set shop=3 platform=1");
+    assert.match(notes.at(-1).m, /^applied [0-9a-f]{16}: _other \$0\.00, platform \$30\.00, shop \$70\.00$/);
+    assert.equal(planOf(redis).writer, "operator-session");
+    redis.store.set("alloc:plan", JSON.stringify({ ...planOf(redis), reasons: { shop: "secret plan text" } }));
+    await run("priorities");
+    const text = sent.at(-1);
+    assert.match(text, /^ALLOCATION · week · total \$100\.00 · delegation on/);
+    assert.match(text, /shop\s+floor \$10\.00\s+weight 3\s+allocation \$70\.00\s+spent \$0\.00/);
+    assert.ok(!text.includes("secret plan text"), "the model-visible channel never carries a reason");
+    const bad = await run("priorities set shop=three");
+    assert.match(bad.at(-1).m, /^usage: \/dispatch priorities set/);
+  });
+});
+
+test("a revert (operator-revert) skips the interval and the step, and is still recorded (#504)", async () => {
+  const { revertAllocation } = await import("../src/read-model.mjs");
+  await withAllocation(async ({ files, redis, advance }) => {
+    const { ctx } = headless();
+    const set = (weights) => toolByName("dispatch_priorities_set").execute("id", { projects: Object.entries(weights).map(([id, weight]) => ({ id, weight })) }, undefined, undefined, ctx).then(textOf);
+    assert.deepEqual((await set({ shop: 3, platform: 1 })).after.allocations, { _other: 0, platform: 30 * M, shop: 70 * M });
+    advance(25 * 3600000);
+    assert.deepEqual((await set({ shop: 1, platform: 0 })).after.allocations, { _other: 0, platform: 10 * M, shop: 90 * M });
+    // Back to the neutral row at once: a $40 move, above the 25% ($25) step, and inside the 24-hour interval.
+    const neutral = JSON.parse(redis.lists.get("alloc:log").at(-1));
+    assert.equal(neutral.outcome, "neutral");
+    const envelope = parseEnvelope(readFileSync(files.envelope, "utf8"), files.envelope, { projects: ALLOC_PROJECTS.map((p) => ({ ...p, name: null })), limits: [], maxCostMicros: 2 * M });
+    const res = await revertAllocation({ url: "redis://127.0.0.1:6390", envelope, target: neutral, host: "mini1", logsDir: files.logs, now: new Date(ALLOC_NOW + 25 * 3600000), redisFn: () => redis });
+    assert.equal(res.outcome, "reverted");
+    assert.deepEqual(planOf(redis).allocations, { _other: 0, platform: 50 * M, shop: 50 * M }, "the whole way back, no step");
+    assert.equal(planOf(redis).writer, "operator-revert");
+    assert.equal(auditRows(files).at(-1).outcome, "reverted");
+  });
+});
+
+test("the operator-typed paths refuse a change that would break the envelope too: the limit dialogs, /dispatch set and unset maxCostUsd (#504)", async () => {
+  await withAllocation(
+    async ({ files }) => {
+      const before = readFileSync(files.limits, "utf8");
+      // The panel's `m`: edit a repo row's scope into project:shop, whose week row would then sit below shop's $10 floor.
+      const ui = mockUi({ select: ["Edit a scoped limit", "#1  github:acme/zzz  week $5.00"], input: ["project:shop", "", "", "", ""], confirm: [true] });
+      await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: files.limits, projectsFile: files.projects, envelopeFile: files.envelope, settingsFile: files.settings }, { ui });
+      assert.match(ui.notes.at(-1).m, /^edit rejected: this change would leave the allocation envelope invalid \(envelope file: floorsUsd\.shop \(10\.00\) is above the scoped-limits row project:shop weekUsd \(5\.00\)/);
+      assert.equal(readFileSync(files.limits, "utf8"), before, "nothing written");
+      // /dispatch unset maxCostUsd and a set to a value the worker cannot read: an envelope needs a per-job cap.
+      const { run } = commandPi();
+      const unset = await run("unset maxCostUsd");
+      assert.match(unset.at(-1).m, /^unset: this change would leave the allocation envelope invalid .*needs a per-job cost cap/);
+      const bad = await run("set maxCostUsd nope");
+      assert.match(bad.at(-1).m, /^set: this change would leave the allocation envelope invalid/);
+      assert.deepEqual(read(files.settings), { maxCostUsd: "2" }, "the settings file is untouched");
+      const fine = await run("set maxCostUsd 3");
+      assert.match(fine.at(-1).m, /^set maxCostUsd = 3/, "a cap the envelope can live with is written");
+    },
+    { limits: [{ scope: "github:acme/zzz", weekUsd: "5" }] },
+  );
 });

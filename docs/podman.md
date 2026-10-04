@@ -1199,7 +1199,7 @@ pull pays it ahead of the first job.
 
 ### The sandbox on this venue
 
-`pi-dispatch sandbox <jobId>` (and `b` in the panel) reopens a run this venue ran under this account's rootless Podman,
+`pi-dispatch sandbox <jobId>` (and `b` on an opened run in the panel) reopens a run this venue ran under this account's rootless Podman,
 never under Docker: every step of the session goes through the `podman` CLI, the running check, the session's
 egress network and its removal, the launch and `podman attach` after a detach. It opens only where the shell you run it
 from has `PI_BACKENDS` naming `podman`, because that is read from your environment and not from the deployment's

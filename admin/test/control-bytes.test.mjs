@@ -465,3 +465,47 @@ test("a flag needs at least one tag, and the search window is what keeps this li
 	assert.equal(scrubControls(longest), longest, "and it is recognised whole");
 	assert.equal(scrubControls(`x${longest}y`), `x${longest}y`, "including when it is not at the start");
 });
+
+test("a plan's reason in the ALLOCATION view goes through the gate: a bidi override shows as text, an escape reaches no terminal (#504)", async () => {
+	// Reasons are agent text (REQ-DELEGATED-ALLOCATION). The worker's parser refuses control characters in them, but the
+	// panel reads `alloc:plan` from a Valkey any writer could have set, so the view holds the gate itself.
+	const jiti = await tsLoader();
+	const { makeDashboard } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
+	const M = 1_000_000;
+	const nasty = "launch\u202Ereversed \u001b[2J\u001b]52;c;Zm9v\u0007 hidden​join⁦iso";
+	const info = {
+		envelope: { window: "week", totalMicros: 100 * M, floors: { shop: 10 * M, platform: 10 * M, _other: 0 }, defaultWeights: { shop: 1, platform: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } },
+		digest: "d1d1d1d1d1d1d1d1",
+		alloc: { state: { planId: "3f9a0c1d2e4b5a67", writer: "operator-session", appliedAt: "2026-10-05T12:00:00.000Z", envelopeDigest: "d1d1d1d1d1d1d1d1", weights: { shop: 3, platform: 1, _other: 0 }, allocations: { shop: 70 * M, platform: 30 * M, _other: 0 }, unallocated: 0, reasons: { shop: nasty, platform: "hidden\u200Bjoin\u2066iso" } }, log: [{ at: "2026-10-05T12:00:00.000Z", writer: "op\u202Eer", outcome: "applied\u001b[31m", planId: "3f9a0c1d2e4b5a67\u202E", weights: { shop: 3 } }] },
+	};
+	const theme = { fg: (_c, t) => `\x1b[38;5;42m${t}\x1b[39m`, bold: (t) => `\x1b[1m${t}\x1b[22m`, bg: (_c, t) => t };
+	for (const t of [undefined, theme]) {
+		const comp = makeDashboard({ paths: {}, done() {}, tui: { requestRender() {} }, intervalMs: 100000, theme: t, deps: { fetchSnapshot: async () => ({ queue: { counts: {} } }), pause: async () => {}, resume: async () => {}, dispose: async () => {}, now: () => 0, allocationInfo: async () => info } });
+		await new Promise((r) => setImmediate(r));
+		comp.handleInput("b");
+		await new Promise((r) => setImmediate(r));
+		for (const width of [100, 4]) {
+			const lines = comp.render(width);
+			for (const line of lines) assert.ok(!hasControls(stripAnsi(line)), `width ${width}: a line carries a control byte: ${JSON.stringify(line)}`);
+			const text = lines.map(stripAnsi).join("\n");
+			if (width === 100) {
+				assert.match(text, /launch\\u\{202E\}reversed/, "the bidi override is VISIBLE text, so it reorders nothing");
+				assert.match(text, /hidden\\u\{200B\}join\\u\{2066\}iso/, "an invisible joiner and an isolate show too");
+				assert.match(text, /op\\u\{202E\}er/, "a history cell's bidi override is escaped too, not only the reasons");
+			}
+		}
+		await comp.dispose();
+	}
+});
+
+test("`/dispatch priorities` text carries no reason at all, whatever the split holds (#504)", async () => {
+	const { renderAllocations } = await import("../src/render.mjs");
+	const M = 1_000_000;
+	const text = renderAllocations({
+		envelope: { window: "week", totalMicros: 100 * M, floors: { shop: 10 * M }, defaultWeights: { shop: 1 }, delegation: { enabled: false } },
+		digest: "d",
+		alloc: { state: { planId: "p\u001b[2J", writer: "operator-session", appliedAt: "x", envelopeDigest: "d", weights: { shop: 1 }, allocations: { shop: 100 * M }, unallocated: 0, reasons: { shop: "secret" } }, log: [{ at: "t", writer: "w", outcome: "refused", reason: "plan-too-soon\u202E" }] },
+	});
+	assert.ok(!text.includes("secret"), "a reason is never rendered here");
+	assert.ok(!hasControls(text.replace(/\n/g, " ")), "and every cell is gated");
+});

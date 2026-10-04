@@ -1091,7 +1091,8 @@ const BOOT_FILES = Object.freeze([
 		unsetMeans: "no envelope governs any job and no priorities plan applies",
 		unit: "envelope",
 		nothing: "allocation envelope",
-		// No panel writes this file yet (the envelope tool comes with part C of issue #504).
+		// The admin writes this file (`dispatch_envelope_set`, issue #504 part C), but only at the path the key names: it
+		// has no default path, so the fix line's "the admin panel defaults to this same file" sentence does not apply.
 		panelWrites: false,
 		fails: "REFUSES TO START",
 		whenDeleted: "turns delegated allocation off",

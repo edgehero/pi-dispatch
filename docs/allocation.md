@@ -4,8 +4,8 @@ The envelope is the outer limit you set once: a dollar total for one window and 
 priorities plan moves headroom between projects with no keypress. The plan holds weights, never dollars, and
 pi-dispatch does the arithmetic. A job over its project's share is refused before anything is spent.
 
-The tools that write a plan, and the panel view that shows the split, come with the next part of issue #504. This
-page covers the file, how the worker applies and enforces the split, and what it refuses.
+This page covers the file, how the worker applies and enforces the split, what it refuses, and the operator's
+surfaces: the tools, `/dispatch priorities`, the panel's `b` view, and the guard on pi's own file tools.
 
 ## Enable it
 
@@ -175,8 +175,9 @@ not its own. So after the first start, a stale copy or a hand edit on one host i
 
 An envelope edit re-bases the fleet only when its digest matches `alloc:envelope:expected`, which the admin's envelope
 tool writes before it writes the file. A hand edit on one host does not move the fleet: that host refuses jobs with
-`envelope-mismatch`, and its log and the audit file say `envelope-changed-externally`. To accept a hand edit before
-the admin tool exists:
+`envelope-mismatch`, its log and the audit file say `envelope-changed-externally`, and the panel's `b` view shows
+the banner "changed outside the panel". Change the envelope with `dispatch_envelope_set` (below) and none of this
+happens. To accept a hand edit:
 
 1. Install the new file on every host. Until a host has it, and until step 2, the hosts that differ refuse their jobs
    as `envelope-mismatch`, and those refusals are not retried, so make the change at a quiet time.
@@ -188,6 +189,91 @@ valkey-cli SET alloc:envelope:expected <digest>
 ```
 
 The next job on each host re-bases the split.
+
+## Set a plan
+
+A plan is weights, an integer from 0 to 1000 per project. From the console:
+
+```text
+/dispatch priorities set shop=3 platform=1
+```
+
+or from a model, `dispatch_priorities_set`. Neither asks for a confirm, and both work with no operator present (a
+headless `pi -p` included): a plan can only move money inside the envelope. The writer is `operator-session`, so
+`delegation.writers` must list it. The plan's `basis` is filled in from the applied plan. A plan that leaves `_other`
+out keeps `_other`'s current weight; any other project left out is refused as `plan-incomplete`.
+
+Worked numbers, for the envelope above with `defaultWeights` of shop 1, platform 1 and `_other` 0 (and the floors
+$10, $10 and $0):
+
+- neutral: the $80 above the floors splits 1:1, so shop $50, platform $50, `_other` $0;
+- `shop=3 platform=1`: shop $70, platform $30. Each moves $20, inside the 25% step ($25), so it is not clamped;
+- the same again at once: refused as `plan-too-soon` (24 hours between plans), and nothing changes.
+
+With the file's own example weights (`_other` at 1), neutral is about shop $36.67, platform $36.67 and `_other`
+$26.67, and 3:1:0 from there is clamped by the step. A weight of 0 on `_other` can starve the jobs in no project,
+within the step, so give it a floor if they matter.
+
+The result names the outcome (`applied`, `duplicate`, `refused`, `apply-failed`), the refusal's reason, the plan id,
+whether the step clamped it, and each project's micro-dollars before and after. It never carries a plan's reason
+text: that is agent text, shown only in the panel.
+
+`/dispatch priorities` shows the envelope, each project's floor, weight, share and spend this window, the applied
+plan and the last outcomes, with no reasons. `dispatch_allocations` returns the same to a model, plus each spend
+key's name.
+
+## Change the envelope
+
+`dispatch_envelope_set` changes any of `window`, `totalUsd`, `floorsUsd` (merged per id), `defaultWeights` (merged),
+`enabled`, `writers`, `maxStepPct`, `minIntervalHours` and `maxPlanDays`. The worker's own parser judges the result
+before the confirm, which shows each field before and after. It is refused with no operator present. After the
+confirm it stores the new digest as `alloc:envelope:expected` in Valkey, then writes the file (tmp and rename, its
+mode and owner kept), so every host re-bases onto it instead of refusing it as a hand edit. If the file cannot be
+written, the key is put back. If Valkey cannot be reached, nothing is written.
+
+The other admin writers check the envelope too. A project delete that removes a floored project, a scoped-limits
+row below a project's floor, and a `maxCostUsd` change that removes the per-job cap are refused before the confirm,
+naming the conflict. An envelope that already does not load does not block them.
+
+## The panel
+
+Press `b` in the panel list (`p` and `r` are pause and resume there). The view shows the envelope, each project's
+floor, weight, share and spend this window with the Valkey key it counts under, the applied plan with the reason it
+gave per project, and the newest 20 outcomes from `alloc:log`. Reasons are shown escaped: an invisible or
+direction-changing character prints as `\u{...}`.
+
+`r` on a history row asks, in the panel, whether to revert to it. `y` applies that row's weights as
+`operator-revert`: an operator act, so it skips the interval and the step, but it is still refused while delegation
+is off, while this host's envelope is not the applied one, or while another apply runs. A refused row has no split
+to go back to.
+
+While an `envelope-changed-externally` outcome is newer than the last re-base or applied plan, the view opens with
+the banner "changed outside the panel".
+
+## The guard on pi's file tools
+
+In your pi session the admin extension blocks pi's own `write` and `edit` tools when the file they would write is the
+envelope, `projects.json`, `scoped-limits.json`, `triggers.json`, the settings file, the deployment's `.env` (which
+names those files) or the deployment pointer. Which files those are:
+
+- with a pointer (`/dispatch setup` writes one), the paths it and its folder's `.env` set;
+- with no pointer, the paths your environment sets, every one of those files the `.env` in the folder you started pi
+  in names (that `.env` is guarded too, and it is never read for anything else), and, when that folder is an `init`
+  folder (its `.env`, `triggers.json`, `pause-windows.json` and `subscriptions.json` are all there), its
+  `triggers.json`, `scoped-limits.json` and `projects.json`;
+- in any other folder, a repository's own `triggers.json` or `projects.json` is left alone.
+
+A deployment the panel cannot see at all (no pointer, no key set, and not the folder pi started in) is not guarded.
+The set only grows within a session: pointing `.env` at another file does not unguard the one guarded before.
+
+The path is resolved the way pi resolves it (`~`, an `@` prefix, Unicode spaces, `file://`, relative to the session's
+folder) and compared by file identity, so a symlink, a hard link or a case variant counts (a not yet existing name is
+compared fully case-folded, so a long s or a Kelvin sign does not slip past). A call made from inside another tool (a
+codemode script) is blocked too. A `powershell` command that names one of the files is blocked.
+
+What it cannot see, named in [`SECURITY.md`](../SECURITY.md): `bash`, a `powershell` command that builds the name
+at run time or uses an 8.3 short name (`PROJEC~1.JSO`), your own `!` commands, a later extension that rewrites a tool's path after the guard ran, and a link
+planted by `bash` in the same message as the write. An envelope edit made that way is still detected by its digest.
 
 ## Audit
 
@@ -209,6 +295,9 @@ The next job on each host re-bases the split.
 | Plan reasons (run record `plan`) | `plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`, `plan-parse-error`, `plan-collect-error`, `plan-invalid`, and the apply ladder |
 | Job files | `/job/portfolio.json` (in), `/outbox/priorities.json` (out) |
 | Valkey | `alloc:plan`, `alloc:lock`, `alloc:log`, `alloc:envelope:expected` |
+| Tools | `dispatch_allocations` (read), `dispatch_priorities_set` (no confirm), `dispatch_envelope_set` (confirm) |
+| Commands | `/dispatch priorities`, `/dispatch priorities set <id>=<weight> ...` |
+| Panel | `b` in the list; `r` on a history row reverts |
 | Audit file | `PI_LOGS_DIR/allocations/YYYY-MM.jsonl` |
 | Host registry | `fpEnvelope`: the envelope digest, or `none`; doctor fails for a host whose digest is not the applied split's |
 | Spec | `REQ-DELEGATED-ALLOCATION`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`, `INT-ENVELOPE-FILE-CONTRACT`, `INT-PRIORITIES-PLAN-CONTRACT`, `INT-OUTBOX-CONTRACT`, `INT-CONTAINER-JOB-INPUTS` |

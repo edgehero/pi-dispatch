@@ -741,6 +741,8 @@ test("wizard: the pointer is written only after a confirm showing the JSON verba
     PI_PROJECTS_FILE: join(dir, "projects.json"),
     PI_SUBSCRIPTIONS_FILE: join(dir, "subscriptions.json"),
   });
+  // Issue #504: the envelope key is allowlisted in the pointer but never written by the wizard (unset = no delegation).
+  assert.ok(!("PI_ENVELOPE_FILE" in pointer.env), "the wizard never turns delegation on");
   const pointerConfirm = seen.confirm.find((c) => /pointer/.test(c.title));
   assert.ok(pointerConfirm.message.includes(JSON.stringify(pointer, null, 2)), "the confirm shows the exact JSON-to-be");
   assert.ok(pointerConfirm.message.includes(dir), "including the deploymentDir");

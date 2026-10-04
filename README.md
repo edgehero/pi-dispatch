@@ -255,7 +255,9 @@ and no undo. The guard lives in the worker process, and one worker per container
 setup. Version 2 of the file adds dollar caps per day, week and month for a repo, a folder or a model.
 Manage limits with `m` in the panel ([`docs/scoped-limits.md`](docs/scoped-limits.md)). Group repos and folders into
 projects, recorded per run, shown by project in the cost views and the panel (`j`), and capped as one, with
-[`docs/projects.md`](docs/projects.md).
+[`docs/projects.md`](docs/projects.md). Set a dollar total for a day, a week or a month, with a floor per
+project, and an agent may move money between projects inside it with no keypress, never above the total or below
+a floor. The panel shows the split on `b` and reverts it ([`docs/allocation.md`](docs/allocation.md)).
 
 ### Waiting on a condition
 

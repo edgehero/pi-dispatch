@@ -478,3 +478,48 @@ export function renderSettingsView(settings) {
   }
   return out.join("\n");
 }
+
+/**
+ * `/dispatch priorities` (issue #504 part C): the envelope, the applied split with what each entry spent and holds in
+ * the envelope window, and the newest outcomes. NO reason text: this view goes to the PII-free channel, which reaches
+ * model context, and a plan's reasons are agent text (`REQ-DELEGATED-ALLOCATION`); the panel's allocation view is the
+ * one place they are drawn. `alloc` is `readAllocations`' result read WITHOUT reasons; `problem` says why there is no
+ * envelope. Every amount is integer micro-dollars, shown in dollars.
+ */
+export function renderAllocations({ envelope = null, digest = null, problem = null, alloc = null, historyRows = 10 } = {}) {
+  const usd = (m) => (Number.isSafeInteger(m) ? `$${formatMicros(m)}` : "-");
+  if (!envelope) return `ALLOCATION\n${cell(problem ?? "no envelope")}`;
+  const d = envelope.delegation ?? {};
+  const rules = d.enabled ? `delegation on (${(d.writers ?? []).join(", ")}; step ${d.maxStepPct}%, interval ${d.minIntervalHours}h, plans up to ${d.maxPlanDays}d)` : "delegation off";
+  const lines = [`ALLOCATION · ${envelope.window} · total ${usd(envelope.totalMicros)} · ${rules}`, `envelope ${cell(digest)}`];
+  if (!alloc) return lines.join("\n");
+  if (alloc.unreachable) return [...lines, `split unreadable (${cell(alloc.unreachable)})`].join("\n");
+  const s = alloc.state;
+  if (alloc.stateProblem === "newer") lines.push("the applied split was written by a newer pi-dispatch: upgrade this console");
+  else if (alloc.stateProblem === "unreadable") lines.push("the applied split does not decode; the next pickup replaces it with the neutral split");
+  else if (!s) lines.push("no split applied yet: the first host to look writes the neutral split");
+  if (s) {
+    const plan = s.planId ? `plan ${cell(s.planId)}` : "neutral (no plan)";
+    lines.push(`${plan} · writer ${cell(s.writer)} · applied ${cell(s.appliedAt)}${s.validUntil ? ` · until ${cell(s.validUntil)}` : ""}${s.clamped ? " · clamped by the step" : ""}`);
+    if (s.envelopeDigest !== digest) lines.push(`made for envelope ${cell(s.envelopeDigest)}, not this host's: governed jobs here refuse as envelope-mismatch`);
+  }
+  const rows = Object.keys(envelope.floors).map((id) => [
+    id,
+    `floor ${usd(envelope.floors[id])}`,
+    `weight ${s?.weights?.[id] ?? envelope.defaultWeights?.[id] ?? "-"}`,
+    `allocation ${usd(s?.allocations?.[id])}`,
+    `spent ${usd(alloc.spend?.projects?.[id]?.micros)}`,
+  ]);
+  const widths = rows.reduce((w, r) => r.map((c, i) => Math.max(w[i] ?? 0, c.length)), []);
+  for (const r of rows) lines.push(`  ${r.map((c, i) => pad(c, widths[i])).join("  ").trimEnd()}`);
+  if (s) lines.push(`  unallocated ${usd(s.unallocated)} · deployment spent ${usd(alloc.spend?.deployment?.micros)}`);
+  const history = Array.isArray(alloc.log) ? alloc.log.slice(0, historyRows) : [];
+  if (history.length > 0) {
+    lines.push("history (newest first):");
+    for (const h of history) {
+      const why = h.reason ? ` ${cell(h.reason)}${h.field ? ` (${cell(h.field)}: ${cell(h.rule)})` : ""}` : "";
+      lines.push(`  ${cell(h.at)}  ${cell(h.writer)}  ${cell(h.outcome)}${why}${h.planId ? `  ${cell(h.planId)}` : ""}${h.clamped ? "  clamped" : ""}`);
+    }
+  }
+  return lines.join("\n");
+}

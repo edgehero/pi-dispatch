@@ -47,6 +47,10 @@ export const POINTER_ENV_ALLOWLIST = Object.freeze([
   "PI_PAUSE_WINDOWS_FILE",
   "PI_SCOPED_LIMITS_FILE",
   "PI_PROJECTS_FILE",
+  // Issue #504 part C: the allocation envelope, a path like its siblings. Readable from a pointer so a panel started
+  // anywhere finds the deployment's envelope; the setup wizard never WRITES it (unset means no delegation, the rule
+  // `up` and `init` follow), so delegation is only ever turned on by the operator's own line.
+  "PI_ENVELOPE_FILE",
   "PI_SUBSCRIPTIONS_FILE",
 ]);
 

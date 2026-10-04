@@ -120,7 +120,8 @@ Caps live in [`scoped-limits.json`](scoped-limits.md#project-rows), never in thi
 - Over its `concurrent`, a member's job waits until a slot frees, on any host.
 - Dollar windows (`dayUsd`, `weekUsd`, `monthUsd`) refuse with `dollar-cap`. Under an allocation envelope the
   project's share of the split narrows the envelope's window, and a refusal by the share is `allocation-cap`
-  ([allocation](allocation.md)).
+  ([allocation](allocation.md)). Under an envelope the project tools refuse a change that would leave it invalid
+  (a project the envelope floors removed), naming the conflict: edit the envelope first.
 - A project row needs `"version": 2` in `scoped-limits.json`, even with counts only. The panel and the tools write it.
 
 The row's id must be a project here. A row naming a missing project stops the worker from starting, and a live
