@@ -1924,9 +1924,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`. **This
   list is the pin**, scanned by `admin/test/wiring.test.mjs` exactly as `REQ-ADMIN-VIA-PI-EXTENSION`'s is:
   the two enumerations drifted identically and undetectably, which is the argument for a mechanism over
-  prose in both places. The project tools (issue #499 part C) write through `planProjectsWrite` and
-  `writeProjects` in `read-model.mjs`: the worker's `parseProjects` judges the result, the pair rule is held from
-  the projects side (a write that removes an id a scoped-limits row names is refused before the confirm and again
+  prose in both places. Issue #504 adds tools that join this list in the change that registers them: a read of
+  the allocation, a confirm-gated envelope write, and a new kind beside the reads, the queue controls and the gated
+  enqueue, the **delegated allocation write**, which applies a priorities plan with no confirm and with no
+  interactive operator, and is the one write that does not route through `confirmedWrite`
+  (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`). The project tools (issue #499 part C) write through
+  `planProjectsWrite` and `writeProjects` in `read-model.mjs`: the worker's `parseProjects` judges the result, the
+  pair rule is held from the projects side (a write that removes an id a scoped-limits row names is refused before the
+  confirm and again
   after it; a row that already dangled leaves the write `pending`, never refused), and the file is replaced by tmp
   and rename through one `replaceFile` the scoped-limits writer shares (PR #569's review: a tmp file of its own,
   `<file>.<pid>.<random>.tmp`; the file's mode, owner and group kept, a write that cannot restore the owner refusing;
@@ -2249,6 +2254,18 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     model to state the change plainly and to accept a decline rather than retry it. Strictly, tool absence was
     safer than a confirm — that trade is taken deliberately to make the surface AI-operable, and the write
     tools are `sequential` so two writes cannot interleave.
+    A **fourth residual is named and bounded by arithmetic rather than a keypress** (issue #504):
+    `dispatch_priorities_set` writes a priorities plan with no confirm, and works headless. Its parameters are
+    weights, reasons, repo weights and a plan life only, so it cannot reach the envelope, a floor, a cap, a trigger or
+    a setting; the envelope's only model-callable writer is `dispatch_envelope_set`, which is confirm-gated like the
+    third residual's tools.
+    What an injected call can do is move spend between projects, and the worker bounds that by the rules of
+    `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`: no project below its floor, no total above the envelope's, and no
+    project moved by more than `maxStepPct` of the total per `minIntervalHours`. The worst case, worked: $100 a
+    week, floors of $10, a 25% step and a 24-hour interval. An injection can push one project to $90 and the other
+    to $10 in four days, and total spend stays at or under $100. One extra step per Valkey flush is named there
+    too. The trade is deliberate: the bound is arithmetic, not presence, so a confirm would buy nothing and would
+    make the unattended portfolio job impossible. The tool is `sequential` like every write.
   - **The operator's pi version is uncontrolled**, so the extension runs a **load-time capability probe**
     of the exact API surface it uses and, on any miss, registers **nothing** — all-or-nothing rather than
     half-loading. The supported version is the pin, `0.99.1` (`CONST-PI-VERSION-PINNED`; it was `0.80.7` until issue #509). Residual risk,
@@ -3904,6 +3921,155 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`,
   `CONST-BUDGET-BEFORE-TOKENS`, `OQ-010`, `OQ-011`, `REQ-SPEND-CAPS-MULTI-WINDOW`, `INT-CONFIG-OVERLAY-CONTRACT`,
   `INT-MODEL-ENDPOINTS-FILE-CONTRACT`
+
+## DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE
+
+- **Decision**: An agent may split the dollar budget between projects with no keypress, inside an envelope the
+  operator writes (issue #504, `REQ-DELEGATED-ALLOCATION`). The agent writes **weights**, never dollars, and
+  pi-dispatch does the arithmetic in one pure module, `worker/src/priorities.mjs`, which the worker and the admin
+  both import. The envelope is parsed by `worker/src/envelope.mjs`. Part A of the issue ships those two modules and
+  this doctrine; the apply path, the enforcement and the operator tools are parts B and C, and the sentences below
+  that describe them describe those parts.
+  - **The envelope** is an operator file, `PI_ENVELOPE_FILE`, a sibling of `scoped-limits.json`
+    (`INT-ENVELOPE-FILE-CONTRACT`): a total for one window, a floor per project of `projects.json` or `_other`, default
+    weights, and the delegation rules. Unset means no delegation anywhere. It is version-checked, refused rather than
+    repaired, written by tmp and rename, and watched with a last good copy, like its siblings.
+  - **The plan** is agent text (`INT-PRIORITIES-PLAN-CONTRACT`): integer weights from 0 to 1000 per project and
+    optionally per member repo, a `basis` naming the plan the writer saw (or null while the neutral split is applied:
+    no plan yet, after a flush, after expiry, or with delegation turned off), and optional reasons. `parsePlan` refuses
+    with a fixed reason and a field from a fixed list, never with the plan's own text.
+  - **The algorithm** (`allocate`), in BigInt micro-dollars inside, Numbers at its edges, each checked as a safe
+    integer:
+    1. Every entry gets its floor. `R = total - sum(floors)`.
+    2. The target: `floor(R * w / W)` each, then the micro-dollars left one each by largest fractional remainder,
+       ties by id ascending, so the target sums to the total exactly. With all weights 0, every entry keeps its
+       floor and R stays unallocated, the money-safe direction.
+    3. The step, against the vector applied now: `S = floor(total * maxStepPct / 100)`, an integer, and `D` the
+       largest change of any entry, the unallocated money counted as one more entry. `D <= S` (including `D = 0`)
+       applies the target. Otherwise every entry moves the same fraction `S / D` of its way, and the blend is
+       re-rounded by largest remainder, ties to the unallocated money first and then by id. Both ends of the blend
+       keep every floor and the total, so the blend does; an exact value within S of the start rounds to an integer
+       within S of it, because S is an integer; so `|after - before| <= S` holds exactly, and the furthest entry
+       moves by exactly S. The result is recorded `clamped: true`.
+    4. Repo shares split a project's stepped allocation by the repo weights, ties by ref, with no floors and no
+       step.
+    The result never exceeds the total, in any entry or in the sum, and a seeded property test holds that over
+    thousands of random envelopes.
+  - **The re-base** (`rebase`): any envelope change (total, floors, window, delegation, rules) projects the applied
+    EFFECTIVE vector onto the new envelope, with no step, because the change is the operator's act. The weights are
+    the vector's current above-floor shares, never the plan's weights, so a plan that was clamped part of the way to
+    its target stays part of the way: an envelope edit cannot carry it to its target. The unallocated money weighs
+    what it holds, so it stays unallocated in proportion. An entry the envelope adds gets its floor; an entry it
+    drops brings its allocation to `_other`, where its jobs now count.
+  - **`_other`** is every scope in no envelope project, a project in `projects.json` that the envelope does not name
+    included, so adding a project never breaks a boot. Its ledger is keyed `scopeDollarKeyPrefix("project:_other")`.
+    `PROJECT_ID_RE` forbids `_`, so no real project can collide with it.
+  - **Where the applied state lives: Valkey `alloc:plan`**, because every host must enforce one split. It holds the
+    effective micro-dollar vector per project and repo, which is the "current" of the next step, the plan id, the
+    weights, the reasons, the writer, when it applied, when a writer's plan last applied, its expiry and the envelope
+    digest. The neutral state (the default weights, no step) is **persisted** too: the first host to find no
+    `alloc:plan` writes it with `SET NX`, writer `default`, carrying the digest, so a reference always exists. After a
+    Valkey flush the interval resets and `basis: null` is accepted again.
+  - **Writes are compare-and-set.** `alloc:plan` changes only through a Lua script that compares the current plan id
+    and envelope digest and writes in one step. `alloc:lock` (`SET NX PX 5000`, the `fleet-lease.mjs` idiom) exists
+    only so a concurrent apply refuses as `plan-busy` rather than as `plan-stale`. Expiry (writer `expiry`), re-base
+    (writer `envelope-change`) and a revert (writer `operator-revert`) are CAS state changes too, and only the CAS
+    winner writes their audit row, so two hosts that both see an expired plan write one `expired` row.
+  - **The ladder**, in order: `delegation-off`, `writer-not-allowed`, `plan-duplicate` (the applied plan's own id: a
+    no-op), `plan-stale` (the basis is not the applied plan's id), `plan-too-soon` (less than `minIntervalHours`
+    since a writer's plan last applied), `plan-incomplete`, `plan-busy`. `planRefusal` is that ladder as a pure
+    function, minus the lock. A revert skips the interval and the step, being an operator act. Expiry, and turning
+    delegation off, apply neutral at once.
+  - **Re-base across a fleet.** The first host to reload a changed envelope CASes `alloc:plan` from the old digest to
+    the new one through `rebase`, but only when its new digest equals `alloc:envelope:expected`, the digest the admin
+    writer stores before it writes the file. Otherwise the host reports `envelope-mismatch` and an
+    `envelope-changed-externally` audit row, so a hand edit on one host cannot re-base the fleet. An absent
+    `expected` (a first boot, or after a flush) is seeded silently. A host whose envelope digest differs from
+    `alloc:plan`'s refuses governed jobs before any spend as `envelope-mismatch`, never retried.
+  - **Enforcement**: for the envelope's window, a project's dollar cap is `min(operator row, allocation)`, a repo's
+    `min(operator row, repo share)`, and the deployment window `min(operator cap, envelope total)`. A missing row
+    counts as no cap, so a project with no row still reserves against its allocation. Each ledger carries where its
+    cap came from, and the refusal is `allocation-cap` when the allocation bound, `dollar-cap` when the operator's
+    number did (a tie says `dollar-cap`). A reservation already made is never taken back, and a running job runs on:
+    a shrink refuses new starts only.
+  - **The audit**: the file is the record, `PI_LOGS_DIR/allocations/YYYY-MM.jsonl` on the host that applied or
+    refused, written FIRST; then the CAS; a CAS that fails after its row was written adds an `apply-failed` row.
+    Valkey `alloc:log` is a view across hosts, `LPUSH` then `LTRIM` to 500 entries, carrying weights and
+    micro-dollars and never reasons. That list idiom is new here (`run-mirror.mjs` mirrors with SET and ZADD); a
+    capped list is the simplest shape for "the last N outcomes, newest first", and it is a view, so losing it loses
+    nothing the file does not hold. The panel's history reads `alloc:log`, because the files are per host.
+  - **Reasons** are agent text. They live in `alloc:plan` and the audit file only, are shown in the panel through the
+    control-byte gate, and never enter a tool result, a run record or a log line.
+  - **The boot refuses an envelope inside a job-visible path**: a cron `run.folder`, a `PI_DISPATCH_RUN_ROOTS` root, a
+    `run.skillsDir` or `PI_GLOBAL_PI_DIR` (`envelopeInsideJobPaths`). The envelope path must be its own canonical path
+    (absolute and equal to its `realpath`: no symlink, `.`, `..`, case variant or alias on the way), else the check
+    refuses naming the path to write; and the file must have one link. A symlink anywhere on the way could sit in a
+    job path where the job can repoint it, and every attempt to judge each link by where it lives found another edge
+    (a link in the middle of a chain), so the rule removes the links instead of walking them. Containment is decided
+    by file identity (device and inode, from `stat`), not by comparing path strings, so a symlink, a case variant, a
+    firmlink or a bind-mount alias of a job path is that directory; equality counts as inside. A job path is judged
+    where the kernel resolves it (the raw string, a link followed before `..`), where a container runtime mounts it
+    (the textual reading: Docker cleans a bind source as text, so `T/link/../b` mounts `T/b`), and for a relative path
+    also against the shell's working directory the runtime CLI uses: `$PWD`, when it has the cwd's identity, Go's own
+    `SameFile` test, which is exactly when `filepath.Abs` uses it. The envelope refuses when it lies in any of them, a
+    job path is skipped only when none exists, and its spelling never refuses a boot. With an envelope set, a relative
+    `PI_DISPATCH_RUN_ROOTS` entry refuses, since the admin resolves it in another process's working directory. The
+    check runs with every successful load and again on every reload (part B wires it). Residual, named: a host bind
+    mount of the envelope's folder placed under a job path is a second view this check cannot see; an operator must
+    not make one.
+  - **An envelope needs a per-job cost cap** (`PI_MAX_COST_USD`): every governed job reserves its per-job cap against
+    its allocation, and without one every governed job would be a configuration refusal. A floor below the per-job
+    cap admits no job of its own, so doctor warns on one (issue #504 part B); the parser does not refuse it, because
+    a project's allocation is usually above its floor.
+  - **A floor no operator row lets the project spend refuses the file**: a project's dollar row for the envelope's
+    window, or for any longer window (a week row caps every day of its week), below the project's floor.
+- **Why**: Weights make every invariant checkable: the sum, the floors and the step are properties of one function,
+  and a property test can hold them. Dollars written by a model cannot be checked that way, and models misjudge a
+  shared budget. The envelope stays a file for the reason `OQ-008` gives: an operator's edit must survive a flush and
+  a boot reconcile. The applied split lives in Valkey because two hosts enforcing two splits against one shared
+  counter would each admit what the other refuses. The step is computed against the EFFECTIVE vector, never the last
+  plan's target, so a run of clamped plans walks at most S per interval: no plan can skip a step; only
+  operator-defined states (neutral on expiry or delegation off, a re-base, a revert) move without one.
+- **Threat model**:
+  - **Prompt injection.** Issue text read by a portfolio flow (issue #505), or any text in the operator's session, can
+    at worst move `maxStepPct` of the total per `minIntervalHours`. It cannot touch a floor or the total. Worked
+    example: $100 a week, floors of $10, a 25% step and a 24-hour interval. An attacker can push one project to $90
+    and the other to $10 in four days, and total spend stays at or under $100. A Valkey flush resets the interval and
+    puts the neutral split back, so it buys one extra step per flush; a flush is an operator-level act, and it is
+    named here rather than designed away.
+  - **A compromised flow** (a malicious skill in the manager's folder) has the same bound. It cannot write the
+    envelope: the boot refuses an envelope inside any path a job container can see.
+  - **The operator's session.** A model that reads issue text there breaks the scope clause of
+    `CONST-ISOLATION-CONTAINER-PER-JOB` (`specs/constitution.md:64-68`, "processes no adversarial input"). The judgement
+    belongs in a job (issue #505); the session tool is for the operator's own instructions. In that session the admin
+    extension blocks pi's `write` and `edit` on the envelope file and `projects.json` (issue #504 part C). `bash`, and
+    `powershell` (a built-in tool since pi 0.99.1, registered but not active by default), cannot be filtered
+    reliably, and stay a residual named in `SECURITY.md`. An edit outside the panel is detected by its digest.
+  - **Reason text** is agent-authored, shown in the panel only through the control-byte gate, under the raw `.log`
+    rule of `REQ-ADMIN-VIA-PI-EXTENSION`'s Why.
+- **Rejected**:
+  - *The model writes dollar amounts.* Every invariant would then be a check on the model's arithmetic, not a
+    property of ours.
+  - *The envelope in Valkey.* `OQ-008`: a flush or a boot reconcile would lose an operator's edit.
+  - *The applied split in a per-host file.* Two hosts would enforce two splits against one shared counter.
+  - *Clawing back reservations, or stopping running jobs, on a shrink.* Stopping a paid run wastes what it spent.
+  - *A confirm on the delegated write.* The bound is arithmetic; a confirm refused headless would make the
+    unattended manager impossible, and a confirm shown to an absent operator protects nothing.
+  - *Re-basing by the plan's weights.* A clamped plan would reach its target through any envelope edit, a step the
+    step rule never granted.
+  - *Truncating the blend without re-rounding.* The entries would sum to less than the total, and the missing
+    micro-dollars would land nowhere on record.
+  - *`S = total * maxStepPct / 100` as a float, or rounded up.* The step bound would hold only approximately, and a
+    property test would catch it only sometimes.
+  - *A lock alone, with no compare-and-set.* A lock that expires mid-write lets a second writer overwrite the first
+    with no error; the CAS makes the write itself the check.
+  - *Unknown plan keys dropped, as the outbox does.* A plan is a money file; a dropped key could be a misspelled
+    weight read as absent.
+- **Traces to**: `REQ-DELEGATED-ALLOCATION`, `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-SCOPED-LIMITS`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
+  `DES-DOLLAR-RESERVE-AND-SETTLE`, `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-HOST-REGISTRY`,
+  `DES-ADMIN-VIA-PI-EXTENSION`, `INT-ENVELOPE-FILE-CONTRACT`, `INT-PRIORITIES-PLAN-CONTRACT`,
+  `INT-PROJECTS-FILE-CONTRACT`, `INT-SCOPED-LIMITS-FILE-CONTRACT`, `OQ-008`
 
 ## DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER
 
@@ -7848,3 +8014,4 @@ a tunnel.
 | 2026-10-03 | Issue #500, part F, PR #570's review. **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` AMENDED**, its residuals: a `pi` subprocess is inside the list since issue #500 (the child meter's guard from the inherited `PI_ALLOWED_MODELS`, the parent's check of every folded child row against its own list, and `model-not-allowed` on a pi child with no ledger under a list alone); the residuals are a child that hides from both, a model-less child row, and a call off the list in a child whose spawner widened its list, which the parent stops only after the fold. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the detector counts a pi process with no ledger at teardown only when a pass before teardown saw it (an honest child in its first milliseconds looks the same); the cost views bullet now says why an absent key is not a floor there (it would mark all history), names the residual (a record from an image before part E that spawned a pi child shows as exact), and says the guard counters do re-judge records that carry them (only unreleased images wrote them; a plan-only bucket holding one reads as an estimate); the cache-warming bullet says a job's child agent folder is the image's, so turning warming off takes a custom image or the spawning package. |
 | 2026-10-03 | Issue #500, part F, PR #570's second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the teardown rule for a pi process with no ledger is a time floor, like the `starting` rule: it counts only when this parent first saw it 2 s or more before teardown (`NO_LEDGER_FINAL_MS`, monotonic), replacing the one-pass rule, which still let a child the last tick caught at spawn fail an honest job; an environment read whole without the ledger directory or the preload still counts at any age. The teardown paragraph lists what a final-pass stop can come from, and the Residuals added list names the new window (a no-ledger child younger than 2 s at teardown whose environment cannot be read). |
 | 2026-10-04 | Issue #571. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: a new paragraph, a call whose answer carries broken usage: pi fills a missing usage block with zeros, so the METER counts `costUnreported` on every run, capped or not, and in every child, for a call on a priced model (`pricedModel`: a rate above 0 in the table, a tier or an allowed fallback) whose settled answer has a finite cost and broken usage (`unreportedUsage`: no input side unless it never started, a failure after it started, or answer content with an output count of 0, or at most 1 on `anthropic-messages`), and that did not forward (no other model call dispatched under its dispatch token); the guard charges every such call at least its bound by the same predicate and counts nothing for it, one counter. An admitted call whose dispatch threw synchronously or returned no answer object counts `costUnanswered` on a bound above 0; a stream method answered with a promise of a stream is metered and settled from the stream it resolves to, its rejection `unpriced`; a slot flushed by a synchronous forward is not counted. The settlement rule lists `costUnreported` among the counters that must be present and 0. Residuals: started failed streams settle at the floor; a forwarding call is trusted for its own usage, a hook's call included; broken usage pi fills with plausible numbers is not detected; a server that never sends usage floors every call on a priced model (a false floor, which `doctor` warns about); the deploy order (upgrade the image before the worker, since a new worker reads the absent key as a floor). **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the child ledger is version 3 and carries the meter's `costUnreported` beside the guard's four floor counters, written with or without a guard, an older version counting as unmetered; the parent meter adds the children's count through setChildren; a stream method answered with a promise of a stream (pi-ai's legacy calls hand an async registry entry's answer on as it is) is counted at dispatch and settled from the stream it resolves to, by the meter and the guard alike; the cost views read a present counter that is not 0 as a floor, `costUnreported` with or without a cap, an absent `costUnreported` or guard counter as a floor only on a record with `costCapMicros`, and an absent `unresolved`, `unpriced` or `unmeteredChildren` as exact. **Code evidence**: image/runner/src/usage-meter.mjs -> pricedModel, unreportedUsage, createUsageMeter, wrapModelRuntime, wrapProviderStreams, dispatchToken, createCostGuard, CHILD_LEDGER_VERSION, childLedger; image/runner/src/child-watch.mjs; worker/src/dollar-budget.mjs -> FLOOR_COUNTERS; worker/src/run-history.mjs -> TOKEN_KEYS; worker/src/model-endpoints.mjs -> unreportedUsageModels; worker/src/model-catalog.mjs -> builtinChatModels; worker/src/doctor.mjs; admin/src/costs.mjs. |
+| 2026-10-04 | Issue #504, part A. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` NEW**: the decision (weights from the agent, arithmetic in `priorities.mjs`, the envelope an operator file), the algorithm (floors, largest remainder with ties by id, the step `S = floor(total * maxStepPct / 100)` with `D = 0` applying the target, the blend by `S / D` re-rounded with the unallocated money as one more entry so `after - before` stays within S exactly, repo shares), the re-base that projects the effective vector by its current above-floor shares (the unallocated money weighing what it holds) and never re-targets a plan's weights, a floor refused under an operator row of its window or any longer one, the boot check requiring the envelope path to be its own canonical path and the file to have one hard link (removing every symlink on the way rather than walking them), deciding containment by file identity (device and inode, never path strings), naming the host bind-mount residual, and judging each job path both where the kernel resolves it and where a container runtime mounts it (the textual reading) and, for a relative path, against the shell's working directory the runtime CLI uses, so its spelling never refuses a boot, a relative run root refused, `_other` keyed `project:_other` with projects absent from the envelope joining it, the applied vector and a persisted neutral record in Valkey `alloc:plan`, writes by compare-and-set with `alloc:lock` only for `plan-busy`, the fleet re-base gated on `alloc:envelope:expected`, the audit file first and the `alloc:log` LPUSH and LTRIM view (a new idiom, named), the threat model with the $100, 25% and 24-hour worked example and one extra step per flush, and the rejected approaches. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: a fourth residual, bounded by arithmetic rather than a keypress, with those worst-case numbers; the Decision describes the three new tools in prose only until part C registers them. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**. **Code evidence**: worker/src/priorities.mjs -> parsePlan, planId, scopeRef, planRefusal, allocate, neutralAllocation, rebase; worker/src/envelope.mjs -> parseEnvelope, loadEnvelope, envelopeDigest, envelopeInsideJobPaths. |

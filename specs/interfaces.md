@@ -5874,6 +5874,152 @@ folders. A job whose scope is a member belongs to that project, and its run reco
   a newer `version` refuse to load; with `PI_PROJECTS_FILE` unset every record carries `project: null` and nothing
   else changes; a live edit that does not load keeps the last good projects and logs `projects_reload_invalid`.
 
+## INT-ENVELOPE-FILE-CONTRACT
+
+**operator → worker (and, from part C of issue #504, the admin extension).** The envelope is the operator's outer
+limit for delegated allocation (`REQ-DELEGATED-ALLOCATION`): a dollar total for one window and a floor per project.
+A priorities plan moves headroom between projects inside it, and nothing an agent writes reaches it.
+
+- **Producer/Consumer**: the operator writes the file by hand, or (issue #504 part C) through the admin's
+  confirm-gated envelope write, which goes through `parseEnvelope`, tmp and rename. The worker will read it at boot
+  and hold it in a watched ref with a last good copy, like `INT-PROJECTS-FILE-CONTRACT`'s file; it is reloaded with
+  the projects and scoped-limits files, because the floors are judged against both. The receiver does not read it.
+- **Location**: `PI_ENVELOPE_FILE`. Unset means no envelope and no delegation anywhere: `loadEnvelope` returns null
+  and every cap is what the operator's rows and windows set. An EMPTY value is not an unset one and refuses, the rule
+  of the projects and scoped-limits keys. **The envelope path must be its own canonical path**: absolute, and equal to
+  what `realpathSync.native` returns for it, so no symlink anywhere on the way, no `.` or `..`, no case variant and no
+  firmlink spelling. Otherwise the check refuses, naming the canonical path to write instead when there is one. A
+  symlink anywhere on the way, however far up a chain, could sit inside a job path where the job can repoint it;
+  requiring the canonical path removes every such link rather than chasing them. The path must name a regular file
+  (a directory refuses as not a regular file) that exists and has one link: a file with more than one hard link
+  refuses, because a second name of the file could sit inside a job path.
+  The path may not lie inside any host path a job container can see: a cron `run.folder`, a `PI_DISPATCH_RUN_ROOTS`
+  root, a `run.skillsDir` or `PI_GLOBAL_PI_DIR` (`envelopeInsideJobPaths`, `./envelope`). Containment is judged by
+  FILE IDENTITY, the device and inode `stat` reports, never by comparing path strings: a job path contains the
+  envelope when one of its locations is the envelope's folder or any directory above it, equality included. So a
+  symlink, a case variant on a case-insensitive volume, a firmlink (`/System/Volumes/Data/Users` is `/Users` on macOS)
+  or a bind-mount alias of a job path is judged as the directory it is. A job path is never refused for its spelling:
+  it is judged where the kernel resolves it, where a container runtime mounts it (the textual reading), and for a
+  relative path also against the shell's working directory the runtime CLI uses. The kernel's location is the raw
+  string, absolutized without normalizing (a relative path appended to the working directory), which follows a link
+  before taking `..`; the textual one is `resolve(path)`, because Docker cleans a bind source as text before mounting
+  it, so `T/link/../b` mounts `T/b` whatever `T/link` points at. A relative job path is also read both ways against
+  `$PWD` when `$PWD` is absolute and has the working directory's identity (device and inode), which is Go's own
+  `SameFile` test: the Docker and Podman CLIs absolutize a relative bind source with Go's `filepath.Abs`, whose
+  `os.Getwd` returns `$PWD` exactly then, so from a symlinked or firmlinked cwd `./../y` reaches the logical parent,
+  not the physical one. A location that does not exist is dropped, since nothing there is visible to a container; a
+  job path is skipped only when no location exists, and any other failure to read a path refuses, naming it. With an
+  envelope set, a relative `PI_DISPATCH_RUN_ROOTS` entry is refused, naming it, as `PI_GLOBAL_PI_DIR` and
+  `run.skillsDir` already must be absolute: the admin's `dispatch_run` resolves a run root in the operator's pi
+  process, so a relative one could name another folder there. The check runs together with every successful load of
+  the file, at boot and again on every reload (the wiring of issue #504 part B), because a later edit can move the
+  file, or a job path, so that one holds the other. **Residual, named**: a host bind mount of the envelope's folder
+  placed under a job path is a second view of the folder with its own identity, and this check does not detect it; an
+  operator must not make one.
+- **Shape**: validated by `parseEnvelope` (`./envelope`), fail loud. Every refusal names the field and never quotes a
+  value as written; a refusal names amounts only after they parse, formatted. A key written twice follows `JSON.parse`:
+  the last one wins. Unlike the projects and scoped-limits files, an **unknown key is refused** (counted, not quoted):
+  every key here is a bound, and a misspelled bound dropped in silence would read as one the file does not hold.
+  ```json
+  { "version": 1, "window": "week", "totalUsd": 100,
+    "floorsUsd": { "shop": 10, "platform": 10, "_other": 0 },
+    "defaultWeights": { "shop": 1, "platform": 1, "_other": 1 },
+    "delegation": { "enabled": true, "writers": ["operator-session", "portfolio-job"],
+                    "maxStepPct": 25, "minIntervalHours": 24, "maxPlanDays": 14 } }
+  ```
+  - `version` (required): an integer >= 1; a newer one is refused (`envelope file written by a newer pi-dispatch`).
+  - `window` (required): `day`, `week` or `month`, the UTC buckets of `worker/src/budget.mjs` (`dayKey`, `weekKey`
+    from Monday, `monthKey`).
+  - `totalUsd` (required): a dollar amount above 0, parsed by `parseUsdMicros` (`worker/src/money.mjs`) into integer
+    micro-dollars. More than 6 decimals, an exponent in a string, or a value above $1,000,000 is refused, never
+    rounded.
+  - `floorsUsd` (required, may be empty): each key a project id from `projects.json` (`INT-PROJECTS-FILE-CONTRACT`)
+    or `_other`; each value a dollar amount of 0 or more, by the same rules. A key naming no project refuses the file.
+    `_other` is always an entry, with floor 0 when absent: it is every scope in no envelope project, and a project in
+    `projects.json` that this file does not name counts in `_other` (doctor names such projects). The floors may not
+    add up to more than the total.
+  - **A project's operator dollar row for the same window or a longer one below its floor refuses the file**,
+    naming both (`floorsUsd.shop (10.00) is above the scoped-limits row project:shop weekUsd (5.00)`). The allocation
+    can only lower a cap, so such a floor would promise money the operator's row never lets the project spend. A
+    longer window counts because it caps every such period that lies inside it: a `weekUsd` of $0.000001 empties a
+    day floor of $50. It is a per-period check, not a sum: four weekly floors of $10 under a `monthUsd` of $20 are
+    accepted, because each week alone fits the month. A shorter window's row is not compared, since several of its
+    periods may still reach the floor.
+  - `defaultWeights` (optional): integers from 0 to 1000 for entries that have a floor; an entry left out weighs 1.
+    They give the **neutral** split, used with no plan applied, after expiry, after a flush and with delegation off.
+  - `delegation` (optional; absent is off): `enabled` (boolean, required). When it is true, every bound is required
+    and none has a default: `writers` (a non-empty list of distinct values from `operator-session` and
+    `portfolio-job`), `maxStepPct` (an integer from 1 to 100; 0 is refused, because delegation that may move nothing
+    is `enabled: false`), `minIntervalHours` (an integer from 0 to 8784) and `maxPlanDays` (an integer from 1 to 366).
+    When it is false, a bound that is written is still judged.
+  - **A per-job cost cap is required.** The file is refused when the deployment has no `PI_MAX_COST_USD` (the
+    caller passes it as a positive safe integer of micro-dollars; anything else counts as none), naming that key: each
+    governed job reserves its per-job cap against its project's allocation, so without one every governed job would be
+    a configuration refusal.
+- **Normalized form** (what `parseEnvelope` returns, and what `envelopeDigest` hashes):
+  `{ version, window, totalMicros, floors, defaultWeights, delegation }`, with `floors` and `defaultWeights` keyed by
+  every entry, `_other` included, and `delegation` as `{ enabled, writers, maxStepPct, minIntervalHours, maxPlanDays }`
+  (`writers` sorted; `writers` empty and the other bounds null when off and unset). `envelopeDigest` is the 16-hex
+  `fingerprint` of that form: key order, whitespace and the spelling of a dollar amount do not move it, a value does.
+  A digest, never the values, so it is admissible in a host row (`INT-HOST-REGISTRY-CONTRACT`).
+
+## INT-PRIORITIES-PLAN-CONTRACT
+
+**agent → worker (the operator's session tool, issue #504 part C; a portfolio job's `/outbox/priorities.json`, issue
+#505).** A plan is agent-authored text: integer weights, never dollars. `parsePlan` (`./priorities`) is the one
+judge, shared by the worker and the admin; issue #505 reuses this contract unchanged.
+
+- **Shape**:
+  ```json
+  { "version": 1, "basis": "3f9a0c1d2e4b5a67", "validUntil": "2026-10-12T00:00:00Z",
+    "projects": [
+      { "id": "shop", "weight": 3, "reason": "launch on Friday",
+        "repos": [ { "ref": "a1b2c3d4", "weight": 2 }, { "ref": "9e8d7c6b", "weight": 1 } ] },
+      { "id": "platform", "weight": 1, "reason": "maintenance only" },
+      { "id": "_other", "weight": 0 } ] }
+  ```
+  - At most 16 KiB of UTF-8. **Unknown keys are refused** at every level, stricter than `INT-OUTBOX-CONTRACT` on
+    purpose: this is a money file, and a dropped key could be a misspelled weight read as absent. A key written twice
+    follows `JSON.parse`: the last one wins.
+  - `version` (required): an integer >= 1; a newer one is refused.
+  - `basis` (required, `null` spelled out): the id of the plan the writer saw, 16 lowercase hex, or `null` while the
+    neutral split is applied: no plan yet, after a flush, after expiry, or with delegation turned off. A writer that
+    forgot the field is told so rather than read as a first plan.
+  - `validUntil` (optional): a UTC instant as `toISOString` writes it (seconds required, milliseconds optional, `Z`
+    only), after now and no later than now plus `maxPlanDays`: the caller's, else the envelope's, else 14 (with no
+    envelope, the runner's pre-check), and never more than 366. Absent, it resolves to now plus `maxPlanDays`. A
+    written instant enters the canonical plan as `toISOString` writes it, so `...00Z` and `...00.000Z` are one plan.
+  - `projects` (required): at most 256 entries, ids unique. With an envelope, each id must be one of its entries,
+    and **every entry must be named, else `plan-incomplete`**.
+    - `id`: a project id (`INT-PROJECTS-FILE-CONTRACT`) or `_other`.
+    - `weight`: an integer from 0 to 1000.
+    - `reason` (optional): 1 to 200 code points; a string of whitespace only is refused (`type`). A control (C0,
+      DEL, C1, the tab included), any format character (bidi controls and isolates, zero-width characters, the soft
+      hyphen, the byte order mark, the tag block, and the joiners ZWNJ and ZWJ), a lone surrogate, a private-use or
+      unassigned code point, or a line or paragraph separator is **refused, not stripped**: stripping would store
+      text the writer did not write. Plainly, that refuses joined emoji sequences, ZWNJ and ZWJ in Persian or Indic
+      text, a soft hyphen, a tab and a tag-sequence flag; a reason is a short note, written without them. Whether a
+      code point is unassigned follows the Unicode tables of the Node.js the worker runs, so a newer Node may admit a
+      character an older one refused.
+    - `repos` (optional): a non-empty list of `{ ref, weight }`, at most 256, refs unique. A `ref`
+      is the first 8 hex of sha256 over the member's canonical scope, the spelling `projects.json` stores
+      (`scopeRef`), so no path or repository name ever appears in a plan. When the projects file is given, a listed
+      `repos` must name every member of its project (else `plan-incomplete`), and a ref that is no member is refused.
+      `repos` on `_other` is refused (`projects.repos`, `unknown-ref`): a scope in no project has no ref to name.
+- **Refusals**: `{ ok: false, reason, field, rule }`. `reason` is `plan-invalid` or `plan-incomplete`. `field` is one
+  of a fixed list: `body`, `plan`, `version`, `basis`, `validUntil`, `projects`, `projects.id`, `projects.weight`,
+  `projects.reason`, `projects.repos`, `projects.repos.ref`, `projects.repos.weight`. `rule` is one of a fixed list
+  (`json`, `too-large`, `shape`, `unknown-key`, `missing`, `type`, `range`, `newer`, `format`, `duplicate`,
+  `unknown-id`, `control-char`, `too-long`, `past`, `too-far`, `missing-project`, `missing-repo`, `unknown-ref`). An
+  unknown key is named by where it sits, never by its spelling, and no refusal carries any text from the plan, so a
+  refusal can enter a log line, an audit row or a tool result as it stands. One refusal, the first found. A
+  `plan-incomplete` refusal also carries the plan and its id, because the apply ladder checks the duplicate, stale
+  and too-soon rungs first (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`).
+- **The plan id**: the first 16 hex of sha256 over the canonical JSON of the canonical plan (keys sorted at every
+  depth, `projects` sorted by id, `repos` by ref, a written `validUntil` in its `toISOString` spelling, an optional
+  field left out kept out). Two plans that differ only in order or in how they spell one instant have one id, and a
+  re-read plan with no `validUntil` keeps its id, so collecting one file twice is a `plan-duplicate`.
+
 ## INT-MODEL-ENDPOINTS-FILE-CONTRACT
 
 **operator → worker, and worker → egress proxy.** The local or LAN model servers (Ollama, vLLM, llama.cpp,
@@ -6955,3 +7101,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #499, part C, PR #569's second review. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin writer refuses a symlinked projects file, keeps the owner and group (or refuses), and re-checks against the snapshot taken before the confirm; the worker's `escapeControls` escapes exactly the panel's `escapeInterpreted` set (every format character but the two joiners, the blanks and fillers, the unassigned code points drawn as nothing), held equal over every code point by a test. **`INT-SCOPED-LIMITS-FILE-CONTRACT` UNCHANGED, checked**: the file is the same; only the admin's writer is stricter. **Code evidence**: worker/src/projects.mjs -> escapeControls; admin/src/read-model.mjs -> replaceFile. |
 | 2026-10-03 | Issue #500, part F (closes #500). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens` gains `childTotal`, `childProcesses` and `unmeteredChildren` between `unpriced` and the cost guard's counters, on the closed key list in the runner's emission order, with a paragraph on what each means, that a non-zero `unmeteredChildren` makes the dollar settlement a floor, and that an older image's record carries none; the attribution comment now says root, other and loose sum to `total` with `childTotal`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, its child keys paragraph: the worker's closed key list admits the three, and `unmeteredChildren` is a floor counter. Exit codes and reasons UNCHANGED, checked: an unmetered child still stops `cost-cap`, `token_budget` or `model-not-allowed`. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: the two reserved names `PI_DISPATCH_CHILD_LEDGER` and `PI_DISPATCH_RUNNER_PID` are as part C wrote them, and no mount, flag or capability token changed. |
 | 2026-10-04 | Issue #571. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a new key, `costUnreported`, written by the METER on every metered line, capped or not, after the child keys and before the cost guard's fields: calls on a priced model whose answer carried broken usage (no input side unless the call never started, a failure after it started, or answer content with an output count of 0, at most 1 on `anthropic-messages`), a call that forwarded not counted, the children's included through their ledgers (version 3; an older one counts as an unmetered child). `costUnanswered` also counts an admitted call whose dispatch threw before any answer object. The cost guard's counters stay six. No new exit code or reason, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens` gains `costUnreported` in the runner's emission order, after `unmeteredChildren`; `metered` requires `costUnreported` (and `unmeteredChildren`, which the list had left out) present and 0; an absent `costUnreported` is a floor, so the image is upgraded before the worker. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the doctor bullet: a ⚠ naming each model the overlay turns streaming usage off on while it costs money, an overlay-defined model or a builtin one through a provider-level `compat` or a `modelOverrides` entry. |
+| 2026-10-04 | Issue #504, part A. **`INT-ENVELOPE-FILE-CONTRACT` NEW**: `PI_ENVELOPE_FILE` (unset is no delegation), version required and a newer one refused, unknown keys refused (counted, never quoted), `window` one of day, week, month, dollars to integer micro-dollars with more than 6 decimals refused, floors keyed to `projects.json` ids or `_other` (always an entry, floor 0 and weight 1 when absent; a project the file does not name counts in `_other`), floors not above the total, a project's operator dollar row for the same window or a longer one below its floor refused naming both, a key written twice following `JSON.parse` (the last wins), `maxStepPct` 1 to 100 when delegation is on (0 refused), writers from `operator-session` and `portfolio-job`, a per-job cost cap required (naming `PI_MAX_COST_USD`), the path refused inside any job-visible path by file identity (device and inode, never path strings, so a firmlink or bind alias is the directory it names, and `$PWD` used exactly when it has the cwd's identity) with equality inside, the envelope path required to be its own canonical path (absolute and equal to its realpath: no symlink, `.`, `..`, case variant or alias on the way; the refusal names the path to write) and to name a regular file with one hard link, the residual of a host bind mount of the envelope's folder under a job path named, while a job path is judged where the kernel resolves it, where a container runtime mounts it (the textual reading), and for a relative path also against the shell's working directory the runtime CLI uses, skipped only when no reading exists, a relative run root refused, and never refused for its spelling, the check run with every load and reload, and the normalized form that `envelopeDigest` hashes. **`INT-PRIORITIES-PLAN-CONTRACT` NEW**: the plan shape, unknown keys refused, weights 0 to 1000, every envelope project named or `plan-incomplete`, `repos` complete by `ref` (8 hex of sha256 over the canonical scope), a reason of at most 200 code points with controls, format characters, lone surrogates, private-use and unassigned code points and line separators refused, `validUntil` defaulting to and capped at `maxPlanDays` (14 with no envelope, never above 366) and canonicalized by `toISOString`, `basis` 16 hex or null and required, refusals as a fixed reason, field and rule that never carry plan text, and the plan id over the canonical plan. Issue #505 reuses it unchanged. **Code evidence**: worker/src/envelope.mjs -> parseEnvelope, envelopeInsideJobPaths; worker/src/priorities.mjs -> parsePlan, planId, scopeRef, PLAN_FIELDS, PLAN_RULES. |
