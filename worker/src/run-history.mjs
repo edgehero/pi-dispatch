@@ -488,7 +488,7 @@ function rebuildUsage(u) {
  * path stay out of the record -- for local jobs only the folder's `basename` is kept, because the full
  * path embeds the operator's OS account name.
  *
- * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | unprotected-branch |
+ * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | unprotected-branch |
  * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
@@ -861,6 +861,11 @@ export function makeRecordWriter({ logsDir, fs = nodeFs, log = () => {} }) {
  * (schedulers "a" vs "a_1": `repeat_a_1_100.json` has a non-digit tail after "repeat_a_", so it never
  * matches scheduler "a"). The max millis strictly below `beforeMillis` is the previous fire.
  *
+ * A fire by hand (`pi-dispatch run --trigger <id>`, issue #505) counts as a run of that trigger: its id is
+ * `manual:<schedulerId>:<millis>`, the millis floored to the minute it was queued, stored as `manual_<id>_<millis>.json`.
+ * It ran the trigger's own data, so the next tick's `previousRunAt` names it rather than an older scheduled fire. A hand
+ * fire and a tick in the same minute share a millis; then the one that ended later is the previous run.
+ *
  * Returns `record.endedAt ?? record.startedAt ?? null` as an ISO string. `endedAt` first: BullMQ never
  * overlaps two fires of one scheduler, so the prior run's end is the honest high-water mark; `startedAt`
  * covers a crashed run's partial record. ANY failure -- missing dir, no prior run, unreadable file, bad
@@ -874,20 +879,25 @@ export function makeFindPreviousRun({ logsDir, fs = nodeFs }) {
 	return function findPreviousRun({ schedulerId, beforeMillis } = {}) {
 		try {
 			if (typeof beforeMillis !== "number" || !Number.isFinite(beforeMillis)) return null;
-			const prefix = sanitizeJobId(`repeat:${schedulerId}:`);
-			const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			const pattern = new RegExp(`^${escaped}(\\d+)\\.json$`);
+			const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const pattern = new RegExp(`^(?:${escape(sanitizeJobId(`repeat:${schedulerId}:`))}|${escape(sanitizeJobId(`manual:${schedulerId}:`))})(\\d+)\\.json$`);
 			let best = null;
 			for (const name of fs.readdirSync(logsDir)) {
 				const m = pattern.exec(name);
 				if (m === null) continue;
 				const millis = Number(m[1]);
 				if (!Number.isFinite(millis) || millis >= beforeMillis) continue;
-				if (best === null || millis > best.millis) best = { millis, name };
+				if (best === null || millis > best.millis) best = { millis, names: [name] };
+				else if (millis === best.millis) best.names.push(name);
 			}
 			if (best === null) return null;
-			const record = JSON.parse(fs.readFileSync(join(logsDir, best.name), "utf8"));
-			return record.endedAt ?? record.startedAt ?? null;
+			let at = null;
+			for (const name of best.names) {
+				const record = JSON.parse(fs.readFileSync(join(logsDir, name), "utf8"));
+				const end = record.endedAt ?? record.startedAt ?? null;
+				if (typeof end === "string" && (at === null || end > at)) at = end;
+			}
+			return at;
 		} catch {
 			return null; // NEVER throws: a history fault must not fail the prepare that asked
 		}

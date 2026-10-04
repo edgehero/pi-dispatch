@@ -1020,6 +1020,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				...(dollarInputs.otherDollars ? { otherDollars: dollarInputs.otherDollars } : {}),
 				...(dollarInputs.dollarCapSource ? { dollarCapSource: dollarInputs.dollarCapSource } : {}),
 				...(dollarInputs.envelopeMismatch ? { envelopeMismatch: dollarInputs.envelopeMismatch } : {}),
+				// Issue #505: this host's envelope delegation block, for the `portfolio-no-envelope` gate; absent without an
+				// envelope, where the processor's default (null, no envelope) is the truth.
+				...(governing?.envelope ? { envelopeDelegation: governing.envelope.delegation ?? null } : {}),
 				modelDollars: modelDollarRows(limits, effectiveJob.models ?? null),
 				// The endpoint gate's snapshot (issue #503): the declared endpoints, the overlay models and this job's
 				// derived set, read once at pickup. Absent on a wiring with no endpoint seam, so a bare processor's

@@ -216,6 +216,9 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// it wrote for itself. The operator's grant was to the trigger they reviewed, not to whatever
 					// that job decides to queue next. A chained child that genuinely needs a secret gets it from a
 					// trigger of its own, which is an operator edit to a reviewed file.
+					// `portfolio` (issue #505) is ABSENT for the same reason, and more plainly: it is budget authority, granted
+					// to one cron trigger the operator reviewed. A child is an agent's request, so inheriting the flag would let
+					// a portfolio job queue a second plan writer of its own choosing.
 					chainDepth: childDepth,
 					parentJobId: job.id,
 					// chainedJobId deliberately does NOT take the image: the child's identity is (parent, flow, task).

@@ -507,3 +507,25 @@ test("a parent whose trigger named no model chains a child with none either, so 
 	const { args } = cap.enqueued[0];
 	for (const k of ["provider", "model", "models", "maxCostUsd"]) assert.equal(args[k], undefined, `${k}: byte-identical to a pre-issue chain`);
 });
+
+test("a chained child of a portfolio job does not inherit run.portfolio, from the parent or from the request file (#505)", async () => {
+	// Budget authority was granted to one reviewed cron trigger. A child is an agent's request, so a child carrying
+	// the flag would be a second plan writer the agent chose. Asserted at the enqueue seam AND through the real
+	// enqueue onto a fake queue, so neither the collector's reads nor the job builder can carry it.
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", portfolio: true }) } } });
+	const cap = makeCapture();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+	const parent = localJob();
+	parent.data = { ...parent.data, portfolio: true, trigger: { id: "pm-weekly", pattern: "0 6 * * 1" } };
+	await collect({ job: parent, prepared: PREPARED });
+	const { args } = cap.enqueued[0];
+	assert.equal("portfolio" in args, false, "the parent's flag must not follow the child");
+	assert.equal("trigger" in args, false, "nor the trigger that would let a live-file check confirm it");
+
+	const added = [];
+	const queue = { add: async (_name, data, opts) => (added.push(data), { id: opts.jobId }) };
+	const real = makeCollectChain({ queue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs: makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", portfolio: true }) } } }) });
+	await real({ job: parent, prepared: PREPARED });
+	assert.equal(added.length, 1);
+	assert.equal("portfolio" in added[0], false);
+});

@@ -363,6 +363,60 @@ test("dispatch_trigger_add: an issue one-shot without a number is refused at the
   assert.equal(read(path).triggers.length, 0);
 });
 
+// --- run.portfolio (issue #505): reviewed-file-only, so no tool or dialog writes it, and every edit keeps it ---
+
+const PM_CRON = { on: { type: "cron", id: "pm-weekly", pattern: "0 6 * * 1" }, run: { kind: "local", folder: "/srv/pm", flow: "pm", task: "plan", portfolio: true } };
+
+test("dispatch_trigger_add cannot produce run.portfolio, even sent as an extra field (#505)", async () => {
+  const path = tmpTriggers({ triggers: [] });
+  process.env.PI_TRIGGERS_FILE = path;
+  const { ctx, shown } = toolCtx({ answer: true });
+  const out = textOf(await toolByName("dispatch_trigger_add").execute(
+    "id",
+    { kind: "cron", id: "pm-weekly", pattern: "0 6 * * 1", folder: "/srv/pm", flow: "pm", task: "plan", portfolio: true, run: { portfolio: true } },
+    undefined, undefined, ctx,
+  ));
+  assert.equal(out.applied, true);
+  const t = read(path).triggers[0];
+  assert.equal("portfolio" in t.run, false, "the written entry carries no flag");
+  assert.doesNotMatch(shown[0].message, /portfolio/, "and the confirm never showed one");
+});
+
+test("the panel's add-trigger dialogs never ask for run.portfolio, and the cron entry they write has none (#505)", async () => {
+  const path = tmpTriggers({ triggers: [] });
+  const asked = [];
+  // Extra "true" answers queued past the cron form's eight prompts: a ninth prompt would take one and show here.
+  const ui = mockUi({ select: ["cron"], input: ["pm-weekly", "0 6 * * 1", "/srv/pm", "pm", "plan", "", "", "", "true", "true"] });
+  const input = ui.input;
+  ui.input = async (label, ...rest) => (asked.push(label), input(label, ...rest));
+  const select = ui.select;
+  const offered = [];
+  ui.select = async (title, options, ...rest) => (offered.push(...(options ?? [])), select(title, options, ...rest));
+  await handleDashboardAction({ action: "addTrigger" }, { triggersPath: path }, { ui });
+  assert.equal(asked.length, 8, "the cron form asks exactly its eight questions");
+  assert.equal(asked.some((l) => /portfolio/i.test(l)), false);
+  assert.equal(offered.some((o) => /portfolio/i.test(String(o))), false);
+  const t = read(path).triggers[0];
+  assert.equal(t.on.id, "pm-weekly");
+  assert.equal("portfolio" in t.run, false);
+});
+
+test("dispatch_trigger_edit keeps an existing run.portfolio flag through a flow and model edit (#505)", async () => {
+  const path = tmpTriggers({ triggers: [PM_CRON] });
+  process.env.PI_TRIGGERS_FILE = path;
+  const { ctx } = toolCtx({ answer: true });
+  await toolByName("dispatch_trigger_edit").execute("id", { index: 0, flow: "pm2", model: "qwen" }, undefined, undefined, ctx);
+  const t = read(path).triggers[0];
+  assert.equal(t.run.flow, "pm2");
+  assert.equal(t.run.portfolio, true, "the reviewed flag survives the round trip");
+});
+
+test("the panel's flow edit keeps an existing run.portfolio flag (#505)", async () => {
+  const path = tmpTriggers({ triggers: [PM_CRON] });
+  await handleDashboardAction({ action: "editTrigger", index: 0 }, { triggersPath: path }, { ui: mockUi({ input: ["pm3"] }) });
+  assert.deepEqual(read(path).triggers[0], { ...PM_CRON, run: { ...PM_CRON.run, flow: "pm3" } });
+});
+
 test("dispatch_trigger_edit: an approved confirm changes the flow and shows old->new", async () => {
   const path = tmpTriggers({ triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old" } }] });
   process.env.PI_TRIGGERS_FILE = path;

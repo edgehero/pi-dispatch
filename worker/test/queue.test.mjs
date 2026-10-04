@@ -892,3 +892,47 @@ test("models and maxCostUsd ride local and forge job data, as written, only when
 	assert.equal("maxCostUsd" in captured.data, false);
 	assert.equal(captured.opts.deduplication.id, dedupFlagged);
 });
+
+// --- pi-dispatch run --trigger (issue #505) ---
+
+test("manualTriggerJobId is manual:<id>:<millis floored to the minute>, three parts on ':' as BullMQ requires (#505)", async () => {
+	const { manualTriggerJobId } = await import("../src/job-id.mjs");
+	const at = (iso) => manualTriggerJobId({ triggerId: "pm-weekly", now: new Date(iso) });
+	const minute = Date.parse("2026-10-05T06:00:00Z");
+	assert.equal(at("2026-10-05T06:00:00.000Z"), `manual:pm-weekly:${minute}`);
+	assert.equal(at("2026-10-05T06:00:59.999Z"), `manual:pm-weekly:${minute}`, "the same minute is the same id, so the queue keeps the first");
+	assert.equal(at("2026-10-05T06:01:00.000Z"), `manual:pm-weekly:${minute + 60_000}`, "a later minute is a new run");
+	assert.equal(at("2026-10-05T06:00:31Z").split(":").length, 3);
+	assert.throws(() => manualTriggerJobId({ triggerId: "a:b", now: new Date() }), TypeError);
+	assert.throws(() => manualTriggerJobId({ triggerId: "", now: new Date() }), TypeError);
+});
+
+test("enqueueTriggerRunReporting passes the schedule's data and options through whole, with only the nonce added (#505)", async () => {
+	const { enqueueTriggerRunReporting } = await import("../src/queue.mjs");
+	const schedule = {
+		schedulerId: "pm-weekly",
+		name: "local",
+		pattern: "0 6 * * 1",
+		data: { kind: "local", folder: "/srv/pm", flow: "pm", task: "plan", provider: "ollama", model: "qwen", maxTurns: 8, github: true, packages: false, image: "img:1", models: ["ollama/qwen"], secrets: { T: "ref" }, resume: false, portfolio: true, trigger: { id: "pm-weekly", pattern: "0 6 * * 1" } },
+		opts: { removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } },
+	};
+	const q = dedupFakeQueue();
+	const added = [];
+	const add = q.add;
+	q.add = async (name, data, opts) => (added.push({ name, data, opts }), add(name, data, opts));
+	const now = new Date("2026-10-05T06:00:31Z");
+	const r = await enqueueTriggerRunReporting(q, schedule, { now });
+	const id = `manual:pm-weekly:${Date.parse("2026-10-05T06:00:00Z")}`;
+	assert.deepEqual(r, { id, existing: null });
+	const { enqueueNonce, ...data } = added[0].data;
+	assert.equal(typeof enqueueNonce, "string");
+	assert.deepEqual(data, schedule.data, "every field of the schedule, the job-level portfolio flag and trigger included");
+	assert.equal(added[0].name, "local");
+	assert.deepEqual(added[0].opts, { ...schedule.opts, jobId: id }, "not retried, as a scheduled tick is not: no attempts, no backoff");
+	assert.equal("portfolio" in added[0].data.trigger, false, "the flag stays out of the object copied into event.json");
+
+	// A second call inside the same minute is swallowed by the dedup and says so.
+	const again = await enqueueTriggerRunReporting(q, schedule, { now: new Date("2026-10-05T06:00:59Z") });
+	assert.equal(again.id, id);
+	assert.deepEqual(again.existing, { queuedAt: 1000, state: "completed" });
+});

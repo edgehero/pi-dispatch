@@ -107,9 +107,12 @@ whoever enqueues it. Everything else stays on the shared queue and any host can 
 | A cron trigger's job | the host whose filesystem has its `run.folder` | the folder is on one machine |
 | A chained child | the host that ran its parent | it continues that working tree |
 | `pi-dispatch run <folder>` | the host you ran the command on | it checked that folder against its own disk |
+| `pi-dispatch run --trigger <id>` | the host you ran the command on, which must have the trigger's `run.folder` | the same placement as the trigger's schedule |
 | `/dispatch run` from the panel | the host the panel is running beside | its `PI_DISPATCH_RUN_ROOTS` resolved the folder |
 | A forge delivery | the shared queue | its workspace is a fresh clone, so any host can build it |
 | A forge delivery binding a secret or wait profile | a host that declares that profile | the resolver or check script is on one machine's disk |
+
+For both `pi-dispatch run` forms, which host queue is "this host's" follows the deployment: `PI_WORKER_NAME` comes from your shell, or else from the deployment `.env` in the folder you run the command from. The command refuses when the shell and the `.env` disagree, or when the `.env` cannot be read and the shell does not set it.
 
 ### A forge delivery that needs one particular machine
 

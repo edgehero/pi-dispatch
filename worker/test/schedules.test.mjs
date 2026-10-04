@@ -227,3 +227,18 @@ test("a trigger whose run.maxCostUsd is above PI_MAX_COST_USD refuses the load, 
 	// The cron schedule carries the trigger's cap into its job data, as written.
 	assert.equal(load([over(CRON, "2.50")], { config: capped })[0].data.maxCostUsd, "2.50");
 });
+
+test("run.portfolio rides the scheduler data at JOB level, never inside trigger (issue #505)", () => {
+	const [s] = load([{ ...CRON, run: { ...CRON.run, portfolio: true } }]);
+	assert.equal(s.data.portfolio, true);
+	// `trigger` is copied verbatim into /job/event.json; the flag is the worker's to re-check, not the agent's to read.
+	assert.deepEqual(s.data.trigger, { id: "nightly-tidy", pattern: "0 3 * * *" });
+	const [f] = load([{ ...CRON, run: { ...CRON.run, portfolio: false } }]);
+	assert.equal(f.data.portfolio, false);
+});
+
+test("an unflagged cron trigger's data grows no portfolio key: the stored schedule is byte-identical (issue #505)", () => {
+	const [s] = load([CRON]);
+	assert.equal("portfolio" in s.data, false);
+	assert.equal(JSON.stringify(s.data), JSON.stringify({ kind: "local", folder: "/proj", flow: "tidy", task: "run the tidy pass", trigger: { id: "nightly-tidy", pattern: "0 3 * * *" } }));
+});

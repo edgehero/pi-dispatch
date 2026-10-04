@@ -1646,3 +1646,21 @@ test("the record module's import graph never reaches config.mjs: the admin loads
 	for (const heavy of ["config.mjs", "projects.mjs", "scoped-limits.mjs", "pause-windows.mjs"]) assert.ok(!names.includes(heavy), `${heavy} is not in the record module's graph: ${names}`);
 	assert.doesNotMatch(readFileSync(new URL("../src/project-id.mjs", import.meta.url), "utf8"), /^\s*import\s/m, "project-id.mjs imports nothing");
 });
+
+test("makeFindPreviousRun counts a hand fire (manual:<id>:<millis>) as a run of its trigger, and a same-minute tie takes the later end (#505)", () => {
+	const fs = makeHistoryFs({
+		names: ["repeat_pm_100.json", "manual_pm_300.json", "manual_pm_1_200.json", "manual_other_400.json", "repeat_pm_500.json", "manual_pm_500.json"],
+		files: {
+			"repeat_pm_100.json": '{"endedAt":"2026-10-05T01:00:00.000Z"}',
+			"manual_pm_300.json": '{"endedAt":"2026-10-05T03:00:00.000Z"}',
+			"manual_pm_1_200.json": '{"endedAt":"WRONG-another-trigger"}',
+			"manual_other_400.json": '{"endedAt":"WRONG-another-trigger"}',
+			"repeat_pm_500.json": '{"endedAt":"2026-10-05T05:01:00.000Z"}',
+			"manual_pm_500.json": '{"endedAt":"2026-10-05T05:09:00.000Z"}',
+		},
+	});
+	const findPreviousRun = makeFindPreviousRun({ logsDir: "/logs", fs });
+	assert.equal(findPreviousRun({ schedulerId: "pm", beforeMillis: 400 }), "2026-10-05T03:00:00.000Z", "the hand fire is the previous run");
+	assert.equal(findPreviousRun({ schedulerId: "pm", beforeMillis: 600 }), "2026-10-05T05:09:00.000Z", "a tick and a hand fire in one minute: the later end");
+	assert.equal(findPreviousRun({ schedulerId: "pm", beforeMillis: 250 }), "2026-10-05T01:00:00.000Z", "manual_pm_1_200 is trigger pm_1's");
+});

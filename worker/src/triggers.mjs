@@ -316,6 +316,13 @@ function normalizeTrigger(entry, index, path, state) {
 	if (!isForgeKind(run.kind)) {
 		throw configError(`${at}: a ${on.type} trigger is webhook-driven and produces a forge job; run.kind must be one of ${FORGE_KINDS.join("|")} (got ${JSON.stringify(run.kind)}): ${path}`);
 	}
+	// Issue #505: `run.portfolio` is cron-only, refused here for every webhook type at once (and before the disarmed
+	// sentinel below, so a disarmed entry carrying it still refuses the file). A forge job is driven by text an issue or
+	// pull request author chose, and it has no `/outbox`, so a plan channel there would hand budget authority to whoever
+	// can open an issue. Any value is refused, `false` included: on a webhook kind the field has no meaning to state.
+	if (run.portfolio !== undefined) {
+		throw configError(`${at}: run.portfolio is only available on a cron trigger: a ${on.type} trigger runs on text a forge user wrote, and a budget plan must come from a schedule the operator reviewed: ${path}`);
+	}
 	let normalized;
 	if (on.type === "label") normalized = normalizeLabel(on, run, index, path);
 	else if (on.type === "comment") normalized = normalizeComment(on, run, index, path, state);
@@ -409,6 +416,10 @@ function normalizeCron(on, run, index, path, state) {
 	const excludeTools = validateExcludeTools(on, run, `cron trigger "${id}"`, path);
 	// Validated since #502; before it these three were copied untouched, so `run.provider: 7` loaded.
 	const ref = validateRunModel(on, run, `cron trigger "${id}"`, path);
+	// Issue #505: the portfolio flag. Strictly boolean, the house rule (`run.github`'s reason: a truthy string must not
+	// quietly arm budget authority). `true` beside `run.command` is refused: a plan is written by a flow's judgement,
+	// and a command has no committed skill to review. `false` is today's default and is carried, `run.resume`'s rule.
+	const portfolio = validatePortfolio(run, command, `cron trigger "${id}"`, path);
 
 	// provider/model/maxTurns stay absent when omitted so the value resolves at job start against the
 	// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT). github/packages/image stay
@@ -417,8 +428,25 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }) },
 	};
+}
+
+/**
+ * `run.portfolio` on a cron trigger (issue #505): the job may send a priorities plan back through
+ * `/outbox/priorities.json`. Returns the flag, or undefined when absent, so an unflagged entry normalizes
+ * byte-identically. Reviewed-file-only, like `run.secrets`: no tool and no panel key writes it.
+ */
+function validatePortfolio(run, command, at, path) {
+	const portfolio = run.portfolio;
+	if (portfolio === undefined) return undefined;
+	if (typeof portfolio !== "boolean") {
+		throw configError(`${at}: run.portfolio must be true or false when present: ${path}`);
+	}
+	if (portfolio === true && command !== undefined) {
+		throw configError(`${at}: run.portfolio cannot be set beside run.command: a budget plan is written by a flow's judgement, and a command has no committed skill to review: ${path}`);
+	}
+	return portfolio;
 }
 
 /**

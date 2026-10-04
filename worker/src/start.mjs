@@ -36,7 +36,7 @@ import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
-import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
+import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, scopeClaimRows } from "./scoped-limits.mjs";
@@ -2015,6 +2015,10 @@ export async function startWorker(
 			// one. In the compose topology the worker's read is the live inode while the receiver's is dead
 			// until restart, which is exactly the deployment where the skew happens.
 			checkWaitSkew: makeCheckWaitSkew({ triggersPath: onceTriggersFile }),
+			// Issue #505. Whether the live file still flags a portfolio job's cron trigger, read when such a job is picked
+			// up, from the same file and by the same rule as the two checks above. `pi-dispatch run --trigger` reads it
+			// there too, so the command that fires a trigger and the check that confirms its flag see one file.
+			checkPortfolioFlag: makeCheckPortfolioFlag({ triggersPath: onceTriggersFile }),
 			// Issue #230. Whether a job the supersede lease names is still in the queue. Without it a holder
 			// that vanished by any route except the clean one leaves a key that refuses every later delivery
 			// for that target until it expires -- and a refused forge delivery is gone, since no webhook
@@ -2162,7 +2166,7 @@ export async function startWorker(
 		// comment and the signal for CONST-PI-VERSION-PINNED's silent-no-op mode -- a missing line is
 		// what tells a human a run did nothing. The container's own output already streams via
 		// runContainer's onOutput during the run.
-		// `reason` is a fixed enum (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | unprotected-branch | runner-policy |
+		// `reason` is a fixed enum (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | unprotected-branch | runner-policy |
 		// provider-auth-refused | job-image-missing), never
 		// user content. Included only when present so success lines stay clean; a shutdown-aborted job logs
 		// { outcome: "policy", reason: "worker-abort" }, making a restart-dropped job visible.

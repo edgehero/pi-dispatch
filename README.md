@@ -415,6 +415,8 @@ Steer the running worker from any terminal:
   changes nothing. Like `pause`, it reads only `VALKEY_URL`, so a
   broken forge setting cannot stand between you and the stop ([`docs/wait-for.md`](docs/wait-for.md)
   covers held jobs and retries).
+- `pi-dispatch run --trigger <id>` runs one cron trigger from the triggers file now, once, as its schedule
+  would ([`docs/triggers.md`](docs/triggers.md#firing-a-cron-trigger-by-hand)).
 
 ## The admin panel
 

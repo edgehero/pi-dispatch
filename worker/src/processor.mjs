@@ -16,6 +16,8 @@ import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mj
 
 /** The refusal of a local job whose resolved folder belongs to another project than the one decided at pickup (issue #504 part B). */
 export const LOCAL_FOLDER_PROJECT_CHANGED = "local-folder-project-changed";
+// Issue #505: a portfolio cron job refused before it spends, because this host could not apply the plan it would write.
+export const PORTFOLIO_NO_ENVELOPE = "portfolio-no-envelope";
 import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
 import { zeroRatedVerdict } from "./model-endpoints.mjs";
 
@@ -337,6 +339,13 @@ export async function runJob(job, deps) {
 		otherDollars = null,
 		dollarCapSource = null,
 		envelopeMismatch = false,
+		// Issue #505: whether the LIVE triggers file still flags this job's cron trigger `run.portfolio: true`, as
+		// `(job) => boolean`, and this host's envelope `delegation` block (`{ enabled, writers }`), null with no envelope.
+		// The flag on the job data is what the trigger said when the job was queued; the file is what the operator says
+		// now, so removing the flag takes effect for a job already queued. The default answers "not flagged": an unwired
+		// processor treats every job as an ordinary one, which is what a job with no confirmed flag is.
+		checkPortfolioFlag = async () => false,
+		envelopeDelegation = null,
 		// Issue #504 part B: the project decided at pickup on the folder as named, and a function giving the project of a
 		// folder from the same projects snapshot. A local job whose RESOLVED folder belongs to another project is refused
 		// after prepare, before any reserve. Absent on a bare wiring, which checks nothing.
@@ -764,6 +773,30 @@ export async function runJob(job, deps) {
 			);
 			log("refused_envelope_mismatch", absent ? { envelope: "none" } : {});
 			return { outcome: "policy", reason: ENVELOPE_MISMATCH_REASON, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
+		// THE PORTFOLIO GATE (issue #505, `portfolio-no-envelope`). A portfolio job exists to write a priorities plan, and a
+		// plan applies only on a host whose envelope has delegation on with `portfolio-job` among its writers. Without
+		// that the plan is refused after the job has paid to write it, so the job is refused here instead: FREE (the
+		// envelope was read at boot or reload, the triggers file is one local read), before the mint, the clone, the
+		// token-cap read and every reserve (CONST-BUDGET-BEFORE-TOKENS), and RETURNED, since a retry meets the same
+		// envelope (CONST-RETRY-INFRA-ONLY). After the envelope gate, which names the host-wide fault first.
+		//
+		// The live flag comes FIRST. The job data says what the trigger said when it was queued; the live file says what
+		// the operator says now. A job whose trigger no longer flags it (or whose file cannot be read) is an ordinary
+		// cron job: it runs unflagged and passes this gate, rather than being refused for a flag nobody holds any more.
+		// Only a job with a cron `trigger` and no chain fields is asked about at all: a manual run and a chained child can
+		// never be a portfolio job, whatever their data says.
+		const portfolio = job.portfolio === true && job.trigger !== undefined && job.parentJobId === undefined && job.chainDepth === undefined && (await Promise.resolve().then(() => checkPortfolioFlag(job)).catch(() => false)) === true;
+		if (portfolio) {
+			const delegation = envelopeDelegation;
+			const why = delegation === null || delegation === undefined ? "no-envelope" : delegation.enabled !== true ? "delegation-off" : !Array.isArray(delegation.writers) || !delegation.writers.includes("portfolio-job") ? "writer-not-allowed" : null;
+			if (why !== null) {
+				// No comment: a portfolio job is always local, and a local job has no issue to comment on. `why` is a
+				// fixed token, so the log says which of the three the operator has to change.
+				log("refused_portfolio_no_envelope", { why });
+				return { outcome: "policy", reason: PORTFOLIO_NO_ENVELOPE, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
 		}
 
 		const credential = await checkProviderCredential(job, { modelEndpoints });

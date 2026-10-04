@@ -106,6 +106,10 @@ A job that does not fit is refused before any container starts. The reason is `a
 bound came from the split or the envelope total, and `dollar-cap` when it was your own row or window (a tie is
 yours). Neither is retried.
 
+A portfolio job (a cron trigger with `"portfolio": true`, see [triggers](triggers.md)) is refused as
+`portfolio-no-envelope` before anything is spent when this worker has no envelope, `delegation.enabled` is false, or
+`portfolio-job` is not in `delegation.writers`. Its plan could never apply there, so it is not paid for. Not retried.
+
 ## Several hosts
 
 Every host of one fleet must carry the same envelope. Each host publishes a digest of its envelope in the host
@@ -163,7 +167,7 @@ The next job on each host re-bases the split.
 |---|---|
 | Env var | `PI_ENVELOPE_FILE` (absolute, canonical path; unset = no envelope. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
 | Needs | `PI_MAX_COST_USD` |
-| Refusal reasons | `allocation-cap`, `envelope-mismatch`, `local-folder-escaped`, `local-folder-holds-envelope`, `local-folder-project-changed` |
+| Refusal reasons | `allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`, `local-folder-escaped`, `local-folder-holds-envelope`, `local-folder-project-changed` |
 | Valkey | `alloc:plan`, `alloc:lock`, `alloc:log`, `alloc:envelope:expected` |
 | Audit file | `PI_LOGS_DIR/allocations/YYYY-MM.jsonl` |
 | Host registry | `fpEnvelope`: the envelope digest, or `none`; doctor fails for a host whose digest is not the applied split's |

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { WORKER_HINT_UNKNOWN, main, workerHint } from "../src/cli.mjs";
+import { TRIGGER_LOADER_ENV_KEYS, WORKER_HINT_UNKNOWN, cliDeploymentEnv, main, workerHint } from "../src/cli.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // cli.mjs dynamic-imports bullmq/ioredis (in the `run` enqueue and `worker` paths), so the
@@ -373,4 +373,201 @@ test("installStdoutPipeGuard keeps the exit code an unhandled EPIPE gives, or th
 	});
 	assert.equal(result.code, 1, `a long-running writer whose reader died exits non-zero, so its supervisor restarts it: ${result.stderr}`);
 	assert.equal(result.stderr, "", "and quietly");
+});
+
+// --- pi-dispatch run --trigger <cron id> (issue #505): fire one cron trigger now, once, as its schedule would ---
+
+const PM = (folder, run = {}) => ({ on: { type: "cron", id: "pm-weekly", pattern: "0 6 1 1 *" }, run: { kind: "local", folder, flow: "pm", task: "plan the week", provider: "ollama", model: "qwen2.5:3b", github: false, packages: false, resume: false, portfolio: true, ...run } });
+const LABEL_WITH_ID = { on: { type: "label", id: "triage", any: ["pi:triage"] }, run: { kind: "github", flow: "triage" } };
+
+/** `main` with stderr captured; the refusal seam fails the test if Valkey is asked, so "nothing queued" is measured. */
+async function refusedTrigger(argv, env2) {
+	const err = [];
+	const realErr = process.stderr.write;
+	process.stderr.write = (chunk) => (err.push(String(chunk)), true);
+	let code;
+	try {
+		code = await main(argv, env2, { valkeyRefusal: async () => assert.fail("reached Valkey"), write: () => assert.fail("printed a queued line") });
+	} finally {
+		process.stderr.write = realErr;
+	}
+	return { code, err: err.join("") };
+}
+
+function triggersFile(triggers) {
+	const dir = tempDir("cli-trigger-");
+	const path = join(dir, "triggers.json");
+	writeFileSync(path, JSON.stringify({ triggers }));
+	return { dir, path };
+}
+
+test("run --trigger refuses an unknown id, a webhook trigger's id and a file the loader refuses, before Valkey (#505)", async () => {
+	const { dir, path } = triggersFile([PM(tempDir("cli-pm-")), LABEL_WITH_ID]);
+	const env2 = { VALKEY_URL: "redis://127.0.0.1:1", PI_TRIGGERS_FILE: path };
+	const unknown = await refusedTrigger(["run", "--trigger", "nope"], env2);
+	assert.equal(unknown.code, 1);
+	assert.equal(unknown.err, `error: no cron trigger with id "nope" in ${path}. Nothing was queued.\n`);
+	const webhook = await refusedTrigger(["run", "--trigger", "triage"], env2);
+	assert.equal(webhook.code, 1);
+	assert.equal(webhook.err, `error: trigger "triage" is a label trigger: only a cron trigger can be fired by hand. Nothing was queued.\n`);
+	writeFileSync(path, JSON.stringify({ triggers: [PM(dir, { portfolio: "yes" })] }));
+	const bad = await refusedTrigger(["run", "--trigger", "pm-weekly"], env2);
+	assert.equal(bad.code, 1);
+	assert.match(bad.err, /run\.portfolio must be true or false when present: .*\. Nothing was queued\.\n$/);
+});
+
+test("run --trigger takes no folder and no other run flag: the trigger's own fields are what runs (#505)", async () => {
+	const { path } = triggersFile([PM(tempDir("cli-pm-"))]);
+	const env2 = { VALKEY_URL: "redis://127.0.0.1:1", PI_TRIGGERS_FILE: path };
+	for (const extra of [["/some/folder"], ["--task", "x"], ["--flow", "f"], ["--model", "m"], ["--provider", "p"], ["--max-turns", "3"], ["--image", "i:1"], ["--force"]]) {
+		const r = await refusedTrigger(["run", "--trigger", "pm-weekly", ...extra], env2);
+		assert.equal(r.code, 1, extra.join(" "));
+		assert.match(r.err, /^error: --trigger takes no folder and no other flag \(got .+\): the trigger's own fields are what runs\. Nothing was queued\.\n$/);
+	}
+});
+
+test("run --trigger with no file, and a trigger whose folder is another host's, both refuse before Valkey (#505)", async () => {
+	const missing = await refusedTrigger(["run", "--trigger", "pm-weekly"], { VALKEY_URL: "redis://127.0.0.1:1", PI_TRIGGERS_FILE: join(tempDir("cli-none-"), "triggers.json") });
+	assert.equal(missing.code, 1);
+	assert.match(missing.err, /^error: no triggers file at .+triggers\.json\. Set PI_TRIGGERS_FILE or run this from the deployment folder\. Nothing was queued\.\n$/);
+	// On a fleet a folder that is not here is another machine's (cronPlacement): queued here, no worker could run it.
+	const { path } = triggersFile([PM("/no/such/folder/on/this/host")]);
+	const elsewhere = await refusedTrigger(["run", "--trigger", "pm-weekly"], { VALKEY_URL: "redis://127.0.0.1:1", PI_TRIGGERS_FILE: path, PI_WORKER_NAME: "mini1" });
+	assert.equal(elsewhere.code, 1);
+	assert.equal(elsewhere.err, `error: cron trigger "pm-weekly" runs on another host: its folder is not on this machine. Run this command on the host that has the folder. Nothing was queued.\n`);
+});
+
+test("run --trigger enqueues the trigger's schedule data whole on this host's queue, and a second call in the same minute queues nothing (#505, VALKEY_TEST_URL)", { skip: needsDeps || (process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL") }, async () => {
+	// Dirty on purpose: a scheduled tick runs on uncommitted changes, and so does a hand fire.
+	const folder = gitRepo({ dirty: true });
+	const { path } = triggersFile([PM(folder)]);
+	// A worker name of this test's own, so the job lands on a host queue nothing drains: never on the shared one.
+	const host = `t505-${process.pid}-${Date.now()}`;
+	const env2 = { VALKEY_URL: process.env.VALKEY_TEST_URL, PI_TRIGGERS_FILE: path, PI_WORKER_NAME: host };
+	const now = () => new Date("2026-10-05T06:00:31Z");
+	const minute = Date.parse("2026-10-05T06:00:00Z");
+	const { Queue } = await import("bullmq");
+	const { parseConnection } = await import("../src/connection.mjs");
+	const queue = new Queue(`pi-jobs@${host}`, { connection: parseConnection(process.env.VALKEY_TEST_URL) });
+	try {
+		let out = "";
+		const write = (chunk) => ((out += chunk), true);
+		assert.equal(await main(["run", "--trigger", "pm-weekly"], env2, { write, now }), 0);
+		assert.match(out, new RegExp(`^queued manual:pm-weekly:${minute} for cron trigger pm-weekly\\n`));
+		const job = await queue.getJob(`manual:pm-weekly:${minute}`);
+		assert.ok(job, "stored under the BullMQ-accepted three-part id, on this host's queue");
+		const { enqueueNonce, ...data } = job.data;
+		assert.equal(typeof enqueueNonce, "string");
+		// Exactly the schedule's data, as the scheduler would have stored it (JSON: undefined keys dropped).
+		assert.deepEqual(data, { kind: "local", folder, flow: "pm", task: "plan the week", provider: "ollama", model: "qwen2.5:3b", github: false, packages: false, resume: false, portfolio: true, trigger: { id: "pm-weekly", pattern: "0 6 1 1 *" } });
+		assert.equal(job.name, "local");
+		assert.ok((job.opts.attempts ?? 0) <= 1, `run once, as a scheduled tick is (attempts ${job.opts.attempts}); \`pi-dispatch run\` sets 2`);
+		assert.equal(job.opts.backoff, undefined);
+		out = "";
+		assert.equal(await main(["run", "--trigger", "pm-weekly"], env2, { write, now: () => new Date("2026-10-05T06:00:59Z") }), 0);
+		assert.match(out, new RegExp(`^an identical run was queued at \\d\\d:\\d\\d as manual:pm-weekly:${minute} \\(waiting\\); nothing new was queued\\.\\nthe same trigger queues a new run from the next minute on\\.\\n$`));
+		assert.equal((await queue.getJobCounts("waiting")).waiting, 1);
+	} finally {
+		await queue.obliterate({ force: true }).catch(() => {});
+		await queue.close();
+	}
+});
+
+test("run --trigger finds the cron trigger even when a webhook entry before it spells the same id (#505 review)", async () => {
+	// The folder is not on this machine and the deployment is a fleet, so a found cron trigger ends at the placement
+	// refusal: proof it was found, before Valkey. A webhook-first lookup said "is a label trigger" instead.
+	const { path } = triggersFile([{ ...LABEL_WITH_ID, on: { ...LABEL_WITH_ID.on, id: "pm-weekly" } }, PM("/no/such/folder/on/this/host")]);
+	const r = await refusedTrigger(["run", "--trigger", "pm-weekly"], { VALKEY_URL: "redis://127.0.0.1:1", PI_TRIGGERS_FILE: path, PI_WORKER_NAME: "mini1" });
+	assert.equal(r.err, `error: cron trigger "pm-weekly" runs on another host: its folder is not on this machine. Run this command on the host that has the folder. Nothing was queued.\n`);
+});
+
+test("run --trigger refuses a trigger whose folder is not a git repository, as run <folder> does (#505 review)", async () => {
+	const plain = tempDir("cli-pm-plain-");
+	const { path } = triggersFile([PM(plain)]);
+	const r = await refusedTrigger(["run", "--trigger", "pm-weekly"], { VALKEY_URL: "redis://127.0.0.1:1", PI_TRIGGERS_FILE: path });
+	assert.equal(r.code, 1);
+	assert.match(r.err, /^error: cron trigger "pm-weekly": .* is not a git repository\. .*Nothing was queued\.\n$/);
+});
+
+test("run --trigger reads PI_TRIGGERS_FILE and PI_WORKER_NAME from the deployment .env when this shell sets neither (#505 review)", async () => {
+	const deploy = tempDir("cli-deploy-");
+	const { path } = triggersFile([PM("/no/such/folder/on/this/host")]);
+	writeFileSync(join(deploy, ".env"), `PI_TRIGGERS_FILE=${path}\nPI_WORKER_NAME=mini1\nVALKEY_URL=redis://127.0.0.1:1\n`);
+	const prev = process.cwd();
+	process.chdir(deploy);
+	try {
+		// Both from the file: the trigger is found in ITS triggers file, and the fleet placement (a named host) applies.
+		const r = await refusedTrigger(["run", "--trigger", "pm-weekly"], {});
+		assert.equal(r.err, `error: cron trigger "pm-weekly" runs on another host: its folder is not on this machine. Run this command on the host that has the folder. Nothing was queued.\n`);
+		// A shell that disagrees with the file is refused, naming both: the job would land where the service is not.
+		const d = await refusedTrigger(["run", "--trigger", "pm-weekly"], { PI_WORKER_NAME: "mini2" });
+		assert.equal(d.err, `error: PI_WORKER_NAME is "mini2" in this shell and "mini1" in ${join(process.cwd(), ".env")}: make them agree (the service runs the file's). Nothing was queued.\n`);
+	} finally {
+		process.chdir(prev);
+	}
+});
+
+test("cliDeploymentEnv: this shell's value, else the .env's, a disagreement or an unreadable line refused (#505 review)", () => {
+	const at = (text) => ({ cwd: "/d", platform: "linux", readFile: () => Buffer.from(text) });
+	const keys = ["PI_WORKER_NAME", "PI_TRIGGERS_FILE"];
+	assert.deepEqual(cliDeploymentEnv({ X: "1" }, keys, at("PI_WORKER_NAME=mini1\n")).env, { X: "1", PI_WORKER_NAME: "mini1" });
+	assert.deepEqual(cliDeploymentEnv({ PI_WORKER_NAME: "mini1" }, keys, at("PI_WORKER_NAME=mini1\n")).env, { PI_WORKER_NAME: "mini1" }, "agreeing values");
+	assert.deepEqual(cliDeploymentEnv({ PI_WORKER_NAME: "mini1" }, keys, at("")).env, { PI_WORKER_NAME: "mini1" }, "a key only this shell sets is the shell's");
+	assert.match(cliDeploymentEnv({ PI_WORKER_NAME: "a" }, keys, at("PI_WORKER_NAME=b\n")).problem, /^PI_WORKER_NAME is "a" in this shell and "b" in \/d\/\.env: make them agree/);
+	assert.match(cliDeploymentEnv({}, keys, at('PI_TRIGGERS_FILE="$HOME/t.json"\n')).problem, /has a line for PI_TRIGGERS_FILE that the service's loader may read differently/);
+	const missing = { cwd: "/d", readFile: () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); } };
+	assert.deepEqual(cliDeploymentEnv({ A: "1" }, keys, missing).env, { A: "1" }, "no .env: this shell alone");
+	const denied = { cwd: "/d", readFile: () => { throw Object.assign(new Error("nope"), { code: "EACCES" }); } };
+	assert.match(cliDeploymentEnv({}, keys, denied).problem, /^\/d\/\.env could not be read \(EACCES\), so PI_WORKER_NAME and PI_TRIGGERS_FILE cannot be told$/);
+	assert.deepEqual(cliDeploymentEnv({ PI_WORKER_NAME: "a", PI_TRIGGERS_FILE: "/t" }, keys, denied).env, { PI_WORKER_NAME: "a", PI_TRIGGERS_FILE: "/t" }, "both set here: nothing to tell");
+});
+
+test("run <folder> queues on the host queue the deployment .env names when this shell sets no PI_WORKER_NAME (#505 review, VALKEY_TEST_URL)", { skip: needsDeps || (process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL") }, async () => {
+	const deploy = tempDir("cli-deploy-run-");
+	const host = `t505run-${process.pid}-${Date.now()}`;
+	writeFileSync(join(deploy, ".env"), `PI_WORKER_NAME=${host}\n`);
+	const dir = gitRepo({ dirty: false });
+	const { Queue } = await import("bullmq");
+	const { parseConnection } = await import("../src/connection.mjs");
+	const queue = new Queue(`pi-jobs@${host}`, { connection: parseConnection(process.env.VALKEY_TEST_URL) });
+	const prev = process.cwd();
+	process.chdir(deploy);
+	try {
+		let out = "";
+		assert.equal(await main(["run", dir, "--task", "tidy", "--force"], { VALKEY_URL: process.env.VALKEY_TEST_URL }, { write: (c) => ((out += c), true) }), 0);
+		const jobId = /^queued (\S+) for folder /m.exec(out)?.[1];
+		assert.ok(jobId, out);
+		assert.ok(await queue.getJob(jobId), "on the .env's host queue, never the shared one");
+	} finally {
+		process.chdir(prev);
+		await queue.obliterate({ force: true }).catch(() => {});
+		await queue.close();
+	}
+});
+
+test("run --trigger refuses what the worker's loader refuses: PI_MAX_COST_USD from the deployment .env is applied (#505 review)", async () => {
+	const deploy = tempDir("cli-deploy-cap-");
+	const { path } = triggersFile([PM(gitRepo({ dirty: false }), { maxCostUsd: "2" })]);
+	writeFileSync(join(deploy, ".env"), `PI_TRIGGERS_FILE=${path}\nPI_MAX_COST_USD=1\nVALKEY_URL=redis://127.0.0.1:1\n`);
+	const prev = process.cwd();
+	process.chdir(deploy);
+	try {
+		const r = await refusedTrigger(["run", "--trigger", "pm-weekly"], {});
+		assert.equal(r.code, 1);
+		assert.match(r.err, /^error: trigger at index 0: run\.maxCostUsd is above this deployment's PI_MAX_COST_USD\. .*Nothing was queued\.\n$/);
+	} finally {
+		process.chdir(prev);
+	}
+});
+
+test("TRIGGER_LOADER_ENV_KEYS covers every config value loadSchedules reads, so run --trigger judges a file as the worker does (#505 review)", () => {
+	// A bolt, not a hope: a new config input to the loader that this list misses would let the command fire an entry
+	// the worker refuses. Read from loadSchedules' own source; `fleet` arrives as PI_WORKER_NAME (workerNameDeclared).
+	const src = readFileSync(new URL("../src/schedules.mjs", import.meta.url), "utf8");
+	const start = src.indexOf("export function loadSchedules(");
+	const body = src.slice(start, src.indexOf("\n}\n", start));
+	const read = [...new Set([...body.matchAll(/config\.(\w+)/g)].map((m) => m[1]))].sort();
+	const ENV_OF = { triggersFile: "PI_TRIGGERS_FILE", maxCostUsd: "PI_MAX_COST_USD" };
+	assert.deepEqual(read, Object.keys(ENV_OF).sort(), "loadSchedules reads a config value this bolt does not map");
+	assert.deepEqual([...TRIGGER_LOADER_ENV_KEYS].sort(), [...Object.values(ENV_OF), "PI_WORKER_NAME"].sort());
 });
