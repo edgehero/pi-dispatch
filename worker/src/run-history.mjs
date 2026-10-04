@@ -946,6 +946,132 @@ export function makeFindPreviousRun({ logsDir, fs = nodeFs }) {
 }
 
 /**
+ * What `makeReadRecord` returns for a record file that exists but cannot be read as a record (unreadable, bad JSON,
+ * not an object). Distinct from `null` (no file), so the lost-lock check can say which it met.
+ */
+export const UNREADABLE_RECORD = Object.freeze({ unreadable: true });
+
+/**
+ * Read one job's run record back, by the name `makeRecordWriter` gave it: `<logsDir>/<sanitizeJobId(id)>.json`
+ * (INT-RUN-HISTORY-FILE-CONTRACT, unchanged). Returns the parsed object, `null` when there is no file, or
+ * `UNREADABLE_RECORD` when there is one that is not a record.
+ *
+ * Why the worker reads its own record: the queue can lose a job's lock after the processor finished and wrote
+ * this file, when Valkey was unreachable for longer than BullMQ's lock renewal window. BullMQ then refuses the
+ * completion ("Missing lock") and its stall check takes the job back, so the queue alone says the job failed or
+ * must run again. The record is the store that already knows it finished (DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK).
+ *
+ * The id inside is NOT checked here: `sanitizeJobId` maps `a:b` and `a_b` to one name, and `recordVerdict` refuses
+ * the other job's record as `id-mismatch`, which is the one place that can also say so. NEVER throws.
+ */
+export function makeReadRecord({ logsDir, fs = nodeFs }) {
+	return function readRecord(jobId) {
+		if (jobId === null || jobId === undefined || jobId === "") return null;
+		let text;
+		try {
+			text = fs.readFileSync(join(logsDir, `${sanitizeJobId(jobId)}.json`), "utf8");
+		} catch (err) {
+			return err?.code === "ENOENT" || err?.code === "ENOTDIR" ? null : UNREADABLE_RECORD;
+		}
+		try {
+			const record = JSON.parse(text);
+			return record !== null && typeof record === "object" && !Array.isArray(record) ? record : UNREADABLE_RECORD;
+		} catch {
+			return UNREADABLE_RECORD;
+		}
+	};
+}
+
+/**
+ * How far a record's `startedAt` may sit BEFORE the job's creation and still be this job's record: 5 minutes.
+ *
+ * The two instants come from two clocks. `job.timestamp` is stamped by whoever ENQUEUED the job (the receiver, the
+ * CLI, another worker) and `startedAt` by the worker that ran it, so a producer whose clock runs ahead of the
+ * worker's would make every genuine record look older than its job and silently turn this check off. The
+ * tolerance absorbs ordinary skew between hosts; what it must still refuse is a record of an OLDER job under a
+ * reused id, and such a record is older by at least that job's whole run, its removal from the queue and a new
+ * enqueue, which in practice is far more than 5 minutes. A skew larger than this is an operator problem the
+ * `job_lost_lock_record_rejected` line (`older-than-job`) makes visible.
+ */
+export const RECORD_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * Does this record say that THIS attempt of THIS job finished without failing? Returns `null` when it does,
+ * `"absent"` when there is no record, and otherwise the reason it does not, from a fixed set:
+ * `unreadable`, `id-mismatch`, `other-attempt`, `failed`, `older-than-job`. Pure; never throws.
+ *
+ * `attempt` is the 1-based attempt number the record would carry, which is BullMQ's `attemptsMade + 1` while the
+ * job is processing (see `buildRecord`) and `attemptsMade` after BullMQ failed it (its moveToFailed adds one
+ * before the failed event). A record of an earlier attempt does not answer for a later one.
+ *
+ * `since` is the job's creation time in millis (BullMQ's `job.timestamp`). A job id can be used again once the
+ * old job is gone (a fixed `--trigger` id, a redelivered webhook), while its record lives for the retention
+ * window; a record that started before this job existed (less `RECORD_CLOCK_SKEW_MS`) belongs to the old one. A
+ * missing or unparseable `startedAt` is not trusted for the same reason.
+ *
+ * `failed` (an outcome of `failed`, or none) is refused on purpose: a record written by the catch path says the run
+ * threw, and the queue's verdict (failed, or run again) is then the right one.
+ */
+export function recordVerdict(record, { jobId, attempt, since } = {}) {
+	try {
+		if (record === null || record === undefined) return "absent";
+		if (record === UNREADABLE_RECORD || typeof record !== "object" || Array.isArray(record)) return "unreadable";
+		if (record.jobId !== jobId) return "id-mismatch";
+		if (!Number.isInteger(attempt) || record.attempt !== attempt) return "other-attempt";
+		if (typeof record.outcome !== "string" || record.outcome === "failed") return "failed";
+		if (Number.isFinite(since)) {
+			const started = Date.parse(record.startedAt ?? "");
+			if (!Number.isFinite(started) || started < since - RECORD_CLOCK_SKEW_MS) return "older-than-job";
+		}
+		return null;
+	} catch {
+		return "unreadable";
+	}
+}
+
+/** `recordVerdict` as a yes or no. */
+export const recordSettlesAttempt = (record, opts) => recordVerdict(record, opts) === null;
+
+/**
+ * The lookup the worker asks when the queue lost a job's lock: the local record first, then the fleet's copy.
+ *
+ * On a fleet without a shared `PI_LOGS_DIR`, the host that meets the stalled job is not always the host that ran
+ * it, so the local file can be absent or hold an older attempt. The run mirror (`run-mirror.mjs`) holds the same
+ * record's bytes, so it is asked when the local file does not settle the attempt. `readMirrored` is `null` on a
+ * deployment that declared no worker name, which has no mirror and is one host.
+ *
+ * `onReject(reason, source)` is told about every record it FOUND and refused (`source` is `local` or `mirror`,
+ * `reason` one of `recordVerdict`'s tokens, never `absent`), so the caller can log why the failure path stood.
+ *
+ * Resolves to the record or `null`, and NEVER rejects: a mirror fault is no record, which fails toward today's
+ * behaviour (a failure comment, or a run).
+ */
+export function makeSettledRecord({ readRecord, readMirrored = null }) {
+	return async function settledRecord(jobId, { attempt, since, onReject = () => {} } = {}) {
+		const judge = (record, source) => {
+			const why = recordVerdict(record, { jobId, attempt, since });
+			if (why !== null && why !== "absent") {
+				try {
+					onReject(why, source);
+				} catch {
+					// a reporting fault must not change the verdict
+				}
+			}
+			return why === null;
+		};
+		try {
+			const local = readRecord(jobId);
+			if (judge(local, "local")) return local;
+			if (typeof readMirrored !== "function") return null;
+			const mirrored = await readMirrored(jobId);
+			return judge(mirrored, "mirror") ? mirrored : null;
+		} catch {
+			return null;
+		}
+	};
+}
+
+/**
  * The durable log reaper: an age sweep that deletes `.log` and `.json` history files older than the
  * retention window, keeping the logs directory bounded. Runs at boot AND on the retention timer since
  * issue #292 (`PI_SWEEP_INTERVAL_HOURS`), because a worker that never restarts never re-swept. It holds

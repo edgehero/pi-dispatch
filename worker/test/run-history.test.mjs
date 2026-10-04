@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
-import { authenticExitLines, buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, PLAN_RECORD_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * A fake writable that records chunks and lets a test drive `finish`/`error` timing.
@@ -1686,4 +1687,111 @@ test("PLAN_RECORD_REASONS is the collector's rungs, plan-invalid, envelope-misma
 	const { PLAN_LADDER, PLAN_INVALID } = await import("../src/priorities.mjs");
 	const { ENVELOPE_MISMATCH_REASON } = await import("../src/allocation.mjs");
 	assert.deepEqual([...PLAN_RECORD_REASONS].sort(), [...new Set([...PLAN_COLLECT_REASONS, PLAN_INVALID, ENVELOPE_MISMATCH_REASON, ...PLAN_LADDER])].sort());
+});
+
+// ---- the lost-lock check reads a job's own record back (DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK) ------------
+
+test("makeReadRecord reads back exactly what makeRecordWriter wrote, by the same sanitized name", () => {
+	const logsDir = tempDir("pi-read-record-");
+	const job = { id: "repeat:nightly:1759572000000", name: "local", attemptsMade: 0, data: { kind: "local", folder: "/srv/proj", flow: "tidy" } };
+	const record = buildRecord({ job, result: { outcome: "completed", exitCode: 0, budgetReserved: true }, startedAt: "2026-10-04T10:00:01.000Z", endedAt: "2026-10-04T10:03:00.000Z" });
+	makeRecordWriter({ logsDir })(record);
+	assert.deepEqual(makeReadRecord({ logsDir })(job.id), record);
+	assert.equal(makeReadRecord({ logsDir })("repeat:nightly:1"), null, "another job has no record");
+	// `repeat_nightly_1759572000000` sanitizes to the same file name; its record must not answer for it.
+	// `repeat_nightly_1759572000000` sanitizes to the same file name: the read returns that file, and the verdict refuses it.
+	const collided = makeReadRecord({ logsDir })("repeat_nightly_1759572000000");
+	assert.equal(recordVerdict(collided, { jobId: "repeat_nightly_1759572000000", attempt: 1 }), "id-mismatch", "a colliding sanitized name is not this job's record");
+});
+
+test("makeReadRecord never throws: no file is null, a file that is not a record is UNREADABLE_RECORD", () => {
+	const failing = (code) => ({ readFileSync: () => { throw Object.assign(new Error(code), { code }); } });
+	assert.equal(makeReadRecord({ logsDir: "/nope", fs: failing("ENOENT") })("j1"), null, "no file");
+	assert.equal(makeReadRecord({ logsDir: "/nope", fs: failing("ENOTDIR") })("j1"), null, "no directory");
+	assert.equal(makeReadRecord({ logsDir: "/l", fs: failing("EACCES") })("j1"), UNREADABLE_RECORD, "a file this worker cannot read");
+	for (const body of ["{nope", "null", "[1]", "7"]) {
+		assert.equal(makeReadRecord({ logsDir: "/l", fs: { readFileSync: () => body } })("j1"), UNREADABLE_RECORD, body);
+	}
+	assert.equal(makeReadRecord({ logsDir: "/l", fs: { readFileSync: () => "{}" } })(), null, "no id");
+	assert.equal(makeReadRecord({ logsDir: "/l", fs: { readFileSync: () => "{}" } })(null), null);
+});
+
+const SETTLED = { jobId: "j1", outcome: "completed", attempt: 1, startedAt: "2026-10-04T10:00:01.000Z" };
+const SINCE = Date.parse("2026-10-04T10:00:00.000Z");
+
+test("recordSettlesAttempt: this job, this attempt, not failed, started after the job existed", () => {
+	const ok = (rec, over = {}) => recordSettlesAttempt(rec, { jobId: "j1", attempt: 1, since: SINCE, ...over });
+	assert.equal(ok(SETTLED), true);
+	assert.equal(ok({ ...SETTLED, outcome: "policy", reason: "runner-policy" }), true, "a policy stop also finished");
+	assert.equal(ok({ ...SETTLED, outcome: "failed" }), false, "a failed record keeps the queue's verdict");
+	assert.equal(ok({ ...SETTLED, outcome: null }), false);
+	assert.equal(ok(SETTLED, { attempt: 2 }), false, "a record of attempt 1 does not answer for attempt 2");
+	assert.equal(ok(SETTLED, { attempt: 0 }), false, "nor the other way");
+	assert.equal(ok(SETTLED, { attempt: undefined }), false, "no attempt, no match");
+	assert.equal(ok(SETTLED, { jobId: "j2" }), false);
+	assert.equal(ok({ ...SETTLED, startedAt: new Date(SINCE - RECORD_CLOCK_SKEW_MS - 1).toISOString() }), false, "a record of an older job under a reused id");
+	assert.equal(ok({ ...SETTLED, startedAt: new Date(SINCE - RECORD_CLOCK_SKEW_MS).toISOString() }), true, "a producer clock ahead of the worker's, within the tolerance, still matches");
+	assert.equal(RECORD_CLOCK_SKEW_MS, 5 * 60 * 1000);
+	assert.equal(ok({ ...SETTLED, startedAt: null }), false, "an undated record is not trusted when the job's age is known");
+	assert.equal(ok(SETTLED, { since: undefined }), true, "no creation time: the id and attempt decide");
+	assert.equal(ok(null), false);
+	assert.equal(ok("j1"), false);
+	assert.equal(recordSettlesAttempt(SETTLED), false, "no question, no match");
+});
+
+test("recordVerdict names why a record was refused, from a fixed set", () => {
+	const v = (rec, over = {}) => recordVerdict(rec, { jobId: "j1", attempt: 1, since: SINCE, ...over });
+	assert.equal(v(SETTLED), null);
+	assert.equal(v(null), "absent");
+	assert.equal(v(undefined), "absent");
+	assert.equal(v(UNREADABLE_RECORD), "unreadable");
+	assert.equal(v("j1"), "unreadable");
+	assert.equal(v([SETTLED]), "unreadable");
+	assert.equal(v({ ...SETTLED, jobId: "j2" }), "id-mismatch");
+	assert.equal(v(SETTLED, { attempt: 2 }), "other-attempt");
+	assert.equal(v({ ...SETTLED, outcome: "failed" }), "failed");
+	assert.equal(v({ ...SETTLED, outcome: undefined }), "failed");
+	assert.equal(v({ ...SETTLED, startedAt: "2026-10-04T09:00:00.000Z" }), "older-than-job");
+	assert.equal(v({ ...SETTLED, startedAt: "garbage" }), "older-than-job");
+});
+
+test("makeSettledRecord: the local record first, the mirror only when the local one does not settle the attempt, and never a rejection", async () => {
+	const at = { attempt: 1, since: SINCE };
+	const mirrorAsked = [];
+	const mirror = (rec) => async (id) => (mirrorAsked.push(id), rec);
+	assert.deepEqual(await makeSettledRecord({ readRecord: () => SETTLED, readMirrored: mirror(null) })("j1", at), SETTLED);
+	assert.deepEqual(mirrorAsked, [], "a local hit asks no mirror");
+	assert.deepEqual(await makeSettledRecord({ readRecord: () => null, readMirrored: mirror(SETTLED) })("j1", at), SETTLED, "the host that meets the job need not be the one that ran it");
+	assert.deepEqual(
+		await makeSettledRecord({ readRecord: () => ({ ...SETTLED, outcome: "failed" }), readMirrored: mirror(SETTLED) })("j1", at),
+		SETTLED,
+		"this host holds an earlier failed attempt, another host ran the one that finished",
+	);
+	assert.equal(await makeSettledRecord({ readRecord: () => null, readMirrored: mirror({ ...SETTLED, attempt: 2 }) })("j1", at), null, "the mirror's record is held to the same test");
+	assert.equal(await makeSettledRecord({ readRecord: () => null })("j1", at), null, "no mirror armed: a single host");
+	assert.equal(await makeSettledRecord({ readRecord: () => null, readMirrored: async () => { throw new Error("ECONNREFUSED"); } })("j1", at), null, "a mirror fault is no record");
+	assert.equal(await makeSettledRecord({ readRecord: () => { throw new Error("boom"); } })("j1", at), null, "a reader fault is no record");
+});
+
+test("an unreadable MIRROR value is reported as unreadable from mirror, and never accepted", async () => {
+	const { readMirroredRecord } = await import("../src/run-mirror.mjs");
+	const seen = [];
+	const lookup = makeSettledRecord({ readRecord: () => null, readMirrored: (id) => readMirroredRecord({ get: async () => "{garbage" }, id) });
+	assert.equal(await lookup("j1", { attempt: 1, since: SINCE, onReject: (reason, source) => seen.push([reason, source]) }), null);
+	assert.deepEqual(seen, [["unreadable", "mirror"]]);
+});
+
+test("makeSettledRecord reports every record it found and refused, with its source, and never one it did not find", async () => {
+	const seen = [];
+	const onReject = (reason, source) => seen.push([reason, source]);
+	const at = { attempt: 1, since: SINCE, onReject };
+	await makeSettledRecord({ readRecord: () => ({ ...SETTLED, attempt: 2 }), readMirrored: async () => UNREADABLE_RECORD })("j1", at);
+	assert.deepEqual(seen, [["other-attempt", "local"], ["unreadable", "mirror"]]);
+	seen.length = 0;
+	await makeSettledRecord({ readRecord: () => null, readMirrored: async () => null })("j1", at);
+	assert.deepEqual(seen, [], "absent everywhere is not a refusal");
+	assert.deepEqual(await makeSettledRecord({ readRecord: () => ({ ...SETTLED, outcome: "failed" }), readMirrored: async () => SETTLED })("j1", at), SETTLED);
+	assert.deepEqual(seen, [["failed", "local"]], "a refused local record is reported even when the mirror then settles it");
+	const throwing = makeSettledRecord({ readRecord: () => ({ ...SETTLED, attempt: 9 }) });
+	assert.equal(await throwing("j1", { attempt: 1, since: SINCE, onReject: () => { throw new Error("log down"); } }), null, "a throwing reporter changes nothing");
 });

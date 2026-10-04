@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -283,6 +283,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(sleep ? { sleep } : {}),
 			...(watchScopedLimits ? { watchScopedLimits } : {}),
 			...(watchProjects ? { watchProjects } : {}),
+			...(readMirroredRecord ? { readMirroredRecord } : {}),
 			...(authResolveTimeoutMs ? { authResolveTimeoutMs } : {}),
 			...(ensureJobsDir ? { ensureJobsDir } : {}),
 			...(ensureUnderAccountRoot ? { ensureUnderAccountRoot } : {}),
@@ -2656,6 +2657,228 @@ test("with PI_ON_FAILURE unset, a terminal failure produces no on_failure line a
 	assert.ok(!lines.some((l) => l.event === "on_failure"), "unset means not constructed: no spawn, no line, byte-identical");
 	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"]);
 	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_completed")), ["event", "jobId", "outcome", "reason", "host"]);
+});
+
+// --- a job that finished, then lost its lock (DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK) ---------------------------------
+
+/** The record the first run wrote before Valkey came back and BullMQ refused its completion. */
+const LOST_LOCK_CREATED = Date.parse("2026-10-04T10:00:00.000Z");
+const lostLockRecord = (id, over = {}) => ({ jobId: id, kind: "github", outcome: "completed", reason: null, exitCode: 0, budgetReserved: true, attempt: 1, startedAt: "2026-10-04T10:00:01.000Z", endedAt: "2026-10-04T10:04:00.000Z", ...over });
+/** The job as BullMQ emits it after the stall check's deferred failure: `attemptsMade` already counts this attempt. */
+const lostLockJob = (id, over = {}) => ({ id, data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } }, attemptsMade: 1, finishedOn: 9, timestamp: LOST_LOCK_CREATED, ...over });
+const stalledError = async () => {
+	const { STALLED_FAILED_REASON } = await import("../src/index.mjs");
+	return new Error(STALLED_FAILED_REASON);
+};
+
+async function lostLockBoot({ env = {}, readMirroredRecord } = {}) {
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const out = await runStart({ env: { PI_ON_FAILURE: "/nope/pi-notify-does-not-exist", ...env }, makeAuth, makeHost: () => host, ...(readMirroredRecord ? { readMirroredRecord } : {}) });
+	const drive = async (job, err) => {
+		const from = bootLines.length;
+		out.handlers.failed(job, err);
+		await settleListeners();
+		return parseLines(bootLines.slice(from));
+	};
+	return { ...out, posted, drive };
+}
+
+test("a terminal stall failure of a job whose record says this attempt completed: one lost-lock line, no failure comment, no page", { skip }, async () => {
+	const logsDir = tempDir("pi-lost-lock-");
+	writeFileSync(join(logsDir, "gh-41.json"), `${JSON.stringify(lostLockRecord("gh-41"))}\n`);
+	const { drive, posted } = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir } });
+	const lines = await drive(lostLockJob("gh-41"), await stalledError());
+	assert.deepEqual(posted, [], "the job completed: nobody is told it failed");
+	assert.ok(!lines.some((l) => l.event === "on_failure"), "and nobody is paged");
+	assert.ok(!lines.some((l) => l.event === "job_failed"), "job_failed is not the terminal line of a job that completed");
+	const terminal = lines.filter((l) => l.event === "job_lost_lock_after_completion");
+	assert.equal(terminal.length, 1, "exactly one terminal line (REQ-LOCAL-JOB-VISIBILITY)");
+	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host"]);
+	assert.equal(terminal[0].jobId, "gh-41");
+	assert.equal(terminal[0].outcome, "completed");
+});
+
+test("the lost-lock check keeps the failure comment and the page unless the record settles THIS attempt, for THIS reason", { skip }, async () => {
+	const logsDir = tempDir("pi-lost-lock-");
+	const write = (id, over) => writeFileSync(join(logsDir, `${id}.json`), `${JSON.stringify(lostLockRecord(id, over))}\n`);
+	write("gh-a", { attempt: 1 });
+	write("gh-f", { outcome: "failed" });
+	write("gh-o");
+	write("gh-old", { startedAt: "2026-10-04T09:00:00.000Z" });
+	const { drive, posted } = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir } });
+	const rejected = [];
+	const cases = [
+		["a record of an earlier attempt", lostLockJob("gh-a", { attemptsMade: 2 }), await stalledError()],
+		["a failed record", lostLockJob("gh-f"), await stalledError()],
+		["any other failure reason", lostLockJob("gh-o"), new Error("boom")],
+		["a record older than the job (a reused id)", lostLockJob("gh-old"), await stalledError()],
+		["no record at all", lostLockJob("gh-none"), await stalledError()],
+	];
+	for (const [label, job, err] of cases) {
+		posted.length = 0;
+		const lines = await drive(job, err);
+		assert.deepEqual(posted, ["Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log."], `${label}: comments`);
+		assert.equal(lines.filter((l) => l.event === "on_failure").length, 1, `${label}: pages`);
+		assert.equal(lines.filter((l) => l.event === "job_failed").length, 1, `${label}: job_failed is the terminal line`);
+		assert.ok(!lines.some((l) => l.event === "job_lost_lock_after_completion"), `${label}: no lost-lock line`);
+		rejected.push(lines.filter((l) => l.event === "job_lost_lock_record_rejected").map((l) => [l.jobId, l.reason, l.source]));
+	}
+	// Why the record did not suppress the comment, said with a fixed token (never for a reason the check does not
+	// apply to, and never for a record that is not there).
+	assert.deepEqual(rejected, [[["gh-a", "other-attempt", "local"]], [["gh-f", "failed", "local"]], [], [["gh-old", "older-than-job", "local"]], []]);
+});
+
+test("a producer clock ahead of the worker's, within RECORD_CLOCK_SKEW_MS, still suppresses; an unreadable record is named", { skip }, async () => {
+	const logsDir = tempDir("pi-lost-lock-");
+	// The record started 4 minutes BEFORE the job's creation stamp: two hosts' clocks, not an older job.
+	writeFileSync(join(logsDir, "gh-skew.json"), `${JSON.stringify(lostLockRecord("gh-skew", { startedAt: new Date(LOST_LOCK_CREATED - 4 * 60_000).toISOString() }))}\n`);
+	writeFileSync(join(logsDir, "gh-bad.json"), "{not json");
+	const { drive, posted } = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir } });
+	const skewed = await drive(lostLockJob("gh-skew"), await stalledError());
+	assert.deepEqual(posted, []);
+	assert.equal(skewed.filter((l) => l.event === "job_lost_lock_after_completion").length, 1);
+	const bad = await drive(lostLockJob("gh-bad"), await stalledError());
+	assert.equal(posted.length, 1, "an unreadable record keeps the failure path");
+	assert.deepEqual(bad.filter((l) => l.event === "job_lost_lock_record_rejected").map((l) => [l.reason, l.source]), [["unreadable", "local"]]);
+});
+
+test("a lost-lock job whose record is a paid policy stop pages as that stop, once, and comments nothing more", { skip }, async () => {
+	const logsDir = tempDir("pi-lost-lock-");
+	writeFileSync(join(logsDir, "gh-p.json"), `${JSON.stringify(lostLockRecord("gh-p", { outcome: "policy", reason: "runner-policy", exitCode: 2 }))}\n`);
+	writeFileSync(join(logsDir, "gh-q.json"), `${JSON.stringify(lostLockRecord("gh-q", { outcome: "policy", reason: "over-budget", budgetReserved: false }))}\n`);
+	const { drive, posted } = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir } });
+	const paid = await drive(lostLockJob("gh-p"), await stalledError());
+	assert.deepEqual(posted, [], "the processor already posted the stop's own sentence before it returned");
+	const pages = paid.filter((l) => l.event === "on_failure");
+	assert.equal(pages.length, 1, "the page the completed listener never got to send");
+	assert.deepEqual(paid.find((l) => l.event === "job_lost_lock_after_completion"), { event: "job_lost_lock_after_completion", jobId: "gh-p", outcome: "policy", reason: "runner-policy", host: paid.find((l) => l.event === "job_lost_lock_after_completion").host });
+	const free = await drive(lostLockJob("gh-q"), await stalledError());
+	assert.ok(!free.some((l) => l.event === "on_failure"), "a free refusal pages nobody, exactly as the completed listener decides");
+	assert.deepEqual(posted, []);
+});
+
+test("on a fleet the lost-lock check falls back to the run mirror, and a single host never asks one", { skip }, async () => {
+	const logsDir = tempDir("pi-lost-lock-");
+	const asked = [];
+	const fromMirror = async (_redis, sanitizedId) => (asked.push(sanitizedId), lostLockRecord("repeat:n:5"));
+	const fleet = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir, PI_WORKER_NAME: `ll-${process.pid}` }, readMirroredRecord: fromMirror });
+	const lines = await fleet.drive(lostLockJob("repeat:n:5"), await stalledError());
+	assert.deepEqual(asked, ["repeat_n_5"], "this host has no file for the job; the mirror is asked by the writer's own sanitized id");
+	assert.deepEqual(fleet.posted, []);
+	assert.equal(lines.filter((l) => l.event === "job_lost_lock_after_completion").length, 1);
+	assert.ok(!lines.some((l) => l.event === "on_failure" || l.event === "job_failed"));
+
+	asked.length = 0;
+	const single = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir }, readMirroredRecord: fromMirror });
+	const alone = await single.drive(lostLockJob("repeat:n:5"), await stalledError());
+	assert.deepEqual(asked, [], "no worker name, no mirror, no Valkey read");
+	assert.equal(single.posted.length, 1, "and with no record anywhere the failure path stands");
+	assert.equal(alone.filter((l) => l.event === "job_failed").length, 1);
+});
+
+test("LIVE: a job whose lock is lost while its processor runs is run once, neither commented failed nor paged, plain and scheduled", { skip }, async () => {
+	const { Queue, Worker } = await import("bullmq");
+	const { parseConnection, makeRedisClient } = await import("../src/connection.mjs");
+	const { makeProcessor } = await import("../src/index.mjs");
+	const { makeRecordWriter: realRecordWriter } = await import("../src/run-history.mjs");
+	const logsDir = tempDir("pi-lost-lock-live-");
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	// The REAL record writer and the REAL listeners and lookup, from a real boot; only the queue below is this test's.
+	const { captured, handlers } = await runStart({ env: { PI_LOGS_DIR: logsDir, PI_ON_FAILURE: "/nope/pi-notify-does-not-exist" }, makeAuth, makeHost: () => host, makeRecordWriter: realRecordWriter });
+
+	const name = `pi-jobs-lostlock-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const conn = parseConnection(VALKEY_URL);
+	const redis = makeRedisClient(VALKEY_URL);
+	const queue = new Queue(name, { connection: conn });
+	const fixedNow = new Date(Date.UTC(2099, 0, 5, 12, 0, 0));
+	const budgetKey = "budget:2099-01-05";
+	const runs = [];
+	const processorLogs = [];
+	const events = [];
+	let current = null;
+	let worker;
+	const waitFor = async (fn, ms = 15_000) => {
+		const deadline = Date.now() + ms;
+		for (;;) {
+			const v = await fn();
+			if (v) return v;
+			if (Date.now() > deadline) throw new Error("waitFor timed out");
+			await new Promise((r) => setTimeout(r, 50));
+		}
+	};
+	try {
+		await redis.del(budgetKey);
+		const base = makeProcessor({
+			cancelJob: () => {},
+			stopContainer: () => {},
+			redis,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 100, concurrency: 1 }),
+			recordRun: captured.recordRun,
+			settledRecord: captured.settledRecord,
+			deps: {
+				mintToken: async () => null,
+				isDefaultBranchProtected: async () => true,
+				prepareWorkspace: async () => ({ workspace: "/tmp/ws", jobDir: "/tmp/job" }),
+				// The container "runs", and while it does the queue loses the job's lock: the state a Valkey outage
+				// longer than the renewal window leaves (b1's repro), made deterministic by deleting the key.
+				runContainer: async () => {
+					const id = current;
+					runs.push(id);
+					// A second run of one id (the defect) returns at once, so it fails on the run count below, not on a timeout.
+					if (runs.filter((r) => r === id).length > 1) return { code: 0, aborted: false };
+					await redis.del(`bull:${name}:${id}:lock`);
+					await waitFor(async () => !(await redis.lrange(`bull:${name}:active`, 0, -1)).includes(id));
+					return { code: 0, aborted: false };
+				},
+				cleanup: async () => {},
+				comment: async () => {},
+				log: (event, fields) => processorLogs.push({ event, ...fields }),
+				now: fixedNow,
+			},
+		});
+		const processor = (job, token, signal) => ((current = job.id), base(job, token, signal));
+		worker = new Worker(name, processor, { connection: { ...conn, maxRetriesPerRequest: null }, concurrency: 1, maxStalledCount: 0, stalledInterval: 250 });
+		worker.on("error", () => {});
+		const from = bootLines.length;
+		worker.on("failed", (job, err) => (events.push(["failed", job.id]), handlers.failed(job, err)));
+		worker.on("completed", (job, result) => (events.push(["completed", job.id]), handlers.completed(job, result)));
+
+		// PLAIN: the stall check stores a deferred failure, and the next pickup fails the job without the processor.
+		await queue.add("local", { kind: "local", folder: "/proj", flow: "tidy", provider: "anthropic", model: "m", maxTurns: 7 }, { jobId: "manual:lostlock:1" });
+		await waitFor(() => events.some(([e, id]) => e === "failed" && id === "manual:lostlock:1"));
+		// Either terminal line, so a regression fails on the assertion below rather than on a timeout.
+		const plainEnd = await waitFor(() => parseLines(bootLines.slice(from)).find((l) => (l.event === "job_lost_lock_after_completion" || l.event === "job_failed") && l.jobId === "manual:lostlock:1"));
+		assert.equal(plainEnd.event, "job_lost_lock_after_completion", "the plain job's terminal line says it completed and lost its lock");
+		assert.deepEqual(runs, ["manual:lostlock:1"], "the plain job ran once");
+
+		// SCHEDULED: the stall check skips the failure for a live scheduler and moves the job back to wait.
+		await queue.upsertJobScheduler("lostlock", { every: 3_600_000 }, { name: "local", data: { kind: "local", folder: "/proj", flow: "tidy", provider: "anthropic", model: "m", maxTurns: 7, trigger: { id: "lostlock", pattern: "every" } } });
+		await waitFor(() => events.some(([e, id]) => e === "completed" && id.startsWith("repeat:lostlock:")));
+		const schedId = events.find(([e, id]) => e === "completed" && id.startsWith("repeat:lostlock:"))[1];
+		assert.deepEqual(runs, ["manual:lostlock:1", schedId], "the scheduled job ran once: its re-delivery was returned, not run (CONST-RETRY-INFRA-ONLY)");
+		assert.ok(processorLogs.some((l) => l.event === "job_lost_lock_after_completion" && l.jobId === schedId && l.outcome === "completed"));
+
+		await settleListeners();
+		const lines = parseLines(bootLines.slice(from));
+		assert.deepEqual(posted, [], "no failure comment for either job");
+		assert.ok(!lines.some((l) => l.event === "comment"), "nothing through the local comment fallthrough either");
+		assert.ok(!lines.some((l) => l.event === "on_failure"), "nobody paged");
+		assert.ok(!lines.some((l) => l.event === "job_failed"), "no job_failed line");
+		assert.deepEqual(lines.filter((l) => l.event === "job_completed").map((l) => [l.jobId, l.outcome]), [[schedId, "completed"]], "the scheduled job ends completed, as its record says");
+		const record = JSON.parse(readFileSync(join(logsDir, `${schedId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf8"));
+		assert.equal(record.attempt, 1, "the first run's record stands, not a second run's");
+	} finally {
+		await queue.removeJobScheduler("lostlock").catch(() => {});
+		await worker?.close(true).catch(() => {});
+		await queue.obliterate({ force: true }).catch(() => {});
+		await queue.close().catch(() => {});
+		await redis.del(budgetKey).catch(() => {});
+		redis.disconnect();
+	}
 });
 
 test("a terminal LOCAL failure comments into the log fallthrough with the fixed sentence, and posts nothing to any forge (review finding)", { skip }, async () => {

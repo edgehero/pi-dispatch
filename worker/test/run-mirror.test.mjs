@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MIRROR_MAX_DAYS, RUNS_INDEX, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
+import { UNREADABLE_RECORD } from "../src/run-history.mjs";
+import { MIRROR_MAX_DAYS, RUNS_INDEX, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -235,4 +236,23 @@ test("hosts come from the RECORDS, not from where a row was read", () => {
 	// Which is what makes the host count correct on shared storage too, with no extra code.
 	assert.deepEqual(hostsIn([record("a", "x", { host: "m2" }), record("b", "y", { host: "m1" }), record("c", "z", { host: "m1" })]), ["m1", "m2"]);
 	assert.deepEqual(hostsIn([{ jobId: "a" }]), [], "a pre-#57 record names no host and invents none");
+});
+
+// ---- readMirroredRecord: the by-id read the lost-lock check falls back to on a fleet ----------------------
+
+test("readMirroredRecord reads one record by its sanitized id; absent or unreachable is null, a value that is not a record is UNREADABLE_RECORD, never a throw", async () => {
+	const rec = { jobId: "repeat:n:1", outcome: "completed", attempt: 1 };
+	const asked = [];
+	const redis = (value) => ({ get: async (k) => (asked.push(k), typeof value === "function" ? value() : value) });
+	assert.deepEqual(await readMirroredRecord(redis(JSON.stringify(rec)), "repeat_n_1"), rec);
+	assert.deepEqual(asked, [runRecordKey("repeat_n_1")], "one GET of the writer's own key, no index scan");
+	assert.equal(await readMirroredRecord(redis(null), "x"), null, "absent (expired, or never mirrored)");
+	assert.equal(await readMirroredRecord(redis("{nope"), "x"), UNREADABLE_RECORD, "unparseable: there, but not a record");
+	assert.equal(await readMirroredRecord(redis("[1]"), "x"), UNREADABLE_RECORD, "not a record");
+	assert.equal(await readMirroredRecord(redis("null"), "x"), UNREADABLE_RECORD);
+	assert.equal(await readMirroredRecord(redis(""), "x"), UNREADABLE_RECORD, "an empty value");
+	assert.equal(await readMirroredRecord(redis(() => Promise.reject(new Error("ECONNREFUSED"))), "x"), null, "unreachable");
+	assert.equal(await readMirroredRecord({ get: () => new Promise(() => {}) }, "x", { timeoutMs: 5 }), null, "a server that never answers is bounded, not awaited forever");
+	assert.equal(await readMirroredRecord(null, "x"), null, "no mirror armed");
+	assert.equal(await readMirroredRecord(redis(JSON.stringify(rec)), ""), null, "no id");
 });

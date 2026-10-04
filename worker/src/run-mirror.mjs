@@ -1,3 +1,5 @@
+import { UNREADABLE_RECORD } from "./run-history.mjs";
+
 /**
  * A fleet-visible copy of the run history (issue #57, Gap 3).
  *
@@ -184,6 +186,34 @@ export async function readMirroredRuns(redis, { limit = 50, sinceMs = 0, now = (
 		}
 	}
 	return { runs, degraded: runs.length >= limit ? "truncated" : "ok" };
+}
+
+/**
+ * One run's mirrored record, by its sanitized id: the parsed object, `null`, or `UNREADABLE_RECORD`. Never throws,
+ * never rejects.
+ *
+ * The by-id read the lost-lock check needs (`makeSettledRecord` in `run-history.mjs`): one bounded `GET`, not the
+ * index scan `readMirroredRuns` does for the panel. Unreachable and absent are `null` (nothing found); a value that
+ * is there but is not a record (unparseable, empty, not an object) is `UNREADABLE_RECORD`, exactly as the local
+ * reader says it, so the check can log `unreadable` from `mirror`. Neither is ever accepted: the caller keeps
+ * today's path.
+ */
+export async function readMirroredRecord(redis, sanitizedJobId, { timeoutMs = OP_TIMEOUT_MS } = {}) {
+	if (!redis || !sanitizedJobId) return null;
+	try {
+		const raw = await bounded(redis.get(runRecordKey(sanitizedJobId)), timeoutMs);
+		if (raw === null || raw === undefined) return null;
+		if (typeof raw !== "string" || raw === "") return UNREADABLE_RECORD;
+		let rec;
+		try {
+			rec = JSON.parse(raw);
+		} catch {
+			return UNREADABLE_RECORD;
+		}
+		return rec !== null && typeof rec === "object" && !Array.isArray(rec) ? rec : UNREADABLE_RECORD;
+	} catch {
+		return null; // unreachable or timed out: nothing was read
+	}
 }
 
 /**
