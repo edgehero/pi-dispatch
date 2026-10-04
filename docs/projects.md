@@ -118,7 +118,9 @@ Caps live in [`scoped-limits.json`](scoped-limits.md#project-rows), never in thi
 
 - Over its `day`, `week` or `month`, a member's job is refused with reason `project-cap`.
 - Over its `concurrent`, a member's job waits until a slot frees, on any host.
-- Dollar windows (`dayUsd`, `weekUsd`, `monthUsd`) refuse with `dollar-cap`.
+- Dollar windows (`dayUsd`, `weekUsd`, `monthUsd`) refuse with `dollar-cap`. Under an allocation envelope the
+  project's share of the split narrows the envelope's window, and a refusal by the share is `allocation-cap`
+  ([allocation](allocation.md)).
 - A project row needs `"version": 2` in `scoped-limits.json`, even with counts only. The panel and the tools write it.
 
 The row's id must be a project here. A row naming a missing project stops the worker from starting, and a live
@@ -156,6 +158,10 @@ skips the comparison.
 
 - A folder matches by its path as written, resolved but not followed: a symlinked folder and its target are two
   separate members. List the path your triggers use.
+- A local job's folder is mounted by the path it resolves to. When that resolved folder is a member of another
+  project than the one its written path belongs to, or of any project when its written path is in none, the job is
+  refused as `local-folder-project-changed` before anything is spent, with or without an envelope, so a link cannot
+  bill one project's work to another. A resolved folder in no project is fine.
 - Paths and repo names match case-sensitively. On macOS, `/SRV/x` does not match a member `/srv/x`, even though the
   file system treats them as one folder.
 - A forge member names a forge kind, not an instance. Two hosts that point one forge kind at two different servers

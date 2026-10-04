@@ -7,8 +7,12 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { GIT_READ_FLAGS } from "../src/git-hardening.mjs";
 import { PI_LIMITS } from "../src/materialize.mjs";
-import { LOCAL_FOLDER_NO_COMMIT, LOCAL_FOLDER_NOT_A_REPO, LOCAL_FOLDER_UNREADABLE_REPO, prepareLocalWorkspace } from "../src/prepare-local.mjs";
+import { LOCAL_FOLDER_ESCAPED, LOCAL_FOLDER_HOLDS_ENVELOPE, LOCAL_FOLDER_NO_COMMIT, LOCAL_FOLDER_NOT_A_REPO, LOCAL_FOLDER_UNREADABLE_REPO, prepareLocalWorkspace } from "../src/prepare-local.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+
+// Issue #504 part B: prepare resolves the folder (realpathSync.native) before anything else, so a fake `fs` that invents a
+// folder at a path that does not exist must resolve it too. These fakes resolve every path to itself.
+const asResolved = Object.assign((p) => p, { native: (p) => p });
 
 function git(dir, args) {
 	return execFileSync("git", ["-C", dir, ...args], {
@@ -41,7 +45,9 @@ test("prepares a local git folder: materialises .pi/ from HEAD, writes the task,
 	const jobDir = tempDir("pi-job-");
 	const result = await prepareLocalWorkspace({ folder, task: "please tidy the imports", jobDir });
 
-	assert.equal(result.workspace, folder, "the folder itself is the workspace (edited in place)");
+	// Issue #504 part B: the RESOLVED folder, deliberately (on macOS a temp dir under /var is /private/var): the path the
+	// container mounts is the one prepare judged, never the raw string a link could redirect afterwards.
+	assert.equal(result.workspace, realFs.realpathSync.native(folder), "the folder itself is the workspace (edited in place), resolved");
 	assert.equal(readFileSync(join(jobDir, "prompt.md"), "utf8"), "please tidy the imports");
 	assert.equal(readFileSync(join(jobDir, "pi/APPEND_SYSTEM.md"), "utf8"), "LOCAL-PERSONA-SENTINEL");
 	assert.ok(result.materialised.includes("pi/skills/tidy/SKILL.md"));
@@ -160,7 +166,7 @@ test("a repository with no commit is refused by its own reason, RETURNED, writin
 });
 
 test("git's exit codes decide only with the follow-ups: unborn is no-commit, any other 1 or 128 is unreadable-repo, anything else throws (#524)", async () => {
-	const fs = { ...realFs, statSync: () => ({ isDirectory: () => true }) };
+	const fs = { ...realFs, realpathSync: asResolved, statSync: () => ({ isDirectory: () => true }) };
 	const code = (c) => Object.assign(new Error(`git failed: ${c}`), { code: c });
 	// A scripted git: the answer per subcommand, so each branch of the decision is driven on its own.
 	const scripted = (answers) => {
@@ -252,6 +258,7 @@ test("every determinate absence of .git is the not-a-repo refusal; the folder's 
 	for (const code of ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]) {
 		const fs = {
 			...realFs,
+			realpathSync: asResolved,
 			statSync: (p) => {
 				if (String(p).endsWith(".git")) throw Object.assign(new Error(`${code}: simulated`), { code });
 				return { isDirectory: () => true };
@@ -279,7 +286,7 @@ test("a folder that cannot be STATTED is retryable, not 'does not exist'", async
 	// The `fs` seam exists because a chmod cannot express this: root ignores permissions, Windows differs,
 	// and EIO has no filesystem you can build in a test at all.
 	for (const code of ["EACCES", "EIO", "ETIMEDOUT", "ESTALE", "EMFILE", "EAGAIN"]) {
-		const fs = { ...realFs, statSync: () => { throw Object.assign(new Error(`${code}: simulated`), { code }); } };
+		const fs = { ...realFs, realpathSync: asResolved, statSync: () => { throw Object.assign(new Error(`${code}: simulated`), { code }); } };
 		await assert.rejects(
 			() => prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs }),
 			(e) => e.piDispatchRetry === true && e.piDispatchConfig === undefined,
@@ -294,7 +301,7 @@ test("ENOENT and ENOTDIR still refuse determinately, and still name which check 
 	// ELOOP and ENAMETOOLONG join absence: a symlink cycle and an over-long name resolve identically
 	// forever, so retrying either is paying to be told so twice.
 	for (const code of ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]) {
-		const fs = { ...realFs, statSync: () => { throw Object.assign(new Error(`${code}: simulated`), { code }); } };
+		const fs = { ...realFs, realpathSync: asResolved, statSync: () => { throw Object.assign(new Error(`${code}: simulated`), { code }); } };
 		await assert.rejects(
 			() => prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs }),
 			(e) => e.piDispatchConfig === true && /local folder does not exist/.test(e.message),
@@ -308,6 +315,7 @@ test("a transient fault on .git alone is retryable, and does not read as 'not a 
 	// repository is not a repository, because one stat of `.git` hit EACCES.
 	const fs = {
 		...realFs,
+		realpathSync: asResolved,
 		statSync: (p) => {
 			if (String(p).endsWith(".git")) throw Object.assign(new Error("EACCES: simulated"), { code: "EACCES" });
 			return { isDirectory: () => true };
@@ -325,6 +333,7 @@ test("the transient-fault message carries the BASENAME, never the absolute path 
 	// reducing folders to basenames. The FAILED panel section renders exactly this string.
 	const fs = {
 		...realFs,
+		realpathSync: asResolved,
 		statSync: () => {
 			throw Object.assign(new Error("EIO: simulated"), { code: "EIO" });
 		},
@@ -342,6 +351,7 @@ test("a worktree's .git is a FILE, and statSync accepts it exactly as existsSync
 	const seen = [];
 	const fs = {
 		...realFs,
+		realpathSync: asResolved,
 		statSync: (p) => {
 			seen.push(String(p));
 			return { isDirectory: () => false, isFile: () => true };
@@ -404,4 +414,70 @@ test("every host-side git invocation begins with the shared hardening flags", ()
 		[],
 		"every host-side git argv must start by spreading worker/src/git-hardening.mjs's constants -- a hostile repo config runs code on the HOST, outside any container, and `git status`/`check-ignore` really do invoke core.fsmonitor",
 	);
+});
+
+// ── issue #504 part B: the folder is resolved at prepare, mounted resolved, and judged where it now lies ───────────────
+
+test("a link below a run root swapped after the check is never followed out of the root: refused, and a link inside mounts its target (#504)", async () => {
+	// Real files, real links: the swap is the thing under test. `root` is a run root, `inside` a repo in it, `outside` a
+	// repo elsewhere (an operator's home, say). `root/link` is what dispatch_run was given while it pointed inside.
+	const root = realFs.realpathSync.native(tempDir("pi-root-"));
+	const inside = join(root, "proj");
+	realFs.mkdirSync(inside);
+	git(inside, ["init", "-q"]);
+	git(inside, ["commit", "-q", "--allow-empty", "-m", "x"]);
+	const outside = realFs.realpathSync.native(committedRepo("pi-outside-"));
+	const link = join(root, "link");
+	realFs.symlinkSync(inside, link);
+	const jobPaths = { runRoots: [root], cronFolders: [] };
+
+	const ok = await prepareLocalWorkspace({ folder: link, task: "x", jobDir: join(tempDir("j-"), "job"), jobPaths });
+	assert.equal(ok.workspace, inside, "the RESOLVED folder is the workspace, so the mount is the folder that was judged");
+	assert.notEqual(ok.workspace, link, "never the raw string a link could redirect later");
+
+	// A job with the root mounted swaps the link to a folder outside every job path.
+	realFs.unlinkSync(link);
+	realFs.symlinkSync(outside, link);
+	const jobDir = join(tempDir("j-"), "job");
+	const swapped = await prepareLocalWorkspace({ folder: link, task: "x", jobDir, jobPaths });
+	assert.deepEqual(swapped, { outcome: "policy", reason: LOCAL_FOLDER_ESCAPED });
+	assert.equal(existsSync(jobDir), false, "refused before anything was written");
+
+	// The same link named by an operator outside every job path is not held to them: nothing there is a job's.
+	const own = await prepareLocalWorkspace({ folder: link, task: "x", jobDir: join(tempDir("j-"), "job"), jobPaths: { runRoots: [], cronFolders: [] } });
+	assert.equal(own.workspace, outside);
+});
+
+test("a cron folder is a job path too: a link planted below it cannot carry a folder out of it (#504)", async () => {
+	const cron = realFs.realpathSync.native(committedRepo("pi-cron-"));
+	const outside = realFs.realpathSync.native(committedRepo("pi-outside-"));
+	realFs.symlinkSync(outside, join(cron, "away"));
+	const jobPaths = { runRoots: [], cronFolders: [cron] };
+	assert.deepEqual(await prepareLocalWorkspace({ folder: join(cron, "away"), task: "x", jobDir: join(tempDir("j-"), "job"), jobPaths }), { outcome: "policy", reason: LOCAL_FOLDER_ESCAPED });
+	// The cron folder itself, named as it is, resolves to itself.
+	const self = await prepareLocalWorkspace({ folder: cron, task: "x", jobDir: join(tempDir("j-"), "job"), jobPaths });
+	assert.equal(self.workspace, cron);
+});
+
+test("a folder that resolves to the envelope's folder or above it is refused, whatever it was called (#504)", async () => {
+	const dir = realFs.realpathSync.native(committedRepo("pi-envdir-"));
+	const envelopeFile = join(dir, "envelope.json");
+	realFs.writeFileSync(envelopeFile, "{}");
+	const elsewhere = realFs.realpathSync.native(tempDir("pi-elsewhere-"));
+	realFs.symlinkSync(dir, join(elsewhere, "innocent"));
+	assert.deepEqual(await prepareLocalWorkspace({ folder: join(elsewhere, "innocent"), task: "x", jobDir: join(tempDir("j-"), "job"), envelopeFile }), { outcome: "policy", reason: LOCAL_FOLDER_HOLDS_ENVELOPE });
+	// A sibling folder is fine.
+	const sibling = realFs.realpathSync.native(committedRepo("pi-sibling-"));
+	const ok = await prepareLocalWorkspace({ folder: sibling, task: "x", jobDir: join(tempDir("j-"), "job"), envelopeFile });
+	assert.equal(ok.workspace, sibling);
+});
+
+test("'named inside' is judged by identity: a case variant of a run root on a case-insensitive volume is still inside it (#504)", async (t) => {
+	const root = realFs.realpathSync.native(tempDir("pi-caseroot-"));
+	const upper = join(root.slice(0, root.lastIndexOf("/")), basename(root).toUpperCase());
+	if (upper === root || !existsSync(upper)) return t.skip("this volume is case-sensitive, so the variant names another folder");
+	const outside = realFs.realpathSync.native(committedRepo("pi-outside-"));
+	realFs.symlinkSync(outside, join(root, "away"));
+	const result = await prepareLocalWorkspace({ folder: join(upper, "away"), task: "x", jobDir: join(tempDir("j-"), "job"), jobPaths: { runRoots: [root], cronFolders: [] } });
+	assert.deepEqual(result, { outcome: "policy", reason: LOCAL_FOLDER_ESCAPED });
 });

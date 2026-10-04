@@ -100,7 +100,7 @@ function optionalBoundedInt(env, name, min, max) {
 // Split a PATH-style list on the OS path delimiter (`;` on Windows, `:` elsewhere) so a Windows
 // drive-letter colon is not mistaken for a separator. Trims, drops empties. Entries are stored
 // verbatim; downstream (task 3.1) realpaths them, so no posix normalisation happens here.
-function delimitedList(raw) {
+export function delimitedList(raw) {
 	return (raw ?? "")
 		.split(delimiter)
 		.map((s) => s.trim())
@@ -429,6 +429,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		triggersFile: env.PI_TRIGGERS_FILE ?? null, // DES-CRON-VIA-BULLMQ-SCHEDULER: unified triggers file; null = cron disabled for the worker (it selects on.type:"cron")
 		pauseWindowsFile: pauseWindowsFilePath(env), // REQ-SCOPED-PAUSE-WINDOWS: per-folder/repo timed pause; null = no scoped pauses
 		modelEndpointsFile: modelEndpointsFilePath(env), // issue #503: the declared model endpoints (INT-MODEL-ENDPOINTS-FILE-CONTRACT); null = model-endpoints.json in the deployment folder, and a missing default file declares none
+		envelopeFile: envelopeFilePath(env), // issue #504: the allocation envelope (INT-ENVELOPE-FILE-CONTRACT); null = no envelope and no delegation anywhere
 		projectsFile: projectsFilePath(env), // issue #499: named groups of repos and folders (INT-PROJECTS-FILE-CONTRACT); null = no projects, and every record's project is null
 		scopedLimitsFile: scopedLimitsFilePath(env), // issue #242: per-scope run caps + concurrency (INT-SCOPED-LIMITS-FILE-CONTRACT); null = none. The one-job-per-folder mutex for local jobs is code, not configuration, and holds regardless
 		schedulerStallMax: positiveInt(env, "PI_SCHEDULER_STALL_MAX", 2), // CONST-RETRY-INFRA-ONLY: per-scheduler stall backstop; positiveInt rejects <1 so a 0 threshold fails closed
@@ -969,6 +970,12 @@ export function scopedLimitsFilePath(env = process.env) {
  *  as "no projects". */
 export function projectsFilePath(env = process.env) {
 	return env.PI_PROJECTS_FILE ?? null;
+}
+
+/** Issue #504. `??` like the projects key: an empty value is a value, so the boot load refuses it rather than reading
+ *  it as "no envelope". Unset turns delegation off everywhere. */
+export function envelopeFilePath(env = process.env) {
+	return env.PI_ENVELOPE_FILE ?? null;
 }
 
 /** Issue #503. `??` like the two above, so an empty value is a value, which the loader refuses rather than reading the

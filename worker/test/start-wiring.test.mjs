@@ -1453,6 +1453,137 @@ test("projects: an invalid file refuses BOOT fail-loud (configError), and an emp
 	}
 });
 
+// ── the allocation envelope (issue #504 part B) ──────────────────────────────────────────────────────────
+
+/** Clear the default `alloc:*` keys of the test Valkey around a boot that reconciles against them. */
+async function withCleanAlloc(fn) {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const redis = makeRedisClient(VALKEY_URL);
+	const clear = async () => {
+		const keys = await redis.keys("alloc:*");
+		if (keys.length > 0) await redis.del(...keys);
+	};
+	try {
+		await clear();
+		return await fn(redis);
+	} finally {
+		await clear();
+		redis.disconnect();
+	}
+}
+
+function envelopeBoot() {
+	const { realpathSync } = process.getBuiltinModule("node:fs");
+	const dir = realpathSync.native(tempDir("pi-envelope-boot-"));
+	const projects = join(dir, "projects.json");
+	writeFileSync(projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+	const envelope = join(dir, "conf", "envelope.json");
+	mkdirSync(join(dir, "conf"));
+	writeFileSync(envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10" }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+	const logsDir = join(dir, "logs");
+	// VALKEY_URL named: the worker's own default is 6379, which is not the test Valkey, and this boot writes `alloc:*`.
+	return { dir, envelope, logsDir, env: { VALKEY_URL, PI_PROJECTS_FILE: projects, PI_ENVELOPE_FILE: envelope, PI_MAX_COST_USD: "2", PI_LOGS_DIR: logsDir } };
+}
+
+test("envelope: a valid file boot-loads with its containment check, seeds the neutral split, arms the watcher and the host row field", { skip }, async () => {
+	await withCleanAlloc(async (redis) => {
+		const b = envelopeBoot();
+		const { captured, logs } = await runStart({ env: b.env });
+		const loaded = logs.find((l) => l.event === "envelope_loaded");
+		assert.match(loaded.digest, /^[0-9a-f]{16}$/);
+		assert.equal(loaded.delegation, true);
+		assert.ok(logs.some((l) => l.event === "envelope_watching" && l.path === b.envelope), "the live-edit watcher armed");
+		assert.equal(logs.find((l) => l.event === "worker_started").envelopeDigest, loaded.digest);
+		assert.deepEqual(logs.find((l) => l.event === "allocation_reconciled"), { event: "allocation_reconciled", why: "boot", mismatch: false, digest: loaded.digest, applied: loaded.digest, host: logs[0].host });
+		assert.equal(JSON.parse(await redis.get("alloc:plan")).writer, "default", "the neutral split is persisted");
+		assert.equal(typeof captured.allocation.reconcile, "function");
+		assert.equal(captured.allocation.current().digest, loaded.digest);
+		const { readdirSync } = process.getBuiltinModule("node:fs");
+		assert.equal(readdirSync(join(b.logsDir, "allocations")).length, 1, "the seed's row is in the audit file");
+	});
+});
+
+test("envelope: unset means no envelope to narrow by, no watcher and no Valkey key; inside a job path refuses BOOT (#504)", { skip }, async () => {
+	await withCleanAlloc(async (redis) => {
+		const { captured, logs } = await runStart({ env: { VALKEY_URL } });
+		assert.equal(captured.allocation.current(), null, "no envelope, nothing to narrow");
+		assert.equal(typeof captured.allocation.fleetGoverned, "function", "each pickup still asks whether the fleet is governed");
+		assert.ok(!logs.some((l) => l.event === "envelope_absent_fleet_governed"));
+		assert.ok(!logs.some((l) => l.event === "envelope_watching"));
+		assert.equal(logs.find((l) => l.event === "worker_started").envelopeDigest, null);
+		assert.equal(await redis.exists("alloc:plan"), 0);
+		const b = envelopeBoot();
+		await assert.rejects(
+			() => runStart({ env: { ...b.env, PI_DISPATCH_RUN_ROOTS: b.dir } }),
+			(e) => e.piDispatchConfig === true && /lies inside a job path \(run-root /.test(e.message),
+		);
+		await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_ENVELOPE_FILE: "" } }), (e) => e.piDispatchConfig === true && /envelope file does not exist/.test(e.message));
+	});
+});
+
+test("reloadEnvelope keeps LAST-GOOD on a bad edit, swaps on a good one and says so once, and re-runs the containment check every time (#504)", { skip }, async () => {
+	const b = envelopeBoot();
+	const config = { envelopeFile: b.envelope, projectsFile: b.env.PI_PROJECTS_FILE };
+	const projects = { current: [{ id: "shop", name: null, members: ["github:acme/web"] }] };
+	const limits = { current: [] };
+	const { envelopeDigest, loadEnvelope } = await import("../src/envelope.mjs");
+	const first = loadEnvelope(config, { projects: projects.current, maxCostMicros: 2_000_000 });
+	const ref = { current: first, digest: envelopeDigest(first) };
+	const logs = [];
+	const log = (event, fields) => logs.push({ event, fields });
+	let changes = 0;
+	let jobPaths = { cronFolders: [], runRoots: [], skillsDirs: [], globalPiDir: null };
+	const ctx = { projects, limits, maxCostMicros: () => 2_000_000, jobPaths: () => jobPaths, onChange: () => changes++ };
+	// A bad edit: the last good envelope stands, the reason is logged.
+	writeFileSync(b.envelope, "{ broken");
+	mod.reloadEnvelope(config, ref, log, ctx);
+	assert.equal(ref.current, first, "the SAME object: last-good untouched");
+	assert.equal(logs.at(-1).event, "envelope_reload_invalid");
+	// A good edit swaps, logs the digest and asks for the re-base once.
+	writeFileSync(b.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "80", floorsUsd: { shop: "10" } }));
+	mod.reloadEnvelope(config, ref, log, ctx);
+	assert.equal(ref.current.totalMicros, 80_000_000);
+	assert.equal(logs.at(-1).event, "envelope_reloaded");
+	assert.equal(logs.at(-1).fields.digest, ref.digest);
+	assert.equal(changes, 1);
+	mod.reloadEnvelope(config, ref, log, ctx);
+	assert.equal(changes, 1, "the same file again changes nothing and asks nothing");
+	// The containment check runs WITH every reload: a job path that now holds the file keeps the last good envelope,
+	// even though the edit itself parses.
+	const before = ref.current;
+	jobPaths = { cronFolders: [b.dir], runRoots: [], skillsDirs: [], globalPiDir: null };
+	writeFileSync(b.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "999", floorsUsd: { shop: "10" } }));
+	mod.reloadEnvelope(config, ref, log, ctx);
+	assert.equal(ref.current, before, "a file a job could have written is never adopted");
+	assert.equal(logs.at(-1).event, "envelope_reload_invalid");
+	assert.match(logs.at(-1).fields.reason, /lies inside a job path \(cron-folder /);
+	assert.equal(changes, 1);
+});
+
+test("the envelope reloads with the projects pair: a projects edit that commits re-judges it from disk, in either save order (#504)", { skip }, async () => {
+	const b = envelopeBoot();
+	const config = { envelopeFile: b.envelope, projectsFile: b.env.PI_PROJECTS_FILE, scopedLimitsFile: null };
+	const projects = { current: [{ id: "shop", name: null, members: ["github:acme/web"] }] };
+	const limits = { current: [] };
+	const { envelopeDigest, loadEnvelope } = await import("../src/envelope.mjs");
+	const first = loadEnvelope(config, { projects: projects.current, maxCostMicros: 2_000_000 });
+	const ref = { current: first, digest: envelopeDigest(first) };
+	const logs = [];
+	const log = (event, fields) => logs.push({ event, fields });
+	const ctx = { projects, limits, maxCostMicros: () => 2_000_000, jobPaths: () => ({ cronFolders: [], runRoots: [], skillsDirs: [], globalPiDir: null }) };
+	const pair = mod.makeProjectPair(limits, projects);
+	pair.afterCommit = () => mod.reloadEnvelope(config, ref, log, ctx);
+	// The envelope saved FIRST with a floor for a project projects.json does not have yet: kept out.
+	writeFileSync(b.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", tools: "5" } }));
+	mod.reloadEnvelope(config, ref, log, ctx);
+	assert.equal(ref.current, first);
+	// Then projects.json gains the project: its commit re-judges the envelope from disk, which now applies.
+	writeFileSync(b.env.PI_PROJECTS_FILE, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }, { id: "tools", members: ["github:acme/tools"] }] }));
+	mod.reloadProjects(config, projects, log, pair);
+	assert.deepEqual(Object.keys(ref.current.floors).sort(), ["_other", "shop", "tools"]);
+	assert.ok(logs.some((l) => l.event === "envelope_reloaded"));
+});
+
 test("reloadProjects keeps LAST-GOOD on a bad edit and hot-swaps on a good one, naming no project name", { skip }, async () => {
 	const dir = tempDir("pi-projects-");
 	try {
@@ -2311,7 +2442,9 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	assert.equal(constructions.length, 1);
 	assert.equal(starts.length, 1, "constructed AND started");
 	assert.equal(constructions[0].intervalMs, 24 * 3600000, "24h by default, in ms");
-	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "sandbox", "session"], "boot's own order");
+	// The allocation audit files (issue #504 part B) second: boot reaps them right after the logs, and a tick re-runs that
+	// same closure in the same place.
+	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "sandbox", "session"], "boot's own order");
 	assert.equal(captured.extraClosers.length, 3, "runtimeQueue + registry + the sweep (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
@@ -3019,7 +3152,7 @@ test("one debounce, shared: the 150ms literal is written once (issue #386)", asy
 	}
 });
 
-test("all SIX live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386, #503, #499)", () => {
+test("all SEVEN live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386, #503, #499, #504)", () => {
 	// BY SHAPE, and the limit is the point rather than an apology. The rule itself is pinned behaviourally
 	// above, and the receiver's watch is driven end to end through its read seam. The worker's three are
 	// private functions armed from deep inside `startWorker`, so driving each would mean three full worker
@@ -3039,7 +3172,9 @@ test("all SIX live-edit watches apply the boot-race rule, not just the one with 
 	// (read again, as the message below asks, and its caller is checked at the end).
 	// Six since issue #499 added the projects watch, read again: it reads before arming and compares after, and its caller
 	// is checked at the end with the scoped-limits one.
-	assert.deepEqual(armings, [["worker/src/start.mjs", 5], ["receiver/src/start.mjs", 1]], "six watches, and if that count moves this test must be read again rather than updated");
+	// Seven since issue #504 part B added the envelope watch, read again: it reads before arming and compares after, its
+	// seam defaults to the real watcher, and its caller hands it the envelope's own boot baseline (checked at the end).
+	assert.deepEqual(armings, [["worker/src/start.mjs", 6], ["receiver/src/start.mjs", 1]], "seven watches, and if that count moves this test must be read again rather than updated");
 	for (const [name, src] of Object.entries(sources)) {
 		const arms = (src.match(/handles\.watcher = watch\(/g) ?? []).length;
 		assert.equal((src.match(/readBeforeArming\(/g) ?? []).length, arms, `${name}: every watch reads before it arms`);
@@ -3066,7 +3201,8 @@ test("all SIX live-edit watches apply the boot-race rule, not just the one with 
 	// The scoped-limits watcher is armed through its injectable seam (PR #549's review), which defaults to the real one.
 	assert.match(worker, /watchScopedLimits: watchScopedLimitsFn = watchScopedLimitsFile,/, "the seam defaults to the real watcher");
 	assert.match(worker, /watchProjects: watchProjectsFn = watchProjectsFile,/, "the projects seam defaults to the real watcher");
-	for (const [fn, key] of [["watchTriggersFile", "triggers"], ["watchPauseWindowsFile", "pauseWindows"], ["watchScopedLimitsFn", "scopedLimits"], ["watchProjectsFn", "projects"]]) {
+	assert.match(worker, /watchEnvelope: watchEnvelopeFn = watchEnvelopeFile,/, "the envelope seam defaults to the real watcher");
+	for (const [fn, key] of [["watchTriggersFile", "triggers"], ["watchPauseWindowsFile", "pauseWindows"], ["watchScopedLimitsFn", "scopedLimits"], ["watchProjectsFn", "projects"], ["watchEnvelopeFn", "envelope"]]) {
 		const call = worker.match(new RegExp(`extraClosers\\.push\\(${fn}\\(([^;]*)\\)\\);`));
 		assert.ok(call, `${fn} is armed from startWorker`);
 		assert.match(call[1], new RegExp(`atBoot\\.${key}\\b`), `${fn} is handed the boot baseline of ITS OWN file, not another's`);

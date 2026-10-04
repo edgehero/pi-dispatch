@@ -1,7 +1,8 @@
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { execFile } from "node:child_process";
 import * as realFs from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { envelopeProtectedIdentities, fileIdentity } from "./envelope.mjs";
 import { promisify } from "node:util";
 import { materializePiDir } from "./materialize.mjs";
 import { InfraRetry } from "./processor.mjs";
@@ -15,6 +16,15 @@ export const LOCAL_FOLDER_NOT_A_REPO = "local-folder-not-a-repo";
 export const LOCAL_FOLDER_NO_COMMIT = "local-folder-no-commit";
 /** The run-record reason for a local job whose repository git cannot resolve HEAD in, other than an unborn HEAD (issue #524). */
 export const LOCAL_FOLDER_UNREADABLE_REPO = "local-folder-unreadable-repo";
+/**
+ * The run-record reason for a local job whose folder is NAMED inside a job path (a `PI_DISPATCH_RUN_ROOTS` root or a cron
+ * trigger's `run.folder`) and RESOLVES, at prepare, to a directory outside it (issue #504 part B). A job container can
+ * write inside its own folder, so it can swap a link below a job path after the folder was checked; such a folder is
+ * refused rather than mounted wherever the link now points.
+ */
+export const LOCAL_FOLDER_ESCAPED = "local-folder-escaped";
+/** The run-record reason for a local job whose resolved folder is the envelope's folder or a directory above it (issue #504 part B). */
+export const LOCAL_FOLDER_HOLDS_ENVELOPE = "local-folder-holds-envelope";
 
 /**
  * Prepare a LOCAL-FOLDER job. This is the zero-GitHub path: no token, no clone, no PR. The folder
@@ -34,8 +44,17 @@ export const LOCAL_FOLDER_UNREADABLE_REPO = "local-folder-unreadable-repo";
  * default keeps a directly-constructed call (tests, older wiring) honest: a job with no derived
  * context is a manual run.
  */
-export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs }) {
-	requirePath(fs, folder, `local folder does not exist: ${folder}`, "the local folder");
+export async function prepareLocalWorkspace({ folder: named, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs, jobPaths = null, envelopeFile = null }) {
+	requirePath(fs, named, `local folder does not exist: ${named}`, "the local folder");
+	// Issue #504 part B: the folder is RESOLVED here, once, and the resolved path is the one everything below reads and the
+	// one the container mounts (`workspace`). The raw string was mounted before, so a link below a job path swapped after
+	// the folder was checked (by the admin's run-root check at enqueue, or by nothing at all for a chained child) would
+	// have mounted whatever it pointed to, read-write. Resolving narrows the window to the moments between this line and
+	// the container start, and the two checks below judge the folder that will be mounted. Residual, named: a link above
+	// the resolved folder swapped inside that window is followed by the runtime when it mounts.
+	const folder = resolveFolder(fs, named);
+	const placement = judgePlacement(fs, named, folder, { jobPaths: typeof jobPaths === "function" ? jobPaths() : jobPaths, envelopeFile });
+	if (placement) return { outcome: "policy", reason: placement };
 	// Issue #524: a folder that is not a repository is its own determinate refusal, RETURNED with its own reason
 	// (CONST-RETRY-INFRA-ONLY), not a config throw. As a throw it reached the processor's config arm, which can only
 	// say "this deployment is misconfigured" (`config-refused`), about a folder the operator can fix with `git init`.
@@ -96,7 +115,7 @@ export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaul
 	const eventBody = {
 		source: event.source,
 		...(event.trigger ? { trigger: event.trigger } : {}),
-		folder: basename(folder),
+		folder: basename(named),
 		sha,
 		...(event.source === "cron" ? { scheduledFor: event.scheduledFor ?? null, previousRunAt: event.previousRunAt ?? null } : {}),
 	};
@@ -104,6 +123,95 @@ export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaul
 
 	// The folder itself is /workspace (rw). No clone: local jobs edit in place.
 	return { workspace: folder, jobDir, outboxDir, sha, materialised: written };
+}
+
+/**
+ * The folder's real path (`realpathSync.native`). A determinate absence here (the folder vanished, or a link in it now
+ * dangles) is the "does not exist" config refusal `requirePath` gives; any other error is retried, `presentAt`'s rule.
+ */
+function resolveFolder(fs, named) {
+	try {
+		return (fs.realpathSync?.native ?? fs.realpathSync)(named);
+	} catch (error) {
+		if (isDeterminateFsCode(error?.code)) {
+			const refusal = new Error(`local folder does not exist: ${named}`);
+			refusal.piDispatchConfig = true;
+			throw refusal;
+		}
+		throw new InfraRetry(`could not resolve the local folder (${error?.code ?? "unknown"}): ${basename(named)}`);
+	}
+}
+
+/** `p` is `root` or lies below it, as text. Both absolute and resolved. */
+function insideOrEqual(p, root) {
+	return p === root || p.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+/** The identity of a path (`dev:ino`, links followed), or null when it cannot be read. */
+function identityAt(fs, path) {
+	try {
+		return fileIdentity(fs.statSync(path, { bigint: true }));
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Where the RESOLVED folder may be mounted from (issue #504 part B), or the refusal reason:
+ *   - `local-folder-escaped`: the folder is named inside a job path (its text, or its text against a job path's real
+ *     path, lies inside a run root or a cron folder, or an ancestor of its text has a job path's identity) and its
+ *     resolved path lies inside none of those job paths, judged
+ *     by identity up the resolved path, so a firmlink or a case variant is the directory it names. A job path is a
+ *     place a job can write; a link a job planted there must not carry another job's folder out of it. A folder named
+ *     outside every job path (an operator's own `pi-dispatch run`) is not held to them, since nothing there is a job's;
+ *   - `local-folder-holds-envelope`: the resolved folder is the envelope file's folder or a directory above it
+ *     (`envelopeProtectedIdentities`), so the job could write its own bounds.
+ * `jobPaths` is `{ runRoots, cronFolders }` (schedules.mjs `envelopeJobPaths`), or null for none.
+ */
+function judgePlacement(fs, named, folder, { jobPaths, envelopeFile }) {
+	const real = (p) => {
+		try {
+			return (fs.realpathSync?.native ?? fs.realpathSync)(p);
+		} catch {
+			return null;
+		}
+	};
+	const areas = [...(jobPaths?.runRoots ?? []), ...(jobPaths?.cronFolders ?? [])].filter((p) => typeof p === "string" && p.trim() !== "" && isAbsolute(p));
+	const text = resolve(named);
+	// The identities of the named path's own ancestors, walked up its TEXT (each stat follows links, as the kernel does):
+	// "named inside" is decided by identity too, so a case variant of a run root on a case-insensitive volume, or a
+	// firmlink spelling of it, is inside it, where a string comparison let it skip the check (PR #574's review).
+	const namedAncestors = new Set();
+	for (let p = text; areas.length > 0; p = dirname(p)) {
+		const id = identityAt(fs, p);
+		if (id !== null) namedAncestors.add(id);
+		if (dirname(p) === p) break;
+	}
+	const holding = areas.filter((area) => {
+		const r = real(area);
+		if (insideOrEqual(text, resolve(area)) || (r !== null && insideOrEqual(text, r))) return true;
+		const id = identityAt(fs, area);
+		return id !== null && namedAncestors.has(id);
+	});
+	if (holding.length > 0) {
+		const ids = new Set(holding.map((area) => identityAt(fs, area)).filter((id) => id !== null));
+		let inside = false;
+		for (let p = folder; ; p = dirname(p)) {
+			const id = identityAt(fs, p);
+			if (id !== null && ids.has(id)) {
+				inside = true;
+				break;
+			}
+			if (dirname(p) === p) break;
+		}
+		if (!inside) return LOCAL_FOLDER_ESCAPED;
+	}
+	if (envelopeFile !== null && envelopeFile !== undefined) {
+		const protectedIds = envelopeProtectedIdentities(envelopeFile, { realpathSync: fs.realpathSync?.native ?? fs.realpathSync, statSync: fs.statSync });
+		const id = identityAt(fs, folder);
+		if (id !== null && protectedIds.has(id)) return LOCAL_FOLDER_HOLDS_ENVELOPE;
+	}
+	return null;
 }
 
 /**

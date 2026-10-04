@@ -173,7 +173,9 @@ parser the worker uses before they ask, and write version 1 until a row needs ve
 
 1. **Reserve.** Before the container starts, the worker adds the job's per-job cap to every active window: the
    deployment's, the job's repo or folder row, and each model row it may use. If any window would pass its cap,
-   the job is refused `dollar-cap`, everything it added is given back, and no container starts. A job whose every
+   the job is refused `dollar-cap`, everything it added is given back, and no container starts. Under an
+   allocation envelope the window may be the project's share of the split or the envelope total, and then the
+   refusal is `allocation-cap` ([allocation](allocation.md)). A job whose every
    allowed model is a declared local endpoint priced at zero reserves nothing (`basis: unreserved`).
 2. **Run.** The runner checks the per-job cap before every model call, against the most that call could cost.
    The call is refused (`cost-cap`) when it could pass the cap. So the reservation bounds what the runner

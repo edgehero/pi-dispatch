@@ -72,7 +72,10 @@ dialog before it takes effect**:
   globs). Both writers also take dollar windows, `dayUsd`/`weekUsd`/`monthUsd`, as decimal strings (`"2.50"`);
   a `model:<provider>/<model>` scope caps one model and takes only those three. A `project:<id>` scope (an id
   from projects.json) caps every member of that project as one: its job-count refusal is `project-cap`, its
-  dollar refusal `dollar-cap`, and the id must already be a project. A malformed amount is refused
+  dollar refusal `dollar-cap`, and the id must already be a project. Under an allocation envelope
+  (`PI_ENVELOPE_FILE`) a project's share of the split narrows its dollar window further, and a job refused by
+  the share (or by the envelope total) is `allocation-cap`, not `dollar-cap`; a worker whose envelope is not the
+  one the split was made for refuses `envelope-mismatch`. A malformed amount is refused
   before the confirm. Read `dispatch_costs` (`dollars.windows`) for what each dollar window holds now.
 - `dispatch_project_add` / `dispatch_project_edit` / `dispatch_project_delete` - manage projects. Members are
   forge-qualified repos (`github:acme/web`) or absolute folders, one project per scope. An edit changes the
@@ -327,7 +330,8 @@ Edits apply live: the worker hot-reloads the file and keeps the last good versio
 
 A `project:<id>` row caps every repo and folder of one project (projects.json) together. A job reserves in
 its own repo or folder row first, then its project's row, then the global caps. A full project window refuses
-with reason `project-cap` (the repo's slot is given back); a full project dollar window refuses `dollar-cap`.
+with reason `project-cap` (the repo's slot is given back); a full project dollar window refuses `dollar-cap`,
+or `allocation-cap` when the project's share of an allocation envelope is the number that bound.
 A row naming an id that projects.json does not define stops the worker from starting, so add the project first.
 
 Separate from all of that, **local jobs carry a built-in one-job-per-folder mutex: at most one job per

@@ -360,6 +360,17 @@ test("up: a key whose value is `\"\"` is named as EMPTY, not merely `already set
 	assert.doesNotMatch(secretText, /WEBHOOK_SECRET[^\n]*REFUSES TO BOOT/, "WEBHOOK_SECRET does not refuse a boot");
 	assert.equal(secret.store.get("/deploy/.env").includes('WEBHOOK_SECRET=""'), true, "and it is still untouched");
 
+	// Issue #504 part B: PI_ENVELOPE_FILE refuses the boot on an empty value too, and up never writes it (unset is no
+	// delegation). So a blank line is SAID, with the boot consequence, and an absent one is not mentioned at all.
+	const envelope = harness({ plan: green, files: { "/deploy/.env": `WEBHOOK_SECRET=x\nPI_ENVELOPE_FILE=""\n` } });
+	await envelope.run();
+	assert.match(envelope.text(), /PI_ENVELOPE_FILE[\s\S]*?its value is EMPTY[\s\S]*?REFUSES TO BOOT/);
+	assert.equal(envelope.store.get("/deploy/.env").includes('PI_ENVELOPE_FILE=""'), true, "left untouched");
+	const none = harness({ plan: green, files: { "/deploy/.env": "WEBHOOK_SECRET=x\n" } });
+	await none.run();
+	assert.doesNotMatch(none.text(), /PI_ENVELOPE_FILE/, "never written and never defaulted");
+	assert.equal(none.store.get("/deploy/.env").includes("PI_ENVELOPE_FILE"), false);
+
 	// The other direction of "both readings are asked": set for systemd, EMPTIED by a later export line. The
 	// key is configured for `EnvironmentFile=` and unset for the wrappers, so calling it empty would be wrong
 	// for the systemd operator. (The mirror of this is pinned above.)

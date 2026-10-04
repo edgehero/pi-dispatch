@@ -41,6 +41,9 @@ import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArmin
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, scopeClaimRows } from "./scoped-limits.mjs";
 import { escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
+import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
+import { NO_ENVELOPE_FINGERPRINT, makeAllocationAudit, makeAllocationLogReaper, makeAllocationState } from "./allocation.mjs";
+import { optionalUsdMicros } from "./money.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -59,7 +62,7 @@ import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecor
 import { makeRunMirror } from "./run-mirror.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
-import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
+import { authoredCron, envelopeJobPaths, loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
 
@@ -169,7 +172,7 @@ export async function settleWithin(promise, ms, fallback) {
  * schedulers. The FSWatcher is unref'd (the debounce it arms is NOT), and the returned closer is what
  * `startWorker` registers so the watch dies with the worker that armed it (issue #295).
  */
-function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot) {
+function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot, afterReload = () => {}) {
 	const path = config.triggersFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -185,7 +188,9 @@ function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot)
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return; // only our file (a null name -> reload to be safe)
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(() => void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet }), WATCH_DEBOUNCE_MS);
+			// Issue #504 part B: a cron folder or a skills dir an edit adds is a new job path, so the envelope's place is
+			// judged again after every triggers reload.
+			handles.timer = setTimeout(() => void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet }).then(() => afterReload(closer.reloadLog)), WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("triggers_watching", { path });
@@ -197,7 +202,7 @@ function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot)
 	// changed.
 	if (changedWhileArming(handles, readFile)) {
 		log("triggers_reread_after_arming", { path });
-		void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet });
+		void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet }).then(() => afterReload(closer.reloadLog));
 	}
 	return closer;
 }
@@ -266,7 +271,10 @@ export function reloadScopedLimits(config, ref, log, deploymentCap = null, pair 
 		}
 	} catch (err) {
 		log("scoped_limits_reload_invalid", { reason: err?.message });
+		return;
 	}
+	// Issue #504 part B: the envelope's floors are judged against both files, so a committed edit re-judges it.
+	pair?.afterCommit?.();
 }
 
 /**
@@ -373,7 +381,10 @@ export function reloadProjects(config, ref, log, pair = null) {
 	} catch (err) {
 		// Escaped (PR #569's review): the parser's own refusals already are, and an fs error quoting the path is too.
 		log("projects_reload_invalid", { reason: escapeControls(err?.message) });
+		return;
 	}
+	// Issue #504 part B: as `reloadScopedLimits` does, so the envelope follows a projects edit in either save order.
+	pair?.afterCommit?.();
 }
 
 /**
@@ -404,6 +415,80 @@ function watchProjectsFile(config, ref, log, atBoot, pair = null) {
 	if (changedWhileArming(handles, readFile)) {
 		log("projects_reread_after_arming", { path });
 		reloadProjects(config, ref, closer.reloadLog, pair);
+	}
+	return closer;
+}
+
+/**
+ * `envelopeJobPaths` as a thunk that keeps its last good answer (issue #504 part B): a triggers file caught mid-edit
+ * must not turn a containment check into a failure of its own, and the last parse that succeeded is what the running
+ * schedulers were built from. The first call has no last good answer and throws, which at boot refuses.
+ */
+export function makeEnvelopeJobPaths(config, io = {}) {
+	let lastGood = null;
+	return () => {
+		try {
+			lastGood = envelopeJobPaths(config, io);
+		} catch (err) {
+			if (lastGood === null) throw err;
+		}
+		return lastGood;
+	};
+}
+
+/**
+ * The envelope reload (issue #504 part B), exported apart from its watcher for `reloadScopedLimits`' reason. `ref` is
+ * `{ current, digest }`. The file is judged against the LIVE projects and scoped limits (its floors name projects and
+ * sit under project rows) and the job paths of the moment, so a reload is paired with both files: their own reloads
+ * call this again once they commit (`pair.afterCommit`), and an envelope edit that needs a projects edit applies in
+ * either save order. A bad edit, or one that puts the file inside a job path, keeps the last good envelope and logs
+ * `envelope_reload_invalid`; the last good copy can never be one a job wrote, because every reload re-runs the
+ * containment check. A changed digest logs `envelope_reloaded` and calls `onChange` (the re-base, or the mismatch).
+ */
+export function reloadEnvelope(config, ref, log, { projects, limits, maxCostMicros = () => null, jobPaths, onChange = () => {} }) {
+	let next;
+	try {
+		next = loadEnvelopeChecked(config, { projects: projects?.current ?? [], limits: limits?.current ?? [], maxCostMicros: maxCostMicros(), jobPaths: jobPaths() });
+	} catch (err) {
+		log("envelope_reload_invalid", { reason: escapeControls(err?.message) });
+		return;
+	}
+	const digest = next === null ? null : envelopeDigest(next);
+	const changed = digest !== ref.digest;
+	ref.current = next;
+	ref.digest = digest;
+	if (!changed) return;
+	log("envelope_reloaded", { digest });
+	onChange();
+}
+
+/**
+ * Watch the envelope file (issue #504 part B) as the projects watcher does: the directory, filtered to the one
+ * basename, debounced, the boot read as the arming baseline, the closer joining `extraClosers`.
+ */
+function watchEnvelopeFile(config, ref, log, atBoot, ctx) {
+	const path = config.envelopeFile;
+	const dir = dirname(path) || ".";
+	const file = basename(path);
+	const handles = { watcher: null, timer: null, closed: false };
+	const closer = makeWatchCloser(handles, log);
+	const readFile = () => readFileSync(path, "utf8");
+	readBeforeArming(handles, readFile, atBoot);
+	try {
+		handles.watcher = watch(dir, (_event, changed) => {
+			if (handles.closed) return;
+			if (changed && changed !== file) return;
+			clearTimeout(handles.timer);
+			handles.timer = setTimeout(() => reloadEnvelope(config, ref, closer.reloadLog, ctx), WATCH_DEBOUNCE_MS);
+		});
+		handles.watcher.unref?.();
+		log("envelope_watching", { path });
+	} catch (err) {
+		log("envelope_watch_unavailable", { reason: err?.message });
+	}
+	if (changedWhileArming(handles, readFile)) {
+		log("envelope_reread_after_arming", { path });
+		reloadEnvelope(config, ref, closer.reloadLog, ctx);
 	}
 	return closer;
 }
@@ -564,6 +649,8 @@ export async function startWorker(
 		watchScopedLimits: watchScopedLimitsFn = watchScopedLimitsFile,
 		// The projects watcher (issue #499), injectable for the same reason: a test sees it armed and closed.
 		watchProjects: watchProjectsFn = watchProjectsFile,
+		// The envelope watcher (issue #504 part B), injectable for the same reason.
+		watchEnvelope: watchEnvelopeFn = watchEnvelopeFile,
 	} = {},
 ) {
 	const config = loadConfigFn(env);
@@ -636,7 +723,7 @@ export async function startWorker(
 	// this race lives in is between these lines and the arming a thousand lines below -- the endpoint probe,
 	// forge auth, the reaper, Valkey -- not the microseconds around the arming itself, which is what a first
 	// attempt measured. `null` where a file is not configured, which reads as "nothing to compare".
-	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null, projects: null, modelEndpoints: null };
+	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null, projects: null, modelEndpoints: null, envelope: null };
 	const recording = (into, path) => ({
 		readFileSync: (file, enc) => {
 			const text = readFileSync(file, enc);
@@ -662,6 +749,40 @@ export async function startWorker(
 	// Issue #499 part B: a `project:<id>` row whose id is not a project refuses BOOT, naming the row and the id: it would
 	// read as a cap on a group that no job can belong to. The live reloads of either file hold the same rule (`pair`).
 	checkProjectRows(scopedLimits.current, projects.current, config.scopedLimitsFile, config.projectsFile ?? null);
+
+	// Issue #504 part B: the allocation envelope (INT-ENVELOPE-FILE-CONTRACT), same posture: a bad file refuses boot with
+	// the operator present, before any Valkey contact. It is judged against the projects and scoped limits just loaded
+	// (its floors name projects and sit under project rows), needs the merged per-job cost cap (each governed job
+	// reserves it against its share), and must lie outside every host path a job container can see, which is checked
+	// with this load and again with every reload. A mutable ref `{ current, digest }`; null when PI_ENVELOPE_FILE is
+	// unset, and then nothing below governs anything.
+	const envelopeCap = () => {
+		try {
+			const s = resolveSettings(config, readOverlay(config.settingsFile));
+			return optionalUsdMicros(s.invalid ? config.maxCostUsd : s.maxCostUsd, "maxCostUsd");
+		} catch {
+			return null;
+		}
+	};
+	const envelopeJobPathsNow = makeEnvelopeJobPaths(config);
+	const envelope = { current: null, digest: null };
+	if (config.envelopeFile !== null && config.envelopeFile !== undefined) {
+		envelope.current = loadEnvelopeChecked(config, { projects: projects.current, limits: scopedLimits.current, maxCostMicros: envelopeCap(), jobPaths: envelopeJobPathsNow() }, { io: recording("envelope", config.envelopeFile) });
+		envelope.digest = envelope.current === null ? null : envelopeDigest(envelope.current);
+		log("envelope_loaded", { digest: envelope.digest, window: envelope.current?.window ?? null, delegation: envelope.current?.delegation?.enabled === true });
+	}
+	// After a triggers reload (a cron folder or a skills dir is a job path): the envelope's place judged again. The live
+	// copy is kept either way, since every envelope reload re-runs the check and so never adopts a file a job could have
+	// written; this line is what tells the operator that a job can now reach the file.
+	const checkEnvelopePlace = (say = log) => {
+		if (!envelope.current) return;
+		try {
+			const inside = envelopeInsideJobPaths(config.envelopeFile, envelopeJobPathsNow());
+			if (inside) say("envelope_inside_job_path", { kind: inside.kind });
+		} catch (err) {
+			say("envelope_inside_job_path", { reason: escapeControls(err?.message) });
+		}
+	};
 
 	// Issue #503: the declared model endpoints, same posture (INT-MODEL-ENDPOINTS-FILE-CONTRACT): a bad file refuses
 	// boot with the operator present, a mutable ref for the live reload, [] when there is no file. Read per pickup
@@ -1034,6 +1155,10 @@ export async function startWorker(
 	} catch (err) {
 		log("log_reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
+	// Issue #504 part B: the allocation audit files (`allocations/YYYY-MM.jsonl`) on the same retention, which the log
+	// reaper above never reaches (it reaps the top-level `.log` and `.json` only). Never throws, so no double wrap.
+	const reapAllocationLogs = makeAllocationLogReaper({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
+	reapAllocationLogs();
 
 	// REQ-RESURRECTABLE-SANDBOX: sweep retained per-job directories past their window, so what `cleanup`
 	// kept for re-opening stays bounded. Third in the row and deliberately its own sweep -- a different
@@ -1085,6 +1210,22 @@ export async function startWorker(
 	// Its errors as one message-only line (PR #475's review, round 2), like every Queue and Worker's: without a listener
 	// ioredis printed a stack per reconnect attempt.
 	onValkeyError(redis, "shared client");
+
+	// Issue #504 part B: the applied split lives in Valkey (`alloc:plan`), shared by every host. Only with an envelope.
+	// The boot reconcile seeds the neutral split when there is none, expires a plan past its life and re-bases on an
+	// envelope this host changed while it was down; a fault is logged and the first pickup tries again, because the
+	// pickup reconciles too and refuses nothing it cannot judge (it throws, and the job is retried).
+	// Built on EVERY host, with an envelope or without: a host with none still asks, at each pickup, whether the fleet is
+	// governed (an applied split exists), and refuses its jobs as envelope-mismatch when it is.
+	const allocationState = makeAllocationState({ redis, host: config.workerName, audit: makeAllocationAudit({ logsDir: config.logsDir }), log });
+	const reconcileAllocation = (why) => {
+		if (!envelope.current) return Promise.resolve();
+		return allocationState
+			.reconcile({ envelope: envelope.current, digest: envelope.digest, now: new Date() })
+			.then((r) => log("allocation_reconciled", { why, mismatch: r.mismatch, digest: envelope.digest, applied: r.state?.envelopeDigest ?? null }))
+			.catch((err) => log("allocation_reconcile_failed", { why, reason: scrubCredentials(err?.message) }));
+	};
+	await reconcileAllocation("boot");
 
 	// This host's own stale scope claims, gated on the reaper having having enumerated: the
 	// reaper is what establishes that this machine holds no `pi-job-*` containers, so a claim naming this
@@ -1450,6 +1591,9 @@ export async function startWorker(
 		// host whose projects.json differs. Each host resolves its own jobs' project from its own copy, while the project
 		// rows' counters are shared, so two copies put one repo in two projects. A thunk, so a live edit shows in one beat.
 		fpProjects: () => projectsFingerprint(projects.current),
+		// Issue #504 part B: the digest of this host's live envelope (`envelopeDigest`, 16 hex, never a value), so doctor can
+		// name a host whose envelope differs; such a host refuses governed jobs as `envelope-mismatch`. `none` without one.
+		fpEnvelope: () => envelope.digest ?? NO_ENVELOPE_FINGERPRINT,
 	});
 
 
@@ -1776,6 +1920,10 @@ export async function startWorker(
 		scopedLimits: () => scopedLimits.current,
 		// Issue #499: the projects snapshot, read by the pickup gate once, beside the limits snapshot above.
 		projects: () => projects.current,
+		// Issue #504 part B: the live envelope and its digest, and the reconcile the pickup runs before it narrows a job's
+		// dollar ledgers by the applied split. Without an envelope `current()` is null, and `fleetGoverned` asks whether an
+		// applied split exists: if it does, this host's jobs refuse as envelope-mismatch rather than run ungoverned.
+		allocation: { current: () => (envelope.current ? { envelope: envelope.current, digest: envelope.digest } : null), reconcile: allocationState.reconcile, fleetGoverned: allocationState.fleetGoverned },
 		// Issue #230. The `after` ceiling is read per pickup from config rather than frozen into the
 		// processor, so it is one value with one home; the wait state shares the budget's redis client
 		// because it describes the same delayed jobs that client already reasons about.
@@ -1943,6 +2091,9 @@ export async function startWorker(
 				jobImage: config.jobImage,
 				// #277: the venue a retained directory records, which the sandbox refuses by when it is not here.
 				defaultBackend: config.defaultBackend,
+				// Issue #504 part B: a local job's folder is resolved at prepare and mounted resolved; one named inside a run
+				// root or a cron folder must still resolve inside it, and none may be the envelope's folder or above it.
+				localPlacement: { jobPaths: envelopeJobPathsNow, envelopeFile: config.envelopeFile ?? null },
 				preparers: makeForgePreparers({ gitlabApiUrl: config.gitlab?.apiUrl ?? null, forgejoApiUrl: config.forgejo?.apiUrl ?? null, azureOrgUrl: config.azure?.orgUrl ?? null }),
 				// The cron event.json's previousRunAt (INT-CONTAINER-JOB-INPUTS): read back from the same
 				// per-job run-history sidecars recordRun writes above -- no new store, no new query surface.
@@ -2011,7 +2162,7 @@ export async function startWorker(
 		// comment and the signal for CONST-PI-VERSION-PINNED's silent-no-op mode -- a missing line is
 		// what tells a human a run did nothing. The container's own output already streams via
 		// runContainer's onOutput during the run.
-		// `reason` is a fixed enum (worker-abort | over-budget | dollar-cap | unprotected-branch | runner-policy |
+		// `reason` is a fixed enum (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | unprotected-branch | runner-policy |
 		// provider-auth-refused | job-image-missing), never
 		// user content. Included only when present so success lines stay clean; a shutdown-aborted job logs
 		// { outcome: "policy", reason: "worker-abort" }, making a restart-dropped job visible.
@@ -2096,7 +2247,7 @@ export async function startWorker(
 		// Only when a triggers file is configured; best-effort; a bad edit keeps the running schedulers. The
 		// closer each of the three returns joins `extraClosers`, so the watch stops with the worker (issue #295).
 		if (config.triggersFile) {
-			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers));
+			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers, checkEnvelopePlace));
 		}
 
 		// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so
@@ -2108,6 +2259,13 @@ export async function startWorker(
 		// Issue #499 part B: the two files a project row joins reload as a pair; the deployment cap rides along so a limits
 		// list either reload commits gets the dollar-rows-without-cap warning.
 		const projectPair = makeProjectPair(scopedLimits, projects, deploymentMaxCostUsd);
+		// Issue #504 part B: the envelope reloads with the pair, since its floors are judged against both files: a committed
+		// limits or projects edit re-judges it from disk, and its own edits are judged against the live pair.
+		const envelopeCtx = { projects, limits: scopedLimits, maxCostMicros: envelopeCap, jobPaths: envelopeJobPathsNow, onChange: () => void reconcileAllocation("reload") };
+		if (config.envelopeFile) {
+			projectPair.afterCommit = () => reloadEnvelope(config, envelope, log, envelopeCtx);
+			extraClosers.push(watchEnvelopeFn(config, envelope, log, atBoot.envelope, envelopeCtx));
+		}
 		// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
 		if (config.scopedLimitsFile) {
 			extraClosers.push(watchScopedLimitsFn(config, scopedLimits, log, atBoot.scopedLimits, deploymentMaxCostUsd, projectPair));
@@ -2138,6 +2296,8 @@ export async function startWorker(
 			const sweep = makeRetentionSweepFn({
 				reapers: [
 					{ name: "log", reap: reapLogs },
+					// Issue #504 part B: where boot runs it, right after the run history it sits beside.
+					{ name: "allocation_log", reap: reapAllocationLogs },
 					{ name: "sandbox", reap: reapSandboxes },
 					{ name: "session", reap: () => sessionStore.reapSessions() },
 				],
@@ -2179,6 +2339,8 @@ export async function startWorker(
 			scopedLimits: scopedLimits.current.length, // row count -- money config deserves boot visibility; the watcher logs only changes
 			projectsFile: config.projectsFile, // issue #499: null = no projects
 			projects: projects.current.length, // project count, never a name
+			envelopeFile: config.envelopeFile, // issue #504: null = no envelope and no delegation
+			envelopeDigest: envelope.digest, // the envelope's 16-hex digest, the host row's fpEnvelope; null without one
 			modelEndpoints: modelEndpoints.current.length, // issue #503: declared model endpoints, each a slot lease at pickup
 			image: config.jobImage,
 			valkey: config.valkeyUrl,

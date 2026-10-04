@@ -6,7 +6,8 @@ import { test } from "node:test";
 import { loadPauseWindows } from "../src/pause-windows.mjs";
 import { loadScopedLimits } from "../src/scoped-limits.mjs";
 import { loadProjects } from "../src/projects.mjs";
-import { pauseWindowsFilePath, projectsFilePath, scopedLimitsFilePath } from "../src/config.mjs";
+import { envelopeFilePath, pauseWindowsFilePath, projectsFilePath, scopedLimitsFilePath } from "../src/config.mjs";
+import { loadEnvelope } from "../src/envelope.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_PROJECTS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -43,6 +44,7 @@ const PAGES = [
 	{ path: "docs/pause-windows.md", key: "PI_PAUSE_WINDOWS_FILE" },
 	{ path: "docs/scoped-limits.md", key: "PI_SCOPED_LIMITS_FILE" },
 	{ path: "docs/projects.md", key: "PI_PROJECTS_FILE" },
+	{ path: "docs/allocation.md", key: "PI_ENVELOPE_FILE" },
 ];
 
 test("an EMPTY boot key survives the config read, so the page cannot say it reads as unset", () => {
@@ -64,6 +66,11 @@ test("an EMPTY boot key survives the config read, so the page cannot say it read
 	assert.equal(projectsFilePath({}), null);
 	assert.throws(() => loadProjects({ projectsFile: "" }), /does not exist/);
 	assert.deepEqual(loadProjects({ projectsFile: null }), []);
+	// Issue #504 part B: the envelope is the fourth.
+	assert.equal(envelopeFilePath({ PI_ENVELOPE_FILE: "" }), "");
+	assert.equal(envelopeFilePath({}), null);
+	assert.throws(() => loadEnvelope({ envelopeFile: "" }), /does not exist/);
+	assert.equal(loadEnvelope({ envelopeFile: null }), null);
 });
 
 test("the loaders accept what init scaffolds, or the pages' advice is wrong", () => {

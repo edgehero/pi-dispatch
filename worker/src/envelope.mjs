@@ -334,6 +334,22 @@ function envelopeIdentities(real, statSync) {
 }
 
 /**
+ * The identities a job folder may never have (issue #504 part B, the prepare-time re-check): the envelope file's
+ * folder and every directory above it, as `envelopeIdentities` gives them, keyed `dev:ino`. A local job's folder is
+ * resolved at prepare and refused when its identity is one of these, so a folder whose spelling was checked earlier
+ * cannot have become the envelope's folder through a swapped link since. Throws as `envelopeInsideJobPaths` does on
+ * an envelope path that is not canonical, so a caller that cannot vouch for the envelope refuses rather than guesses.
+ */
+export function envelopeProtectedIdentities(envelopePath, { realpathSync = fsRealpathSync.native, statSync = fsStatSync } = {}) {
+	return envelopeIdentities(canonicalEnvelopePath(envelopePath, realpathSync, statSync), statSync);
+}
+
+/** A `stat` result's identity (`dev:ino`), the key `envelopeProtectedIdentities` holds. Pass a `bigint` stat. */
+export function fileIdentity(stat) {
+	return identityOf(stat);
+}
+
+/**
  * The first host path a job container can see that holds the envelope file, as `{ kind, path }`, or null. The boot
  * refuses an envelope inside one (issue #504 part 3): a job that can write the envelope can write its own bounds.
  * `kind` is `cron-folder` (a cron trigger's `run.folder`, bind-mounted read-write), `run-root` (a
@@ -377,4 +393,21 @@ export function envelopeInsideJobPaths(envelopePath, { cronFolders = [], runRoot
 		}
 	}
 	return null;
+}
+
+/**
+ * Load the envelope AND judge where it lies, in one step (issue #504 part B, INT-ENVELOPE-FILE-CONTRACT): every load
+ * that succeeds is followed by `envelopeInsideJobPaths` against the job paths of the moment, at boot and on every
+ * reload, because a later edit can move the file, or a job path, so that one holds the other. Returns the parsed
+ * envelope, null when `PI_ENVELOPE_FILE` is unset, or throws a `configError` naming the job path that holds it.
+ * `maxCostMicros` is the merged per-job cap in micro-dollars, or null.
+ */
+export function loadEnvelopeChecked(config, { projects = [], limits = [], maxCostMicros = null, jobPaths }, { io = {}, containment = {} } = {}) {
+	const envelope = loadEnvelope(config, { projects, limits, maxCostMicros }, io);
+	if (envelope === null) return null;
+	const inside = envelopeInsideJobPaths(config.envelopeFile, jobPaths, containment);
+	if (inside) {
+		throw configError(`the envelope file ${JSON.stringify(String(config.envelopeFile))} lies inside a job path (${inside.kind} ${JSON.stringify(inside.path)}) that a job container can see, so a job could write its own bounds; move the envelope outside every cron run.folder, PI_DISPATCH_RUN_ROOTS root, run.skillsDir and PI_GLOBAL_PI_DIR`);
+	}
+	return envelope;
 }

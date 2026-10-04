@@ -192,6 +192,20 @@ changes what code runs or what it costs.
 - `"github": true` on a cron trigger gets the same per-job GitHub token the webhook path gets. A
   scheduled flow can use `gh`.
 
+## Local folders behind a link
+
+A local job's folder is resolved when the job is prepared, and the container mounts the resolved folder, not the
+spelling you wrote. A folder named inside a job path (a cron trigger's `run.folder` or a `PI_DISPATCH_RUN_ROOTS` root)
+must still resolve inside one. If it does not, the job is refused as `local-folder-escaped`, and nothing is spent.
+
+The reason is that a job can write inside its own folder. A link planted there could otherwise send a later job, a
+chained child or a `dispatch_run` job, to a folder nobody checked, mounted read-write.
+
+So a run root used as a symlink farm (`root/shop` linking to `/srv/shop`) is refused. List the real folder instead:
+add `/srv/shop` to `PI_DISPATCH_RUN_ROOTS`, or name it as the cron trigger's `run.folder`. A folder named outside every
+job path, as in your own `pi-dispatch run`, is not held to them. See [allocation](allocation.md) for the two related
+refusals, `local-folder-holds-envelope` and `local-folder-project-changed`.
+
 ## Choosing the model and the turn limit
 
 Any trigger type can name the model its jobs run on, and how many turns a job may take:
@@ -431,6 +445,8 @@ of this once when a trigger sets `maxCostUsd`, as it does for `models`.
 
 - Before a job starts, its cap (the smaller of the trigger's `maxCostUsd` and the deployment's) is held in
   every window that is set. A job that does not fit is refused with reason `dollar-cap`, and nothing is spent.
+  Under an allocation envelope a window bound by the project's share or the envelope total refuses with
+  `allocation-cap` instead ([allocation](allocation.md)).
 - After the run, the hold is replaced by what the job really cost. When that cost is not fully known (the job
   died before it reported, or some calls could not be priced), the window is charged at least the whole hold,
   and the measured cost when that is higher.

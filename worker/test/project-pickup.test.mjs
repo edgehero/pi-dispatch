@@ -153,7 +153,9 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
 	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project });");
 	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project");
-	assert.ok(at > src.indexOf("const project = projectOf(job.data, projects());"), "and after the pickup resolution");
+	// One read of the projects ref per pickup (issue #504 part B reuses the same snapshot for the resolved folder).
+	assert.ok(at > src.indexOf("const project = projectOf(job.data, pickupProjects);"), "and after the pickup resolution");
+	assert.ok(src.indexOf("const pickupProjects = projects();") < src.indexOf("const project = projectOf(job.data, pickupProjects);"));
 	// Comments stripped first (they name `recordRun` in prose), then NO `recordRun` identifier at all: that refuses a
 	// bare call, an optional call (`recordRun?.(`) and an alias (`const rec = recordRun`) alike.
 	const code = src

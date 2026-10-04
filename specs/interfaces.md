@@ -1003,6 +1003,23 @@ refactor apart.
   the directory must also carry a label a container may read, which the worker gives its own per-job directories
   with `:Z` (`INT-CONTAINER-RUNTIME-CONTRACT`, issue #355). A local job's `/workspace` and the overlay are the
   operator's to label, and the runner refuses a job that cannot read either, pre-spend, as `job-inputs-unreadable`.
+  **A local job's `/workspace` is its folder RESOLVED at prepare** (issue #504 part B): `realpathSync.native` of the
+  folder the job names, and that resolved path is what everything at prepare reads and what the bind mount names. It
+  used to be the raw string, so a link below a job path swapped after the folder was checked (by the admin's
+  `PI_DISPATCH_RUN_ROOTS` check at enqueue, or by nothing for a chained child) mounted whatever it then pointed to,
+  read-write. Three refusals are judged on the resolved folder, before the reserve: a folder NAMED inside a job path
+  (its text, or its text against the job path's real path, lies inside a run root or a cron `run.folder`, or an ancestor
+  of its text has a job path's identity, so a case variant or a firmlink spelling counts) that resolves outside every
+  such job path, by identity up the resolved path, is `local-folder-escaped`, a run root used as a symlink farm included
+  (list the real folder as a run root or a cron folder instead); a folder that is the envelope file's folder or any
+  folder above it (`envelopeProtectedIdentities`, `INT-ENVELOPE-FILE-CONTRACT`) is `local-folder-holds-envelope`; and a
+  folder whose resolved path is a member of ANOTHER project than the one decided at pickup from the named spelling is
+  `local-folder-project-changed` (a resolved folder in no project keeps the named membership). A folder named outside
+  every job path (the operator's own `pi-dispatch run`) is not held to them. `event.json`'s `folder` stays the basename
+  of the folder as named, and a chained child is enqueued on the folder as its parent NAMED it (`INT-OUTBOX-CONTRACT`),
+  so it matches the parent's rows, member and mutex and is resolved and judged again at its own prepare. Residual,
+  named: a link ABOVE the resolved folder swapped between prepare and the container start is followed by the runtime
+  when it mounts.
   ```
   /job/prompt.md          task text (issue/PR payload, or the operator-supplied task), plus the
                           trigger's `run.instructions` in the envelope above the data region, if set
@@ -4438,7 +4455,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -4557,8 +4574,8 @@ validator rather than a second copy of it.
     rest still hold the reservation; the record says the computed basis and the log says `dollar_settle_error`
     with how many keys were adjusted;
   - `refunded`: no container ran, so the reservation was given back whole and `settledMicros` is `0`: a
-    never-started exit, a `config-refused` job, or the `dollar-cap` refusal itself (whose `reservedMicros` is
-    the per-job cap that did not fit);
+    never-started exit, a `config-refused` job, or the `dollar-cap` or `allocation-cap` refusal itself (whose
+    `reservedMicros` is the per-job cap that did not fit);
   - `unreserved`: the job could not spend, so nothing was reserved (`reservedMicros` and `settledMicros` `0`):
     every model it may call is served by a declared endpoint and zero-rated (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`),
     or its effective per-job cap was already `0` (a malformed queued `run.maxCostUsd` reads as 0); either way it
@@ -4572,7 +4589,8 @@ validator rather than a second copy of it.
   (the parser keeps an absent `truncated` as `null`, so this condition is live)
   (folded rows hide part of a model's spend); or an `other`/`other` row has a cost above `0` (spend attributed to
   no model). A Valkey fault that adjusted none of a model window's keys is `floor` too. `refunded` is the
-  never-started, `config-refused` and `dollar-cap` cases, where every model window was given back (`floor` if a
+  never-started, `config-refused`, `dollar-cap` and `allocation-cap` cases, where every model window was given back
+  (`floor` if a
   give-back could not reach a key). With several model windows the record says `floor` when any one settled at
   the floor. The repo and folder windows settle with `basis`, like the deployment's. Integers and fixed tokens only, so the record stays PII-free;
   a malformed source object records `null`. The record is one file per job id, last write wins, so a retried
@@ -4614,6 +4632,33 @@ validator rather than a second copy of it.
   global-only: a dollar-cap, a config-refused job and an InfraRetry all record whether the global slot is still held
   after the refund; a scoped or project slot a failed refund left behind is in the `budget_release_failed` log line. It comments one fixed sentence naming the window (today's, this
   week's, this month's) and no amount. Like every free refusal it pages nobody.
+
+  **`allocation-cap`** (issue #504 part B) is `dollar-cap` with another owner: the window that refused had its cap
+  from the applied split of an allocation envelope (a project's share, `_other`'s share, a repo share) or from the
+  envelope total on the deployment window, not from the operator's own row or setting
+  (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`). Decided at the same point, giving back the same slots and dollars, and
+  recorded the same way (`budgetReserved` global-only, `dollars.basis` `refunded`, or `floor` when a give-back
+  stranded a key). A tie between the operator's number and the split's is `dollar-cap`. Its comment names the split
+  ("share of the budget split") and never tells the reader to raise a budget, since the number moves with the next
+  priorities plan or an envelope edit. Never retried; like every free refusal it pages nobody.
+
+  **`envelope-mismatch`** (issue #504 part B) is a free pre-spend refusal: this host's envelope digest is not the one
+  the applied split was made for, or this host has no envelope while the fleet has an applied split (`alloc:plan`), so
+  the job would be judged against another envelope or none. Decided with the free gates, before the mint, the clone, the
+  token-cap read and every reserve; `budgetReserved: false`, no `dollars`. Never retried; the operator makes the hosts'
+  envelopes agree (doctor names them); a host with no envelope comments its own sentence, since its fix is to install
+  the envelope or turn delegation off everywhere. It pages nobody. A Valkey fault while the pickup reads the split is
+  not this refusal: it is retried as infrastructure (`container-never-started`), nothing spent.
+
+  **`local-folder-escaped`**, **`local-folder-holds-envelope`** and **`local-folder-project-changed`** (issue #504
+  part B) are prepare-stage policy refusals of a local job, returned before the reserve like `local-folder-not-a-repo`:
+  the folder, resolved at prepare, was named inside a job path (a `PI_DISPATCH_RUN_ROOTS` root or a cron
+  `run.folder`) and now lies outside it; or it is the envelope file's folder or a folder above it; or it is a member
+  of ANOTHER project than the one decided at pickup from the folder as named (`INT-CONTAINER-JOB-INPUTS`). Fixed
+  tokens, no path. Never retried; they page nobody.
+
+  **`INT-ON-FAILURE-HOOK-CONTRACT` is unchanged**: every reason above is a pre-spend refusal and stays out of the
+  hook's policy set (`HOOK_POLICY_REASONS`), which carries only paid terminals.
 
   Field order is the serialisation order (`JSON.stringify` emits insertion order). The filename uses the
   **sanitized** id (`:` → `_`, because `repeat:<sched>:<millis>` is NTFS-illegal); the record **body**
@@ -5732,8 +5777,12 @@ validator rather than a second copy of it.
   case); a job with no list reserves in EVERY model row, because it may switch to any model mid-run (fail closed:
   a full model window refuses an unrestricted job, and the remedy is a list); a job that reserves nothing
   (`unreserved`) reserves in none. A refusal in any window gives back every key the call added, the deployment's
-  included, and returns `reason: "dollar-cap"`; the log names the ledger (`deployment`, `scope`, `project` or `model`), the
-  key prefix (a hash) and, for a model, its ref, never a scope string. A dollar row with no per-job cap to
+  included, and returns `reason: "dollar-cap"`; the log names the ledger (`deployment`, `scope`, `project`, `other` or
+  `model`), the key prefix (a hash) and, for a model, its ref, never a scope string. Under an allocation envelope
+  (issue #504 part B, `DES-DOLLAR-RESERVE-AND-SETTLE` item 10) the hold gains `_other`'s ledger
+  (`budget:usd:s:<16-hex sha256 of "project:_other">`, after the project tier), a row's window for the envelope's
+  window is narrowed to `min(row, share)`, and a refusal whose binding cap was the split or the envelope total
+  returns `allocation-cap`, the log adding `source: "allocation"`. A dollar row with no per-job cap to
   reserve (no `maxCostUsd` and no `run.maxCostUsd`) refuses the job as `config-refused`, the deployment
   invariant's rule. That is a WARNING, never a refusal, where it can be seen ahead (a trigger may supply the cap):
   the worker logs `scoped_limits_dollar_rows_without_cap` (row indexes and kinds) at boot and at each reload, and
@@ -5881,11 +5930,22 @@ limit for delegated allocation (`REQ-DELEGATED-ALLOCATION`): a dollar total for 
 A priorities plan moves headroom between projects inside it, and nothing an agent writes reaches it.
 
 - **Producer/Consumer**: the operator writes the file by hand, or (issue #504 part C) through the admin's
-  confirm-gated envelope write, which goes through `parseEnvelope`, tmp and rename. The worker will read it at boot
-  and hold it in a watched ref with a last good copy, like `INT-PROJECTS-FILE-CONTRACT`'s file; it is reloaded with
-  the projects and scoped-limits files, because the floors are judged against both. The receiver does not read it.
+  confirm-gated envelope write, which goes through `parseEnvelope`, tmp and rename. The worker reads it at boot
+  (`loadEnvelopeChecked`, with the merged per-job cap, before any Valkey contact) and holds it in a watched ref with a
+  last good copy, like `INT-PROJECTS-FILE-CONTRACT`'s file (`envelope_reloaded`, `envelope_reload_invalid`). It is
+  reloaded WITH the projects and scoped-limits files, because the floors are judged against both: an envelope edit is
+  judged against their live lists, and a projects or scoped-limits reload that commits re-judges the envelope from
+  disk (`pair.afterCommit`), so an edit that needs both files applies in either save order. A changed digest asks the
+  applied split to follow it (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`). Doctor loads it through the same function
+  (`BOOT_FILES`, `loadEnvelopeAsTheWorker`), and `PI_ENVELOPE_FILE` is one of the keys doctor reads from `.env`.
+  `pi-dispatch up` never writes the key (it says so when the operator's line is blank, since that refuses the boot),
+  and `init` scaffolds no file: an envelope has no neutral empty form. The receiver does not read it.
 - **Location**: `PI_ENVELOPE_FILE`. Unset means no envelope and no delegation anywhere: `loadEnvelope` returns null
-  and every cap is what the operator's rows and windows set. An EMPTY value is not an unset one and refuses, the rule
+  and every cap is what the operator's rows and windows set. Every host of a fleet must agree: a host with no envelope
+  while an applied split exists (`alloc:plan`) refuses its jobs as `envelope-mismatch`, so delegation is turned off for
+  a fleet by removing the key from every host AND deleting `alloc:plan` and `alloc:envelope:expected`. An EMPTY value is
+  not an unset one and refuses,
+  the rule
   of the projects and scoped-limits keys. **The envelope path must be its own canonical path**: absolute, and equal to
   what `realpathSync.native` returns for it, so no symlink anywhere on the way, no `.` or `..`, no case variant and no
   firmlink spelling. Otherwise the check refuses, naming the canonical path to write instead when there is one. A
@@ -5912,8 +5972,18 @@ A priorities plan moves headroom between projects inside it, and nothing an agen
   envelope set, a relative `PI_DISPATCH_RUN_ROOTS` entry is refused, naming it, as `PI_GLOBAL_PI_DIR` and
   `run.skillsDir` already must be absolute: the admin's `dispatch_run` resolves a run root in the operator's pi
   process, so a relative one could name another folder there. The check runs together with every successful load of
-  the file, at boot and again on every reload (the wiring of issue #504 part B), because a later edit can move the
-  file, or a job path, so that one holds the other. **Residual, named**: a host bind mount of the envelope's folder
+  the file, at boot and again on every reload, because a later edit can move the file, or a job path, so that one
+  holds the other. The job paths are read from the triggers FILE (every cron `run.folder` and every `run.skillsDir`,
+  whichever host serves them, `envelopeJobPaths`), the run roots and `PI_GLOBAL_PI_DIR`. A reload that fails the check
+  keeps the last good envelope, so the live copy is never one a job could have written; a triggers reload that adds a
+  job path around the file logs `envelope_inside_job_path` and changes nothing else, since the next envelope reload is
+  judged against that path too. The same identities guard a local job's folder at prepare (`INT-CONTAINER-JOB-INPUTS`,
+  `local-folder-holds-envelope`). **Residual, named: an edit elsewhere can invalidate the live envelope.** A projects,
+  scoped-limits or per-job cap edit that the envelope no longer fits (a floored project removed, a row lowered below a
+  floor, the cap removed) is taken on its own; the worker keeps the last good envelope and logs
+  `envelope_reload_invalid`, doctor fails on the file, and the next boot refuses until the files agree again. The
+  admin writers cross-check the envelope in issue #504 part C. **Residual, named**: a host bind mount of the envelope's
+  folder
   placed under a job path is a second view of the folder with its own identity, and this check does not detect it; an
   operator must not make one.
 - **Shape**: validated by `parseEnvelope` (`./envelope`), fail loud. Every refusal names the field and never quotes a
@@ -6613,6 +6683,7 @@ abstains.
     cronCount       how many cron entries that fingerprint covers -- for the MESSAGE, never the rule
     fpUsd           a fingerprint of the dollar caps this host judges the shared dollar counters against
     fpProjects      a fingerprint of this host's live projects: ids and member hashes, never a name
+    fpEnvelope      the digest of this host's live allocation envelope, or "none" without one
 ```
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
@@ -6664,6 +6735,21 @@ publishes the digest of no projects. Only `doctor` reads it, to WARN (`doctor.mj
 whose digest differs, or one that publishes none while projects are in use (this host's or a peer's digest is not the
 one of no projects). When this host's own projects file does not load, doctor fails on that and makes no comparison,
 so a healthy peer is not blamed. Nothing refuses on it.
+
+**`fpEnvelope` is a digest or the word `none`** (issue #504 part B). It is `envelopeDigest` of the host's LIVE
+envelope (`INT-ENVELOPE-FILE-CONTRACT`'s normalized form, 16 hex), published as a thunk so a reload shows within one
+beat, or `none` when `PI_ENVELOPE_FILE` is unset. A name rather than an empty value, so a host without an envelope is
+told apart from a worker too old to publish the field. It is NOT what the refusal reads: a host refuses governed jobs
+as `envelope-mismatch` by comparing its own digest with the applied split's (`alloc:plan`), never a peer's row, so
+deleting the keyspace changes no decision. Only `doctor` reads it. Doctor reads the applied split (`alloc:plan`, one
+GET) whenever it may talk to the Valkey; with one present it prints the split's envelope digest, names the hosts whose
+`fpEnvelope` matches it (a warning, not a green line, when none does), and FAILS for this host and for each peer whose
+value differs, `none` included, since each refuses its governed jobs; a key that does not decode is said as such and
+counts as governed for a host with no envelope (`doctor.mjs -> appliedSplitChecks`). With no key, nothing is said. With
+none, it WARNS about the peers whose digest differs from this host's
+(`fleetEnvelopeChecks`) and about a peer that publishes no `fpEnvelope` field (a worker from before it) while an
+envelope is in use somewhere (this host's or a peer's value is not `none`). When this host's own envelope does not
+load, doctor fails on that and makes no comparison.
 
 **The TTL is refreshed on EVERY beat**, which reverses this project's stated set-once rule (`budget.mjs`:
 *"set the TTL only when the key is first created, so a long window cannot push its expiry forward"*). The
@@ -7102,3 +7188,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #500, part F (closes #500). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens` gains `childTotal`, `childProcesses` and `unmeteredChildren` between `unpriced` and the cost guard's counters, on the closed key list in the runner's emission order, with a paragraph on what each means, that a non-zero `unmeteredChildren` makes the dollar settlement a floor, and that an older image's record carries none; the attribution comment now says root, other and loose sum to `total` with `childTotal`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, its child keys paragraph: the worker's closed key list admits the three, and `unmeteredChildren` is a floor counter. Exit codes and reasons UNCHANGED, checked: an unmetered child still stops `cost-cap`, `token_budget` or `model-not-allowed`. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: the two reserved names `PI_DISPATCH_CHILD_LEDGER` and `PI_DISPATCH_RUNNER_PID` are as part C wrote them, and no mount, flag or capability token changed. |
 | 2026-10-04 | Issue #571. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a new key, `costUnreported`, written by the METER on every metered line, capped or not, after the child keys and before the cost guard's fields: calls on a priced model whose answer carried broken usage (no input side unless the call never started, a failure after it started, or answer content with an output count of 0, at most 1 on `anthropic-messages`), a call that forwarded not counted, the children's included through their ledgers (version 3; an older one counts as an unmetered child). `costUnanswered` also counts an admitted call whose dispatch threw before any answer object. The cost guard's counters stay six. No new exit code or reason, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens` gains `costUnreported` in the runner's emission order, after `unmeteredChildren`; `metered` requires `costUnreported` (and `unmeteredChildren`, which the list had left out) present and 0; an absent `costUnreported` is a floor, so the image is upgraded before the worker. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the doctor bullet: a ⚠ naming each model the overlay turns streaming usage off on while it costs money, an overlay-defined model or a builtin one through a provider-level `compat` or a `modelOverrides` entry. |
 | 2026-10-04 | Issue #504, part A. **`INT-ENVELOPE-FILE-CONTRACT` NEW**: `PI_ENVELOPE_FILE` (unset is no delegation), version required and a newer one refused, unknown keys refused (counted, never quoted), `window` one of day, week, month, dollars to integer micro-dollars with more than 6 decimals refused, floors keyed to `projects.json` ids or `_other` (always an entry, floor 0 and weight 1 when absent; a project the file does not name counts in `_other`), floors not above the total, a project's operator dollar row for the same window or a longer one below its floor refused naming both, a key written twice following `JSON.parse` (the last wins), `maxStepPct` 1 to 100 when delegation is on (0 refused), writers from `operator-session` and `portfolio-job`, a per-job cost cap required (naming `PI_MAX_COST_USD`), the path refused inside any job-visible path by file identity (device and inode, never path strings, so a firmlink or bind alias is the directory it names, and `$PWD` used exactly when it has the cwd's identity) with equality inside, the envelope path required to be its own canonical path (absolute and equal to its realpath: no symlink, `.`, `..`, case variant or alias on the way; the refusal names the path to write) and to name a regular file with one hard link, the residual of a host bind mount of the envelope's folder under a job path named, while a job path is judged where the kernel resolves it, where a container runtime mounts it (the textual reading), and for a relative path also against the shell's working directory the runtime CLI uses, skipped only when no reading exists, a relative run root refused, and never refused for its spelling, the check run with every load and reload, and the normalized form that `envelopeDigest` hashes. **`INT-PRIORITIES-PLAN-CONTRACT` NEW**: the plan shape, unknown keys refused, weights 0 to 1000, every envelope project named or `plan-incomplete`, `repos` complete by `ref` (8 hex of sha256 over the canonical scope), a reason of at most 200 code points with controls, format characters, lone surrogates, private-use and unassigned code points and line separators refused, `validUntil` defaulting to and capped at `maxPlanDays` (14 with no envelope, never above 366) and canonicalized by `toISOString`, `basis` 16 hex or null and required, refusals as a fixed reason, field and rule that never carry plan text, and the plan id over the canonical plan. Issue #505 reuses it unchanged. **Code evidence**: worker/src/envelope.mjs -> parseEnvelope, envelopeInsideJobPaths; worker/src/priorities.mjs -> parsePlan, planId, scopeRef, PLAN_FIELDS, PLAN_RULES. |
+| 2026-10-04 | Issue #504, part B. **`INT-ENVELOPE-FILE-CONTRACT` AMENDED**: the worker reads the file at boot with `loadEnvelopeChecked` (the merged per-job cap, before any Valkey contact) and holds it in a watched ref with a last good copy; a reload is judged against the live projects and scoped limits, and a projects or scoped-limits reload that commits re-judges the envelope from disk, so an edit needing both files applies in either save order; the containment check runs with every load and every reload against the job paths read from the triggers FILE (`envelopeJobPaths`), a reload that fails it keeps the last good envelope, and a triggers reload that adds a job path around it logs `envelope_inside_job_path`; every host must agree, a host without the key in a fleet with an applied split refusing its jobs; a named residual: an edit to projects, scoped limits or the per-job cap can leave the live envelope invalid (last good kept, doctor fails, the next boot refuses; part C's writers cross-check); doctor loads it through the same function, `up` never writes the key and says so when its line is blank, `init` scaffolds no file. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: five reasons, `allocation-cap` (the dollar refusal whose binding cap was the split or the envelope total; a tie is `dollar-cap`; its own comment, never "raise the budget"; it joins the `refunded` lists), `envelope-mismatch` (a free gate before the mint, a no-envelope host in a governed fleet included; a fault reading the split is `container-never-started` instead), `local-folder-escaped`, `local-folder-holds-envelope` and `local-folder-project-changed` (prepare-stage refusals of a local job); each pages nobody. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: the dollar hold names `_other`'s ledger (log `ledger: "other"`) and the `allocation-cap` refusal with `source: "allocation"`. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: a host row gains `fpEnvelope`, the live envelope's digest or `none`, read by doctor only, never by the refusal, which compares the host's digest with `alloc:plan`'s; doctor reads the applied split whenever it may talk to the Valkey, prints its digest, names the hosts matching it (a warning when none does), fails for each host that does not (a host with no envelope included), and counts a key that does not decode as governed (`appliedSplitChecks`), else it warns on disagreeing peers and on a peer that publishes no `fpEnvelope` field (`fleetEnvelopeChecks`). **`INT-CONTAINER-JOB-INPUTS` AMENDED**: a local job's `/workspace` is its folder resolved at prepare (`realpathSync.native`), the path everything at prepare reads and the bind mount names; the raw string used to be mounted, so a link a job swapped below a job path after the folder was checked mounted its target read-write; a folder named inside a run root or a cron folder (by text or by an ancestor's identity) that resolves outside it, a symlink farm included, one that is the envelope's folder or above it, and one whose resolved folder is another project's member are refused before the reserve; a chained child is enqueued on the folder as its parent named it; the residual (a link above the resolved folder swapped before the mount) is named. **`INT-ON-FAILURE-HOOK-CONTRACT`** UNCHANGED, checked: `allocation-cap`, `envelope-mismatch`, `local-folder-escaped`, `local-folder-holds-envelope` and `local-folder-project-changed` are pre-spend refusals and stay out of `HOOK_POLICY_REASONS`. **`INT-PRIORITIES-PLAN-CONTRACT`** UNCHANGED, checked: the apply path reuses `parsePlan` and `planRefusal` as they are. **Code evidence**: `worker/src/allocation.mjs`, `worker/src/envelope.mjs` (`loadEnvelopeChecked`, `envelopeProtectedIdentities`), `worker/src/start.mjs` (`reloadEnvelope`, `fpEnvelope`), `worker/src/prepare-local.mjs` (`judgePlacement`), `worker/src/outbox.mjs`, `worker/src/doctor.mjs` (`appliedSplitChecks`, `fleetEnvelopeChecks`, `BOOT_FILES`). |

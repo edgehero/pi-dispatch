@@ -57,7 +57,7 @@ import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 }
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, loadProjects, projectsFingerprint } from "./projects.mjs";
@@ -106,7 +106,10 @@ import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { DOLLAR_KEY_PREFIX } from "./dollar-budget.mjs";
 import { dayKey, monthKey, weekKey } from "./budget.mjs";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
-import { cronPlacement } from "./schedules.mjs";
+import { cronPlacement, envelopeJobPaths } from "./schedules.mjs";
+import { envelopeDigest, loadEnvelopeChecked } from "./envelope.mjs";
+import { OTHER } from "./priorities.mjs";
+import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
@@ -209,6 +212,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		modelCatalog,
 		piModelLoader,
 		dollarKeysExist,
+		// Issue #504 part B: the applied split's envelope digest (`alloc:plan`), read once. Undefined means the default.
+		readAppliedSplit,
 		// --live (issue #278, INT-LIVE-PROBE-CONTRACT): read the backend declarations back off short-lived real containers.
 		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
 		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
@@ -369,7 +374,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -559,7 +564,7 @@ function asText(content, enc) {
  * set is a key the other reads back the same way -- and it is asked for THIS PLATFORM's loader, because
  * the three loaders of this file disagree and a blended reading is wrong for every deployment at once.
  */
-export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_MODEL_ENDPOINTS_FILE"]);
+export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_MODEL_ENDPOINTS_FILE", "PI_ENVELOPE_FILE"]);
 
 /**
  * The keys doctor takes from the deployment's `.env` as the SERVICE's values (issue #453, and since issue #471 every key
@@ -581,7 +586,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -700,6 +705,7 @@ export const DOCTOR_SHELL_KEYS = Object.freeze({
 	PI_SCOPED_LIMITS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS)",
 	PI_PROJECTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #499",
 	PI_MODEL_ENDPOINTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #503",
+	PI_ENVELOPE_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #504",
 	[VALKEY_SHARED_KEY]: "read from .env ONLY (#464); a value in this shell is named as ignored",
 });
 
@@ -1073,7 +1079,64 @@ const BOOT_FILES = Object.freeze([
 		// The worker's own default when VALKEY_URL is unset, so both refuse an endpoint on 6379 alike.
 		load: (path, io, env) => loadModelEndpoints({ modelEndpointsFile: path, valkeyUrl: env?.VALKEY_URL ?? DEFAULT_VALKEY_URL }, io),
 	}),
+	// Issue #504 part B. Off when unset: no envelope and no delegation, and every cap is what the operator's rows and
+	// windows set. The worker loads it at boot (start.mjs, `loadEnvelopeChecked`) against the projects and scoped limits
+	// it loaded, with the merged per-job cap, and refuses the start when it lies inside a job path, so this load asks the
+	// same three questions through the same function (`loadEnvelopeAsTheWorker`).
+	Object.freeze({
+		key: "PI_ENVELOPE_FILE",
+		noun: "the allocation envelope",
+		scaffold: "envelope.json",
+		off: "delegated allocation is OFF (every dollar cap is the operator's own)",
+		unsetMeans: "no envelope governs any job and no priorities plan applies",
+		unit: "envelope",
+		nothing: "allocation envelope",
+		// No panel writes this file yet (the envelope tool comes with part C of issue #504).
+		panelWrites: false,
+		fails: "REFUSES TO START",
+		whenDeleted: "turns delegated allocation off",
+		whenEmpty: "turns the worker off",
+		emptyCost: "refuses the boot",
+		resolve: envelopeFilePath,
+		load: (path, io, env) => loadEnvelopeAsTheWorker(path, io, env),
+	}),
 ]);
+
+/** A key's value when it is a non-empty string, else null: the boot reads an unset key as off. */
+function nonEmpty(value) {
+	return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+/**
+ * The envelope as the WORKER would load it (issue #504 part B): against the projects and scoped limits the service
+ * names (each loaded by its own loader; one that does not load is its own BOOT_FILES line, so here it counts as none),
+ * with the merged per-job cap, and with the containment check against the triggers file's cron folders and skills
+ * dirs, the run roots and the global pi dir. Throws what the worker's boot would throw.
+ */
+export function loadEnvelopeAsTheWorker(path, io = {}, env = {}) {
+	return loadEnvelopeChecked({ envelopeFile: path }, { ...envelopeContextOf(env, io), jobPaths: envelopeJobPaths({ triggersFile: nonEmpty(env.PI_TRIGGERS_FILE), dispatchRunRoots: delimitedList(env.PI_DISPATCH_RUN_ROOTS), globalPiDir: nonEmpty(env.PI_GLOBAL_PI_DIR) }, io) }, { io });
+}
+
+/** The projects, the scoped limits and the merged per-job cap (micro-dollars, or null) the envelope is judged against. */
+function envelopeContextOf(env, io = {}) {
+	const quiet = (load) => {
+		try {
+			return load();
+		} catch {
+			return [];
+		}
+	};
+	const projects = quiet(() => loadProjects({ projectsFile: nonEmpty(env.PI_PROJECTS_FILE) }, io));
+	const limits = quiet(() => loadScopedLimits({ scopedLimitsFile: nonEmpty(env.PI_SCOPED_LIMITS_FILE) }, io));
+	let maxCostMicros = null;
+	try {
+		const settings = deploymentSettingsOf(env, settingsFilePath(env), (p) => (io.existsSync ?? existsSync)(p));
+		maxCostMicros = optionalUsdMicros(settings.maxCostUsd, "maxCostUsd");
+	} catch {
+		// A malformed cap is its own line; the envelope then reads as having none, which it refuses.
+	}
+	return { projects, limits, maxCostMicros };
+}
 
 /**
  * Is anything at `path`, by `statFile`: ENOENT is absence, so a directory or an unreadable entry is judged. A stat that
@@ -2334,6 +2397,11 @@ export async function collectChecks(shellVars, seams) {
 	// Valkey doctor reads, a host row is another party's text, and a control byte in a name or zone must not reach the
 	// terminal. The registry's own charset already refuses them at the source; this is the reader not relying on it.
 	const peers = (fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name), tz: h.tz ? printable(h.tz) : h.tz })).filter((h) => h.name !== workerNameOf(declaredWorkerName));
+	// The applied split (issue #504 part B): one GET whenever this command may talk to the Valkey, so a single host with
+	// no envelope that refuses every job is told why. `{ digest }`, `{ undecodable: true }` for a key that exists and does
+	// not decode (the worker's EXISTS still counts it as governed), or null (no split, or no answer: nothing is said).
+	const valkeyUsable = !(unreadValkey || valkeyRefused || valkeyDbProblem || valkeyAuthVerdict?.state === "dbrange");
+	const appliedSplit = valkeyUsable ? await (seams.readAppliedSplit ?? defaultReadAppliedSplit)(valkeyTalkUrl) : null;
 	// Read only when there is a peer to compare against. Every line below is gated on a peer existing, and
 	// the SUBPROCESS has to be too: otherwise every `doctor` run on every single-host deployment spawns an
 	// extra docker call whose answer nothing reads.
@@ -2424,9 +2492,21 @@ export async function collectChecks(shellVars, seams) {
 		// "no projects" against healthy peers would send the operator to the wrong host.
 		const projectFactsHere = readProjectFacts(env, fileExists);
 		if (projectFactsHere.parseError === null) checks.push(...fleetProjectsChecks(projectsFingerprint(projectFactsHere.projects), peers));
+		// Issue #504 part B: one applied split, judged on every host against its own envelope. A host whose envelope digest
+		// differs refuses every governed job as `envelope-mismatch`. SKIPPED when this host's file does not load, for the
+		// projects check's reason above.
+		const envelopeHere = readEnvelopeFacts(env);
+		if (envelopeHere.parseError === null && appliedSplit === null) checks.push(...fleetEnvelopeChecks(envelopeHere.envelope ? envelopeDigest(envelopeHere.envelope) : NO_ENVELOPE_FINGERPRINT, peers));
 	} else if (fleet.unreachable) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
+	}
+	// Issue #504 part B: the APPLIED split names the envelope it was made for, and every host
+	// whose envelope differs refuses its governed jobs. Read whenever this command may talk to the Valkey (above), from
+	// the same Valkey the fleet was read from; with no split there, or no answer, nothing is said.
+	if (appliedSplit !== null) {
+		const envelopeHere = readEnvelopeFacts(env);
+		if (envelopeHere.parseError === null) checks.push(...appliedSplitChecks(appliedSplit, envelopeHere.envelope ? envelopeDigest(envelopeHere.envelope) : NO_ENVELOPE_FINGERPRINT, workerNameOf(declaredWorkerName), peers));
 	}
 
 	// Which variable holds a provider's key is PI'S fact, asked of pi rather than copied (issue #286).
@@ -3501,6 +3581,11 @@ export async function collectChecks(shellVars, seams) {
 		if (projectFacts.parseError === null) checks.push(...projectRowChecks(scopedLimitFacts.limits, projectFacts.projects, scopedLimitFacts.path));
 	}
 
+	// Issue #504 part B: the envelope's advisories, on the file the service names, when it loads (a file that does not is
+	// the BOOT_FILES line's). Warnings only: the worker boots on both.
+	const envelopeFactsHere = readEnvelopeFacts(env);
+	if (envelopeFactsHere.envelope) checks.push(...envelopeChecks(envelopeFactsHere.envelope, envelopeFactsHere.projects, envelopeFactsHere.maxCostMicros));
+
 	// Issue #498: a BARE repo scope (`acme/web`) matches that repo on every forge, so with triggers on more than one forge
 	// kind a bare row is one cap (one lease, one count) shared by GitHub's acme/web and Forgejo's, and a bare pause window
 	// pauses both. That may be meant, so this is a WARNING naming the qualified spellings, never a failure: refusing bare
@@ -4355,6 +4440,158 @@ function readProjectFacts(env, fileExists) {
 		return { projects: loadProjects({ projectsFile: path }, { readFileSync, existsSync: fileExists }), parseError: null };
 	} catch (e) {
 		return { projects: [], parseError: e?.message ?? String(e) };
+	}
+}
+
+/**
+ * The envelope facts (issue #504 part B): the envelope as the worker would load it, the projects and the per-job cap it
+ * was judged against, or a parse error when `PI_ENVELOPE_FILE` is set and does not load (the BOOT_FILES line's).
+ * `envelope` is null when the key is unset.
+ */
+function readEnvelopeFacts(env) {
+	const path = nonEmpty(env.PI_ENVELOPE_FILE);
+	if (path === null) return { envelope: null, projects: [], maxCostMicros: null, parseError: null };
+	const io = { readFileSync, existsSync };
+	try {
+		const context = envelopeContextOf(env, io);
+		return { envelope: loadEnvelopeAsTheWorker(path, io, env), projects: context.projects, maxCostMicros: context.maxCostMicros, parseError: null };
+	} catch (e) {
+		return { envelope: null, projects: [], maxCostMicros: null, parseError: e?.message ?? String(e) };
+	}
+}
+
+/**
+ * The envelope's advisories (issue #504 part B, INT-ENVELOPE-FILE-CONTRACT), WARNINGS the worker boots on:
+ *   - a floor above 0 and below the per-job cost cap: every governed job reserves its per-job cap against its share, so a
+ *     floor that small admits no job of its own (it still counts toward the total);
+ *   - a project in projects.json that the envelope does not name: its jobs count in `_other`'s share.
+ * Plus one line of facts: the digest (what `fpEnvelope` and `alloc:envelope:expected` hold), the window, the total and
+ * whether delegation is on. Ids and amounts only.
+ */
+export function envelopeChecks(envelope, projects, maxCostMicros) {
+	const checks = [{ ok: true, label: `Allocation envelope ${envelopeDigest(envelope)}: ${formatMicros(envelope.totalMicros)} a ${envelope.window}, ${Object.keys(envelope.floors).length} entries, delegation ${envelope.delegation?.enabled ? `ON (writers ${envelope.delegation.writers.join(", ")}, step ${envelope.delegation.maxStepPct}%, interval ${envelope.delegation.minIntervalHours}h)` : "OFF"}` }];
+	const low = Object.entries(envelope.floors).filter(([, floor]) => floor > 0 && Number.isSafeInteger(maxCostMicros) && floor < maxCostMicros);
+	if (low.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `envelope floor(s) ${low.map(([id, floor]) => `${id} (${formatMicros(floor)})`).join(", ")} are below the per-job cost cap (${formatMicros(maxCostMicros)}): each governed job reserves its whole cap against its share, so a floor that small admits no job of its own`,
+			fix: "raise the floor to at least the per-job cap (PI_MAX_COST_USD), lower the cap, or set the floor to 0 if the project needs no guaranteed share",
+		});
+	}
+	const absent = (Array.isArray(projects) ? projects : []).map((p) => p?.id).filter((id) => typeof id === "string" && id !== OTHER && envelope.floors[id] === undefined);
+	if (absent.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `project(s) ${absent.join(", ")} are in projects.json and not in the envelope, so their jobs count in ${OTHER}'s share of the split`,
+			fix: "add each to the envelope's floorsUsd (0 is a floor) if it should have a share of its own; leave it out if counting it with the work in no project is what you meant",
+		});
+	}
+	return checks;
+}
+
+/**
+ * Issue #504 part B: do this host's envelope and its peers' agree? `mine` is this host's `fpEnvelope` as doctor computes
+ * it from the service's envelope file (`envelopeDigest`, or `none`), `peers` the registry rows of every OTHER host.
+ * WARNINGS only, the fleet block's rule, but the consequence is named: a host whose digest is not the applied split's
+ * refuses every governed job as `envelope-mismatch`.
+ *
+ *   - A peer whose `fpEnvelope` differs: the hosts judge one shared split against two envelopes, so one side refuses.
+ *   - A peer with no `fpEnvelope`: a worker from before the envelope, which enforces no split at all. Said only when an
+ *     envelope is in use somewhere, so a fleet without one hears nothing new on upgrade.
+ * Hosts are named, never a value: the registry carries a digest.
+ */
+export function fleetEnvelopeChecks(mine, peers) {
+	const checks = [];
+	const opinions = peers.filter((h) => typeof h.fpEnvelope === "string" && h.fpEnvelope !== "");
+	const differing = opinions.filter((h) => h.fpEnvelope !== mine);
+	if (differing.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `Hosts disagree about the allocation envelope: ${differing.map((h) => h.name).join(", ")} ${differing.length === 1 ? "has" : "have"} ${differing.every((h) => h.fpEnvelope === NO_ENVELOPE_FINGERPRINT) ? "no envelope" : "an envelope with other numbers"}, and this host ${mine === NO_ENVELOPE_FINGERPRINT ? "has none" : `has ${mine}`}, so the hosts whose envelope is not the applied split's refuse every governed job as envelope-mismatch`,
+			fix: "copy the same envelope.json to every host (PI_ENVELOPE_FILE), or unset it on every host and DEL alloc:plan alloc:envelope:expected; to make a hand edit the fleet's, copy it to every host and SET alloc:envelope:expected to its digest (doctor prints it)",
+		});
+	}
+	const silent = peers.filter((h) => typeof h.fpEnvelope !== "string" || h.fpEnvelope === "");
+	const inUse = mine !== NO_ENVELOPE_FINGERPRINT || opinions.some((h) => h.fpEnvelope !== NO_ENVELOPE_FINGERPRINT);
+	if (silent.length > 0 && inUse) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${silent.map((h) => h.name).join(", ")} ${silent.length === 1 ? "publishes" : "publish"} no envelope digest, so ${silent.length === 1 ? "it enforces" : "they enforce"} no allocation split while the rest of the fleet does`,
+			fix: "upgrade every worker on this Valkey to the same release: a worker from before the envelope reserves against the operator's caps alone",
+		});
+	}
+	return checks;
+}
+
+/**
+ * The applied split against every host (issue #504 part B). `applied` is `{ digest }`, the
+ * envelope digest `alloc:plan` was made for; `mine` this host's (`none` without an envelope); `peers` the registry rows.
+ * One line of facts naming the hosts that match it, and a FAILURE for this host and for each peer that does not: such a
+ * host refuses every governed job as `envelope-mismatch` (a host with no envelope in a governed fleet included).
+ */
+export function appliedSplitChecks(applied, mine, myName, peers) {
+	const TURN_OFF = "remove PI_ENVELOPE_FILE from every host, then `valkey-cli DEL alloc:plan alloc:envelope:expected`";
+	const noEnvelopeHere = { ok: false, label: "this host has no envelope while the fleet has an applied budget split (alloc:plan), so it refuses every job as envelope-mismatch", fix: `install the fleet's envelope here (PI_ENVELOPE_FILE), or turn delegation off for the whole fleet: ${TURN_OFF}` };
+	if (applied.undecodable) {
+		// The key exists and is no split this build can read: a host with an envelope replaces it with the neutral split at
+		// its next job, while a host without one counts it as governed and refuses.
+		const checks = [{ ok: false, warn: true, label: "alloc:plan exists but is not a budget split this build can read; a host with an envelope replaces it with the neutral split at its next job", fix: `if delegation is meant to be off: ${TURN_OFF}` }];
+		if (mine === NO_ENVELOPE_FINGERPRINT) checks.push(noEnvelopeHere);
+		return checks;
+	}
+	const d = applied.digest;
+	const matching = [...(mine === d ? [myName] : []), ...peers.filter((h) => h.fpEnvelope === d).map((h) => h.name)].sort();
+	// Green only while some host matches: a split no host carries the envelope of refuses every governed job everywhere.
+	const checks = [
+		matching.length > 0
+			? { ok: true, label: `Applied budget split (alloc:plan) was made for envelope ${d}: ${matching.join(", ")} ${matching.length === 1 ? "matches" : "match"} it` }
+			: { ok: false, warn: true, label: `Applied budget split (alloc:plan) was made for envelope ${d}, and no host matches it`, fix: `copy that envelope to the hosts, or make another one the fleet's (copy it to every host, then \`valkey-cli SET alloc:envelope:expected <its digest>\`), or turn delegation off: ${TURN_OFF}` },
+	];
+	if (mine !== d) {
+		checks.push(
+			mine === NO_ENVELOPE_FINGERPRINT
+				? noEnvelopeHere
+				: { ok: false, label: `this host's envelope (${mine}) is not the one the applied budget split was made for (${d}), so it refuses every governed job as envelope-mismatch`, fix: `copy the fleet's envelope here; or, to make this one the fleet's, copy it to every host and run \`valkey-cli SET alloc:envelope:expected ${mine}\`` },
+		);
+	}
+	const off = peers.filter((h) => typeof h.fpEnvelope === "string" && h.fpEnvelope !== "" && h.fpEnvelope !== d);
+	if (off.length > 0) {
+		checks.push({
+			ok: false,
+			label: `${off.map((h) => h.name).join(", ")} ${off.length === 1 ? "carries" : "carry"} ${off.every((h) => h.fpEnvelope === NO_ENVELOPE_FINGERPRINT) ? "no envelope" : "another envelope"}, not the one the applied budget split was made for (${d}), so ${off.length === 1 ? "it refuses" : "they refuse"} every governed job as envelope-mismatch`,
+			fix: `copy the fleet's envelope to those hosts (PI_ENVELOPE_FILE), or turn delegation off for the whole fleet: ${TURN_OFF}`,
+		});
+	}
+	return checks;
+}
+
+/**
+ * The applied split from Valkey (`alloc:plan`): `{ digest }`, `{ undecodable: true }` when the key exists and holds no
+ * readable split, or null with no key or no answer.
+ */
+export async function defaultReadAppliedSplit(url) {
+	try {
+		const { makeRedisClient } = await import("./connection.mjs");
+		const client = makeRedisClient(url, { failFast: true, lazyConnect: true });
+		client.on("error", () => {});
+		try {
+			await client.connect();
+			const text = await client.get(ALLOC_PLAN_KEY);
+			if (text === null || text === undefined) return null;
+			let digest = null;
+			try {
+				digest = JSON.parse(text)?.envelopeDigest;
+			} catch {}
+			return typeof digest === "string" && /^[0-9a-f]{16}$/.test(digest) ? { digest } : { undecodable: true };
+		} finally {
+			client.disconnect();
+		}
+	} catch {
+		return null;
 	}
 }
 

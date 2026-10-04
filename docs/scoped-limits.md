@@ -123,7 +123,10 @@ Version 2 adds dollar caps (issues #501 and #502). Set `"version": 2` to use the
   remove it. The panel and the tools write version 1 until a row needs version 2.
 - Each job reserves its per-job cost cap (`maxCostUsd`) in every window that applies, together with the
   deployment's dollar windows. If any window has no room, the job is refused (`dollar-cap`) and everything it
-  reserved is given back. So a dollar row needs a per-job cap: a job with none is refused `config-refused`.
+  reserved is given back. Under an allocation envelope the job's project share, its repo share or the envelope
+  total can be smaller than the row or the window, and a window bound by one of those is refused `allocation-cap`
+  ([allocation.md](allocation.md)). So a dollar row needs a per-job cap: a job with none is refused
+  `config-refused`.
 - Which model rows a job reserves in: a job with an allowed-model list (`run.models` or `PI_ALLOWED_MODELS`)
   reserves only in the rows of its listed models. A job with **no list** reserves in **every** model row,
   because it can switch to any model while it runs. Give such triggers a list if a full model window should
@@ -158,6 +161,8 @@ A `project:<id>` row caps every repo and folder of one project as one. The id is
 - `concurrent` bounds how many of the project's jobs run at once, across every member and every host. The
   excess is deferred, like a repo's.
 - `dayUsd` / `weekUsd` / `monthUsd` cap what the project's jobs spend. A job that does not fit is refused `dollar-cap`, and the comment says "this project".
+  Under an allocation envelope the cap for the envelope's window is the smaller of the row and the project's share; a
+  job refused by the share is `allocation-cap`.
 - A job is counted narrowest first: its repo or folder row, then its project's row, then the global caps. A
   refusal gives back the slots taken before it, so a full project does not use up its repos' counts, and a full
   global cap uses up neither.
@@ -253,9 +258,10 @@ Three doors, same as quiet hours:
 |---|---|
 | Env var | `PI_SCOPED_LIMITS_FILE` (absolute path; unset = no scoped limits. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
 | File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?`, `model:` rows and `project:<id>` rows |
-| Refusal reason | `scope-cap` (pre-spend, never retried); `project-cap` for a project row; `dollar-cap` for a dollar window |
+| Refusal reason | `scope-cap` (pre-spend, never retried); `project-cap` for a project row; `dollar-cap` for a dollar window; `allocation-cap` when an allocation envelope's split bound the window |
 | Deferral | delayed set, fixed re-check, never dropped |
 | Panel key | `m` |
 | Tools | `dispatch_limits`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete` |
 | Projects | `PI_PROJECTS_FILE` groups repos and folders into a project, recorded per run and capped by a `project:<id>` row. It is wired like this key. See [projects.md](projects.md) |
+| Allocation envelope | `PI_ENVELOPE_FILE`: a dollar total and a floor per project, split between projects by a priorities plan. See [allocation.md](allocation.md) |
 | The folder mutex | always on for local jobs, max 1 per folder, no configuration anywhere |

@@ -58,7 +58,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A trigger's `run.secrets` and `run.secretsProfile` | **Operator — the same trust as the triggers file, plus a host exec** | The references are named in the reviewed file; the resolver that reads them is a script the operator wrote and declared. The job receives VALUES and never a manager credential, so it cannot enumerate a vault, but it can spend what it was given. |
 | A trigger's `run.skillsDir` and `run.instructions` | **Operator — the same trust as the triggers file** | Both are instructions, and both come from the reviewed `triggers.json` on the worker host rather than from any payload. Nothing reachable from a webhook, an issue or comment body, or `dispatch_run` can set either, and no panel key or AI tool writes them. The skills are copied per job into `/job` (adding no mount) and are layered UNDER the repo's own `.pi/`, so a serviced repo still wins a name collision; the instruction text lands in the user prompt above the issue text and never in the system prompt |
 | The job image (`PI_JOB_IMAGE`, or a trigger's `run.image`) | **Operator, the same trust as baking it** | It *is* the code every job executes: the pi version, the runner and its exit codes, the guardrail floor, the loader's discovery posture and, where the argv carries no `--user` (Docker Desktop, or a worker running as uid 1001), the non-root user all come from it. Nothing here verifies an image this project did not build. The isolation flags are applied by the worker's argv and hold for **any** image; the **contents** do not. |
-| The allocation envelope (`PI_ENVELOPE_FILE`) | **Operator, the same trust as the scoped-limits file** | It bounds what a priorities plan may move: the total, the floors and the step. The worker refuses to boot when the file lies inside any path a job container can see, and the plan itself, which is agent text, gets no trust |
+| The allocation envelope (`PI_ENVELOPE_FILE`) | **Operator, the same trust as the scoped-limits file** | It bounds what a priorities plan may move: the total, the floors and the step. The worker refuses to boot when the file lies inside any path a job container can see, and re-checks that at every reload, keeping the last good envelope when it fails; a local job's folder is re-judged at prepare and refused when it resolves to the envelope's folder or above it. The plan itself, which is agent text, gets no trust |
 | The job container | **None** — it is the untrusted side | It runs the agent |
 | A job container's `/outbox` request file | **None** — agent-authored | An agent-initiated signal channel back to the host; validated host-side before anything is enqueued. **Local jobs only** — a github job has no `/outbox` mount at all |
 | A job container's `/session` transcript | **None** — agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges |
@@ -434,7 +434,8 @@ Stated openly rather than discovered later:
   reads and the queue controls, and unlike either it spends money editing a folder in place with no undo —
   an explicit break from the "money-safe" framing that governs `pause`/`resume`. It is bounded in
   blast-radius, not prevented, by **six** independent limits: the folder allowlist `PI_DISPATCH_RUN_ROOTS`
-  (realpath + containment); the committed per-flow opt-in (default deny, read at a pre-agent SHA); the
+  (realpath + containment, judged again at prepare on the resolved folder, which is what is mounted:
+  `local-folder-escaped`); the committed per-flow opt-in (default deny, read at a pre-agent SHA); the
   dirty-tree refusal (no force option); no spend-knob parameters on the tool; a per-hour rate limit; and
   the daily cap (`CONST-BUDGET-BEFORE-TOKENS`).
   One supporting fact about that allowlist, because `/dispatch setup` writes a file that could otherwise
@@ -469,7 +470,10 @@ Stated openly rather than discovered later:
   $10, a 25% step and a 24-hour interval, a prompt injection can push one project to $90 and the other to $10 in
   four days, and total spend stays at or under $100. A Valkey flush resets the interval, which buys one extra step.
   A compromised portfolio flow (a malicious skill in its folder) has the same bound, and it cannot write the
-  envelope: the worker refuses to boot when the envelope lies inside any path a job container can see. The session
+  envelope: the worker refuses to boot when the envelope lies inside any path a job container can see, re-checks that
+  at every reload (keeping the last good envelope when it fails), and re-judges a local job's folder at prepare, so a
+  link a job planted cannot mount the envelope's folder (`local-folder-holds-envelope`) or carry a folder out of its
+  job path (`local-folder-escaped`). The session
   tool is for your own instructions. A model that reads issue text in your session breaks the premise that the
   operator's session processes no adversarial input; that judgement belongs in a portfolio job (issue #505), whose
   plan meets the same rules. Reasons in a plan are agent text: they show in the panel only, escaped, and never reach

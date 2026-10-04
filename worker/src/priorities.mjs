@@ -505,6 +505,29 @@ function blend(keys, b, t, step, largest) {
 }
 
 /**
+ * The repo shares of an effective vector (issue #504 part B): each project's allocation split by its repo weights,
+ * the rule of `allocate`'s step 4 (largest remainder, ties by ref, no floors, no step). `repos` is
+ * `{ projectId: { ref: weight } }`; a project that is not in `allocations`, or `_other`, is skipped, because a re-base
+ * may have dropped it. Used where a vector changes without a new plan (a re-base keeps the plan's repo weights).
+ */
+export function repoShares(allocations, repos) {
+	const out = {};
+	for (const [projectId, repoWeights] of Object.entries(repos ?? {})) {
+		if (projectId === OTHER || allocations?.[projectId] === undefined) continue;
+		const refs = Object.keys(repoWeights ?? {}).sort();
+		const rw = {};
+		for (const ref of refs) {
+			if (!isWeight(repoWeights[ref])) throw new TypeError(`repos.${projectId}.${ref} must be an integer from 0 to ${WEIGHT_MAX}`);
+			rw[ref] = BigInt(repoWeights[ref]);
+		}
+		const split = largestRemainder(micros(allocations[projectId], `allocations.${projectId}`), refs, rw);
+		out[projectId] = {};
+		for (const ref of refs) out[projectId][ref] = Number(split[ref]);
+	}
+	return out;
+}
+
+/**
  * The neutral allocation: the envelope's `defaultWeights`, no step. What every host computes with no applied plan,
  * after a flush, after expiry and when delegation is off.
  */

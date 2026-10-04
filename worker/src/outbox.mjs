@@ -158,8 +158,11 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 
 				// Enqueue an ordinary local job on the parent's OWN folder (folder is forced, not read from
 				// the outbox). The child id is retry-idempotent so a retried parent dedups instead of fanning out.
+				// The folder AS THE PARENT NAMED IT (issue #504 part B), never `prepared.workspace`, which is now the folder
+				// resolved at prepare: the named spelling is what matched the parent's scoped-limits row, its project member and
+				// its folder mutex, and the child's own prepare resolves and judges it again.
 				await enqueue(queue, {
-					folder: prepared.workspace,
+					folder: job.data?.folder ?? prepared.workspace,
 					flow,
 					task,
 					// The child runs the parent's OWN folder, so it needs the parent's toolchain by definition: a
