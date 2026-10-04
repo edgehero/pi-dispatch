@@ -101,7 +101,19 @@ import {
   collectGraphInputs,
   forgeRepoTargets,
   secureGraphRoot,
+  DEPLOYMENT_SCAFFOLD_FILES,
+  readEnvelope,
+  readAllocations,
+  planEnvelopeWrite,
+  writeEnvelope,
+  applyPriorities,
+  revertAllocation,
+  envelopeJobCap,
+  envelopeRefusal,
 } from "./read-model.mjs";
+// The operator session's write guard (issue #504 part C): pi's own `write`, `edit` and `powershell` blocked on the
+// deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
+import { envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
 import { buildInsightsHtml } from "./insights-html.mjs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
@@ -133,6 +145,9 @@ import { applyDeploymentPointer, pointerPath, pointerState, readPointer, takePoi
 // The only fs use in this module: the skew notice reads one package.json through the wizard's own reader.
 // Everything else fs-shaped goes through read-model.mjs by design.
 import * as nodeFs from "node:fs";
+// The audit rows' host name for a plan this session applies (issue #504 part C): PI_WORKER_NAME, else this machine's.
+import { hostname } from "node:os";
+import { join } from "node:path";
 import { COSTS_WINDOWS, PROJECT_KEY_RE, costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo, whatIfFlow } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
@@ -142,7 +157,7 @@ import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGl
 import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
-import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -216,7 +231,7 @@ const CHANNEL = "pi-dispatch-admin";
 
 
 const USAGE =
-  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup|secrets>";
+  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|priorities|setup|secrets>";
 
 const KNOWN_SUBCOMMANDS = [
   "status",
@@ -231,6 +246,7 @@ const KNOWN_SUBCOMMANDS = [
   "settings",
   "set",
   "unset",
+  "priorities",
   "setup",
   "secrets",
 ] as const;
@@ -278,7 +294,7 @@ export default function admin(pi: ExtensionAPI): void {
     // which is exactly the drift the USAGE/KNOWN_SUBCOMMANDS pin exists to catch -- keep all three
     // in step.
     description:
-      "pi-dispatch admin: status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup",
+      "pi-dispatch admin: status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|priorities|setup",
     getArgumentCompletions: (prefix) => completeArguments(prefix),
     handler: async (args, ctx) => dispatch(pi, args, ctx),
   });
@@ -286,6 +302,76 @@ export default function admin(pi: ExtensionAPI): void {
   registerTools(pi);
   registerSkill(pi);
   registerNudge(pi);
+  registerWriteGuard(pi);
+}
+
+/**
+ * The write guard (issue #504 part C, `write-guard.mjs`): a `tool_call` handler that blocks pi's built-in `write` and
+ * `edit` (and a `powershell` command naming one) when the target is one of the deployment's money files, or one of the
+ * two files that NAME them: the deployment's `.env` and the deployment pointer. `models.json` is not here: the admin
+ * never writes it, so no confirm is bypassed by writing it.
+ *
+ * The set is read per call (a deployment the panel is pointed at after load is guarded from its next call) AND it
+ * never shrinks within a session: every file guarded at load, or at any call since, stays guarded. The per-call read
+ * goes through the deployment's `.env`, so without the union a session that rewrote where `.env` points could unguard
+ * the real file, write it, and point `.env` back (measured in review). `.env` and the pointer are guarded too, for the
+ * same reason and for the worker's: a service restart reads them.
+ */
+function registerWriteGuard(pi: ExtensionAPI): void {
+  const seen = new Map<string, { path: string; label: string; tool: string }>();
+  const remember = () => {
+    for (const g of guardedFiles()) if (!seen.has(g.path)) seen.set(g.path, g);
+    return [...seen.values()];
+  };
+  try {
+    remember();
+  } catch {
+    // A deployment that cannot be read at load is read again at the first call; the guard blocks if it still cannot.
+  }
+  const guard = makeWriteGuard({ guardedFiles: remember });
+  pi.on("tool_call", (event: any, ctx: any) => guard(event, ctx));
+}
+
+/**
+ * The files the write guard protects, with the label and the tool the model is told to ask for instead. A cwd
+ * default (`./triggers.json`, `./scoped-limits.json`, `./projects.json`) is guarded when its key is set (the worker
+ * reads that file only then: `config.mjs`, each is null when unset), or, with no pointer, when the session folder is an
+ * init scaffold folder (below); otherwise every repository with a file of that name would be refused in a session
+ * that has no deployment. The settings overlay's default is the worker's own per-account file, so it is always
+ * guarded. A deployment the panel cannot see at all (no pointer, no key, not the folder pi started in) is not.
+ */
+export function guardedFiles(): { path: string; label: string; tool: string }[] {
+  const env = deploymentEnv();
+  const paths = resolvePaths(deploymentEnv());
+  const set = (key: string) => typeof env?.[key] === "string" && env[key] !== "";
+  const dir = pointerState().deploymentDir;
+  const out = [
+    { path: paths.envelopeFile, label: "the allocation envelope (PI_ENVELOPE_FILE)", tool: "dispatch_envelope_set" },
+    { path: paths.projectsFile, label: "projects.json (PI_PROJECTS_FILE)", tool: "dispatch_project_add, _edit or _delete" },
+    { path: set("PI_SCOPED_LIMITS_FILE") ? paths.scopedLimitsPath : null, label: "scoped-limits.json (PI_SCOPED_LIMITS_FILE)", tool: "dispatch_limit_add, _edit or _delete" },
+    { path: set("PI_TRIGGERS_FILE") ? paths.triggersPath : null, label: "triggers.json (PI_TRIGGERS_FILE)", tool: "dispatch_trigger_add, _edit or _delete" },
+    { path: paths.settingsFile, label: "the settings overlay (PI_SETTINGS_FILE)", tool: "dispatch_set" },
+    { path: typeof dir === "string" && dir !== "" ? join(dir, ".env") : null, label: "the deployment's .env, which names these files (PI_*_FILE)", tool: "the operator's own editor" },
+    { path: pointerPath(process.env), label: "the deployment pointer (PI_DISPATCH_DEPLOYMENT_FILE)", tool: "/dispatch setup" },
+  ];
+  if (!(typeof dir === "string" && dir !== "")) {
+    // No pointer: the session folder may BE the deployment (`init` then `up`, pi started there, nothing exported). Its
+    // `.env` is never read for configuration (`panelEnv`), but it may ADD to the guard: every guarded file it names,
+    // and itself (`envNamedFiles`). And in a deployment folder (init's four scaffold files are there) the files the
+    // panel's own confirm tools write with no key set (`./triggers.json`, `./scoped-limits.json`, `./projects.json`)
+    // are guarded too; in any other folder they stay a repository's own files (review round 1).
+    const cwd = process.cwd();
+    out.push(...envNamedFiles(cwd));
+    if (DEPLOYMENT_SCAFFOLD_FILES.every((f) => nodeFs.existsSync(join(cwd, f)))) {
+      out.push(
+        { path: join(cwd, ".env"), label: "the deployment's .env, which names these files (PI_*_FILE)", tool: "the operator's own editor" },
+        { path: paths.triggersPath, label: "triggers.json (PI_TRIGGERS_FILE)", tool: "dispatch_trigger_add, _edit or _delete" },
+        { path: paths.scopedLimitsPath, label: "scoped-limits.json (PI_SCOPED_LIMITS_FILE)", tool: "dispatch_limit_add, _edit or _delete" },
+        { path: paths.projectsPath, label: "projects.json (PI_PROJECTS_FILE)", tool: "dispatch_project_add, _edit or _delete" },
+      );
+    }
+  }
+  return out.filter((g): g is { path: string; label: string; tool: string } => typeof g.path === "string" && g.path !== "");
 }
 
 /**
@@ -544,6 +630,10 @@ function registerTools(pi: ExtensionAPI): void {
       // or --env-setup script, which the admin cannot see (`mergedDollarProblem`). The operator decides.
       const isDollarKey = (DOLLAR_SETTING_KEYS as readonly string[]).includes(params.key);
       const problem = isDollarKey ? mergedDollarProblem(afterOverlay, env, shown) : null;
+      // Issue #504 part C: the per-job cap is what the allocation envelope needs to load (each governed job reserves it),
+      // so a change that removes it or makes it unreadable is refused BEFORE the confirm, naming the conflict.
+      const broken = settingsEnvelopeRefusal(params.key, view?.overlay ?? {}, afterOverlay, paths, env);
+      if (broken) throw new Error(`rejected: ${escapeInterpreted(broken)}`);
       const result = await confirmedWrite(
         ctx,
         {
@@ -968,11 +1058,16 @@ function registerTools(pi: ExtensionAPI): void {
       const paths = resolvePaths(deploymentEnv());
       const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
       const l = buildScopedLimit({ ...params, ...dollarFieldsOf(params) });
+      // Issue #504 part C: judged BEFORE the confirm (the parser, the project pair and the allocation envelope), so the
+      // operator is never asked to approve a row the write would refuse, such as one below an envelope floor.
+      const envelope = envelopeGuard(paths, deploymentEnv());
+      const mutate = (list: any[]) => [...list, l];
+      refuseLimitsWrite({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate, envelope });
       const result = await confirmedWrite(
         ctx,
         { title: "Add scoped limit", message: `Add to scoped-limits.json:\n${JSON.stringify(l)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (list: any[]) => [...list, l] });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope, mutate });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, added: l, ...(res.pending ? { pending: res.pending } : {}) };
         },
@@ -996,11 +1091,14 @@ function registerTools(pi: ExtensionAPI): void {
       const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
       const cur = list[params.index];
       if (!cur) throw new Error(`no scoped limit at index ${params.index} (have ${list.length})`);
+      const envelope = envelopeGuard(paths, deploymentEnv());
+      const mutate = (l: any[]) => l.filter((_, i) => i !== params.index);
+      refuseLimitsWrite({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate, envelope });
       const result = await confirmedWrite(
         ctx,
         { title: `Delete scoped limit #${params.index + 1}`, message: `Remove scoped limit #${params.index + 1}: ${cur.scope} ${limitSummary(cur)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope, mutate });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, deletedIndex: params.index, ...(res.pending ? { pending: res.pending } : {}) };
         },
@@ -1061,11 +1159,14 @@ function registerTools(pi: ExtensionAPI): void {
         weekUsd: usd.weekUsd ?? cur.weekUsd,
         monthUsd: usd.monthUsd ?? cur.monthUsd,
       });
+      const envelope = envelopeGuard(paths, deploymentEnv());
+      const mutate = (l: any[]) => l.map((w, i) => (i === params.index ? merged : w));
+      refuseLimitsWrite({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate, envelope });
       const result = await confirmedWrite(
         ctx,
         { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope, mutate });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, index: params.index, limit: merged, ...(res.pending ? { pending: res.pending } : {}) };
         },
@@ -1124,14 +1225,14 @@ function registerTools(pi: ExtensionAPI): void {
       const paths = resolvePaths(deploymentEnv());
       const entry = { id: params.id, name: params.name ?? null, members: params.members };
       const mutate = (list: any[]) => [...list, entry];
-      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, envelope: envelopeGuard(paths, deploymentEnv()) });
       if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
       const added = plan.projects.find((p: any) => p.id === params.id);
       const result = await confirmedWrite(
         ctx,
         { title: "Add project", message: `Add to projects.json:\n${JSON.stringify(projectShown(added))}\nRuns of these members record project ${added.id} from their next pickup.` },
         () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs, envelope: envelopeGuard(paths, deploymentEnv()) });
           if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
           return { applied: true, added: projectShown(added), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
@@ -1165,7 +1266,7 @@ function registerTools(pi: ExtensionAPI): void {
         members: params.members ?? cur.members,
       };
       const mutate = (list: any[]) => list.map((p) => (p.id === cur.id ? merged : p));
-      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, envelope: envelopeGuard(paths, deploymentEnv()) });
       if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
       const after = plan.projects.find((p: any) => p.id === cur.id);
       const leaving = cur.members.filter((m: string) => !after.members.includes(m));
@@ -1174,7 +1275,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Edit project ${cur.id}`, message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\n→ ${JSON.stringify(projectShown(after))}${note}` },
         () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs, envelope: envelopeGuard(paths, deploymentEnv()) });
           if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
           return { applied: true, project: projectShown(after), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
@@ -1198,13 +1299,13 @@ function registerTools(pi: ExtensionAPI): void {
       const cur = currentProject(paths, params.id);
       const mutate = (list: any[]) => list.filter((p) => p.id !== cur.id);
       // Judged BEFORE the confirm: a row naming the project refuses here, so the operator is never asked to approve it.
-      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, envelope: envelopeGuard(paths, deploymentEnv()) });
       if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
       const result = await confirmedWrite(
         ctx,
         { title: `Delete project ${cur.id}`, message: `Remove project ${cur.id} (${cur.members.length} member${cur.members.length === 1 ? "" : "s"}). Its members' runs record no project from their next pickup; records already written keep the id.` },
         () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs, envelope: envelopeGuard(paths, deploymentEnv()) });
           if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
           return { applied: true, deleted: cur.id, ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
@@ -1238,6 +1339,119 @@ function registerTools(pi: ExtensionAPI): void {
       return toolText(JSON.stringify(result));
     },
   });
+  // Issue #504 part C: delegated allocation (REQ-DELEGATED-ALLOCATION, DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE). One
+  // read, the delegated write that needs no keypress, and the confirm-gated envelope write. Every rule is the worker's:
+  // the envelope through `parseEnvelope`, a plan through `applyPlan`. No result of any of the three carries a plan's
+  // reason text: it is agent-authored, so it lives in `alloc:plan` and the audit file and is drawn only by the panel.
+  pi.registerTool({
+    name: "dispatch_allocations",
+    label: "pi-dispatch allocations",
+    description:
+      "Read-only. The allocation envelope and the split applied inside it (PI_ENVELOPE_FILE, docs/allocation.md): the " +
+      "envelope's window, total, floors, default weights and delegation rules; the applied split (plan id, writer, when " +
+      "it was applied and until when, the weights, and each project's and repo's allocation in integer micro-dollars, " +
+      "1 USD = 1000000); what each project has spent and holds in the envelope window; and the last 20 outcomes " +
+      "(applied, refused with its reason, expired, rebased, reverted). It returns no reason text a plan carried. " +
+      "`unset` means PI_ENVELOPE_FILE is unset: no envelope, no delegation.",
+    parameters: Type.Object({}),
+    async execute() {
+      const a = allocationContext();
+      const r = a.read;
+      if (r.unset) return toolText(JSON.stringify({ unset: true }));
+      if (!r.envelope) return toolText(JSON.stringify({ envelope: envelopeProblem(r) }));
+      const alloc: any = await readAllocations({ url: a.paths.valkeyUrl, envelope: r.envelope, projects: r.projects, now: allocNow(), withReasons: false, ...allocRedis() });
+      if (alloc.unreachable) throw new Error(`could not reach the queue: ${alloc.unreachable}`);
+      return toolText(JSON.stringify({ envelope: envelopeShown(r.envelope, r.digest), ...alloc }));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_priorities_set",
+    label: "pi-dispatch set priorities",
+    description:
+      "Sets a priorities plan: a WEIGHT per project (an integer 0 to 1000), and pi-dispatch splits the envelope's " +
+      "headroom by it. NO confirm, and it works with no interactive operator: it can only move money between projects " +
+      "inside the operator's envelope, never above the total, below a floor or by more than the envelope's step per " +
+      "plan. `projects` must name every project of the envelope (dispatch_allocations lists them); `_other` (the jobs " +
+      "in no listed project) keeps its current weight when it is left out. `reason` (at most 200 characters, no " +
+      "control characters) is kept for the operator's panel and never returned. `repos` (optional) splits a " +
+      "project's share by repo `ref` (the first 8 hex digits of sha256 of the member scope), naming every member. " +
+      "`validDays` (optional) is how long the plan lives, at most the envelope's maxPlanDays; it then gives way to the " +
+      "neutral split. The plan's basis is filled in from the applied plan. The result is the outcome (applied, " +
+      "duplicate, refused or apply-failed), the refusal's reason (delegation-off, writer-not-allowed, " +
+      "envelope-mismatch, plan-duplicate, plan-stale, plan-too-soon, plan-incomplete, plan-busy, or plan-invalid " +
+      "with the field and rule), the plan id, whether the step clamped it, and each project's micro-dollars before " +
+      "and after. A refusal changes nothing; every attempt is recorded.",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      projects: Type.Array(
+        Type.Object({
+          id: Type.String(),
+          weight: Type.Integer({ minimum: 0, maximum: 1000 }),
+          reason: Type.Optional(Type.String()),
+          repos: Type.Optional(Type.Array(Type.Object({ ref: Type.String(), weight: Type.Integer({ minimum: 0, maximum: 1000 }) }))),
+        }),
+        { minItems: 1 },
+      ),
+      validDays: Type.Optional(Type.Integer({ minimum: 1 })),
+    }),
+    // NO confirmedWrite, on purpose (REQ-ADMIN-VIA-PI-EXTENSION, the delegated allocation write): the bound is the
+    // envelope's arithmetic, not a keypress, and a confirm refused headless would make the unattended manager impossible.
+    async execute(_id, params) {
+      const res = await setPriorities(params.projects, params.validDays);
+      return toolText(JSON.stringify(res));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_envelope_set",
+    label: "pi-dispatch set the allocation envelope",
+    description:
+      "Changes the allocation envelope (PI_ENVELOPE_FILE) and applies it live: any of `window` (day, week or month), " +
+      "`totalUsd` (a decimal string such as \"100\"), `floorsUsd` (project id to a decimal string; merged with the " +
+      "file's, \"0\" is a floor), `defaultWeights` (project id to an integer 0 to 1000; merged), and the delegation " +
+      "rules `enabled`, `writers` (operator-session, portfolio-job), `maxStepPct` (1 to 100), `minIntervalHours` and " +
+      "`maxPlanDays`. The result is judged by the worker's own parser before the confirm (floors may not exceed the " +
+      "total, a floor names a project in projects.json or _other, no floor above a project's own dollar row). The " +
+      "operator MUST approve a confirm dialog showing the before->after; refused with no interactive operator. The " +
+      "fleet re-bases the split onto the new envelope with no step.",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      window: Type.Optional(Type.String()),
+      totalUsd: Type.Optional(Type.String()),
+      floorsUsd: Type.Optional(Type.Record(Type.String(), Type.String())),
+      defaultWeights: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: 1000 }))),
+      enabled: Type.Optional(Type.Boolean()),
+      writers: Type.Optional(Type.Array(Type.String())),
+      maxStepPct: Type.Optional(Type.Integer()),
+      minIntervalHours: Type.Optional(Type.Integer()),
+      maxPlanDays: Type.Optional(Type.Integer()),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const change = envelopeChangeOf(params);
+      if (Object.keys(change).length === 0) throw new Error("nothing to change: name at least one of window, totalUsd, floorsUsd, defaultWeights, enabled, writers, maxStepPct, minIntervalHours, maxPlanDays");
+      const a = allocationContext();
+      const files = { envelopeFile: a.paths.envelopeFile, projectsPath: a.paths.projectsFile, scopedLimitsPath: a.paths.scopedLimitsPath, maxCostMicros: a.maxCostMicros };
+      // Judged BEFORE the confirm, so the operator is never asked to approve an envelope the worker would refuse.
+      const plan: any = planEnvelopeWrite({ ...files, change });
+      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
+      if (plan.digest === plan.beforeDigest) return toolText(JSON.stringify({ applied: false, reason: "no change: the envelope already says this" }));
+      const result = await confirmedWrite(
+        ctx,
+        {
+          title: "Change the allocation envelope",
+          message: `${plan.lines.join("\n")}\n\nEvery host re-bases the split onto it with no step; a host whose copy differs refuses its jobs until it has it.`,
+        },
+        async () => {
+          const res: any = await writeEnvelope({ ...files, change, expect: plan.inputs, url: a.paths.valkeyUrl, ...allocRedis() });
+          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+          return { applied: true, digest: res.digest, previousDigest: res.previousDigest, changed: plan.lines };
+        },
+      );
+      return toolText(JSON.stringify(result));
+    },
+  });
+
 }
 
 /**
@@ -1266,6 +1480,187 @@ async function confirmedWrite(
   const ok = await ctx.ui.confirm(prompt.title, prompt.message);
   if (!ok) return { applied: false, reason: "operator declined" };
   return doWrite();
+}
+
+// ---- delegated allocation (issue #504 part C) ----
+
+// TEST-ONLY seams for the allocation tools and commands: the Valkey client factory and the clock. Production leaves
+// both unset, so the read-model's real defaults (makeRedisClient, the wall clock) apply.
+let allocSeams: { redisFn?: any; now?: () => Date; prefix?: string } = {};
+/** TEST-ONLY: inject the allocation tools' Valkey client factory, clock and key prefix; `{}` restores the defaults. */
+export function _setAllocationSeamsForTests(seams: { redisFn?: any; now?: () => Date; prefix?: string }): void {
+  allocSeams = seams ?? {};
+}
+function allocRedis(): any {
+  return { ...(allocSeams.redisFn ? { redisFn: allocSeams.redisFn } : {}), ...(allocSeams.prefix ? { prefix: allocSeams.prefix } : {}) };
+}
+function allocNow(): Date {
+  return allocSeams.now ? allocSeams.now() : new Date();
+}
+
+/**
+ * The deployment's allocation context, read per call: its paths and environment, the merged per-job cap the worker
+ * judges the envelope with, and the envelope as read (`readEnvelope`).
+ */
+function allocationContext(): any {
+  const env = deploymentEnv();
+  const paths = resolvePaths(deploymentEnv());
+  const maxCostMicros = envelopeJobCap({ settingsFile: paths.settingsFile, env });
+  const read: any = readEnvelope({ envelopeFile: paths.envelopeFile, projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, maxCostMicros });
+  return { env, paths, maxCostMicros, read };
+}
+
+/** The envelope cross-check context the scoped-limits and projects writers take (`envelopeRefusal`). */
+function envelopeGuard(paths: any, env: any): any {
+  return paths.envelopeFile ? { file: paths.envelopeFile, maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env }) } : null;
+}
+
+/** A scoped-limits change judged in full without writing (`dryRun`); throws the refusal, so a tool refuses BEFORE its confirm. */
+function refuseLimitsWrite(args: any): void {
+  const res: any = writeScopedLimits({ ...args, dryRun: true });
+  if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+}
+
+/**
+ * A settings write of `key` that would leave the allocation envelope invalid (the per-job cap removed, or set to
+ * something the worker cannot read), or null. Only `maxCostUsd` can: it is the one setting the envelope is judged by.
+ */
+function settingsEnvelopeRefusal(key: string, beforeOverlay: any, afterOverlay: any, paths: any, env: any): string | null {
+  if (key !== "maxCostUsd" || !paths.envelopeFile) return null;
+  return envelopeRefusal({
+    envelopeFile: paths.envelopeFile,
+    projectsPath: paths.projectsFile,
+    scopedLimitsPath: paths.scopedLimitsPath,
+    maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env, overlay: beforeOverlay }),
+    next: { maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env, overlay: afterOverlay }) },
+  });
+}
+
+/** Why there is no envelope to work with, in one sentence (the read's own words, escaped). */
+function envelopeProblem(r: any): string {
+  if (r.unset) return "PI_ENVELOPE_FILE is unset: there is no envelope, so delegation is off (docs/allocation.md)";
+  if (r.missing) return "the envelope file (PI_ENVELOPE_FILE) does not exist";
+  if (r.unreadable) return `the envelope file (PI_ENVELOPE_FILE) could not be read (${r.unreadable})`;
+  return `the envelope file does not load: ${escapeInterpreted(String(r.invalid ?? "unknown"))}`;
+}
+
+/** The envelope as a tool shows it: numbers and ids the parser checked, in micro-dollars, with its digest. */
+function envelopeShown(e: any, digest: string): any {
+  return { digest, window: e.window, totalMicros: e.totalMicros, floors: e.floors, defaultWeights: e.defaultWeights, delegation: e.delegation };
+}
+
+/** The tool's envelope fields as `planEnvelopeWrite`'s change: only the fields that were sent. */
+function envelopeChangeOf(p: any): any {
+  const change: any = {};
+  if (p.window !== undefined) change.window = p.window;
+  if (p.totalUsd !== undefined) change.totalUsd = p.totalUsd;
+  if (p.floorsUsd !== undefined) change.floorsUsd = p.floorsUsd;
+  if (p.defaultWeights !== undefined) change.defaultWeights = p.defaultWeights;
+  const delegation: any = {};
+  for (const f of ["enabled", "writers", "maxStepPct", "minIntervalHours", "maxPlanDays"]) if (p[f] !== undefined) delegation[f] = p[f];
+  if (Object.keys(delegation).length > 0) change.delegation = delegation;
+  return change;
+}
+
+/**
+ * Apply a priorities plan as the operator's session (`dispatch_priorities_set`, `/dispatch priorities set`). The plan
+ * is built from what was given, the basis filled in by `applyPriorities` from the applied state, and `_other` keeps
+ * its current weight when it is left out. Returns the worker's outcome with the micro-dollars before and after, and
+ * NEVER a reason text. Throws only when there is no envelope to apply against or on infrastructure.
+ */
+async function setPriorities(projects: any[], validDays?: number): Promise<any> {
+  const a = allocationContext();
+  if (!a.read.envelope) throw new Error(envelopeProblem(a.read));
+  const now = allocNow();
+  const plan: any = {
+    ...(validDays !== undefined ? { validUntil: new Date(now.getTime() + validDays * 86400000).toISOString() } : {}),
+    projects: (Array.isArray(projects) ? projects : []).map((p: any) => ({
+      id: p?.id,
+      weight: p?.weight,
+      ...(p?.reason !== undefined ? { reason: p.reason } : {}),
+      ...(p?.repos !== undefined ? { repos: p.repos } : {}),
+    })),
+  };
+  const res: any = await applyPriorities({
+    url: a.paths.valkeyUrl,
+    envelope: a.read.envelope,
+    digest: a.read.digest,
+    projects: a.read.projects,
+    plan,
+    keepOther: true,
+    host: allocHost(a.env),
+    logsDir: a.paths.logsDir,
+    now,
+    ...allocRedis(),
+  });
+  return res;
+}
+
+/** The panel's allocation read (issue #504 part C): the envelope as read, and the split WITH its reasons, for the view alone. */
+async function allocationInfo(): Promise<any> {
+  const a = allocationContext();
+  if (!a.read.envelope) return { envelope: null, problem: envelopeProblem(a.read) };
+  const alloc = await readAllocations({ url: a.paths.valkeyUrl, envelope: a.read.envelope, projects: a.read.projects, now: allocNow(), withReasons: true, ...allocRedis() });
+  return { envelope: a.read.envelope, digest: a.read.digest, alloc };
+}
+
+/** The panel's revert to an `alloc:log` row (issue #504 part C): `revertAllocation` against the envelope as read now. */
+async function revertTo(target: any): Promise<any> {
+  const a = allocationContext();
+  if (!a.read.envelope) return { outcome: "refused", reason: "no-envelope" };
+  return revertAllocation({ url: a.paths.valkeyUrl, envelope: a.read.envelope, digest: a.read.digest, target, host: allocHost(a.env), logsDir: a.paths.logsDir, now: allocNow(), ...allocRedis() });
+}
+
+/** The host name an audit row of this session carries: the deployment's PI_WORKER_NAME, else this machine's. */
+function allocHost(env: any): string {
+  return typeof env?.PI_WORKER_NAME === "string" && env.PI_WORKER_NAME !== "" ? env.PI_WORKER_NAME : hostname();
+}
+
+/**
+ * `/dispatch priorities [set <id>=<weight> ...]` (issue #504 part C), operator-typed, zero-spend. The bare form sends
+ * the envelope, the applied split, the spend and the history to the PII-free channel (no reason text: that channel
+ * reaches model context); `set` applies a plan as `operator-session`, through the same path as the tool.
+ */
+async function prioritiesCommand(pi: ExtensionAPI, tokens: string[], notify: Notify): Promise<void> {
+  if (tokens[1] === "set") {
+    const given: any[] = [];
+    for (const t of tokens.slice(2)) {
+      const m = /^([a-z0-9_-]{1,32})=(\d{1,4})$/.exec(t);
+      if (!m) {
+        notify?.("usage: /dispatch priorities set <project>=<weight> ... (weights are integers 0 to 1000; _other keeps its weight unless given)", "warning");
+        return;
+      }
+      given.push({ id: m[1], weight: Number(m[2]) });
+    }
+    if (given.length === 0) {
+      notify?.("usage: /dispatch priorities set <project>=<weight> ...", "warning");
+      return;
+    }
+    try {
+      const res = await setPriorities(given);
+      notify?.(prioritiesOutcome(res), res.outcome === "applied" || res.outcome === "duplicate" ? "info" : "warning");
+    } catch (err: any) {
+      notify?.(`priorities: ${scrubControls(String(err?.message ?? err))}`, "error");
+    }
+    return;
+  }
+  if (tokens.length > 1) {
+    notify?.("usage: /dispatch priorities [set <project>=<weight> ...]", "warning");
+    return;
+  }
+  const a = allocationContext();
+  const alloc: any = a.read.envelope ? await readAllocations({ url: a.paths.valkeyUrl, envelope: a.read.envelope, projects: a.read.projects, now: allocNow(), withReasons: false, ...allocRedis() }) : null;
+  send(pi, renderAllocations({ envelope: a.read.envelope ?? null, digest: a.read.digest ?? null, problem: a.read.envelope ? null : envelopeProblem(a.read), alloc }));
+}
+
+/** One line for a plan's outcome: the enum, the plan id, and each project's dollars after (never a reason text). */
+function prioritiesOutcome(res: any): string {
+  const after = res?.after?.allocations ?? {};
+  const split = Object.keys(after).sort().map((id) => `${id} $${formatMicros(after[id])}`).join(", ");
+  if (res?.outcome === "applied") return `applied ${res.planId}${res.clamped ? " (clamped by the step)" : ""}: ${split}`;
+  if (res?.outcome === "duplicate") return `no change: plan ${res.planId} is already applied`;
+  const field = res?.field ? ` (${res.field}: ${res.rule})` : "";
+  return `${res?.outcome ?? "refused"}: ${res?.reason ?? "unknown"}${field}; the split is unchanged${split ? ` (${split})` : ""}`;
 }
 
 /**
@@ -1814,6 +2209,10 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       applyUnset(paths.settingsFile, tokens, notify);
       return;
     }
+    case "priorities": {
+      await prioritiesCommand(pi, tokens, notify);
+      return;
+    }
     case "secrets": {
       // REQ-TRIGGER-SECRETS. Declaring a resolver profile means naming an absolute host path the WORKER
       // EXECUTES, so it lives here, on the operator-typed command surface, and nowhere else.
@@ -2176,6 +2575,11 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
           return c?.unreachable ? { unreachable: String(c.unreachable) } : { byProject: c?.fold?.byProject ?? [] };
         },
         launchSandbox: ({ jobId }: { jobId: string }) => openSandboxSession(paths, jobId),
+        // The ALLOCATION view (issue #504 part C, key `b`): the envelope and the split, read here where the Valkey and the
+        // file reads live, WITH the plan's reasons, which only this view draws (escaped, through the control-byte gate).
+        allocationInfo: () => allocationInfo(),
+        // Its `r`: the worker's own revert, writer operator-revert, against the envelope as it is read now.
+        revertAllocation: ({ target }: { target: any }) => revertTo(target),
         // OSC 52 clipboard write. This hands the terminal the operator's OWN selection: it fires only on
         // an explicit y/Y keypress in RUN_DETAIL, carries id-only strings (a jobId or a derived public
         // URL, never log bytes), and nothing is ever read back. The escape rides the stdout pi already
@@ -2537,7 +2941,7 @@ async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Pr
   const concurrent = await ui.input("concurrent — max jobs in flight for this scope, extras deferred (blank = no limit)", "");
   if (concurrent === undefined) return;
   const l = buildScopedLimit({ scope, day, week, month, concurrent });
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (list: any[]) => [...list, l] });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (list: any[]) => [...list, l] });
   notify?.(res.ok ? `scoped limit added (${liveOr(res)}): ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -2578,7 +2982,7 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
   });
   const note = scopeChangeNote(buildScopedLimit(cur), merged);
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
   notify?.(res.ok ? `scoped limit #${index + 1} updated (${liveOr(res)}): ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -2605,7 +3009,7 @@ async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify):
   if (index < 0) return;
   const ok = await ui.confirm("Delete scoped limit", `Remove ${labels[index]}?`);
   if (!ok) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (l: any[]) => l.filter((_, i) => i !== index) });
   notify?.(res.ok ? `scoped limit #${index + 1} deleted (${liveOr(res)})` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -2824,6 +3228,11 @@ function applySet(settingsFile: string, tokens: string[], notify: Notify): void 
     return;
   }
   const value = coerceSettingValue(key, valueTokens[0]);
+  const broken = settingsCommandEnvelopeRefusal(key, settingsFile, (o: any) => ({ ...o, [key]: value }));
+  if (broken) {
+    notify?.(`set: ${broken}`, "error");
+    return;
+  }
   const res = writeSettings({ settingsFile, mutate: (o) => ({ ...o, [key]: value }), ...dollarCheckFor(key) });
   if (res.invalid) {
     notify?.(`set: ${res.invalid}`, "error");
@@ -2842,6 +3251,14 @@ function dollarCheckFor(key: string): { dollarEnv?: any; deploymentDir?: string 
   return { dollarEnv: deploymentEnv(), deploymentDir: pointerState().deploymentDir ?? null };
 }
 
+/** `settingsEnvelopeRefusal` for the operator-typed `set`/`unset`, over the overlay as it is on disk now. */
+function settingsCommandEnvelopeRefusal(key: string, settingsFile: string, mutate: (o: any) => any): string | null {
+  if (key !== "maxCostUsd") return null;
+  const env = deploymentEnv();
+  const before = readSettingsView({ settingsFile })?.overlay ?? {};
+  return settingsEnvelopeRefusal(key, before, mutate({ ...before }), { ...resolvePaths(deploymentEnv()), settingsFile }, env);
+}
+
 /**
  * `unset <key>`: the key must be a known settings key; the mutation deletes it, and an empty result `{}`
  * is a valid written state (no overrides). Over a present-but-invalid file it is refused like `set`.
@@ -2850,6 +3267,15 @@ function applyUnset(settingsFile: string, tokens: string[], notify: Notify): voi
   const key = tokens[1] ?? "";
   if (!KNOWN_KEYS.includes(key)) {
     notify?.(`unset: unknown key '${key}'. valid keys: ${KNOWN_KEYS.join(", ")}`, "error");
+    return;
+  }
+  const broken = settingsCommandEnvelopeRefusal(key, settingsFile, (o: any) => {
+    const next = { ...o };
+    delete next[key];
+    return next;
+  });
+  if (broken) {
+    notify?.(`unset: ${broken}`, "error");
     return;
   }
   const res = writeSettings({

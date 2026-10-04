@@ -822,6 +822,10 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // empty run list and panel-set caps landing where the worker never looks. The one shape where the
   // accounts genuinely differ is a hand-rolled unit whose `User=` the operator edited, and the fix there
   // belongs in that operator's `.env`, which is exactly what all three deploy templates now say.
+  //
+  // PI_ENVELOPE_FILE (issue #504) is allowlisted in the pointer and deliberately NOT written here, the rule `up` and
+  // `init` follow: unset means no envelope and no delegation, and the wizard must never be what turns an agent's
+  // budget split on. An operator who sets one adds its line to the deployment's `.env` (docs/allocation.md).
   const pointer = {
     version: POINTER_VERSION,
     deploymentDir: dir,

@@ -6102,7 +6102,13 @@ limit for delegated allocation (`REQ-DELEGATED-ALLOCATION`): a dollar total for 
 A priorities plan moves headroom between projects inside it, and nothing an agent writes reaches it.
 
 - **Producer/Consumer**: the operator writes the file by hand, or (issue #504 part C) through the admin's
-  confirm-gated envelope write, which goes through `parseEnvelope`, tmp and rename. The worker reads it at boot
+  confirm-gated envelope write (`dispatch_envelope_set`), which goes through `parseEnvelope`, stores the new digest as
+  `alloc:envelope:expected` BEFORE it replaces the file (tmp and rename, mode and owner kept, a symlink refused), and
+  puts the key back when the file is not written. The admin also reads it (`readEnvelope`) for `dispatch_allocations`,
+  `/dispatch priorities` and the panel's `b` view, and judges every projects, scoped-limits and per-job cap write
+  against it (`envelopeRefusal`): a write that would make a loading envelope fail is refused. In the operator's pi
+  session pi's own `write` and `edit` are blocked on the file (the write guard, `DES-ADMIN-VIA-PI-EXTENSION`). The
+  deployment pointer may carry `PI_ENVELOPE_FILE`; the setup wizard never writes it. The worker reads it at boot
   (`loadEnvelopeChecked`, with the merged per-job cap, before any Valkey contact) and holds it in a watched ref with a
   last good copy, like `INT-PROJECTS-FILE-CONTRACT`'s file (`envelope_reloaded`, `envelope_reload_invalid`). It is
   reloaded WITH the projects and scoped-limits files, because the floors are judged against both: an envelope edit is
@@ -6154,7 +6160,7 @@ A priorities plan moves headroom between projects inside it, and nothing an agen
   scoped-limits or per-job cap edit that the envelope no longer fits (a floored project removed, a row lowered below a
   floor, the cap removed) is taken on its own; the worker keeps the last good envelope and logs
   `envelope_reload_invalid`, doctor fails on the file, and the next boot refuses until the files agree again. The
-  admin writers cross-check the envelope in issue #504 part C. **Residual, named**: a host bind mount of the envelope's
+  admin writers refuse such an edit (`envelopeRefusal`, above). **Residual, named**: a host bind mount of the envelope's
   folder
   placed under a job path is a second view of the folder with its own identity, and this check does not detect it; an
   operator must not make one.
@@ -6209,7 +6215,10 @@ A priorities plan moves headroom between projects inside it, and nothing an agen
 
 **agent → worker (the operator's session tool, issue #504 part C; a portfolio job's `/outbox/priorities.json`, issue
 #505).** A plan is agent-authored text: integer weights, never dollars. `parsePlan` (`./priorities`) is the one
-judge, shared by the worker and the admin; issue #505 reuses this contract unchanged.
+judge, shared by the worker and the admin; issue #505 reuses this contract unchanged. The session's writers
+(`dispatch_priorities_set` and `/dispatch priorities set`, writer `operator-session`) build the plan from the weights
+given, fill `basis` with the applied plan's id, and add `_other` at its current weight when it is not named; any other
+project left out stays `plan-incomplete`.
 
 - **Shape**:
   ```json
@@ -6722,14 +6731,17 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 - **Shape**: `{ "version": 1, "deploymentDir": "<abs>", "env": { … } }`. `version` (required):
   integer ≥ 1 — the one field that cannot be retrofitted. `env` is an **allowlisted map**:
   `VALKEY_URL`, `PI_LOGS_DIR`, `PI_SETTINGS_FILE`, `PI_TRIGGERS_FILE`, `PI_PAUSE_WINDOWS_FILE`,
-  `PI_SCOPED_LIMITS_FILE`, `PI_PROJECTS_FILE`, `PI_SUBSCRIPTIONS_FILE` (eight since issue #499 added the
-  projects key; this entry once listed six and omitted the
+  `PI_SCOPED_LIMITS_FILE`, `PI_PROJECTS_FILE`, `PI_ENVELOPE_FILE`, `PI_SUBSCRIPTIONS_FILE` (nine since issue #504
+  added the envelope key, eight since issue #499 added the projects key; this entry once listed six and omitted the
   scoped-limits key that `POINTER_ENV_ALLOWLIST` has always carried, corrected under issue #357 where the
   overlap with what `up` writes had to be counted exactly); every path value must be **absolute** (a relative value would resolve
   against whichever session happens to read it, i.e. silently wrong — dropped).
-- **What the wizard EMITS is five of those eight**, and the gap is deliberate rather than an oversight:
+- **What the wizard EMITS is five of those nine**, and the gap is deliberate rather than an oversight:
   `PI_TRIGGERS_FILE`, `PI_PAUSE_WINDOWS_FILE`, `PI_SCOPED_LIMITS_FILE`, `PI_PROJECTS_FILE` (issue #499) and
   `PI_SUBSCRIPTIONS_FILE`.
+  `PI_ENVELOPE_FILE` (issue #504) is allowlisted and never written, the rule `up` and `init` follow: unset means no
+  envelope and no delegation, so only the operator's own line turns delegation on. A pointer that carries it lets a
+  panel started anywhere find the deployment's envelope.
   `PI_LOGS_DIR` and `PI_SETTINGS_FILE` are allowlisted and not written, because the pointer moves only the
   PANEL: pinning those two here would point the panel at a directory the worker's own environment may not
   share, which is the drift this file exists to prevent rather than create. Since issue #357 the other
@@ -7365,3 +7377,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-04 | Issue #505, part A. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a `run.portfolio` bullet and contract line (cron only, strictly boolean, refused at load on every webhook type with `false` included and when `true` sits beside `run.command`; carried at job level, never inside `trigger`; not inherited by an outbox child; re-read from the live file at pickup by `on.id`, a flag no longer there or an unreadable file making the job an ordinary cron job; reviewed-file-only: no tool parameter, `buildTriggerEntry` cannot produce it, the panel never asks, both edits keep it), and `pi-dispatch run --trigger <id>` (the same path rule as the one-shot checks, an unknown or webhook id refused, the scheduler data passed through whole, not retried, as a tick is not, id `manual:<id>:<minute millis>` because BullMQ takes a custom id with `:` only in three parts, a second call in the same minute queues nothing, queued on this host's cron queue, another host's folder refused). The cron byte-match acceptance admits `portfolio` on `command`'s terms. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `portfolio-no-envelope`, a free pre-spend refusal after `envelope-mismatch` (no envelope, delegation off, or `portfolio-job` not among the writers), never retried, paging nobody. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: a trigger fired by hand is a `cron` event with `scheduledFor` and `previousRunAt` both null. Review of PR #575: the live check holds the entry found by id to the job's `folder`, `flow`, `command` and `task`; `run --trigger` reads `PI_TRIGGERS_FILE`, `PI_WORKER_NAME` and `PI_MAX_COST_USD` (the loader's config inputs) by issue #471's service-key rule (a disagreement, or an unreadable `.env` the shell does not cover, refused), as `run <folder>` now reads `PI_WORKER_NAME`, looks the cron trigger up before any webhook entry spelling its id, and refuses a folder that is not a git repository; a hand fire counts as a run of its trigger for the next tick's `previousRunAt`. `INT-OUTBOX-CONTRACT`, `INT-ENVELOPE-FILE-CONTRACT`, `INT-PRIORITIES-PLAN-CONTRACT` and `INT-ON-FAILURE-HOOK-CONTRACT` UNCHANGED, checked. |
 | 2026-10-04 | Issue #505, part B. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/portfolio.json`, a confirmed portfolio job's snapshot, `0444` beside `event.json` on the existing `/job` mount, built at prepare only when the pickup decided portfolio AND the live triggers file still flags the entry; its shape, its content rule (ids, digests, integers, ISO instants, enum tokens, project ids and member labels, a label with a control, format or bidi character replaced by its ref, never issue text, a title, a plan reason or a path), money from the fleet-wide counters of the envelope's window (a member's key the one enforcement uses, `memberDollarKeyPrefix`, so a bare row's key; `spentMicros` is spent plus held, the counter the next job is admitted against; the issue's sketch also named a `reservedMicros`, which the counters cannot give), `runs7d` from the local history merged with the run mirror and `runsComplete` false without one, InfraRetry on a Valkey fault, and the portfolio persona it composes. **`INT-OUTBOX-CONTRACT` AMENDED**: a second file, `/outbox/priorities.json`, with its own ladder (no file, `plan-not-portfolio` from the pickup decision, prepare and the live file together, recorded only in the run record and the log line for a job the pickup never confirmed, `plan-oversize` and `plan-not-regular-file` by `lstat` and again on the `O_NOFOLLOW` and `O_NONBLOCK` descriptor's `fstat`, `plan-unreadable`, `plan-parse-error`, then `applyPlan` with the `portfolio-job` writer); every refusal recorded, completed-only, never throws (`plan-collect-error`, outcome unknown, the plan id carried), and the runner's log-only pre-check. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the tail field `plan` (`outcome`, `reason`, `planId`, `clamped`) after `project`, rebuilt and enum-checked, and the reason `portfolio-snapshot-oversize` (prepare-stage policy, before the reserve, `HOOK_POLICY_REASONS` UNCHANGED, checked: nothing is spent to page about). **`INT-PRIORITIES-PLAN-CONTRACT` AMENDED**, one sentence: the runner's pre-check passes the snapshot's `maxPlanDays` as the caller's. `INT-TRIGGERS-FILE-CONTRACT`, `INT-ENVELOPE-FILE-CONTRACT` and `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked (the pre-check changes neither the exit code nor the exit line). |
 | 2026-10-04 | Found this round (no issue), the lost-lock fix. No contract changed. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the worker now reads a job's own record back (`makeReadRecord`, by the writer's `<sanitizedJobId>.json` name; a record whose id differs from the job's is refused as `id-mismatch`) and, on a declared fleet, the mirror's copy by the same sanitized id; the shape, the name, the last-write-wins rule and the PII-free property are untouched, and a read never throws. **`INT-ON-FAILURE-HOOK-CONTRACT` UNCHANGED, checked**: a lost-lock job pages with the argv the completed listener would have used for its record (`policy` and the reason), or not at all. |
+| 2026-10-04 | Issue #504, part C. **`INT-ENVELOPE-FILE-CONTRACT` AMENDED**: the producer names the admin's envelope write (`dispatch_envelope_set`: `parseEnvelope`, the expected digest stored before the file, put back on a failed write), the admin's reads, the writers' cross-check (`envelopeRefusal`) and the guard on pi's file tools; the rollback of the expected digest is a compare-and-set; the deployment pointer may carry the key and the wizard never writes it. **`INT-PRIORITIES-PLAN-CONTRACT` AMENDED**: the session's writers fill `basis` and add `_other` at its current weight when it is not named. **`INT-DEPLOYMENT-POINTER-CONTRACT` AMENDED**: the allowlist has nine keys with `PI_ENVELOPE_FILE`, allowlisted and never emitted by the wizard. **`INT-HOST-REGISTRY-CONTRACT`** and **`INT-RUN-HISTORY-FILE-CONTRACT`** UNCHANGED, checked: no field or reason is added. **Code evidence**: admin/src/read-model.mjs -> readEnvelope, planEnvelopeWrite, writeEnvelope, envelopeRefusal, readAllocations, applyPriorities, revertAllocation; admin/src/write-guard.mjs; admin/src/deployment-pointer.mjs -> POINTER_ENV_ALLOWLIST. |

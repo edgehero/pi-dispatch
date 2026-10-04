@@ -481,7 +481,7 @@ Stated openly rather than discovered later:
   operator's session processes no adversarial input; that judgement belongs in a portfolio job (issue #505), whose
   plan meets the same rules. Reasons in a plan are agent text: they show in the panel only, escaped, and never reach
   a tool result, a record or a log line. Every attempt, applied or refused, is in the audit log, and the panel
-  reverts to any row in its history (the last 500) (`REQ-DELEGATED-ALLOCATION`,
+  reverts to any of the newest 20 rows of that history (`REQ-DELEGATED-ALLOCATION`,
   `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`).
 
 - **A resumed session hands one job's transcript to the next job on the same key.** With
@@ -668,11 +668,27 @@ Stated openly rather than discovered later:
   of that package and every transitive dependency would run AS YOU, ON YOUR HOST**, at install time, which is
   a host compromise and not a job one. So: no port, no harness credential, and still the same trust as shell
   access, which is where `/dispatch setup` stops being theoretical.
-  **The model in that session has a shell too, and the envelope guard cannot see it.** The admin extension blocks
-  pi's `write` and `edit` tools on the envelope file and `projects.json` (issue #504 part C), but `bash`, and
-  `powershell` (a built-in tool since pi 0.99.1, registered but not active by default), can write any file your
-  account can, and neither can be filtered reliably. That residual is named, not closed: an edit outside the panel
-  is detected by the envelope's digest and shown as a banner and an `envelope-changed-externally` audit row.
+  **The model in that session has a shell too, and the write guard cannot see it.** The admin extension blocks
+  pi's `write` and `edit` tools (a call nested through `ctx.executeTool` or a codemode script included) whose
+  target is the envelope file, `projects.json`, `scoped-limits.json`, `triggers.json`, the settings overlay, the
+  deployment's `.env` or the deployment pointer (issue #504). The `.env` and the pointer are guarded because they
+  NAME the other files: the panel reads `.env` on every call, and a session that could point it at a decoy could
+  unguard the real file, write it, and point it back; the guarded set also never shrinks within a session. With no
+  pointer, the `.env` of the folder pi started in may only add to the set (every guarded file it names, and itself),
+  and an `init` folder's own `triggers.json`, `scoped-limits.json` and `projects.json` are guarded. A deployment the
+  panel cannot see at all (no pointer, no key set, not the folder pi started in) is not guarded. The target
+  is resolved as pi resolves it (`~`, an `@` prefix, Unicode spaces, `file://`, against the session's working
+  directory) and compared by file identity, so a symlink, a hard link or a case variant is the file it names (a
+  name not yet created is compared fully case-folded); a target it cannot resolve is blocked. A `powershell`
+  command (a built-in tool since pi 0.99.1, registered but not active by default) that names one of those files is
+  blocked by its text, which is a best effort: a glob, a backtick escape, an environment variable
+  (`$env:PI_PROJECTS_FILE`) or an 8.3 short name (`PROJEC~1.JSO`) passes, while an ordinary read of another folder's
+  `settings.json` is blocked for naming it. `bash`, your own `!` commands, and a later extension that rewrites a
+  tool's path after the guard ran can write any file your account can, and none of them can be filtered reliably.
+  Nor can a `bash` command in the same message as a `write`: pi runs every `tool_call` hook of a parallel batch
+  before it executes any call of it, so an `ln -s` there can repoint a path the guard already judged (this needs
+  `bash`, which is the residual already). That residual is named, not closed: an edit of the envelope outside the
+  panel is detected by its digest and shown as a banner and an `envelope-changed-externally` audit row.
 - **The graph export writes one static HTML file, on your keystroke, to a temp path it names.** What
   crosses into it: trigger configuration you authored, skill names and frontmatter from the repos you
   service, and the PII-free run-record fields the panel already shows. What never does: raw job log

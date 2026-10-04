@@ -130,7 +130,7 @@ One command puts a live terminal view over the whole deployment:
 
 - **Status and spend.** Queue and worker state, day, week and month spend meters, a daily token counter,
   and the run history with tokens and cost per job. `Enter` on a run opens its full record, `x` on a
-  running job cancels it after asking, and `b` reopens a finished run's workspace.
+  running job cancels it after asking, and `b` on an opened run reopens its workspace.
 - **Insights, the one analytics page.** Press `i` (or type `/dispatch insights`) and one self contained
   page opens in your browser. It shows the budget dials, plan verdicts against API rates, daily,
   cumulative and per flow spend charts, breakdowns by flow, trigger, model and repo, and the trigger and
@@ -153,6 +153,13 @@ One command puts a live terminal view over the whole deployment:
   no switch: one job per folder at a time (it lives in the worker process, and one worker per container
   daemon is the supported shape), because two agents editing one working tree race each other with no
   gate and no undo.
+- **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`
+  in the list shows each project's share and spend, the applied plan with the reasons it gave, and the history.
+  `r` on a history row reverts to it after a yes or no. `dispatch_priorities_set` sets a plan of weights with
+  no confirm, because it can only move money inside the envelope; `dispatch_envelope_set` changes the envelope
+  behind your confirm; `dispatch_allocations` reads the split. pi's own `write` and `edit` tools are blocked on
+  the envelope, `projects.json`, `scoped-limits.json`, `triggers.json` and the settings file
+  ([`docs/allocation.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/allocation.md)).
 - **Held and failed jobs.** A trigger with `run.waitFor` holds its job in the queue, unstarted and
   unbilled, until a time passes or your check script exits 0. The panel shows a **held** section while
   anything waits (the target, the condition and how long), and a **failed** section for jobs the queue

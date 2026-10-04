@@ -1713,7 +1713,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Decision**: The admin surface is a **pi extension** shipped in an `admin/` workspace, loaded into the
   operator's own interactive pi session (via `-e`, `~/.pi/agent/extensions`, or a trust-gated
   `.pi/extensions`). It provides operator-only slash commands
-  (`/dispatch status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup|secrets`,
+  (`/dispatch status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|priorities|setup|secrets`,
   the order `KNOWN_SUBCOMMANDS` declares them in) and one
   self-refreshing TUI overlay component with **four in-component views**: **LIST** — a framed,
   **theme-colored** panel (color via pi's injected `Theme`, applied post-layout; CORRECTED under issue #382,
@@ -1916,19 +1916,69 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   LLM-callable tools are the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs` (which returns
   the fold as JSON whose every monetary value carries its `class`, so a model consuming it cannot launder
   an estimate into a fact; the `dollars` beside it are enforcement amounts in integer micro-dollars, with no
-  class), `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`;
-  the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue** `dispatch_run`; and
-  the **confirm-gated writes** `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`,
+  class), `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`,
+  `dispatch_allocations`; the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue**
+  `dispatch_run`; the **confirm-gated writes** `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`,
   `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`,
   `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete`, `dispatch_wait_cancel`,
-  `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`. **This
+  `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`, `dispatch_envelope_set`; and the
+  **delegated allocation write** `dispatch_priorities_set`. **This
   list is the pin**, scanned by `admin/test/wiring.test.mjs` exactly as `REQ-ADMIN-VIA-PI-EXTENSION`'s is:
   the two enumerations drifted identically and undetectably, which is the argument for a mechanism over
-  prose in both places. Issue #504 adds tools that join this list in the change that registers them: a read of
-  the allocation, a confirm-gated envelope write, and a new kind beside the reads, the queue controls and the gated
-  enqueue, the **delegated allocation write**, which applies a priorities plan with no confirm and with no
-  interactive operator, and is the one write that does not route through `confirmedWrite`
-  (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`). The project tools (issue #499 part C) write through
+  prose in both places. The delegated allocation write (issue #504) applies a priorities plan with no confirm and
+  with no interactive operator, and is the one write that does not route through `confirmedWrite`
+  (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`). It calls the worker's own `applyPlan` through `read-model.mjs`
+  (`applyPriorities`), writer `operator-session`, and fills the plan's `basis` itself from the state it reconciled
+  to; a plan that leaves `_other` out keeps `_other`'s current weight, any other project left out is
+  `plan-incomplete`. The allocation read and the priorities write return enums, ids and micro-dollars through an
+  allowlist of fields, never a plan's reason text. The envelope write plans the change through the worker's
+  `parseEnvelope` before its confirm, then sets `alloc:envelope:expected` to the new digest BEFORE it replaces the
+  file (`replaceFile`, the projects writer's) and puts the key back when the file is not written: a file written
+  first is what a host reads as a hand edit. The project, limit and per-job cap writers judge their result against
+  the live envelope too (`envelopeRefusal`) and refuse a change that would make it fail to load; an envelope that
+  already fails is not this write's doing and does not block it. The panel's ALLOCATION view opens on `b` (`p` and
+  `r` are pause and resume in LIST; `c` and `g` stay dead): the envelope, each entry's floor, weight, allocation and
+  spend with the Valkey key it counts under, the applied plan with its per-project reasons (read from `alloc:plan`
+  alone, escaped and isolated, through the control-byte gate; every history cell and reason key escaped the same way),
+  and the newest 20 outcomes of `alloc:log`; `r` on a history row that carries a split arms a y/n in the frame on the
+  CAPTURED row and reverts through the worker's `revert` (writer `operator-revert`); a banner says "changed outside
+  the panel" while an `envelope-changed-externally` row is newer than the last re-base or applied plan (so a refused
+  plan logged after the edit cannot hide it); the hint rides the spend divider's meta, because the footer has no
+  headroom.
+  **The write guard** (`admin/src/write-guard.mjs`): a `pi.on("tool_call")` handler blocks pi's built-in `write` and
+  `edit` whose target is one of the deployment's guarded files (the envelope, `projects.json`, `scoped-limits.json`,
+  `triggers.json`, the settings overlay, at the paths `resolvePaths` resolves through the pointer and the deployment
+  `.env`, read per call; `projects.json`, `scoped-limits.json` and `triggers.json` only when their key is set, which is
+  when the worker reads them, so outside an `init` scaffold folder a repository's own file of that name is never
+  refused), the two files that NAME
+  them (the deployment's `.env` and the pointer), and a `powershell` command whose text names one as a path segment
+  (both texts folded; a name touched by a file-name character on either side, as `.env` in `process.env`, is not
+  one; trailing dots and spaces, which Windows strips, still name it; an 8.3 short name does not, a named residual).
+  The session folder's `.env` is read through one bounded read (`readSmallRegularFile`: opened non-blocking, a
+  regular file by `fstat`, at most 1 MiB), so a FIFO or a link to a device planted there by a cloned repository adds
+  nothing and cannot hang or grow the session (found in review round 3); every reading a loader might make of a
+  value (a trailing comment, quotes, `~`, `$HOME`) is guarded, for the last assignment of each key. With no pointer, the session folder's `.env` may only ADD to the set, never change configuration: every
+  guarded file it names (a relative path against that folder) and itself, so an `init` plus `up` deployment with pi
+  started in it is guarded (found in review round 2); and in an `init` scaffold folder (its `.env`, `triggers.json`,
+  `pause-windows.json` and `subscriptions.json` all there) the panel's own cwd targets are guarded too. A
+  deployment the panel cannot see at all (no pointer, no key, not the session folder) is not guarded, a named limit. The set never
+  shrinks within a session: every path guarded at load or at any call since stays guarded, because the per-call read
+  goes through `.env` and a session that could point `.env` elsewhere could otherwise unguard the real file, write
+  it, and point `.env` back (found in review). The tool set is pinned against pi 0.99.1's
+  `allToolNames`. The target is resolved by pi's own rules, copied because pi exports none of them and pinned by a
+  test against pi's `resolveToCwd` (Unicode spaces, one leading `@`, `~`, `file://`, against `ctx.cwd`), then compared
+  by identity: an existing target by `(dev, ino)`, so a symlink, a hard link and a case variant on a case-insensitive
+  volume are the guarded file; a new one by its nearest existing ancestor's `(dev, ino)` plus the rest of the path,
+  fully case-folded on every volume (NFKC, then lower, upper and lower case, so APFS's foldings of U+017F LONG S to s,
+  of the KELVIN SIGN to K and of U+1E9E CAPITAL SHARP S to ss, all measured, are caught; on a case-sensitive volume this also blocks a case variant of a
+  missing guarded name, which costs nothing and needs no probe), with every link on the way followed as create
+  would follow it. A resolution error other than "not there" blocks. Nested calls (`ctx.executeTool`, codemode) run
+  through the same hooks with `parentToolCallId` set (pi's `_executeNestedToolCall`), and a test drives a real pi
+  session to show it. Rejected: comparing path strings or realpaths (a hard link and a case variant pass both), and
+  judging `bash` by its text (too free-form to read, and it would block the operator's own `cat`). Residuals, named:
+  `bash`, a `powershell` command that builds the name at run time, the operator's `!` commands, a later extension
+  that rewrites `input.path` after the guard ran, and a link planted by `bash` in the same message as the write
+  (pi runs every `tool_call` hook of a parallel batch before it executes any call of it). The project tools (issue #499 part C) write through
   `planProjectsWrite` and `writeProjects` in `read-model.mjs`: the worker's `parseProjects` judges the result, the
   pair rule is held from the projects side (a write that removes an id a scoped-limits row names is refused before the
   confirm and again
@@ -3968,7 +4018,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   both import. The envelope is parsed by `worker/src/envelope.mjs`. Part A of the issue shipped those two modules and
   this doctrine; part B ships the apply path, the Valkey state, the audit and the enforcement
   (`worker/src/allocation.mjs`, wired in `start.mjs`, `index.mjs` and `processor.mjs`) and the fleet digest; the
-  operator tools are part C, and the sentences below that describe them describe that part.
+  operator tools are part C (the three tools in `DES-ADMIN-VIA-PI-EXTENSION`, `/dispatch priorities`, the panel's `b`
+  view with its revert, and the session's write guard).
   - **The envelope** is an operator file, `PI_ENVELOPE_FILE`, a sibling of `scoped-limits.json`
     (`INT-ENVELOPE-FILE-CONTRACT`): a total for one window, a floor per project of `projects.json` or `_other`, default
     weights, and the delegation rules. Unset means no delegation anywhere. It is version-checked, refused rather than
@@ -4172,9 +4223,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **The operator's session.** A model that reads issue text there breaks the scope clause of
     `CONST-ISOLATION-CONTAINER-PER-JOB` (`specs/constitution.md:64-68`, "processes no adversarial input"). The judgement
     belongs in a job (issue #505); the session tool is for the operator's own instructions. In that session the admin
-    extension blocks pi's `write` and `edit` on the envelope file and `projects.json` (issue #504 part C). `bash`, and
-    `powershell` (a built-in tool since pi 0.99.1, registered but not active by default), cannot be filtered
-    reliably, and stay a residual named in `SECURITY.md`. An edit outside the panel is detected by its digest.
+    extension's write guard blocks pi's `write` and `edit` whose target is the envelope file, `projects.json`,
+    `scoped-limits.json`, `triggers.json`, the settings overlay, the deployment's `.env` or the pointer, and a
+    `powershell` command naming one (`DES-ADMIN-VIA-PI-EXTENSION`). `bash`, a `powershell` command that builds the
+    name at run time or uses an 8.3 short name, the operator's own `!` commands, a later extension that rewrites a
+    tool's path after the guard ran, and a `bash` link planted in the same message as the write cannot be filtered
+    reliably, and stay residuals named in `SECURITY.md`. An edit outside the panel is detected by its digest.
   - **Reason text** is agent-authored, shown in the panel only through the control-byte gate, under the raw `.log`
     rule of `REQ-ADMIN-VIA-PI-EXTENSION`'s Why.
 - **Rejected**:
@@ -8196,3 +8250,4 @@ a tunnel.
 | 2026-10-04 | Issue #505, part A. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**: a portfolio job (`run.portfolio: true`, confirmed against the live triggers file at pickup) on a host whose envelope could not apply its plan (none, delegation off, or `portfolio-job` not a writer) is refused as `portfolio-no-envelope`, a free gate after `envelope-mismatch` and before the mint and the clone. Rejected: running it and recording the plan's refusal, which pays for a container whose one output is known to be refused. A job whose live entry lost the flag runs as an ordinary cron job. `DES-JOB-OUTBOX-CHAINING` and `DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked (the snapshot and the plan channel are part B; a trigger fired by hand is one ordinary job under a `manual:` id). |
 | 2026-10-04 | Issue #505, part B. **`DES-JOB-OUTBOX-CHAINING` AMENDED**: a second kind of request, the priorities plan in `/outbox/priorities.json`, collected on the completed-only path after the chain requests and enqueueing nothing, with the facts coming in as `/job/portfolio.json` and its own baked persona `guardrails/PORTFOLIO_PROTOCOL.md`. Rejected: a `type` discriminator in `request-<n>.json` (it would share the chain count cap, and an older worker would refuse it as `chain-bad-flow-name`), and Valkey, the envelope or an admin tool in the container. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**: the portfolio-job writer path (the snapshot, the collector, `recordRefusal` rows for the collector's own refusals, `plan-duplicate` on re-collection and `plan-too-soon` for a retried attempt, a race won by the first compare-and-set, a hand fire queued beside a tick and deferred behind it by the folder mutex, the rule that keeps a never-confirmed job's refusal out of the audit file and `alloc:log`, and `plan-collect-error` as an unknown outcome), and three rejected alternatives (the flag on job data alone, the live file alone at collection, an allocation module in the image). `REQ-AI-TRIGGERED-RUNS` UNCHANGED, checked: a plan enqueues nothing. |
 | 2026-10-04 | Found this round (no issue): a job that completed while Valkey was unreachable was reported failed, or run again. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**, Residuals: the duplication residual ("bounded at one duplicate, and not worth the idempotence store") is replaced by the record-read suppression. The run record is the existing store: on a terminal failure whose message is exactly BullMQ's stall reason (`STALLED_FAILED_REASON`, pinned against the installed bullmq), the failed listener reads the record (local file, then the run mirror on a declared fleet) and, when it settles this attempt (id, `attempt` equal to `attemptsMade`, outcome not `failed`, started no earlier than the job), logs `job_lost_lock_after_completion`, posts nothing, and pages only for a paid policy stop the completed listener would have paged for. `startedAt` may sit up to `RECORD_CLOCK_SKEW_MS` (5 minutes) before the job's creation, because the two instants come from two hosts' clocks; a record found and refused (a mirror value that is not a record included) is logged as `job_lost_lock_record_rejected` with a fixed reason and its source, by the processor's gate once per job id, stall count, attempt and source (a bounded set of 1000), since the gate runs before every deferral. The remaining residuals are named: a fleet without a shared logs dir whose mirror holds no copy (the writing host exits before Valkey returns, or another host fails the job before the writer reconnects; the offline queue otherwise delivers the mirror write), a skew beyond the tolerance, a run that dies between its comment and its record, and a suppressed job still sitting in BullMQ's failed set with the stall reason while the record says it completed. The Decision, Rejected list and Acceptance are UNCHANGED, checked. **Code evidence**: worker/src/start.mjs (the failed listener), worker/src/run-history.mjs (`makeReadRecord`, `recordSettlesAttempt`, `makeSettledRecord`), worker/src/run-mirror.mjs (`readMirroredRecord`), worker/src/index.mjs (`STALLED_FAILED_REASON`, the processor's lost-lock gate). |
+| 2026-10-04 | Issue #504, part C. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Decision names `dispatch_allocations`, `dispatch_envelope_set` and `dispatch_priorities_set` in its list and `priorities` among the subcommands; records that the priorities write calls the worker's `applyPlan` through `read-model.mjs` with writer `operator-session`, fills `basis` itself and keeps `_other`'s weight when it is left out; that the allocation read and the priorities write return an allowlist of fields and never a reason text; that the envelope write plans through `parseEnvelope` before its confirm, sets `alloc:envelope:expected` before it replaces the file (SET with GET, so it knows the value it replaced) and on a failed file write puts it back by a compare-and-set, only while it still holds this write's digest, so a second confirmed write that landed meanwhile keeps its key; that the project, limit and per-job cap writers (the tools, the panel's limit dialogs and `/dispatch set`/`unset maxCostUsd`) refuse a change that breaks a loading envelope; the panel's ALLOCATION view on `b` (reasons from `alloc:plan` only, every cell escaped, the newest 20 outcomes, the in-frame revert on the captured row, the banner while an outside edit is newer than the last re-base or applied plan, the hint in the spend divider's meta); and the write guard: pi's `write` and `edit` (and a `powershell` command naming one) blocked on the envelope, `projects.json`, `scoped-limits.json`, `triggers.json` (the three cwd defaults when their key is set, or in an `init` scaffold folder pi was started in), the settings overlay, the deployment's `.env` and the pointer, with no pointer also every guarded file the session folder's `.env` names and that `.env` (it only adds, it configures nothing), a set that never shrinks within a session (a session that could point `.env` at a decoy could otherwise unguard the real file, found in review), the tool set pinned to pi 0.99.1's `allToolNames`, pi's path rules copied and pinned against `resolveToCwd`, identity by `(dev, ino)` or by the nearest existing ancestor plus the rest fully case-folded (APFS's long s, Kelvin sign and capital sharp s foldings measured), the `powershell` match on a folded path segment only (trailing dots and spaces allowed), the session `.env` read bounded (non-blocking, a regular file, 1 MiB) with every loader reading of a value guarded, fail closed, nested calls through pi's own hooks (a real-session test), with the rejected string comparison and the residuals (`bash`, a built name, `!` commands, a later extension rewriting the path, a `bash` link in the same parallel batch). The guard's wider file list is folded into issue #504's part C, as issue #504's open question on the guard recommended; no separate issue. The panel's cron run counts (`cronRunStats`) and the cost attribution (`attributeRunsToTriggers`) also join `manual:<id>:<millis>`, a hand-fired run of the trigger (`pi-dispatch run --trigger`, issue #505), which the worker counts as a run of that trigger. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**: part C is named, and the operator-session threat bullet names the wider guard. **`DES-FIRST-RUN-SETUP-WIZARD`** UNCHANGED, checked: the wizard's pointer never carries `PI_ENVELOPE_FILE`. |

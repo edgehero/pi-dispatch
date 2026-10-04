@@ -262,10 +262,11 @@ test("resetForTests clears the memo, the notice, and the owned-key ledger", () =
   assert.equal(env.PI_LOGS_DIR, "/b/logs");
 });
 
-test("the allowlist is exactly the eight resolvePaths path/URL keys, and the version constant is 1", () => {
+test("the allowlist is exactly the nine resolvePaths path/URL keys, and the version constant is 1", () => {
   // A guard for the contract itself: adding a key here must be a reviewed decision (the docblock's
   // "paths only, never credentials, never capability grants"), so the exact list is pinned.
   assert.deepEqual([...POINTER_ENV_ALLOWLIST].sort(), [
+    "PI_ENVELOPE_FILE",
     "PI_LOGS_DIR",
     "PI_PAUSE_WINDOWS_FILE",
     "PI_PROJECTS_FILE",

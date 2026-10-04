@@ -162,7 +162,8 @@ A `project:<id>` row caps every repo and folder of one project as one. The id is
   excess is deferred, like a repo's.
 - `dayUsd` / `weekUsd` / `monthUsd` cap what the project's jobs spend. A job that does not fit is refused `dollar-cap`, and the comment says "this project".
   Under an allocation envelope the cap for the envelope's window is the smaller of the row and the project's share; a
-  job refused by the share is `allocation-cap`.
+  job refused by the share is `allocation-cap`. The limit tools refuse a row below the project's envelope floor
+  before the confirm, naming both ([allocation.md](allocation.md)).
 - A job is counted narrowest first: its repo or folder row, then its project's row, then the global caps. A
   refusal gives back the slots taken before it, so a full project does not use up its repos' counts, and a full
   global cap uses up neither.

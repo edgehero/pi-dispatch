@@ -638,20 +638,32 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
   `parseTriggers`, atomic — and reloaded **live** by both services, `OQ-008`). The model-callable tools are
   the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`,
-  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`; the **queue controls** `dispatch_pause` and
-  `dispatch_resume`; the **gated enqueue** `dispatch_run`; and the **confirm-gated writes** `dispatch_set`,
-  `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_delete`, `dispatch_pause_add`,
+  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_allocations`; the **queue
+  controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue** `dispatch_run`; the **confirm-gated writes**
+  `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_delete`, `dispatch_pause_add`,
   `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`,
   `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`,
-  `dispatch_project_delete`. **This list is the pin**: `admin/test/wiring.test.mjs`
+  `dispatch_project_delete`, `dispatch_envelope_set`; and the **delegated allocation write**
+  `dispatch_priorities_set`. **This list is the pin**: `admin/test/wiring.test.mjs`
   reads this paragraph and fails the build if a registered tool is missing from it, or if a name here is
   registered nowhere — so every name is spelled in full, and a tool discussed as rejected belongs in
   **Why**, which the scan does not read. There is deliberately **no count word** beside the list: a number
   is a second claim the pin does not check, and this entry said "eleven" while twenty-one shipped.
-  Issue #504 adds tools that are named in this list in the change that registers them: a read of the allocation, a
-  confirm-gated write of the envelope, and a new kind, the **delegated allocation write**, which sets a
-  priorities plan with no confirm, works with no interactive operator, and can change nothing but the split inside
-  the envelope (`REQ-DELEGATED-ALLOCATION`). It is the one exception to the confirm rule below.
+  The delegated allocation write (issue #504) sets a priorities plan with no confirm, works with no interactive
+  operator, and can change nothing but the split inside the envelope (`REQ-DELEGATED-ALLOCATION`). It is the one
+  exception to the confirm rule below. The allocation read returns no reason text a plan carried. The envelope write
+  is judged by the worker's `parseEnvelope` before its confirm and stores the new digest as `alloc:envelope:expected`
+  before it writes the file, so the fleet re-bases onto it rather than refusing it as a hand edit. The project, limit
+  and per-job cap writes refuse a change that would leave the live envelope invalid, naming the conflict.
+  Since issue #504's part C the panel's `b` key opens an allocation view (the envelope, each project's allocation and
+  spend, the applied plan with its per-project reasons drawn through the control-byte gate, and the history from
+  `alloc:log`); `r` on a history row reverts to it after a y/n in the frame, as `operator-revert`, and a banner
+  shows while an `envelope-changed-externally` outcome is newer than the last re-base or applied plan.
+  `/dispatch priorities` shows the same without reasons and `/dispatch priorities set <id>=<weight> ...` applies a
+  plan as `operator-session`; both are zero-spend. A `tool_call` handler blocks pi's built-in `write` and `edit` (and
+  a `powershell` command naming one) whose target is the envelope, `projects.json`, `scoped-limits.json`,
+  `triggers.json`, the settings overlay, the deployment's `.env` or the deployment pointer, decided by file identity,
+  with a set that never shrinks within a session; `bash` is a named residual (`DES-ADMIN-VIA-PI-EXTENSION`).
   A write tool applies
   its change **only after a human operator approves a `ctx.ui.confirm` dialog showing the concrete
   before→after**, and **refuses — writing nothing — when no interactive operator is present** (`ctx.hasUI`
@@ -751,7 +763,22 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   no model row, then the file is written as version 1; given a dollar window, then the panel and
   `dispatch_costs` show its counter as spent and held, never the records' sum, and a window whose counter cannot
   be read shows no number rather than 0; given `dispatch_priorities_set` with or without an interactive operator,
-  then it applies or refuses under `REQ-DELEGATED-ALLOCATION` and never shows a confirm (issue #504 part C).
+  then it applies or refuses under `REQ-DELEGATED-ALLOCATION` and never shows a confirm (issue #504 part C);
+  given a headless session and an envelope of $100 a week with floors of $10, when `dispatch_priorities_set` sends
+  weights 3:1 (with `_other` at 0), then it applies $70 and $30 with no dialog; given `dispatch_envelope_set` with no
+  interactive operator, then it refuses and writes nothing, and when the operator declines its confirm the file and
+  `alloc:envelope:expected` are untouched; given `dispatch_allocations`, `/dispatch priorities` or a
+  `dispatch_priorities_set` result, then no plan reason text is in it, and the panel's `b` view is the one place the
+  reasons are drawn, escaped; given `r` on a history row of that view, then a y/n in the frame precedes the revert,
+  which is recorded as `operator-revert` and skips the interval and step rules; given a project, limit or per-job cap
+  write that would leave the live envelope invalid, then it is refused before any confirm and names the conflict;
+  given pi's `write` or `edit` (a nested `ctx.executeTool` call included) whose target resolves to a guarded file
+  through a symlink, a hard link, a case variant (a long s or a Kelvin sign included), `~` or an `@` prefix, then the
+  call is blocked, and a target the guard cannot resolve is blocked too; given an edit of the deployment's `.env` or
+  the pointer, then it is blocked, and pointing `.env` elsewhere does not unguard a file guarded before; given a
+  session with no deployment, then a repository's own `triggers.json`, `scoped-limits.json` or `projects.json` is not
+  guarded; given a deployment built with `init` and `up` and pi started in it with no pointer, then every file its
+  `.env` names, and that `.env`, are guarded.
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -971,7 +998,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   shipped the contracts and the
   pure
   arithmetic (`worker/src/priorities.mjs`, `worker/src/envelope.mjs`); part B the apply path, the shared state, the
-  audit, the enforcement and the fleet digest (`worker/src/allocation.mjs`); the operator tools follow in part C.
+  audit, the enforcement and the fleet digest (`worker/src/allocation.mjs`); part C the operator surfaces
+  (`REQ-ADMIN-VIA-PI-EXTENSION`: the three tools, `/dispatch priorities`, the panel's `b` view and the write guard).
 - **Why**: The owner wants an agent to move budget between projects on its own, more for the project that
   matters this week, while the operator sets the outer limits once. Models reason poorly about a shared budget,
   so the agent writes priorities and pi-dispatch does the arithmetic, where every invariant (the sum, the floors,
@@ -3129,6 +3157,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-04 | Issue #504, part C (the operator surfaces). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Statement names the three tools in its list, `dispatch_allocations` among the reads, `dispatch_envelope_set` among the confirm-gated writes, and the new kind, the delegated allocation write `dispatch_priorities_set` (part A described them in prose, because the wiring scan matches the registered tools exactly; #504's same-change spec acceptance is met across part A and this part); it adds the envelope write's order (the expected digest before the file), the writers' cross-check against the live envelope, the panel's `b` view with its revert and banner, `/dispatch priorities`, and the write guard on pi's `write` and `edit` (the money files, the deployment's `.env` and the pointer, a set that never shrinks within a session) with `bash` a named residual; the Acceptance gains the headless 3:1 apply ($70 and $30 with `_other` at 0), the envelope write refused headless and writing nothing on decline, no reason text in any tool result or message, the in-frame revert as `operator-revert`, the cross-check refusals (the tools and the operator-typed paths), the guard's spellings, its fold and nested calls, a session with no deployment that leaves a repository's own `triggers.json`, `scoped-limits.json` and `projects.json` alone, and an `init` and `up` deployment whose `.env` names the files the guard then holds. **`REQ-DELEGATED-ALLOCATION` AMENDED**, wording only: part C is named as shipped. **`REQ-SCOPED-LIMITS`** UNCHANGED, checked: its Why already says a delegated allocation never goes above a limit the operator wrote, and the limit writers' new refusal only keeps a row from going below a floor. **`CONST-BUDGET-BEFORE-TOKENS`** UNCHANGED, checked: no gate moved. |
 | 2026-10-04 | Found this round (no issue): a job that completed while Valkey was unreachable was reported failed (`job_failed`, a failure comment and a page), or run again. **`REQ-LOCAL-JOB-VISIBILITY` AMENDED**, Acceptance: `job_lost_lock_after_completion` (`jobId`, `outcome`, `reason` when present) is the terminal line of a job the queue failed after it lost the lock of a finished run, in place of `job_failed`; a scheduled job handed back logs it and then its one `job_completed` line. A record found and refused is logged as `job_lost_lock_record_rejected` (`jobId`, a fixed `reason`, `source`) before the failure line. The Statement is UNCHANGED, checked. **Code evidence**: worker/src/start.mjs (the failed listener), worker/src/index.mjs (the processor's lost-lock gate). |
 | 2026-10-04 | Issue #504, part B (apply, state, enforcement and the fleet). **`REQ-DELEGATED-ALLOCATION` AMENDED**: the Statement adds `envelope-mismatch` to the plan ladder after the writer rung, `allocation-cap` and `envelope-mismatch` as pre-spend refusals, the shared applied split and the audit file; the Scope says what part B ships, and that a host with no envelope in a fleet with an applied split refuses its jobs (turning delegation off for a fleet is removing the envelope everywhere and deleting `alloc:plan` and `alloc:envelope:expected`); the Acceptance adds the persisted neutral seed, the live two-writer race (one applies, the other `plan-stale` or `plan-busy`), the `apply-failed` row after a lost compare-and-set, one `expired` row across two hosts, the re-base gated on `alloc:envelope:expected` with one `envelope-changed-externally` row otherwise, `expected` seeded with the applied digest whichever host looks first (PR #574's review: the lazy seed let the first differing host re-base the fleet), the no-envelope host, a pickup fault retried as infrastructure, a corrupt or newer stored state, the synthetic ledger for a project with no row and `_other`'s own ledger, `allocation-cap` against `dollar-cap` (a tie is `dollar-cap`), a shrink that never touches a running job, the operator revert, the last good envelope kept on a reload inside a job path, and the local folder resolved at prepare (`local-folder-escaped` judged by identity, `local-folder-holds-envelope`, `local-folder-project-changed`, a chained child on the named folder). **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: doctor's list of the worker keys it resolves from `.env` names `PI_DISPATCH_RUN_ROOTS`, read for the envelope's containment check. **`REQ-SCOPED-LIMITS`** UNCHANGED, checked: its Why already bounds a delegated allocation by the operator's own limits, which `min(row, allocation)` keeps. **`REQ-SPEND-CAPS-MULTI-WINDOW`** UNCHANGED, checked: the operator's windows behave as before; a deployment window narrowed by an envelope total refuses `allocation-cap` under `REQ-DELEGATED-ALLOCATION`, not under this entry. **`REQ-OPERATOR-FAILURE-NOTIFICATION`** UNCHANGED, checked: every new reason is a pre-spend refusal and pages nobody. **`REQ-ADMIN-VIA-PI-EXTENSION`** UNCHANGED, checked: no tool lands in this part. **`CONST-BUDGET-BEFORE-TOKENS`** UNCHANGED, checked: `envelope-mismatch` is a free gate placed with the others before the mint, `local-folder-project-changed` is decided after prepare and before the token-cap read and every reserve, and `allocation-cap` is decided where `dollar-cap` is. |
 | 2026-10-04 | Issue #504, part A (the doctrine and the pure modules). **`REQ-DELEGATED-ALLOCATION` NEW**: the worker applies a priorities plan with no keypress, inside an operator envelope, under fixed rules (floors first, the rest by weight with largest remainder and ties by id, a step of at most `floor(total * maxStepPct / 100)` from the applied vector, all weights 0 leaving the headroom unallocated), refuses in a fixed order (delegation off, writer not allowed, duplicate, stale, too soon, incomplete, busy) and records every attempt; the worked cases are stated with `_other` at its default weight of 1 (neutral 36,666,666, 36,666,667 and 26,666,667, and 3:1:0 from it clamped to 61,666,666, 31,666,667 and 6,666,667) and with `_other` at 0 where the issue's 70/30 and 75/25 apply; for the envelope's window a project's cap becomes the smaller of its row and its allocation. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Why keeps the daily cap sentence and adds that one model-callable write needs no keypress, `dispatch_priorities_set`, bounded by the floors, the step and interval rules and the envelope total; the Statement describes the three tools issue #504 adds in prose only, because the scan in `admin/test/wiring.test.mjs` matches the registered tools exactly and their names join the list in part C, which registers them; the Acceptance reads a settings, trigger, limit or envelope write tool, and adds that the priorities write applies or refuses with or without an operator and never shows a confirm. **`REQ-SCOPED-LIMITS` AMENDED**, the Why: the sentence that a limit only ever narrows what may spend was already loose (a confirm-gated limit edit can raise a cap), and now says an operator edit may narrow or widen behind a keypress, and a delegated allocation moves headroom with none but never above the envelope total, below a floor, or above a limit the operator wrote. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the ordering is untouched, and only the values the dollar reserve compares against change. |
