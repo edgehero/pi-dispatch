@@ -29,6 +29,8 @@ import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS } from "./index.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { makeCollectChain } from "./outbox.mjs";
+import { makeCollectPlan } from "./outbox-plan.mjs";
+import { makePortfolioSnapshot } from "./portfolio-snapshot.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
 import { listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch } from "./sandbox.mjs";
@@ -1384,6 +1386,18 @@ export async function startWorker(
 	// else would enqueue a job only this host can run onto a queue every host drains.
 	const collectChain = makeCollectChain({ queue: cronQueue, config, log });
 
+	// Issue #505. One live-file check, shared by the pickup gate, the snapshot and the plan collector, so the three ask one
+	// file by one rule: the same file and rule as the one-shot checks below (`onceTriggersFile`). `pi-dispatch run
+	// --trigger` reads it there too, so the command that fires a trigger and the check that confirms its flag see one file.
+	const checkPortfolioFlag = makeCheckPortfolioFlag({ triggersPath: onceTriggersFile });
+	const governingNow = () => (envelope.current ? { envelope: envelope.current, digest: envelope.digest } : null);
+	// The plan collector: a completed portfolio job's /outbox/priorities.json, applied under the envelope by the same
+	// allocation state every pickup reconciles. Never throws, like collectChain beside it.
+	const collectPlan = makeCollectPlan({ allocation: allocationState, governing: governingNow, projects: () => projects.current, checkPortfolioFlag, log });
+	// The snapshot a confirmed portfolio job reads as /job/portfolio.json, built at prepare. The run counts are complete
+	// only with the run mirror, which a declared worker name arms (the `runMirror` rule below).
+	const portfolioSnapshot = makePortfolioSnapshot({ checkPortfolioFlag, governing: governingNow, projects: () => projects.current, limits: () => scopedLimits.current, allocation: allocationState, redis, logsDir: config.logsDir, mirror: config.workerNameDeclared === true, log });
+
 	// REQ-GLOBAL-PI-OVERLAY staged packages: read the operator's stage manifest at EACH job start, like
 	// getSettings above and the pause-window ref below.
 	//
@@ -1967,6 +1981,7 @@ export async function startWorker(
 		maxFaults: () => config.waitMaxFaults,
 		deps: {
 			collectChain,
+			collectPlan,
 			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses
 			// only on a FOREIGN positive mark (index.mjs binds the real queue jobId so a retry of the
 			// spending delivery is excused). In the compose topology this check is the once-enforcement
@@ -2016,9 +2031,8 @@ export async function startWorker(
 			// until restart, which is exactly the deployment where the skew happens.
 			checkWaitSkew: makeCheckWaitSkew({ triggersPath: onceTriggersFile }),
 			// Issue #505. Whether the live file still flags a portfolio job's cron trigger, read when such a job is picked
-			// up, from the same file and by the same rule as the two checks above. `pi-dispatch run --trigger` reads it
-			// there too, so the command that fires a trigger and the check that confirms its flag see one file.
-			checkPortfolioFlag: makeCheckPortfolioFlag({ triggersPath: onceTriggersFile }),
+			// up, from the same file and by the same rule as the two checks above (built once, beside collectPlan).
+			checkPortfolioFlag,
 			// Issue #230. Whether a job the supersede lease names is still in the queue. Without it a holder
 			// that vanished by any route except the clean one leaves a key that refuses every later delivery
 			// for that target until it expires -- and a refused forge delivery is gone, since no webhook
@@ -2098,6 +2112,8 @@ export async function startWorker(
 				// Issue #504 part B: a local job's folder is resolved at prepare and mounted resolved; one named inside a run
 				// root or a cron folder must still resolve inside it, and none may be the envelope's folder or above it.
 				localPlacement: { jobPaths: envelopeJobPathsNow, envelopeFile: config.envelopeFile ?? null },
+				// Issue #505: /job/portfolio.json for a confirmed portfolio job.
+				portfolioSnapshot,
 				preparers: makeForgePreparers({ gitlabApiUrl: config.gitlab?.apiUrl ?? null, forgejoApiUrl: config.forgejo?.apiUrl ?? null, azureOrgUrl: config.azure?.orgUrl ?? null }),
 				// The cron event.json's previousRunAt (INT-CONTAINER-JOB-INPUTS): read back from the same
 				// per-job run-history sidecars recordRun writes above -- no new store, no new query surface.
@@ -2166,7 +2182,7 @@ export async function startWorker(
 		// comment and the signal for CONST-PI-VERSION-PINNED's silent-no-op mode -- a missing line is
 		// what tells a human a run did nothing. The container's own output already streams via
 		// runContainer's onOutput during the run.
-		// `reason` is a fixed enum (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | unprotected-branch | runner-policy |
+		// `reason` is a fixed enum (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | portfolio-snapshot-oversize | unprotected-branch | runner-policy |
 		// provider-auth-refused | job-image-missing), never
 		// user content. Included only when present so success lines stay clean; a shutdown-aborted job logs
 		// { outcome: "policy", reason: "worker-abort" }, making a restart-dropped job visible.

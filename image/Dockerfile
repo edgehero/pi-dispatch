@@ -197,6 +197,7 @@ RUN mkdir -p /home/pi/.pi/agent && chown -R pi:pi /home/pi \
 # would delete the floor from the prompt with no error. The runner reads this path explicitly.
 COPY guardrails/HARD_RULES.md /opt/pi-dispatch/HARD_RULES.md
 COPY guardrails/OUTBOX_PROTOCOL.md /opt/pi-dispatch/OUTBOX_PROTOCOL.md
+COPY guardrails/PORTFOLIO_PROTOCOL.md /opt/pi-dispatch/PORTFOLIO_PROTOCOL.md
 
 # The runner's own node: an EXEC-ONLY, root-owned copy (issue #545). The kernel marks a process that exec'd a binary its
 # user cannot read as not dumpable, and a non-dumpable process's /proc/<pid>/mem, environ and fd are refused to the

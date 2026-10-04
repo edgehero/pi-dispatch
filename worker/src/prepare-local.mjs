@@ -44,7 +44,7 @@ export const LOCAL_FOLDER_HOLDS_ENVELOPE = "local-folder-holds-envelope";
  * default keeps a directly-constructed call (tests, older wiring) honest: a job with no derived
  * context is a manual run.
  */
-export async function prepareLocalWorkspace({ folder: named, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs, jobPaths = null, envelopeFile = null }) {
+export async function prepareLocalWorkspace({ folder: named, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs, jobPaths = null, envelopeFile = null, portfolio = null }) {
 	requirePath(fs, named, `local folder does not exist: ${named}`, "the local folder");
 	// Issue #504 part B: the folder is RESOLVED here, once, and the resolved path is the one everything below reads and the
 	// one the container mounts (`workspace`). The raw string was mounted before, so a link below a job path swapped after
@@ -91,6 +91,16 @@ export async function prepareLocalWorkspace({ folder: named, task, jobDir, git =
 		return { outcome: "policy", reason: LOCAL_FOLDER_UNREADABLE_REPO };
 	}
 
+	// Issue #505: a confirmed portfolio job's snapshot, built BEFORE anything is written, so a refusal
+	// (`portfolio-snapshot-oversize`) or an InfraRetry (Valkey) leaves nothing behind but the directory prepare.mjs removes.
+	// Null from the builder means the live file no longer flags the job (or this host lost its envelope): no snapshot, and
+	// the job runs as an ordinary cron job.
+	let snapshot = null;
+	if (typeof portfolio === "function") {
+		snapshot = await portfolio();
+		if (snapshot?.outcome === "policy") return snapshot;
+	}
+
 	fs.mkdirSync(jobDir, { recursive: true });
 	// The outbox is the container's only signal channel back to the worker (INT-OUTBOX-CONTRACT). It is
 	// mounted /outbox:rw for local jobs only; the host reads it after the run to enqueue chained children.
@@ -120,9 +130,14 @@ export async function prepareLocalWorkspace({ folder: named, task, jobDir, git =
 		...(event.source === "cron" ? { scheduledFor: event.scheduledFor ?? null, previousRunAt: event.previousRunAt ?? null } : {}),
 	};
 	fs.writeFileSync(join(jobDir, "event.json"), JSON.stringify(eventBody, null, 2), { mode: 0o444 });
+	// /job/portfolio.json (INT-CONTAINER-JOB-INPUTS), 0o444 beside event.json, so it reaches the container on the existing
+	// read-only /job mount with no new mount. Its presence is also what composes the portfolio persona in the runner.
+	if (typeof snapshot?.body === "string") fs.writeFileSync(join(jobDir, "portfolio.json"), snapshot.body, { mode: 0o444 });
 
 	// The folder itself is /workspace (rw). No clone: local jobs edit in place.
-	return { workspace: folder, jobDir, outboxDir, sha, materialised: written };
+	// `portfolio: true` only when the snapshot was written (issue #505): the plan collector requires prepare to have
+	// agreed, beside the pickup and the live file at collection, so a job that ran without the facts writes no plan.
+	return { workspace: folder, jobDir, outboxDir, sha, materialised: written, ...(typeof snapshot?.body === "string" ? { portfolio: true } : {}) };
 }
 
 /**

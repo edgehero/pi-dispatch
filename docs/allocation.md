@@ -109,6 +109,44 @@ yours). Neither is retried.
 A portfolio job (a cron trigger with `"portfolio": true`, see [triggers](triggers.md)) is refused as
 `portfolio-no-envelope` before anything is spent when this worker has no envelope, `delegation.enabled` is false, or
 `portfolio-job` is not in `delegation.writers`. Its plan could never apply there, so it is not paid for. Not retried.
+A worker with no envelope gets that refusal only while the fleet has no applied split. Once a split exists
+(`alloc:plan`), removing the envelope from a worker refuses every job there as `envelope-mismatch` first (see
+[Several hosts](#several-hosts)).
+
+## Portfolio jobs
+
+A portfolio job runs a flow that reads the budget and proposes a split, with no keypress.
+
+- **What it reads.** The worker writes `/job/portfolio.json` for it: the envelope's numbers, the applied plan (its id is
+  the next plan's `basis`, or `null` when no plan applied), the trigger's last attempt, and for each project its floor,
+  weight, allocation, what it has spent in the window, and its runs of the last 7 days. Money is in micro-dollars.
+  The file holds ids, numbers and operator labels (a project member as `github:acme/web` or `local:<folder name>`): no issue text, no titles, no plan reasons and no paths. Spending is read from
+  the counters every host shares; run counts cover the whole fleet only when `PI_WORKER_NAME` is set (the run
+  mirror), and `fleet.runsComplete` says which. A snapshot over 64 KiB refuses the job as
+  `portfolio-snapshot-oversize` before it costs anything.
+- **What it writes.** `/outbox/priorities.json`, the plan format of the operator's own tool. The worker reads it
+  after the container completes and applies it under the same rules: the step, the interval, the floors.
+- **When it is refused.** The plan is refused, and the job stays completed, when the job is not a portfolio job any
+  more (`plan-not-portfolio`: the flag was removed from the triggers file, or the job was a manual run or a chained
+  child), when the file is over 16 KiB, is a link or is not a regular file, is not JSON, or fails the plan rules
+  (`plan-invalid`), and for every reason the operator's own plan can be refused (`plan-stale`, `plan-too-soon`,
+  `plan-duplicate` and the rest). The run record's `plan` field names every refusal. A refusal of a portfolio job is
+  also a line in the audit file and in `alloc:log`, and the next snapshot shows it as `lastAttempt`, except
+  `plan-collect-error` (below), which is only in the run record and the worker log. A file left by a
+  job that was never a portfolio job (a manual run, a chained child, an unflagged cron job) is refused in its run
+  record and the worker log only, so stray files cannot push the panel's history out of `alloc:log`.
+  `plan-collect-error` means the worker could not tell what happened (the plan may have applied), so it writes no
+  row of its own: look at the panel's current plan and the audit file.
+- **The job log** shows `plan_precheck` from inside the container (what the plan is likely to meet, a hint only) and
+  `plan_collected` from the worker (what happened).
+- **The manager pays from a share too.** Its own job is governed like any other: its folder's project, or `_other`
+  when the folder is in no project. Give that share a floor of at least `PI_MAX_COST_USD`, or the manager itself is
+  refused as `allocation-cap` once a plan (or the default weights) leaves it nothing. `_other` with floor 0 and weight
+  0 refuses it from the first run.
+- **Two plans at once.** A run fired by hand waits for a scheduled run of the same trigger to end (one job per folder
+  at a time), so its plan meets the first one's and is refused as `plan-too-soon`. The operator can apply a plan while
+  a job runs: the first plan to apply wins, and the other is refused as `plan-stale` or `plan-busy`. Nothing merges two
+  plans.
 
 ## Several hosts
 
@@ -167,8 +205,10 @@ The next job on each host re-bases the split.
 |---|---|
 | Env var | `PI_ENVELOPE_FILE` (absolute, canonical path; unset = no envelope. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
 | Needs | `PI_MAX_COST_USD` |
-| Refusal reasons | `allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`, `local-folder-escaped`, `local-folder-holds-envelope`, `local-folder-project-changed` |
+| Refusal reasons | `allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`, `portfolio-snapshot-oversize`, `local-folder-escaped`, `local-folder-holds-envelope`, `local-folder-project-changed` |
+| Plan reasons (run record `plan`) | `plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`, `plan-parse-error`, `plan-collect-error`, `plan-invalid`, and the apply ladder |
+| Job files | `/job/portfolio.json` (in), `/outbox/priorities.json` (out) |
 | Valkey | `alloc:plan`, `alloc:lock`, `alloc:log`, `alloc:envelope:expected` |
 | Audit file | `PI_LOGS_DIR/allocations/YYYY-MM.jsonl` |
 | Host registry | `fpEnvelope`: the envelope digest, or `none`; doctor fails for a host whose digest is not the applied split's |
-| Spec | `REQ-DELEGATED-ALLOCATION`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`, `INT-ENVELOPE-FILE-CONTRACT`, `INT-PRIORITIES-PLAN-CONTRACT` |
+| Spec | `REQ-DELEGATED-ALLOCATION`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`, `INT-ENVELOPE-FILE-CONTRACT`, `INT-PRIORITIES-PLAN-CONTRACT`, `INT-OUTBOX-CONTRACT`, `INT-CONTAINER-JOB-INPUTS` |

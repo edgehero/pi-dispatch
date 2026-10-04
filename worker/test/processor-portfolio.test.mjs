@@ -188,3 +188,70 @@ test("the pickup hands the processor this host's envelope delegation, so the gat
 	const on = await pickup(governed(envelopeOf({ enabled: true, writers: ["portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 })));
 	assert.deepEqual([on.result.outcome, on.seen.containers], ["completed", 1]);
 });
+
+// ── issue #505 part B: the snapshot at prepare, and the plan collected on the completed branch only ──────────────
+
+const PLAN = { outcome: "refused", reason: "plan-too-soon", planId: "0123456789abcdef", clamped: false };
+
+function collecting(overrides = {}) {
+	const plans = [];
+	const prepares = [];
+	const d = deps({
+		prepareWorkspace: async (job, token, opts) => (prepares.push(opts), { workspaceDir: "/w", jobDir: "/j" }),
+		collectPlan: async (ctx) => (plans.push(ctx), PLAN),
+		...overrides,
+	});
+	return { ...d, plans, prepares };
+}
+
+test("a confirmed portfolio job's prepare is asked for the snapshot, and its plan is collected after the chain with the pickup's decision (#505)", async () => {
+	const order = [];
+	const d = collecting({
+		collectChain: async () => (order.push("chain"), { enqueued: 0, refused: 0 }),
+		collectPlan: async (ctx) => (order.push("plan"), d.plans.push(ctx), PLAN),
+	});
+	const r = await runJob(flagged, d.deps);
+	assert.equal(r.outcome, "completed", "a refused plan leaves the completed job completed");
+	assert.deepEqual(r.plan, PLAN);
+	assert.deepEqual(order, ["chain", "plan"]);
+	assert.equal(d.plans.length, 1);
+	assert.equal(d.plans[0].portfolio, true, "the pickup's decision rides to the collector");
+	assert.equal(d.prepares[0].portfolio, true, "prepare is told to write the snapshot");
+});
+
+test("an unflagged job, or one the live file no longer flags at pickup, gets no snapshot and its collector is told portfolio:false (#505)", async () => {
+	for (const [job, check] of [[unflagged, () => true], [flagged, () => false]]) {
+		const d = collecting({ checkPortfolioFlag: check, envelopeDelegation: null });
+		const r = await runJob(job, d.deps);
+		assert.equal(r.outcome, "completed");
+		assert.equal("portfolio" in d.prepares[0], false, "the prepare call is unchanged for every other job");
+		assert.equal(d.plans[0].portfolio, false);
+	}
+});
+
+test("a policy or infra exit, an abort and a pre-container refusal collect no plan (#505)", async () => {
+	for (const runContainer of [async () => ({ code: 2, aborted: false }), async () => ({ code: 137, aborted: true }), async () => ({ code: 1, aborted: false })]) {
+		const d = collecting({ runContainer });
+		await runJob(flagged, d.deps).catch(() => {});
+		assert.equal(d.plans.length, 0);
+	}
+	const refused = collecting({ envelopeDelegation: null });
+	assert.equal((await runJob(flagged, refused.deps)).reason, PORTFOLIO_NO_ENVELOPE);
+	assert.equal(refused.plans.length, 0);
+});
+
+test("a snapshot refused at prepare (portfolio-snapshot-oversize) is policy before any reserve and runs no container (#505)", async () => {
+	const d = collecting({ prepareWorkspace: async () => ({ outcome: "policy", reason: "portfolio-snapshot-oversize" }) });
+	const r = await runJob(flagged, d.deps);
+	assert.deepEqual([r.outcome, r.reason], ["policy", "portfolio-snapshot-oversize"]);
+	assert.equal(r.budgetReserved, undefined, "returned from prepare, before the reserve");
+	assert.ok(!d.calls.includes("run-container"));
+	assert.equal(d.plans.length, 0);
+});
+
+test("a completed job whose collector found no file has no plan on its result (#505)", async () => {
+	const d = collecting({ collectPlan: async () => null });
+	const r = await runJob(flagged, d.deps);
+	assert.equal(r.outcome, "completed");
+	assert.equal("plan" in r, false);
+});

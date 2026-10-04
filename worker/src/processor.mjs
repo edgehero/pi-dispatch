@@ -317,6 +317,11 @@ export async function runJob(job, deps) {
 		// or a github job with no /outbox -- chains nothing. It NEVER throws (outbox.mjs), so its counts are
 		// additive telemetry that can never flip the parent's completed outcome (CONST-RETRY-INFRA-ONLY).
 		collectChain = async () => ({ enqueued: 0, refused: 0 }),
+		// The plan collector (issue #505, outbox-plan.mjs): a completed portfolio job's `/outbox/priorities.json`, handed to
+		// applyPlan. Called on the completed branch only, after collectChain, with the pickup's `portfolio` decision. It
+		// NEVER throws, so a refused plan is a recorded outcome of a completed job and never a retry. The default collects
+		// nothing (null: no plan), so a wiring that omits it records `plan: null`.
+		collectPlan = async () => null,
 		// Issue #501: the deployment's dollar windows `{ day, week, month }` in micro-dollars (each null when unset), or
 		// null when no window is set. Null is the default and the off switch: nothing is reserved or settled and no
 		// `budget:usd:*` key is written, so a deployment with no dollar setting is byte-identical.
@@ -1060,7 +1065,9 @@ export async function runJob(job, deps) {
 		}
 
 		// `podmanStore` (issue #429) only where the venue's job user carried one: the podman store the container ran in.
-		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
+		// `portfolio` (issue #505) only for a job the gate above confirmed: prepare then writes /job/portfolio.json, after
+		// asking the live file once more. Absent otherwise, so every other job's prepare call is unchanged.
+		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
 
 		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
 		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)
@@ -1354,6 +1361,10 @@ export async function runJob(job, deps) {
 				// over-budget, infra): an InfraRetry job is retried, so chaining there would double-enqueue.
 				// collectChain never throws; chainEnqueued/chainRefused are additive telemetry only.
 				const chain = await collectChain({ job, prepared });
+				// Issue #505: the plan, after the chain and on this branch only, for the reason the chain is here: a policy or
+				// infra exit collects nothing, and a retried job must not apply what its failed attempt wrote. `portfolio` is
+				// the pickup's decision; the collector asks the live file again, and both must agree. Never throws.
+				const plan = await collectPlan({ job, prepared, portfolio });
 				// COMPLETED-ONLY PROMOTION, and the exclusivity is the point rather than an optimisation.
 				// A policy or infra exit leaves the canonical transcript byte-identical to what it was
 				// before this run, so a retry starts from exactly what the first attempt did -- promote on
@@ -1378,6 +1389,8 @@ export async function runJob(job, deps) {
 					chainEnqueued: chain.enqueued,
 					chainRefused: chain.refused,
 					...(dollars ? { dollars } : {}),
+					// Only when a plan file was there: the record's `plan` is null otherwise, and every other result is unchanged.
+					...(plan ? { plan } : {}),
 				};
 			}
 			case EXIT_POLICY: {

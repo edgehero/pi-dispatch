@@ -269,6 +269,14 @@ docker run --rm --entrypoint grep "$IMAGE_REF" -q "pi-dispatch-guardrails-v1" /o
 	|| fail "the guardrails sentinel is missing from /opt/pi-dispatch/HARD_RULES.md -- the runner reads its safety floor from there."
 ok "guardrails are baked where the runner reads them"
 
+# The two gated personas (issue #505): the loader composes each only when its mount or file is there, and reads it from
+# here. A missing file is no error, just a prompt without the protocol, so the image check is what notices.
+docker run --rm --entrypoint grep "$IMAGE_REF" -q "pi-dispatch-outbox-v1" /opt/pi-dispatch/OUTBOX_PROTOCOL.md 2>/dev/null \
+	|| fail "the outbox sentinel is missing from /opt/pi-dispatch/OUTBOX_PROTOCOL.md -- a local job would run without the outbox protocol."
+docker run --rm --entrypoint grep "$IMAGE_REF" -q "pi-dispatch-portfolio-v1" /opt/pi-dispatch/PORTFOLIO_PROTOCOL.md 2>/dev/null \
+	|| fail "the portfolio sentinel is missing from /opt/pi-dispatch/PORTFOLIO_PROTOCOL.md -- a portfolio job would run without the plan protocol."
+ok "the outbox and portfolio protocols are baked where the runner reads them"
+
 # Root-owned and NOT writable by the runtime user, or the floor is advisory.
 if docker run --rm --entrypoint sh "$IMAGE_REF" -c 'echo x >> /opt/pi-dispatch/HARD_RULES.md' 2>/dev/null; then
 	fail "the runtime user can WRITE /opt/pi-dispatch/HARD_RULES.md. A safety floor the agent can edit is not a floor."

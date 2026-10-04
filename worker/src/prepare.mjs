@@ -63,6 +63,10 @@ export function makePrepareWorkspace({
 	// run roots and cron folders a folder named inside must stay inside, and `envelopeFile` the file whose folder no job
 	// may mount. Null (a bare dispatcher) passes neither, and prepareLocal then judges nothing but the folder itself.
 	localPlacement = null,
+	// Issue #505: `(job) => null | { body } | { outcome: "policy", reason }`, the portfolio snapshot builder
+	// (portfolio-snapshot.mjs `makePortfolioSnapshot`). Asked only for a local job the processor confirmed as a portfolio
+	// job (`portfolio: true` below); null (a bare dispatcher) writes no snapshot for any job.
+	portfolioSnapshot = null,
 	// Keyed by `job.kind`, so a new forge is one entry rather than a new `if`. A kind with no entry falls
 	// through to the throw below, which is what makes an unrouted job loud instead of a silent no-op.
 	preparers = { github: prepareGithubWorkspace },
@@ -78,7 +82,7 @@ export function makePrepareWorkspace({
 	removeDir = (dir) => rmSync(dir, { recursive: true, force: true }),
 }) {
 	ensureDir(jobsDir);
-	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null } = {}) {
+	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false } = {}) {
 		ensureDir(jobsDir);
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
 		// Issue #524: a THROW out of anything below leaves `jobDir` to nobody. The processor tears down only what
@@ -88,7 +92,7 @@ export function makePrepareWorkspace({
 		// covers the thrown ones, in one place for every kind, rather than in each preparer that can throw.
 		// A retry makes a fresh directory, so nothing is lost by removing this one.
 		try {
-			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore });
+			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio });
 		} catch (error) {
 			// GUARDED: a removal that fails (a busy mount, a permission flipped mid-job) must never replace the error
 			// that is the job's actual outcome. The directory is then left, which is what happened before this catch.
@@ -99,7 +103,7 @@ export function makePrepareWorkspace({
 		}
 	};
 
-	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore }) {
+	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio }) {
 		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
 		// mounted, and copied ONCE for every job kind because this is where local and forge converge.
 		//
@@ -153,7 +157,10 @@ export function makePrepareWorkspace({
 					? `Use the "${job.flow}" skill for this task.\n\n${pointer}${job.task ?? ""}`
 					: `${pointer}${job.task ?? ""}`;
 			const event = localEventContext(job, queueJobId, findPreviousRun);
-			return discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null } : {}) }), sandbox), jobDir);
+			// The snapshot only for a confirmed portfolio job, and never for a chained child or a manual run, whatever its data
+			// says (the processor's gate already holds both; this keeps a direct caller to the same rule).
+			const snapshot = portfolio === true && typeof portfolioSnapshot === "function" && event.source === "cron" ? { portfolio: () => portfolioSnapshot(job) } : {};
+			return discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null } : {}), ...snapshot }), sandbox), jobDir);
 		}
 		const prepare = preparers[job.kind];
 		if (prepare) {
