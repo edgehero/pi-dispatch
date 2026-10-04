@@ -3015,13 +3015,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     refuses the call. `spend()` returns `spentMicros` and `inflightMicros` (also on the policy guard, zeros with
     no cap). They are not in `snapshot()`, so the exit line is byte-identical with or without `external`.
   - **The ledger file.** One per child, `<pid>.<nonce>.json` (a 16 hex character nonce) in the run's ledger
-    directory, written whole by rename, at most 64 KiB. Fields, all required in every state: `v` (2), `state`
+    directory, written whole by rename, at most 64 KiB. Fields, all required in every state: `v` (3), `state`
     (`starting`, `running` or `done`), `metered`, `totals` (`input`, `output`, `total`, `cost`, `calls`,
     `unresolved`, `unpriced`, `sessions`), `rows` (at most 256, the run record's ten numerics, `provider` and
-    `model` both ids or both null), `spentMicros`, `inflightMicros`, `costRefused`, `modelRefused`, and the cost
+    `model` both ids or both null), `spentMicros`, `inflightMicros`, `costRefused`, `modelRefused`, the cost
     guard's four floor counters `boundExceeded`, `costUnanswered`, `longContext`, `costUnjudged` (version 2, part E's
     review: the parent adds them to its own exit-line counters, so a child's partial count floors the settlement as
-    a parent call's would; a version 1 file is malformed, so unmetered). Numbers only:
+    a parent call's would), and the meter's `costUnreported` (version 3, issue #571: written by the child's meter
+    with or without a cost guard, and added to the parent meter's own through the fold). A file of an older version
+    is malformed, so unmetered, and a child from an older image floors the job. Numbers only:
     amounts from 0 to `Number.MAX_SAFE_INTEGER` (so no sum of files can overflow), counts safe integers. Ids must
     be printable ASCII and pass the worker's id rule after lowercasing (a copy, `USAGE_ID_PATTERN`, held to the
     worker's by a test), because the worker drops the whole usage block for one row it refuses. The rows must
@@ -3248,11 +3250,23 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     parent's own failure to write either file is counted once as unmetered: a child the parent cannot reach is a child
     it cannot hold to the cap. No SPENT without a dollar cap: no child of such a job judges spend against the parent,
     and a write that cannot fail cannot count as a breach.
+  - **A promise of a stream** (issue #571). pi-ai's legacy `streamSimple` and `stream` (compat.js) hand a registry
+    entry's answer on as it is, so an extension's entry that answers with `Promise<stream>` (an async function)
+    reaches its caller as a promise, and a caller that awaits it (a router forwarding to it) gets a working stream
+    and spends. pi's own paths never hand one on: ModelRuntime and the provider composer wrap every provider call in
+    `lazyStream`, which awaits it. So the meter counts such a call when it is dispatched and settles it from the
+    stream it resolves to (its result), and the cost guard settles its admission the same way; a rejection, or a
+    value with no `result()`, is a call with no usage (`unpriced`, and the guard keeps its bound), as a rejected
+    result is. A promise that resolves to a stream the meter already observed (an async router entry that forwards
+    through the legacy call and resolves to the forward's own stream) settles as a priced zero, not judged for broken
+    usage, so the forward's spend is counted once.
   - **The parent's cost guard and exit line.** The guard's `external` is every child's `ledgerCharge` as of the last
     fold. The exit line's guard counters (`costRefused`, `boundExceeded`, `longContext`, `costUnjudged`,
     `costUnanswered`, `modelRefused`, each only where the parent's guard writes it) add the children's
     (`guardFields`), so a child call that never started, or was charged past its bound, floors the dollar settlement
-    exactly as the parent's own would.
+    exactly as the parent's own would. The meter's `costUnreported` adds the children's in the meter (setChildren, a
+    high-water mark like the totals), on every line, so a child with no cost guard (its spawner dropped
+    `PI_MAX_COST_MICROS`) that got an answer with broken usage floors the job too.
   - **The detector** (Linux; it reads `/proc`, so elsewhere there is none and `distinct` and `peak` are null).
     - **What it scans.** All of `/proc`, not the runner's own children: a background child reparents to init. It skips
       this process, pid 1, and any process with `PF_FORKNOEXEC` set in `/proc/<pid>/stat`, read BEFORE the command line
@@ -3393,11 +3407,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **The cost views.** `admin/src/costs.mjs` makes a run with `unmeteredChildren` above 0 a floor (`≥`), beside
     `unresolved`, `unpriced`, the fallback meter and, from part F, the cost guard's `longContext`, `costUnjudged` and
     `costUnanswered`, which it used to ignore. `boundExceeded` stays out: the metered cost is still pi's full price,
-    and the reservation it escaped is the worker's concern. An absent key is not a floor there, unlike the
-    settlement: reading it as one would put `≥` on every record from before the key. The price is a residual: a record
-    from an image before part E whose job did spawn a pi child undercounts with no mark. The new list does re-judge
-    records that carry `longContext`, `costUnjudged` or `costUnanswered` (only unreleased images wrote them): their
-    dollar gains `≥`, no amount moves, and a plan-only bucket holding one reads as an estimate, not `plan:<id>`.
+    and the reservation it escaped is the worker's concern. An absent `unresolved`, `unpriced` or
+    `unmeteredChildren` is not a floor there, unlike the settlement: reading it as one would put `≥` on every record
+    from before the key. The price is a residual: a record from an image before part E whose job did spawn a pi child
+    undercounts with no mark. The new list does re-judge records that carry `longContext`, `costUnjudged` or
+    `costUnanswered` (only unreleased images wrote them): their dollar gains `≥`, no amount moves, and a plan-only
+    bucket holding one reads as an estimate, not `plan:<id>`. Issue #571 adds the meter's `costUnreported`, and the
+    rule for it and the guard's three is: present and not 0 (a negative, fractional or non-number value included, as
+    the worker reads anything but 0) is a floor, with or without a cap; ABSENT is a floor only on a record that
+    carries `costCapMicros` (an image with the cost guard that does not write one of them did not measure it), and a
+    record with no `costCapMicros` (from before the guard, or uncapped from an image before issue #571) stays exact.
+    History from before the cost guard is unchanged.
   - **The run detail** labels `otherTotal` "other sessions" (it holds compaction and branch summaries since the
     0.99.1 pin, not only subagents) and adds "subprocesses" from `childTotal`, naming any unmetered children.
   - **No cache-warming pin.** A child builds its own pi settings (a pi CLI child, a pi-subagents foreground or
@@ -3449,12 +3469,45 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     connection lost before the answer) is charged its metered cost, `max(ceil(cost x 1e6), 0)`, and counted as
     `costUnanswered` on the exit line.
   A SUCCESSFUL call that reports no input at all is broken usage reporting and is charged its bound.
+  **A call whose answer carries broken usage** (issue #571). pi fills a missing usage block with zeros and keeps the
+  part of a usage it did see, so the meter cannot tell "no usage reported" from "a free call" by the numbers, and
+  priced such a call at about $0 as metered. The METER counts it, on every run, capped or not, and in every child:
+  `costUnreported`, written on every metered exit line (after the child keys) and in every child ledger. Both
+  wrappers hand the meter the Model object a call was dispatched on, and when the call settles the meter counts it
+  when ALL of these hold:
+  - the model is PRICED (`pricedModel`): a rate above 0 in its cost table, one of its tiers, or an allowed fallback's
+    table, as pi composed it (pi gives a model with no `cost` all zeros, so through pi a table is never missing; a
+    Model object built by hand with no table, or with a rate that is not a number, counts as priced). A zero-rated
+    model never counts, so a free local model never floors a job;
+  - the answer has a finite `cost.total` (a missing one is already `unpriced`) and its usage is broken
+    (`unreportedUsage`): (a) its input side (input + cache read + cache write) is 0 and it is not a failed call that
+    never started (that stays the guard's `costUnanswered`); (b) it failed (`error` or `aborted`) after it started,
+    so its usage is partial, an Anthropic stream cut after message_start reported its input included; or (c) it
+    succeeded with answer content (non-empty text or thinking, or a tool call) but an output count of 0, or of at most
+    1 on `anthropic-messages`, where pi keeps message_start's output count (Anthropic sends 1) when a proxy's
+    message_delta carries none. A genuine one-token answer there (or a call capped at one output token) is floored
+    too: the safe side;
+  - the call did not FORWARD: no other model call was dispatched under its dispatch token (either half, the
+    asynchronous forward of a router or proxy provider included; both halves mark it before they dispatch the
+    forward, so a forward that throws marks it too). A forwarding call's own zero usage is the router's,
+    and the forward is metered on its own, so counting it would floor every job that runs through a router.
+  The count lands before the settle's change hook fires, so the child ledger written on that settle carries it. The
+  guard charges every call with broken usage at least its bound, by the SAME predicate (`unreportedUsage`), so what the
+  cap charges and what the settlement floors cannot drift apart, and counts nothing for it: ONE counter, the meter's.
+  The guard lifts a forwarding call too, though the meter does not count it: the cap judges each call on its own
+  worst case, and a router that answers itself after a failed forward must not run under the cap at $0.
+  A call the guard admitted whose dispatch THREW synchronously (the wrappers catch it, bind `undefined` and rethrow),
+  or that returned neither a stream nor a promise, stays charged at its bound and, on a bound above 0, counts
+  `costUnanswered`: it was never answered, the meter never saw it, and a provider may still have received it. A slot
+  merely flushed by the next admit (a call that dispatched a forward synchronously, before its own bind) or by the
+  snapshot is charged its bound and not counted: that call is answered and metered like any other.
   The six counters (`costCapMicros`, `costRefused`, `boundExceeded`, `longContext`, `costUnjudged`,
   `costUnanswered`) ride the exit line only when a cap is set. A job that ends by an abort or a stop while a call
   that has not started is in flight settles that call unstarted too, so it gets `costUnanswered > 0` and settles
   at the floor: conservative by design. A non-zero `costUnanswered` is part of the contract
   the dollar settlement (the worker half, below) reads: such a job's metered cost is a floor, and the
-  settlement charges at least its reservation, as for `boundExceeded` and `longContext`.
+  settlement charges at least its reservation, as for `boundExceeded` and `longContext`. So is a non-zero
+  `costUnreported`, and an absent one (an image from before issue #571).
 - **The bound**, every term an upper bound and every pi-ai fact under it pinned by needle in
   `image/runner/test/pinned-api.test.mjs`:
   - only the 11 api ids whose module reaches pi-ai's `calculateCost` price from the catalog (`PRICED_APIS`,
@@ -3605,7 +3658,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
      gains is a real token record. Then `metered` only when the count
      is complete: `tokens.metered` is `true`; `costCapMicros` is present and
      not above the reservation (a runner that ran under a wider cap than was reserved was not bounded by it); each
-     of `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered` and
+     of `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `costUnreported`
+     (issue #571) and
      `unmeteredChildren` (issue #500 part F: pi child processes whose spend the runner could not count) is PRESENT
      and `0`; and the per-model `usage` ledger is not null, OR the run made no provider call at all (`calls: 0` and a cost
      of 0: the runner omits the ledger when it observed no call, and a call the cost guard refuses answers with the
@@ -3759,9 +3813,19 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     the table it declares, not by what is billed;
   - **uncatalogued fees**: server-side tools (web search, code execution), Bedrock regional or cross-region
     pricing and any other charge the catalog does not carry are outside both the bound and pi's cost;
-  - **aborted and failed streams** count at their bound only against the per-job cap, during the run. The
-    windows settle from pi's partial cost on the exit line, which can be below what the provider billed: an
-    undercount, not an overcharge;
+  - **aborted and failed streams** that started count at their bound against the per-job cap, during the run, and
+    count `costUnreported` (issue #571), so the windows settle at the floor and the cost views show `≥`, not pi's
+    partial cost as exact;
+  - **a call that forwarded is trusted for its own usage** (issue #571): any model call dispatched under it marks it,
+    so an extension that makes a call from a request hook or an `onPayload` inside a runtime call exempts that call's
+    own broken usage too. The hook's call is metered; the outer call's lost count is not. Broken usage that pi fills
+    with plausible numbers (a partial count above the thresholds above) is not detected at all;
+  - **a server that never sends usage** (a local OpenAI-compatible server, or a model whose `compat` sets
+    `supportsUsageInStreaming: false`) floors every call on a priced model: a false floor, the safe side. `doctor`
+    warns on such a model the overlay configures with a nonzero cost table (issue #571);
+  - **deploy order for issue #571**: a new worker with an older image reads the absent `costUnreported` as a floor
+    and settles every capped job there (the `costUnjudged` precedent, an overcharge); an older worker with a new
+    image drops the key. Upgrade the image before the worker;
   - **images**: the per-image ceilings assume pi's resize box and the families named above. An image an
     extension puts in the context without pi's resize, or a family whose id matches neither name and whose image
     billing is dearer than its api's ceiling, can exceed it; one the provider downscales further is over-bounded,
@@ -7783,3 +7847,4 @@ a tunnel.
 | 2026-10-03 | Issue #500, part F (closes #500). **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: a new bullet, the worker and the panel (the record keeps `childTotal`, `childProcesses` and `unmeteredChildren` in the runner's emission order; `unmeteredChildren` is a floor counter; the cost views floor a run with `unmeteredChildren`, `longContext`, `costUnjudged` or `costUnanswered` above 0, `boundExceeded` deliberately not; the run detail says other sessions and subprocesses; no cache-warming pin, with the fact that pi reads `cacheWarming` from global settings only; rejected: absent read as 0, a new reason token). Two detector corrections from part E's final check: the `starting` CPU grace widens from 1 s to 3 s (an honest child reached 0.67 s under load on arm64), and at teardown a live `starting` ledger counts only when first seen 10 s or more before (`STARTING_FINAL_MS`, the M5 grace; the two-tick rule failed an honest job ending while children started), both in Rejected and in the residuals. The release coupling now says parts E and F ship in one release, both directions named. The child processes bullet's 'The plan is' becomes 'The answer is'. The two residuals from part C's final check (the marker query, a `require()` by absolute path) were already named: UNCHANGED, checked. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: `unmeteredChildren` joins the floor counters in the settlement rule; the two pi-subprocess residuals now say a cooperating child is metered and an unmetered one floors; a new residual names that a new worker with an image from before part E settles every capped job at the floor (the `costUnjudged` precedent, an overcharge) and why the reverse pairing makes parts E and F one release. |
 | 2026-10-03 | Issue #500, part F, PR #570's review. **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` AMENDED**, its residuals: a `pi` subprocess is inside the list since issue #500 (the child meter's guard from the inherited `PI_ALLOWED_MODELS`, the parent's check of every folded child row against its own list, and `model-not-allowed` on a pi child with no ledger under a list alone); the residuals are a child that hides from both, a model-less child row, and a call off the list in a child whose spawner widened its list, which the parent stops only after the fold. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the detector counts a pi process with no ledger at teardown only when a pass before teardown saw it (an honest child in its first milliseconds looks the same); the cost views bullet now says why an absent key is not a floor there (it would mark all history), names the residual (a record from an image before part E that spawned a pi child shows as exact), and says the guard counters do re-judge records that carry them (only unreleased images wrote them; a plan-only bucket holding one reads as an estimate); the cache-warming bullet says a job's child agent folder is the image's, so turning warming off takes a custom image or the spawning package. |
 | 2026-10-03 | Issue #500, part F, PR #570's second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the teardown rule for a pi process with no ledger is a time floor, like the `starting` rule: it counts only when this parent first saw it 2 s or more before teardown (`NO_LEDGER_FINAL_MS`, monotonic), replacing the one-pass rule, which still let a child the last tick caught at spawn fail an honest job; an environment read whole without the ledger directory or the preload still counts at any age. The teardown paragraph lists what a final-pass stop can come from, and the Residuals added list names the new window (a no-ledger child younger than 2 s at teardown whose environment cannot be read). |
+| 2026-10-04 | Issue #571. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: a new paragraph, a call whose answer carries broken usage: pi fills a missing usage block with zeros, so the METER counts `costUnreported` on every run, capped or not, and in every child, for a call on a priced model (`pricedModel`: a rate above 0 in the table, a tier or an allowed fallback) whose settled answer has a finite cost and broken usage (`unreportedUsage`: no input side unless it never started, a failure after it started, or answer content with an output count of 0, or at most 1 on `anthropic-messages`), and that did not forward (no other model call dispatched under its dispatch token); the guard charges every such call at least its bound by the same predicate and counts nothing for it, one counter. An admitted call whose dispatch threw synchronously or returned no answer object counts `costUnanswered` on a bound above 0; a stream method answered with a promise of a stream is metered and settled from the stream it resolves to, its rejection `unpriced`; a slot flushed by a synchronous forward is not counted. The settlement rule lists `costUnreported` among the counters that must be present and 0. Residuals: started failed streams settle at the floor; a forwarding call is trusted for its own usage, a hook's call included; broken usage pi fills with plausible numbers is not detected; a server that never sends usage floors every call on a priced model (a false floor, which `doctor` warns about); the deploy order (upgrade the image before the worker, since a new worker reads the absent key as a floor). **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the child ledger is version 3 and carries the meter's `costUnreported` beside the guard's four floor counters, written with or without a guard, an older version counting as unmetered; the parent meter adds the children's count through setChildren; a stream method answered with a promise of a stream (pi-ai's legacy calls hand an async registry entry's answer on as it is) is counted at dispatch and settled from the stream it resolves to, by the meter and the guard alike; the cost views read a present counter that is not 0 as a floor, `costUnreported` with or without a cap, an absent `costUnreported` or guard counter as a floor only on a record with `costCapMicros`, and an absent `unresolved`, `unpriced` or `unmeteredChildren` as exact. **Code evidence**: image/runner/src/usage-meter.mjs -> pricedModel, unreportedUsage, createUsageMeter, wrapModelRuntime, wrapProviderStreams, dispatchToken, createCostGuard, CHILD_LEDGER_VERSION, childLedger; image/runner/src/child-watch.mjs; worker/src/dollar-budget.mjs -> FLOOR_COUNTERS; worker/src/run-history.mjs -> TOKEN_KEYS; worker/src/model-endpoints.mjs -> unreportedUsageModels; worker/src/model-catalog.mjs -> builtinChatModels; worker/src/doctor.mjs; admin/src/costs.mjs. |

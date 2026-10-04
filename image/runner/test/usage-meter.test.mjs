@@ -19,6 +19,8 @@ import {
 	wrapProviderStreams,
 	DISPATCH_MARK,
 	dispatchToken,
+	pricedModel,
+	unreportedUsage,
 } from "../src/usage-meter.mjs";
 import { COST_CAP, COST_CAP_UNENFORCEABLE, EXIT_POLICY, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "../src/outcome.mjs";
 
@@ -1526,15 +1528,15 @@ test("rows() keeps at most CHILD_LEDGER_ROWS rows, the overflow folded into the 
 	assert.equal(rows.reduce((sum, row) => sum + row.total, 0), CHILD_LEDGER_ROWS + 10);
 });
 
-test("with no children the snapshot is exactly the pre-#500 line: the three child keys appear only after setChildren", () => {
+test("with no children the snapshot is the pre-#500 line plus costUnreported (issue #571): the three child keys appear only after setChildren, before it", () => {
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	meter.record(usage({ input: 10, output: 5, cost: 0.25 }), { sessionId: "root", provider: "p", modelId: "m" });
 	assert.equal(
 		JSON.stringify(meter.snapshot()),
-		'{"input":10,"output":5,"total":15,"cost":0.25,"metered":true,"rootTotal":15,"otherTotal":0,"looseTotal":0,"sessions":1,"calls":0,"unresolved":0,"unpriced":0}',
+		'{"input":10,"output":5,"total":15,"cost":0.25,"metered":true,"rootTotal":15,"otherTotal":0,"looseTotal":0,"sessions":1,"calls":0,"unresolved":0,"unpriced":0,"costUnreported":0}',
 	);
 	meter.setChildren(childFold({ processes: 0 }));
-	assert.deepEqual(Object.keys(meter.snapshot()).slice(-3), ["childTotal", "childProcesses", "unmeteredChildren"], "appended after unpriced, in this order");
+	assert.deepEqual(Object.keys(meter.snapshot()).slice(-4), ["childTotal", "childProcesses", "unmeteredChildren", "costUnreported"], "appended after unpriced, in this order");
 	assert.deepEqual(meter.snapshot().childTotal, 0);
 });
 
@@ -1880,4 +1882,131 @@ test("install: a throwing children hook stops a meter with a policy, by the unme
 	} } });
 	handle.uninstall();
 	assert.equal(throwingTeardown.state.stopReason, TOKEN_BUDGET, "the last fold failing at teardown fails closed too");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #571: an answer whose usage is broken counts costUnreported, in the meter, capped or not
+// ---------------------------------------------------------------------------------------------
+
+const PRICED = { api: "openai-completions", provider: "lan", id: "priced", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } };
+const PRICED_ANTHROPIC = { ...PRICED, api: "anthropic-messages", provider: "anthropic", id: "claude-x" };
+const FREE = { ...PRICED, id: "free", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+const TEXT = [{ type: "text", text: "a long answer" }];
+const answer = ({ stopReason = "stop", content = TEXT, input = 0, output = 0, cacheRead = 0, cost = 0 } = {}) => ({ role: "assistant", stopReason, content, usage: { input, output, cacheRead, cacheWrite: 0, totalTokens: input + output + cacheRead, cost: { total: cost } } });
+
+test("pricedModel: any rate above 0 in the table, a tier or an allowed fallback; a missing table is priced", () => {
+	assert.equal(pricedModel(PRICED), true);
+	assert.equal(pricedModel(FREE), false);
+	assert.equal(pricedModel({ ...FREE, cost: { ...FREE.cost, tiers: [{ inputTokensAbove: 10, input: 0, output: 3, cacheRead: 0, cacheWrite: 0 }] } }), true, "a priced tier");
+	assert.equal(pricedModel({ ...FREE, compat: { allowedFallbackModels: [{ provider: "a", model: "b", cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 } }] } }), true, "a priced fallback");
+	assert.equal(pricedModel({ ...FREE, cost: undefined }), true, "no table: not proof of a free call");
+	assert.equal(pricedModel({ ...FREE, cost: { input: "1", output: 0 } }), true, "a rate that is not a number");
+	assert.equal(pricedModel({ ...FREE, cost: { input: 0, output: 0 } }), false, "absent rates are 0");
+});
+
+test("unreportedUsage: zero input, a started failure, and content with no output count are broken; an unanswered call is not", () => {
+	assert.equal(unreportedUsage(answer(), "openai-completions"), true, "pi's zeros for a missing usage block");
+	assert.equal(unreportedUsage(answer({ input: 0, output: 500, cost: 0.001 }), "openai-completions"), true, "no input side");
+	assert.equal(unreportedUsage(answer({ cacheRead: 1000, output: 200, cost: 0.001 }), "openai-completions"), false, "cache-only input is input");
+	assert.equal(unreportedUsage(answer({ stopReason: "error", input: 100, output: 1, cost: 0.0001 }), "anthropic-messages"), true, "failed after it started: partial");
+	assert.equal(unreportedUsage(answer({ stopReason: "aborted", content: [] }), "openai-completions"), false, "never started: costUnanswered's, not this");
+	assert.equal(unreportedUsage(answer({ stopReason: "toolUse", content: [{ type: "toolCall", id: "t", name: "bash", arguments: {} }], input: 5000, cost: 0.005 }), "openai-completions"), true, "output 0 with a tool call: the final usage chunk was lost");
+	assert.equal(unreportedUsage(answer({ content: [{ type: "text", text: "x".repeat(20000) }], input: 1200, output: 1, cost: 0.0012 }), "anthropic-messages"), true, "output stuck at message_start's 1");
+	assert.equal(unreportedUsage(answer({ content: [{ type: "text", text: "yes" }], input: 1200, output: 1, cost: 0.0012 }), "openai-completions"), false, "1 output token elsewhere is a count");
+	assert.equal(unreportedUsage(answer({ content: [{ type: "text", text: "" }], input: 1200, output: 0, cost: 0.0012 }), "openai-completions"), false, "an empty answer with output 0 is consistent");
+	assert.equal(unreportedUsage(answer({ input: 100, output: 20, cost: 0.0001 }), "anthropic-messages"), false, "a whole answer");
+	assert.equal(unreportedUsage({ stopReason: "stop", content: TEXT, usage: { input: 0, cost: {} } }, "openai-completions"), false, "no finite cost: the meter's unpriced already");
+	assert.equal(unreportedUsage(undefined, "openai-completions"), false);
+});
+
+test("the meter counts costUnreported on an uncapped run, on a priced model, before the change hook writes, never for a forward", async () => {
+	const seen = [];
+	const meter = createUsageMeter({ maxTokens: null, onChange: () => seen.push(meter.state.unreported) });
+	const observe = (message, model, extra = {}) => {
+		const stream = new FakeStream();
+		stream.end(message);
+		meter.observe(stream, { provider: model.provider, modelId: model.id, model, ...extra });
+	};
+	observe(answer(), PRICED);
+	await flush();
+	assert.equal(meter.snapshot().costUnreported, 1, "no cap, no guard: still counted");
+	assert.equal(seen.at(-1), 1, "the settle's ledger write already carries it");
+	observe(answer(), FREE);
+	observe(answer({ input: 10, output: 5, cost: 0.00002 }), PRICED);
+	observe(answer({ stopReason: "error", content: [] }), PRICED);
+	observe(answer(), PRICED, { forwarded: () => true });
+	await flush();
+	assert.equal(meter.snapshot().costUnreported, 1, "free, whole, unanswered and forwarded calls are not counted");
+	// A caller with no model in its context (outside the two wrappers) is never counted.
+	meter.observe(streamOf(usage({})), { provider: "lan", modelId: "priced" });
+	await flush();
+	assert.equal(meter.snapshot().costUnreported, 1);
+	// The result methods too: a classify that reports no input.
+	meter.observeResult(Promise.resolve({ answers: {}, stopReason: "stop", usage: usage({}) }), { provider: "lan", modelId: "priced", model: PRICED });
+	await flush();
+	assert.equal(meter.snapshot().costUnreported, 2);
+	// The children's count is added, as a high-water mark.
+	meter.setChildren({ processes: 1, unmetered: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 1, unresolved: 0, unpriced: 0, sessions: 1 }, rows: [], costUnreported: 3 });
+	meter.setChildren({ processes: 1, unmetered: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 1, unresolved: 0, unpriced: 0, sessions: 1 }, rows: [], costUnreported: 1 });
+	assert.equal(meter.snapshot().costUnreported, 5);
+});
+
+test("a router that forwards asynchronously is not counted for its own zero usage, through either half; one that does not forward is (issue #571)", async () => {
+	const UPSTREAM = { ...PRICED_ANTHROPIC, id: "upstream" };
+	const PROXY = { ...PRICED, provider: "router", id: "proxy" };
+	const LONE = { ...PRICED, provider: "router", id: "lone" };
+	const dispatch = new AsyncLocalStorage();
+	const meter = createUsageMeter({ maxTokens: null });
+	const catalog = fakeCatalog([]);
+	const BROKEN = { ...UPSTREAM, id: "broken" };
+	const compatWrapper = wrapProviderStreams({ inner: { streamSimple: (model) => { if (model.id === "broken") throw new Error("upstream setup failed"); const s = new FakeStream(); s.end(answer({ input: 1000, output: 100, cost: 0.0045 })); return s; }, stream: () => null }, fallbackModels: catalog, meter, dispatch });
+	class Router {
+		streamSimple(model, context, options) {
+			const outer = new FakeStream();
+			if (model.id === "upstream") {
+				outer.end(answer({ input: 1000, output: 100, cost: 0.0045 }));
+				return outer;
+			}
+			if (model.id.startsWith("catch-")) {
+				try {
+					if (model.id === "catch-runtime") this.streamSimple(BROKEN, context, options);
+					else compatWrapper.streamSimple(BROKEN, context, { ...options });
+				} catch {
+					// the forward failed; the router answers itself
+				}
+				outer.end(answer());
+				return outer;
+			}
+			if (model.id === "broken") throw new Error("upstream setup failed");
+			(async () => {
+				await Promise.resolve();
+				if (model.id === "proxy") await this.streamSimple(UPSTREAM, context, options).result();
+				if (model.id === "proxy-legacy") await compatWrapper.streamSimple(UPSTREAM, context, { ...options }).result();
+				await new Promise((resolve) => setTimeout(resolve, 1));
+				outer.end(answer());
+			})();
+			return outer;
+		}
+	}
+	const layer = wrapModelRuntime({ ModelRuntime: Router, meter, dispatch });
+	try {
+		const runtime = new Router();
+		await runtime.streamSimple(PROXY, {}, {}).result();
+		await runtime.streamSimple({ ...PROXY, id: "proxy-legacy" }, {}, {}).result();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.deepEqual([meter.state.calls, meter.snapshot().costUnreported], [4, 0], "two forwards, metered upstream, the routers' zeros not counted");
+		assert.ok(Math.abs(meter.state.cost - 0.009) < 1e-12, "the cost is the upstream's");
+		await runtime.streamSimple(LONE, {}, {}).result();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.equal(meter.snapshot().costUnreported, 1, "a provider that answered zeros with no forward is counted");
+		// A forward that THROWS, which the router catches and answers itself with zeros: the same counters through
+		// either half, because both mark the forward before they dispatch it.
+		const before = meter.snapshot().costUnreported;
+		await runtime.streamSimple({ ...PROXY, id: "catch-runtime" }, {}, {}).result();
+		await runtime.streamSimple({ ...PROXY, id: "catch-legacy" }, {}, {}).result();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.equal(meter.snapshot().costUnreported, before, "a forward that threw still marks the call that made it, in both halves");
+	} finally {
+		layer.restore();
+	}
 });

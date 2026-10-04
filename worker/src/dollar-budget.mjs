@@ -272,8 +272,13 @@ export function meteredMicros(costUsd) {
  * (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`). The same absent-means-floor rule holds for it, so a worker from part F
  * running an image from before issue #500 part E settles every capped job at the floor: such a runner never writes
  * the key. That is the `costUnjudged` precedent, an overcharge until the image is rebuilt, never an undercharge.
+ *
+ * `costUnreported` (issue #571) counts the calls on a priced model whose answer carried broken usage (pi fills a
+ * missing usage block with zeros, so the metered cost holds about $0 for them); the runner's meter writes it on every
+ * line. Absent means floor here too, so a worker from issue #571 running an older image settles every capped job at
+ * the floor: upgrade the image before the worker.
  */
-export const FLOOR_COUNTERS = Object.freeze(["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "unmeteredChildren"]);
+export const FLOOR_COUNTERS = Object.freeze(["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "costUnreported", "unmeteredChildren"]);
 
 /**
  * How a job's reservation settles, from what the container reported. PURE. Returns `{ settledMicros, basis }`.

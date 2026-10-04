@@ -380,6 +380,17 @@ test("the policy counters (issues #501, #502) survive the rebuild, in emission o
 	assert.ok(Object.isFrozen(TOKEN_KEYS));
 });
 
+test("costUnreported (issue #571) survives the rebuild after the child keys and before the policy counters, on a line with or without a cap", () => {
+	const at = TOKEN_KEYS.indexOf("unmeteredChildren");
+	assert.deepEqual(TOKEN_KEYS.slice(at + 1, at + 3), ["costUnreported", "costCapMicros"], "the meter writes it last, the guard's fields follow");
+	const uncapped = { input: 1, output: 2, total: 3, cost: 0, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 1, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costUnreported: 1 };
+	const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(uncapped)}}`);
+	assert.equal(JSON.stringify(out), JSON.stringify(uncapped), "byte-identical round trip on an uncapped line");
+	const capped = { ...uncapped, costCapMicros: 2_000_000, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
+	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(capped)}}`)), JSON.stringify(capped), "and on a capped one");
+	assert.equal(parseExitTokens('{"event":"exit","tokens":{"total":1,"costUnreported":"one"}}').costUnreported, undefined, "numbers only");
+});
+
 test("the child keys (issue #500 part F) survive the rebuild, between unpriced and the policy counters, each by name", () => {
 	// A metered runner from issue #500 part E on writes all three on every line, zeros with no children. A key missing
 	// from TOKEN_KEYS is DROPPED, and `unmeteredChildren` is a floor counter: dropped, it would read as an honest zero.
@@ -1465,14 +1476,15 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	// The rest of the line as run-job.mjs builds it, at its WORST CASE, so the budget is not flattered:
 	// the maximal ledger usage-meter.test.mjs builds (8 named rows of 64-character provider and model ids
 	// plus the folded "other" row, 8-digit counts everywhere), every tokens key at 8 digits, the context
-	// block, the longest session reason, and the longest job-id shape (a cron id).
+	// block, the longest session reason, and the longest job-id shape (a cron id). `tokens` holds every TOKEN_KEYS key,
+	// the child keys and the policy counters included (issue #571 added one).
 	const wide = (prefix, i) => `${prefix}-${i}`.padEnd(64, "x");
 	const N = 99_999_999;
 	const row = (provider, model) => ({ provider, model, calls: N, input: N, output: N, cacheRead: N, cacheWrite: N, cacheWrite1h: N, reasoning: N, total: N, cost: 99_999.99, unpriced: N });
 	const rest = {
 		turns: 4096,
 		retryTurns: 4096,
-		tokens: { input: N, output: N, total: N, cost: 99_999.99, metered: true, rootTotal: N, otherTotal: N, looseTotal: N, sessions: N, calls: N, unresolved: N, unpriced: N },
+		tokens: Object.fromEntries(TOKEN_KEYS.map((key) => [key, key === "metered" ? true : key === "cost" ? 99_999.99 : N])),
 		usage: { v: 1, piAi: "88.88.88", truncated: 1, models: [...Array.from({ length: 8 }, (_, i) => row(wide("provider", i), wide("model", i))), row("other", "other")] },
 		context: { tokens: N, window: N },
 		session: { resumed: false, reason: "resume-chain-too-long" },

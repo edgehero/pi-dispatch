@@ -7,8 +7,10 @@ import { test } from "node:test";
 // unconditionally and the gate below applies only to pi itself.
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { createJobModelRuntime } from "../src/model-runtime.mjs";
-import { assertPoliciesEnforceable, callCostBound, createCostGuard, createPolicyGuard, createUsageMeter, installProcessUsageMeter, policyEnforcement, resolvePiAiCompat } from "../src/usage-meter.mjs";
+import { assertPoliciesEnforceable, callCostBound, createCostGuard, createPolicyGuard, createUsageMeter, foldChildLedgers, installProcessUsageMeter, policyEnforcement, resolvePiAiCompat } from "../src/usage-meter.mjs";
 import { decideExit, EXIT_POLICY, MODEL_NOT_ALLOWED } from "../src/outcome.mjs";
+import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
+import { parseExitTokens } from "../../../worker/src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { trackPiRefreshes } from "./helpers/track-pi-refreshes.mjs";
 
@@ -670,7 +672,7 @@ test("cost cap: session.compact() is a provider call like any other, and is refu
 // These run pi's REAL openai-completions module against a loopback server: the HTTP status, the SDK's error and
 // the message pi settles with are all real. Loopback only, and a literal key, so nothing leaves the machine.
 
-/** A local OpenAI-shaped server. `plan` answers each request in turn: "429", "ok", "lost" (no answer), "inband" (200, then an error before content) or "cut" (200, content deltas, then the socket dies). */
+/** A local OpenAI-shaped server. `plan` answers each request in turn: "429", "ok", "nousage" ("ok" with no usage chunk, a server that ignores stream_options), "lost" (no answer), "inband" (200, then an error before content) or "cut" (200, content deltas, then the socket dies). */
 async function loopbackOpenAI(plan) {
 	const seen = [];
 	const server = createServer((req, res) => {
@@ -705,7 +707,7 @@ async function loopbackOpenAI(plan) {
 			}
 			chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] });
 			chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
-			chunk({ ...base, choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
+			if (step !== "nousage") chunk({ ...base, choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
 			res.end("data: [DONE]\n\n");
 		});
 	});
@@ -775,6 +777,70 @@ test("cost cap: a 200 cut after content is charged its bound, so a retry loop of
 		assert.ok(message.content.length > 0, "the premise: content came back before the cut");
 		assert.equal(capped.guard.state.spent, callCostBound("streamSimple", lb.model, context, options), "it started, so it is charged its bound");
 		assert.equal(capped.guard.snapshot().costUnanswered, 0);
+		assert.equal(capped.meter.snapshot().costUnreported, 1, "its usage never came: the metered cost is short (issue #571)");
+	} finally {
+		installed?.uninstall();
+		await lb.close();
+	}
+});
+
+test("cost cap: an answer with no usage chunk is charged its bound and counted costUnreported, so the worker settles the job at the floor (issue #571)", { skip }, async () => {
+	const lb = await loopbackOpenAI(["ok", "nousage"]);
+	let installed;
+	try {
+		const cap = 100_000_000;
+		const capped = await installCapped({ fx: { modelRuntime: lb.modelRuntime }, capMicros: cap, rootSessionId: undefined });
+		installed = capped.installed;
+		// As in a job: the children's fold (none here) puts the child keys on the line at zero.
+		capped.meter.setChildren(foldChildLedgers({ dir: lb.root }));
+		const context = { systemPrompt: "s", messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+		const options = { maxRetries: 0 };
+		// The premise first: this server sends usage when asked, so the floor below is the missing chunk and nothing else.
+		const reported = await lb.modelRuntime.streamSimple(lb.model, context, options).result();
+		await flush();
+		assert.deepEqual([reported.stopReason, reported.usage.input, reported.usage.output], ["stop", 100, 10], "the premise: usage when the server sends it");
+		assert.equal(capped.meter.snapshot().costUnreported, 0, "a call that reported its usage is not counted");
+		const line = () => ({ tokens: { ...capped.meter.snapshot(), ...capped.guard.snapshot() }, usage: capped.meter.usageSnapshot() });
+		const before = line();
+		assert.equal(dollarSettlement({ ...before, reservedMicros: cap, trusted: true }).basis, "metered", "one honest call settles metered");
+		const spentBefore = capped.guard.state.spent;
+		const message = await lb.modelRuntime.streamSimple(lb.model, context, options).result();
+		await flush();
+		assert.deepEqual(lb.seen, ["ok", "nousage"]);
+		assert.equal(message.stopReason, "stop", `it succeeded: ${message.errorMessage}`);
+		assert.deepEqual([message.usage.input, message.usage.output, message.usage.cost.total], [0, 0, 0], "the premise: pi fills a missing usage block with zeros");
+		assert.equal(capped.guard.state.spent - spentBefore, callCostBound("streamSimple", lb.model, context, options), "charged its bound");
+		assert.deepEqual([capped.meter.snapshot().costUnreported, capped.guard.snapshot().costUnanswered], [1, 0]);
+		// The exit line as run-job writes it, through the worker's own parse and settlement.
+		const after = line();
+		const tokens = parseExitTokens(JSON.stringify({ event: "exit", tokens: after.tokens }));
+		assert.equal(tokens.costUnreported, 1, "the worker keeps the key");
+		assert.equal(tokens.cost, before.tokens.cost, "the meter priced the call at $0");
+		assert.equal(dollarSettlement({ tokens, usage: after.usage, reservedMicros: cap, trusted: true }).basis, "floor", "so the run settles at the floor");
+	} finally {
+		installed?.uninstall();
+		await lb.close();
+	}
+});
+
+test("no cap: an answer with no usage chunk is counted costUnreported on the exit line all the same (issue #571)", { skip }, async () => {
+	const lb = await loopbackOpenAI(["ok", "nousage"]);
+	let installed;
+	try {
+		const logged = [];
+		const meter = createUsageMeter({ maxTokens: null });
+		installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: lb.modelRuntime, meter, log: (event, fields) => logged.push({ event, fields }) });
+		assert.equal(installed.ok, true, JSON.stringify(logged));
+		meter.setChildren(foldChildLedgers({ dir: lb.root }));
+		const context = { systemPrompt: "s", messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+		await lb.modelRuntime.streamSimple(lb.model, context, { maxRetries: 0 }).result();
+		await flush();
+		assert.equal(meter.snapshot().costUnreported, 0, "the premise: usage when the server sends it");
+		const message = await lb.modelRuntime.streamSimple(lb.model, context, { maxRetries: 0 }).result();
+		await flush();
+		assert.deepEqual([message.stopReason, message.usage.input, message.usage.cost.total], ["stop", 0, 0], "the premise: pi's zeros");
+		const tokens = parseExitTokens(JSON.stringify({ event: "exit", tokens: meter.snapshot() }));
+		assert.deepEqual([tokens.costUnreported, tokens.costCapMicros], [1, undefined], "no guard, and the line still says the cost is short");
 	} finally {
 		installed?.uninstall();
 		await lb.close();
@@ -1490,6 +1556,16 @@ async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels 
 					})();
 					return own;
 				}
+				if (proxyAnswer === "async-zero") {
+					// A router that awaits before it forwards, then answers with zero usage of its own (issue #571).
+					const own = compat.createAssistantMessageEventStream();
+					(async () => {
+						await new Promise((resolve) => setTimeout(resolve, 1));
+						const message = await compat.streamSimple(target, context, { ...options }).result();
+						own.push({ type: "done", reason: "stop", message: { ...message, api: model.api, provider: model.provider, model: model.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } });
+					})();
+					return own;
+				}
 				const forwarded = compat.streamSimple(target, context, { ...options });
 				if (proxyAnswer === "pass") return forwarded;
 				const own = compat.createAssistantMessageEventStream();
@@ -1530,6 +1606,42 @@ test("PR #547's reviews: a proxy provider's forward to another model is a full c
 	// A proxy that answers with zero usage of its own: the target's usage is counted.
 	const zero = await proxyRun({ answer: "zero" });
 	assert.deepEqual([zero.served, zero.meter.state.calls, zero.meter.state.total], [["upstream-1"], 2, SENTINEL_TOTAL]);
+	// Issue #571: its own zeros are a router's, not a lost count: it forwarded, so it is not counted costUnreported.
+	assert.equal(zero.meter.snapshot().costUnreported, 0, "a forwarding proxy's own zero usage is not counted");
+	// The same proxy forwarding asynchronously, after an await: still not counted, so a line with every guard counter at 0
+	// settles metered at the upstream's cost. (No cap here: the served target's api is one the bound cannot price.)
+	const later = await proxyRun({ answer: "async-zero" });
+	assert.deepEqual([later.served, later.meter.snapshot().costUnreported, later.meter.state.cost], [["upstream-1"], 0, SENTINEL_COST]);
+	const guardZeros = { costCapMicros: 5_000_000, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
+	const settled = dollarSettlement({ tokens: { ...later.meter.snapshot(), unmeteredChildren: 0, ...guardZeros }, usage: later.meter.usageSnapshot(), reservedMicros: 5_000_000, trusted: true });
+	assert.deepEqual(settled, { settledMicros: Math.ceil(SENTINEL_COST * 1e6), basis: "metered" });
+});
+
+test("issue #571: a legacy registry entry that answers with a promise of a stream reaches its caller as a promise, and the meter counts the call", { skip }, async () => {
+	const fx = await fixture(`pi-dispatch-fake-api-571-promise-${(loadTimeRuns += 1)}`);
+	const compat = await import(resolvePiAiCompat()[0].url);
+	const asyncApi = `pi-dispatch-async-api-${loadTimeRuns}`;
+	// An extension's entry whose streamSimple is an async function: it answers Promise<stream>.
+	const answer = async (model) => {
+		const stream = compat.createAssistantMessageEventStream();
+		stream.push({ type: "done", reason: "stop", message: { role: "assistant", content: [{ type: "text", text: "ok" }], api: model.api, provider: model.provider, model: model.id, usage: SENTINEL_USAGE, stopReason: "stop", timestamp: Date.now() } });
+		return stream;
+	};
+	compat.registerApiProvider({ api: asyncApi, stream: answer, streamSimple: answer });
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, log: () => {} });
+	try {
+		const target = { ...fx.model, provider: "pi-dispatch-async", id: "async-1", api: asyncApi };
+		const returned = compat.streamSimple(target, { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, {});
+		assert.equal(typeof returned.result, "undefined", "the premise: pi-ai's legacy call hands the promise on as it is");
+		const message = await (await returned).result();
+		await flush();
+		assert.equal(message.usage.cost.total, SENTINEL_COST, "a caller that awaits it gets a working answer");
+		assert.deepEqual([meter.state.calls, meter.state.unresolved, meter.state.total, meter.state.cost], [1, 0, SENTINEL_TOTAL, SENTINEL_COST], "so its spend is on the exit line");
+	} finally {
+		installed.uninstall();
+		fx.cleanup();
+	}
 });
 
 test("PR #547's final review: a fallback provider whose forward failed and that answers itself is counted, and a $1 cap still stops the job", { skip }, async () => {

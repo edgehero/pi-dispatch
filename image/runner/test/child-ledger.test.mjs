@@ -9,6 +9,7 @@ import {
 	CHILD_LEDGER_MAX_ROWS,
 	CHILD_LEDGER_NAME,
 	CHILD_LEDGER_ROWS,
+	CHILD_FLOOR_COUNTERS,
 	childLedger,
 	createPolicyGuard,
 	createUsageMeter,
@@ -37,7 +38,7 @@ const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, inpu
 function ledger({ calls = 1, each = 10, cost = 0.5, unresolved = 0, state = "running", metered = true, extra = {} } = {}) {
 	const rows = calls === 0 ? [] : [row("anthropic", "claude-x", { calls, input: calls * each, total: calls * each, cost: calls * cost })];
 	return {
-		v: 2,
+		v: 3,
 		state,
 		metered,
 		totals: { input: calls * each, output: 0, total: calls * each, cost: calls * cost, calls: calls + unresolved, unresolved, unpriced: 0, sessions: 1 },
@@ -48,6 +49,7 @@ function ledger({ calls = 1, each = 10, cost = 0.5, unresolved = 0, state = "run
 		modelRefused: 0,
 		boundExceeded: 0,
 		costUnanswered: 0,
+		costUnreported: 0,
 		longContext: 0,
 		costUnjudged: 0,
 		...extra,
@@ -144,8 +146,10 @@ test("parseChildLedger refuses the whole file for any one bad part", () => {
 		"not json": "{",
 		"an array": "[]",
 		"v 1 (before the floor counters)": json({ ...good, v: 1 }),
-		"v 3": json({ ...good, v: 3 }),
+		"v 2 (before costUnreported, issue #571)": json({ ...good, v: 2 }),
+		"v 4": json({ ...good, v: 4 }),
 		"a floor counter missing": json({ ...good, costUnanswered: undefined }),
+		"costUnreported missing": json({ ...good, costUnreported: undefined }),
 		"an unknown state": json({ ...good, state: "stopped" }),
 		"metered as a string": json({ ...good, metered: "true" }),
 		"no totals": json({ ...good, totals: undefined }),
@@ -208,6 +212,18 @@ test("a shrink counts once as unmetered, keeps the mark it reached, and the file
 	fs.opened.length = 0;
 	const third = fold(fs, second);
 	assert.deepEqual([third.unmetered, third.totals.total, fs.opened], [1, 30, []], "once, frozen, unread");
+});
+
+test("a floor counter that falls is a shrink: the mark keeps it, so a child cannot take back a floor (issues #500, #571)", () => {
+	assert.deepEqual(CHILD_FLOOR_COUNTERS, ["boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged"]);
+	for (const key of CHILD_FLOOR_COUNTERS) {
+		const fs = fakeFs({ [NAME_A]: json(ledger({ calls: 1, extra: { [key]: 1 } })) });
+		const first = fold(fs);
+		assert.equal(first[key], 1, key);
+		fs.files[NAME_A] = json(ledger({ calls: 2 }));
+		const second = fold(fs, first);
+		assert.deepEqual([second.unmetered, second.files.get(NAME_A).why, second[key]], [1, "shrank", 1], key);
+	}
 });
 
 test("a row that shrinks or disappears is a shrink, even when the totals grew", () => {
@@ -284,7 +300,7 @@ test("a child meter's own ledger round-trips through the fold, and the parent's 
 	child.observe({ result: () => new Promise(() => {}) }, { sessionId: "c", provider: "anthropic", modelId: "claude-x" });
 	await new Promise((resolve) => setImmediate(resolve));
 	const { metered, rootTotal, otherTotal, looseTotal, ...totals } = child.snapshot();
-	const text = json({ v: 2, state: "running", metered, totals, rows: child.rows(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, longContext: 0, costUnjudged: 0 });
+	const text = json({ v: 3, state: "running", metered, totals, rows: child.rows(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0 });
 	const result = fold(fakeFs({ [NAME_A]: text }));
 	assert.equal(result.unmetered, 0, "the meter's own snapshot and rows() make a ledger the fold accepts");
 	const parent = createUsageMeter({ maxTokens: null, rootSessionId: "p" });
@@ -314,7 +330,7 @@ test("a child writing CHILD_LEDGER_ROWS worst-case rows stays under the 64 KiB r
 		cost: longest,
 		unpriced: Number.MAX_SAFE_INTEGER,
 	}));
-	const text = json({ v: 2, state: "running", metered: true, totals: { input: longest, output: longest, total: longest, cost: longest, calls: Number.MAX_SAFE_INTEGER, unresolved: Number.MAX_SAFE_INTEGER, unpriced: Number.MAX_SAFE_INTEGER, sessions: Number.MAX_SAFE_INTEGER }, rows, spentMicros: Number.MAX_SAFE_INTEGER, inflightMicros: Number.MAX_SAFE_INTEGER, costRefused: Number.MAX_SAFE_INTEGER, modelRefused: Number.MAX_SAFE_INTEGER, boundExceeded: Number.MAX_SAFE_INTEGER, costUnanswered: Number.MAX_SAFE_INTEGER, longContext: Number.MAX_SAFE_INTEGER, costUnjudged: Number.MAX_SAFE_INTEGER });
+	const text = json({ v: 3, state: "running", metered: true, totals: { input: longest, output: longest, total: longest, cost: longest, calls: Number.MAX_SAFE_INTEGER, unresolved: Number.MAX_SAFE_INTEGER, unpriced: Number.MAX_SAFE_INTEGER, sessions: Number.MAX_SAFE_INTEGER }, rows, spentMicros: Number.MAX_SAFE_INTEGER, inflightMicros: Number.MAX_SAFE_INTEGER, costRefused: Number.MAX_SAFE_INTEGER, modelRefused: Number.MAX_SAFE_INTEGER, boundExceeded: Number.MAX_SAFE_INTEGER, costUnanswered: Number.MAX_SAFE_INTEGER, costUnreported: Number.MAX_SAFE_INTEGER, longContext: Number.MAX_SAFE_INTEGER, costUnjudged: Number.MAX_SAFE_INTEGER });
 	assert.ok(Buffer.byteLength(text) <= CHILD_LEDGER_MAX_BYTES, `${Buffer.byteLength(text)} bytes`);
 	assert.ok(CHILD_LEDGER_ROWS <= CHILD_LEDGER_MAX_ROWS);
 });
@@ -338,7 +354,7 @@ function forged({ rows, calls, unresolved = 0 }) {
 	const t = { input: 0, output: 0, total: 0, cost: 0 };
 	for (const r of rows) for (const k of Object.keys(t)) t[k] += r[k];
 	const settled = rows.reduce((sum, r) => sum + r.calls, 0);
-	return { v: 2, state: "running", metered: true, totals: { ...t, calls: calls ?? settled + unresolved, unresolved, unpriced: 0, sessions: 1 }, rows, spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, longContext: 0, costUnjudged: 0 };
+	return { v: 3, state: "running", metered: true, totals: { ...t, calls: calls ?? settled + unresolved, unresolved, unpriced: 0, sessions: 1 }, rows, spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0 };
 }
 const FORGED_A = "900.aaaaaaaaaaaaaaaa.json";
 const FORGED_B = "901.bbbbbbbbbbbbbbbb.json";

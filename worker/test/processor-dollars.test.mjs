@@ -66,7 +66,7 @@ function keyedRedis(preset = {}) {
 
 const usdKeys = (redis) => [...redis.store.keys()].filter((k) => k.startsWith("budget:usd"));
 
-const COMPLETE_TOKENS = { input: 10, output: 5, total: 15, cost: 0.3, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
+const COMPLETE_TOKENS = { input: 10, output: 5, total: 15, cost: 0.3, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costUnreported: 0 };
 const LEDGER = { v: 1, piAi: null, truncated: 0, models: [{ provider: "anthropic", model: "m", calls: 1, input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 15, cost: 0.3, unpriced: 0 }] };
 
 function deps(overrides = {}) {
@@ -257,7 +257,7 @@ test("a dollar window with no per-job cap on the job is refused as configuration
 
 // What the runner writes when it made no provider call: metered, calls 0, cost 0, the cap counters, and NO usage
 // ledger (usage-meter.mjs `usageSnapshot` returns null for a zero-call run, so run-job.mjs omits the key).
-const ZERO_CALL = { input: 0, output: 0, total: 0, cost: 0, metered: true, rootTotal: 0, otherTotal: 0, looseTotal: 0, sessions: 0, calls: 0, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
+const ZERO_CALL = { input: 0, output: 0, total: 0, cost: 0, metered: true, rootTotal: 0, otherTotal: 0, looseTotal: 0, sessions: 0, calls: 0, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costUnreported: 0 };
 
 test("a run that made NO provider call settles metered at 0: the guard refused call 1, a command job, an early exit 1", async () => {
 	const cases = [

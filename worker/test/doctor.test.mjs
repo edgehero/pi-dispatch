@@ -11,7 +11,7 @@ import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS, runInit } from "../src/init.mjs";
-import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINT_ID_RE, loadModelEndpoints, parseModelEndpoints, renderEndpointsInclude } from "../src/model-endpoints.mjs";
+import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINT_ID_RE, loadModelEndpoints, parseModelEndpoints, renderEndpointsInclude, unreportedUsageModels } from "../src/model-endpoints.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe, egressEndpointProbe } from "../src/egress.mjs";
 import { LIVE_PREFIX, egressVerdict } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -3998,6 +3998,72 @@ test("doctor: an overlay model on a loopback baseUrl is ⚠, named with its prov
 	const { out, text } = capture();
 	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay }), { ...ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync });
 	assert.match(text(), /⚠ Overlay models\.json points "local-ollama"\/"qwen2\.5:0\.5b" \(localhost:11434\) at a loopback address, which inside a job is the job's own container, so no job reaches that server\n {4}→ serve the model on an address the egress proxy reaches, declare it in model-endpoints\.json/);
+});
+
+test("doctor: an overlay model that costs money and asks for no streaming usage is ⚠, named, since every capped call floors (issue #571)", async () => {
+	const priced = { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 };
+	const free = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	assert.deepEqual(
+		unreportedUsageModels({
+			providers: {
+				lan: {
+					baseUrl: "http://gpu.lan:8000/v1",
+					api: "openai-completions",
+					compat: { supportsUsageInStreaming: false },
+					models: [{ id: "priced", cost: priced }, { id: "free", cost: free }, { id: "nocost" }, { id: "on", cost: priced, compat: { supportsUsageInStreaming: true } }, { id: "tiered", cost: { ...free, tiers: [{ inputTokensAbove: 1, ...priced }] } }, { id: "overridden", cost: free }],
+					modelOverrides: { overridden: { cost: { input: 3 } }, priced: {} },
+				},
+				own: { baseUrl: "http://gpu.lan:8001/v1", models: [{ id: "m", api: "openai-completions", cost: priced, compat: { supportsUsageInStreaming: false } }, { id: "anth", api: "anthropic-messages", cost: priced, compat: { supportsUsageInStreaming: false } }] },
+				switched: { baseUrl: "http://gpu.lan:8002/v1", compat: { supportsUsageInStreaming: false }, models: [{ id: "back", cost: priced }], modelOverrides: { back: { compat: { supportsUsageInStreaming: true } } } },
+				plain: { baseUrl: "http://gpu.lan:8003/v1", models: [{ id: "x", cost: priced }] },
+			},
+		}),
+		[{ provider: "lan", modelId: "priced" }, { provider: "lan", modelId: "tiered" }, { provider: "lan", modelId: "overridden" }, { provider: "own", modelId: "m" }],
+	);
+	assert.deepEqual(unreportedUsageModels(null), []);
+	assert.deepEqual(unreportedUsageModels({ providers: [] }), []);
+	// Builtin models (PR #572's review): a provider-level compat or a modelOverrides entry turns usage off on the catalog's
+	// chat models, priced from the catalog with the override's cost applied. The catalog's own flag is not the overlay's.
+	const catalogModels = {
+		groq: [
+			{ id: "priced", api: "openai-completions", cost: priced },
+			{ id: "free", api: "openai-completions", cost: free },
+			{ id: "made-free", api: "openai-completions", cost: priced },
+			{ id: "other-api", api: "anthropic-messages", cost: priced },
+			{ id: "redefined", api: "openai-completions", cost: priced },
+		],
+		openrouter: [{ id: "a", api: "openai-completions", cost: priced }, { id: "b", api: "openai-completions", cost: priced, compat: { supportsUsageInStreaming: false } }],
+		mistral: [{ id: "own-false", api: "openai-completions", cost: priced, compat: { supportsUsageInStreaming: false } }],
+	};
+	const catalog = { builtinChatModels: (p) => catalogModels[p] ?? [], builtinModel: (p, id) => (catalogModels[p] ?? []).find((m) => m.id === id) ?? null };
+	assert.deepEqual(
+		unreportedUsageModels(
+			{
+				providers: {
+					groq: { models: [{ id: "redefined", cost: free, api: "openai-completions" }], modelOverrides: { priced: { compat: { supportsUsageInStreaming: false } }, free: { compat: { supportsUsageInStreaming: false } }, "made-free": { cost: { input: 0, output: 0 }, compat: { supportsUsageInStreaming: false } }, "other-api": { compat: { supportsUsageInStreaming: false } } }, compat: {} },
+					openrouter: { compat: { supportsUsageInStreaming: false }, modelOverrides: { b: { compat: { supportsUsageInStreaming: true } } } },
+					mistral: { baseUrl: "http://x" },
+				},
+			},
+			catalog,
+		),
+		[{ provider: "groq", modelId: "priced" }, { provider: "openrouter", modelId: "a" }],
+	);
+	// Through doctor with a catalog seam: a modelOverrides entry on a builtin model is named.
+	const builtinOverlay = tempDir("pi-overlay-571b-");
+	writeFileSync(join(builtinOverlay, "models.json"), JSON.stringify({ providers: { groq: { modelOverrides: { priced: { compat: { supportsUsageInStreaming: false } } } } } }));
+	const viaCatalog = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: builtinOverlay }), { ...ghDeps(viaCatalog.out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync, modelCatalog: async () => ({ ...catalog, checkModelsKnown: () => [] }) });
+	assert.match(viaCatalog.text(), /⚠ Overlay models\.json sets compat\.supportsUsageInStreaming to false on "groq"\/"priced" with a nonzero cost table/);
+	const overlay = tempDir("pi-overlay-571-");
+	writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { lan: { baseUrl: "http://gpu.lan:8000/v1", api: "openai-completions", apiKey: "$LAN_KEY", models: [{ id: "qwen", cost: priced, compat: { supportsUsageInStreaming: false } }] } } }));
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay }), { ...ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync });
+	assert.match(text(), /⚠ Overlay models\.json sets compat\.supportsUsageInStreaming to false on "lan"\/"qwen" with a nonzero cost table, so those calls report no usage: each counts as costUnreported, and every job that calls one settles at the floor\n {4}→ remove supportsUsageInStreaming: false/);
+	writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { lan: { baseUrl: "http://gpu.lan:8000/v1", api: "openai-completions", apiKey: "$LAN_KEY", models: [{ id: "qwen", compat: { supportsUsageInStreaming: false } }] } } }));
+	const quiet = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay }), { ...ghDeps(quiet.out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync });
+	assert.doesNotMatch(quiet.text(), /supportsUsageInStreaming/, "a zero-rated model reports nothing and costs nothing");
 });
 
 test("doctor: an allowlist naming a host alias is ⚠, pointing at model-endpoints.json (#503)", async () => {

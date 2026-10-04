@@ -96,7 +96,7 @@ const GUARD_FIELDS = Object.freeze(["costRefused", "boundExceeded", "longContext
 
 /** The fold of a directory with nothing in it: what setChildren gets before the first tick, so the keys are there. */
 function emptyFold() {
-	return { processes: 0, unmetered: 0, flooded: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, longContext: 0, costUnjudged: 0, settledMicros: 0, chargeMicros: 0, missing: false, files: new Map(), retired: null };
+	return { processes: 0, unmetered: 0, flooded: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, settledMicros: 0, chargeMicros: 0, missing: false, files: new Map(), retired: null };
 }
 
 /** Whether a ledger's mark holds any spend at all. */

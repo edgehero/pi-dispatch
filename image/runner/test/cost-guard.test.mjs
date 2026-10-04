@@ -22,6 +22,7 @@ import {
 	dispatchToken,
 } from "../src/usage-meter.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
+import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
 import { AZURE_GPT_5_4, CODEX_SPARK, FABLE_5, GPT_5_4, GPT_5_5, GPT_5_5_CODEX, SONNET_4_5 } from "./helpers/catalog-models.mjs";
 
 /**
@@ -814,6 +815,139 @@ test("a failed call that STARTED is charged at least its bound; one that never s
 	};
 	assert.equal(await loop(failed()), 10, "ten 429s in a row are all admitted: nothing was billed");
 	assert.equal(await loop(failed({ content: [{ type: "text", text: "x" }] })), 2, "two started-then-cut calls fit 2500 at 1000 each");
+});
+
+test("an admitted dispatch that threw, or returned no answer object, counts costUnanswered; a slot a synchronous forward flushed does not (issue #571)", async () => {
+	const UP = { ...FLAT, provider: "anthropic", id: "up" };
+	const zeros = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } };
+	class Router {
+		streamSimple(model, context, options) {
+			if (model.id === "boom") throw new Error("provider setup failed");
+			const stream = new FakeStream();
+			if (model.id === "proxy") {
+				// A synchronous forward: the upstream is admitted while this call's own slot is still unbound.
+				const forward = this.streamSimple(UP, context, options);
+				forward.result().then((answer) => stream.end({ ...answer, usage: zeros }));
+				return stream;
+			}
+			stream.end({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100, cost: { total: 0.0045 } } });
+			return stream;
+		}
+	}
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 100_000 });
+	const guard = createCostGuard({ capMicros: 100_000, bound: () => 10_000 });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const layer = wrapModelRuntime({ ModelRuntime: Router, meter, hardStop, guard });
+	try {
+		const runtime = new Router();
+		await runtime.streamSimple({ ...FLAT, provider: "router", id: "proxy" }, {}, {}).result();
+		await flush();
+		assert.deepEqual([meter.state.calls, guard.snapshot().costUnanswered, meter.snapshot().costUnreported], [2, 0, 0], "the forward's flush is not a lost answer");
+		const settled = dollarSettlement({ tokens: { ...meter.snapshot(), unmeteredChildren: 0, ...guard.snapshot() }, usage: meter.usageSnapshot(), reservedMicros: 100_000, trusted: true });
+		assert.deepEqual(settled, { settledMicros: 4500, basis: "metered" }, "a synchronous forward under a cap settles metered at the upstream's cost");
+		assert.throws(() => runtime.streamSimple({ ...FLAT, id: "boom" }, {}, {}), /provider setup failed/, "the throw is not swallowed");
+		assert.equal(guard.state.unanswered, 1, "a dispatch that threw is counted");
+		assert.equal(guard.state.inflight, 0, "and settled at once, at its bound");
+	} finally {
+		layer.restore();
+	}
+	// A dispatch that returned neither a stream nor a promise: counted.
+	const odd = createCostGuard({ capMicros: 100_000, bound: () => 1000 });
+	odd.admit(call());
+	odd.bind({});
+	assert.deepEqual([odd.state.spent, odd.state.unanswered], [1000, 1]);
+	// A slot flushed by the next admit or the snapshot: charged its bound, not counted.
+	const flushed = createCostGuard({ capMicros: 100_000, bound: () => 1000 });
+	flushed.admit(call());
+	flushed.admit(call());
+	assert.deepEqual([flushed.snapshot().costUnanswered, flushed.state.spent], [0, 2000]);
+	// A zero-rated call (bound 0) costs nothing, answered or not.
+	const free = createCostGuard({ capMicros: 0, bound: () => 0 });
+	free.admit(call());
+	free.bind({});
+	assert.equal(free.snapshot().costUnanswered, 0);
+});
+
+test("a stream method whose dispatch answered with a promise: a stream it resolves to is metered and settled from its result, a rejection is unpriced (issue #571)", async () => {
+	const whole = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100, cost: { total: 0.0045 } } };
+	// pi-ai's legacy streamSimple hands a registry entry's answer on as it is: an entry answering Promise<stream>.
+	const inner = {
+		streamSimple: async (model) => {
+			if (model.id === "down") throw new Error("async provider failed");
+			const stream = new FakeStream();
+			stream.end(whole);
+			return stream;
+		},
+		stream: () => null,
+	};
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 100_000 });
+	const guard = createCostGuard({ capMicros: 100_000, bound: () => 10_000 });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const compat = wrapProviderStreams({ inner, fallbackModels: { getProvider: () => null }, meter, hardStop, guard, dispatch: new AsyncLocalStorage() });
+	// A caller that awaits the promise gets a working stream, and its spend is on the line.
+	const answer = await (await compat.streamSimple({ ...FLAT, id: "up" }, {}, {})).result();
+	await flush();
+	assert.equal(answer.usage.cost.total, 0.0045);
+	assert.deepEqual([meter.state.calls, meter.state.unresolved, meter.state.cost, guard.state.spent, guard.state.inflight], [1, 0, 0.0045, 4500, 0], "metered and settled at its cost, not unseen");
+	const settled = dollarSettlement({ tokens: { ...meter.snapshot(), unmeteredChildren: 0, ...guard.snapshot() }, usage: meter.usageSnapshot(), reservedMicros: 100_000, trusted: true });
+	assert.deepEqual(settled, { settledMicros: 4500, basis: "metered" });
+	// A promise that rejects: charged its bound, and a call with no usage on the line (unpriced), so the run floors.
+	await assert.rejects(compat.streamSimple({ ...FLAT, id: "down" }, {}, {}), /async provider failed/);
+	await flush();
+	assert.deepEqual([meter.state.calls, meter.state.unpriced, guard.state.spent, guard.snapshot().costUnanswered], [2, 1, 14_500, 0]);
+});
+
+test("a promise of a stream: resolving to something that is not a stream is unpriced at the bound, and an async forward is metered once (issue #571)", async () => {
+	const whole = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100, cost: { total: 0.0045 } } };
+	const setup = (streamSimple) => {
+		const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 1_000_000 });
+		const guard = createCostGuard({ capMicros: 1_000_000, bound: () => 10_000 });
+		const box = {};
+		box.compat = wrapProviderStreams({ inner: { streamSimple: (...args) => streamSimple(box, ...args), stream: () => null }, fallbackModels: { getProvider: () => null }, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard, dispatch: new AsyncLocalStorage() });
+		return { meter, guard, compat: box.compat };
+	};
+	// An async entry that resolves to a message rather than a stream: no usage to settle from.
+	const odd = setup(async () => whole);
+	await odd.compat.streamSimple({ ...FLAT, id: "odd" }, {}, {});
+	await flush();
+	assert.deepEqual([odd.meter.state.unpriced, odd.meter.state.cost, odd.guard.state.spent], [1, 0, 10_000], "the meter's unpriced, the guard's bound");
+	// An async router entry that forwards through the legacy call and resolves to the forward's own stream.
+	const routed = setup((box, model, context, options) => {
+		if (model.id === "router") {
+			return (async () => {
+				await null;
+				return box.compat.streamSimple({ ...FLAT, id: "upstream" }, context, options);
+			})();
+		}
+		const stream = new FakeStream();
+		stream.end(whole);
+		return stream;
+	});
+	await (await routed.compat.streamSimple({ ...FLAT, id: "router" }, {}, {})).result();
+	await flush();
+	assert.deepEqual([routed.meter.state.calls, routed.meter.state.total, routed.meter.state.cost, routed.meter.state.unresolved], [2, 1100, 0.0045, 0], "the forward's usage counted once");
+});
+
+test("the guard charges a call its bound by the meter's own predicate: an Anthropic answer whose output count stuck at 1 stops a $2 job at the cap (issue #571)", async () => {
+	const CLAUDE = { ...FLAT, api: "anthropic-messages", provider: "anthropic", id: "claude-x" };
+	const stuck = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "x".repeat(60_000) }], usage: { input: 2000, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2001, cost: { total: 0.006015 } } };
+	const { FakeRuntime, calls } = fakeRuntimeClass((s) => s.end(stuck));
+	const stops = [];
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 2_000_000, onStop: (reason) => stops.push(reason) });
+	const guard = createCostGuard({ capMicros: 2_000_000, bound: () => 600_000 });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop, guard });
+	try {
+		const runtime = new FakeRuntime();
+		for (let i = 0; i < 10 && meter.state.stopReason === null; i++) {
+			await runtime.streamSimple(CLAUDE, {}, {}).result();
+			await flush();
+		}
+		assert.deepEqual([calls.length, guard.state.spent, stops], [3, 1_800_000, [COST_CAP]], "three bounds fit $2, the fourth is refused");
+		assert.equal(meter.snapshot().costUnreported, 3, "and each is counted by the meter, by the same predicate");
+	} finally {
+		layer.restore();
+	}
 });
 
 test("the image ceiling is the larger of the api's and the model family's", () => {

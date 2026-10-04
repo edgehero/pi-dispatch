@@ -844,8 +844,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   admitted, and a sixth is refused `dollar-cap` before its container starts with its job-count slots and dollars
   given back; given a finished job whose metered cost is complete, then its windows show that cost, not its
   reservation, and an overshoot above the reservation is charged in full; given a job with no exit line, or any of
-  `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `unmeteredChildren`
-  non-zero or absent,
+  `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `costUnreported`,
+  `unmeteredChildren` non-zero or absent,
   then it settles at the floor, `basis: "floor"`, charging its reservation or the reported metered cost, whichever is
   larger; given a run that made no provider call (the first call refused by the guard, a command job, an early
   exit), then it settles metered at 0; given a job reserved at 23:59:59 UTC that settles after
@@ -1047,7 +1047,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   cannot cover (`pi-messages` and other self-priced apis, image generation, deferred fetches, a classifier
   with an output rate) are refused under a cap rather than guessed. With no cap set no guard is installed and
   no cost counters are emitted; the one change such a job can see is that a call whose result rejected now
-  counts as unpriced.
+  counts as unpriced. A call whose answer carries broken usage is not priced: pi records a missing usage block as
+  zeros (and keeps a partial one), so the meter counts such a call on a priced model `costUnreported` (issue #571),
+  on every run, capped or not, a pi child's included, and the run's cost is a floor; a zero-rated model never
+  counts, and neither does a router's own call that forwarded to another model.
   **Why the accounting is process-wide, and not per-session.**
   *Negative fact — this scope exists because of an upstream absence.* A session's event bus is **per
   instance**: `AgentSession._eventListeners` is an array on the instance and `Agent.listeners` a `Set` on
@@ -1120,7 +1123,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the cap; given two sessions calling at once, then each is judged against the other's bound while it is in
   flight; given `session.compact()` as the call that would pass the cap, then it is refused the same way; given
   a cap of `0`, then a zero-rated model runs and a priced one is refused before its first call; given no cap,
-  then no guard is installed and the exit line carries none of the cost counters.
+  then no guard is installed and the exit line carries none of the cost counters; given a cost cap and a priced
+  call whose answer carries no usage (a server that sends no usage chunk, or a stream cut after content), then the
+  call is charged its bound, the exit line carries `costUnreported: 1`, and the dollar settlement is the floor;
+  given the same with no cap, then the exit line still carries `costUnreported: 1`; given an answer with content
+  and an output count of 0 (or 1 on `anthropic-messages`), then it is counted too; given the same on a zero-rated
+  model, then `costUnreported` stays 0; given a router provider that forwards to a metered model, after an await,
+  and answers with zero usage of its own, then its call is not counted and the settlement stays metered at the
+  forward's cost; given a child with no cost guard under a capped parent whose call reports no usage, then the
+  parent's line carries the child's count and the job settles at the floor.
   **Child clauses (issue #500).** Given a parent and a pi child CLI whose tokens together pass `maxTokens`, then a
   `STOP` file appears and the child's next call is braked, and the run exits `2` with `token_budget`; given the
   same under a cost cap, then `cost-cap`; given a pi child spawned with `env: {}` under a cap, on Linux, then
@@ -1158,8 +1169,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (c) an estimate is **always visibly marked** (`~`/`est.`/`seeded`) and never silently mixes with
   metered numbers — a sum containing one estimated addend is itself marked estimated, with its coverage;
   (d) a floor (`unpriced`/`unresolved`/fallback-metered/pre-meter records, and since issue #500 part F a run
-  with `unmeteredChildren`, `longContext`, `costUnjudged` or `costUnanswered` above 0) renders `≥`, and the marker
-  is never dropped by aggregation;
+  with `unmeteredChildren`, `longContext`, `costUnjudged` or `costUnanswered` above 0, and since issue #571 one
+  whose `costUnreported` is above 0, capped or not, a capped run (one carrying `costCapMicros`) that lacks
+  `costUnreported`, `longContext`, `costUnjudged` or `costUnanswered`, and any run whose floor counter is present
+  but not a whole number at least 0) renders `≥`, and the marker is never dropped by aggregation;
   (e) a quota window whose vendor discloses no limit shows **facts only** (peak runs/tokens) — never an
   invented burn-down or "remaining";
   (f) what-if seeding uses the flow's own **measured median** first and the `OQ-002` `$0.5–$5/job` band
@@ -1208,7 +1221,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `(no project)`, a fold over the id `constructor` keeps its own row, and `dispatch_costs` with `project: shop`
   scopes every fold arm to the first run; given a run whose `unmeteredChildren` is above 0, then its dollar and
   every bucket holding it render `≥`, while a run with metered children only (`childTotal` above 0,
-  `unmeteredChildren` 0) or with no child keys at all is not a floor for that.
+  `unmeteredChildren` 0) or with no child keys at all is not a floor for that; given a run whose `costUnreported`
+  is above 0, with or without `costCapMicros`, then its dollar renders `≥`; given a capped run with no
+  `costUnreported` (an image from before issue #571), then `≥`, while an uncapped run with no `costUnreported` stays
+  exact; given a floor counter of -1 or 0.5, then `≥`.
 
 ## REQ-TOPOLOGY-GRAPH
 
@@ -2991,6 +3007,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-04 | Issue #571. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: a call whose answer carries broken usage is not priced; the meter counts it `costUnreported` on every run, capped or not, a child's included, a zero-rated model and a forwarding router's own call never; Acceptance clauses for the capped and uncapped cases, the output-0 answer, the zero-rated model, the async router and the guard-less child. **`REQ-COST-ANALYTICS` AMENDED**, rule (d) and Acceptance: a run with `costUnreported` above 0 is a floor with or without a cap, so is a capped run that lacks `costUnreported` or one of the guard's three short-count counters, and so is a present floor counter that is not a whole number at least 0; an uncapped record with no `costUnreported` stays exact. **`REQ-SPEND-CAPS-MULTI-WINDOW` AMENDED**, Acceptance only: `costUnreported` joins the floor counters. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the new doctor line is a cost warning, recorded in `INT-MODEL-ENDPOINTS-FILE-CONTRACT`. |
 | 2026-10-03 | Issue #500, part F, PR #570's second review. **`REQ-MODEL-POLICY` AMENDED, wording only**: a pi child found with no ledger stops the job `model-not-allowed` only under a model list alone; under a dollar cap the stop is `cost-cap`, else under a token cap `token_budget`. |
 | 2026-10-03 | Issue #500, part F, PR #570's review. **`REQ-MODEL-POLICY` AMENDED**: a `pi` subprocess is no longer out of scope. Each pi child judges its own calls by a guard built from the list it inherits, and the runner judges every child's folded usage against the job's own list and stops `model-not-allowed` on a call off it or on a pi child with no ledger (Linux). What stays out is a pi child that hides from the child meter and the detector (`OQ-011`). |
 | 2026-10-03 | Issue #500, part F (closes #500). **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: the child processes paragraph corrects 'pi's own SDK example spawns one' (in a job it spawns the runner, which now runs as a metered pi CLI), says the record keeps the three child keys and a dollar window floors unless `unmeteredChildren` is present and 0, and that `OQ-011` is resolved with its residual; new Child clauses in Acceptance (STOP past `maxTokens`, `cost-cap`, an `env: {}` child, an uncapped job, the partition, the worker keeping the keys, the floor). The compaction sentence #510 added (`otherTotal`, fresh session id) is UNCHANGED, checked. **`REQ-COST-ANALYTICS` AMENDED**: rule (d) adds a run with `unmeteredChildren`, `longContext`, `costUnjudged` or `costUnanswered` above 0 to the floors; the Scope's stale claim that pi-subprocess spend is unmetered and makes every total a floor is replaced by what is metered, what floors and what `OQ-011` keeps; an Acceptance clause for the child floor. **`REQ-SPEND-CAPS-MULTI-WINDOW` AMENDED**, Acceptance only: `unmeteredChildren` joins the floor counters. |

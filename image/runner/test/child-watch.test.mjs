@@ -22,7 +22,7 @@ const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, inpu
 function ledger({ state = "running", metered = true, calls = 1, each = 100, provider = "fake", model = "m1", unresolved = 0, spentMicros = 0, inflightMicros = 0, costRefused = 0, modelRefused = 0, cost = 0.001, floor = {} } = {}) {
 	const rows = calls === 0 ? [] : [row(provider, model, { calls, input: calls * each, total: calls * each, cost: calls * cost })];
 	return {
-		v: 2,
+		v: 3,
 		state,
 		metered,
 		totals: { input: calls * each, output: 0, total: calls * each, cost: calls * cost, calls: calls + unresolved, unresolved, unpriced: 0, sessions: calls === 0 ? 0 : 1 },
@@ -33,6 +33,7 @@ function ledger({ state = "running", metered = true, calls = 1, each = 100, prov
 		modelRefused,
 		boundExceeded: 0,
 		costUnanswered: 0,
+		costUnreported: 0,
 		longContext: 0,
 		costUnjudged: 0,
 		...floor,
@@ -95,7 +96,7 @@ test("with no children the exit line is the one it was, plus the three child key
 	// The keys are there before the first tick too: the hook hands over an empty fold when it is made.
 	const early = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	createChildWatch({ dir, meter: early, proc: null });
-	assert.deepEqual(Object.keys(early.snapshot()).slice(-3), ["childTotal", "childProcesses", "unmeteredChildren"]);
+	assert.deepEqual(Object.keys(early.snapshot()).slice(-4), ["childTotal", "childProcesses", "unmeteredChildren", "costUnreported"]);
 	assert.deepEqual(hook.teardown(), { distinct: null, peak: null, unmetered: 0 }, "no detector off Linux");
 	assert.equal(watched.state.stopReason, null);
 	assert.deepEqual(stopOf(dir), { v: 1, reason: TOKEN_BUDGET }, "the directory and its STOP stay: the container ends right after");
@@ -255,18 +256,31 @@ test("the worker keeps the child keys: a runner's exit line round-trips byte-ide
 
 test("a child's floor counters reach the exit line: a child call that never started floors the job exactly as a parent call would (issue #500)", async () => {
 	const cap = 1_000_000;
+	const M1 = { provider: "fake", id: "m1", api: "openai-completions", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } };
 	const failed = { role: "assistant", stopReason: "error", content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } };
 	const noUsage = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }] };
-	/** One call through a meter and a cost guard, answered with `message`. */
+	// Issue #571: what pi settles when the answer carried no usage block, all zeros. The meter would price it at $0 as
+	// metered; its costUnreported floors it, written by the meter whether or not a guard runs.
+	const zeroUsage = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } };
+	/** One call through a meter (and a cost guard, when given), answered with `message`, as the wrappers observe it. */
 	async function call(meter, guard, message) {
 		const stream = { result: () => Promise.resolve(message) };
-		assert.equal(guard.admit({ method: "streamSimple", model: { provider: "fake", id: "m1" }, args: [{}, {}] }), null);
-		guard.bind(stream);
-		meter.observe(stream, { sessionId: "s", provider: "fake", modelId: "m1" });
+		if (guard !== null) {
+			assert.equal(guard.admit({ method: "streamSimple", model: M1, args: [{}, {}] }), null);
+			guard.bind(stream);
+		}
+		meter.observe(stream, { sessionId: "s", provider: M1.provider, modelId: M1.id, model: M1 });
 		await new Promise((resolve) => setImmediate(resolve));
 	}
 	const settle = (meter, guard, extra = (fields) => fields) => dollarSettlement({ tokens: { ...meter.snapshot(), ...extra(guard.snapshot()) }, usage: meter.usageSnapshot(), reservedMicros: cap, trusted: true });
-	for (const [label, message] of [["a call that never started", failed], ["an answer with no usage", noUsage]]) {
+	const cases = [
+		["a call that never started", failed, "costUnanswered", true],
+		["an answer with no usage", noUsage, null, true],
+		["an answer pi filled with zero usage", zeroUsage, "costUnreported", true],
+		// Issue #571: a child whose spawner dropped PI_MAX_COST_MICROS runs no cost guard; its meter still counts.
+		["an answer pi filled with zero usage, in a child with no cost guard", zeroUsage, "costUnreported", false],
+	];
+	for (const [label, message, counter, childGuarded] of cases) {
 		// The parent makes the call itself.
 		const parent = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
 		const direct = createCostGuard({ capMicros: cap, bound: () => 1000 });
@@ -276,7 +290,7 @@ test("a child's floor counters reach the exit line: a child call that never star
 		const own = settle(parent, direct);
 		// A child makes it, and the parent folds its ledger.
 		const childMeter = createUsageMeter({ maxTokens: null, rootSessionId: "child" });
-		const childGuard = createCostGuard({ capMicros: cap, bound: () => 1000 });
+		const childGuard = childGuarded ? createCostGuard({ capMicros: cap, bound: () => 1000 }) : null;
 		await call(childMeter, childGuard, message);
 		const folding = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
 		const parentOnly = createPolicyGuard({ maxCostMicros: cap, env: {} });
@@ -286,6 +300,15 @@ test("a child's floor counters reach the exit line: a child call that never star
 		const viaChild = settle(folding, parentOnly, (fields) => hook.guardFields(fields));
 		assert.equal(own.basis, "floor", `${label}: the parent's own call floors`);
 		assert.equal(viaChild.basis, "floor", `${label}: so does the child's`);
+		if (counter === "costUnanswered") {
+			assert.equal(direct.snapshot()[counter], 1, `${label}: counted as ${counter}`);
+			assert.equal(hook.guardFields(parentOnly.snapshot())[counter], 1, `${label}: the child's ${counter} reaches the parent's line`);
+			assert.equal(settle(folding, parentOnly).basis, "metered", `${label}: without the child's counter the line would read as metered`);
+		}
+		if (counter === "costUnreported") {
+			assert.equal(parent.snapshot()[counter], 1, `${label}: counted by the parent's meter`);
+			assert.equal(folding.snapshot()[counter], 1, `${label}: the child's count reaches the parent's line through the fold`);
+		}
 	}
 	// And a clean child call settles metered: the counters are added, not invented.
 	const childMeter = createUsageMeter({ maxTokens: null, rootSessionId: "child" });
@@ -297,9 +320,22 @@ test("a child's floor counters reach the exit line: a child call that never star
 	writeLedger(dir, 12, childLedger({ state: "done", meter: childMeter, guard: childGuard }));
 	hook.sample();
 	assert.equal(settle(folding, parentOnly, (fields) => hook.guardFields(fields)).basis, "metered");
-	const fields = hook.guardFields(parentOnly.snapshot());
-	assert.deepEqual([fields.costUnanswered, fields.boundExceeded, fields.costRefused], [0, 0, 0]);
+	const fields = { ...folding.snapshot(), ...hook.guardFields(parentOnly.snapshot()) };
+	assert.deepEqual([fields.costUnanswered, fields.costUnreported, fields.boundExceeded, fields.costRefused], [0, 0, 0, 0]);
 	assert.deepEqual(hook.guardFields({ modelRefused: 1 }), { modelRefused: 1 }, "only the keys the parent's guard writes");
+});
+
+test("a version 2 ledger (an image from before costUnreported) counts as unmetered and floors the job (issue #571)", () => {
+	const cap = 1_000_000;
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+	const guard = createPolicyGuard({ maxCostMicros: cap, env: {} });
+	const { dir, hook } = watch({ meter, guard: () => guard });
+	const { costUnreported, ...old } = ledger({ state: "done" });
+	writeLedger(dir, 41, { ...old, v: 2 });
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 1, "a child that cannot say whether it lifted a call is unmetered");
+	const tokens = { ...meter.snapshot(), ...hook.guardFields(guard.snapshot()) };
+	assert.equal(dollarSettlement({ tokens, usage: meter.usageSnapshot(), reservedMicros: cap, trusted: true }).basis, "floor");
 });
 
 test("the detector: a registered child is metered however long it lives; a pi process with no ledger is unmetered after two ticks (issue #500)", () => {

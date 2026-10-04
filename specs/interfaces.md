@@ -836,7 +836,7 @@ refactor apart.
   silent `0` would read as "this call was free"; since issue #501 a call whose result REJECTED counts here
   too, on its own ledger row, because what it spent is unknown and a dollar settlement must not read unknown
   as zero). The four original keys keep their meaning and position,
-  so a reader that only knows them is unaffected. Seven more names follow `unpriced`, in this
+  so a reader that only knows them is unaffected. Seven more names follow `unpriced` and the child keys below, in this
   order, for the cost cap and the model list (issues #501, #502): `costCapMicros`, `costRefused`,
   `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `modelRefused`. The first six are written by the cost guard, and ONLY when a
   cost cap is set: with no cap no guard is installed and no cost counter is emitted, and the one change such a
@@ -849,9 +849,17 @@ refactor apart.
   unjudged and unmetered, and the job was stopped `cost-cap` for it, so a non-zero value is the only exit-line
   evidence that tells such a stop from a plain refusal) and `costUnanswered` (failed calls that never started:
   no content block, so charged their metered cost rather than their bound; a provider that
-  accepted such a request and lost the answer may still bill it).
+  accepted such a request and lost the answer may still bill it; since issue #571 also a call the guard admitted whose
+  dispatch threw before it returned an answer object, on a bound above 0).
   `modelRefused` (calls the model guard refused before dispatch, issue #502) is written by the model guard, and
   ONLY when a list is set, after the cost fields; with no list the exit line is byte-identical to before. The worker's closed key list admits all seven.
+  **`costUnreported` (issue #571)** is written by the METER on every metered line, capped or not, after the child
+  keys and before the cost fields: calls on a priced model (a rate above 0 in its table, a tier or an allowed
+  fallback) whose answer carried broken usage, which pi records as zeros or a partial count, so `cost` holds about $0
+  for each and a non-zero value means `cost` is a floor. Broken: no input side on a call that was not a failure
+  before it started (that is `costUnanswered`), a failure after it started, or answer content with an output count of
+  0 (at most 1 on `anthropic-messages`). A call that forwarded (another model call was dispatched under it, a router
+  or proxy provider's) is not counted. It includes the children's, through their ledgers.
   **Three keys come from the job's pi child processes** (issue #500 part E, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`),
   between `unpriced` and the cost fields, on every line of the process-wide meter (zeros with no children; every other
   key is then byte-identical to before): `childTotal` (the children's billed tokens, so `rootTotal + otherTotal +
@@ -861,7 +869,9 @@ refactor apart.
   children, `input`, `output`, `total`, `cost`, `sessions`, `calls`, `unresolved` and `unpriced` include theirs, the
   `usage` rows merge theirs, and so do the guard counters the parent writes (`costRefused`, `boundExceeded`,
   `longContext`, `costUnjudged`, `costUnanswered`, `modelRefused`, each only where the parent's own guard writes it),
-  so a child's partial count floors the settlement as the parent's would. Every exit line of a metered run carries the
+  and so does the meter's `costUnreported`, guard or no guard, so a child's partial count floors the settlement as the
+  parent's would. A child ledger is version 3 since `costUnreported` (issue #571); one of an older version counts as an
+  unmetered child. Every exit line of a metered run carries the
   children's final fold, the SIGTERM line and the outer catch's included. The worker's closed key list admits the three
   (part F), and `unmeteredChildren` is a floor counter of the dollar settlement (`DES-DOLLAR-RESERVE-AND-SETTLE`); a
   worker from before part F drops them, and the `total` it keeps already includes the children. The fallback line carries `metered: false` and the four
@@ -4436,6 +4446,7 @@ validator rather than a second copy of it.
                    "rootTotal": <int>, "otherTotal": <int>, "looseTotal": <int>,                // attribution split; with childTotal sums to `total`
                    "sessions": <int>, "calls": <int>, "unresolved": <int>, "unpriced": <int>,
                    "childTotal": <int>, "childProcesses": <int>, "unmeteredChildren": <int>,  // issue #500: pi child processes; on every metered line from part E
+                   "costUnreported": <int>,                                                    // issue #571: on every metered line, capped or not
                    "costCapMicros": <int>, "costRefused": <int>, "boundExceeded": <int>,         // issue #501: written only when a cost cap was set
                    "longContext": <int>, "costUnjudged": <int>, "costUnanswered": <int>,         // issue #501: written only when a cost cap was set
                    "modelRefused": <int> } | null,                                             // issue #502: written only when a model list was set
@@ -4529,7 +4540,8 @@ validator rather than a second copy of it.
     last exit line's own `code` equals the container's exit code: the job's own tools can write a line to the
     runner's stdout, so a line read after a stop is never believed. Complete means ALL of:
     `tokens.metered` is `true`; `tokens.costCapMicros` is present and not above `reservedMicros`; `unresolved`,
-    `unpriced`, `boundExceeded`, `longContext`, `costUnjudged` and `costUnanswered` are each PRESENT and `0`; and
+    `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `costUnreported` and
+    `unmeteredChildren` are each PRESENT and `0`; and
     `usage` is not null, or the run made no provider call (`tokens.calls` `0` and `tokens.cost` `0`; `costRefused`
     may be above 0, since a refused call is never sent), which settles at `0`. An ABSENT counter counts as
     non-zero: a runner that did not write it did not measure it;
@@ -4806,7 +4818,8 @@ validator rather than a second copy of it.
   guard refused before dispatch (normally `1`, the call that stopped the job), `boundExceeded` the settled calls
   whose charge passed their pre-call bound, `longContext` the Anthropic calls past 200,000 input tokens on a
   model with no catalog tiers, `costUnjudged` the compat api entries found displaced under the cap, and
-  `costUnanswered` the failed calls that never started. A non-zero `boundExceeded`, `longContext`,
+  `costUnanswered` the failed calls that never started (and, since issue #571, admitted calls whose dispatch threw
+  before any answer). A non-zero `boundExceeded`, `longContext`,
   `costUnjudged` or `costUnanswered` says `cost` is not the whole truth: the first that the bound's
   one-byte-per-token assumption broke, the second that pi priced a call at base rates the provider bills
   higher, the third that legacy calls may have run unmetered, the fourth that a request the provider accepted
@@ -4816,6 +4829,12 @@ validator rather than a second copy of it.
   Absent means no cap, never zero refusals. The meaning of `unpriced` WIDENED with them: a call whose result
   rejected now counts as unpriced (its cost is unknown), where before it was counted in `calls` and nowhere
   else; a run record from before this change can carry such a call in neither.
+  **`costUnreported` (issue #571)** rides after the child keys and before the cost guard's counters, on every
+  metered line, capped or not, written by the meter: the calls on a priced model whose answer carried broken usage
+  (`INT-RUNNER-EXIT-CODE-PROTOCOL` has the rule), the children's included. A non-zero value says pi recorded a
+  call's lost usage as zeros or a partial count, so `cost` is short. A worker from issue #571 reads an absent
+  `costUnreported` as a floor, so the image is upgraded before the worker; the cost views read an absent one as a
+  floor only on a record with `costCapMicros`.
   **The child keys (issue #500 part F)** ride between `unpriced` and the cost guard's counters, on the same closed
   key list, the runner's emission order: `childTotal` (the billed tokens of the job's pi child processes, already
   inside `total`, so `rootTotal + otherTotal + looseTotal + childTotal` is `total`), `childProcesses` (child ledger
@@ -6068,7 +6087,13 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   Whatever is declared: a ⚠ naming each overlay `models.json` model (or model-less provider) whose effective
   baseUrl is `localhost` or a loopback literal, unreachable from any job; and, with the policy armed, a ⚠ for an
   allowlist entry admitting `host.docker.internal` or `host.containers.internal`, the name itself or a dotted suffix
-  over it (`.internal`, `.docker.internal`), which opens that host's ports 443 and 80 and no model server's. No declaration is no line and no container, and doctor's output is unchanged.
+  over it (`.internal`, `.docker.internal`), which opens that host's ports 443 and 80 and no model server's; and
+  (issue #571) a ⚠ naming each model the overlay sets `compat.supportsUsageInStreaming` to `false` on while its cost
+  table is not all zeros: a model the overlay defines (the provider's, the model's and its `modelOverrides` entry's
+  `compat`, composed as pi does), or a builtin chat model of that provider that a provider-level `compat` or a
+  `modelOverrides` entry turns off, priced from the worker's catalog with the override's cost applied; only on the
+  `openai-completions` api, the one that reads the flag. Every call on such a model reports no usage and counts
+  `costUnreported`, so every job that calls one settles at the floor. No declaration is no line and no container, and doctor's output is unchanged.
 - **Acceptance**: Given a file with `version: 2`, a loopback or `localhost` host, port 3128 or the queue's port, a
   duplicate id, one host and port under two ids, `slots` of 0 or 65, or an unknown key, when parsed, then the
   whole file is refused naming the endpoint. Given a model whose own baseUrl names another host than its
@@ -6929,3 +6954,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #499, part C, PR #569's review. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin writer's rules (only `ENOENT` is missing, a unique tmp file, the mode kept, a symlink written through, both judged files re-checked before the rename, the two-writer race as a residual); every refusal escapes a C1, bidi or zero-width character a member may hold (`escapeControls`), so `projects_reload_invalid`, doctor and a tool error never carry one raw; a folder mounted at different paths is listed under each in the one shared file. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: doctor makes no `fpProjects` comparison when this host's own projects file does not load (it fails on that already). **Code evidence**: worker/src/projects.mjs -> escapeControls; worker/src/start.mjs -> reloadProjects; worker/src/doctor.mjs. |
 | 2026-10-03 | Issue #499, part C, PR #569's second review. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin writer refuses a symlinked projects file, keeps the owner and group (or refuses), and re-checks against the snapshot taken before the confirm; the worker's `escapeControls` escapes exactly the panel's `escapeInterpreted` set (every format character but the two joiners, the blanks and fillers, the unassigned code points drawn as nothing), held equal over every code point by a test. **`INT-SCOPED-LIMITS-FILE-CONTRACT` UNCHANGED, checked**: the file is the same; only the admin's writer is stricter. **Code evidence**: worker/src/projects.mjs -> escapeControls; admin/src/read-model.mjs -> replaceFile. |
 | 2026-10-03 | Issue #500, part F (closes #500). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens` gains `childTotal`, `childProcesses` and `unmeteredChildren` between `unpriced` and the cost guard's counters, on the closed key list in the runner's emission order, with a paragraph on what each means, that a non-zero `unmeteredChildren` makes the dollar settlement a floor, and that an older image's record carries none; the attribution comment now says root, other and loose sum to `total` with `childTotal`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, its child keys paragraph: the worker's closed key list admits the three, and `unmeteredChildren` is a floor counter. Exit codes and reasons UNCHANGED, checked: an unmetered child still stops `cost-cap`, `token_budget` or `model-not-allowed`. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: the two reserved names `PI_DISPATCH_CHILD_LEDGER` and `PI_DISPATCH_RUNNER_PID` are as part C wrote them, and no mount, flag or capability token changed. |
+| 2026-10-04 | Issue #571. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a new key, `costUnreported`, written by the METER on every metered line, capped or not, after the child keys and before the cost guard's fields: calls on a priced model whose answer carried broken usage (no input side unless the call never started, a failure after it started, or answer content with an output count of 0, at most 1 on `anthropic-messages`), a call that forwarded not counted, the children's included through their ledgers (version 3; an older one counts as an unmetered child). `costUnanswered` also counts an admitted call whose dispatch threw before any answer object. The cost guard's counters stay six. No new exit code or reason, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens` gains `costUnreported` in the runner's emission order, after `unmeteredChildren`; `metered` requires `costUnreported` (and `unmeteredChildren`, which the list had left out) present and 0; an absent `costUnreported` is a floor, so the image is upgraded before the worker. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the doctor bullet: a ⚠ naming each model the overlay turns streaming usage off on while it costs money, an overlay-defined model or a builtin one through a provider-level `compat` or a `modelOverrides` entry. |

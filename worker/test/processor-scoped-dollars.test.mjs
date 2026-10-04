@@ -78,7 +78,7 @@ const gptDay = `${GPT.keyPrefix}:2026-10-07`;
 const claudeDay = `${CLAUDE.keyPrefix}:2026-10-07`;
 const scopeDay = `${SCOPE.keyPrefix}:2026-10-07`;
 
-const TOKENS = (cost) => ({ input: 10, output: 5, total: 15, cost, calls: 2, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 });
+const TOKENS = (cost) => ({ input: 10, output: 5, total: 15, cost, calls: 2, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costUnreported: 0 });
 const ROW = (provider, model, cost) => ({ provider, model, calls: 1, input: 5, output: 2, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 7, cost, unpriced: 0 });
 const USAGE = (rows, truncated = 0) => ({ v: 1, piAi: null, truncated, models: rows });
 

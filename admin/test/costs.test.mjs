@@ -291,10 +291,47 @@ test("floor: an unmetered pi child, and the cost guard's short-count counters, f
   // A metered child's spend is in the run's cost: not a floor.
   assert.equal(floorOf({ childTotal: 900, childProcesses: 2, unmeteredChildren: 0 }), false);
   assert.equal(floorOf({ childTotal: 900, childProcesses: 2, unmeteredChildren: 1 }), true, "a pi child the runner could not count");
-  for (const key of ["longContext", "costUnjudged", "costUnanswered"]) assert.equal(floorOf({ [key]: 1 }), true, key);
+  for (const key of ["longContext", "costUnjudged", "costUnanswered", "costUnreported"]) assert.equal(floorOf({ [key]: 1 }), true, key);
   assert.equal(floorOf({ boundExceeded: 1 }), false, "a call past its bound is still metered at pi's full price");
   // A record from before the keys, or a run with no cap, carries none of them: measured nothing missing.
   assert.equal(floorOf({}), false);
+});
+
+test("floor: a capped record without a guard counter came from an image that did not measure it; an uncapped one stays exact (issue #571)", () => {
+  const run = (extra) => rec({ jobId: "g-1", tokens: { ...tok(0.5), ...extra }, usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]) });
+  const floorOf = (extra) => fold([run(extra)]).provenance.total.floor;
+  const guard = { costCapMicros: 2_000_000, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costUnreported: 0 };
+  assert.equal(floorOf(guard), false, "a capped run with every counter at 0 is exact");
+  // An image from before issue #571 wrote the cap and no costUnreported: a no-usage call may sit in its cost at $0.
+  const { costUnreported: _r, ...older } = guard;
+  assert.equal(floorOf(older), true, "a capped record missing a guard counter is a floor");
+  for (const key of ["longContext", "costUnjudged", "costUnanswered"]) {
+    const { [key]: _k, ...missing } = guard;
+    assert.equal(floorOf(missing), true, key);
+  }
+  // No cap: no guard ran, so the counters' absence says nothing (history before the guard keeps its exact dollars).
+  assert.equal(floorOf({ costRefused: 0 }), false);
+  // The other floor keys keep absent-is-exact even under a cap; boundExceeded is never a floor here.
+  const { boundExceeded: _b, ...noBound } = guard;
+  assert.equal(floorOf(noBound), false, "boundExceeded is the worker's settlement concern, absent or not");
+});
+
+test("floor: costUnreported above 0 floors an uncapped run too, and an uncapped record from before the counter stays exact (issue #571)", () => {
+  const run = (extra) => rec({ jobId: "u-1", tokens: { ...tok(0.5), ...extra }, usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]) });
+  const floorOf = (extra) => fold([run(extra)]).provenance.total.floor;
+  assert.equal(floorOf({ costUnreported: 1 }), true, "no cap, and the meter still says a call's usage was lost");
+  assert.equal(floorOf({ costUnreported: 0 }), false);
+  assert.equal(floorOf({}), false, "an uncapped record from an image before the counter: exact");
+});
+
+test("floor: a present counter that is not a whole number at least 0 is a floor, as the worker reads anything but 0", () => {
+  const run = (extra) => rec({ jobId: "n-1", tokens: { ...tok(0.5), ...extra }, usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]) });
+  const floorOf = (extra) => fold([run(extra)]).provenance.total.floor;
+  for (const key of ["unresolved", "unpriced", "unmeteredChildren", "costUnreported", "longContext", "costUnjudged", "costUnanswered"]) {
+    for (const value of [-1, 0.5, Number.NaN, "1", null]) assert.equal(floorOf({ [key]: value }), true, `${key}: ${String(value)}`);
+    assert.equal(floorOf({ [key]: 0 }), false, `${key}: 0`);
+  }
+  assert.equal(floorOf({ costUnreported: -0 }), false, "-0 is 0, as the worker's !== 0 reads it");
 });
 
 // ---- daily buckets ----
