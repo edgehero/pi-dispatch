@@ -34,8 +34,16 @@ Evidence convention as in `constitution.md`.
   // Prefer the operator overlay's models.json when the :ro overlay is mounted (REQ-GLOBAL-PI-OVERLAY) --
   // how a CUSTOM provider/model becomes resolvable. Definitions only; the key still flows env -> auth.json.
   const modelsPath = existsSync("/opt/pi-global/models.json") ? "/opt/pi-global/models.json" : `${agentDir}/models.json`;
+  // The credentials: auth.json as it is NOW, held in pi's own in-memory store (issue #587's review). pi's file store
+  // re-reads the file when it changes, and a credential's env is merged into options.env after the guards ran, so a
+  // mid-run write could pick an Azure deployment or a cache retention. AuthStorage is not a root export: it is loaded
+  // by file URL from pi-coding-agent's dist/core/auth-storage.js, and a pi without AuthStorage.inMemory there is a
+  // config error (exit 2), never a fallback to the file store. (src/model-runtime.mjs: loadPiAuthStorage,
+  // createJobModelRuntime; pinned by pinned-api.test.mjs.)
+  const AuthStorage = await loadPiAuthStorage();
   const modelRuntime = await ModelRuntime.create({
-    authPath: `${agentDir}/auth.json`,
+    credentials: AuthStorage.inMemory(readAuthSnapshot(`${agentDir}/auth.json`)),
+    authPath: `${agentDir}/auth.json`,     // unread while `credentials` is given
     modelsPath,
     modelsStore: DISCARDING_MODELS_STORE,  // pi's default writes models-store.json BESIDE modelsPath: EACCES on the :ro overlay
     allowModelNetwork: false,              // no catalog refresh over the network (PI_OFFLINE=1 is the other lock)
@@ -445,7 +453,11 @@ Evidence convention as in `constitution.md`.
   own pi-ai compat and pi-coding-agent) · `-> dist/core/settings-manager.js:664,679-682` (maxAgentDelayMs,
   cacheWarming default "streaming") · `-> dist/core/telemetry.js:6-7` (PI_TELEMETRY overrides the setting) ·
   `-> dist/index.js` (`ModelRuntime` a value export; `AuthStorage` absent). The 0.80.7 evidence below is kept
-  as the record of the previous pin.
+  as the record of the previous pin. Re-verified at 1.0.3 (issue #587): the same, plus
+  `-> dist/core/model-runtime.js` (`create` takes `options.credentials` and falls back to
+  `AuthStorage.create(authPath)` only without it; `prepareRequest` merges the resolved credential's `env` under
+  the call's `options.env`) · `-> dist/core/auth-storage.js` (`AuthStorage.inMemory(data)` over an in-memory backend;
+  a file-backed store re-reads auth.json when its revision changes).
 - **Evidence (the previous pin, 0.80.7, kept as the record)**: `npm @earendil-works/pi-coding-agent@0.80.7 →
   dist/core/sdk.d.ts → CreateAgentSessionOptions` — `authStorage?: AuthStorage` ("Default:
   AuthStorage.create(agentDir/auth.json)"), `modelRegistry?: ModelRegistry` ("Default:
@@ -7454,3 +7466,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-05 | Issue #507, the final review of the doctor half. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the Output cap bullet: a model the overlay defines with no api or baseUrl of its own or its provider's takes them from pi's `findModelDefaults` model (same id, else one of its api, else the first openai-completions chat model, else the first), as pi composes it; the view took only a same-id builtin, so doctor missed such a model. A parity test holds the view to pi's ModelRuntime. The rest of the bullet UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test: a run the cost guard refused as unboundable recorded only `cost-cap` with $0 and `why: null`, and which rule refused reached the job log alone. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a `cost-cap` exit line names the first refusal's rule as `why` (`unboundable`, `external`, `over-cap`; the runner's `COST_REFUSALS`), on both decided exit-line paths, and writes none for a stop the runner's own guard did not refuse; `parseExitWhy` keeps it only from the worker's closed `COST_CAP_WHYS` off a last line that says `code: 2` and `cost-cap`, pinned equal to the runner's list. The `cost_refused` log line is unchanged. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `why` carries that rule under `cost-cap`. Exit codes, classes, `tokens` and every other field UNCHANGED, checked. **Code evidence**: image/runner/src/outcome.mjs -> COST_REFUSALS, costRefusalField; image/runner/src/usage-meter.mjs -> createCostGuard (refusedWhy), createPolicyGuard; image/runner/run-job.mjs; worker/src/run-history.mjs -> COST_CAP_WHYS, parseExitWhy, makeLogSink; worker/src/run-container.mjs; worker/src/processor.mjs. |
 | 2026-10-05 | Issue #587 (pi 1.0.3). **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: a model entry and a `modelOverrides` entry may carry `samplingParamsByThinkingLevel` (pi 1.0.2), validated by the mirror in both places and read in full by the runner's guards; the mirror is pinned to pi's model-config.js and provider-composer.js by content hash; Output cap names the empty catalog `baseUrl` of every `azure` row as the operator's own server and the `modelOverrides` way out, and the Azure provider rename with doctor's flag for an old-id entry that lacks an api, a baseUrl or models. **`INT-SDK-SESSION-OPTIONS` AMENDED**, trap (g): from pi 1.0.1 there is no shrinkwrap and at the 1.0.3 pin one copy of each pi package; the runner finds pi's pi-ai by pi-coding-agent's own lookup and accepts it by identity; the up-to-0.99.1 text is kept as history. The option table is UNCHANGED, checked (pinned-api.test.mjs holds it). **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: the new refusals end as `model-not-allowed` and `cost-cap`, existing rows. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: `run.provider` and model entries keep their shape; an `azure-openai-responses` provider is refused before spend as any provider pi does not have, now naming `azure`; the five Anthropic federation variables were already reserved from `run.secrets` (derived from the Anthropic SDK) and are now also found in pi-ai's own sources. |
+| 2026-10-05 | Issue #587, the second review round. **`INT-SDK-SESSION-OPTIONS` AMENDED**, the block and its evidence: the job's runtime is created with `credentials: AuthStorage.inMemory(<auth.json read once at start>)`, the class loaded by file URL from pi-coding-agent's `dist/core/auth-storage.js` (not a root export) and refused as a config error when missing; the 1.0.3 evidence names `create`'s `credentials` option, `prepareRequest`'s env merge and the in-memory store. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_DISPATCH_PRICE_TABLE` is a third reserved runner name (the hash of the price table the runner hands its children). |
