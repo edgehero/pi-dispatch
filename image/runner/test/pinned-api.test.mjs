@@ -139,6 +139,31 @@ test("the job's model runtime writes no catalog cache beside a read-only models.
 	}
 });
 
+test("pi's own ModelRuntime composes samplingParamsByThinkingLevel from models[] and modelOverrides, and both guards follow it (issue #587)", { skip }, async () => {
+	// The guards read the field off the model pi composed; this holds that pi composes it at all, from both places the
+	// schema allows it, with the per-level merge provider-composer.js applies to an override.
+	const agentDir = tempDir("pi-levels-");
+	const modelsPath = join(agentDir, "models.json");
+	writeFileSync(modelsPath, JSON.stringify({
+		providers: {
+			lab: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "k", models: [{ id: "q", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, maxTokens: 64, compat: { maxTokensField: "max_tokens" }, samplingParamsByThinkingLevel: { high: { max_tokens: 100000 } } }] },
+			groq: { modelOverrides: { "llama-3.1-8b-instant": { samplingParamsByThinkingLevel: { low: { model: "llama-3.3-70b-versatile" } } } } },
+		},
+	}));
+	const runtime = await createJobModelRuntime({ ModelRuntime: mod.ModelRuntime, agentDir, modelsPath });
+	const defined = runtime.getModel("lab", "q");
+	const overridden = runtime.getModel("groq", "llama-3.1-8b-instant");
+	assert.deepEqual(defined?.samplingParamsByThinkingLevel, { high: { max_tokens: 100000 } }, "a models[] entry's levels reach the composed model");
+	assert.deepEqual(overridden?.samplingParamsByThinkingLevel, { low: { model: "llama-3.3-70b-versatile" } }, "a modelOverrides entry's levels reach the composed builtin model");
+	// The cost guard bounds the defined model's output by the level's max_tokens, not its own 64.
+	assert.equal(callCostBound("streamSimple", defined, "", {}, {}), (2 + BOUND_OVERHEAD_TOKENS) * 1 + 100000 * 2);
+	// The model guard refuses the overridden model under a list that names it: a level routes to another model.
+	const { createModelGuard } = await import("../src/usage-meter.mjs");
+	const guard = createModelGuard({ allowedModels: [{ provider: "groq", model: "llama-3.1-8b-instant" }] });
+	assert.equal(guard.admit({ method: "streamSimple", model: overridden, args: [{}, {}] }), "model-not-allowed");
+	assert.equal(guard.admit({ method: "streamSimple", model: { ...overridden, samplingParamsByThinkingLevel: undefined }, args: [{}, {}] }), null, "the same model without the level passes");
+});
+
 test("the job's credentials are read ONCE at start: an auth.json the job writes later changes nothing pi resolves (issue #587)", { skip }, async () => {
 	// pi's file store re-reads auth.json whenever its revision changes, and a credential's `env` is merged into every
 	// request's options.env after the guards ran (ModelRuntime.prepareRequest): a job that wrote
