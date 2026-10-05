@@ -182,7 +182,7 @@ not its own. So after the first start, a stale copy or a hand edit on one host i
 An envelope edit re-bases the fleet only when its digest matches `alloc:envelope:expected`, which the admin's envelope
 tool writes before it writes the file. A hand edit on one host does not move the fleet: that host refuses jobs with
 `envelope-mismatch`, its log and the audit file say `envelope-changed-externally`, and the panel's `b` view shows
-the banner "changed outside the panel". Change the envelope with `dispatch_envelope_set` (below) and none of this
+a notice that a host reported another envelope. Change the envelope with `dispatch_envelope_set` (below) and none of this
 happens. To accept a hand edit:
 
 1. Install the new file on every host. Until a host has it, and until step 2, the hosts that differ refuse their jobs
@@ -257,8 +257,11 @@ A revert does not stop the manager. The interval restarts at the revert, and the
 split again. With `minIntervalHours` 0, the next run of the trigger can undo a revert at once. To keep a revert, turn
 delegation off or remove the trigger's `run.portfolio` flag.
 
-While an `envelope-changed-externally` outcome is newer than the last re-base or applied plan, the view opens with
-the banner "changed outside the panel".
+While the newest `envelope-changed-externally` outcome reports an envelope other than the one the applied split was
+made for, the view, `/dispatch priorities` and the insights page show "a host reported envelope <digest> at <time>,
+not the one the split was made for (<digest>); a host still on it refuses governed jobs as envelope-mismatch". It is
+history, not a live check: a host logs each digest once per process, so the log cannot say whether that host still
+runs the edited file, and it cannot see a hand edit put back. Check the host's log or restart it to be sure.
 
 ## The guard on pi's file tools
 

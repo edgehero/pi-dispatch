@@ -157,7 +157,7 @@ import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGl
 import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
-import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations, changedOutside } from "./render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations, outsideEdit } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -2452,7 +2452,7 @@ export function splitCounts(records: any): any {
  * reaches a file meant to be shared. A problem text has the envelope path cut to its basename for the same reason,
  * unless the operator passed `--full-paths`, the page's one opt-in for host paths. The cut is made on the parser's RAW
  * text, before `envelopeProblem` escapes it: a path holding a character the escape rewrites would no longer match.
- * `changedOutside` is the panel's banner rule over the same 20 rows. Exported for its tests, as `splitCounts` is: the
+ * `outsideEdit` is the panel's notice, by its rule, over the same 20 rows. Exported for its tests, as `splitCounts` is: the
  * rest of the insights assembly dials the real queue.
  */
 export async function assembleAllocationView(paths: any, counts: any, { fullPaths = false }: { fullPaths?: boolean } = {}): Promise<any> {
@@ -2473,7 +2473,7 @@ export async function assembleAllocationView(paths: any, counts: any, { fullPath
     stateProblem: alloc.stateProblem ?? null,
     state: st && { planId: st.planId ?? null, writer: st.writer ?? null, appliedAt: st.appliedAt ?? null, validUntil: st.validUntil ?? null, clamped: st.clamped === true, allocations: { ...(st.allocations ?? {}) }, unallocated: st.unallocated ?? null },
     mismatch: st !== null && st.envelopeDigest !== read.digest,
-    changedOutside: changedOutside(alloc.log),
+    outsideEdit: outsideEdit(alloc.log, st?.envelopeDigest),
     spend: {
       deployment: alloc.spend?.deployment?.micros ?? null,
       projects: Object.fromEntries(Object.entries(alloc.spend?.projects ?? {}).map(([id, v]: [string, any]) => [id, v?.micros ?? null])),

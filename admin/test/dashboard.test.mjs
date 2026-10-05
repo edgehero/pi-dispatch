@@ -3379,7 +3379,7 @@ test("ALLOCATION: `r` asks a y/n in the frame; `n` stands down, `y` reverts to t
   comp.handleInput("\u001b[B"); // down, to the applied row
   comp.handleInput("r");
   await flush();
-  assert.match(stripAnsi(comp.render(100).join("\n")), /revert to plan 3f9a0c1d2e4b5a67 as operator-revert\? it skips the\s*│?\s*│?\s*interval\s*│?\s*│?\s*and the step[\s\S]*y revert\s+·\s+n cancel/);
+  assert.match(stripAnsi(comp.render(100).join("\n")), /revert to plan 3f9a0c1d2e4b5a67 \(10-05 12:00\) as[\s│]*operator-revert\?[\s│]*it[\s│]*skips[\s│]*the[\s│]*interval[\s│]*and[\s│]*the[\s│]*step[\s\S]*y revert\s+·\s+n cancel/);
   comp.handleInput("q");
   comp.handleInput("n");
   await flush();
@@ -3458,7 +3458,7 @@ test("ALLOCATION: a revert's note is a body line that says a due plan may move t
   assert.ok(lines.includes(boxed("↑↓ select  ·  r revert  ·  esc back")), "the footer keeps its keys");
 });
 
-test("ALLOCATION: the revert question names an expired row's neutral split, never the plan that ran out (#507)", async () => {
+test("ALLOCATION: the revert question names a row with no plan as the current neutral split, never the plan that ran out (#507)", async () => {
   const expired = { at: "2026-10-05T11:30:00.000Z", host: "mini1", writer: "expiry", outcome: "expired", reason: null, planId: "3f9a0c1d2e4b5a67", weights: { _other: 0, platform: 1, shop: 1 } };
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [expired] }) }) });
   await flush();
@@ -3468,31 +3468,30 @@ test("ALLOCATION: the revert question names an expired row's neutral split, neve
   await flush();
   const out = stripAnsi(comp.render(100).join("\n"));
   await comp.dispose();
-  assert.match(out, /revert to the expired split of 2026-10-05T11:30:00\.000Z as operator-revert\?/);
+  assert.match(out, /revert to the current neutral split \(the expired row of 10-05 11:30\) as[\s│]*operator-revert\?/, "a row with no plan restores today's neutral split");
   assert.doesNotMatch(out, /revert to plan 3f9a0c1d2e4b5a67/);
 });
 
-test("ALLOCATION: the banner says the envelope changed outside the panel when an envelope-changed-externally row is newer than the last rebase or applied plan", async () => {
-  const outside = { at: "2026-10-05T13:00:00.000Z", host: "mini2", writer: "envelope-change", outcome: "envelope-changed-externally", reason: "envelope-mismatch", planId: "3f9a0c1d2e4b5a67", weights: null };
-  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [outside, APPLIED_ROW] }) }) });
-  await flush();
-  comp.handleInput("b");
-  await flush();
-  const out = stripAnsi(comp.render(100).join("\n"));
-  assert.match(out, /changed outside the panel/);
-  const quiet = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [APPLIED_ROW, outside] }) }) });
-  await flush();
-  quiet.handleInput("b");
-  await flush();
-  assert.doesNotMatch(stripAnsi(quiet.render(100).join("\n")), /changed outside the panel/, "an edit the fleet has since agreed past (an applied row after it) raises nothing");
-  const buried = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [REFUSED_ROW, outside, APPLIED_ROW] }) }) });
-  await flush();
-  buried.handleInput("b");
-  await flush();
-  assert.match(stripAnsi(buried.render(100).join("\n")), /changed outside the panel/, "a refused plan logged after the edit does not hide it");
-  await buried.dispose();
-  await comp.dispose();
-  await quiet.dispose();
+test("ALLOCATION: the outside-edit notice shows while the newest changed-externally row reports another envelope than the split's, in historical words (#507)", async () => {
+  const open = async (log) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log }) }) });
+    await flush();
+    comp.handleInput("b");
+    await flush();
+    const out = stripAnsi(comp.render(100).join("\n")).replace(/\s*│\s*│?\s*/g, " ");
+    await comp.dispose();
+    return out;
+  };
+  const outside = { at: "2026-10-05T13:00:00.000Z", host: "mini2", writer: "envelope-change", outcome: "envelope-changed-externally", reason: "envelope-mismatch", planId: "3f9a0c1d2e4b5a67", envelopeDigest: "e2e2e2e2e2e2e2e2", weights: null };
+  const words = "a host reported envelope e2e2e2e2 at 10-05 13:00, not the one the split was made for (d1d1d1d1); a host still on it refuses governed jobs as envelope-mismatch";
+  assert.ok((await open([outside, APPLIED_ROW])).includes(words), "the newest report names another envelope");
+  assert.ok((await open([APPLIED_ROW, outside])).includes(words), "a later applied plan says nothing about the host that refused: still shown");
+  assert.ok((await open([REFUSED_ROW, outside, APPLIED_ROW])).includes(words), "a refusal logged after it does not hide it");
+  assert.ok(!(await open([{ ...outside, envelopeDigest: "d1d1d1d1d1d1d1d1" }, APPLIED_ROW])).includes("a host reported envelope"), "the split was re-based onto that envelope: nothing to say");
+  assert.ok(!(await open([APPLIED_ROW])).includes("a host reported envelope"), "no report, no notice");
+  // Only the newest report counts: an older one for another digest is history the newer row replaced.
+  const older = { ...outside, at: "2026-10-05T12:45:00.000Z", envelopeDigest: "f3f3f3f3f3f3f3f3" };
+  assert.ok(!(await open([{ ...outside, envelopeDigest: "d1d1d1d1d1d1d1d1" }, older])).includes("a host reported envelope"));
 });
 
 test("ALLOCATION: with no seam the view says so; an unset envelope says why; `b split` rides the spend divider only with an envelope", async () => {
