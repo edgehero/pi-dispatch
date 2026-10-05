@@ -478,21 +478,33 @@ export function microsUsd(m) {
 }
 
 /**
- * An instant as `YYYY-MM-DD HH:MM UTC`, or "?" for anything that is not one. The shape alone admitted 2026-99-99T99:99,
- * so the fields are range-checked too (a month 1 to 12, a day 1 to 31, an hour below 24, a minute below 60).
+ * An instant as `YYYY-MM-DD HH:MM UTC`, or "?" for anything that is not one. The shape alone admitted 2026-99-99T99:99.
  */
 function splitAt(v) {
   const m = typeof v === "string" ? SPLIT_AT.exec(v) : null;
   if (!m) return "?";
-  const [mo, d] = [Number(m[1].slice(5, 7)), Number(m[1].slice(8, 10))];
-  const [h, mi] = [Number(m[2].slice(0, 2)), Number(m[2].slice(3, 5))];
-  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59) return "?";
+  // Round-tripped through Date, so a day the calendar does not have (02-31) is "?" too, not only an out-of-range field.
+  const t = Date.parse(`${m[1]}T${m[2]}:00Z`);
+  if (!Number.isFinite(t) || new Date(t).toISOString().slice(0, 16) !== `${m[1]}T${m[2]}`) return "?";
   return `${m[1]} ${m[2]} UTC`;
 }
 
-/** A plan id: null when there is none, the 16-hex hash, or "?" for a value that is neither (never read as "no plan"). */
+/** The outside-edit facts the assembler sends: two 8-hex digests (or "?") and an `MM-DD HH:MM` instant, else none. */
+function normOutsideEdit(v) {
+  if (v === null || v === undefined || typeof v !== "object") return null;
+  const hex = (d) => (typeof d === "string" && /^(?:[0-9a-f]{8}|\?)$/.test(d) ? d : null);
+  const at = typeof v.at === "string" && /^\d{2}-\d{2} \d{2}:\d{2}$/.test(v.at) ? v.at : "?";
+  const digest = hex(v.digest);
+  const split = hex(v.split);
+  return digest !== null && split !== null ? { digest, at, split } : null;
+}
+
+/**
+ * A plan id: null when there is none (an empty string included, which the panel and `/dispatch priorities` read as no
+ * plan too), the 16-hex hash, or "?" for a value that is neither (never read as "no plan").
+ */
 function splitPlanId(v) {
-  if (v === null || v === undefined) return null;
+  if (v === null || v === undefined || v === "") return null;
   return typeof v === "string" && SPLIT_PLAN_ID.test(v) ? v : "?";
 }
 
@@ -507,9 +519,12 @@ function splitMicrosMap(v) {
   return out;
 }
 
-/** `{ reason: count }` over the allowed keys, or null when the assembler said it did not count (the scan was unread). */
+/**
+ * `{ reason: count }` over the allowed keys. Undefined for a block that is not a map: the counts arrived and cannot be
+ * read, which is not the unread scan (null, decided by the caller), so it reads "?" and blames no scan.
+ */
 function splitCountMap(v, keys) {
-  if (v === null || typeof v !== "object" || Array.isArray(v)) return null;
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return undefined;
   const out = new Map();
   for (const k of keys ?? Object.keys(v).sort()) {
     if (splitWord(k) === null) continue;
@@ -561,7 +576,7 @@ function normAllocation(v) {
       unallocated: microsOr(st.unallocated),
     },
     mismatch: v.mismatch === true,
-    changedOutside: v.changedOutside === true,
+    outsideEdit: normOutsideEdit(v.outsideEdit),
     deploymentSpent: microsOr(spend.deployment),
     rows,
     log,
@@ -1115,6 +1130,7 @@ function splitBarsSvg(na, tips, names) {
 /** The count line: every reason with its number, or the stated absence when the scan was not read. */
 function splitCountsLine(label, counts, empty) {
   if (counts === null) return `${label}: not counted (the spend scan could not be read)`;
+  if (counts === undefined) return `${label}: ?`;
   if (counts.size === 0) return `${label}: ${empty}`;
   return `${label}: ${[...counts].map(([k, n]) => `${k} ${n === null ? "?" : fmt(n)}`).join(" · ")}`;
 }
@@ -1133,8 +1149,12 @@ function splitSectionHtml(na, tips, names, windowLabel) {
   const per = na.window !== null ? ` per ${na.window}` : "";
   rows.push(`<div class="row"><span class="wl">envelope</span><span>${escapeHtml(`${microsUsd(na.totalMicros)}${per} · delegation ${na.delegation ? "on" : "off"}`)}</span></div>`);
   const st = na.state;
-  // The panel's banner, by its rule (render.mjs `changedOutside`, computed by the assembler over the same rows).
-  if (na.changedOutside) rows.push('<div class="row"><span class="state">changed outside the panel: the envelope was edited by hand on a host, which then refuses governed jobs as envelope-mismatch until alloc:envelope:expected names its digest</span></div>');
+  // The panel's outside-edit notice: its facts come from the assembler (render.mjs `outsideEdit`), and these words are
+  // render.mjs `outsideEditText`'s, held equal by a test, since this module may load neither.
+  if (na.outsideEdit !== null) {
+    const e = na.outsideEdit;
+    rows.push(`<div class="row"><span class="state">${escapeHtml(`a host reported envelope ${e.digest} at ${e.at}, not the one the split was made for (${e.split}); a host still on it refuses governed jobs as envelope-mismatch`)}</span></div>`);
+  }
   if (na.stateProblem === "newer") rows.push('<div class="row"><span class="state">the applied split was written by a newer pi-dispatch: upgrade this console</span></div>');
   else if (na.stateProblem === "unreadable") rows.push('<div class="row"><span class="state">the applied split does not decode; the next pickup replaces it with the neutral split</span></div>');
   if (st) {

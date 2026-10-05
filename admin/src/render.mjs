@@ -511,6 +511,9 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
     lines.push(`${plan} · ${cell(s.writer)} · ${allocAt(s.appliedAt)}${s.validUntil ? ` · until ${sliceColumns(cell(s.validUntil), 10)}` : ""}`);
     if (s.clamped) lines.push("  clamped by the step");
     if (s.envelopeDigest !== digest) lines.push(`made for envelope ${cell(s.envelopeDigest)}, not this host's: governed jobs here refuse as envelope-mismatch`);
+    // The panel's outside-edit notice, by the same rule and in the same words (issue #507).
+    const edit = outsideEdit(alloc.log, s.envelopeDigest);
+    if (edit) lines.push(cell(outsideEditText(edit)));
   }
   const rows = Object.keys(envelope.floors).map((id) => [
     id,
@@ -552,15 +555,28 @@ export function allocAt(at) {
 }
 
 /**
- * Whether the envelope was edited outside the admin since the fleet last agreed on one (issue #504 part C's banner rule,
- * shared since issue #507 so the panel's `b` view and the insights page cannot disagree): an
- * `envelope-changed-externally` row newer than the newest `rebased` or `applied` row, not only the newest row, so a
- * refused plan logged after the edit does not hide it. `log` is newest first, as `alloc:log` is read.
+ * The outside-edit notice (issue #504 part C's banner, one rule since issue #507 for the panel's `b` view, `/dispatch
+ * priorities` and the insights page): the NEWEST `envelope-changed-externally` row in `log` (newest first, as
+ * `alloc:log` is read), when the envelope digest it reports is not the one the applied split was made for. Returned as
+ * its facts, `{ digest, at, split }` (8-hex digests and an `MM-DD HH:MM` instant), or null; `outsideEditText` words it.
+ *
+ * Historical on purpose: a host logs each digest once per process, so the log cannot say whether that host still runs
+ * the edited file, nor see a hand restore; a later applied plan or a re-base to a third digest says nothing about the
+ * host that refused either. The notice states what a host reported and when, and what follows for a host still on it.
+ * Rejected: the earlier "newer than the last re-base or applied plan" rule, which cleared while that host still
+ * refused and stayed after the edit was put back.
  */
-export function changedOutside(log) {
-  const rows = Array.isArray(log) ? log : [];
-  const agreedAt = rows.findIndex((r) => r?.outcome === "rebased" || r?.outcome === "applied");
-  return (agreedAt === -1 ? rows : rows.slice(0, agreedAt)).some((r) => r?.outcome === "envelope-changed-externally");
+export function outsideEdit(log, splitDigest) {
+  if (typeof splitDigest !== "string" || splitDigest === "") return null;
+  const row = (Array.isArray(log) ? log : []).find((r) => r?.outcome === "envelope-changed-externally");
+  if (!row || typeof row.envelopeDigest !== "string" || row.envelopeDigest === splitDigest) return null;
+  const hex8 = (d) => (/^[0-9a-f]{8}/.test(d) ? d.slice(0, 8) : "?");
+  return { digest: hex8(row.envelopeDigest), at: allocAt(row.at), split: hex8(splitDigest) };
+}
+
+/** The outside-edit notice in words, the same on every surface. */
+export function outsideEditText(e) {
+  return `a host reported envelope ${e.digest} at ${e.at}, not the one the split was made for (${e.split}); a host still on it refuses governed jobs as envelope-mismatch`;
 }
 
 /**

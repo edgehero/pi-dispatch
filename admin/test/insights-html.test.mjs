@@ -1044,10 +1044,12 @@ test("the split's refusal list is the worker's four reasons, the one list the as
 test("the split says what this host sees: its mismatch, an outside edit, a plan id it cannot read, and a count it cannot read (#507)", () => {
   const mismatch = splitPage({ ...SPLIT(), mismatch: true });
   assert.ok(mismatch.includes(`<div class="row"><span class="state">the split was made for another envelope, not this host's: governed jobs on this host refuse as envelope-mismatch</span></div>`));
-  const edited = splitPage({ ...SPLIT(), changedOutside: true });
-  assert.ok(edited.includes('<div class="row"><span class="state">changed outside the panel: the envelope was edited by hand on a host, which then refuses governed jobs as envelope-mismatch until alloc:envelope:expected names its digest</span></div>'));
-  assert.ok(!splitPage(SPLIT()).includes("changed outside the panel"), "no notice without the flag");
-  assert.ok(!splitPage({ ...SPLIT(), changedOutside: "yes" }).includes("changed outside the panel"), "a strict boolean");
+  const words = "a host reported envelope e2e2e2e2 at 10-05 13:00, not the one the split was made for (d1d1d1d1); a host still on it refuses governed jobs as envelope-mismatch";
+  const edited = splitPage({ ...SPLIT(), outsideEdit: { digest: "e2e2e2e2", at: "10-05 13:00", split: "d1d1d1d1" } });
+  assert.ok(edited.includes(`<div class="row"><span class="state">${words}</span></div>`));
+  assert.ok(!splitPage(SPLIT()).includes("a host reported envelope"), "no notice without the facts");
+  assert.ok(!splitPage({ ...SPLIT(), outsideEdit: { digest: "<b>", at: "10-05 13:00", split: "d1d1d1d1" } }).includes("a host reported envelope"), "a digest that is not one is no notice");
+  assert.ok(splitPage({ ...SPLIT(), outsideEdit: { digest: "e2e2e2e2", at: "junk", split: "d1d1d1d1" } }).includes("a host reported envelope e2e2e2e2 at ?,"), "an instant that is not one reads ?");
   const p = SPLIT();
   p.state.planId = "not-a-hash";
   const odd = splitPage(p);
@@ -1055,13 +1057,15 @@ test("the split says what this host sees: its mismatch, an outside edit, a plan 
   p.state.planId = null;
   assert.ok(splitPage(p).includes("<span>neutral split, no plan · written by portfolio-job ·"));
   const bad = SPLIT();
-  bad.log = [{ at: "2026-99-99T99:99:00.000Z", writer: "default", outcome: "neutral", reason: null, planId: null }, { at: "2026-02-31T23:59:00Z", writer: "default", outcome: "neutral", reason: null, planId: null }];
+  bad.log = [{ at: "2026-99-99T99:99:00.000Z", writer: "default", outcome: "neutral", reason: null, planId: null }, { at: "2026-02-31T23:59:00Z", writer: "default", outcome: "neutral", reason: null, planId: "" }];
   bad.counts = { refusals: { "allocation-cap": -1, "envelope-mismatch": "3" }, plans: { applied: 1.5 } };
   const junk = splitPage(bad);
-  assert.ok(junk.includes("<tr><td>?</td><td>default</td>"), "an instant out of range is ?");
-  assert.ok(junk.includes("<tr><td>2026-02-31 23:59 UTC</td>"), "the check is a range, not a calendar: the worker writes ISO from a Date");
+  assert.equal(junk.split("<tr><td>?</td><td>default</td><td>neutral</td><td></td><td class=\"pid\"></td></tr>").length - 1, 2, "a day the calendar lacks (02-31) is ? too, and an empty plan id is no plan");
   assert.ok(junk.includes("refusals in runs on this host, last 30d: allocation-cap ? · envelope-mismatch ? · portfolio-no-envelope 0 · portfolio-snapshot-oversize 0</div>"));
   assert.ok(junk.includes("plans collected in runs on this host, last 30d: applied ?</div>"));
+  const block = splitPage({ ...SPLIT(), counts: { refusals: "junk", plans: [1] } });
+  assert.ok(block.includes("refusals in runs on this host, last 30d: ?</div>") && block.includes("plans collected in runs on this host, last 30d: ?</div>"), "a block that is not a map is ?, and blames no scan");
+  assert.ok(!block.includes("not counted"));
 });
 
 test("the split box scrolls sideways on a narrow window, and its labels never wrap (#507)", () => {

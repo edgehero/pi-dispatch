@@ -302,7 +302,7 @@ test("with an envelope set, the split is read through readAllocations, without h
   assert.ok(page.includes("plan 3f9a0c1d2e4b5a67 · written by portfolio-job · applied 2026-10-05 06:00 UTC"));
   assert.ok(page.includes("plans collected in runs on this host, last 30d: applied 1 · plan-absent 1 · plan-stale 1</div>"));
   assert.equal(mod.splitCounts({ unreachable: "EACCES" }), null, "an unread scan counts nothing");
-  assert.equal(slice.changedOutside, false);
+  assert.equal(slice.outsideEdit, null);
 
   // No envelope, and an envelope that does not load: neither reads the queue at all.
   let dials = 0;
@@ -325,29 +325,51 @@ test("with an envelope set, the split is read through readAllocations, without h
   assert.equal(dials, 0, "no queue read for an unset or a broken envelope");
 });
 
-test("the insights notice for an outside edit follows the panel's rule, row for row (#507)", async () => {
+test("the outside-edit notice is one rule and one sentence on the panel's text twin, the assembler and the insights page (#507)", async () => {
   const { fakeAllocRedis } = await import("./helpers/fake-alloc-redis.mjs");
-  const { changedOutside } = await import("../src/render.mjs");
+  const { outsideEdit, outsideEditText, renderAllocations } = await import("../src/render.mjs");
+  const { readEnvelope } = await import("../src/read-model.mjs");
+  const { buildInsightsHtml } = await import("../src/insights-html.mjs");
   const dir = tempDir("admin-insights-outside-");
   const files = { envelope: join(dir, "envelope.json"), projects: join(dir, "projects.json"), settings: join(dir, "settings.json") };
   writeFileSync(files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
-  writeFileSync(files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 } }));
+  writeFileSync(files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: true, writers: ["portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
   writeFileSync(files.settings, JSON.stringify({ maxCostUsd: "2" }));
+  const read = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 });
+  const digest = read.digest;
   const paths = { envelopeFile: files.envelope, projectsFile: files.projects, settingsFile: files.settings, valkeyUrl: "redis://127.0.0.1:6390" };
-  const outside = { at: "2026-10-05T13:00:00.000Z", writer: "envelope-change", outcome: "envelope-changed-externally", reason: "envelope-mismatch" };
-  const applied = { at: "2026-10-05T12:00:00.000Z", writer: "operator-session", outcome: "applied", planId: "3f9a0c1d2e4b5a67" };
+  const M = 1_000_000;
+  const state = { version: 1, envelopeDigest: digest, planId: "3f9a0c1d2e4b5a67", writer: "portfolio-job", appliedAt: "2026-10-05T06:00:00.000Z", weights: { shop: 1, _other: 0 }, allocations: { shop: 100 * M, _other: 0 }, unallocated: 0, repos: {}, clamped: false };
+  const other = "e2e2e2e2e2e2e2e2";
+  const outside = { at: "2026-10-05T13:00:00.000Z", writer: "envelope-change", outcome: "envelope-changed-externally", reason: "envelope-mismatch", envelopeDigest: other };
+  const applied = { at: "2026-10-05T12:00:00.000Z", writer: "operator-session", outcome: "applied", planId: "3f9a0c1d2e4b5a67", envelopeDigest: digest };
   const refused = { at: "2026-10-05T12:30:00.000Z", writer: "operator-session", outcome: "refused", reason: "plan-too-soon" };
-  // The panel test's three logs (dashboard.test.mjs): newer than the agreement, agreed past, and buried under a refusal.
-  for (const [log, want] of [[[outside, applied], true], [[applied, outside], false], [[refused, outside, applied], true], [[], false]]) {
+  const restored = { ...outside, envelopeDigest: digest };
+  const cases = [[[outside, applied], true], [[applied, outside], true], [[refused, outside, applied], true], [[restored, outside], false], [[], false]];
+  for (const [log, want] of cases) {
     const redis = fakeAllocRedis();
+    redis.store.set("t507:plan", JSON.stringify(state));
     redis.lists.set("t507:log", log.map((r) => JSON.stringify(r)));
     mod._setAllocationSeamsForTests({ redisFn: () => redis, prefix: "t507", now: () => new Date(Date.parse("2026-10-05T14:00:00Z")) });
+    let slice;
     try {
-      const slice = await mod.assembleAllocationView(paths, null);
-      assert.equal(slice.changedOutside, want, JSON.stringify(log.map((r) => r.outcome)));
-      assert.equal(changedOutside(log), want, "the one rule the panel draws its banner by");
+      slice = await mod.assembleAllocationView(paths, null);
     } finally {
       mod._setAllocationSeamsForTests({});
+    }
+    const label = JSON.stringify(log.map((r) => r.outcome));
+    const rule = outsideEdit(log, digest);
+    assert.equal(rule !== null, want, label);
+    assert.deepEqual(slice.outsideEdit, rule, `the assembler applies the rule: ${label}`);
+    const text = renderAllocations({ envelope: read.envelope, digest, alloc: { state, log, spend: {} } });
+    const page = buildInsightsHtml({ allocation: slice, window: "30d" }, { now: 0 });
+    if (want) {
+      const words = outsideEditText(rule);
+      assert.equal(words, `a host reported envelope e2e2e2e2 at 10-05 13:00, not the one the split was made for (${digest.slice(0, 8)}); a host still on it refuses governed jobs as envelope-mismatch`);
+      assert.ok(text.split("\n").includes(words), `the text twin: ${label}`);
+      assert.ok(page.includes(`<span class="state">${words}</span>`), `the page: ${label}`);
+    } else {
+      assert.ok(!text.includes("a host reported envelope") && !page.includes("a host reported envelope"), label);
     }
   }
 });

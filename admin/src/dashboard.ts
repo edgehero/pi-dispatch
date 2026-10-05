@@ -31,7 +31,7 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
-import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, changedOutside } from "./render.mjs";
+import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -2371,12 +2371,14 @@ function revertible(row: any): boolean {
 }
 
 /**
- * How the revert question names its target: the plan id, or the outcome and time of a split that had none. An `expired`
- * row names the plan that ran out beside the NEUTRAL weights that replaced it, and a revert to it restores that neutral
- * split with no plan (issue #507), so the question names the split, never the expired plan.
+ * How the revert question names its target, with the row's instant as the history shows it (`allocAt`). A row with a
+ * plan names the plan. A row with none (neutral, default, `expired`) restores TODAY's neutral split, not that row's
+ * weights (issue #507, the worker's `revert`), so the question says so and names the row it came from: an `expired`
+ * row's id is the plan that ran out, never the one a `y` restores.
  */
 function revertTargetName(row: any): string {
-  return row?.planId && row?.outcome !== "expired" ? `plan ${cellOf(row.planId)}` : `the ${cellOf(row?.outcome)} split of ${cellOf(row?.at)}`;
+  const at = cellOf(allocAt(row?.at));
+  return row?.planId && row?.outcome !== "expired" ? `plan ${cellOf(row.planId)} (${at})` : `the current neutral split (the ${cellOf(row?.outcome)} row of ${at})`;
 }
 
 /** One sentence for the footer from a revert's result: every branch names what happened, never a reason text. */
@@ -2411,12 +2413,10 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
   const lines: string[] = [];
   const a = info.alloc ?? {};
   const log: any[] = Array.isArray(a.log) ? a.log : [];
-  // Any outside edit since the fleet last agreed on an envelope (a re-base or an applied plan), not only the newest
-  // row: a refused plan logged after the edit must not hide it.
-  // The rule is render.mjs `changedOutside`, which the insights page uses too (issue #507).
-  if (changedOutside(log)) {
-    lines.push(...wrapped("changed outside the panel: the envelope was edited by hand on a host, which then refuses governed jobs as envelope-mismatch until alloc:envelope:expected names its digest (docs/allocation.md)", "warning"));
-  }
+  // The outside-edit notice: render.mjs `outsideEdit`, the rule and the words `/dispatch priorities` and the insights
+  // page use too (issue #507). Historical, because the log cannot say whether that host still runs the edited file.
+  const edit = outsideEdit(log, a.state?.envelopeDigest);
+  if (edit) lines.push(...wrapped(cellOf(outsideEditText(edit)), "warning"));
   if (a.unreachable) lines.push(...wrapped(`split unreadable (${cellOf(a.unreachable)})`, "error"));
   const d = e.delegation ?? {};
   // Wrapped, not clipped (issue #507): with both writers named the rules ran past the frame and lost the plan length.
