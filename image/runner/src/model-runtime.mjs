@@ -23,8 +23,10 @@
  *
  * `authPath` stays `${agentDir}/auth.json`, the same file the 0.80.7 wiring passed to AuthStorage.create: the
  * credential still comes from the environment or auth.json, and the overlay models.json is definitions only
- * (import-pi refuses a literal key there).
+ * (import-pi refuses a literal key there). Since issue #587's gate run-job reads that file once, at start
+ * (createJobModelRuntime below).
  */
+import { readFileSync } from "node:fs";
 export const DISCARDING_MODELS_STORE = Object.freeze({
 	async read() {
 		return undefined;
@@ -37,6 +39,40 @@ export function jobModelRuntimeOptions({ agentDir, modelsPath }) {
 	return { authPath: `${agentDir}/auth.json`, modelsPath, modelsStore: DISCARDING_MODELS_STORE, allowModelNetwork: false };
 }
 
-export function createJobModelRuntime({ ModelRuntime, agentDir, modelsPath }) {
-	return ModelRuntime.create(jobModelRuntimeOptions({ agentDir, modelsPath }));
+/**
+ * auth.json's contents at job start, or `{}` when there is none or it cannot be read as a JSON object. The job's
+ * credential comes from its environment (the worker's closed env); this file is a fallback the job image does not
+ * ship, so a file that does not parse leaves the job on its env key rather than failing it.
+ */
+export function readAuthSnapshot(path, { readFile = readFileSync } = {}) {
+	let parsed;
+	try {
+		parsed = JSON.parse(String(readFile(path, "utf8")).replace(/^\uFEFF/, ""));
+	} catch {
+		return {};
+	}
+	return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+/**
+ * pi's own AuthStorage class, from pi-coding-agent's dist by file URL (it is not exported from the package root at
+ * the pin; pinned-api.test.mjs holds the path and `inMemory`). `resolve` and `load` are injected for tests.
+ */
+export async function loadPiAuthStorage({ resolve = (spec) => import.meta.resolve(spec), load = (url) => import(url) } = {}) {
+	const module = await load(new URL("./core/auth-storage.js", resolve("@earendil-works/pi-coding-agent")).href);
+	return module?.AuthStorage ?? null;
+}
+
+/**
+ * The job's ModelRuntime. With pi's `AuthStorage` handed in (run-job.mjs always does), the credentials are the
+ * auth.json contents read ONCE here, held in pi's in-memory store (issue #587's gate): pi's file store re-reads the
+ * file whenever it changes, and a credential's `env` is merged into every request's options.env after the guards ran
+ * (ModelRuntime.prepareRequest), so a job that wrote auth.json mid-run could pick its Azure deployment past the model
+ * list, or set PI_CACHE_RETENTION past the cost bound. A refresh or login pi makes writes to memory only. Without
+ * `AuthStorage` (tests that build pi's model layer on its own) pi's file store is used as before.
+ */
+export function createJobModelRuntime({ ModelRuntime, AuthStorage = null, agentDir, modelsPath, readFile }) {
+	const options = jobModelRuntimeOptions({ agentDir, modelsPath });
+	if (AuthStorage !== null) options.credentials = AuthStorage.inMemory(readAuthSnapshot(options.authPath, readFile ? { readFile } : {}));
+	return ModelRuntime.create(options);
 }

@@ -13,7 +13,7 @@ import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLE
 import * as catalogModels from "./helpers/catalog-models.mjs";
 import { classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
 import { jobSettings } from "../src/config.mjs";
-import { createJobModelRuntime, jobModelRuntimeOptions } from "../src/model-runtime.mjs";
+import { createJobModelRuntime, jobModelRuntimeOptions, loadPiAuthStorage } from "../src/model-runtime.mjs";
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -137,6 +137,31 @@ test("the job's model runtime writes no catalog cache beside a read-only models.
 	} finally {
 		chmodSync(readOnly, 0o755);
 	}
+});
+
+test("the job's credentials are read ONCE at start: an auth.json the job writes later changes nothing pi resolves (issue #587)", { skip }, async () => {
+	// pi's file store re-reads auth.json whenever its revision changes, and a credential's `env` is merged into every
+	// request's options.env after the guards ran (ModelRuntime.prepareRequest): a job that wrote
+	// { azure: { env: { AZURE_OPENAI_DEPLOYMENT_NAME_MAP } } } chose its deployment, and PI_CACHE_RETENTION its
+	// cache price. The job's runtime holds the start-time contents in memory instead (pi's own AuthStorage.inMemory).
+	const AuthStorage = await loadPiAuthStorage();
+	assert.equal(typeof AuthStorage?.inMemory, "function", "pi's AuthStorage.inMemory moved: the job's credential snapshot has no store");
+	const agentDir = tempDir("pi-auth-once-");
+	const modelsPath = join(agentDir, "models.json");
+	writeFileSync(modelsPath, JSON.stringify({ providers: { azure: { baseUrl: "https://example.openai.azure.com/openai/v1" } } }));
+	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: "sk-ant-start" } }));
+	const job = await createJobModelRuntime({ ModelRuntime: mod.ModelRuntime, AuthStorage, agentDir, modelsPath });
+	const control = await mod.ModelRuntime.create({ ...jobModelRuntimeOptions({ agentDir, modelsPath }) });
+	const written = { azure: { type: "api_key", key: "written-later", env: { AZURE_OPENAI_DEPLOYMENT_NAME_MAP: "gpt-4o=gpt-5-pro-deployment", PI_CACHE_RETENTION: "long" } } };
+	writeFileSync(join(agentDir, "auth.json"), JSON.stringify(written));
+	const late = await job.getAuth("azure");
+	assert.equal(late?.env, undefined, `the job's runtime picked up a credential written after start: ${JSON.stringify(late?.env)}`);
+	assert.equal((await job.getAuth("anthropic"))?.auth?.apiKey, "sk-ant-start", "what auth.json held at start still resolves");
+	// THE CONTROL: pi's default store does pick the write up, so the assertion above is about something.
+	assert.deepEqual((await control.getAuth("azure"))?.env, written.azure.env, "pi's file store no longer re-reads auth.json: re-check whether the snapshot is still needed");
+	// And run-job builds its runtime this way.
+	const runJob = readFileSync(fileURLToPath(new URL("../run-job.mjs", import.meta.url)), "utf8");
+	assert.match(runJob, /createJobModelRuntime\(\{ ModelRuntime, AuthStorage: await loadPiAuthStorage\(\), agentDir, modelsPath \}\)/, "run-job.mjs must build the job's runtime on the start-time credential snapshot");
 });
 
 test("the job's settings mean what jobSettings says at the pin, each against pi's own default (issue #509)", { skip }, async () => {

@@ -31,7 +31,7 @@ import {
 } from "./src/outcome.mjs";
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
 import { createExitWriter, readExitKey, writeAllSync } from "./src/exit-line.mjs";
-import { createJobModelRuntime } from "./src/model-runtime.mjs";
+import { createJobModelRuntime, loadPiAuthStorage } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { isNestedRunner, runAsPiCli } from "./src/child-route.mjs";
 import { createChildWatch } from "./src/child-watch.mjs";
@@ -185,7 +185,8 @@ async function main() {
 	// overlay is mounted -- this is how a CUSTOM provider/model becomes resolvable.
 	const GLOBAL_MODELS = "/opt/pi-global/models.json";
 	const modelsPath = existsSync(GLOBAL_MODELS) ? GLOBAL_MODELS : `${agentDir}/models.json`;
-	const modelRuntime = await createJobModelRuntime({ ModelRuntime, agentDir, modelsPath });
+	// The credentials are auth.json as it is NOW, held in memory (issue #587's gate, src/model-runtime.mjs has the why).
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime, AuthStorage: await loadPiAuthStorage(), agentDir, modelsPath });
 
 	// Pin the model explicitly. With `model` omitted, pi picks from settings and provider defaults
 	// -- nondeterministic across images, and it silently changes cost per job. hasConfiguredAuth takes the

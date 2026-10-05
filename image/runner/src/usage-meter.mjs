@@ -2534,9 +2534,13 @@ export function createModelGuard({ allowedModels, log = () => {} }) {
 		return null;
 	}
 
-	function prepare({ method, args, stop }) {
+	function prepare({ method, model, args, stop }) {
 		const options = args?.[1];
 		const theirs = options?.onPayload;
+		// Issue #587's gate: on azure the deployment is resolved from options.env MERGED with the credential's own env
+		// (ModelRuntime.prepareRequest, after admit), so a deployment map can arrive where admit cannot see it. The api
+		// and the azure provider write that deployment as payload.model before this hook runs; it must be model.id.
+		const deploymentChecked = model?.api === AZURE_API || model?.provider === AZURE_PROVIDER;
 		// A `function`, so the caller's hook runs with the `this` pi gives it: pi calls `options.onPayload(...)` as a method
 		// of the options object the provider received, which is this wrapper's `this` too.
 		const onPayload = async function (payload, payloadModel) {
@@ -2545,6 +2549,11 @@ export function createModelGuard({ allowedModels, log = () => {} }) {
 				before = isPlain(payload) ? snapshotPayload(payload) : null;
 			} catch {
 				before = null;
+			}
+			if (deploymentChecked && (before === null || before.model !== model.id)) {
+				refuse(method, "deployment");
+				stop(MODEL_NOT_ALLOWED);
+				throw new Error(STOP_MESSAGES[MODEL_NOT_ALLOWED]);
 			}
 			const next = typeof theirs === "function" ? await theirs.call(this, payload, payloadModel) : undefined;
 			// The hook's result, or pi's payload as the hook may have changed it in place: compared, then sent as a fresh object.
