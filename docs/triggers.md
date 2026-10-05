@@ -253,6 +253,18 @@ Any trigger type can name the model its jobs run on, and how many turns a job ma
   `models.json`. A job on the old id is refused before it spends, and the refusal names `azure`. An
   allowed-models entry on the old id matches nothing. A thread job that resumes an older session is safe:
   a session written by another pi version is never resumed, the job starts fresh.
+- A pi bump can also remove models from pi's catalog. A trigger, an allowed-models entry or `PI_MODEL` that
+  names a model the new pi does not have is refused before it spends (`model-unknown`), and `doctor` names it.
+  pi 1.0.3 removed these ids (besides the Azure rename):
+  - `cloudflare-ai-gateway`: `claude-fable-5.1`, `claude-haiku-4.5`, `claude-opus-4.5`, `claude-opus-4.6`,
+    `claude-opus-4.7`, `claude-opus-4.8`, `claude-opus-5.5`, `claude-sonnet-4.5` and `claude-sonnet-4.6`. Each
+    is now spelled with dashes (`claude-opus-4-8`).
+  - `openrouter`: `openai/gpt-6.1-sol:batch` and `openai/gpt-6.1-sol-pro:batch`.
+  - `together`: `deepseek-ai/DeepSeek-V4-Pro`, `google/gemma-4-31B-it` and `openai/gpt-oss-20b`.
+  - `vercel-ai-gateway`: `inclusionai/ling-3.0-flash-sante-free`.
+
+  `opencode-go/qwen3.7-plus` and `opencode-go/qwen3.8-max` keep their ids and moved from openai-completions to
+  anthropic-messages. 57 models changed price; a run is priced at the rates of the pi it ran on.
 - `"model"` is that provider's model id. Case is kept as you wrote it.
 - `"maxTurns"` is a whole number of 1 or more.
 
