@@ -672,7 +672,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   revert's note adds that a due plan may move the split again. Every total shown beside the split (the view's
   header, the headroom's `$Total`, the insights page's envelope row and bars) is the applied split's own (its
   allocations plus its unallocated money), the envelope's file total only when no split is applied; during an
-  envelope mismatch the mismatch line adds "This host's file says total $X; the totals shown are the split's." `/dispatch priorities` composes its plan line and
+  envelope mismatch the mismatch line adds "This host's file says total $X; the totals shown are the split's.", and
+  the rows list every entry the split allocates that this host's file does not name, after the file's own, with no
+  floor or spend and marked "not in this host's file", so each dollar the total counts is on a row. `/dispatch priorities` composes its plan line and
   history rows the same way. A run's drill-in shows the
   record's `plan` (outcome, enum reason, clamped, plan id) and the dollars it settled with their basis, each only
   when the record carries it, and says in words whether the run kept a global job-count slot (`budget slot held`
@@ -3212,6 +3214,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-05 | Issue #507, the review of the allocation totals. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: during an envelope mismatch the ALLOCATION rows, on the panel, `/dispatch priorities` and the insights page, also list each entry the applied split allocates that this host's file does not name, marked "not in this host's file" (render.mjs `allocationRowIds`); before, such an allocation counted in the shown total and was listed nowhere. With the digests equal the rows are the file's entries alone, UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the panel's job-count meter with no overlay cap read `N / ? (cap unknown)` while the worker ran under `PI_DAILY_CAP` from its `.env`. By design the panel reads job-count caps from the overlay only (the lab drove the panel with no overlay); the meter now reads `N / ? (worker env cap)`, as `/dispatch budget` and the insights page already said where the cap lives. Reading the env was rejected: without a pointer it is pi's own. The caps the panel reads UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: during an envelope mismatch the ALLOCATION view's header and headroom showed this host's unapplied envelope total ($30) beside the applied split's allocations ($28). Every total shown beside the split is now the split's own, on the panel, `/dispatch priorities` and the insights page (render.mjs `splitTotalMicros`), and the mismatch line says this host's file holds another total. The outside-edit notice, the plan line and the history UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by rendering the README images. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a run's drill-in says whether the run kept a global job-count slot in words (`budget slot held`, `no budget slot`) instead of printing `true budget slot`; the panel's dollar window rows show a `boundExceeded` count only above zero and fit 80 columns with exact micro-dollar amounts; the scoped limits rows show their dollar windows. **`REQ-INSIGHTS-HTML-EXPORT` AMENDED**, the budget panel: a scoped row shows its dollar windows (spent and held over the cap, exact micro-dollars, no state word), so a `model:` or dollar-only `project:` row is no longer drawn with no number. `REQ-COST-ANALYTICS` UNCHANGED, checked: no fold, basis or count changed, only how the panel words them. |

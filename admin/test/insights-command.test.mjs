@@ -403,6 +403,46 @@ test("during an envelope mismatch every total shown is the applied split's, and 
   assert.ok(agreeing.includes(`made for envelope ${made}, not this host's: governed jobs here refuse as envelope-mismatch\n`), "the line ends where it always did");
 });
 
+test("during an envelope mismatch an entry only the split allocates is listed and marked on the text twin and the insights page, by one rule (#507)", async () => {
+  const { fakeAllocRedis } = await import("./helpers/fake-alloc-redis.mjs");
+  const { allocationRowIds, renderAllocations, SPLIT_ONLY_MARK } = await import("../src/render.mjs");
+  const { readEnvelope } = await import("../src/read-model.mjs");
+  const { buildInsightsHtml } = await import("../src/insights-html.mjs");
+  const dir = tempDir("admin-insights-splitonly-");
+  const files = { envelope: join(dir, "envelope.json"), projects: join(dir, "projects.json"), settings: join(dir, "settings.json") };
+  writeFileSync(files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+  // This host's file dropped `legacy`; the applied split, made for the old envelope, still allocates it.
+  writeFileSync(files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "30", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: true, writers: ["portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+  writeFileSync(files.settings, JSON.stringify({ maxCostUsd: "2" }));
+  const read = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 });
+  const paths = { envelopeFile: files.envelope, projectsFile: files.projects, settingsFile: files.settings, valkeyUrl: "redis://127.0.0.1:6390" };
+  const M = 1_000_000;
+  const state = { version: 1, envelopeDigest: "5428cdb615bcf0d2", planId: "13a11619b5ea3d49", writer: "portfolio-job", appliedAt: "2026-10-05T10:06:00.000Z", weights: { shop: 2, legacy: 1, _other: 0 }, allocations: { shop: 20 * M, legacy: 7 * M, _other: 0 }, unallocated: 1 * M, repos: {}, clamped: false };
+  assert.deepEqual(allocationRowIds(read.envelope.floors, state, true).filter((r) => r.splitOnly).map((r) => r.id), ["legacy"]);
+  assert.deepEqual(allocationRowIds(read.envelope.floors, state, false).filter((r) => r.splitOnly), [], "no mismatch: the file's entries alone");
+  const text = renderAllocations({ envelope: read.envelope, digest: read.digest, alloc: { state, log: [], spend: {} } }).split("\n");
+  const legacy = text.find((l) => l.trim().startsWith("legacy"));
+  assert.ok(legacy, text.join("\n"));
+  assert.match(legacy, new RegExp(`^  legacy\\s+floor -\\s+weight 1\\s+allocation \\$7\\.00\\s+spent -\\s+${SPLIT_ONLY_MARK}$`));
+  assert.ok(text[0].includes("total $28.00"), "the row the total counted is the row shown");
+  const agreeing = renderAllocations({ envelope: read.envelope, digest: read.digest, alloc: { state: { ...state, envelopeDigest: read.digest }, log: [], spend: {} } });
+  assert.ok(!agreeing.includes("legacy"), "the same split on its own envelope lists the file's entries alone");
+  const redis = fakeAllocRedis();
+  redis.store.set("t507s:plan", JSON.stringify(state));
+  mod._setAllocationSeamsForTests({ redisFn: () => redis, prefix: "t507s", now: () => new Date(Date.parse("2026-10-05T14:00:00Z")) });
+  let slice;
+  try {
+    slice = await mod.assembleAllocationView(paths, null);
+  } finally {
+    mod._setAllocationSeamsForTests({});
+  }
+  const page = buildInsightsHtml({ allocation: slice, window: "30d" }, { now: 0 });
+  assert.ok(page.includes(`$7.00 allocated · ${SPLIT_ONLY_MARK.replace("'", "&#39;")}`), "the page's bar row, in render.mjs' words, escaped");
+  assert.ok(page.includes(`>legacy</text>`), "its label");
+  const agreeingPage = buildInsightsHtml({ allocation: { ...slice, mismatch: false }, window: "30d" }, { now: 0 });
+  assert.ok(!agreeingPage.includes(">legacy</text>"));
+});
+
 test("the outside-edit notice is one rule and one sentence on the panel's text twin, the assembler and the insights page (#507)", async () => {
   const { fakeAllocRedis } = await import("./helpers/fake-alloc-redis.mjs");
   const { outsideEdit, outsideEditText, renderAllocations } = await import("../src/render.mjs");
