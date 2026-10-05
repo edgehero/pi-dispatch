@@ -3458,6 +3458,20 @@ test("ALLOCATION: a revert's note is a body line that says a due plan may move t
   assert.ok(lines.includes(boxed("↑↓ select  ·  r revert  ·  esc back")), "the footer keeps its keys");
 });
 
+test("ALLOCATION: the revert question names an expired row's neutral split, never the plan that ran out (#507)", async () => {
+  const expired = { at: "2026-10-05T11:30:00.000Z", host: "mini1", writer: "expiry", outcome: "expired", reason: null, planId: "3f9a0c1d2e4b5a67", weights: { _other: 0, platform: 1, shop: 1 } };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [expired] }) }) });
+  await flush();
+  comp.handleInput("b");
+  await flush();
+  comp.handleInput("r");
+  await flush();
+  const out = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.match(out, /revert to the expired split of 2026-10-05T11:30:00\.000Z as operator-revert\?/);
+  assert.doesNotMatch(out, /revert to plan 3f9a0c1d2e4b5a67/);
+});
+
 test("ALLOCATION: the banner says the envelope changed outside the panel when an envelope-changed-externally row is newer than the last rebase or applied plan", async () => {
   const outside = { at: "2026-10-05T13:00:00.000Z", host: "mini2", writer: "envelope-change", outcome: "envelope-changed-externally", reason: "envelope-mismatch", planId: "3f9a0c1d2e4b5a67", weights: null };
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [outside, APPLIED_ROW] }) }) });

@@ -555,6 +555,11 @@ export function makeAllocationState({ redis, host = "", audit, log = () => {}, l
 	 * on the state it read, written after its row like a plan, and still refused while delegation is off (neutral is
 	 * then the only state), while this host's envelope is not the applied one, or while another apply holds the lock.
 	 * Weights that do not cover exactly the envelope's entries (an older envelope's row) refuse as `plan-incomplete`.
+	 *
+	 * A revert to an `expired` row restores the NEUTRAL split it records, with no plan id and no expiry (issue #507). That
+	 * row names the plan that expired beside the neutral weights that replaced it, and taking its id would put "plan X
+	 * until ..." over neutral weights, a plan nobody wrote, on every surface. The row keeps the id: it is the audit's
+	 * answer to "which plan ran out", and the next manager reads it.
 	 */
 	async function revert({ envelope, digest = envelope ? envelopeDigest(envelope) : null, target, now }) {
 		const at = iso(now);
@@ -576,16 +581,17 @@ export function makeAllocationState({ redis, host = "", audit, log = () => {}, l
 			const repoWeights = Object.fromEntries(Object.entries(target?.repoWeights ?? {}).filter(([k]) => entries.includes(k) && k !== OTHER));
 			const result = allocate({ envelope, weights, current: null, repos: repoWeights });
 			const validUntil = new Date(nowMs(now) + envelope.delegation.maxPlanDays * 86400000).toISOString();
+			const planId = target?.outcome !== "expired" && typeof target?.planId === "string" ? target.planId : null;
 			const next = {
 				version: ALLOC_STATE_VERSION,
-				planId: typeof target?.planId === "string" ? target.planId : null,
+				planId,
 				basis: state.planId,
 				writer: "operator-revert",
 				jobId: null,
 				triggerId: null,
 				appliedAt: at,
 				lastPlanAt: at,
-				validUntil: typeof target?.planId === "string" ? validUntil : null,
+				validUntil: planId !== null ? validUntil : null,
 				envelopeDigest: digest,
 				weights: { ...weights },
 				repoWeights,
