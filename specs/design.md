@@ -4444,8 +4444,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
        outside the guard's, for its openai-completions models too), a per-call `azureDeploymentName` or
        `options.env` deployment map, either of which picks the deployment before `model.id`. And, because pi merges
        a stored credential's own `env` into `options.env` after admit (`ModelRuntime.prepareRequest`), the payload
-       check in step 5 also refuses, on the same api or provider, a payload whose `model` is not `model.id` before
-       any hook ran (issue #587's gate). The job's runtime closes the same door at its source: its credentials are
+       check in step 5 also refuses, on the same api or provider, a payload whose `model` before any hook ran is not
+       what the operator's own map says: the `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` the job's environment held when the
+       guard was created (forwarded with `PI_FORWARD_ENV`, parsed as pi parses it), else `model.id` (issue #587's
+       review). A map arriving later, from a credential or an edit of the environment, is refused. The job's runtime closes the same door at its source: its credentials are
        auth.json read once at start and held in pi's in-memory store, so a file the job writes mid-run is never read
        (`createJobModelRuntime`); a runtime an extension creates for itself, or a pi child, reads the file as pi does,
        and there the payload check holds the deployment while a credential `PI_CACHE_RETENTION` remains a named
