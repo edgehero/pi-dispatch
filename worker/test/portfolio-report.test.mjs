@@ -5,8 +5,10 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { makeAllocationState } from "../src/allocation.mjs";
 import { weekKey } from "../src/budget.mjs";
 import { parseEnvelope, envelopeDigest } from "../src/envelope.mjs";
+import { makeCollectPlan } from "../src/outbox-plan.mjs";
 import { buildPortfolioSnapshot } from "../src/portfolio-snapshot.mjs";
 import { PLAN_FIELDS, allocate, neutralAllocation, parsePlan } from "../src/priorities.mjs";
 import { scopeDollarKeyPrefix } from "../src/scoped-limits.mjs";
@@ -139,6 +141,30 @@ test("a refused last attempt prints its reason, and a plan-invalid one its field
 	assert.equal((await run([...invalid.argv, "--dry-run"])).out.split("\n")[0], "Last plan: refused (plan-invalid: projects.weight range)");
 	const none = files({ snap: await snapshot(null) });
 	assert.equal((await run([...none.argv, "--dry-run"])).out.split("\n")[0], "Last plan: none yet");
+});
+
+test("a portfolio run that wrote no plan reaches the next report as Last plan: refused (plan-absent) (#507)", async () => {
+	// The real path: the collector refuses through the real allocation state, whose alloc:log row is the next snapshot's
+	// lastAttempt, built by the worker's own builder.
+	const lists = new Map();
+	const redis = {
+		async lpush(k, v) {
+			lists.set(k, [v, ...(lists.get(k) ?? [])]);
+		},
+		async ltrim(k, a, b) {
+			lists.set(k, (lists.get(k) ?? []).slice(a, b + 1));
+		},
+		lrange: async (k, a, b) => (lists.get(k) ?? []).slice(a, b + 1),
+	};
+	const allocation = makeAllocationState({ redis, host: "mini1", audit: { append: () => {} }, token: () => "t" });
+	const absent = { lstatSync: () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); } };
+	const collect = makeCollectPlan({ allocation, governing: () => ({ envelope: ENVELOPE, digest: envelopeDigest(ENVELOPE) }), checkPortfolioFlag: () => true, fs: absent, now: () => NOW });
+	const job = { id: "repeat:pm-weekly:1", data: { kind: "local", folder: "/home/me/pm", trigger: { id: "pm-weekly", pattern: "0 6 * * 1" }, portfolio: true } };
+	assert.equal((await collect({ job, prepared: { jobDir: "/jobs/job-1", portfolio: true }, portfolio: true })).reason, "plan-absent");
+	const last = await allocation.lastAttempt({ kind: "portfolio-job", triggerId: "pm-weekly" });
+	const snap = await snapshot(last);
+	assert.equal(snap.lastAttempt.reason, "plan-absent", "lastAttemptOf passes it through");
+	assert.equal((await run([...files({ snap }).argv, "--dry-run"])).out.split("\n")[0], "Last plan: refused (plan-absent)");
 });
 
 test("no snapshot: the report says so, and a missing or broken plan is named (#506)", async () => {

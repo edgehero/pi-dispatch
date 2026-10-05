@@ -17,10 +17,14 @@ import { PLAN_MAX_BYTES, parsePlan } from "./priorities.mjs";
  * completed job, never a failed job.
  *
  * The ladder, failing closed at the first miss (each refusal a fixed token, `PLAN_COLLECT_REASONS`):
- *   1. No `/outbox/priorities.json` (or no outbox: a forge job has none): nothing happens and the record says
- *      `plan: null`. An unflagged job that writes no plan is byte-identical to before. Only ENOENT and ENOTDIR mean
- *      "no file"; any other answer (an outbox the job made unreadable) is judged by rung 2 first: a job that was never a
- *      portfolio job then has no plan (`null`), and a confirmed one meets rung 4, which reads it again.
+ *   1. No `/outbox/priorities.json` (or no outbox: a forge job has none). Only ENOENT and ENOTDIR mean "no file", and
+ *      the answer waits for rung 2's three checks (issue #507). A job all three confirm as a portfolio job is refused as
+ *      `plan-absent`, recorded like every refusal below: the job exists to write a plan, so writing none is the
+ *      trigger's own attempt, and the operator and the next manager run (its `lastAttempt`) must see "wrote nothing"
+ *      rather than last week's answer. Every other job that writes no plan says `plan: null` and writes no row, so an
+ *      unflagged job is byte-identical to before (and a job whose flag went away while it ran is no longer asked for a
+ *      plan). Any other lstat answer (an outbox the job made unreadable) is judged by rung 2 first: a job that was never
+ *      a portfolio job then has no plan (`null`), and a confirmed one meets rung 4, which reads it again.
  *   2. Portfolio authority, `plan-not-portfolio`: the job was a portfolio job AT PICKUP (the processor's `portfolio`
  *      decision: the flag on the data, a cron `trigger`, no chain field, and the live file), it still has the flag, a
  *      trigger and no chain field on its data, prepare AGREED (it wrote the snapshot, `prepared.portfolio`), and the
@@ -42,24 +46,26 @@ import { PLAN_MAX_BYTES, parsePlan } from "./priorities.mjs";
  *   5. JSON with an object root, `plan-parse-error`.
  *   6. `applyPlan`, which judges the plan (`plan-invalid` naming one field) and applies the ladder of
  *      DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE (`delegation-off` through `plan-busy`).
- * Rungs 2 (as above) to 5 are recorded by `recordRefusal` (a file row and an `alloc:log` row, the reason and nothing of
- * the body); rung 6 records its own. So no refusal of a portfolio job is silent, and the next snapshot's `lastAttempt`
- * tells the next manager run. `plan-collect-error` means the outcome is UNKNOWN: a fault after the compare-and-set was
+ * Rung 1 (`plan-absent`), rung 2 (as above) and rungs 3 to 5 are recorded by `recordRefusal` (a file row and an
+ * `alloc:log` row, the reason and nothing of the body); rung 6 records its own. So no refusal of a portfolio job is
+ * silent, and the next snapshot's `lastAttempt` tells the next manager run. `plan-collect-error` means the outcome is UNKNOWN: a fault after the compare-and-set was
  * sent (a lost reply) may hide a plan that applied, so the record carries the plan's id when it could be computed, and
  * `alloc:plan` and the audit file are the truth.
  *
  * Returns the record's `plan`: `{ outcome, reason, planId, clamped }` (`outcome` one of `applied`, `duplicate`,
- * `refused`), or null when there was no file. The worker log line is `plan_collected { jobId, outcome, reason }`.
+ * `refused`), or null when there was no file and the job was not a confirmed portfolio job. The worker log line is
+ * `plan_collected { jobId, outcome, reason }`.
  */
 
 /** The collector's own refusals, in ladder order, and the catch-all for a fault inside it. */
+export const PLAN_ABSENT = "plan-absent";
 export const PLAN_NOT_PORTFOLIO = "plan-not-portfolio";
 export const PLAN_OVERSIZE = "plan-oversize";
 export const PLAN_NOT_REGULAR_FILE = "plan-not-regular-file";
 export const PLAN_UNREADABLE = "plan-unreadable";
 export const PLAN_PARSE_ERROR = "plan-parse-error";
 export const PLAN_COLLECT_ERROR = "plan-collect-error";
-export const PLAN_COLLECT_REASONS = Object.freeze([PLAN_NOT_PORTFOLIO, PLAN_OVERSIZE, PLAN_NOT_REGULAR_FILE, PLAN_UNREADABLE, PLAN_PARSE_ERROR, PLAN_COLLECT_ERROR]);
+export const PLAN_COLLECT_REASONS = Object.freeze([PLAN_ABSENT, PLAN_NOT_PORTFOLIO, PLAN_OVERSIZE, PLAN_NOT_REGULAR_FILE, PLAN_UNREADABLE, PLAN_PARSE_ERROR, PLAN_COLLECT_ERROR]);
 
 /** The plan file's name in `/outbox`. */
 export const PLAN_FILE = "priorities.json";
@@ -142,26 +148,33 @@ export function makeCollectPlan({ allocation, governing = () => null, projects =
 			at = now();
 			if (data.kind !== "local" || typeof prepared?.jobDir !== "string") return null;
 			const path = join(prepared.jobDir, "outbox", PLAN_FILE);
-			// Rung 1: no file, no plan. lstat, so a dangling link is a file that is there (and refused below), not "none".
-			// Any other error is NOT judged here: the authority rung comes first, and rung 4 reads it again.
+			// Rung 1: is there a file? lstat, so a dangling link is a file that is there (and refused below), not "none".
+			// Nothing is decided here (issue #507): whether "no file" is `null` or `plan-absent` depends on rung 2, and any
+			// other error is judged by rung 2 first too, then read again by rung 4.
 			let present = true;
+			let absent = false;
 			try {
 				fs.lstatSync(path);
 			} catch (error) {
-				if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+				absent = error?.code === "ENOENT" || error?.code === "ENOTDIR";
 				present = false;
 			}
 
 			// Rung 2: the pickup decision, prepare and the live file, all three.
 			const shaped = data.portfolio === true && data.trigger !== undefined && data.parentJobId === undefined && data.chainDepth === undefined;
-			// A job that was never a portfolio job, with no file PROVEN present (its outbox could not be read), has no plan:
-			// the record stays `plan: null`, so an unflagged job that writes no plan is byte-identical whatever its outbox.
+			// A job that was never a portfolio job, with no file PROVEN present (none, or an outbox that could not be read),
+			// has no plan: the record stays `plan: null`, so an unflagged job that writes no plan is byte-identical whatever
+			// its outbox.
 			if (portfolio !== true || !shaped) return present ? await refuse(PLAN_NOT_PORTFOLIO, at, { audit: false }) : null;
-			if (prepared.portfolio !== true) return await refuse(PLAN_NOT_PORTFOLIO, at);
+			// A confirmed job whose flag went away at prepare or since, with no file: nobody asks it for a plan any more, so
+			// it has none to be refused. With a file, that file is the trigger's attempt, refused and recorded.
+			if (prepared.portfolio !== true) return absent ? null : await refuse(PLAN_NOT_PORTFOLIO, at);
 			const live = await Promise.resolve()
 				.then(() => checkPortfolioFlag(data))
 				.catch(() => false);
-			if (live !== true) return await refuse(PLAN_NOT_PORTFOLIO, at);
+			if (live !== true) return absent ? null : await refuse(PLAN_NOT_PORTFOLIO, at);
+			// All three agree and there is no file: the portfolio job wrote no plan, and it says so (issue #507).
+			if (absent) return await refuse(PLAN_ABSENT, at);
 
 			// Rungs 3 and 4.
 			try {

@@ -95,6 +95,16 @@ test("a prepare policy outcome (sha-gone) RETURNS before reserveBudget -- no cap
 	assert.equal(r.reason, "sha-gone");
 	assert.equal(redis.incrCalls, 0, "reserveBudget never reached on a determinate prepare policy outcome");
 	assert.ok(!calls.includes("run-container"), "a sha-gone prepare must never spend on a container");
+	assert.equal(r.budgetReserved, false, "the record says nothing was reserved, so the cost fold reads an exact $0 (#507)");
+	assert.deepEqual([r.exitCode ?? null, r.tokens ?? null], [null, null]);
+});
+
+test("every prepare refusal records budgetReserved false, whatever the preparer returned beside its reason (#507)", async () => {
+	for (const reason of ["sha-gone", "pi-too-many-files", "portfolio-snapshot-oversize", "local-folder-not-a-repo"]) {
+		const { deps: d } = deps({ redis: fakeRedis(), prepareWorkspace: async () => ({ outcome: "policy", reason, budgetReserved: true }) });
+		const r = await runJob(ghJob, d);
+		assert.deepEqual([r.outcome, r.reason, r.budgetReserved], ["policy", reason, false], reason);
+	}
 });
 
 // Issue #524: a local job on a folder that is not a repository, through the REAL dispatcher and local preparer. It

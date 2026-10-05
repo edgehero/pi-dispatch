@@ -126,6 +126,10 @@ A portfolio job runs a flow that reads the budget and proposes a split, with no 
   `portfolio-snapshot-oversize` before it costs anything.
 - **What it writes.** `/outbox/priorities.json`, the plan format of the operator's own tool. The worker reads it
   after the container completes and applies it under the same rules: the step, the interval, the floors.
+- **When it writes nothing.** A portfolio job that leaves no `/outbox/priorities.json` is recorded as refused,
+  `plan-absent`, and the applied split stays as it was. It is a line in the audit file and in `alloc:log` like the
+  refusals below, so the panel and the next snapshot's `lastAttempt` show that the run wrote no plan. A job that is
+  not a portfolio job (or whose flag was removed while it ran) and writes no plan records nothing.
 - **When it is refused.** The plan is refused, and the job stays completed, when the job is not a portfolio job any
   more (`plan-not-portfolio`: the flag was removed from the triggers file, or the job was a manual run or a chained
   child), when the file is over 16 KiB, is a link or is not a regular file, is not JSON, or fails the plan rules
@@ -247,6 +251,10 @@ direction-changing character prints as `\u{...}`.
 is off, while this host's envelope is not the applied one, or while another apply runs. A refused row has no split
 to go back to.
 
+A revert does not stop the manager. The interval restarts at the revert, and the next plan that is due may move the
+split again. With `minIntervalHours` 0, the next run of the trigger can undo a revert at once. To keep a revert, turn
+delegation off or remove the trigger's `run.portfolio` flag.
+
 While an `envelope-changed-externally` outcome is newer than the last re-base or applied plan, the view opens with
 the banner "changed outside the panel".
 
@@ -292,7 +300,7 @@ planted by `bash` in the same message as the write. An envelope edit made that w
 | Env var | `PI_ENVELOPE_FILE` (absolute, canonical path; unset = no envelope. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
 | Needs | `PI_MAX_COST_USD` |
 | Refusal reasons | `allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`, `portfolio-snapshot-oversize`, `local-folder-escaped`, `local-folder-holds-envelope`, `local-folder-project-changed` |
-| Plan reasons (run record `plan`) | `plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`, `plan-parse-error`, `plan-collect-error`, `plan-invalid`, and the apply ladder |
+| Plan reasons (run record `plan`) | `plan-absent`, `plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`, `plan-parse-error`, `plan-collect-error`, `plan-invalid`, and the apply ladder |
 | Job files | `/job/portfolio.json` (in), `/outbox/priorities.json` (out) |
 | Valkey | `alloc:plan`, `alloc:lock`, `alloc:log`, `alloc:envelope:expected` |
 | Tools | `dispatch_allocations` (read), `dispatch_priorities_set` (no confirm), `dispatch_envelope_set` (confirm) |

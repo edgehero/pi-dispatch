@@ -625,7 +625,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// The priorities plan a completed portfolio job wrote (issue #505, INT-RUN-HISTORY-FILE-CONTRACT). Additive, nullable,
 		// an explicit literal REBUILT here, TAIL position after `project` on the same contract. `{ outcome, reason, planId,
 		// clamped }`: a fixed outcome, a fixed reason or null, a 16-hex content hash or null, a boolean. Null for every
-		// run that left no `/outbox/priorities.json`, which is every run of a deployment with no portfolio trigger. Never
+		// run that left no `/outbox/priorities.json` and was no confirmed portfolio job, which is every run of a deployment
+		// with no portfolio trigger; a confirmed one that wrote none says `plan-absent` (issue #507). Never
 		// the plan's weights or its reasons: those are in the allocation audit file, and a reason is agent text.
 		plan: planOf(source.plan),
 	};
@@ -639,6 +640,7 @@ export const PLAN_RECORD_OUTCOMES = Object.freeze(["applied", "duplicate", "refu
  * Restated here so this module imports neither, and pinned to them by a test.
  */
 export const PLAN_RECORD_REASONS = Object.freeze([
+	"plan-absent",
 	"plan-not-portfolio",
 	"plan-oversize",
 	"plan-not-regular-file",

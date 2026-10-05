@@ -244,7 +244,7 @@ test("a snapshot refused at prepare (portfolio-snapshot-oversize) is policy befo
 	const d = collecting({ prepareWorkspace: async () => ({ outcome: "policy", reason: "portfolio-snapshot-oversize" }) });
 	const r = await runJob(flagged, d.deps);
 	assert.deepEqual([r.outcome, r.reason], ["policy", "portfolio-snapshot-oversize"]);
-	assert.equal(r.budgetReserved, undefined, "returned from prepare, before the reserve");
+	assert.equal(r.budgetReserved, false, "returned from prepare, before the reserve, and the record says so (#507)");
 	assert.ok(!d.calls.includes("run-container"));
 	assert.equal(d.plans.length, 0);
 });

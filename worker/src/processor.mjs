@@ -1074,9 +1074,11 @@ export async function runJob(job, deps) {
 		// -- is POLICY: return before reserveBudget so it burns no cap slot and is never retried.
 		// Mirrors the branch-protection policy return above. Spread-plus-attribution: the prepare
 		// result keeps its own reason and fields, and the host-effective provider/model land beside
-		// them exactly as on every other terminal result.
+		// them exactly as on every other terminal result. `budgetReserved: false` like every pre-reserve refusal (issue
+		// #507): nothing was reserved and no container started, so the record says so and the cost fold counts the run as
+		// an exact $0 rather than a floor (REQ-COST-ANALYTICS (d)). After the spread, so no preparer can say otherwise.
 		if (prepared?.outcome === "policy") {
-			return { ...prepared, provider: job.provider ?? null, model: job.model ?? null };
+			return { ...prepared, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 		}
 
 		// THE RESOLVED FOLDER'S PROJECT (issue #504 part B). The pickup decided the project, and so the share a job reserves
