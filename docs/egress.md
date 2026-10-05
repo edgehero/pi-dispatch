@@ -138,12 +138,21 @@ A model uses an endpoint when its `baseUrl` (its own, else its provider's) has t
 alone does not match.
 
 Keep the `compat` line. pi sends a model's output cap as `max_completion_tokens` unless `maxTokensField` says
-`max_tokens`, and Ollama ignores `max_completion_tokens`: it answers as long as it likes. Every OpenAI compatible
-server reads `max_tokens`. A free model (no `cost`, or all zeros) does not need it. A priced one does, if a job
-runs under a dollar cap (`PI_MAX_COST_USD` or a trigger's `run.maxCostUsd`): the cap can only hold when the
-server stops at the output cap. So on any server that is not one of pi's own hosted providers, the cost guard
-counts a call unboundable unless its cap travels as `max_tokens`, and refuses it under a dollar cap
-(`DES-DOLLAR-RESERVE-AND-SETTLE`). `doctor` warns about a priced model on a declared endpoint that misses it:
+`max_tokens`, and Ollama ignores `max_completion_tokens`: it answers as long as it likes. Ollama, vLLM, llama.cpp
+and LM Studio all read `max_tokens`. A free model (no `cost`, or all zeros) does not need it. A priced one does, if a
+job runs under a dollar cap (`PI_MAX_COST_USD` or a trigger's `run.maxCostUsd`): the cap can only hold when the
+server stops at the output cap. So on any server that is not one of pi's own hosted providers (or `api.openai.com`,
+which reads `max_completion_tokens`), the cost guard counts a call unboundable unless its cap travels as
+`max_tokens`, and refuses it under a dollar cap (`DES-DOLLAR-RESERVE-AND-SETTLE`). It refuses a call that asks for a
+cap of 0 or less there too: pi then sends no cap, or a negative one, which Ollama reads as no limit.
+
+Set the field yourself even where pi would pick `max_tokens` on its own (a provider named `deepseek` or `together`
+behind a proxy, a `chutes.ai` address): the cost guard reads only what `models.json` says, so it refuses such a
+model under a cap until the field is set. A server that ignores `max_tokens` as well can still answer past the cap;
+the run then counts `boundExceeded`.
+
+`doctor` names every priced model a capped job may use that misses the field, and warns about any other priced
+model on a declared endpoint:
 
 ```
 ⚠ Overlay models.json sends the output cap of "local-ollama"/"qwen2.5:0.5b" as max_completion_tokens to a declared model endpoint, which a local server may ignore (Ollama does), so under a dollar cap every call to it is refused as unboundable

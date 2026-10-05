@@ -3957,6 +3957,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **an operator's server on an api other than openai-completions** (issue #507) is trusted to read that api's own
     output-cap field (`max_output_tokens`, `max_tokens`); only openai-completions has a field choice pi makes per
     host. A server that ignores its api's own field can exceed the bound; `boundExceeded` again;
+  - **an operator's server that ignores `max_tokens` too** (review of #507) can exceed the bound; `boundExceeded`
+    again. Ollama, vLLM, llama.cpp and LM Studio read it. On Ollama a `max_tokens` of 0 or less means no limit, which
+    is why a caller's cap of 0 or less is `Infinity` on such a server (and a negative one on any openai-completions
+    host);
+  - **pi's own field detection is not read** (review of #507): `detectCompat` also picks `max_tokens` by provider
+    name or URL substring (`chutes.ai`, `deepseek.com`, providers `deepseek`, `together`, `nvidia` and others behind a
+    proxy), while the guard reads only the composed `model.compat`. Such a model off the trusted hosts is refused
+    under a cap until `compat.maxTokensField` is set explicitly: a safe false refusal, not an overspend. The trusted
+    hosts are the catalog's plus `api.openai.com` (`COMPLETIONS_EXTRA_HOSTS`, pinned): pi sends
+    `max_completion_tokens` there, OpenAI reads it, and its reasoning models reject `max_tokens`, so refusing it
+    would leave no field that works;
   - **api-id trust**: the bound believes `model.api`. An overlay or extension model that names a priced api but
     is served by something that bills differently (a gateway with its own fees, a mislabelled api) is bounded by
     the table it declares, not by what is billed;
@@ -8352,3 +8363,4 @@ a tunnel.
 | 2026-10-05 | Issue #507, the review of the panel's scoped rows. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the dollar surfaces: a scoped limits row takes its dollar caps from its own fields, so a failed dollar read shows `-` over the cap instead of dropping the cap; a full dollar window is drawn first among the row's dollar windows; the narrow plain-text path takes the counter and `(full)` from the DOLLAR WINDOWS rows by index, where it printed `$-` because the panel's scoped read takes no dollar key. `/dispatch budget` UNCHANGED, checked: it keeps the scoped read's own counters. Code evidence: admin/src/dashboard.ts (`limitRow`, the plain path), admin/src/render.mjs (`renderScopedLimits`); tests admin/test/dollar-windows.test.mjs, render.test.mjs. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, the bound: on openai-completions to a host outside the pinned catalog's (`COMPLETIONS_CATALOG_HOSTS`, derived by test), the output term is only a cap that travels as `max_tokens`; any other such call is `Infinity` and refused under a cap. The e2e overrun ($3.41 under $2 on Ollama, which ignores `max_completion_tokens`) cannot recur. Rejected: the context window as a bound, rewriting the operator's models.json, trusting an explicit `max_completion_tokens`. New residual: an operator's server on another api is trusted to read that api's own field. Every other bound term UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**, the other surfaces: the totals shown beside the split (header, headroom, the insights envelope row and bars) are the applied split's own, the envelope file's only with no split applied, and the mismatch line names the file's total. Rejected: both totals in the header. The outside-edit rule UNCHANGED, checked. |
+| 2026-10-05 | Issue #507, the review of the output-cap rule. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: a caller's cap of 0 or less no longer falls back to `model.maxTokens` on openai-completions (pi keeps it through its clamp, sends no cap for 0 and a negative one as it is, which Ollama reads as no limit): Infinity on the operator's own server, and a negative one on every host. `api.openai.com` joins the trusted hosts as a pinned addition. New residuals: a server that ignores `max_tokens` too, and pi's name and URL detection of `max_tokens`, which the guard does not read (a safe false refusal). The other bound terms UNCHANGED, checked. |
