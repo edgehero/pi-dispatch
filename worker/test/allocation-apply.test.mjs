@@ -502,6 +502,12 @@ test("a revert to a row with no plan restores the CURRENT neutral split, never a
 	assert.ok(stored(redis).validUntil, "a plan's revert carries an expiry");
 	// An old plan row that does not cover this envelope's entries still refuses as before.
 	assert.equal((await alloc.revert({ envelope: env2, digest: d2, target: { ...applied, weights: { shop: 1 } }, now: later + 5 * HOUR })).reason, "plan-incomplete");
+	// No real row (a missing target, or a refusal row with no weights) never resets the split to neutral.
+	const before = JSON.stringify(stored(redis));
+	for (const target of [undefined, null, { outcome: "refused", planId: null, weights: null }]) {
+		assert.equal((await alloc.revert({ envelope: env2, digest: d2, target, now: later + 6 * HOUR })).reason, "plan-incomplete");
+	}
+	assert.equal(JSON.stringify(stored(redis)), before);
 });
 
 test("governedDollars: min(row, allocation) with its source, synthetic ledgers for a project with no row and for _other, the total on the deployment (#504)", () => {
