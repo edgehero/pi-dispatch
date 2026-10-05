@@ -971,7 +971,9 @@ passing, on the record — issue #80.)
 
 - **Statement**: The job image shall pin an exact pi version (the one `image/runner/package.json` pins for
   `@earendil-works/pi-coding-agent`). Upgrading is an explicit commit that changes a version string, gated by
-  the upstream contract tests.
+  the upstream contract tests. `.github/workflows/pi-bump.yml` prepares that commit for every new pi release and
+  opens it as one DRAFT pull request; the pull request's own checks decide whether it holds, and a person makes it
+  ready and merges it (`CONST-MERGE-NEVER-AUTOMATIC`).
 - **Why**: pi breaks between **minors**, not just majors — a past regression silently dropped
   `sendUserMessage` after `newSession`, and the npm package was renamed from `@mariozechner` to
   `@earendil-works` mid-flight. A floating range turns a silent upstream minor into every queued job
@@ -1004,7 +1006,10 @@ passing, on the record — issue #80.)
   `@earendil-works` entry in `package-lock.json`, every such entry in the root `overrides`, the worker's
   pi-ai, the admin devDependency, `SUPPORTED_PI_VERSION` and the Dockerfile's `PI_VERSION` equal the runner's
   pin (`.github/scripts/pi-pin-check.mjs`, run by the `pins are exact` job and tested by
-  `worker/test/pi-pin-check.test.mjs`). An **operator-staged
+  `worker/test/pi-pin-check.test.mjs`). The automated bump (`.github/scripts/pi-bump.mjs`) rewrites every one of
+  those pins from one table, and `worker/test/pi-bump.test.mjs` holds that table to the sites pi-pin-check reads,
+  in both directions. It runs no pi code, regenerates nothing and moves no content hash, so a changed pi file
+  still shows on the bump's pull request as the red test that names it. An **operator-staged
   third-party pi package** is pinned by the same reasoning and is enforced at **stage time**, not here: the
   version in `pi-packages.json` must be exact and `import-pi --with-packages` refuses a range, a tag, or a
   wildcard and stages nothing (`INT-PI-PACKAGES-FILE-CONTRACT`). This constraint's own statement and scope
@@ -1023,6 +1028,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-05 | Issue #587 (every new pi release as a draft pull request). **`CONST-PI-VERSION-PINNED` AMENDED**: the Statement names `.github/workflows/pi-bump.yml` as how the upgrade commit is prepared (one rolling pull request, always a draft, whose own required checks decide whether the bump holds; a person makes it ready and merges it); the Acceptance adds that `pi-bump.mjs` rewrites every pin from one table held to pi-pin-check's sites in both directions, runs no pi code and never moves a content hash. The pin itself is unchanged. **`CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: the workflow opens or updates a draft pull request and merges nothing; the `no automatic merge` grep now covers the workflow and `.github/scripts`, any spelling of auto merge, and self-approval in its forms (and reading a pull request's reviews, in the bump's scope only). **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new zero-spend smoke spends nothing (a fake key, refused with a 401). |
 | 2026-10-05 | Issue #587 (pi 1.0.3). **`CONST-PI-VERSION-PINNED` AMENDED**: the Statement names the pin's file (`image/runner/package.json`) instead of a number, so a bump no longer edits this article; the Evidence records that pi 1.0.1 dropped the shrinkwrap that locked pi's own sibling packages and that pi-coding-agent depends on them by a range, so the root `package.json` pins every `@earendil-works` package in `overrides`; the Acceptance adds that every pi entry in the lockfile, every pi override and every hand-written copy of the pin equal the runner's pin (`.github/scripts/pi-pin-check.mjs`, in the `pins are exact` job). The pin itself moves from 0.99.1 to 1.0.3 in the same commit. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new refusals (a routing key under any thinking level, an Azure deployment option on provider `azure`) are the model guard's and the cost guard's, inside the container before a provider call, and no worker gate moved; the renamed Azure provider is refused before any spend as any id pi does not have, now with the new id named. **`CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: the new script and workflow step merge nothing and name no merge call. |
 | 2026-10-04 | Found this round (no issue): a scheduled job whose run finished while Valkey was unreachable longer than the lock renewal window was run again, paid. **`CONST-RETRY-INFRA-ONLY` AMENDED**, the Why only: a scheduled job that stalls after its completion was recorded is returned as its record says, without running (the processor's lost-lock gate: `stalledCounter > 0`, `attempt` equal to `attemptsMade + 1`, outcome not `failed`, started no earlier than the job less a 5 minute clock tolerance; a record found and refused is logged as `job_lost_lock_record_rejected`); a job with no such record runs as before, and the stall guard still counts the stall. The Statement and Acceptance are UNCHANGED, checked: a re-run of a completed job was a retry of a determinate outcome, which the Statement already forbids. **Code evidence**: worker/src/index.mjs -> makeProcessor (the first gate); worker/src/run-history.mjs -> makeSettledRecord. |
 | 2026-10-04 | Issue #504, part A (delegated allocation: the doctrine and the pure modules). **No article changed.** **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the ordering is untouched; a delegated allocation changes only the values the dollar reserve compares against (a project's cap becomes the smaller of its row and its allocation), never when the reserve runs. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the operator's session still processes no adversarial input by premise; a model there that reads issue text breaks that premise, and `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` names it as a residual of the session tool, whose judgement belongs in a portfolio job (issue #505). |

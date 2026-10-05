@@ -37,6 +37,11 @@ on:
       - ".github/scripts/admin-pi-canary.mjs"
       - ".github/scripts/host-pi-canary.mjs"
       - ".github/scripts/job-user-e2e.mjs"
+      - ".github/scripts/fake-key-smoke.mjs"
+      - ".github/scripts/pi-pin-check.mjs"
+      - ".github/scripts/pi-derived.mjs"
+      - ".github/scripts/pi-bump.mjs"
+      - ".github/workflows/pi-bump.yml"
   # DELIBERATELY UNFILTERED, unlike the push trigger above. Five of the jobs below are REQUIRED status
   # checks on main (issue #105), and a required check that never reports blocks the merge FOREVER -- a
   # docs-only PR under the old path filter reported nothing at all (PR #106: "no checks reported") and
@@ -235,11 +240,36 @@ jobs:
           # The pattern has TWO surfaces since GitLab landed (issue #42). A grep that still only knew
           # GitHub's would pass while `PUT /projects/:id/merge_requests/:iid/merge` sat in the worker:
           # the constraint would read as enforced and would not be.
-          if grep -rnE 'pulls\.merge|gh pr merge|mergePullRequest|merge_pull_request|[Aa]utoMerge|/pulls/.*/merge|glab mr merge|merge_requests/[^ ]*/merge|acceptMergeRequest' worker/src image/runner receiver/src; then
-            echo "::error::Merge symbol found. CONST-MERGE-NEVER-AUTOMATIC forbids any merge call."
+          #
+          # The scope grew with the automated pi bump (issue #587): .github/workflows/pi-bump.yml and the scripts it runs
+          # hold a write token, which is exactly where an automatic merge, an auto-merge switch or a self-approval would
+          # go. This file stays OUT of scope, because it holds the patterns themselves. Approval joins the list because on
+          # a branch that required an approving review it would be a merge by another name. Reading a pull request's
+          # reviews is refused only in the bump's own scope: the receiver's poller GETs them on purpose (issue #66),
+          # and a GET there is not the hazard.
+          #
+          # grep exits 0 on a match, 1 on none and 2 on an error, a missing path among them. Only 1 is clean: an `if grep`
+          # would read a renamed or deleted path in scope as "no match" and pass. worker/test/no-automatic-merge.test.mjs
+          # runs this script on a planted tree and on the real one.
+          runtime=(worker/src image/runner receiver/src)
+          bump=(.github/workflows/pi-bump.yml .github/scripts)
+          found=0
+          check() {
+            set +e
+            grep -rn --exclude-dir=node_modules "$@"
+            rc=$?
+            set -e
+            if [ "$rc" -ne 1 ]; then found=1; fi
+          }
+          check -E 'pulls\.merge|gh[[:space:]]+pr[[:space:]]+merge|mergePullRequest|merge_pull_request|/pulls/.*/merge|glab mr merge|merge_requests/[^ ]*/merge|acceptMergeRequest' "${runtime[@]}" "${bump[@]}"
+          check -iE 'auto[-_]?merge' "${runtime[@]}" "${bump[@]}"
+          check -E 'gh[[:space:]]+pr[[:space:]]+review.*(--approve|[[:space:]]-a([[:space:]]|$))|addPullRequestReview|createReview|event"?[[:space:]]*[=:]?[[:space:]]*"?APPROVE' "${runtime[@]}" "${bump[@]}"
+          check -E '/pulls/[^ ]*/reviews' "${bump[@]}"
+          if [ "$found" -ne 0 ]; then
+            echo "::error::A merge or approval symbol is listed above, or a path in scope is missing. CONST-MERGE-NEVER-AUTOMATIC forbids any merge call, and the scope must exist to be checked."
             exit 1
           fi
-          echo "OK: no merge symbols (both forges)"
+          echo "OK: no merge or approval symbols (both forges, and the pi bump workflow)"
 
       - name: No test may steal the runner's stdout
         run: |
@@ -504,6 +534,32 @@ jobs:
           sudo chown -R pdjob:pdjob /srv/pd
           sudo install -d -o pdjob -g pdjob -m 0755 /srv/pd-jobs
           sudo -H -u pdjob env "PATH=$PATH" PI_JOBS_DIR=/srv/pd-jobs "$(command -v node)" /srv/pd/.github/scripts/job-user-e2e.mjs "$IMAGE_REF"
+
+      # --- REQ-UPSTREAM-CONTRACT-TESTS (issue #587): the zero-spend provider smoke ---
+      # Every other in-image check runs offline against a fake provider. This one runs a real job through the entrypoint
+      # against Anthropic itself, with a key that has a real key's shape and is not one: it must reach the provider, get
+      # its 401, be metered on every method the meter wraps, exit 2 provider-auth-refused and cost $0, uncapped and
+      # under a dollar cap. That is what tells a pi bump (the automated ones from pi-bump.yml included) that the pinned
+      # pi still reaches a real provider through the meter. When a run fails, a control fetch from the same image with the
+      # same fake key decides: only Anthropic's 401 makes it the image's fault; a network error, a 5xx, a 529 or a 429
+      # fails as "infrastructure, re-run", never read as a verdict either way.
+      #
+      # A STEP IN A REQUIRED JOB, SO IT DECIDES FOR ITSELF WHETHER TO RUN. The job must always report, so it cannot be
+      # path-filtered; the smoke depends on a real provider, so a pull request that cannot move its result does not pay
+      # for it. It runs on a push to main, the schedule and a manual run, on the pi bump's own branch, and on a pull
+      # request that changes a pi pin site, the lockfile, image/ or the smoke itself, computed here against the base
+      # (fake-key-smoke.mjs's smokeWanted). On pull_request the checkout is the merge commit, so a diff against the
+      # base sha is exactly the pull request's change.
+      - name: "RUNNER: a fake-key job reaches the provider, is refused with a 401, is metered and costs nothing (issue #587)"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          : > "$RUNNER_TEMP/changed.txt"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
+          fi
+          node .github/scripts/fake-key-smoke.mjs "$IMAGE_REF" --changed "$RUNNER_TEMP/changed.txt"
 
       # --- INT-CONTAINER-JOB-INPUTS / REQ-GLOBAL-PI-OVERLAY ---
       # A staged package that did not mount must be refused BEFORE any spend. This is the one failure
