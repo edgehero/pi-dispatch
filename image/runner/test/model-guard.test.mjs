@@ -646,10 +646,11 @@ test("under a cap a call is priced from the table pinned at install: a forged co
 	// poisoned mid-run (registerProvider over a builtin id, a rewritten models.json and a refresh, an extension's own
 	// runtime). So the table is taken ONCE, when the meter installs, and every capped call on every runtime instance is
 	// held to it: no entry for (provider, id, api), or an entry whose api, cost or compat differs, is unboundable.
-	const source = [{ ...LISTED }, { ...LISTED, id: "free-1", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }];
+	const source = [JSON.parse(JSON.stringify(LISTED)), { ...LISTED, id: "free-1", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }];
 	const prices = pinPriceTable({ getAllModels: () => source });
-	// Poisoning the source after the pin changes nothing the table holds.
-	source[0].cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	// Poisoning the source after the pin changes nothing the table holds: in place, as a registry's own objects can be.
+	Object.assign(source[0].cost, { input: 0, output: 0 });
+	source[0].compat.maxTokensField = "max_completion_tokens";
 	const cases = [
 		["the pinned model", { ...LISTED }, true],
 		["a deep-equal copy", JSON.parse(JSON.stringify(LISTED)), true],
