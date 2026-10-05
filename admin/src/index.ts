@@ -2365,10 +2365,11 @@ function posIntOrNull(v: any): number | null {
  * parity test would put policy in two places. Caps come from the settings overlay ALONE -- a cap the
  * overlay does not set is null, "unknown", because the worker resolves it from env/defaults this
  * process cannot read authoritatively, and the page must render that as absence, never a guess.
- * `readBudget` is GET-only (CONST-BUDGET-BEFORE-TOKENS: observing the budget spends nothing).
+ * `readBudget` is GET-only (CONST-BUDGET-BEFORE-TOKENS: observing the budget spends nothing). Exported with a Valkey
+ * client seam (`redisFn`) for its tests, as `assembleAllocationView` is.
  */
-async function assembleBudgetView(paths: any): Promise<any> {
-  const raw: any = await readBudget({ url: paths.valkeyUrl });
+export async function assembleBudgetView(paths: any, { redisFn }: { redisFn?: any } = {}): Promise<any> {
+  const raw: any = await readBudget({ url: paths.valkeyUrl, redisFn });
   const view: any = readSettingsView({ settingsFile: paths.settingsFile });
   const overlay = view && !view.invalid && view.overlay ? view.overlay : {};
   const pct = Number.isInteger(overlay.softHoldPct) ? overlay.softHoldPct : null;
@@ -2395,7 +2396,7 @@ async function assembleBudgetView(paths: any): Promise<any> {
   // in-flight is worker-process state no redis read can see, and the panel never invents a number.
   const limitsView: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
   const limits: any[] = Array.isArray(limitsView?.limits) ? limitsView.limits : [];
-  const scopedCounters: any = limits.length > 0 ? await readScopedBudget({ url: paths.valkeyUrl, limits }) : { rows: [] };
+  const scopedCounters: any = limits.length > 0 ? await readScopedBudget({ url: paths.valkeyUrl, limits, redisFn }) : { rows: [] };
   const scoped = limits.map((l: any, i: number) => {
     const used = scopedCounters?.rows?.[i] ?? null;
     const win = (cap: number | null, key: string) => {
@@ -2403,7 +2404,28 @@ async function assembleBudgetView(paths: any): Promise<any> {
       const u = used && Number.isFinite(used[key]) ? used[key] : null;
       return { used: u, cap, state: u !== null ? windowState(u, cap, null) : "ok" };
     };
-    return { scope: l.scope, day: win(l.day, "day"), week: win(l.week, "week"), month: win(l.month, "month"), concurrent: l.concurrent };
+    // The row's dollar windows (issue #507), from the `usdMicros` the same read already returned: a `model:` row, or a
+    // `project:` row with only `weekUsd`, has no job-count window, and the page drew its scope with no number beside
+    // it. Integer micro-dollars both ways (the cap through the worker's own parser), so the page formats them exactly.
+    const usdWin = (field: string, key: string) => {
+      let cap: number | null = null;
+      try {
+        cap = typeof l[field] === "string" ? parseUsdMicros(l[field], field) : null;
+      } catch {
+        cap = null; // the shared parser already refused such a file; a hand-built row is skipped, never guessed
+      }
+      if (cap === null) return null;
+      const u = used?.usdMicros?.[key];
+      return { usedMicros: Number.isSafeInteger(u) && u >= 0 ? u : null, capMicros: cap };
+    };
+    return {
+      scope: l.scope,
+      day: win(l.day, "day"),
+      week: win(l.week, "week"),
+      month: win(l.month, "month"),
+      concurrent: l.concurrent,
+      usd: { day: usdWin("dayUsd", "day"), week: usdWin("weekUsd", "week"), month: usdWin("monthUsd", "month") },
+    };
   });
   return {
     unreachable,

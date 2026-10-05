@@ -731,6 +731,26 @@ test("RUN_DETAIL shows a portfolio run's plan and the dollars a run settled, and
   assert.deepEqual(nulls, older, "a record with null fields renders byte-identical to one written before them");
 });
 
+test("RUN_DETAIL says in words whether a run kept a budget slot, and nothing for a value the record contract has not got (#507)", async () => {
+  // `budgetReserved` is a boolean or null (INT-RUN-HISTORY-FILE-CONTRACT). The line used to print the value itself:
+  // "true budget slot". Pinned as the whole framed row, so the words and their place on the line are both held.
+  const openRun = async (extra) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], exitCode: 0, attempt: 1, ...extra }] }) }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const lines = comp.render(80).map(stripAnsi);
+    await comp.dispose();
+    return lines.map((l) => l.trim()).find((l) => l.startsWith("│ turns ")) ?? null;
+  };
+  const kvRow = (value) => `│ ${`${"turns".padEnd(12)} ${value}`.padEnd(66)} │`;
+  assert.equal(await openRun({ budgetReserved: true }), kvRow("4 turns · exit 0 · budget slot held · attempt 1"));
+  assert.equal(await openRun({ budgetReserved: false }), kvRow("4 turns · exit 0 · no budget slot · attempt 1"));
+  assert.equal(await openRun({ budgetReserved: null }), kvRow("4 turns · exit 0 · attempt 1"), "null says nothing");
+  assert.equal(await openRun({}), kvRow("4 turns · exit 0 · attempt 1"), "an older record without the key says nothing");
+  assert.equal(await openRun({ budgetReserved: "true" }), kvRow("4 turns · exit 0 · attempt 1"), "a value outside the contract is not guessed at");
+});
+
 test("RUN_DETAIL breaks out other sessions and subprocesses, and shows nothing for a pre-metering record", async () => {
   const openRun = async (tokens) => {
     const comp = makeDashboard({

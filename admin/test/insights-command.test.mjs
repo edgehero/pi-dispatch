@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { modelDollarKeyPrefix, scopeDollarKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 
 /**
  * The insights command (REQ-INSIGHTS-HTML-EXPORT): the bare `/dispatch insights` writes the
@@ -235,6 +236,37 @@ test("the budget slice carries the scoped rows from the limits file; a dead queu
   assert.ok(page.includes("scoped limits (scoped-limits.json)"), "the configured limits reach the page");
   assert.ok(page.includes("day used ? / cap 10"), "the dead queue leaves used unknown, never an invented zero");
   assert.ok(page.includes("concurrent ≤2 (config; in-flight not shown)"), "concurrency stays config-only");
+});
+
+test("the budget slice carries a scoped row's dollar windows, so a dollar-only row is not drawn bare (#507)", async () => {
+  // A `model:` row, or a `project:` row with only `weekUsd`, has no job-count window; the page drew its scope and no
+  // number. The counters come from the one scoped read the slice already makes (`usdMicros`), the caps from the file.
+  const dir = tempDir("admin-insights-usd-");
+  const slPath = join(dir, "scoped-limits.json");
+  writeFileSync(slPath, JSON.stringify({ version: 2, limits: [
+    { scope: "acme/web", day: 10 },
+    { scope: "project:shop", weekUsd: "45" },
+    { scope: "model:anthropic/claude-sonnet-4-5", weekUsd: "80", monthUsd: "300.5" },
+  ] }));
+  const shop = scopeDollarKeyPrefix("project:shop");
+  const model = modelDollarKeyPrefix("anthropic/claude-sonnet-4-5");
+  const redis = {
+    on() {},
+    disconnect() {},
+    async get(key) {
+      if (key.startsWith(shop)) return "6340917";
+      if (key.startsWith(model) && key.includes(":w:")) return "7966101";
+      return null;
+    },
+  };
+  const view = await mod.assembleBudgetView({ valkeyUrl: "redis://127.0.0.1:1", scopedLimitsPath: slPath }, { redisFn: () => redis });
+  assert.deepEqual(view.scoped.map((r) => r.usd), [
+    { day: null, week: null, month: null },
+    { day: null, week: { usedMicros: 6_340_917, capMicros: 45_000_000 }, month: null },
+    { day: null, week: { usedMicros: 7_966_101, capMicros: 80_000_000 }, month: { usedMicros: 0, capMicros: 300_500_000 } },
+  ]);
+  const dead = await mod.assembleBudgetView({ valkeyUrl: "not-a-url", scopedLimitsPath: slPath });
+  assert.deepEqual(dead.scoped[1].usd.week, { usedMicros: null, capMicros: 45_000_000 }, "a dead queue leaves the counter unknown, never $0");
 });
 
 test("the default graph dir's account root is made this account's first, and another account's root writes nothing (#464)", async () => {

@@ -679,6 +679,24 @@ test("scoped rows render facts with the assembler's state words; config-only con
   assert.ok(page.includes("dispatch_limit_add/edit/delete"), "the scoped lever is named");
 });
 
+test("a scoped row's dollar windows render as exact micro-dollars; junk and an old payload draw none (#507)", () => {
+  const p = CANNED_PAYLOAD();
+  p.budget = {
+    ...CANNED_BUDGET(),
+    scoped: [
+      { scope: "project:shop", day: null, week: null, month: null, concurrent: null, usd: { day: null, week: { usedMicros: 6_340_917, capMicros: 45_000_000 }, month: null } },
+      { scope: "model:anthropic/claude-sonnet-4-5", day: null, week: null, month: null, concurrent: null, usd: { day: { usedMicros: null, capMicros: 5_000_000 }, week: { usedMicros: 1, capMicros: 0 }, month: "junk" } },
+      { scope: "acme/web", day: { used: 2, cap: 10, state: "ok" }, week: null, month: null, concurrent: 1 },
+    ],
+    scopedInvalid: null,
+  };
+  const page = buildInsightsHtml(p, { now: NOW });
+  const row = (scope) => page.match(new RegExp(`<div class="row"><span class="wl">${scope.replace(/[/:]/g, "\\$&")}</span><span>([^<]*)</span>`))?.[1] ?? null;
+  assert.equal(row("project:shop"), "week spent+held $6.340917 / cap $45.00");
+  assert.equal(row("model:anthropic/claude-sonnet-4-5"), "day spent+held ? / cap $5.00", "an unread counter is ?, a zero cap and junk draw nothing");
+  assert.equal(row("acme/web"), "day used 2 / cap 10 · concurrent ≤1 (config; in-flight not shown)", "a payload row without the key draws what it always did");
+});
+
 test("a pre-#242 payload (no scoped key) and an invalid limits file both state their absence honestly", () => {
   const base = cannedHtml(); // CANNED_BUDGET carries no `scoped` -- the pre-#242 payload shape
   assert.ok(!base.includes("scoped limits (scoped-limits.json)"), "no scoped block invented for an old payload");

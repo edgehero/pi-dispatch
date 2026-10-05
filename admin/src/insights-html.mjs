@@ -428,12 +428,21 @@ function normScopedRow(v) {
       state: BUDGET_STATES.includes(w.state) ? w.state : "ok",
     };
   };
+  // A dollar window (issue #507): integer micro-dollars, the cap above 0 or the window is not drawn; the counter null when
+  // it could not be read, never an invented $0. A payload from before the key lacks `usd` and draws no dollar window.
+  const usdWin = (w) => {
+    if (w === null || w === undefined || typeof w !== "object") return null;
+    if (!Number.isSafeInteger(w.capMicros) || w.capMicros <= 0) return null;
+    return { usedMicros: Number.isSafeInteger(w.usedMicros) && w.usedMicros >= 0 ? w.usedMicros : null, capMicros: w.capMicros };
+  };
+  const usd = v.usd !== null && v.usd !== undefined && typeof v.usd === "object" ? v.usd : {};
   return {
     scope: clip(v.scope, 60),
     day: win(v.day),
     week: win(v.week),
     month: win(v.month),
     concurrent: Number.isInteger(v.concurrent) && v.concurrent > 0 ? v.concurrent : null,
+    usd: { day: usdWin(usd.day), week: usdWin(usd.week), month: usdWin(usd.month) },
   };
 }
 
@@ -1071,6 +1080,14 @@ function budgetSectionHtml(nb) {
         if (w.state !== "ok") worst = w.state;
       }
       if (s.concurrent !== null) bits.push(`concurrent ≤${fmt(s.concurrent)} (config; in-flight not shown)`);
+      // The dollar windows (issue #507), exact micro-dollars like the panel's: the counter is spent and held, what the
+      // worker admits the next job against. No state word: a dollar window is full before its counter reaches the cap
+      // (a reservation adds the whole per-job cap), and this page does not hold the per-job cap to judge it.
+      for (const key of ["day", "week", "month"]) {
+        const w = s.usd[key];
+        if (w === null) continue;
+        bits.push(`${key} spent+held ${w.usedMicros !== null ? microsUsd(w.usedMicros) : "?"} / cap ${microsUsd(w.capMicros)}`);
+      }
       rows.push(`<div class="row"><span class="wl">${escapeHtml(s.scope)}</span><span>${escapeHtml(bits.join(" · "))}</span>${worst !== "ok" ? stateWord(worst) : ""}</div>`);
     }
     rows.push('<div class="lever">scoped: dispatch_limit_add/edit/delete · or press m in the /dispatch panel</div>');
