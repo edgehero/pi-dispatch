@@ -40,7 +40,7 @@
  * this factory applies above. A bare `/dispatch` against a POINTED-AT deployment whose installed
  * runtime differs from the pinned one says so once per process, and names setup as the fix.
  *
- * Tested pi version: 1.0.3 (SUPPORTED_PI_VERSION). The gate is the capability
+ * Tested pi version: SUPPORTED_PI_VERSION below. The gate is the capability
  * probe, not the version: the factory registers nothing unless every API member
  * it consumes is present; on a miss it names the member and the tested version
  * on stderr and returns. A pi that DIFFERS from the pin but passes the probe

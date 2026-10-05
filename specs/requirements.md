@@ -228,8 +228,16 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   change in flight)
 - **Traces to**: `CONST-PI-VERSION-PINNED`, `CONST-NO-CONTEXT-FILES-MANDATORY`, `INT-SDK-SESSION-OPTIONS`,
   `OQ-005`
+- **How a bump arrives** (issue #587): `.github/workflows/pi-bump.yml` prepares the upgrade commit for every new
+  pi release, daily or on demand. It moves every pin and re-resolves pi's tree in the lockfile, and runs no pi code
+  doing it, so it holds a write token and executes nothing it downloaded. It opens or updates one rolling pull
+  request, ALWAYS as a draft: the verdict is this suite's, run by the pull request's own required checks on the new
+  pi, together with the derived-table equality test (`worker/test/pi-derived.test.mjs`; a person runs
+  `.github/scripts/pi-derived.mjs --write` on the branch when it is red) and the `image` job's zero-spend smoke
+  (`.github/scripts/fake-key-smoke.mjs`: a real job with a fake Anthropic key reaches the provider, is refused with
+  a 401, is metered on every wrapped method and costs $0). A person makes it ready and merges it.
 - **Acceptance**: Given a version bump where a pinned assumption breaks, the build fails and publishes
-  nothing. Given an **operator-built** image named in `run.image`,
+  nothing, and the automated bump's draft pull request shows the broken assumption as a red check that names it. Given an **operator-built** image named in `run.image`,
   **nothing in this repo gates it**; the same suite is runnable against that tag by the operator
   (`docs/job-image.md`), and the residual is `OQ-012`.
 
@@ -3220,6 +3228,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-05 | Issue #587 (every new pi release as a draft pull request). **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: a new paragraph names `.github/workflows/pi-bump.yml` as how the upgrade commit is prepared (pins and lockfile only, no pi code run, one rolling pull request that is always a draft) and says the verdict is this suite's, run by that pull request's own required checks, with the derived-table test and the `image` job's zero-spend provider smoke; the Acceptance adds the draft's red check. Every assertion this requirement lists is UNCHANGED, checked. |
 | 2026-10-05 | Issue #587 (pi 1.0.3). **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED** (mechanism, not contract): the bound's output cap is the largest any of the call's sampling parameters could send, every `samplingParamsByThinkingLevel` level included (pi 1.0.2 merges the level pi picks per call). **`REQ-MODEL-POLICY` AMENDED**: a routing key in the sampling parameters refuses whichever thinking level the call is made at, and a per-call Azure deployment refuses on provider `azure` whatever its api as well as on the azure-openai-responses api; the Acceptance gains the thinking-level case. **`REQ-TRIGGER-SECRETS` UNCHANGED, checked**: pi-ai 1.0.3's five Anthropic workload identity federation variables were already reserved (the Anthropic SDK reads them by name) and are now pinned as found in pi-ai's own sources too. **`REQ-UPSTREAM-CONTRACT-TESTS` UNCHANGED, checked**: version literals that only forced a review are now content hashes of the pi files each copy came from, and a new test holds every pi package in the lockfile and the overrides to the pin. |
 | 2026-10-05 | Issue #507, found by its end-to-end test: a run the cost guard refused as unboundable recorded only `cost-cap` with $0. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a run's drill-in header names the record's `why` after the reason, and points an unboundable `cost-cap` at `compat.maxTokensField`. `REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked: no cap, bound or refusal rule moved; the record only names which rule refused. |
 | 2026-10-05 | Issue #507, the review of the allocation totals. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: during an envelope mismatch the ALLOCATION rows, on the panel, `/dispatch priorities` and the insights page, also list each entry the applied split allocates that this host's file does not name, marked "not in this host's file" (render.mjs `allocationRowIds`); before, such an allocation counted in the shown total and was listed nowhere. With the digests equal the rows are the file's entries alone, UNCHANGED, checked. |

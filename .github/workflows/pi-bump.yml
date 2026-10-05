@@ -1,0 +1,148 @@
+# Every new pi release as a draft pull request (issue #587; CONST-PI-VERSION-PINNED, REQ-UPSTREAM-CONTRACT-TESTS).
+#
+# CONST-PI-VERSION-PINNED makes a pi upgrade an explicit commit. This workflow makes the mechanical part of that commit
+# (every pin, and pi's tree in the lockfile) and opens it as one rolling DRAFT pull request; a person reviews it, makes
+# it ready and merges it. It never merges anything (CONST-MERGE-NEVER-AUTOMATIC), and the `no automatic merge` job in
+# pi-upgrade-check.yml greps this file and every script it runs to keep it that way.
+#
+# ONE JOB, AND IT RUNS NO PI CODE. That is the security design, and it is simpler than the one it replaced. The job
+# holds a write token, so it runs only this repository's own scripts and npm's resolver
+# (`npm install --package-lock-only --ignore-scripts`, which reads registry metadata and extracts and runs nothing). It
+# installs nothing, runs no test and no generator, and takes no file from any other job. Whether the bump HOLDS is
+# decided where every pull request's is: by its own required checks (pi-upgrade-check.yml on pull_request), which run
+# the suite, the pinned-assumption and derived-table tests and the image job's zero-spend smoke on the new pi, and name
+# what broke. So the pull request is ALWAYS a draft, and a person makes it ready.
+#
+# Before it commits, pi-bump.mjs refuses anything a bump cannot explain: a lockfile entry not from the npm registry
+# with an integrity hash, a package that gains an install script, a package.json that changed beyond its pin, and any
+# file in the working tree beyond the pin files and the lockfile. The workflow then stages exactly those paths.
+#
+# Untrusted text (the version input, a branch name) reaches a shell only through `env:`, never through an expression
+# inside `run:`.
+
+name: pi bump
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "pi version to bump to (exact, like 1.0.4). Empty means npm's latest @earendil-works/pi-coding-agent."
+        required: false
+        default: ""
+
+permissions: {}
+
+# One bump at a time, and never cancelled halfway: a run cut short can leave the branch pushed and the pull request
+# stale.
+concurrency:
+  group: pi-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: open or update the pi bump pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: The bump token is configured
+        id: token
+        env:
+          PI_BUMP_TOKEN: ${{ secrets.PI_BUMP_TOKEN }}
+        run: |
+          if [ -z "$PI_BUMP_TOKEN" ]; then
+            echo "::warning::PI_BUMP_TOKEN is not set, so no pi bump can be pushed. CLAUDE.md, section \"pi bumps\", says how to create it."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The node in .nvmrc brings the npm the lockfile is made with (npm 10.9.3 with node 22.19.0), the pair every other
+      # job in this repository installs with, so the lockfile is the one a person would have made.
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Resolve the target and decide whether there is a bump to make
+        id: decide
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            TARGET="$INPUT_VERSION"
+          elif ! TARGET=$(npm view @earendil-works/pi-coding-agent@latest version); then
+            # The canaries' doctrine: a registry that did not answer is infrastructure, never a verdict.
+            echo "::error::npm view @earendil-works/pi-coding-agent@latest failed: an infrastructure failure, not a verdict. Re-run."
+            exit 1
+          fi
+          # Every pull request whose head is this repository's chore/pi-bump, open or closed. pi-bump.mjs keeps only
+          # those whose head repository IS this one: a fork can carry a branch of the same name.
+          gh api "repos/$GITHUB_REPOSITORY/pulls?state=all&head=${GITHUB_REPOSITORY_OWNER}:chore/pi-bump&per_page=100" > "$RUNNER_TEMP/pulls.json"
+          export TARGET
+          PULLS="$RUNNER_TEMP/pulls.json" node .github/scripts/pi-bump.mjs decide > "$RUNNER_TEMP/decision"
+          cat "$RUNNER_TEMP/decision" >> "$GITHUB_OUTPUT"
+          # Written only once pi-bump.mjs has accepted it as an exact version, so an input cannot add an output line.
+          if grep -qx 'skip=false' "$RUNNER_TEMP/decision"; then echo "target=$TARGET" >> "$GITHUB_OUTPUT"; fi
+          echo "::notice::$(grep '^reason=' "$RUNNER_TEMP/decision" | cut -d= -f2-)"
+
+      - name: Bump every pin and resolve the lockfile (no package code runs)
+        if: steps.decide.outputs.skip == 'false'
+        env:
+          TARGET: ${{ steps.decide.outputs.target }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr"
+          node .github/scripts/pi-bump.mjs "$TARGET" --summary "$RUNNER_TEMP/summary.json"
+          git diff --stat
+          # Only for the links to pi's releases; release text is linked, never pasted.
+          npm view @earendil-works/pi-coding-agent versions --json > "$RUNNER_TEMP/versions.json"
+          node .github/scripts/pi-bump.mjs render "$RUNNER_TEMP/summary.json" "$RUNNER_TEMP/versions.json" "$RUNNER_TEMP/pr"
+
+      # Force-pushed: the workflow owns chore/pi-bump. A run for a newer pi rebuilds it from the base branch, because a
+      # fix made for the older release has to be re-verified against the newer one anyway.
+      - name: Commit as Rob Boerman, signed off, and push the rolling branch
+        if: steps.decide.outputs.skip == 'false'
+        env:
+          PI_BUMP_TOKEN: ${{ secrets.PI_BUMP_TOKEN }}
+        run: |
+          mapfile -t paths < <(node .github/scripts/pi-bump.mjs paths)
+          git config user.name "Rob Boerman"
+          git config user.email "robboerman@live.nl"
+          git checkout -B chore/pi-bump
+          git add -- "${paths[@]}"
+          git commit -s -F "$RUNNER_TEMP/pr/commit.txt"
+          basic=$(printf 'x-access-token:%s' "$PI_BUMP_TOKEN" | base64 -w0)
+          echo "::add-mask::$basic"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" \
+            push --force "https://github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/chore/pi-bump
+
+      - name: Open or update the one pull request, as a draft
+        if: steps.decide.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.PI_BUMP_TOKEN }}
+          BASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          title=$(cat "$RUNNER_TEMP/pr/title.txt")
+          number=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&head=${GITHUB_REPOSITORY_OWNER}:chore/pi-bump" \
+            --jq "[.[] | select(.head.repo.full_name == \"$GITHUB_REPOSITORY\")][0].number // empty")
+          if [ -z "$number" ]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" --head chore/pi-bump --draft --title "$title" --body-file "$RUNNER_TEMP/pr/body.md"
+            exit 0
+          fi
+          gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/pr/body.md"
+          # A rebuilt branch is unreviewed again, so a pull request a person had made ready goes back to draft.
+          if [ "$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "false" ]; then
+            gh pr ready "$number" --repo "$GITHUB_REPOSITORY" --undo
+          fi
+          echo "updated #$number"

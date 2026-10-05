@@ -1,10 +1,12 @@
 /**
- * Catalog rows the cost-bound tests price against (issue #501). Copied from the pinned pi-ai catalog
- * (`dist/providers/data/*.json`) and NOT trusted: pinned-api.test.mjs finds each row named in CATALOG_ROWS in the
- * pinned copy by its (provider, api, id), whatever file holds it, and requires these fields to match it, so a pin
- * bump that reprices or renames one of these models fails there rather than leaving cost-guard.test.mjs asserting
- * yesterday's prices. Keyed by identity rather than by file name since pi 1.0.3 renamed the Azure provider from
- * `azure-openai-responses` to `azure` and its file with it (issue #587). Only the fields callCostBound reads are kept.
+ * Catalog rows the cost-bound tests price against (issue #501). GENERATED from the pinned pi-ai catalog
+ * (`dist/providers/data/*.json`) by .github/scripts/pi-derived.mjs, and held to it by worker/test/pi-derived.test.mjs:
+ * do not edit a fixture by hand. CATALOG_ROWS at the end is the input: add a row there and run the generator.
+ * pinned-api.test.mjs also finds each row in the pinned copy by its (provider, api, id), whatever file holds it, so a
+ * pin bump that reprices or renames one of these models fails there and in cost-guard.test.mjs rather than leaving the
+ * tests asserting yesterday's prices. Keyed by identity rather than by file name since pi 1.0.3 renamed the Azure
+ * provider from `azure-openai-responses` to `azure` and its file with it (issue #587). Only the fields callCostBound
+ * reads are kept.
  */
 /** openai.json openai-responses chat:gpt-5.4 */
 export const GPT_5_4 = Object.freeze({"id":"gpt-5.4","api":"openai-responses","provider":"openai","baseUrl":"https://api.openai.com/v1","cost":{"input":2.5,"output":15,"cacheRead":0.25,"cacheWrite":0,"tiers":[{"inputTokensAbove":272000,"input":5,"output":22.5,"cacheRead":0.5,"cacheWrite":0}]},"contextWindow":272000,"maxTokens":128000});
@@ -20,7 +22,7 @@ export const AZURE_GPT_5_4 = Object.freeze({"id":"gpt-5.4","api":"azure-openai-r
 export const SONNET_4_5 = Object.freeze({"id":"claude-sonnet-4-5-20250929","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://api.anthropic.com","cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},"contextWindow":1000000,"maxTokens":64000});
 /** anthropic.json anthropic-messages chat:claude-fable-5 */
 export const FABLE_5 = Object.freeze({"id":"claude-fable-5","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://api.anthropic.com","cost":{"input":10,"output":50,"cacheRead":1,"cacheWrite":12.5},"contextWindow":1000000,"maxTokens":128000,"compat":{"allowedFallbackModels":[{"provider":"anthropic","model":"claude-opus-4-8","cost":{"input":5,"output":25,"cacheRead":0.5,"cacheWrite":6.25}},{"provider":"anthropic","model":"claude-opus-5","cost":{"input":5,"output":25,"cacheRead":0.5,"cacheWrite":6.25}}]}});
-/** Each fixture's row in the pinned catalog, as [provider, api, id]. */
+/** Each fixture's row in the pinned catalog, as [provider, api, id]. CATALOG_ROWS is hand-written: the input. */
 export const CATALOG_ROWS = Object.freeze({
 	GPT_5_4: ["openai", "openai-responses", "gpt-5.4"],
 	GPT_5_5: ["openai", "openai-responses", "gpt-5.5"],

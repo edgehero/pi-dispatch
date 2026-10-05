@@ -52,8 +52,9 @@ Two consequences worth internalising before you design anything:
   not a version, and this rule is in the constitution because ignoring it once nearly shipped a runner that
   imported an export the pinned release did not have. Docs are a hint; source at the pin is evidence.
 - **`CONST-MERGE-NEVER-AUTOMATIC`.** Nothing in this project merges anything, ever. CI greps
-  `worker/src`, `receiver/src` and `image/runner` for `pulls.merge`, `gh pr merge`, `autoMerge` and friends,
-  so even a comment mentioning one fails the build.
+  `worker/src`, `receiver/src`, `image/runner`, `.github/workflows/pi-bump.yml` and `.github/scripts` for
+  `pulls.merge`, `gh pr merge`, any spelling of auto merge, a self-approval and friends, so even a comment
+  mentioning one fails the build.
 - **`CONST-BUDGET-BEFORE-TOKENS`.** Free, determinate refusals go before anything that spends: before the
   token mint, the clone, the token-cap read and the budget reservation.
 - **`CONST-RETRY-INFRA-ONLY`.** A determinate policy refusal **returns** a result; only infrastructure
@@ -137,7 +138,8 @@ Two consequences worth internalising before you design anything:
   `runtime-settings.mjs`; `EXIT_POLICY`'s copies in the runner and the `deploy/` units; the receiver
   filters' action sets as the loader's set minus their own named exclusions; the git hardening flags,
   which live in `worker/src/git-hardening.mjs` because seven files carried them by hand and one had
-  quietly lost a flag; `docs/egress.md`'s canary rows, whose first column is rebuilt from
+  quietly lost a flag; the pi tables that can be derived (`.github/scripts/pi-derived.mjs`, each checked-in
+  copy held to its generation by `worker/test/pi-derived.test.mjs`); `docs/egress.md`'s canary rows, whose first column is rebuilt from
   `CANARY_LINES` by a test and required to match between markers (the count-the-source test it replaced
   could not see four spellings and could go false red on a comment); and every spec revision row, which
   must split into exactly two cells on unescaped pipes, because such a row is CUT on the rendered page
@@ -145,6 +147,52 @@ Two consequences worth internalising before you design anything:
   Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.
+
+## pi bumps
+
+`.github/workflows/pi-bump.yml` turns every new pi release into one DRAFT pull request (issue #587). It makes the
+mechanical part of the upgrade commit that `CONST-PI-VERSION-PINNED` asks for; a person reviews it, makes it ready
+and merges it.
+
+- **What it does.** Daily, and on demand (Actions, "pi bump", Run workflow; the version input defaults to npm's
+  latest). One job, which runs no pi code: `.github/scripts/pi-bump.mjs <version>` moves every pin from one table and
+  re-resolves pi's tree in the lockfile with `npm install --package-lock-only --ignore-scripts` (registry metadata
+  only, nothing extracted or run). It refuses a lockfile entry not from the npm registry with an integrity hash, a
+  package that gains an install script, a `package.json` that changed beyond its pin, and any file other than the
+  pin files and the lockfile. Then it commits exactly those files as Rob Boerman with `-s`, force-pushes
+  `chore/pi-bump`, and opens or updates the one pull request titled `chore(pi): run on pi X`. It skips a target that
+  is the pin, older than it, not an exact release, already carried by the open pull request, or closed unmerged.
+- **The pull request is ALWAYS a draft.** The workflow cannot know whether the bump holds; the pull request's own
+  required checks say so (the suite, the pinned-assumption tests and the image job's zero-spend smoke, on the new pi).
+  Each red check names what broke. When everything is fixed and green, a person marks it ready.
+- **Reviewing a bump.** Work through the body's checklist (it is OQ-005's).
+  - If `worker/test/pi-derived.test.mjs` is red, run `node .github/scripts/pi-derived.mjs --write` on the branch and
+    commit the result. It prints the catalog hosts added and removed: **a new host widens the cost guard**, so check
+    which output field pi sends there.
+  - Read the linked pi releases (linked, never pasted). Check the human-judged copies their tests name (steering
+    variables, pricing pins, the width table).
+  - Every other red test is a pinned assumption that no longer holds: fix the code or the copy against the new
+    release, never the assertion.
+- **Updating a content hash.** Nothing moves one automatically: a red hash test is the prompt to re-verify. Read
+  the named pi code in the new tarball (`npm pack @earendil-works/<pkg>@<version>`, never HEAD) and re-check the
+  copy that test guards against it. Two kinds:
+  - the `pinned-api.test.mjs` hashes are of single FUNCTIONS cut out by `piFunction`; the failing assertion prints
+    the new values, so copy them from there;
+  - the whole-file hashes (`models-json.test.mjs`'s `MIRRORED_PI_FILES`, `pricing.test.mjs`'s `models.js`,
+    `admin/test/helpers/renderer.mjs`'s `PI_TUI_UTILS_SHA256`) are `shasum -a 256` of the named file.
+
+  Put the new value in the same commit as any fix.
+- **Fixes go on `chore/pi-bump`,** as ordinary signed-off commits. A later rebuild (a run for a newer pi) force-pushes
+  the branch from the base and OVERWRITES them, on purpose: a fix for the older release has to be re-verified
+  anyway. A rebuild also puts a ready pull request back to draft.
+- **The `PI_BUMP_TOKEN` secret** is a fine-grained personal access token of the owner's account, so the push and
+  the pull request run every required check (a pull request opened with the workflow's own token runs none).
+  Create it at GitHub, Settings, Developer settings, Fine-grained tokens: resource owner `edgehero`, repository
+  access "Only select repositories" with `pi-dispatch` alone, permissions **Contents read and write** and **Pull
+  requests read and write**, and nothing else (no Workflows permission: a bump touches no workflow file), with an
+  expiry (90 days is a good default). Store it as the repository secret `PI_BUMP_TOKEN` (Settings, Secrets and
+  variables, Actions). Without it the run warns and does nothing; once it has expired the push fails with an
+  authentication error. Either way no pull request appears until a new token is stored.
 
 ## Commits and PRs
 

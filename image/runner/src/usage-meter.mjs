@@ -1714,8 +1714,9 @@ const MIN_OUTPUT_TOKENS = 16;
  */
 const MAX_TOKENS_UNSENT_APIS = new Set(["openai-codex-responses", "cloudflare-workers-ai-system-one", "typesafe-system-one"]);
 /**
- * The hosts pi's own catalog serves openai-completions models on (issue #507), pinned to the catalog by
- * pinned-api.test.mjs. openai-completions sends the output cap as `max_completion_tokens` unless the model's
+ * The hosts pi's own catalog serves openai-completions models on (issue #507), GENERATED from the pinned catalog by
+ * .github/scripts/pi-derived.mjs (a pi bump reruns it and lists the hosts that came or went) and pinned to the catalog
+ * by pinned-api.test.mjs. openai-completions sends the output cap as `max_completion_tokens` unless the model's
  * compat says `max_tokens`, and pi picked that field per host for these hosts only. Any other server is the
  * operator's (Ollama, vLLM, llama.cpp, LM Studio, a proxy), and pi's default is a guess there: Ollama 0.35.0
  * ignores `max_completion_tokens` and answers past it (measured: 20 asked, 440 returned), which let a job settle

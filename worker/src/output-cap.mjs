@@ -13,7 +13,7 @@
 
 import { composedCost, endpointsForModel, isZeroCost, modelEntryOf } from "./model-endpoints.mjs";
 
-/** The hosts pi's catalog serves openai-completions on: the runner's `COMPLETIONS_CATALOG_HOSTS`, copied. */
+/** The hosts pi's catalog serves openai-completions on: the runner's `COMPLETIONS_CATALOG_HOSTS`, generated the same way. */
 export const COMPLETIONS_CATALOG_HOSTS = Object.freeze([
 	"api.ant-ling.com",
 	"api.cerebras.ai",
