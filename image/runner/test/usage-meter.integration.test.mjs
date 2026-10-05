@@ -1575,7 +1575,7 @@ async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels 
 				return own;
 			},
 		});
-		// `registerTarget` (issue #587's gate): the target is a model of the job runtime's own registry, so under a cap it is
+		// `registerTarget` (issue #587's review): the target is a model of the job runtime's own registry, so under a cap it is
 		// priced from there; an unregistered target is refused as unboundable before its bound is even taken.
 		if (registerTarget) {
 			const { provider: _provider, ...definition } = target;
@@ -1613,7 +1613,7 @@ test("PR #547's reviews: a proxy provider's forward to another model is a full c
 	const refusal = dear.logged.find((line) => line.event === "cost_refused");
 	assert.ok(refusal?.fields.bound > 1_000_000, `the target's own bound was judged: ${JSON.stringify(refusal)}`);
 	assert.deepEqual([dear.served, dear.stops, dear.guard.cost.state.inflight], [[], ["cost-cap"], 0], "nothing sent, nothing left in flight");
-	// The same forward to a target no registry knows (issue #587's gate): refused before its bound, as unboundable.
+	// The same forward to a target no registry knows (issue #587's review): refused before its bound, as unboundable.
 	const unregistered = await proxyRun({ maxCostMicros: 1_000_000, target: { api: PRICED_API, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000, compat: { maxTokensField: "max_tokens" } } });
 	assert.equal(unregistered.logged.find((line) => line.event === "cost_refused")?.fields.why, "unboundable", JSON.stringify(unregistered.logged));
 	assert.deepEqual([unregistered.served, unregistered.stops], [[], ["cost-cap"]], "a zero-rated target nobody registered is not run for free");

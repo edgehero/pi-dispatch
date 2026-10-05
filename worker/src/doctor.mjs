@@ -2554,7 +2554,7 @@ export async function collectChecks(shellVars, seams) {
 			if (typeof error?.code === "string") keylessUnreadable = error.code;
 		}
 	}
-	// Issue #587's gate: the rename hint is judged on the overlay itself, read whenever there is one, endpoint or not.
+	// Issue #587's review: the rename hint is judged on the overlay itself, read whenever there is one, endpoint or not.
 	let hintModels = keylessModels;
 	let hintUnread = false;
 	if (unknownToPi && hintModels === null && Object.hasOwn(RENAMED_PROVIDERS, provider) && typeof env.PI_GLOBAL_PI_DIR === "string" && isAbsolute(env.PI_GLOBAL_PI_DIR)) {

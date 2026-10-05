@@ -964,7 +964,7 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	// answer the guard with one id and the provider with another. Only while a guard can judge, so a job with no
 	// policy dispatches the caller's own object exactly as before.
 	const judgedModel = (model) => (guard !== null && hardStop ? snapshotModel(model) : model);
-	// The options too, on the same condition (issue #587's gate): their sampling parameters and env are read after an await.
+	// The options too, on the same condition (issue #587's review): their sampling parameters and env are read after an await.
 	const judgedArgs = (args) => (guard !== null && hardStop ? snapshotArgs(args) : args);
 	const dispatchOrUnanswered = (verdict, run) => dispatchBinding(guard, verdict, run);
 
@@ -2634,7 +2634,7 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 	function prepare({ method, model, args, stop }) {
 		const options = args?.[1];
 		const theirs = options?.onPayload;
-		// Issue #587's gate: on azure the deployment is resolved from options.env MERGED with the credential's own env
+		// Issue #587's review: on azure the deployment is resolved from options.env MERGED with the credential's own env
 		// (ModelRuntime.prepareRequest, after admit), so a deployment map can arrive where admit cannot see it. The api
 		// and the azure provider write that deployment as payload.model before this hook runs; it must be model.id.
 		const deploymentChecked = model?.api === AZURE_API || model?.provider === AZURE_PROVIDER;

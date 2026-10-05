@@ -214,7 +214,7 @@ function unknownProviderMessage(provider, overlay = {}) {
 }
 
 /**
- * The overlay models.json the rename hint is judged on (issue #587's gate): the pickup's snapshot when it read one, else
+ * The overlay models.json the rename hint is judged on (issue #587's review): the pickup's snapshot when it read one, else
  * the overlay itself, read here, only for an id pi renamed. The snapshot reads the overlay only when an endpoint is
  * declared, so a full custom provider under the old id, with no endpoint, was told "did you mean". A read that fails
  * is `overlayUnread`: no guess.

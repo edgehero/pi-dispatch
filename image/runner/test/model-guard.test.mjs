@@ -487,7 +487,7 @@ test("on provider azure, a deployment name or map refuses on EVERY api it serves
 	assert.equal(other.admit({ method: "streamSimple", model: LISTED, args: [{}, { azureDeploymentName: "x", env: { AZURE_OPENAI_DEPLOYMENT_NAME_MAP: "listed-1=x" } }] }), null);
 });
 
-// ── Issue #587's gate: the sampling layers pi reads are the ones the guards judged ───────────────────────
+// ── Issue #587's review: the sampling layers pi reads are the ones the guards judged ───────────────────────
 
 /** A runtime that records the model and options each call was dispatched with, by reference, as pi receives them. */
 function recordingRuntimeClass() {
