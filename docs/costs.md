@@ -366,8 +366,9 @@ is an open issue.
   "max_tokens"}}}}}` in the overlay `models.json`. Also refused: a call on a model that is not in the price table
   the job pins when it starts (pi's catalog plus your overlay `models.json`, read once, before any extension loads),
   or one whose cost, compat or api differs from that table's entry. A price is never taken from the caller or from
-  anything that changes during the run, so a model an extension registers itself cannot run under a cap. A pi
-  process the job starts prices from the same table. The run record says which rule
+  anything that changes during the run, so a model an extension registers itself cannot run under a cap. Declare such a model in the overlay
+  `models.json` instead: its price is then pinned when the job starts. A pi process the job starts prices from the
+  same table. The run record says which rule
   refused in its `why`: `unboundable` for these, `over-cap` when the call's bound would pass the cap, and `external`
   when the subprocesses' spend could not be read. The run detail shows it after the reason, as
   `cost-cap (unboundable: see compat.maxTokensField)`. A `cost-cap` stop with no `why` came from a subprocess, an
@@ -486,7 +487,9 @@ the provider key and runs as the same user as the runner. Named gaps:
   counted;
 - a lot of output from a background child can push the job's exit line out of the part of the log the worker
   reads. The run then settles at the floor;
-- children do not see the overlay `models.json` (issue #503).
+- children do not see the overlay `models.json` (issue #503). So when the overlay's `modelOverrides` changes the
+  cost, compat or api of a builtin model, a child builds that model from the catalog, which differs from the
+  pinned table, and every capped call the child makes on it is refused as `unboundable`.
 
 **pi-subagents in a job.** It needs `PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT` set to pi's package folder, or it
 fails before any child runs. Its children do not see the overlay `models.json` (issue #503), so a model defined

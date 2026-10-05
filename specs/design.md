@@ -3640,6 +3640,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     installed has no entry, so it cannot run under a cap (without a cap nothing is compared); and the job's own
     processes run as the runner's uid, so one that rewrites `PRICES` and exports a matching hash to a child it starts
     itself defeats the child's check (it stops an extension or a model in a pi child from forging a price in passing);
+    and a pi child does not see the overlay `models.json`, so a builtin model whose cost, compat or api the overlay's
+    `modelOverrides` changes differs from its pinned entry in a child, and the child's capped calls on it are refused
+    as unboundable (fail closed);
   - only the 11 api ids whose module reaches pi-ai's `calculateCost` price from the catalog (`PRICED_APIS`,
     derived from the pinned source by that test); any other api is `Infinity`;
   - the tables are the model's cost, each allowed fallback's cost (anthropic-messages bills a fallback answer
