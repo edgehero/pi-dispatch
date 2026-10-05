@@ -58,23 +58,24 @@ export function completionsOwnServer(model) {
 /**
  * The parts of a model the rule reads, composed as pi 0.99.1's provider-composer.js composes them from the overlay
  * `models.json` (`models`, parsed, or null) and the builtin catalog (`builtinModel(provider, id)`, injected):
- *   - a model the overlay DEFINES: its own `api` and `baseUrl`, else its provider's, else the builtin's of that id;
- *     its compat field from its `modelOverrides` entry, else its own, else its provider's (a defined model takes no
- *     builtin compat);
+ *   - a model the overlay DEFINES: its own `api` and `baseUrl`, else its provider's, else those of pi's DEFAULTS
+ *     model (`findModelDefaults`, mirrored in `definedDefaults`); its compat field from its `modelOverrides` entry,
+ *     else its own, else its provider's (a defined model takes no builtin compat);
  *   - a BUILTIN model: its own `api`; the provider's `baseUrl` over its own; its compat field from the override, else
  *     the provider's, else the catalog's.
- * The cost is `composedCost`'s. Null when neither the overlay nor the catalog knows the model.
+ * The cost is `composedCost`'s. Null when neither the overlay nor the catalog knows the model. `builtinChatModels`
+ * (the provider's catalog chat models, injected) feeds the defaults.
  */
-export function outputCapView({ models, provider, modelId, builtinModel = () => null }) {
+export function outputCapView({ models, provider, modelId, builtinModel = () => null, builtinChatModels = () => [] }) {
 	const { entry, defined, override } = modelEntryOf(models, provider, modelId);
 	const builtin = typeof builtinModel === "function" ? builtinModel(provider, modelId) : null;
 	const field = (compat) => (compat !== null && typeof compat === "object" ? compat.maxTokensField : undefined);
-	const str = (v) => (typeof v === "string" ? v : undefined);
 	const cost = composedCost({ models, provider, modelId, builtinModel });
 	if (defined) {
+		const composed = definedDefaults(entry, modelId, typeof builtinChatModels === "function" ? builtinChatModels(provider) : []);
 		return {
-			api: str(defined.api) ?? str(entry?.api) ?? str(builtin?.api),
-			baseUrl: str(defined.baseUrl) ?? str(entry?.baseUrl) ?? str(builtin?.baseUrl),
+			api: composed?.api,
+			baseUrl: composed?.baseUrl,
 			maxTokensField: field(override?.compat) ?? field(defined.compat) ?? field(entry?.compat),
 			cost,
 		};
@@ -88,6 +89,34 @@ export function outputCapView({ models, provider, modelId, builtinModel = () => 
 		};
 	}
 	return null;
+}
+
+const str = (v) => (typeof v === "string" ? v : undefined);
+
+/**
+ * The `{ api, baseUrl }` pi 0.99.1 composes for the overlay-defined model `modelId` (provider-composer.js
+ * `applyModelsJson`): the provider's chat models start as the catalog's (each on the provider's `baseUrl` when it sets
+ * one), and each definition in the file's order is composed and then replaces the model of its id or joins the list.
+ * A definition's `api` is its own, else the provider's, else its DEFAULTS model's, and its `baseUrl` likewise, where the
+ * defaults are `findModelDefaults` over the list so far: the model of the same id, else one of the definition's api,
+ * else the first openai-completions model, else the first. Null when no definition has that id.
+ */
+function definedDefaults(entry, modelId, catalogChat) {
+	const list = (Array.isArray(catalogChat) ? catalogChat : [])
+		.filter((m) => m !== null && typeof m === "object" && typeof m.id === "string" && (m.type ?? "chat") === "chat")
+		.map((m) => ({ id: m.id, api: str(m.api), baseUrl: str(entry?.baseUrl) ?? str(m.baseUrl) }));
+	let found = null;
+	for (const d of Array.isArray(entry?.models) ? entry.models : []) {
+		if (d === null || typeof d !== "object" || typeof d.id !== "string") continue;
+		const wanted = str(d.api) ?? str(entry.api);
+		const defaults = list.find((m) => m.id === d.id) ?? (wanted ? list.find((m) => m.api === wanted) : undefined) ?? list.find((m) => m.api === "openai-completions") ?? list[0];
+		const composed = { id: d.id, api: wanted ?? defaults?.api, baseUrl: str(d.baseUrl) ?? str(entry.baseUrl) ?? defaults?.baseUrl };
+		const at = list.findIndex((m) => m.id === d.id);
+		if (at >= 0) list[at] = composed;
+		else list.push(composed);
+		if (d.id === modelId) found = composed;
+	}
+	return found;
 }
 
 /**
@@ -119,7 +148,7 @@ export function ignoredOutputCapModels({ models, endpoints, builtinModel = () =>
 		const builtins = (Array.isArray(listed) ? listed : []).filter((b) => b !== null && typeof b === "object" && typeof b.id === "string" && !defined.some((m) => m.id === b.id));
 		for (const modelId of [...defined.map((m) => m.id), ...builtins.map((b) => b.id)]) {
 			const lookup = (p, id) => (p === provider ? (builtins.find((b) => b.id === id) ?? (typeof builtinModel === "function" ? builtinModel(p, id) : null)) : null);
-			if (!outputUnboundable(outputCapView({ models, provider, modelId, builtinModel: lookup }))) continue;
+			if (!outputUnboundable(outputCapView({ models, provider, modelId, builtinModel: lookup, builtinChatModels }))) continue;
 			if (endpointsForModel({ models, provider, modelId, endpoints }).length === 0) continue;
 			found.push({ provider, modelId });
 		}
