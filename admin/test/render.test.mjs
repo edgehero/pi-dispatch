@@ -436,6 +436,29 @@ test("renderScopedLimits shows version 2 dollar windows, a model row's included 
   assert.match(renderScopedLimits({ limits }), /day \$-\/\$3\.00/);
 });
 
+test("renderScopedLimits takes the counter and the full verdict from the panel's dollar rows by index, and keeps a cap they lack (#507)", () => {
+  const limits = { limits: [
+    { scope: "acme/web", day: 10, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: null, monthUsd: null },
+    { scope: "project:shop", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: "45.00", monthUsd: null },
+    { scope: "model:openai/gpt-x", day: null, week: null, month: null, concurrent: null, dayUsd: "3.00", weekUsd: "80.00", monthUsd: null },
+  ] };
+  // The panel's own scoped read carries no `usdMicros`; a stale one here must not win over the DOLLAR WINDOWS rows.
+  const scopedBudget = { rows: [{ day: 2 }, { usdMicros: { week: 1 } }, {}] };
+  const dollars = { rows: [
+    { ledger: "deployment", name: null, index: null, window: "week", capMicros: 120_000_000, counterMicros: 5, full: false },
+    { ledger: "scope", name: "project:shop", index: 1, window: "week", capMicros: 45_000_000, counterMicros: 6_340_917, full: false },
+    { ledger: "model", name: "openai/gpt-x", index: 2, window: "week", capMicros: 80_000_000, counterMicros: 79_000_000, full: true },
+  ] };
+  assert.equal(renderScopedLimits({ limits, scopedBudget, dollars }), [
+    "Scoped limits:",
+    "  acme/web: day 2/10",
+    "  project:shop: week $6.340917/$45.00",
+    "  model:openai/gpt-x: day $-/$3.00 · week $79.00/$80.00 (full)",
+  ].join("\n"));
+  // The dollar read failed as a whole: every cap stays, every counter is unknown.
+  assert.equal(renderScopedLimits({ limits, scopedBudget, dollars: { rows: [], unreachable: "down" } }).split("\n")[3], "  model:openai/gpt-x: day $-/$3.00 · week $-/$80.00");
+});
+
 test("renderScopedLimits: rows with used/cap and config-only concurrency; null when nothing configured; invalid degrades", () => {
   const limits = { limits: [{ scope: "acme/web", day: 10, week: 40, month: null, concurrent: 1 }, { scope: "/srv/site", day: null, week: null, month: 60, concurrent: null }] };
   const out = renderScopedLimits({ limits, scopedBudget: { rows: [{ day: 3, week: null }, { month: 12 }] } });

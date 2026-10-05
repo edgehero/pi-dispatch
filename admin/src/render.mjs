@@ -218,7 +218,7 @@ function plainDuration(ms) {
 	return h < 24 ? `${h}h${m % 60}m` : `${Math.floor(h / 24)}d${h % 24}h`;
 }
 
-export function renderScopedLimits({ limits, scopedBudget, projects = null } = {}) {
+export function renderScopedLimits({ limits, scopedBudget, projects = null, dollars = null } = {}) {
   if (limits?.invalid) return `Scoped limits: file invalid (${limits.invalid})`;
   const list = Array.isArray(limits?.limits) ? limits.limits : [];
   if (list.length === 0) return null; // nothing configured: say nothing (the mutex needs no line)
@@ -233,12 +233,17 @@ export function renderScopedLimits({ limits, scopedBudget, projects = null } = {
     }
     if (Number.isInteger(l.concurrent)) bits.push(`<=${l.concurrent} at once`);
     // Version 2's dollar windows (issues #501, #502): the cap, and what is held or settled when the counter was read.
+    // Given `dollars` (the panel's DOLLAR WINDOWS rows, issue #507), the counter and its `(full)` verdict are that
+    // section's row for this file index and window, so the two cannot disagree; a row missing there (the read failed)
+    // keeps its cap with `-`. Without it (`/dispatch budget`), the counter is the scoped read's own `usdMicros`.
+    const dollarRows = Array.isArray(dollars?.rows) ? dollars.rows : null;
     for (const key of ["day", "week", "month"]) {
       const cap = l[`${key}Usd`];
       if (typeof cap !== "string") continue;
-      const micros = used?.usdMicros?.[key];
+      const d = dollarRows === null ? null : (dollarRows.find((r) => r?.index === i && r?.window === key) ?? null);
+      const micros = dollarRows === null ? used?.usdMicros?.[key] : d?.counterMicros;
       const u = Number.isSafeInteger(micros) && micros >= 0 ? formatMicros(micros) : "-";
-      bits.push(`${key} $${u}/$${cap}`);
+      bits.push(`${key} $${u}/$${cap}${d?.full === true ? " (full)" : ""}`);
     }
     // A project row (issue #499 part C): its member count, or that its project is missing (the panel's framed twin).
     if (typeof l.scope === "string" && l.scope.startsWith("project:")) {
