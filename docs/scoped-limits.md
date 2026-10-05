@@ -234,7 +234,8 @@ Three doors, same as quiet hours:
   `monthUsd` as decimal strings (`"2.50"`) and check them before they ask, with the worker's own rules. They
   write version 1 until a row needs version 2, and drop back to version 1 when the last dollar row goes.
 - **The dollar windows** of every row, with the deployment's, are in the panel's DOLLAR WINDOWS section and in
-  `dispatch_costs` ([costs](costs.md#where-to-look)).
+  `dispatch_costs` ([costs](costs.md#where-to-look)). A row's own dollar windows also show on its line in the
+  panel's SCOPED LIMITS section and in the budget panel of the insights page, as spent and held over the cap.
 - **By hand**: edit the file; the worker hot-reloads it.
 
 ## Caveats

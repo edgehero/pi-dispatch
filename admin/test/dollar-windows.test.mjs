@@ -301,6 +301,39 @@ test("a scoped limit row shows its dollar windows from the DOLLAR WINDOWS rows o
   assert.ok(lines.includes(framed("● model:anthropic/claude-sonnet-4-5  week $79.00/$80.00 full")), lines.join("\n"));
 });
 
+test("a scoped limit row keeps its dollar caps when the dollar read failed, with the counter unknown (#507)", async () => {
+  const scopedLimits = { limits: [
+    { scope: "project:shop", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: "45.00", monthUsd: null },
+    { scope: "model:anthropic/claude-sonnet-4-5", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: "80.00", monthUsd: null },
+  ] };
+  const projects = { projects: [{ id: "shop", members: ["github:acme/web", "github:acme/api"] }] };
+  const lines = await renderSnapshot({ ...BASE, scopedLimits, scopedBudget: { rows: [{}, {}] }, projects, dollars: { rows: [], unreachable: "EACCES" } }, 80);
+  assert.ok(lines.includes(framed("○ project:shop  week -/$45.00  2 members")), lines.join("\n"));
+  assert.ok(lines.includes(framed("○ model:anthropic/claude-sonnet-4-5  week -/$80.00")), lines.join("\n"));
+});
+
+test("a scoped limit row draws a full dollar window first, so the word is not what clips at 80 (#507)", async () => {
+  const scopedLimits = { limits: [
+    { scope: "model:anthropic/claude-sonnet-4-5", day: null, week: null, month: null, concurrent: null, dayUsd: "12.50", weekUsd: "80.00", monthUsd: "300.123456" },
+  ] };
+  const dollars = { rows: [
+    { ledger: "model", name: "anthropic/claude-sonnet-4-5", index: 0, window: "day", capMicros: 12_500_000, counterMicros: 1_000_000, full: false, records: null },
+    { ledger: "model", name: "anthropic/claude-sonnet-4-5", index: 0, window: "week", capMicros: 80_000_000, counterMicros: 40_000_000, full: false, records: null },
+    { ledger: "model", name: "anthropic/claude-sonnet-4-5", index: 0, window: "month", capMicros: 300_123_456, counterMicros: 299_000_000, full: true, records: null },
+  ] };
+  const lines = await renderSnapshot({ ...BASE, scopedLimits, scopedBudget: { rows: [{}] }, dollars }, 80);
+  assert.ok(lines.includes("│ ● model:anthropic/claude-sonnet-4-5  month $299.00/$300.123456 full  day $1… │"), lines.join("\n"));
+});
+
+test("the narrow plain-text panel shows a scoped row's dollar counter and verdict from the DOLLAR WINDOWS rows (#507)", async () => {
+  const scopedLimits = { limits: [
+    { scope: "project:shop", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: "45.00", monthUsd: null },
+  ] };
+  const dollars = { rows: [{ ledger: "scope", name: "project:shop", index: 0, window: "week", capMicros: 45_000_000, counterMicros: 46_000_000, full: true, records: null }] };
+  const lines = await renderSnapshot({ ...BASE, scopedLimits, scopedBudget: { rows: [{}] }, dollars }, 0);
+  assert.ok(lines.includes("  project:shop: week $46.00/$45.00 (full)"), lines.join("\n"));
+});
+
 test("the panel's REAL deps read the counters every tick and the records at most once per interval", async () => {
   const dir = tempDir("pd-501-p7-");
   const settingsFile = join(dir, "settings.json");

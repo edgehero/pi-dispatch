@@ -28,7 +28,7 @@ import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readProjects, readScopedLimits, readStagedPackages, scanRunRecords } from "./read-model.mjs";
 import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs, renderDollarWindows } from "./dollar-windows.mjs";
-import { formatMicros } from "@edgehero/pi-dispatch/money";
+import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText } from "./render.mjs";
@@ -1514,7 +1514,9 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   ];
   // Scoped limits appear only when configured (the mutex needs no line) -- renderScopedLimits returns
   // null for the nothing-configured case, and a section with no lines would render an empty box.
-  const scopedText = renderScopedLimits({ limits: snapshot.scopedLimits, scopedBudget: snapshot.scopedBudget, projects: snapshot.projects });
+  // The dollar counters come from the DOLLAR WINDOWS rows (issue #507), as on the framed row: this snapshot's scoped
+  // read takes no dollar key, and a second read could disagree with the section beside it.
+  const scopedText = renderScopedLimits({ limits: snapshot.scopedLimits, scopedBudget: snapshot.scopedBudget, projects: snapshot.projects, dollars: snapshot.dollars ?? null });
   if (scopedText) sections.splice(2, 0, { title: "SCOPED LIMITS", lines: toLines(scopedText) });
   // Held jobs appear only when something is held, for the same reason: a section with no lines renders an
   // empty box, and a deployment that never waits must look exactly as it did before the feature existed.
@@ -2276,14 +2278,27 @@ function limitRow(l: any, used: any, inner: number, styler: any, projects: any =
   }
   // The row's dollar windows (issue #507): a dollar-only row (a `model:` row, or a `project:` row with `weekUsd`) used to
   // show no cap at all here. Each is `window $spent+held/$cap`, after the concurrency, the order of the plain-text path
-  // (`renderScopedLimits`). Amber and `full`, and the dot with it, on the DOLLAR WINDOWS row's own verdict: the next job
-  // at the deployment's per-job cap would be refused `dollar-cap`, which is what the dot means for a count window.
-  const usdWindows: string[] = [];
-  for (const d of dollarRows) {
+  // (`renderScopedLimits`). The CAP comes from the row's own field, so it stays on screen when the dollar read fails as a
+  // whole (the counter is then `-`, DOLLAR WINDOWS' convention for an unread counter). The counter and the verdict come
+  // from the DOLLAR WINDOWS row of the same window: amber and `full`, and the dot with it, when the next job at the
+  // deployment's per-job cap would be refused `dollar-cap`, which is what the dot means for a count window. A full
+  // window is drawn first among the row's dollar windows. The count windows still come before them, so on a row with
+  // both a long row can clip the dollar cell; DOLLAR WINDOWS above names the full window in that case.
+  const usdCells: { full: boolean; text: string }[] = [];
+  for (const key of ["day", "week", "month"]) {
+    let cap: number | null = null;
+    try {
+      cap = optionalUsdMicros(l[`${key}Usd`], `${key}Usd`);
+    } catch {
+      cap = null; // the shared parser already refused such a file; a hand-built row is skipped, never guessed
+    }
+    if (cap === null) continue;
+    const d = dollarRows.find((r: any) => r?.window === key) ?? null;
     const full = d?.full === true;
     if (full) atCap = true;
-    usdWindows.push(styler.fg(full ? "warning" : "text", `${d?.window ?? "-"} ${usd(d?.counterMicros)}/${usd(d?.capMicros)}${full ? " full" : ""}`));
+    usdCells.push({ full, text: styler.fg(full ? "warning" : "text", `${key} ${usd(d?.counterMicros ?? null)}/${usd(cap)}${full ? " full" : ""}`) });
   }
+  const usdWindows = [...usdCells.filter((c) => c.full), ...usdCells.filter((c) => !c.full)].map((c) => c.text);
   const dot = atCap ? styler.fg("warning", "●") : styler.fg("dim", "○");
   const bits = [`${dot} ${styler.fg("accent", l.scope ?? "-")}`, ...windows];
   if (Number.isInteger(l.concurrent)) bits.push(styler.fg("muted", `≤${l.concurrent} at once`));

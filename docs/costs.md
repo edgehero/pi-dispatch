@@ -292,8 +292,9 @@ change what the windows are charged.
   still running. The row turns amber and says `full` when a job at the deployment's per-job cap would no longer
   fit. Beside it, from the run records: what settled and how many runs settled each way (`13 metered, 1 floor`).
   A `boundExceeded` count shows, amber, only when it is above zero. The SCOPED LIMITS section shows each row's
-  dollar windows the same way (`week $6.340917/$45.00`), and so does the insights page's budget panel. A folder or model row says `records n/a`: a record names a folder by its basename only, and does not say
-  which model windows its job reserved in. A `project:<id>` row folds the records whose `project` is that id,
+  dollar windows the same way (`week $6.340917/$45.00`), and so does the insights page's budget panel. A folder
+  or model row says `records n/a`: a record names a folder by its basename only, and does not say which model
+  windows its job reserved in. A `project:<id>` row folds the records whose `project` is that id,
   local runs included. The records side counts only the records this host can read
   (`PI_LOGS_DIR`), so on a fleet without shared logs it is this host's share. The panel reads the deployment's
   caps from the settings overlay and the deployment's `.env`, so a cap set only in the worker's service unit
