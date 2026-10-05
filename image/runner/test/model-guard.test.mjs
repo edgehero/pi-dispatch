@@ -576,6 +576,54 @@ test("the sampling layers and options pi receives are copies: a mutation after t
 	}
 });
 
+test("every field of the model, the call's env and its samplingParams must be plain own data, at any depth, or the call is refused (issue #587)", async () => {
+	// The copy pi is handed is built from data only. A class instance, a Proxy, an accessor, a hidden property or a
+	// function anywhere in it would otherwise be kept BY REFERENCE (measured: a compat class instance whose
+	// allowedFallbackModels was set after admit put an unlisted fallback on the wire; an env class instance that gained
+	// PI_CACHE_RETENTION after admit priced a 1h cache write the bound never counted).
+	class Compat { constructor() { this.maxTokensField = "max_tokens"; } }
+	const proxied = new Proxy({ maxTokensField: "max_tokens" }, {});
+	const hiddenFallback = () => {
+		const compat = { maxTokensField: "max_tokens" };
+		Object.defineProperty(compat, "allowedFallbackModels", { value: [], enumerable: false });
+		return compat;
+	};
+	const shapes = [
+		["a class instance as compat", { compat: new Compat() }, {}],
+		["a Proxy as compat", { compat: proxied }, {}],
+		["a hidden property in compat", { compat: hiddenFallback() }, {}],
+		["an accessor deep in compat", { compat: { maxTokensField: "max_tokens", allowedFallbackModels: [{ get model() { return "x"; } }] } }, {}],
+		["a function in cost", { cost: { ...LISTED.cost, input: () => 1 } }, {}],
+		["a Proxy as cost", { cost: new Proxy({ ...LISTED.cost }, {}) }, {}],
+		["a class instance as the call's env", {}, { env: new (class Env {})() }],
+		["a Proxy as the call's env", {}, { env: new Proxy({}, {}) }],
+		["a class instance as the call's samplingParams", {}, { samplingParams: new (class S {})() }],
+		["an array with an accessor", { input: Object.defineProperty(["text"], 0, { get: () => "text", enumerable: true }) }, {}],
+	];
+	for (const [label, extraModel, options] of shapes) {
+		for (const policy of [{ allowedModels: LIST }, { allowedModels: null, maxCostMicros: 1_000_000_000 }]) {
+			const { runtime, dispatched, meter, layer } = recorded(policy);
+			try {
+				await runtime.streamSimple({ ...LISTED, ...extraModel }, {}, options).result();
+				assert.deepEqual([dispatched.length, meter.state.stopReason], [0, policy.allowedModels ? MODEL_NOT_ALLOWED : COST_CAP], `${label}, ${policy.allowedModels ? "list" : "cap"}`);
+			} finally {
+				layer.restore();
+			}
+		}
+	}
+	// Plain data at every depth passes, typed arrays and nested arrays included, and pi gets copies.
+	const { runtime, dispatched, meter, layer } = recorded({ allowedModels: LIST, maxCostMicros: 1_000_000_000 });
+	try {
+		const model = { ...LISTED, input: ["text"], extra: { bytes: new Uint8Array([1, 2]), list: [[1], { a: null }] } };
+		await runtime.streamSimple(model, {}, { env: { A: "b" } }).result();
+		assert.deepEqual([dispatched.length, meter.state.stopReason], [1, null]);
+		assert.notEqual(dispatched[0].model.extra.bytes, model.extra.bytes);
+		assert.deepEqual([...dispatched[0].model.extra.bytes], [1, 2]);
+	} finally {
+		layer.restore();
+	}
+});
+
 test("the compat half hands its provider the same copies, and refuses an inherited level too (issue #587)", async () => {
 	const sent = [];
 	const meter = createUsageMeter({ allowedModels: LIST });
@@ -653,14 +701,14 @@ test("the compat half prices a legacy call from the job runtime's registry too (
 });
 
 /** A runtime whose provider runs options.onPayload on `{ model }` before it sends, as every pinned api does, and records what it sent. */
-function payloadRuntimeClass({ wireModel = (model) => model.id } = {}) {
+function payloadRuntimeClass({ wireModel = (model) => model.id, extra = {} } = {}) {
 	const sent = [];
 	class FakeRuntime {
 		streamSimple(model, _context, options) {
 			const stream = new FakeStream();
 			(async () => {
 				try {
-					const payload = { model: wireModel(model), messages: [] };
+					const payload = { model: wireModel(model), messages: [], ...extra };
 					const next = await options?.onPayload?.(payload, model);
 					sent.push((next ?? payload).model);
 					stream.end(answer());
@@ -704,6 +752,21 @@ test("on azure, a payload whose model is not the requested id before any hook ra
 		try {
 			await new FakeRuntime().streamSimple(model, {}, {}).result();
 			assert.deepEqual([sent.length, meter.state.stopReason], refused ? [0, MODEL_NOT_ALLOWED] : [1, null], model.api);
+		} finally {
+			layer.restore();
+		}
+	}
+});
+
+test("a payload whose fallbacks name a model off the list is refused before any hook ran, the backstop (issue #587)", async () => {
+	for (const [fallbacks, refused] of [[[{ model: "unlisted-1" }], true], [[{ model: "listed-1" }], false], ["not-a-list", true]]) {
+		const { FakeRuntime, sent } = payloadRuntimeClass({ wireModel: (model) => model.id, extra: { fallbacks } });
+		const meter = createUsageMeter({ allowedModels: LIST });
+		const logged = [];
+		const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ allowedModels: LIST, log: (event, fields) => logged.push(fields) }) });
+		try {
+			await new FakeRuntime().streamSimple(LISTED, {}, {}).result();
+			assert.deepEqual([sent.length, meter.state.stopReason, logged.map((f) => f.why)], refused ? [0, MODEL_NOT_ALLOWED, ["fallback"]] : [1, null, []], JSON.stringify(fallbacks));
 		} finally {
 			layer.restore();
 		}
@@ -850,15 +913,17 @@ test("a payload hook cannot slip a model past the check with toJSON or an access
 	// A nested toJSON inside a routing value is resolved to what it serialises to, then compared.
 	const nested = await payloadCall({ onPayload: (payload) => ({ ...payload, fallbacks: [{ toJSON: () => ({ model: "big-unlisted" }) }] }) });
 	assert.deepEqual([nested.sent, nested.meter.state.stopReason], [[], MODEL_NOT_ALLOWED]);
-	// A getter nested inside a routing value is read once, into the copy: what was compared is what is sent.
+	// A getter nested inside a routing value is read once, into the copy: what was compared is what is sent. (pi's own
+	// fallbacks name a listed model: since issue #587's review an off-list fallback pi put on the request is refused
+	// before any hook runs, the backstop test below.)
 	let reads = 0;
 	const nestedGetter = await payloadCall(
 		{ onPayload: (payload) => ({ ...payload, fallbacks: [{ get model() {
-			return reads++ === 0 ? "listed-2" : "big-unlisted";
+			return reads++ === 0 ? "listed-1" : "big-unlisted";
 		} }] }) },
-		{ payloadOf: (model) => ({ model: model.id, fallbacks: [{ model: "listed-2" }] }) },
+		{ payloadOf: (model) => ({ model: model.id, fallbacks: [{ model: "listed-1" }] }) },
 	);
-	assert.deepEqual(nestedGetter.sent, [{ model: "listed-1", fallbacks: [{ model: "listed-2" }] }], "the unlisted id never reaches the wire");
+	assert.deepEqual(nestedGetter.sent, [{ model: "listed-1", fallbacks: [{ model: "listed-1" }] }], "the unlisted id never reaches the wire");
 	// The copy is what pi gets back, also when the hook returned nothing: never the hook's own object, never undefined.
 	const guard = createModelGuard({ allowedModels: LIST });
 	const wrapped = (onPayload) => guard.prepare({ method: "streamSimple", args: [{}, { onPayload }], stop: () => {} })[1].onPayload;
@@ -968,15 +1033,19 @@ test("the payload check covers every door: classify and generateImages, the lega
 	assert.deepEqual([sent, meter.state.stopReason], [["listed-1"], MODEL_NOT_ALLOWED]);
 });
 
-test("the compat half judges and dispatches one copy of the model too", async () => {
+test("the compat half judges and dispatches one copy of the model too, and refuses a model with an accessor", async () => {
+	// Since issue #587's review the copy is data only: a model whose id is a getter is not read once and trusted, it is
+	// refused (unreadable), so neither answer the getter could give reaches a provider.
 	const meter = createUsageMeter({ allowedModels: LIST });
 	const reached = [];
 	const compat = wrapProviderStreams({ inner: { streamSimple: (m) => (reached.push(m.id), Object.assign(new FakeStream(), {})) }, fallbackModels: null, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ allowedModels: LIST }) });
+	compat.streamSimple({ ...LISTED }, {}, {});
+	assert.deepEqual([reached, meter.state.stopReason], [["listed-1"], null]);
 	let reads = 0;
 	const shifty = { ...LISTED };
 	Object.defineProperty(shifty, "id", { enumerable: true, get: () => (reads++ === 0 ? "listed-1" : "big-unlisted") });
 	compat.streamSimple(shifty, {}, {});
-	assert.deepEqual([reached, meter.state.stopReason], [["listed-1"], null]);
+	assert.deepEqual([reached, meter.state.stopReason], [["listed-1"], MODEL_NOT_ALLOWED]);
 });
 
 test("the model is read once: a getter cannot answer the guard with one id and the provider with another", async () => {
@@ -986,7 +1055,9 @@ test("the model is read once: a getter cannot answer the guard with one id and t
 		const shifty = { ...LISTED };
 		Object.defineProperty(shifty, "id", { enumerable: true, get: () => (reads++ === 0 ? "listed-1" : "big-unlisted") });
 		await runtime.streamSimple(shifty, {}, {}).result();
-		assert.deepEqual([calls, meter.state.stopReason], [["streamSimple:listed-1"], null], "judged and dispatched on the same copy");
+		// Since issue #587's review an accessor anywhere in the model is refused outright (snapshotModel's data-only rule),
+		// which is stricter than reading it once: neither id the getter can answer reaches a provider.
+		assert.deepEqual([calls, meter.state.stopReason], [[], MODEL_NOT_ALLOWED], "an accessor id is refused, never dispatched");
 	} finally {
 		layer.restore();
 	}

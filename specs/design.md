@@ -4409,13 +4409,18 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   (`DES-DOLLAR-RESERVE-AND-SETTLE`). This entry records the runner half (issue #502, part 4); the worker's free
   gates and its emission of the list to the container are `REQ-MODEL-POLICY`'s worker half. Per call, in both
   meter halves, on ONE copy of the model read once (so a getter cannot answer the guard with one id and the
-  provider with another), and that copy is what pi is handed. Since issue #587's gate the copy is DEEP, and so is the
-  copy of the call's `samplingParams` and `env`: pi reads the nested objects (the sampling layers, `compat`, `cost`)
-  after an await, so a caller that kept a reference could otherwise change them between the verdict and the request
-  (measured: a level's `model` set after `streamSimple` returned reached the wire). The sampling fields are copied as
-  own data only, into null-prototype objects: a map or a layer that is not a plain object, or that holds an
-  inherited, non-enumerable or accessor property (pi reads a level by property access, so an inherited level reaches
-  the request while `Object.values` never sees it), refuses the call under a list and is unboundable under a cap:
+  provider with another), and that copy is what pi is handed. Since issue #587's review the copy is DATA ONLY, and so
+  is the copy of the call's `samplingParams` and `env`: pi reads the nested objects (the sampling layers, `compat`,
+  `cost`) after an await, so anything handed over by reference could change between the verdict and the request
+  (measured: a level's `model` set after `streamSimple` returned reached the wire; a `compat` class instance gained an
+  unlisted fallback; an `env` class instance gained `PI_CACHE_RETENTION`). THE RULE: every field is copied as plain own
+  data at any depth (plain objects with Object.prototype or a null prototype, arrays, primitives, typed arrays copied);
+  anything else (a class instance, a Proxy, an accessor, a property hidden from `Object.keys`, a symbol key, a function
+  where data is expected) makes the copy unreadable, which refuses the call under a list (`why: unreadable`) and is
+  unboundable under a cap. Nothing is kept by reference. The sampling fields are copied into null-prototype objects
+  (pi reads a level by property access, so an inherited level would reach the request while `Object.values` never
+  sees it). A model whose fields are getters is therefore refused, no longer read once and trusted. And, as a backstop,
+  the payload check refuses fallbacks pi itself put on the request that are not listed under the model's provider:
   1. a job already stopped answers with the hard stop;
   2. a virtual model on `streamSimple` passes unjudged, and the physical call pi makes next through
      `this.streamSimple(route.model, ...)` is judged, so a router is judged on each request's pick, whatever the

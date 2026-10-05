@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { types as utilTypes } from "node:util";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readPidNamespace, runnerIdentity } from "./child-route.mjs";
@@ -689,36 +690,44 @@ function zeroUsage() {
 }
 
 /**
- * The copy of the model a call was made on that the guard judges AND pi is handed, read once (issue #502, PR #538's
- * review; deepened by issue #587's gate). Spreading reads each own enumerable field exactly once, so a getter cannot
- * answer the guard and the provider differently; a model whose id lives on a prototype getter loses it in the copy and
- * is refused, the safe side. Every field is then copied DEEP (snapshotPayload), because pi reads the nested objects
- * (samplingParams, every samplingParamsByThinkingLevel level, compat with its fallbacks and maxTokensField, cost with
- * its tiers) after an await: a caller that kept a reference could change them between the verdict and the request.
- * The two sampling fields are copied stricter still (samplingCopy, levelsCopy): own data only, into null-prototype
- * objects, or a marker the guards refuse.
+ * The copy of the model a call was made on that the guard judges AND pi is handed (issue #502, PR #538's review; made a
+ * data-only deep copy in issue #587's review). pi reads the nested objects (the sampling layers, compat with its
+ * fallbacks and maxTokensField, cost with its tiers) after an await, so anything handed over by reference could change
+ * between the verdict and the request. THE RULE: every field is copied as plain own data, at any depth (dataCopy):
+ * plain objects (prototype Object.prototype or null), arrays, primitives and typed arrays (copied). Anything else, a
+ * class instance, a Proxy, an accessor, a property hidden from Object.keys, a symbol key, a function or a symbol where
+ * data is expected, makes the copy UNREADABLE (isUnreadable), and both guards refuse it: no field is ever kept by
+ * reference. The two sampling fields are copied into null-prototype objects, so a level pi reads by property access
+ * (`byLevel?.[level]`) cannot come from Object.prototype either.
  */
 function snapshotModel(model) {
 	if (model === null || typeof model !== "object") return model;
-	const copy = { ...model };
-	for (const key of Object.keys(copy)) {
-		if (key === "samplingParams") copy[key] = samplingCopy(copy[key]);
-		else if (key === "samplingParamsByThinkingLevel") copy[key] = levelsCopy(copy[key]);
-		else copy[key] = snapshotPayload(copy[key]);
+	try {
+		return ownDataObject(model, (key, value) => dataCopy(value, key === "samplingParamsByThinkingLevel" ? 2 : key === "samplingParams" ? 1 : 0), false);
+	} catch (error) {
+		if (error !== NOT_DATA) throw error;
+		const copy = { ...model };
+		UNREADABLE_COPIES.add(copy);
+		return copy;
 	}
-	return copy;
 }
 
 /**
- * The call's options, copied the same way for the same reason (issue #587's gate): one read of each own field, and a
- * deep copy of the two pi reads after an await and the guards judge, `samplingParams` and `env` (the per-call
- * deployment map, PI_CACHE_RETENTION). Anything else is handed over as given (a signal, the caller's onPayload).
+ * The call's options, copied for the same reason: one read of each own field, and a data-only deep copy of the two pi
+ * reads after an await and the guards judge, `samplingParams` and `env` (the per-call deployment map,
+ * PI_CACHE_RETENTION). Anything else is handed over as given (a signal, the caller's onPayload). Either of the two that
+ * is not plain data makes the options UNREADABLE.
  */
 function snapshotOptions(options) {
 	if (options === null || typeof options !== "object") return options;
 	const copy = { ...options };
-	if (Object.hasOwn(copy, "samplingParams")) copy.samplingParams = samplingCopy(copy.samplingParams);
-	if (Object.hasOwn(copy, "env")) copy.env = snapshotPayload(copy.env);
+	try {
+		if (Object.hasOwn(copy, "samplingParams")) copy.samplingParams = dataCopy(copy.samplingParams, 1);
+		if (Object.hasOwn(copy, "env")) copy.env = dataCopy(copy.env, 0);
+	} catch (error) {
+		if (error !== NOT_DATA) throw error;
+		UNREADABLE_COPIES.add(copy);
+	}
 	return copy;
 }
 
@@ -728,17 +737,68 @@ function snapshotArgs(args) {
 	return [...args.slice(0, -1), snapshotOptions(args.at(-1))];
 }
 
+/** The copies (snapshotModel, snapshotOptions) that held something other than plain data: both guards refuse them. */
+const UNREADABLE_COPIES = new WeakSet();
+export function isUnreadable(value) {
+	return value !== null && typeof value === "object" && UNREADABLE_COPIES.has(value);
+}
+
+/** Thrown inside dataCopy for a value that is not plain data; never escapes snapshotModel and snapshotOptions. */
+const NOT_DATA = Symbol("not plain data");
+const ARRAY_INDEX = /^(?:0|[1-9][0-9]*)$/;
+const DATA_COPY_DEPTH = 64;
+
 /**
- * Stands in for a sampling field that is not plain own data. Its prototype is neither Object.prototype nor null, so
- * isOwnData refuses it: the model guard as a routing key, the cost guard as unboundable.
+ * A deep copy of plain data, or a throw of NOT_DATA (snapshotModel has the rule). Each property is read ONCE, from its
+ * descriptor, so a Proxy's traps or a getter are never consulted twice; a Proxy is refused outright (util.types.isProxy).
+ * `nullDepth` levels of plain objects from the top are copied with a null prototype (the sampling fields).
  */
-const UNREADABLE_SAMPLING = Object.freeze(Object.create(Object.freeze({ unreadable: true })));
+function dataCopy(value, nullDepth = 0, depth = 0) {
+	if (value === null || value === undefined) return value;
+	const type = typeof value;
+	if (type === "string" || type === "number" || type === "boolean" || type === "bigint") return value;
+	if (type !== "object" || depth > DATA_COPY_DEPTH || utilTypes.isProxy(value)) throw NOT_DATA;
+	if (ArrayBuffer.isView(value)) {
+		if (value instanceof DataView) throw NOT_DATA;
+		return value.slice();
+	}
+	if (Array.isArray(value)) {
+		if (Object.getPrototypeOf(value) !== Array.prototype) throw NOT_DATA;
+		const out = [];
+		for (const key of Reflect.ownKeys(value)) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (key === "length") {
+				out.length = descriptor.value;
+				continue;
+			}
+			if (typeof key !== "string" || !ARRAY_INDEX.test(key) || !descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) throw NOT_DATA;
+			out[Number(key)] = dataCopy(descriptor.value, 0, depth + 1);
+		}
+		return out;
+	}
+	return ownDataObject(value, (_key, inner) => dataCopy(inner, Math.max(0, nullDepth - 1), depth + 1), nullDepth > 0);
+}
+
+/** A plain object's own data, each value through `copyValue(key, value)`, or a throw of NOT_DATA. */
+function ownDataObject(value, copyValue, nullProto) {
+	if (utilTypes.isProxy(value)) throw NOT_DATA;
+	const proto = Object.getPrototypeOf(value);
+	if (proto !== Object.prototype && proto !== null) throw NOT_DATA;
+	const out = nullProto ? Object.create(null) : {};
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (typeof key !== "string" || !descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) throw NOT_DATA;
+		out[key] = copyValue(key, descriptor.value);
+	}
+	return out;
+}
 
 /**
  * Whether `value` is a plain object of own data: its prototype is Object.prototype or null, and every own key is a
  * string naming an enumerable data property (no getter, nothing hidden from Object.keys). pi reads a level by property
  * access (`byLevel?.[level]`), so an inherited, non-enumerable or accessor level reaches the request while Object.values
- * never sees it (issue #587's gate measured `Object.create({ off: { model } })` on the wire, unrefused).
+ * never sees it (issue #587's review measured `Object.create({ off: { model } })` on the wire, unrefused). The copies
+ * pi is handed always pass it; a caller's own object judged without a copy is held to it here.
  */
 function isOwnData(value) {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -749,25 +809,6 @@ function isOwnData(value) {
 		if (typeof key !== "string" || !descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) return false;
 	}
 	return true;
-}
-
-/** A null-prototype copy of an own-data object, each value copied by `copyValue`; UNREADABLE_SAMPLING otherwise. */
-function ownDataCopy(value, copyValue) {
-	if (value === undefined || value === null) return value;
-	if (!isOwnData(value)) return UNREADABLE_SAMPLING;
-	const out = Object.create(null);
-	for (const key of Object.keys(value)) out[key] = copyValue(Object.getOwnPropertyDescriptor(value, key).value);
-	return out;
-}
-
-/** A sampling-parameter object (the model's, a level's or the call's), copied as own data, its values deep. */
-function samplingCopy(value) {
-	return ownDataCopy(value, (inner) => snapshotPayload(inner));
-}
-
-/** samplingParamsByThinkingLevel: the map and each level copied as own data. */
-function levelsCopy(value) {
-	return ownDataCopy(value, (level) => samplingCopy(level));
 }
 
 /**
@@ -2207,6 +2248,8 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		// when there is no registry to ask (a pi child's compat half), and then the call is judged on its own object.
 		if (registered !== undefined && !pricedAsRegistered(model, registered)) return refuse({ why: "unboundable" });
 		const [context, options] = args ?? [];
+		// A copy that held something other than plain data (snapshotModel): what pi would read is not what was judged.
+		if (isUnreadable(model) || isUnreadable(options)) return refuse({ why: "unboundable" });
 		const b = method === "generateImages" || method === "streamDeferred" ? Infinity : bound(method, model, context, options, env);
 		if (!Number.isFinite(b)) return refuse({ why: "unboundable" });
 		const outside = externalMicros();
@@ -2514,6 +2557,8 @@ export function createModelGuard({ allowedModels, log = () => {} }) {
 		const provider = model?.provider;
 		const id = model?.id;
 		if (typeof provider !== "string" || typeof id !== "string" || !allowed.has(pairKey(provider, id))) return "unlisted";
+		// Issue #587's review: a model or options copy that held something other than plain data (snapshotModel).
+		if (isUnreadable(model) || isUnreadable(options)) return "unreadable";
 		if (samplingRoutes(model, options)) return "sampling";
 		// A caller's own `fetch` sends the request after every hook ran, so it could rewrite the body unseen. pi never
 		// passes one itself (only a caller does), so under a list it is refused rather than trusted.
@@ -2552,6 +2597,13 @@ export function createModelGuard({ allowedModels, log = () => {} }) {
 			}
 			if (deploymentChecked && (before === null || before.model !== model.id)) {
 				refuse(method, "deployment");
+				stop(MODEL_NOT_ALLOWED);
+				throw new Error(STOP_MESSAGES[MODEL_NOT_ALLOWED]);
+			}
+			// The backstop (issue #587's review): the fallbacks pi itself put on the request, before any hook, must be on the
+			// list under the model's provider, whatever admit read off the model.
+			if (before !== null && present(before, "fallbacks") && !(Array.isArray(before.fallbacks) && before.fallbacks.every((fallback) => allowed.has(pairKey(model?.provider, fallback?.model))))) {
+				refuse(method, "fallback");
 				stop(MODEL_NOT_ALLOWED);
 				throw new Error(STOP_MESSAGES[MODEL_NOT_ALLOWED]);
 			}
