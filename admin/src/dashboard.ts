@@ -31,7 +31,7 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
-import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText } from "./render.mjs";
+import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -2475,14 +2475,15 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
   const st = a.state ?? null;
   if (st && st.envelopeDigest !== info.digest) lines.push(...wrapped(`the split was made for envelope ${cellOf(st.envelopeDigest)}, not this host's ${cellOf(info.digest)}: governed jobs here refuse as envelope-mismatch${total !== e.totalMicros ? `.${fileTotalText(usd(e.totalMicros))}` : ""}`, "warning"));
   const spend = a.spend ?? null;
-  for (const id of Object.keys(e.floors ?? {})) {
+  // During a mismatch an entry only the split names is listed too, marked (render.mjs `allocationRowIds`, issue #507).
+  for (const { id, splitOnly } of allocationRowIds(e.floors, st, !!st && st.envelopeDigest !== info.digest)) {
     const weight = st?.weights?.[id] ?? e.defaultWeights?.[id];
     const bits = [
       styler.fg("accent", cellOf(id)),
-      styler.fg("muted", `floor ${usd(e.floors[id])}`),
+      styler.fg("muted", `floor ${splitOnly ? "-" : usd(e.floors[id])}`),
       styler.fg("muted", `weight ${weight ?? "-"}`),
       styler.fg("text", `${usd(st?.allocations?.[id])}`),
-      styler.fg("dim", `spent ${usd(spend?.projects?.[id]?.micros)}`),
+      styler.fg("dim", splitOnly ? SPLIT_ONLY_MARK : `spent ${usd(spend?.projects?.[id]?.micros)}`),
     ];
     lines.push(fitLine(bits.join("  "), iw, styler));
     if (spend?.projects?.[id]?.key) lines.push(fitLine(`    ${styler.fg("dim", cellOf(spend.projects[id].key))}`, iw, styler));

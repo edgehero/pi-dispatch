@@ -563,7 +563,12 @@ function normAllocation(v) {
   const spent = splitMicrosMap(spend.projects);
   const allocations = st ? splitMicrosMap(st.allocations) : new Map();
   // One row per entry the envelope floors (the panel's rule: the floors name every entry, `_other` included).
-  const rows = [...floors.keys()].map((id) => ({ id, floor: floors.get(id), allocation: allocations.get(id) ?? null, spent: spent.get(id) ?? null }));
+  const rows = [...floors.keys()].map((id) => ({ id, floor: floors.get(id), allocation: allocations.get(id) ?? null, spent: spent.get(id) ?? null, splitOnly: false }));
+  // During a mismatch, every entry the split allocates and this host's file does not name, marked (issue #507): render.mjs
+  // `allocationRowIds`' rule, restated because this module may load neither, and held equal by a test.
+  if (v.mismatch === true) {
+    for (const id of allocations.keys()) if (!floors.has(id)) rows.push({ id, floor: null, allocation: allocations.get(id), spent: null, splitOnly: true });
+  }
   const log = [];
   for (const h of Array.isArray(v.log) ? v.log.slice(0, SPLIT_LOG_ROWS) : []) {
     if (h === null || typeof h !== "object") continue;
@@ -1126,9 +1131,10 @@ function splitBarsSvg(na, tips, names) {
   const parts = [`<svg width="${fmt(SPLIT_W)}" height="${fmt(height)}" role="img" aria-label="allocation and spend by project">`];
   laid.forEach((g, i) => {
     const r = na.rows[i];
-    const text = `${microsUsd(r.spent)} spent of ${microsUsd(r.allocation)} · floor ${microsUsd(r.floor)}`;
+    // A split-only entry (issue #507) has no floor or spend this host can read: its allocation and the mark alone.
+    const text = r.splitOnly ? `${microsUsd(r.allocation)} allocated · not in this host's file` : `${microsUsd(r.spent)} spent of ${microsUsd(r.allocation)} · floor ${microsUsd(r.floor)}`;
     const name = names.get(r.id);
-    const idx = tips.push(`${r.id}${name !== undefined ? ` (${name})` : ""} · allocated ${microsUsd(r.allocation)} · spent ${microsUsd(r.spent)} · floor ${microsUsd(r.floor)}${g.over ? " · over its allocation" : ""}`) - 1;
+    const idx = tips.push(r.splitOnly ? `${r.id} · allocated ${microsUsd(r.allocation)} · not in this host's file` : `${r.id}${name !== undefined ? ` (${name})` : ""} · allocated ${microsUsd(r.allocation)} · spent ${microsUsd(r.spent)} · floor ${microsUsd(r.floor)}${g.over ? " · over its allocation" : ""}`) - 1;
     const base = g.y + 14;
     const bx = SPLIT_LABEL_W;
     parts.push(`<g data-tip="${fmt(idx)}">`);

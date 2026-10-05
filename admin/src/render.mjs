@@ -522,12 +522,14 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
     const edit = outsideEdit(alloc.log, s.envelopeDigest);
     if (edit) lines.push(cell(outsideEditText(edit)));
   }
-  const rows = Object.keys(envelope.floors).map((id) => [
-    id,
-    `floor ${usd(envelope.floors[id])}`,
+  // During a mismatch an entry only the split names is listed too, marked (`allocationRowIds`, issue #507).
+  const rows = allocationRowIds(envelope.floors, s, !!s && s.envelopeDigest !== digest).map(({ id, splitOnly }) => [
+    cell(id),
+    `floor ${splitOnly ? "-" : usd(envelope.floors[id])}`,
     `weight ${s?.weights?.[id] ?? envelope.defaultWeights?.[id] ?? "-"}`,
     `allocation ${usd(s?.allocations?.[id])}`,
-    `spent ${usd(alloc.spend?.projects?.[id]?.micros)}`,
+    `spent ${splitOnly ? "-" : usd(alloc.spend?.projects?.[id]?.micros)}`,
+    splitOnly ? SPLIT_ONLY_MARK : "",
   ]);
   const widths = rows.reduce((w, r) => r.map((c, i) => Math.max(w[i] ?? 0, c.length)), []);
   for (const r of rows) lines.push(`  ${r.map((c, i) => pad(c, widths[i])).join("  ").trimEnd()}`);
@@ -606,6 +608,24 @@ export function splitTotalMicros(state, envelopeTotalMicros) {
 export function fileTotalText(usdText) {
   return ` This host's file says total ${usdText}; the totals shown are the split's.`;
 }
+
+/**
+ * The entries an ALLOCATION view lists (issue #507), as `[{ id, splitOnly }]`: this host's envelope file's entries in
+ * its order, and, while the applied split was made for another envelope (`mismatch`), every entry the split allocates
+ * that the file does not name, sorted, marked `splitOnly`. Without them an allocation the file dropped counted in the
+ * split's total (`splitTotalMicros`) and was listed nowhere. One rule for the panel, `/dispatch priorities` and the
+ * insights page (which restates it, held equal by a test).
+ */
+export function allocationRowIds(floors, state, mismatch) {
+  const file = Object.keys(floors ?? {});
+  const rows = file.map((id) => ({ id, splitOnly: false }));
+  if (!mismatch || !state || typeof state !== "object") return rows;
+  const extra = Object.keys(state.allocations ?? {}).filter((id) => !file.includes(id)).sort();
+  return [...rows, ...extra.map((id) => ({ id, splitOnly: true }))];
+}
+
+/** The mark a split-only entry carries on every surface. */
+export const SPLIT_ONLY_MARK = "not in this host's file";
 
 /** The outside-edit notice in words, the same on every surface. */
 export function outsideEditText(e) {

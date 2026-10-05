@@ -3537,6 +3537,23 @@ test("ALLOCATION: during an envelope mismatch the header and the headroom show t
   assert.doesNotMatch(agreeing, /This host's file says/);
 });
 
+test("ALLOCATION: during an envelope mismatch an entry only the split allocates is listed, marked, and only then (#507)", async () => {
+  const open = async (info) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => info }) });
+    await flush();
+    comp.handleInput("b");
+    await flush();
+    const out = stripAnsi(comp.render(100).join("\n")).replace(/\s*│\s*│?\s*/g, " ");
+    await comp.dispose();
+    return out;
+  };
+  const base = allocInfo();
+  const state = { ...base.alloc.state, weights: { ...base.alloc.state.weights, legacy: 1 }, allocations: { _other: 0, platform: 30 * M504, shop: 55 * M504, legacy: 15 * M504 } };
+  const out = await open({ ...base, alloc: { ...base.alloc, state: { ...state, envelopeDigest: "e2e2e2e2e2e2e2e2" } } });
+  assert.match(out, /legacy\s+floor -\s+weight 1\s+\$15\.00\s+not in this host's file/, out);
+  assert.doesNotMatch(await open({ ...base, alloc: { ...base.alloc, state } }), /legacy/, "the split on this host's envelope: the file's entries alone");
+});
+
 test("ALLOCATION: with no seam the view says so; an unset envelope says why; `b split` rides the spend divider only with an envelope", async () => {
   const bare = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
   await flush();
