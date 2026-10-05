@@ -3356,7 +3356,7 @@ test("`b` opens the ALLOCATION view: envelope, each project's split and spend wi
   assert.match(out, /budget:usd:s:00112233aabbccdd:w:2026-10-05/, "the key an operator seeds or reads with valkey-cli");
   assert.match(out, /plan 3f9a0c1d2e4b5a67 · operator-session/);
   assert.match(out, /shop: launch on Friday/, "the plan's reason, drawn here and nowhere else");
-  assert.match(out, /› 10-05 12:30 {2}operator-session {2}refused plan-too-soon {2}aaaaaaaa /, "the history, newest first, the cursor on the first row");
+  assert.match(out, /› 10-05 12:30 {2}operator-session {2}aaaaaaaa {2}refused plan-too-soon /, "the history, newest first, the cursor on the first row");
   assert.match(out, /r revert/);
 });
 
@@ -3402,9 +3402,12 @@ test("ALLOCATION: `r` asks a y/n in the frame; `n` stands down, `y` reverts to t
 /** A body line of the ALLOCATION frame at 80 columns: the text padded to the frame's 76 inner columns. */
 const boxed = (text) => `│ ${text.padEnd(76)} │`;
 
-test("ALLOCATION at 80 columns: the frame is the terminal's, and every history row is composed whole, host only on a fleet (#507)", async () => {
-  const open = async (log) => {
-    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log }) }) });
+test("ALLOCATION framed at 80 columns: the plan id comes before the reason, so a clip takes the reason's tail, and the host shows only on a fleet (#507)", async () => {
+  // render(80) is the OVERLAY's width (the overlay is 75% of the terminal), so this is a terminal of 107 columns.
+  const open = async (log, clamped = false) => {
+    const info = allocInfo({ log });
+    info.alloc.state.clamped = clamped;
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => info }) });
     await flush();
     comp.handleInput("b");
     await flush();
@@ -3412,18 +3415,29 @@ test("ALLOCATION at 80 columns: the frame is the terminal's, and every history r
     await comp.dispose();
     return lines;
   };
+  // A row wider than the frame's 76 inner columns is cut with the ellipsis at the end: its reason's tail.
+  const cut = (t) => (t.length > 76 ? `${t.slice(0, 75)}…` : t);
   const one = await open([REFUSED_ROW, APPLIED_ROW]);
   for (const l of one) assert.equal(visibleLen(l), 80, `the frame fills the 80 columns: ${l}`);
-  assert.ok(one.includes(boxed("› 10-05 12:30  operator-session  refused plan-too-soon  aaaaaaaa")), one.join("\n"));
-  assert.ok(one.includes(boxed("  10-05 12:00  operator-session  applied  3f9a0c1d")));
+  assert.ok(one.includes(boxed("› 10-05 12:30  operator-session  aaaaaaaa  refused plan-too-soon")), one.join("\n"));
+  assert.ok(one.includes(boxed("  10-05 12:00  operator-session  3f9a0c1d  applied")));
   assert.ok(one.includes(boxed("unallocated $0.00 · deployment spent $0.00 of $100.00")), "the headroom names the total it is headroom of");
   assert.ok(one.includes(boxed("plan 3f9a0c1d2e4b5a67 · operator-session · 10-05 12:00 · until 2026-10-19")), "the plan line keeps its until");
   assert.ok(one.includes(boxed("plans up to 14d")), "the delegation rules wrap, never clip");
+  const clamped = await open([APPLIED_ROW], true);
+  assert.ok(clamped.includes(boxed("plan 3f9a0c1d2e4b5a67 · operator-session · 10-05 12:00 · until 2026-10-19 ·")), clamped.join("\n"));
+  assert.ok(clamped.includes(boxed("clamped")), "clamped wraps onto its own line, never cut");
   const fleet = await open([{ ...REFUSED_ROW, host: "mini2" }, APPLIED_ROW]);
-  assert.ok(fleet.includes(boxed("› 10-05 12:30  mini2  operator-session  refused plan-too-soon  aaaaaaaa")), fleet.join("\n"));
-  assert.ok(fleet.includes(boxed("  10-05 12:00  mini1  operator-session  applied  3f9a0c1d")));
+  assert.ok(fleet.includes(boxed("› 10-05 12:30  mini2  operator-session  aaaaaaaa  refused plan-too-soon")), fleet.join("\n"));
+  assert.ok(fleet.includes(boxed("  10-05 12:00  mini1  operator-session  3f9a0c1d  applied")));
   const long = await open([{ ...REFUSED_ROW, host: "build-host-number-7" }, APPLIED_ROW]);
-  assert.ok(long.includes(boxed("› 10-05 12:30  build-hos…  operator-session  refused plan-too-soon  aaaaaaaa")), "a long host is cut at 10 columns, and the row still fits");
+  assert.ok(long.includes(boxed("› 10-05 12:30  build-hos…  operator-session  aaaaaaaa  refused plan-too-soon")), "a long host is cut at 10 columns");
+  // The rows that do not fit: a fleet's envelope-mismatch refusal, and an outside edit even on one host.
+  const mismatch = await open([{ ...REFUSED_ROW, host: "mini-host7", reason: "envelope-mismatch" }, APPLIED_ROW]);
+  assert.ok(mismatch.includes(boxed(cut("› 10-05 12:30  mini-host7  operator-session  aaaaaaaa  refused envelope-mismatch"))), mismatch.join("\n"));
+  const outside = { at: "2026-10-05T13:00:00.000Z", host: "mini1", writer: "envelope-change", outcome: "envelope-changed-externally", reason: "envelope-mismatch", planId: "3f9a0c1d2e4b5a67", weights: null };
+  const edited = await open([outside, APPLIED_ROW]);
+  assert.ok(edited.includes(boxed(cut("› 10-05 13:00  envelope-change  3f9a0c1d  envelope-changed-externally envelope-mismatch"))), edited.join("\n"));
 });
 
 test("ALLOCATION: a revert's note is a body line that says a due plan may move the split again (#507)", async () => {

@@ -551,9 +551,9 @@ test("the #507 cells go through the gate: a run's plan and dollars, an allocatio
 	const view = alloc.render(80).map(stripAnsi);
 	await alloc.dispose();
 	for (const l of view) assert.ok(!hasControls(l), `an allocation line carries a control byte: ${JSON.stringify(l)}`);
-	assert.ok(view.includes(`│ ${"› 10-05 12:00  h\\u{001B}…  operator-session  applied  3f9a0c1d".padEnd(76)} │`), view.join("\n"));
+	assert.ok(view.includes(`│ ${"› 10-05 12:00  h\\u{001B}…  operator-session  3f9a0c1d  applied".padEnd(76)} │`), view.join("\n"));
 	const { renderAllocations } = await import("../src/render.mjs");
 	const text = renderAllocations({ envelope: info.envelope, digest: "d", alloc: info.alloc });
 	assert.ok(!hasControls(text.replace(/\n/g, " ")), "the text twin's host cell is gated too");
-	assert.ok(text.split("\n").some((l) => l.startsWith("  10-05 12:00  h [31m") && l.endsWith("  operator-session  applied  3f9a0c1d")), text);
+	assert.ok(text.split("\n").some((l) => l.startsWith("  10-05 12:00  h [31m") && l.endsWith("  operator-session  3f9a0c1d  applied")), text);
 });

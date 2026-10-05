@@ -115,7 +115,7 @@ import {
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
 import { envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
-import { buildInsightsHtml } from "./insights-html.mjs";
+import { buildInsightsHtml, INSIGHTS_SPLIT_REFUSALS } from "./insights-html.mjs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
 import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // The trigger vocabularies, IMPORTED from the loader that validates them rather than retyped. Every one
@@ -157,7 +157,7 @@ import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGl
 import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
-import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations } from "./render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations, changedOutside } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -2417,8 +2417,11 @@ async function assembleBudgetView(paths: any): Promise<any> {
   };
 }
 
-/** The run-record refusals that belong to the split (issue #507): what the insights page counts beside it. */
-const SPLIT_REFUSALS = ["allocation-cap", "envelope-mismatch", "portfolio-no-envelope", "portfolio-snapshot-oversize"];
+/**
+ * The run-record refusals that belong to the split (issue #507): the page's own list, so the assembler counts exactly
+ * the reasons the page draws. `insights-html.test.mjs` holds it to the worker's constants.
+ */
+const SPLIT_REFUSALS: readonly string[] = INSIGHTS_SPLIT_REFUSALS;
 
 /**
  * The split's counts over the SPEND window (issue #507), from the records the assembler already scanned: governed
@@ -2446,13 +2449,20 @@ export function splitCounts(records: any): any {
  * newest `alloc:log` outcomes, through the same `readAllocations` the panel's `b` view and `/dispatch priorities` use,
  * read WITHOUT reasons (a plan's reasons are agent text, and the panel's view is the one place they are drawn). Valkey
  * is read only when an envelope is set. Each row is cut to its enum fields here, so no host name and no reason text
- * reaches a file meant to be shared. A problem text has the envelope path cut to its basename for the same reason.
- * Exported for its tests, as `splitCounts` is: the rest of the insights assembly dials the real queue.
+ * reaches a file meant to be shared. A problem text has the envelope path cut to its basename for the same reason,
+ * unless the operator passed `--full-paths`, the page's one opt-in for host paths. The cut is made on the parser's RAW
+ * text, before `envelopeProblem` escapes it: a path holding a character the escape rewrites would no longer match.
+ * `changedOutside` is the panel's banner rule over the same 20 rows. Exported for its tests, as `splitCounts` is: the
+ * rest of the insights assembly dials the real queue.
  */
-export async function assembleAllocationView(paths: any, counts: any): Promise<any> {
+export async function assembleAllocationView(paths: any, counts: any, { fullPaths = false }: { fullPaths?: boolean } = {}): Promise<any> {
   if (!paths.envelopeFile) return { unset: true };
   const read: any = readEnvelope({ envelopeFile: paths.envelopeFile, projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env: deploymentEnv() }) });
-  if (!read.envelope) return { problem: envelopeProblem(read).split(String(paths.envelopeFile)).join(basename(String(paths.envelopeFile))) };
+  if (!read.envelope) {
+    const file = String(paths.envelopeFile);
+    const invalid = read.invalid !== undefined && !fullPaths ? String(read.invalid).split(file).join(basename(file)) : read.invalid;
+    return { problem: envelopeProblem({ ...read, invalid }) };
+  }
   const e = read.envelope;
   const head = { window: e.window, totalMicros: e.totalMicros, floors: { ...e.floors }, delegation: e.delegation?.enabled === true };
   const alloc: any = await readAllocations({ url: paths.valkeyUrl, envelope: e, projects: read.projects, now: allocNow(), withReasons: false, ...allocRedis() });
@@ -2463,6 +2473,7 @@ export async function assembleAllocationView(paths: any, counts: any): Promise<a
     stateProblem: alloc.stateProblem ?? null,
     state: st && { planId: st.planId ?? null, writer: st.writer ?? null, appliedAt: st.appliedAt ?? null, validUntil: st.validUntil ?? null, clamped: st.clamped === true, allocations: { ...(st.allocations ?? {}) }, unallocated: st.unallocated ?? null },
     mismatch: st !== null && st.envelopeDigest !== read.digest,
+    changedOutside: changedOutside(alloc.log),
     spend: {
       deployment: alloc.spend?.deployment?.micros ?? null,
       projects: Object.fromEntries(Object.entries(alloc.spend?.projects ?? {}).map(([id, v]: [string, any]) => [id, v?.micros ?? null])),
@@ -2472,7 +2483,7 @@ export async function assembleAllocationView(paths: any, counts: any): Promise<a
   };
 }
 
-async function assembleInsights(paths: any, window: string): Promise<any> {
+async function assembleInsights(paths: any, window: string, fullPaths = false): Promise<any> {
   const graph = await assembleGraph(paths);
   const costs = assembleCosts(paths, window);
   // The budget slice rides BOTH return shapes: the caps are the operator's one real lever on cost,
@@ -2480,7 +2491,7 @@ async function assembleInsights(paths: any, window: string): Promise<any> {
   const budget = await assembleBudgetView(paths);
   if (costs?.unreachable) {
     // The split too, for the budget's reason; its counts are the records', so here they were not made.
-    const allocation = await assembleAllocationView(paths, null);
+    const allocation = await assembleAllocationView(paths, null, { fullPaths });
     return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null, budget, allocation };
   }
   const fold = costs?.fold ?? null;
@@ -2500,7 +2511,7 @@ async function assembleInsights(paths: any, window: string): Promise<any> {
   // name; members are not carried, the page shows spend by id.
   const pv: any = readProjects({ projectsPath: paths.projectsFile });
   const projects = Array.isArray(pv?.projects) ? pv.projects.map((x: any) => ({ id: x.id, name: x.name })) : [];
-  const allocation = await assembleAllocationView(paths, splitCounts(records));
+  const allocation = await assembleAllocationView(paths, splitCounts(records), { fullPaths });
   return { graph, fold, costsUnreachable: null, window, costByTrigger, budget, projects, allocation };
 }
 
@@ -2533,7 +2544,7 @@ export async function insightsCommand(paths: any, tokens: string[], notify: Noti
     notify?.(INSIGHTS_USAGE, "warning");
     return;
   }
-  const payload = await assembleInsights(paths, window);
+  const payload = await assembleInsights(paths, window, fullPaths);
   const html = buildInsightsHtml(payload, { now: deps.now(), fullPaths });
   const file = `${paths.graphDir}/insights.html`;
   try {

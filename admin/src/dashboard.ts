@@ -31,7 +31,7 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
-import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId } from "./render.mjs";
+import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, changedOutside } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -1408,8 +1408,9 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
 
   if (view === "ALLOCATION") {
     // ALLOC_WIDTH, not DRILL_WIDTH (issue #507): this pane's history row is the widest line in the panel (an instant, a
-    // host on a fleet, a writer, an outcome with its reason, a plan id), and at 70 every refusal lost its plan id to
-    // the clip. 80 is the terminal the rest of the panel is pinned at, so the frame still fits it whole.
+    // host on a fleet, a writer, a plan id, an outcome with its reason). The frame takes up to 80 of the columns the
+    // overlay is given (the overlay is 75% of the terminal, so 80 needs a terminal of 107 or more); narrower, it takes
+    // what there is, like every drill-in, and a row's clip then takes the reason's tail first (see the row).
     const dw = framed ? Math.min(Math.trunc(width), ALLOC_WIDTH) : Math.trunc(width);
     const iw = framed ? dw - 4 : 24;
     const { title: detailTitle, lines } = allocationView(state.allocInfo, state.allocSelected ?? 0, iw, styler);
@@ -2408,9 +2409,8 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
   const log: any[] = Array.isArray(a.log) ? a.log : [];
   // Any outside edit since the fleet last agreed on an envelope (a re-base or an applied plan), not only the newest
   // row: a refused plan logged after the edit must not hide it.
-  const agreedAt = log.findIndex((r: any) => r?.outcome === "rebased" || r?.outcome === "applied");
-  const sinceAgreed = agreedAt === -1 ? log : log.slice(0, agreedAt);
-  if (sinceAgreed.some((r: any) => r?.outcome === "envelope-changed-externally")) {
+  // The rule is render.mjs `changedOutside`, which the insights page uses too (issue #507).
+  if (changedOutside(log)) {
     lines.push(...wrapped("changed outside the panel: the envelope was edited by hand on a host, which then refuses governed jobs as envelope-mismatch until alloc:envelope:expected names its digest (docs/allocation.md)", "warning"));
   }
   if (a.unreachable) lines.push(...wrapped(`split unreadable (${cellOf(a.unreachable)})`, "error"));
@@ -2439,7 +2439,9 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
   if (st) {
     const plan = st.planId ? `plan ${cellOf(st.planId)}` : "neutral, no plan";
     // The applied instant as the history shows one (`allocAt`, issue #507), so the line keeps its `until` at 80 columns.
-    lines.push(fitLine(styler.fg("text", `${plan} · ${cellOf(st.writer)} · ${cellOf(allocAt(st.appliedAt))}${st.validUntil ? ` · until ${cellOf(String(st.validUntil).slice(0, 10))}` : ""}${st.clamped ? " · clamped" : ""}`), iw, styler));
+    // Wrapped, not clipped (issue #507): with a long writer the line ran past 80 and the clip took `clamped`, the one word
+    // that says the step cut the plan.
+    lines.push(...wrapped(`${plan} · ${cellOf(st.writer)} · ${cellOf(allocAt(st.appliedAt))}${st.validUntil ? ` · until ${cellOf(String(st.validUntil).slice(0, 10))}` : ""}${st.clamped ? " · clamped" : ""}`, "text"));
     const reasons = st.reasons && typeof st.reasons === "object" ? st.reasons : {};
     for (const id of Object.keys(reasons).sort()) {
       lines.push(fitLine(`  ${styler.fg("accent", textCell(id))}${styler.fg("dim", ": ")}${styler.fg("text", textCell(reasons[id]))}`, iw, styler));
@@ -2450,8 +2452,10 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
   lines.push(dim("history, newest first (alloc:log)"));
   if (log.length === 0) lines.push(dim("(no outcomes yet)"));
   // The row's cells are `/dispatch priorities`' (render.mjs `allocAt`, `allocHostsShown`, `allocPlanId`, issue #507):
-  // the instant as MM-DD HH:MM, the host only when the history names more than one, the plan id's first 8 digits, so a
-  // refusal row fits the frame whole instead of losing its plan id to the clip.
+  // the instant as MM-DD HH:MM, the host only when the history names more than one, the plan id's first 8 digits, and
+  // the plan id BEFORE the outcome and its reason. The reason is the longest and least needed cell (an
+  // `envelope-changed-externally envelope-mismatch` row is 87 columns on one host), so when a row is clipped the clip
+  // takes the reason's tail, never the id a revert names.
   const hosts = allocHostsShown(log);
   log.forEach((h: any, i: number) => {
     const cursor = i === selected ? styler.fg("accent", "›") : " ";
@@ -2460,8 +2464,8 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
       `${cursor} ${styler.fg("dim", textCell(allocAt(h.at)))}`,
       ...(hosts ? [styler.fg("dim", clip(textCell(h.host), 10))] : []),
       styler.fg("muted", textCell(h.writer)),
-      styler.fg(h.outcome === "refused" || h.outcome === "apply-failed" || h.outcome === "envelope-changed-externally" ? "warning" : "text", `${textCell(h.outcome)}${why}`),
       ...(h.planId ? [styler.fg("dim", textCell(allocPlanId(h.planId)))] : []),
+      styler.fg(h.outcome === "refused" || h.outcome === "apply-failed" || h.outcome === "envelope-changed-externally" ? "warning" : "text", `${textCell(h.outcome)}${why}`),
       ...(h.clamped ? [styler.fg("dim", "clamped")] : []),
     ];
     lines.push(fitLine(bits.join("  "), iw, styler));
