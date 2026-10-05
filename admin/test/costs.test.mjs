@@ -310,6 +310,31 @@ test("a refusal before any spend is an exact $0: metered, never a floor, never u
   }
 });
 
+test("a refusal before any spend stays out of plan math: no attribution, no demotion, no what-if run (#507)", () => {
+  const refusal = (jobId, over = {}) => rec({ jobId, endedAt: "2026-07-14T12:00:00.000Z", outcome: "policy", reason: "dollar-cap", exitCode: null, turns: null, tokens: null, budgetReserved: false, provider: "kimi-coding", model: "kimi-k2", ...over });
+  const refusals = [refusal("r-1"), refusal("r-2"), refusal("r-3")];
+  const windows = [{ id: "5h", kind: "rolling", hours: 5, per: "5h", rolling: true, unit: "requests", limit: null }];
+  const alone = fold([planCovered], { subscriptions: [sub({ windows })] });
+  const beside = fold([planCovered, ...refusals], { subscriptions: [sub({ windows })] });
+  // The plan's numbers: the refusals named its provider and model, and still never ran on it.
+  for (const key of ["attributedRuns", "attributedTokens", "amortizedPerRun", "apiEquiv", "verdict", "windows"]) {
+    assert.deepEqual(beside.plans[0][key], alone.plans[0][key], key);
+  }
+  // A plan-only bucket keeps plan:<id>; a refusal is classless, so it neither demotes nor dilutes coverage.
+  assert.deepEqual(beside.provenance.total, alone.provenance.total);
+  assert.equal(beside.provenance.total.class, "plan");
+  const mixed = fold([planCovered, ledgeredMetered, ...refusals]);
+  assert.equal(mixed.provenance.total.coverage, 0.5, "one metered of two measured runs, the refusals left out");
+  // A bucket of refusals alone is vacuously exact: metered $0, no floor.
+  assert.deepEqual(fold(refusals).provenance.total, { usd: 0, class: "metered", floor: false });
+  // The what-if: a refusal is no run of the flow, so it is neither extrapolated nor counted as excluded.
+  const target = { provider: "anthropic", id: "claude-sonnet-4" };
+  const plain = whatIfFlow({ records: [ledgeredMetered], flow: "fix", target, pricing: cannedPricing() });
+  const withRefusals = whatIfFlow({ records: [ledgeredMetered, ...refusals], flow: "fix", target, pricing: cannedPricing() });
+  assert.deepEqual(withRefusals, plain);
+  assert.deepEqual(whatIfFlow({ records: refusals, flow: "fix", target, pricing: cannedPricing() }), whatIfFlow({ records: [], flow: "fix", target, pricing: cannedPricing() }), "a flow that was only refused never ran");
+});
+
 test("floor: an unmetered pi child, and the cost guard's short-count counters, floor the run; boundExceeded and absent keys do not (issue #500 part F)", () => {
   const run = (extra) => rec({ jobId: "c-1", tokens: { ...tok(0.5), ...extra }, usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]) });
   const floorOf = (extra) => fold([run(extra)]).provenance.total.floor;

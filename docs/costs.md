@@ -53,9 +53,12 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 A run whose container died before reporting tokens contributes no row of its own: it makes its bucket a
 floor and demotes it to `est.` with coverage, so nothing renders as an unclassified dollar.
 
-A run refused before it could spend is an exact `$0`, metered and never a floor. The record says so: no
-tokens, no container exit, and `budgetReserved: false`. It still counts as a run, but not as an unmetered one.
-A record that lacks any of the three keeps the floor, because a run that did start can lack the other two.
+Most runs refused before they could spend are an exact `$0` and never a floor. The record says so: no
+tokens, no container exit, and `budgetReserved: false`. Such a run still counts as a run, but not as an
+unmetered one, and it does not change a bucket's class or coverage. A record that lacks any of the three keeps
+the floor, because a run that did start can lack the other two. So some refusals stay a floor: `over-budget`
+and the soft hold keep the budget slot they took, so does any refusal whose job-count give-back failed, and a
+container the runtime failed to start (often exit 125) carries that exit code.
 
 A bucket (a trigger, flow, repo or day) whose every run one declared plan covers reads `plan:<id>`, and
 `dispatch_costs` returns its typed value as class `"plan"` with that `planId`. A bucket that mixes plan
@@ -216,6 +219,9 @@ Some cases worth knowing:
   `costUnanswered`, because a request that got no answer may still have been billed. The worker cannot tell that
   apart from a label written inside the container, and such a label must never release money. A bad key therefore
   costs one per-job cap in each window.
+- **A refusal whose dollar give-back failed** records `dollars.basis` `floor` with the whole hold. The window
+  counter really holds that amount until it expires. The cost views still show the run as `$0`, because nothing
+  ran.
 - **A run the worker stopped** (timeout, cancel, shutdown) settles at the floor: its exit line is not believed.
 - **A call whose answer reported no usage settles at the floor.** See [A call that reports no usage](#a-call-that-reports-no-usage).
 - **A retried job** keeps only its last attempt's record. The window counters are the truth for every attempt.

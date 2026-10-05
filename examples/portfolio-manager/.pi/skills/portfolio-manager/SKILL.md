@@ -25,7 +25,8 @@ From the snapshot, note:
 - `projects`: one entry per project, `_other` included. Your plan names every one of them.
 - per project: `floorMicros`, `weight`, `allocationMicros`, `spentMicros` and `runs7d`. Money is in
   micro-dollars (1000000 is one dollar).
-- `lastAttempt`: what your previous plan met.
+- `lastAttempt`: what your previous plan met. It is `refused` with reason `plan-absent` when the previous run
+  completed without writing a plan.
 
 ## Step 2: read the priorities
 

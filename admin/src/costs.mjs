@@ -207,10 +207,17 @@ function floorCounted(tokens) {
 
 /**
  * Whether a record is a refusal before any spend (issue #507): no tokens, no container exit, and the worker's own word
- * that no budget slot is held (`budgetReserved: false`). Every pre-spend refusal writes exactly that, and a run that
- * started a container has an exit code or holds its slot. All three, because each alone is also true of a run that
- * spent: a pre-meter record (before issue #25) has no tokens, and a container killed before its exit line may have
- * no exit code. A record that does not SAY `false` (null, or absent on an old record) keeps the floor below.
+ * that no global budget slot is held (`budgetReserved: false`). Most pre-spend refusals write exactly that. All three,
+ * because each alone is also true of a run that spent: a pre-meter record (before issue #25) has no tokens, a
+ * container killed before its exit line may have no exit code, and an old record has no `budgetReserved`. A record
+ * that does not SAY `false` (null, or absent on an old record) keeps the floor below.
+ *
+ * Not every refusal before spend matches, and those stay floors, on purpose (a residual, DES-COST-FOLD-BY-SCAN): a
+ * refusal by the global count ledger (`over-budget`, the soft hold) keeps the global slot it reserved
+ * (`budgetReserved: true`), and so does any other refusal whose job-count give-back failed. A container the runtime
+ * failed to start (`container-never-started` with an exit code, often 125) carries that code, so it stays a floor too. Telling those
+ * apart would mean keying on the reason, a list every new gate would have to join; a fact the record states itself
+ * would be the way to count them as $0.
  */
 function refusedBeforeSpend(record) {
   return (record.tokens === null || record.tokens === undefined) && (record.exitCode === null || record.exitCode === undefined) && record.budgetReserved === false;
@@ -222,10 +229,11 @@ function refusedBeforeSpend(record) {
  */
 function runContribution(record, subscriptions, pricing) {
   const tokens = record.tokens ?? null;
-  // A refusal before any spend (issue #507): an exact, measured $0, class "metered" and never a floor. Before this it
-  // fell to the branch below and put a floor on every bucket it joined, so a lab of refusals read "≥$0.00" and counted
-  // as unmetered runs (REQ-COST-ANALYTICS (d)).
-  if (refusedBeforeSpend(record)) return { rows: [], usd: 0, classes: ["metered"], floor: false };
+  // A refusal before any spend (issue #507): an exact $0, never a floor, and CLASSLESS: it measured nothing, so it
+  // takes no part in a bucket's class or coverage (combineContributions), and a plan-only bucket stays `plan:<id>`.
+  // Before this it fell to the branch below and put a floor on every bucket it joined, so a lab of refusals read
+  // "≥$0.00" and counted as unmetered runs (REQ-COST-ANALYTICS (d)).
+  if (refusedBeforeSpend(record)) return { rows: [], usd: 0, classes: [], floor: false, refused: true };
   // Pre-#25: the run spent real money and recorded nothing. $0 of class "unknown", and a FLOOR -- any
   // total containing it understates by construction.
   if (!tokens) return { rows: [], usd: 0, classes: ["unknown"], floor: true };
@@ -259,13 +267,17 @@ function runContribution(record, subscriptions, pricing) {
 function combineContributions(contribs) {
   const usd = contribs.reduce((sum, c) => sum + c.usd, 0);
   const floor = contribs.some((c) => c.floor);
-  const allMetered = contribs.every((c) => c.classes.length === 1 && c.classes[0] === "metered");
+  // A refusal before any spend (issue #507) is classless: it is left out of every class test and of the coverage
+  // denominator, so it neither demotes a bucket nor dilutes its coverage. A bucket of refusals alone is then
+  // vacuously metered, an exact $0, like an empty bucket.
+  const measured = contribs.filter((c) => c.refused !== true);
+  const allMetered = measured.every((c) => c.classes.length === 1 && c.classes[0] === "metered");
   if (allMetered) return typed(usd, "metered", { floor });
-  const allPlan = !floor && contribs.length > 0 && contribs.every((c) => c.rows.length > 0 && c.classes.length === 1 && c.classes[0] === "plan");
-  const ids = allPlan ? [...new Set(contribs.flatMap((c) => c.rows.map((row) => row.planId)))] : [];
+  const allPlan = !floor && measured.length > 0 && measured.every((c) => c.rows.length > 0 && c.classes.length === 1 && c.classes[0] === "plan");
+  const ids = allPlan ? [...new Set(measured.flatMap((c) => c.rows.map((row) => row.planId)))] : [];
   if (ids.length === 1) return typed(usd, "plan", { floor, planId: ids[0] });
-  const meteredRuns = contribs.filter((c) => c.classes.includes("metered")).length;
-  return typed(usd, "estimated", { floor, coverage: meteredRuns / contribs.length });
+  const meteredRuns = measured.filter((c) => c.classes.includes("metered")).length;
+  return typed(usd, "estimated", { floor, coverage: meteredRuns / measured.length });
 }
 
 /** A record's bucketing instant: `endedAt`, or `startedAt` for a record that never ended; null when
@@ -727,6 +739,9 @@ function buildPlans(runs, subs, pricing, windowDays) {
     // rows are in scope.
     const attributed = [];
     for (const r of runs) {
+      // A refusal before any spend (issue #507) never ran on the plan, whatever provider and model it names: it is no
+      // attributed run, no amortization share, no excluded row and no peak-window event.
+      if (r.contribution.refused === true) continue;
       const covered = r.contribution.rows.filter((row) => row.provider === sub.provider && sub.models.some((glob) => matchesGlob(row.model, glob)));
       if (covered.length > 0) {
         attributed.push({ at: r.at, rows: covered, floor: r.contribution.floor });
@@ -889,7 +904,9 @@ function buildProvenance(runs, piAiPin) {
  * band rather than emit a $0 that looks like an answer.
  */
 export function whatIfFlow({ records, flow, target, pricing }) {
-  const members = (Array.isArray(records) ? records : []).filter((r) => r && typeof r === "object" && (r.flow ?? null) === flow);
+  // A refusal before any spend (issue #507) is no run of the flow: it would be extrapolated at the flow's per-run cost
+  // and counted as an unmeasured run in `excluded` and `coverage`.
+  const members = (Array.isArray(records) ? records : []).filter((r) => r && typeof r === "object" && (r.flow ?? null) === flow && !refusedBeforeSpend(r));
   const ledgered = members.filter((r) => r.usage && Array.isArray(r.usage.models) && r.usage.models.length > 0);
   if (ledgered.length === 0) return seededBand(members.length);
   const quads = ledgered.map((r) => sumQuads(r.usage.models));

@@ -1391,7 +1391,8 @@ export async function runJob(job, deps) {
 					chainEnqueued: chain.enqueued,
 					chainRefused: chain.refused,
 					...(dollars ? { dollars } : {}),
-					// Only when a plan file was there: the record's `plan` is null otherwise, and every other result is unchanged.
+					// Only when the collector returned a plan (a file, or a confirmed portfolio job with none, `plan-absent`): the
+					// record's `plan` is null otherwise, and every other result is unchanged.
 					...(plan ? { plan } : {}),
 				};
 			}

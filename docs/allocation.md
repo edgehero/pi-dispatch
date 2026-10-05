@@ -126,10 +126,12 @@ A portfolio job runs a flow that reads the budget and proposes a split, with no 
   `portfolio-snapshot-oversize` before it costs anything.
 - **What it writes.** `/outbox/priorities.json`, the plan format of the operator's own tool. The worker reads it
   after the container completes and applies it under the same rules: the step, the interval, the floors.
-- **When it writes nothing.** A portfolio job that leaves no `/outbox/priorities.json` is recorded as refused,
-  `plan-absent`, and the applied split stays as it was. It is a line in the audit file and in `alloc:log` like the
-  refusals below, so the panel and the next snapshot's `lastAttempt` show that the run wrote no plan. A job that is
-  not a portfolio job (or whose flag was removed while it ran) and writes no plan records nothing.
+- **When it writes nothing.** A portfolio job that completes without a `/outbox/priorities.json` is recorded as
+  refused, `plan-absent`, and the applied split stays as it was. It is a line in the audit file and in `alloc:log`
+  like the refusals below, so the panel and the next snapshot's `lastAttempt` show that the run wrote no plan. A run
+  that stops before it completes (a policy exit, a timeout, a cancel, an infrastructure failure, a refusal before
+  start) records nothing, and `lastAttempt` still shows the earlier attempt. A job that is not a portfolio job (or
+  whose flag was removed while it ran) and writes no plan records only `plan: null`.
 - **When it is refused.** The plan is refused, and the job stays completed, when the job is not a portfolio job any
   more (`plan-not-portfolio`: the flag was removed from the triggers file, or the job was a manual run or a chained
   child), when the file is over 16 KiB, is a link or is not a regular file, is not JSON, or fails the plan rules
