@@ -1888,7 +1888,7 @@ test("install: a throwing children hook stops a meter with a policy, by the unme
 // Issue #571: an answer whose usage is broken counts costUnreported, in the meter, capped or not
 // ---------------------------------------------------------------------------------------------
 
-const PRICED = { api: "openai-completions", provider: "lan", id: "priced", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } };
+const PRICED = { api: "openai-completions", provider: "lan", id: "priced", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" } };
 const PRICED_ANTHROPIC = { ...PRICED, api: "anthropic-messages", provider: "anthropic", id: "claude-x" };
 const FREE = { ...PRICED, id: "free", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const TEXT = [{ type: "text", text: "a long answer" }];

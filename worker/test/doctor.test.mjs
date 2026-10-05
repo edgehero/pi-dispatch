@@ -12,7 +12,7 @@ import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS, runInit } from "../src/init.mjs";
-import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINT_ID_RE, loadModelEndpoints, parseModelEndpoints, renderEndpointsInclude, unreportedUsageModels } from "../src/model-endpoints.mjs";
+import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINT_ID_RE, ignoredOutputCapModels, loadModelEndpoints, parseModelEndpoints, renderEndpointsInclude, unreportedUsageModels } from "../src/model-endpoints.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe, egressEndpointProbe } from "../src/egress.mjs";
 import { LIVE_PREFIX, egressVerdict } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -4070,6 +4070,50 @@ test("doctor: an overlay model that costs money and asks for no streaming usage 
 	const quiet = capture();
 	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay }), { ...ghDeps(quiet.out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync });
 	assert.doesNotMatch(quiet.text(), /supportsUsageInStreaming/, "a zero-rated model reports nothing and costs nothing");
+});
+
+test("doctor: a priced model on a declared endpoint whose output cap travels as max_completion_tokens is ⚠, named, since a capped job is refused at its first call (issue #507)", async () => {
+	const priced = { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 };
+	const free = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	const endpoints = [{ id: "gpu", host: "gpu.lan", port: 8000, slots: 1, keyless: true }];
+	assert.deepEqual(
+		ignoredOutputCapModels({
+			models: {
+				providers: {
+					lan: {
+						baseUrl: "http://gpu.lan:8000/v1",
+						api: "openai-completions",
+						models: [{ id: "priced", cost: priced }, { id: "free", cost: free }, { id: "fixed", cost: priced, compat: { maxTokensField: "max_tokens" } }, { id: "explicit", cost: priced, compat: { maxTokensField: "max_completion_tokens" } }, { id: "anth", api: "anthropic-messages", cost: priced }, { id: "elsewhere", cost: priced, baseUrl: "http://other.lan:8000/v1" }, { id: "by-override", cost: priced }],
+						modelOverrides: { "by-override": { compat: { maxTokensField: "max_tokens" } } },
+					},
+					whole: { baseUrl: "http://gpu.lan:8000/v1", api: "openai-completions", compat: { maxTokensField: "max_tokens" }, models: [{ id: "a", cost: priced }, { id: "b", cost: priced, compat: { maxTokensField: "max_completion_tokens" } }] },
+				},
+			},
+			endpoints,
+		}),
+		[{ provider: "lan", modelId: "priced" }, { provider: "lan", modelId: "explicit" }, { provider: "whole", modelId: "b" }],
+	);
+	assert.deepEqual(ignoredOutputCapModels({ models: { providers: { lan: { baseUrl: "http://gpu.lan:8000/v1", models: [{ id: "x", api: "openai-completions", cost: priced }] } } }, endpoints: [] }), [], "no declared endpoint: nothing to judge");
+	assert.deepEqual(ignoredOutputCapModels({ models: null, endpoints }), []);
+	// A builtin provider pointed at the endpoint: the catalog's chat models take its baseUrl, priced from the catalog.
+	const catalogModels = { groq: [{ id: "g", api: "openai-completions", cost: priced }, { id: "own-field", api: "openai-completions", cost: priced, compat: { maxTokensField: "max_tokens" } }] };
+	assert.deepEqual(
+		ignoredOutputCapModels({ models: { providers: { groq: { baseUrl: "http://gpu.lan:8000/v1" } } }, endpoints, builtinChatModels: (p) => catalogModels[p] ?? [] }),
+		[{ provider: "groq", modelId: "g" }],
+	);
+	const overlay = tempDir("pi-overlay-507-");
+	const write = (model) => writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { ollama: { baseUrl: "http://gpu.lan:8000/v1", api: "openai-completions", apiKey: "$PI_DISPATCH_KEYLESS", models: [model] } } }));
+	const run = async () => {
+		const { out, text } = capture();
+		await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay }), { ...ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync, declaredEndpoints: () => endpoints });
+		return text();
+	};
+	write({ id: "qwen2.5:3b", cost: priced, contextWindow: 32768, maxTokens: 256 });
+	assert.match(await run(), /⚠ Overlay models\.json sends the output cap of "ollama"\/"qwen2\.5:3b" as max_completion_tokens to a declared model endpoint, which a local server may ignore \(Ollama does\), so under a dollar cap every call to it is refused as unboundable\n {4}→ set "compat": \{ "maxTokensField": "max_tokens" \} on the model or its provider in models\.json/);
+	write({ id: "qwen2.5:3b", cost: priced, contextWindow: 32768, maxTokens: 256, compat: { maxTokensField: "max_tokens" } });
+	assert.doesNotMatch(await run(), /maxTokensField|max_completion_tokens/, "the documented fix silences it");
+	write({ id: "qwen2.5:3b", cost: free, contextWindow: 32768, maxTokens: 256 });
+	assert.doesNotMatch(await run(), /max_completion_tokens/, "a zero-rated model is bounded at 0 and needs no output cap");
 });
 
 test("doctor: an allowlist naming a host alias is ⚠, pointing at model-endpoints.json (#503)", async () => {

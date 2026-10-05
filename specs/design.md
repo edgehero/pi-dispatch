@@ -3651,6 +3651,22 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     Because that merge comes last, ANY key overrides the request (`model`, `service_tier`, `tools`), so a
     samplingParams holding a key outside a fixed safe list (`temperature`, `top_p`, `top_k`, `seed`, `stop`,
     `presence_penalty`, `frequency_penalty`, the three output-cap keys, `n`) makes the call `Infinity` too;
+  - **an output cap the server may ignore** (issue #507): openai-completions sends the cap as
+    `max_completion_tokens` unless the model's composed `compat.maxTokensField` is `"max_tokens"` (pinned), and
+    Ollama 0.35.0 ignores `max_completion_tokens` (measured: 20 asked, 440 answered), so a capped job on a priced
+    declared-endpoint model settled $3.41 under a $2 cap. pi chose that field per host only for the hosts its own
+    catalog serves openai-completions on (`COMPLETIONS_CATALOG_HOSTS`, derived from the pinned catalog by test). On
+    ANY other host (`completionsOwnServer`: the operator's server, a declared endpoint or not, or a baseUrl that
+    does not parse) the output term is only the cap that travels as `max_tokens`: the asked cap or
+    `model.maxTokens` on `streamSimple` (pi always sends one there), the asked cap alone on a raw `stream`; a
+    model whose field is not `max_tokens`, or a raw `stream` with no cap, is `Infinity`, so it is refused under a
+    cap. ONE rule, in the runner, because the runner is the one place that sees the model as pi composed it; the
+    worker never writes `models.json` (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`), and doctor warns about a priced model
+    on a declared endpoint that misses the field (`ignoredOutputCapModels`). Rejected: bounding by
+    `model.contextWindow` (the operator's number, not the server's, and Ollama shifts its context to keep
+    answering); rewriting the field for the operator (the overlay is the operator's file and a job mounts it
+    read-only); and trusting an explicit `"max_completion_tokens"` (Ollama ignores it however it was chosen). A
+    zero-rated model is `0` before this term, so a free local model is untouched;
   - the input rate is the dearest of input, cache read and cache write, and twice input when a 1h cache write
     can happen (anthropic-messages or bedrock-converse-stream with retention `long`, resolved in pi's order:
     the option, the call's env, the process env);
@@ -3938,6 +3954,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     cold-starts it as `compaction-summary-empty` (`INT-SESSION-STORE-CONTRACT`, issue #535);
   - a provider whose server output limit exceeds the catalog's `maxTokens`, on an api that does not send the
     caller's cap, can exceed the bound; `boundExceeded` again;
+  - **an operator's server on an api other than openai-completions** (issue #507) is trusted to read that api's own
+    output-cap field (`max_output_tokens`, `max_tokens`); only openai-completions has a field choice pi makes per
+    host. A server that ignores its api's own field can exceed the bound; `boundExceeded` again;
   - **api-id trust**: the bound believes `model.api`. An overlay or extension model that names a priced api but
     is served by something that bills differently (a gateway with its own fees, a mislabelled api) is bounded by
     the table it declares, not by what is billed;
@@ -8325,3 +8344,4 @@ a tunnel.
 | 2026-10-05 | Issue #507, found by review. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**: a revert to a row with no plan (neutral, default, a neutral re-base, or `expired`) restores the CURRENT neutral split, today's default weights with no plan id, no expiry and `lastPlanAt` at the revert, where it had restored the row's own weights (an older envelope's neutral, kept for good) and, for an `expired` row, written the expired plan's id with a fresh `validUntil` over neutral weights. The `expired` row keeps the id (rejected: logging it with none). A revert to a plan's row is unchanged. The panel's revert question names such a row as the current neutral split. `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked: no record or plan field changed, and the `alloc:log` row shape is the same. |
 | 2026-10-05 | Issue #507, found by rendering the README images. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the dollar surfaces: the panel's dollar window row fits 80 columns with exact micro-dollar amounts (`boundExceeded` only above zero, amber and before the settled part; runs counted by basis when the counts add up); each scoped limits row and each insights scoped row shows its dollar windows. RUN_DETAIL says `budget slot held` or `no budget slot` for the record's `budgetReserved`, and nothing for a value outside the contract. Rejected: rounded amounts and a second line per row. The RUNS row's clip of a long cron job id (`repeat:<id>:<ms>`) is UNCHANGED, checked: the clipped cells are turns and tokens, last by design, the outcome cell survives, and the drill-in shows both. `DES-DOLLAR-RESERVE-AND-SETTLE` UNCHANGED, checked: no key, counter or verdict changed. Code evidence: admin/src/dashboard.ts (`dollarRow`, `limitLines`, `limitRow`, `renderRunDetail`), admin/src/index.ts (`assembleBudgetView`), admin/src/insights-html.mjs (`normScopedRow`, `budgetSectionHtml`); tests admin/test/dollar-windows.test.mjs, dashboard.test.mjs, insights-html.test.mjs, insights-command.test.mjs. |
 | 2026-10-05 | Issue #507, the review of the panel's scoped rows. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the dollar surfaces: a scoped limits row takes its dollar caps from its own fields, so a failed dollar read shows `-` over the cap instead of dropping the cap; a full dollar window is drawn first among the row's dollar windows; the narrow plain-text path takes the counter and `(full)` from the DOLLAR WINDOWS rows by index, where it printed `$-` because the panel's scoped read takes no dollar key. `/dispatch budget` UNCHANGED, checked: it keeps the scoped read's own counters. Code evidence: admin/src/dashboard.ts (`limitRow`, the plain path), admin/src/render.mjs (`renderScopedLimits`); tests admin/test/dollar-windows.test.mjs, render.test.mjs. |
+| 2026-10-05 | Issue #507, found by its end-to-end test. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, the bound: on openai-completions to a host outside the pinned catalog's (`COMPLETIONS_CATALOG_HOSTS`, derived by test), the output term is only a cap that travels as `max_tokens`; any other such call is `Infinity` and refused under a cap. The e2e overrun ($3.41 under $2 on Ollama, which ignores `max_completion_tokens`) cannot recur. Rejected: the context window as a bound, rewriting the operator's models.json, trusting an explicit `max_completion_tokens`. New residual: an operator's server on another api is trusted to read that api's own field. Every other bound term UNCHANGED, checked. |

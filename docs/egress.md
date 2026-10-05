@@ -131,11 +131,23 @@ then its provider needs no key at all ("A provider with no key" below).
 Then point the model at it in the overlay `models.json`, with the same host and port as the declaration:
 
 ```json
-{"providers":{"local-ollama":{"api":"openai-completions","baseUrl":"http://host.docker.internal:11434/v1","apiKey":"$PI_DISPATCH_KEYLESS","models":[{"id":"qwen2.5:0.5b","contextWindow":32768,"maxTokens":2048}]}}}
+{"providers":{"local-ollama":{"api":"openai-completions","baseUrl":"http://host.docker.internal:11434/v1","apiKey":"$PI_DISPATCH_KEYLESS","compat":{"maxTokensField":"max_tokens"},"models":[{"id":"qwen2.5:0.5b","contextWindow":32768,"maxTokens":2048}]}}}
 ```
 
 A model uses an endpoint when its `baseUrl` (its own, else its provider's) has the endpoint's host and port. Host
 alone does not match.
+
+Keep the `compat` line. pi sends a model's output cap as `max_completion_tokens` unless `maxTokensField` says
+`max_tokens`, and Ollama ignores `max_completion_tokens`: it answers as long as it likes. Every OpenAI compatible
+server reads `max_tokens`. A free model (no `cost`, or all zeros) does not need it. A priced one does, if a job
+runs under a dollar cap (`PI_MAX_COST_USD` or a trigger's `run.maxCostUsd`): the cap can only hold when the
+server stops at the output cap. So on any server that is not one of pi's own hosted providers, the cost guard
+counts a call unboundable unless its cap travels as `max_tokens`, and refuses it under a dollar cap
+(`DES-DOLLAR-RESERVE-AND-SETTLE`). `doctor` warns about a priced model on a declared endpoint that misses it:
+
+```
+⚠ Overlay models.json sends the output cap of "local-ollama"/"qwen2.5:0.5b" as max_completion_tokens to a declared model endpoint, which a local server may ignore (Ollama does), so under a dollar cap every call to it is refused as unboundable
+```
 
 ### A provider with no key
 

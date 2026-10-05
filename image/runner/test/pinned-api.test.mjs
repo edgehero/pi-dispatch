@@ -9,7 +9,7 @@ import { test } from "node:test";
 // Pure -- no static pi import in its module graph -- so it needs none of the gating below. Importing
 // the runner's OWN candidate resolver is deliberate: the layout fact it encodes is the thing that
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
-import { BOUND_OVERHEAD_TOKENS, callCostBound, IMAGE_RESIZE_MAX, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
+import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, IMAGE_RESIZE_MAX, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
 import * as catalogModels from "./helpers/catalog-models.mjs";
 import { classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
 import { jobSettings } from "../src/config.mjs";
@@ -1630,6 +1630,19 @@ test("the output-bound rules: who sends maxTokens, the 16 floor, the reasoning c
 	}
 	// openai-completions drops a falsy cap; the bound reads only a positive one as asked.
 	assert.match(nestedPiAi("api", "openai-completions.js"), /if \(options\?\.maxTokens\) \{/);
+});
+
+test("COMPLETIONS_CATALOG_HOSTS is exactly the hosts the pinned catalog serves openai-completions on, and pi picks the cap's field from compat (issue #507)", { skip }, () => {
+	const dataDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "providers", "data");
+	const hosts = new Set();
+	for (const file of readdirSync(dataDir).filter((name) => name.endsWith(".json"))) {
+		for (const row of Object.values(JSON.parse(readFileSync(join(dataDir, file), "utf8"))["openai-completions"] ?? {})) hosts.add(new URL(row.baseUrl).hostname);
+	}
+	assert.deepEqual([...COMPLETIONS_CATALOG_HOSTS], [...hosts].sort(), "a catalog host came or went: re-check which field pi sends there before trusting it");
+	const src = nestedPiAi("api", "openai-completions.js");
+	assert.match(src, /if \(compat\.maxTokensField === "max_tokens"\) \{[^}]*params\.max_tokens = options\.maxTokens;\s*\}\s*else \{\s*params\.max_completion_tokens = options\.maxTokens;/, "max_tokens only when compat says so");
+	assert.match(src, /maxTokensField: model\.compat\.maxTokensField \?\? detected\.maxTokensField,/, "the model's compat wins over detection");
+	assert.match(src, /maxTokensField: useMaxTokens \? "max_tokens" : "max_completion_tokens",/, "detection's default is max_completion_tokens");
 });
 
 test("the catalog rows the bound tests price against are the pinned catalog's (issue #501)", { skip }, () => {

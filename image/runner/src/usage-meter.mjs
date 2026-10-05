@@ -1518,6 +1518,55 @@ const MIN_OUTPUT_TOKENS = 16;
  * to the model's own limit, so a small options.maxTokens bounds nothing there.
  */
 const MAX_TOKENS_UNSENT_APIS = new Set(["openai-codex-responses", "cloudflare-workers-ai-system-one", "typesafe-system-one"]);
+/**
+ * The hosts pi's own catalog serves openai-completions models on (issue #507), pinned to the catalog by
+ * pinned-api.test.mjs. openai-completions sends the output cap as `max_completion_tokens` unless the model's
+ * compat says `max_tokens`, and pi picked that field per host for these hosts only. Any other server is the
+ * operator's (Ollama, vLLM, llama.cpp, LM Studio, a proxy), and pi's default is a guess there: Ollama 0.35.0
+ * ignores `max_completion_tokens` and answers past it (measured: 20 asked, 440 returned), which let a job settle
+ * $3.41 under a $2 cap. Every OpenAI-compatible server reads `max_tokens`, so on any other host only a cap that
+ * travels as `max_tokens` bounds the output. Rejected: trusting `model.contextWindow` instead, since it is the
+ * operator's number and not the server's (Ollama's own window differs and it shifts context to keep answering).
+ */
+export const COMPLETIONS_CATALOG_HOSTS = Object.freeze([
+	"api.ant-ling.com",
+	"api.cerebras.ai",
+	"api.cloudflare.com",
+	"api.deepseek.com",
+	"api.fireworks.ai",
+	"api.groq.com",
+	"api.individual.githubcopilot.com",
+	"api.moonshot.ai",
+	"api.moonshot.cn",
+	"api.together.ai",
+	"api.xiaomimimo.com",
+	"api.z.ai",
+	"gateway.ai.cloudflare.com",
+	"inference.baseten.co",
+	"integrate.api.nvidia.com",
+	"open.bigmodel.cn",
+	"opencode.ai",
+	"openrouter.ai",
+	"router.huggingface.co",
+	"token-plan-ams.xiaomimimo.com",
+	"token-plan-cn.xiaomimimo.com",
+	"token-plan-sgp.xiaomimimo.com",
+	"token-plan.ap-southeast-1.maas.aliyuncs.com",
+	"token-plan.cn-beijing.maas.aliyuncs.com",
+]);
+
+/**
+ * Whether an openai-completions model talks to a server outside COMPLETIONS_CATALOG_HOSTS, where only a cap sent as
+ * `max_tokens` is known to be read. A baseUrl that does not parse counts as such a server.
+ */
+export function completionsOwnServer(model) {
+	if (model?.api !== "openai-completions") return false;
+	try {
+		return !COMPLETIONS_CATALOG_HOSTS.includes(new URL(model.baseUrl).hostname);
+	} catch {
+		return true;
+	}
+}
 
 /** A rate that is a finite, non-negative number. Anything else makes the table unusable for a bound. */
 function rate(value) {
@@ -1568,7 +1617,9 @@ function sendsMaxTokens(model, options) {
  *      to it); at least 16 on openai-responses and azure. 0 for `classify`, which is Infinity if any output rate
  *      is above 0 (pi exposes no output bound for it). No usable number, or a present maxTokens that is not
  *      finite: Infinity. On the three apis that merge samplingParams after the cap, an output-cap key there wins
- *      if larger and `n` multiplies (samplingOutput).
+ *      if larger and `n` multiplies (samplingOutput). On openai-completions to a host outside
+ *      COMPLETIONS_CATALOG_HOSTS (issue #507), only the cap the request carries as `max_tokens` counts: a model
+ *      whose compat does not set that field is Infinity, and so is a raw `stream` with no options.maxTokens.
  *   6. The input rate of a table is the highest of input, cacheRead and cacheWrite, and 2 x input when a 1h cache
  *      write can happen: api anthropic-messages or bedrock-converse-stream and retention "long", resolved as pi
  *      does (options.cacheRetention, else options.env.PI_CACHE_RETENTION, else the process env).
@@ -1618,7 +1669,14 @@ export function callCostBound(method, model, context, options, env = process.env
 		if (raw !== undefined && raw !== null && !(typeof raw === "number" && Number.isFinite(raw))) return Infinity;
 		const asked = typeof raw === "number" && raw > 0 ? raw : undefined;
 		const modelMax = typeof model.maxTokens === "number" && Number.isFinite(model.maxTokens) && model.maxTokens > 0 ? model.maxTokens : undefined;
-		output = sendsMaxTokens(model, options) ? (asked ?? modelMax) : modelMax;
+		if (completionsOwnServer(model)) {
+			// Issue #507: on the operator's own server the output is bounded by the cap on the wire, and only when it
+			// travels as max_tokens. streamSimple always sends one (`asked ?? model.maxTokens`, clamped lower); a raw
+			// stream sends only the caller's, and with none the server answers as long as it likes.
+			output = model.compat?.maxTokensField === "max_tokens" ? (method === "stream" ? asked : (asked ?? modelMax)) : undefined;
+		} else {
+			output = sendsMaxTokens(model, options) ? (asked ?? modelMax) : modelMax;
+		}
 		if (options?.reasoning) output = modelMax === undefined || output === undefined ? undefined : Math.max(output, modelMax);
 		if (output === undefined) return Infinity;
 		if (MIN_OUTPUT_APIS.has(model.api)) output = Math.max(output, MIN_OUTPUT_TOKENS);

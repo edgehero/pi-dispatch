@@ -44,7 +44,7 @@ class FakeStream {
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const answer = (extra = {}) => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 11, cost: { total: 0 } }, ...extra });
 
-const LISTED = Object.freeze({ id: "listed-1", api: "openai-completions", provider: "local", baseUrl: "http://127.0.0.1:1", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 1000 });
+const LISTED = Object.freeze({ id: "listed-1", api: "openai-completions", provider: "local", baseUrl: "http://127.0.0.1:1", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 1000, compat: { maxTokensField: "max_tokens" } });
 const UNLISTED = Object.freeze({ ...LISTED, id: "unlisted-1" });
 const LIST = Object.freeze([{ provider: "local", model: "listed-1" }]);
 const VIRTUAL = Object.freeze({ api: VIRTUAL_MODEL_API, provider: "router", id: "auto" });

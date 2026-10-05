@@ -336,8 +336,9 @@ test("deploymentSettingsOf: the overlay over env, env when the overlay is invali
 // ── PR #551's review ─────────────────────────────────────────────────────────────────────────────────────
 
 test("the floor carries the runner's service-tier multiplier, derived from the runner's own bound on every priced api", () => {
-	// A table that prices output only, with 1,000 output tokens: the runner's bound is then 1,000 x its multiplier.
-	const flat = (api, id) => ({ id, api, provider: "x", baseUrl: "http://x", maxTokens: 1000, cost: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0 } });
+	// A table that prices output only, with 1,000 output tokens: the runner's bound is then 1,000 x its multiplier. The
+	// compat line keeps openai-completions on its own server boundable (issue #507); no other api reads it.
+	const flat = (api, id) => ({ id, api, provider: "x", baseUrl: "http://x", maxTokens: 1000, cost: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" } });
 	for (const api of PRICED_APIS) {
 		for (const id of ["gpt-5.5", "some-model"]) {
 			const runner = callCostBound("streamSimple", flat(api, id), { systemPrompt: "" }, {}, {}) / 1000;

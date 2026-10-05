@@ -530,7 +530,7 @@ test("a branch summary is metered too: one call in otherTotal under a fresh sess
 // The margins below are hundreds of thousands of micro-dollars wide, so the request's exact byte count cannot
 // move an outcome.
 const PRICED_API = "openai-completions";
-const PRICED_MODEL = { cost: { input: 1, output: 100, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000 };
+const PRICED_MODEL = { cost: { input: 1, output: 100, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000, compat: { maxTokensField: "max_tokens" } };
 const FORTY_CENTS = { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100, cost: { input: 0.001, output: 0.399, cacheRead: 0, cacheWrite: 0, total: 0.4 } };
 
 /** One install with a cost cap, as run-job.mjs builds it: the meter carries the cap, the guard enforces it. */
@@ -718,7 +718,7 @@ async function loopbackOpenAI(plan) {
 	// object. A provider pi does not know would be composed onto the compat registry's openai-completions entry
 	// (trap #5), which earlier tests in this file left wrapped by installs whose meters are stopped.
 	writeFileSync(modelsPath, JSON.stringify({ providers: { openai: { apiKey: "loopback-literal-key",
-		models: [{ id: "loopback-priced", name: "priced", api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, reasoning: false, input: ["text"], cost: { input: 1, output: 100, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 10000 }] } } }));
+		models: [{ id: "loopback-priced", name: "priced", api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, reasoning: false, input: ["text"], cost: { input: 1, output: 100, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 10000, compat: { maxTokensField: "max_tokens" } }] } } }));
 	// The compat registry is process-wide and an install never unwraps it, so the cost-cap tests above left its
 	// openai-completions entry wrapped by meters they stopped. pi's own reset puts the builtins back, as
 	// AgentSession.reload() would, so this test's install arms a clean registry.
@@ -1539,7 +1539,7 @@ async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels 
 			apiKey: "pi-dispatch-proxy-literal-key",
 			api: PRICED_API,
 			// A cheap table on a priced api, so under a cap the proxy's own call has a small finite bound.
-			models: [{ id: "proxy-1", name: "proxy-1", api: PRICED_API, reasoning: false, input: ["text"], cost: { input: 0.01, output: 0.01, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 }],
+			models: [{ id: "proxy-1", name: "proxy-1", api: PRICED_API, reasoning: false, input: ["text"], cost: { input: 0.01, output: 0.01, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096, compat: { maxTokensField: "max_tokens" } }],
 			// "pass" answers with the forward's own stream; "zero" with a stream of its own that reports no usage, a proxy
 			// that drops it; "fallback" tries the forward and, whatever it gave (an answer, an error, a throw, a
 			// refusal), answers ITSELF with $2 of its own (the review's f1 shape: a fallback or router provider).
@@ -1598,7 +1598,7 @@ test("PR #547's reviews: a proxy provider's forward to another model is a full c
 	assert.deepEqual([listed.served, listed.stops, listed.guard.snapshot().modelRefused], [[], [MODEL_NOT_ALLOWED], 1]);
 	// A cheap proxy forwarding to a dear target under a $1 cap: the target's own bound (about $2) is judged, and refused
 	// before anything is sent, as the same target called directly would be.
-	const dear = await proxyRun({ maxCostMicros: 1_000_000, target: { api: PRICED_API, cost: { input: 1, output: 200, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000 } });
+	const dear = await proxyRun({ maxCostMicros: 1_000_000, target: { api: PRICED_API, cost: { input: 1, output: 200, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000, compat: { maxTokensField: "max_tokens" } } });
 	assert.equal(dear.result.errorMessage, "pi-dispatch: cost cap reached", JSON.stringify(dear.result));
 	const refusal = dear.logged.find((line) => line.event === "cost_refused");
 	assert.ok(refusal?.fields.bound > 1_000_000, `the target's own bound was judged: ${JSON.stringify(refusal)}`);
@@ -1654,7 +1654,7 @@ test("PR #547's final review: a fallback provider whose forward failed and that 
 	}
 	// Under a $1 cap, a forward that fails on the network (the target's priced api dials a closed port): the provider's
 	// own $2 is charged, so the job's next call is refused cost-cap, as on main.
-	const neterr = await proxyRun({ answer: "fallback", maxCostMicros: 1_000_000, target: { api: PRICED_API }, second: true });
+	const neterr = await proxyRun({ answer: "fallback", maxCostMicros: 1_000_000, target: { api: PRICED_API, compat: { maxTokensField: "max_tokens" } }, second: true });
 	assert.ok(neterr.guard.cost.state.spent >= 2_000_000, `charged the provider's own $2: ${neterr.guard.cost.state.spent}`);
 	assert.deepEqual([neterr.next?.errorMessage, neterr.meter.state.stopReason], ["pi-dispatch: cost cap reached", "cost-cap"]);
 	// Under a $1 cap, a forward refused (unboundable target): the job stops, and the provider's own answer is still counted.

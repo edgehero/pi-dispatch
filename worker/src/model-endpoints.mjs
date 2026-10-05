@@ -503,6 +503,48 @@ export function unreportedUsageModels(models, { builtinModel = () => null, built
 	return found;
 }
 
+/**
+ * The priced models a declared endpoint serves on openai-completions whose output cap does not travel as `max_tokens`
+ * (issue #507), as `[{ provider, modelId }]`. pi 0.99.1 sends the cap as `max_completion_tokens` unless the model's
+ * composed `compat.maxTokensField` is `"max_tokens"`, and Ollama ignores that field, so the runner's cost guard
+ * (`completionsOwnServer`, image/runner/src/usage-meter.mjs) counts every such call unboundable and refuses it under a
+ * dollar cap. Composed the way unreportedUsageModels composes `supportsUsageInStreaming`: a defined model's provider
+ * compat, then its own, then its `modelOverrides` entry; a builtin chat model's catalog compat, then the provider's,
+ * then the override. Only models `endpointsForModel` puts on a declared endpoint, and not zero-rated ones (a zero
+ * bound needs no output cap). A model whose api is set to another api is skipped. In the overlay's order.
+ */
+export function ignoredOutputCapModels({ models, endpoints, builtinModel = () => null, builtinChatModels = () => [] }) {
+	const providers = models?.providers;
+	if (providers === null || typeof providers !== "object" || Array.isArray(providers) || !Array.isArray(endpoints) || endpoints.length === 0) return [];
+	const found = [];
+	const field = (compat) => (compat !== null && typeof compat === "object" ? compat.maxTokensField : undefined);
+	const judge = (provider, modelId, maxTokensField, cost) => {
+		if (maxTokensField === "max_tokens") return;
+		if (endpointsForModel({ models, provider, modelId, endpoints }).length === 0) return;
+		if (cost !== null && isZeroCost(cost)) return;
+		found.push({ provider, modelId });
+	};
+	for (const provider of Object.keys(providers)) {
+		const entry = providerOf(models, provider);
+		if (entry === null) continue;
+		const overrides = entry.modelOverrides !== null && typeof entry.modelOverrides === "object" && !Array.isArray(entry.modelOverrides) ? entry.modelOverrides : {};
+		const overrideOf = (id) => (Object.hasOwn(overrides, id) ? overrides[id] : undefined);
+		const defined = modelsOf(entry);
+		for (const model of defined) {
+			const api = model.api ?? entry.api;
+			if (typeof api === "string" && api !== "openai-completions") continue;
+			judge(provider, model.id, field(overrideOf(model.id)?.compat) ?? field(model.compat) ?? field(entry.compat), composedCost({ models, provider, modelId: model.id, builtinModel }));
+		}
+		const listed = typeof builtinChatModels === "function" ? builtinChatModels(provider) : [];
+		for (const builtin of Array.isArray(listed) ? listed : []) {
+			if (builtin === null || typeof builtin !== "object" || typeof builtin.id !== "string") continue;
+			if (defined.some((m) => m.id === builtin.id) || builtin.api !== "openai-completions") continue;
+			judge(provider, builtin.id, field(overrideOf(builtin.id)?.compat) ?? field(entry.compat) ?? field(builtin.compat), composedCost({ models, provider, modelId: builtin.id, builtinModel: () => builtin }));
+		}
+	}
+	return found;
+}
+
 /** The exact `apiKey` a keyless provider's models.json entry carries: pi resolves `$NAME` from the job's environment. */
 export const KEYLESS_API_KEY = `$${KEYLESS_ENV_NAME}`;
 
