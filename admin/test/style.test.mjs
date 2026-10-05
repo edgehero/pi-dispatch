@@ -70,7 +70,7 @@ test("meter with an unknown cap renders the 'cap unknown' note at `width`", () =
   const s = makeStyler(PLAIN_THEME);
   const m = s.meter(5, null, 40, "ok");
   assert.equal(visibleLen(m), 40);
-  assert.match(stripAnsi(m), /5 \/ \? \(cap unknown\)/);
+  assert.match(stripAnsi(m), /5 \/ \? \(worker env cap\)/);
 });
 
 test("divider fills exactly `width` with a rule and optional right-side meta", () => {

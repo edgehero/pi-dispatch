@@ -934,8 +934,10 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
 
 /**
  * A block-char progress bar `[####....] reserved/cap` fitted to `width`. When `cap` is not a positive
- * integer the true cap is unknown to this process, so it renders `reserved / ? (cap unknown)` with no bar
- * rather than a bar against a guessed denominator.
+ * integer the true cap is unknown to this process, so it renders `reserved / ? (worker env cap)` with no bar
+ * rather than a bar against a guessed denominator. The words say where the cap lives (issue #507): the panel reads
+ * a job-count cap from the settings overlay only, and with none there the worker's own env (or its default)
+ * decides it. A bare "cap unknown" read as a fault on a deployment that set PI_DAILY_CAP in its `.env`.
  *
  * `state` ("ok" | "soft-hold" | "over") appends a textual marker to the label: the panel is monochrome and
  * `clip` strips ANSI, so the amber/red of a soft-hold or over-budget window is carried as a word, not a
@@ -949,7 +951,7 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
 export function meter(reserved, cap, width = 24, state = "ok") {
   const r = Number.isFinite(reserved) ? Math.max(0, Math.trunc(reserved)) : 0;
   if (!Number.isInteger(cap) || cap <= 0) {
-    return clip(`${r} / ? (cap unknown)`, width);
+    return clip(`${r} / ? (worker env cap)`, width);
   }
   const tag = state === "soft-hold" ? " soft-hold" : state === "over" ? " over" : "";
   const label = ` ${r}/${cap}${tag}`;

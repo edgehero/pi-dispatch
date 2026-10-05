@@ -1258,8 +1258,10 @@ function toLines(text: string): string[] {
  * One meter per spend window whose cap the admin can read (the overlay sets it). The day meter always shows
  * (parity with the single-window panel); week/month meters show only when their overlay cap is set. Each
  * meter's state comes from the worker's own `windowState`, so the bar's amber/red marker cannot drift from
- * what `reserveBudget` enforces. `meter` renders "cap unknown" for a window with no readable cap, so a
- * missing overlay cap degrades in place rather than guessing a denominator.
+ * what `reserveBudget` enforces. `meter` renders "? (worker env cap)" for a window with no readable cap, so a
+ * missing overlay cap degrades in place rather than guessing a denominator, and says where the cap lives. Not read
+ * from the env (issue #507 looked): with no deployment pointer the env the panel sees is pi's own, not the worker's,
+ * so a number from it, or the worker's default of 25 when it sets none, would be a guess.
  */
 function budgetMeters(budget: any, settings: any, width: number): string[] {
   const overlay = settings?.overlay ?? {};

@@ -201,14 +201,14 @@ export function makeStyler(theme, { ascii = false } = {}) {
    * A block-char spend meter fitted to `width` visible columns: `[███░░░] r/cap`. The filled cells take
    * `state`'s color (ok→success, soft-hold→warning, over→error), the empty cells `dim`, the label the
    * state color too. When `cap` is not a positive integer the true cap is unknown, so it renders
-   * `r / ? (cap unknown)` with no bar. Visible width === `width`.
+   * `r / ? (worker env cap)` with no bar (panel.mjs `meter` says why those words). Visible width === `width`.
    */
   const meter = (reserved, cap, width, state = "ok") => {
     const w = Math.max(8, Math.trunc(width) || 8);
     const r = Number.isFinite(reserved) ? Math.max(0, Math.trunc(reserved)) : 0;
     const stateColor = state === "over" ? "error" : state === "soft-hold" ? "warning" : "success";
     if (!Number.isInteger(cap) || cap <= 0) {
-      const plain = `${r} / ? (cap unknown)`;
+      const plain = `${r} / ? (worker env cap)`;
       return cell(plain, w, { color: "dim" });
     }
     const label = ` ${r}/${cap}`;
