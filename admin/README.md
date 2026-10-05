@@ -10,9 +10,11 @@ without giving it the keys to your machine.**
 [pi](https://github.com/earendil-works/pi) is an open source coding agent that you normally run in a
 terminal. It has no job queue, no spend limit and, by its own README, no permission system. pi-dispatch
 adds exactly those, so pi can run unattended: on a cron schedule, on your repo's issues and PRs, or from
-the command line. Every job runs in its own container. Spend is checked before a single token is spent,
-for the whole deployment and per repo or folder. Everything the agent did, and what it cost, is recorded,
-graphed and priced.
+the command line. Every job runs in its own container. Spend is checked before a single token is spent:
+job counts and a daily token count for the whole deployment, job counts per repo, folder or project, and
+dollars per day, week or month for the deployment and per repo, folder, project or model, plus an optional
+dollar cap per job. Everything the agent did, and what it cost, is
+recorded, graphed and priced.
 
 On a forge you stay in control at both ends. A job starts only when someone with write access to the repo
 asks for one, with a label, an `@pi` comment or a review. What comes back is a pull request that you
@@ -37,8 +39,10 @@ Every trigger produces the same job, through the same path: one queue, one conta
                 │
                 ▼
      under the day, week and       if not: refused here, before any spend
-     month caps, the scoped
-     limits and the turn budget?
+     month caps (jobs, tokens,
+     dollars), the scoped limits,
+     the project's share of the
+     envelope and the turn budget?
                 │  yes
                 ▼
      one container per job         Docker or Podman, removed after the job: all
@@ -125,7 +129,7 @@ Four things to know before you build on it:
 One command puts a live terminal view over the whole deployment:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2.0.0" alt="The /dispatch panel: status, spend meters, triggers, pause windows, scoped limits, held and failed jobs, runs, and settings" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-05" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects, and settings" width="820">
 </p>
 
 - **Status and spend.** Queue and worker state, day, week and month spend meters, a daily token counter,
@@ -133,12 +137,13 @@ One command puts a live terminal view over the whole deployment:
   running job cancels it after asking, and `b` on an opened run reopens its workspace.
 - **Insights, the one analytics page.** Press `i` (or type `/dispatch insights`) and one self contained
   page opens in your browser. It shows the budget dials, plan verdicts against API rates, daily,
-  cumulative and per flow spend charts, breakdowns by flow, trigger, model and repo, and the trigger and
-  flow topology with spend on each trigger. A plan covered run never shows as $0.00, and an estimate is
+  cumulative and per flow spend charts, five breakdowns (by flow, trigger, model, repo and project), the
+  budget split with each project's share, spend and floor and the split's history, and the trigger and flow
+  topology with spend on each trigger. A plan covered run never shows as $0.00, and an estimate is
   always marked as one ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2.0.0" alt="The insights page: KPI tiles, budget dials, a plan verdict, spend charts, the four breakdowns, and the topology with spend badges" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-05" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, and the topology with spend badges" width="820">
 </p>
 
 - **Triggers, editable live.** Add, edit and delete triggers without a restart. Drill-ins show what
@@ -146,13 +151,22 @@ One command puts a live terminal view over the whole deployment:
   stays in the list, matches nothing, and is re-armed when you delete its `on.disarmed` mark from the file.
   Triggers that run third party code or a custom image carry a badge. Turning either on or off stays an
   edit to the reviewed `triggers.json`, which neither the console nor a model callable tool makes for you.
+  A portfolio manager's cron trigger carries `[portfolio]`: its jobs write the budget split.
 - **Quiet hours.** Pause windows per folder or repo, timezone aware. A paused job waits, never drops, and
   costs nothing.
-- **Scoped limits.** Job caps per repo or folder (day, week, month), refused before any spend, plus a
-  ceiling on how many run at once, enforced by making jobs wait. Local jobs also have a fixed guard with
+- **Scoped limits.** Job caps per repo, folder or project (day, week, month), refused before any spend, plus a
+  ceiling on how many run at once, enforced by making jobs wait. Dollar caps per day, week or month for a
+  repo, a folder, a model (`model:<provider>/<id>`) or a project (`project:<id>`). Write a repo with its
+  forge (`github:acme/web`) to limit it on that forge only. Local jobs also have a fixed guard with
   no switch: one job per folder at a time (it lives in the worker process, and one worker per container
   daemon is the supported shape), because two agents editing one working tree race each other with no
   gate and no undo.
+- **Dollar windows.** With dollar caps set, the panel shows each window's spend and holds against its cap,
+  and what the run records settled ([`docs/costs.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/costs.md)).
+- **Projects.** `j` shows each project with its members and this month's spend, and `Enter` on one filters
+  the runs list. `dispatch_projects` lists them, and `dispatch_project_add`, `dispatch_project_edit` and
+  `dispatch_project_delete` change `projects.json` behind your confirm
+  ([`docs/projects.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/projects.md)).
 - **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`
   in the list shows each project's share and spend, the applied plan with the reasons it gave, and the history.
   `r` on a history row reverts to it after a yes or no. `dispatch_priorities_set` sets a plan of weights with
@@ -160,6 +174,16 @@ One command puts a live terminal view over the whole deployment:
   behind your confirm; `dispatch_allocations` reads the split. pi's own `write` and `edit` tools are blocked on
   the envelope, `projects.json`, `scoped-limits.json`, `triggers.json` and the settings file
   ([`docs/allocation.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/allocation.md)).
+  `/dispatch priorities` shows the split as text, and `/dispatch priorities set shop=3 platform=1` sets a
+  plan. A run's detail names the plan a portfolio run wrote and the dollars it settled.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-allocation.png?v=2026-10-05" alt="The panel's budget split view: the weekly envelope, each project's floor, weight, share and spend, the headroom, the applied plan clamped by the step with its reasons, and the history across two hosts with a revert" width="820">
+</p>
+
+- **The portfolio manager.** A weekly flow you own reads the budget and writes a plan of weights. The
+  worker applies it inside the envelope, bounds each move and logs it, so you can revert it
+  ([`docs/portfolio-manager.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/portfolio-manager.md)).
 - **Held and failed jobs.** A trigger with `run.waitFor` holds its job in the queue, unstarted and
   unbilled, until a time passes or your check script exits 0. The panel shows a **held** section while
   anything waits (the target, the condition and how long), and a **failed** section for jobs the queue
@@ -212,7 +236,8 @@ setup appears when there is nothing, never over an outage.
 
 **Already have a deployment?** The panel finds it through the deployment pointer, or through the same env
 vars your worker uses (`VALKEY_URL`, `PI_LOGS_DIR`, `PI_SETTINGS_FILE`, `PI_TRIGGERS_FILE`,
-`PI_PAUSE_WINDOWS_FILE`, `PI_SUBSCRIPTIONS_FILE`). Your env always wins. What your env does not set comes
+`PI_PAUSE_WINDOWS_FILE`, `PI_SCOPED_LIMITS_FILE`, `PI_SUBSCRIPTIONS_FILE`, `PI_PROJECTS_FILE`,
+`PI_ENVELOPE_FILE`). Your env always wins. What your env does not set comes
 from the deployment's own `.env`, by the same rule `pi-dispatch doctor` uses: only the pointer's
 deployment folder (never a `.env` in the folder pi started in, which any repository could ship), and only
 when that file is yours and nobody else can write it. A key your env sets differently is named once as a
