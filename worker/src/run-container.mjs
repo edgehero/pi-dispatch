@@ -246,6 +246,8 @@ export function makeRunContainer({
 				// Issue #501 (PR #542's review, round 3): the LAST exit line's own `code`, which the dollar settlement
 				// compares with the container's real exit code before it trusts that line's cost.
 				let exitLineCode = null;
+				// Issue #507: the cost guard's rule on a `cost-cap` line, already filtered by parseExitWhy to COST_CAP_WHYS.
+				let exitWhy = null;
 				// Issue #545: null (no key issued), "verified" or "unverified" (a key, and no exit line carried it).
 				let exitAuthResult = null;
 				try {
@@ -253,7 +255,7 @@ export function makeRunContainer({
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitAuth: exitAuthResult = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -262,6 +264,7 @@ export function makeRunContainer({
 					context = null;
 					exitReason = null;
 					exitLineCode = null;
+					exitWhy = null;
 					// The sink could not say, and a key was issued: nothing it returned was verified.
 					exitAuthResult = exitKey !== null ? "unverified" : null;
 				}
@@ -275,10 +278,13 @@ export function makeRunContainer({
 					context = null;
 					exitReason = null;
 					exitLineCode = null;
+					exitWhy = null;
 				}
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...auth } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...auth });
+				// `exitWhy` only when the line named one, so every other run resolves the object it always did.
+				const why = exitWhy !== null ? { exitWhy } : {};
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...auth } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...auth });
 			});
 		});
 

@@ -3208,7 +3208,13 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   const outcomeColor = outcome === "completed" ? "success" : outcome === "policy" ? "warning" : "error";
   const glyph = outcome === "completed" ? "✔" : outcome === "policy" ? "⚠" : "✘";
   let head = styler.bold(styler.fg(outcomeColor, `${glyph} ${oc}`));
-  if (r.reason) head += styler.fg("dim", ` · ${show(r.reason)}`);
+  // The reason's detail (the record's `why`, a fixed token, PR #558) in parentheses after it, so a refusal says WHICH
+  // rule refused: `model-unknown (overlay-link)`, and since issue #507 `cost-cap (unboundable)`. That one carries a
+  // pointer too, because its usual cause is one models.json field (docs/egress.md, "Local model servers"): a run the
+  // cap stopped at $0 otherwise reads as a cap set too low. Absent on a record with no `why`, which renders as before.
+  const why = typeof r.why === "string" && r.why !== "" ? r.why : null;
+  const hint = r.reason === "cost-cap" && why === "unboundable" ? ": see compat.maxTokensField" : "";
+  if (r.reason) head += styler.fg("dim", ` · ${show(r.reason)}${why !== null ? ` (${show(why)}${hint})` : ""}`);
   out.push(fitLine(head, inner, styler));
   out.push(styler.cell("", inner));
 

@@ -22,7 +22,7 @@ import {
 	DISPATCH_MARK,
 	dispatchToken,
 } from "../src/usage-meter.mjs";
-import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
+import { COST_CAP, COST_REFUSALS, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
 import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
 import { AZURE_GPT_5_4, CODEX_SPARK, FABLE_5, GPT_5_4, GPT_5_5, GPT_5_5_CODEX, SONNET_4_5 } from "./helpers/catalog-models.mjs";
 
@@ -213,6 +213,34 @@ test("the guard refuses what it cannot bound: Infinity, generateImages, streamDe
 	assert.equal(guard.state.refused, 3);
 	for (const fields of logged) assert.deepEqual(fields, { why: "unboundable", spent: 0, inflight: 0, cap: 1_000_000_000 });
 	assert.throws(() => createCostGuard({ capMicros: -1 }), /invalid PI_MAX_COST_MICROS/);
+});
+
+test("refusedWhy names the FIRST refusal's rule, one of COST_REFUSALS, and null until the guard refuses (#507)", () => {
+	// Each rule on its own guard: unboundable, external (fail closed), over-cap.
+	const unboundable = createCostGuard({ capMicros: 1_000_000 });
+	assert.equal(unboundable.refusedWhy(), null, "nothing refused yet");
+	assert.equal(unboundable.admit({ method: "generateImages", model: FLAT, args: [{}, {}] }), COST_CAP);
+	assert.equal(unboundable.refusedWhy(), "unboundable");
+	const external = createCostGuard({ capMicros: 1_000_000, bound: () => 1, external: () => Number.NaN });
+	assert.equal(external.admit(call()), COST_CAP);
+	assert.equal(external.refusedWhy(), "external");
+	const over = createCostGuard({ capMicros: 1000, bound: () => 600 });
+	assert.equal(over.admit(call()), null);
+	over.bind(new FakeStream());
+	assert.equal(over.refusedWhy(), null, "an admitted call names nothing");
+	assert.equal(over.admit(call()), COST_CAP);
+	assert.equal(over.refusedWhy(), "over-cap");
+	// First wins: the refusal that stopped the job is the one the exit line names, as the meter's stop is.
+	assert.equal(over.admit({ method: "generateImages", model: FLAT, args: [{}, {}] }), COST_CAP);
+	assert.equal(over.refusedWhy(), "over-cap");
+	for (const guard of [unboundable, external, over]) assert.ok(COST_REFUSALS.includes(guard.refusedWhy()));
+	// Not in the snapshot: `tokens` on the exit line is numbers only, and stays byte-identical.
+	assert.equal(Object.hasOwn(over.snapshot(), "why"), false);
+	// The policy guard passes it through, and says null with no cap.
+	const policy = createPolicyGuard({ maxCostMicros: 1_000_000, allowedModels: null });
+	policy.admit({ method: "streamDeferred", model: FLAT, args: [{ id: "h" }, {}] });
+	assert.equal(policy.refusedWhy(), "unboundable");
+	assert.equal(createPolicyGuard({ maxCostMicros: null, allowedModels: [{ provider: FLAT.provider, model: FLAT.id }] }).refusedWhy(), null);
 });
 
 test("settle: cost rounds up, a cost over its bound counts boundExceeded, and an unknown cost stays charged at the bound", async () => {

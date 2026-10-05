@@ -1952,7 +1952,7 @@ export function unreportedUsage(message, api) {
 export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null }) {
 	if (!Number.isSafeInteger(capMicros) || capMicros < 0) throw new Error(`invalid PI_MAX_COST_MICROS: ${capMicros}`);
 	if (external !== null && typeof external !== "function") throw new Error("createCostGuard: external must be a function");
-	const state = { spent: 0, inflight: 0, refused: 0, boundExceeded: 0, longContext: 0, unjudged: 0, unanswered: 0 };
+	const state = { spent: 0, inflight: 0, refused: 0, boundExceeded: 0, longContext: 0, unjudged: 0, unanswered: 0, why: null };
 	let pending = null;
 
 	/**
@@ -1973,6 +1973,10 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 
 	function refuse(fields) {
 		state.refused += 1;
+		// The FIRST refusal's rule (issue #507), the one that stopped the job: a refusal stops the meter, and a stopped
+		// meter answers every later call before the guard is asked. The log line below stays as it was (an over-cap
+		// refusal logs its `bound`, not a `why`); the exit line names the rule through refusedWhy().
+		state.why ??= fields.why ?? "over-cap";
 		log("cost_refused", { ...fields, spent: state.spent, inflight: state.inflight, cap: capMicros });
 		return COST_CAP;
 	}
@@ -2088,7 +2092,12 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		state.unjudged += count;
 	}
 
-	return { enforces: Object.freeze([COST_CAP]), admit, bind, snapshot, spend, unjudged, state };
+	/** The first refusal's rule (a COST_REFUSALS member), or null when the guard refused nothing. NOT in snapshot(): `tokens` is numbers only. */
+	function refusedWhy() {
+		return state.why;
+	}
+
+	return { enforces: Object.freeze([COST_CAP]), admit, bind, snapshot, spend, unjudged, refusedWhy, state };
 }
 
 // ── Issue #502, part 4: the allowed-model list, checked before every provider call ────────────────────────
@@ -2440,6 +2449,10 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 		/** The cost guard's spend() (issue #500), zeros without a cap. */
 		spend() {
 			return cost ? cost.spend() : { spentMicros: 0, inflightMicros: 0 };
+		},
+		/** The cost guard's refusedWhy() (issue #507), null without a cap. */
+		refusedWhy() {
+			return cost ? cost.refusedWhy() : null;
 		},
 		snapshot() {
 			return { ...(cost ? cost.snapshot() : {}), ...(model ? model.snapshot() : {}) };

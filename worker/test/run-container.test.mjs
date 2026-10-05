@@ -733,6 +733,30 @@ test("exitReason reaches the result through a disabled real sink, and only off a
 	assert.deepEqual(opened, [], "raw logs stayed off: no .log was ever opened");
 });
 
+// Issue #507: the cost guard's rule, through the same real disabled sink, and only when the line named one.
+test("exitWhy reaches the result off a cost-cap exit line, and is absent from every other result", { skip }, async () => {
+	const { makeLogSink } = await import("../src/run-history.mjs");
+	const fs = { mkdirSync() {}, createWriteStream: () => null };
+	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId: "j1", ...fields })}\n`;
+	for (const [chunk, want] of [
+		[line({ code: 2, reason: "cost-cap", why: "unboundable" }), "unboundable"],
+		[line({ code: 2, reason: "cost-cap", why: "free text" }), undefined],
+		[line({ code: 2, reason: "cost-cap" }), undefined],
+	]) {
+		const runContainer = mod.makeRunContainer({
+			image: "pi-job:x",
+			hostEnv: HOST,
+			onOutput: () => {},
+			openJobLog: makeLogSink({ logsDir: "/logs", enabled: false, fs }),
+			spawnFn: fakeSpawnWithData({}, { chunks: [Buffer.from(chunk)], exitCode: 2 }),
+		});
+		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+		assert.equal(result.exitReason, "cost-cap");
+		assert.equal(result.exitWhy, want, chunk);
+		assert.equal(Object.hasOwn(result, "exitWhy"), want !== undefined, chunk);
+	}
+});
+
 test("a job's teardown uses the runtime it was ADMITTED on, so a failed, erroring or slow `docker info` never leaks its network on Docker Engine (#452 gate round 4)", { skip }, async () => {
 	// MEASURED (gate round 4, engine-teardown.txt): a fresh `docker info` at every teardown that exited 1, answered
 	// ServerErrors, or took 15 s read as `runtime-unreadable`, asked for a keeper Docker never has, and left the network.

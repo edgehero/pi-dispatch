@@ -24,6 +24,7 @@ import {
 	classifyPromptRejection,
 	classifyThrow,
 	configError,
+	costRefusalField,
 	decideExit,
 	EXIT_INFRA,
 	loadRetryPredicate,
@@ -96,6 +97,11 @@ let meteredExitFields = () => ({});
  * decideExit gives a stop over a rejected prompt, so the record says why the job really ended (PR #547's review).
  */
 let meterStopAtExit = () => null;
+/**
+ * The cost guard's first refusal rule (issue #507, outcome.mjs COST_REFUSALS), or null. Set once the guard exists. Both
+ * exit-line paths spread costRefusalField(outcome, costRefusalWhy()), so a `cost-cap` line names which rule refused.
+ */
+let costRefusalWhy = () => null;
 /**
  * The turn count and the session as they stand, for an exit line written by the SIGTERM handler (issue #545). Empty
  * until the turn budget is attached; then set, so a line written on a stop carries what the decided line would have.
@@ -257,6 +263,7 @@ async function main() {
 	// on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no children.
 	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
 	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external() });
+	costRefusalWhy = () => policyGuard?.refusedWhy() ?? null;
 	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
 	if (usageMeter.ok) {
 		meteredExitFields = () => {
@@ -567,7 +574,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
 	return outcome.code;
 }
 
@@ -626,7 +633,7 @@ if (!nestedRunner) {
 			if (stopped !== null) log("throw_after_stop", { reason: thrown.reason, error: typeof error?.name === "string" ? error.name : null });
 			const outcome = stopped ?? thrown;
 			const capped = capExitMessage(outcome);
-			exitWriter.writeExit({ code: capped.code, reason: capped.reason, message: capped.message, ...meteredExitFields() });
+			exitWriter.writeExit({ code: capped.code, reason: capped.reason, ...costRefusalField(outcome, costRefusalWhy()), message: capped.message, ...meteredExitFields() });
 			process.exitCode = outcome.code ?? EXIT_INFRA;
 		});
 }

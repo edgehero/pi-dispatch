@@ -3557,7 +3557,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   4. the guard computes the call's BOUND (`callCostBound`) and refuses when
      `spent + in-flight bounds + bound > cap`, or when the bound is `Infinity`. A refusal counts `costRefused`,
      logs `cost_refused` with numbers only, stops the job with `cost-cap` (the meter's one first-wins stop, which
-     aborts the root session) and answers this call with the hard stop. An admitted call's bound is held in
+     aborts the root session) and answers this call with the hard stop. The first refusal's rule (`unboundable`,
+     `external` or `over-cap`) rides the exit line as `why` and reaches the run record (issue #507), because a stop at
+     $0 read as a cap set too low when the fix was one models.json field. A closed enum, never the model id: the
+     record is PII-free and the line is container-written. An admitted call's bound is held in
      flight until it settles.
   When the call settles, its bound leaves the in-flight sum and `ceil(cost x 1e6)`, never below zero (pi's
   short-write term can go negative), joins `spent`. A charge above the bound counts `boundExceeded`. A call
@@ -8367,3 +8370,4 @@ a tunnel.
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**, the other surfaces: the totals shown beside the split (header, headroom, the insights envelope row and bars) are the applied split's own, the envelope file's only with no split applied, and the mismatch line names the file's total. Rejected: both totals in the header. The outside-edit rule UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, the review of the output-cap rule. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: a caller's cap of 0 or less no longer falls back to `model.maxTokens` on openai-completions (pi keeps it through its clamp, sends no cap for 0 and a negative one as it is, which Ollama reads as no limit): Infinity on the operator's own server, and a negative one on every host. `api.openai.com` joins the trusted hosts as a pinned addition. New residuals: a server that ignores `max_tokens` too, and pi's name and URL detection of `max_tokens`, which the guard does not read (a safe false refusal). The other bound terms UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, the review of the allocation totals. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**, the other surfaces: during a mismatch the rows list the split-only entries too, marked, so the split's total and its rows agree on all three surfaces. The outside-edit rule UNCHANGED, checked. |
+| 2026-10-05 | Issue #507, found by its end-to-end test. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, step 4: the first refusal's rule (`unboundable`, `external`, `over-cap`) rides the exit line as `why` and reaches the run record and the run drill-in. Rejected: putting it in `tokens` (numbers only, rebuilt by the worker) and naming the model (the record holds no container-chosen string). A `cost-cap` stop from a child, a displaced compat entry or an unmetered child names no rule, since no refusal of this runner's guard made it. The bound and the settle UNCHANGED, checked. |

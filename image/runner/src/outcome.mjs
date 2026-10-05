@@ -26,6 +26,24 @@ export const COST_CAP_UNENFORCEABLE = "cost-cap-unenforceable";
 export const MODEL_POLICY_UNENFORCEABLE = "model-policy-unenforceable";
 
 /**
+ * Which rule of the cost guard refused the call that stopped a `cost-cap` job (issue #507), as the exit line's `why`:
+ * `unboundable` (the call has no cost bound, most often an openai-completions model whose output cap is not sent as
+ * `max_tokens`), `external` (the children's spend could not be read, so the guard failed closed) or `over-cap` (the
+ * bound would take the job past its cap). CLOSED, because the worker copies it into the PII-free run record: it keeps
+ * a `why` only when it is a member of its own copy, which a worker test pins to this list. A `cost-cap` stop the guard
+ * did not refuse (a displaced compat entry, a child's spend or refusal, an unmetered child) writes no `why`.
+ */
+export const COST_REFUSALS = Object.freeze(["unboundable", "external", "over-cap"]);
+
+/**
+ * The exit line's `why` for a decided outcome: `{ why }` when the outcome is a `cost-cap` stop and `why` is one of
+ * COST_REFUSALS, else `{}`, so every other exit line stays byte-identical. Both exit-line paths of run-job.mjs spread it.
+ */
+export function costRefusalField(outcome, why) {
+	return outcome?.reason === COST_CAP && COST_REFUSALS.includes(why) ? { why } : {};
+}
+
+/**
  * pi-ai@0.99.1 dist/types.d.ts:311 -- all seven, in the union's own order. Enumerated so "length" (or a
  * reason a pin bump adds) cannot hide in a default branch; outcome.test.mjs pins the list against that line.
  */
