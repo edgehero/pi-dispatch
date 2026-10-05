@@ -75,9 +75,10 @@ test("meter appends a textual state marker for soft-hold and over (no colour in 
   assert.doesNotMatch(meter(3, 10, 24), /soft-hold|over/);
 });
 
-test("meter renders (cap unknown) with no bar glyph when cap is not a positive integer", () => {
+test("meter renders (worker env cap) with no bar glyph when cap is not a positive integer, saying where the cap lives (#507)", () => {
   const out = meter(5, null, 24);
-  assert.match(out, /\(cap unknown\)/);
+  assert.equal(out, "5 / ? (worker env cap)");
+  assert.equal(meter(500, null, 24), "500 / ? (worker env cap)", "three digits still fit the panel's 24 columns");
   assert.doesNotMatch(out, new RegExp(GLYPHS.full), "no bar when the cap is unknown");
   assert.doesNotMatch(out, new RegExp(GLYPHS.empty), "no bar when the cap is unknown");
   assert.doesNotMatch(meter(5, 0, 24), /\[/, "cap of 0 is not a positive integer");

@@ -344,7 +344,7 @@ test("the spend meter shows a filled bar against a known cap, and (cap unknown) 
 
   assert.match(knownOut, /5\/25/, "reserved/cap label against the overlay cap");
   assert.match(knownOut, /[█]/, "a filled block glyph fills the bar");
-  assert.match(unknownOut, /cap unknown/, "an unknown cap renders as text");
+  assert.match(unknownOut, /\? \(worker env cap\)/, "an unknown cap renders as text, saying where it lives");
   assert.doesNotMatch(unknownOut, /[█]/, "no bar is drawn against an unknown denominator");
 });
 
