@@ -173,6 +173,9 @@ that someone else wrote must never reach it. A reason your last plan gave is age
 - **That `lastAttempt` shows a revert.** It holds only this trigger's own plans. A revert in the panel shows in the
   snapshot's `plan`: its `writer` is then `operator-revert`, and the report's "In force" line names it. A revert to
   the neutral split leaves `plan` null, and the line says so.
+- **That `plan.writer` wrote the plan.** It is the split's last writer. After an envelope edit the worker re-bases
+  the plan onto the new envelope: same plan id and weights, writer `envelope-change`. The report then says
+  "re-based onto a changed envelope". The plan's author is in the panel's history.
 - **That the numbers are exact to the cent mid run.** Spend counters include what running jobs still hold, and
   other jobs settle while the manager runs.
 - **That run counts cover the whole fleet.** They do only with a run mirror (`PI_WORKER_NAME` set on every

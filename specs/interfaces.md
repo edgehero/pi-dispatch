@@ -1224,7 +1224,10 @@ refactor apart.
     newest `alloc:log` row a `portfolio-job` writer wrote for this trigger, null when there is none. A run that wrote
     no plan shows as `outcome: "refused"`, `reason: "plan-absent"` (issue #507). An operator revert is not a
     `portfolio-job` row, so it never shows here: it reaches the next run through `plan.writer`, `operator-revert`
-    (or `plan: null` after a revert to the neutral split).
+    (or `plan: null` after a revert to the neutral split). `plan.writer` is the split's LAST writer, the state's own
+    field, not the plan's author: a re-base onto a changed envelope keeps the plan's id and weights and writes
+    `envelope-change` (and its `appliedAt`). The plan's author stays in `alloc:log` and the audit file. The example
+    report says such a plan is "re-based onto a changed envelope" rather than "from envelope-change" (issue #507).
   - **Money comes from the fleet-wide counters**, the `budget:usd:s:<hash16>` keys of the envelope's window that every
     host reserves and settles in, so it is complete on every host. A member's key is `memberDollarKeyPrefix`, the one
     enforcement uses: the scoped-limits row its jobs match (a bare `acme/web` row for the member `github:acme/web`),
@@ -7412,3 +7415,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-05 | Issue #507. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the `run.portfolio` bullet: the admin's display record of a cron entry, and so the read tool `dispatch_triggers`, carries `portfolio: true` only when the flag is true and no key otherwise. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the run drill-in reads the record's existing `plan` and `dollars` and writes nothing. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, new Output cap bullet: a priced model a declared endpoint serves on openai-completions sets `compat.maxTokensField` to `"max_tokens"`, because pi otherwise sends `max_completion_tokens` and Ollama ignores it (20 asked, 440 answered; a capped job settled $3.41 under a $2 cap). The runner refuses such calls under a dollar cap as unboundable, and doctor names each such model. pi-dispatch still writes neither file. Shape, Derivation, Slots, Keyless and Cost UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**, the `fpEnvelope` paragraph: doctor's line for THIS host's envelope mismatch (and for this host having none) names the host, `this host (<PI_WORKER_NAME>)`, as the peer lines name theirs; on a two-host fleet the mismatching host's line said only "this host's envelope". The comparison and its failure UNCHANGED, checked. |
+| 2026-10-05 | Issue #507, found by its end-to-end test. **`INT-CONTAINER-JOB-INPUTS` AMENDED**, the portfolio snapshot's `plan`: `plan.writer` is the split's last writer, so after a re-base it is `envelope-change` with the plan's id kept; the plan's author stays in `alloc:log`. The example report now says "re-based onto a changed envelope" for it, where it printed "from envelope-change" as if the envelope change had written the plan. Rejected: a second writer field in the state and the snapshot (a state shape change for one sentence). The snapshot's fields UNCHANGED, checked. |

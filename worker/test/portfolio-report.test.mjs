@@ -124,6 +124,18 @@ test("--dry-run prints the report byte for byte and posts nothing (#506)", async
 	assert.equal(out, EXPECTED);
 });
 
+test("a plan re-based onto a changed envelope is said as a re-base, not as the envelope change's plan (#507)", async () => {
+	const snap = await snapshot();
+	const line = async (writer) => {
+		const { argv } = files({ snap: { ...snap, plan: { ...snap.plan, writer } } });
+		const { out } = await run([...argv, "--dry-run"]);
+		return out.split("\n").find((l) => l.startsWith("In force:"));
+	};
+	assert.equal(await line("envelope-change"), `In force: plan ${FIXTURE.id} re-based onto a changed envelope, since 2026-10-05T06:01:10.000Z, until 2026-10-13T12:00:00.000Z.`);
+	assert.equal(await line("operator-revert"), `In force: plan ${FIXTURE.id} from operator-revert, since 2026-10-05T06:01:10.000Z, until 2026-10-13T12:00:00.000Z.`, "a revert still names its writer");
+	assert.equal(await line("portfolio-job"), `In force: plan ${FIXTURE.id} from portfolio-job, since 2026-10-05T06:01:10.000Z, until 2026-10-13T12:00:00.000Z.`);
+});
+
 test("the report says requested, never applied, below its first line (#506)", async () => {
 	const { argv } = files({ snap: await snapshot() });
 	const { out } = await run([...argv, "--dry-run"]);
