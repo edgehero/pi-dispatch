@@ -251,7 +251,8 @@ direction-changing character prints as `\u{...}`.
 `r` on a history row asks, in the panel, whether to revert to it. `y` applies that row's weights as
 `operator-revert`: an operator act, so it skips the interval and the step, but it is still refused while delegation
 is off, while this host's envelope is not the applied one, or while another apply runs. A refused row has no split
-to go back to.
+to go back to. A row with no plan (a neutral, default or expired row) restores the current neutral split: today's
+default weights, with no plan and no expiry, not the weights that row recorded under an older envelope.
 
 A revert does not stop the manager. The interval restarts at the revert, and the next plan that is due may move the
 split again. With `minIntervalHours` 0, the next run of the trigger can undo a revert at once. To keep a revert, turn
