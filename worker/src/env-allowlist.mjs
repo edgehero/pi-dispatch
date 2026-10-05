@@ -33,7 +33,7 @@ import { egressEnv } from "./egress.mjs";
 import { forgeSpec } from "./forges.mjs";
 import { apiKeyVariable } from "./provider-key.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
-import { KEYLESS_HOW, keylessVerdict, providerRenameHint } from "./model-endpoints.mjs";
+import { KEYLESS_HOW, keylessVerdict, providerRenameHint, readOverlayModels, RENAMED_PROVIDERS } from "./model-endpoints.mjs";
 import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
 
 function configError(message) {
@@ -161,7 +161,7 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
 			error.code = unreadable.code;
 			throw error;
 		}
-		throw configError(unknownProviderMessage(provider, modelEndpoints?.models ?? null));
+		throw configError(unknownProviderMessage(provider, hintOverlay(provider, modelEndpoints, hostEnv)));
 	}
 	const held = candidates
 		.map((name) => [name, hostEnv[name]])
@@ -209,8 +209,24 @@ export function keylessEndpointsFor(provider, modelEndpoints) {
 	return verdict.keyless ? verdict.endpoints : null;
 }
 
-function unknownProviderMessage(provider, models = null) {
-	return `pi has no provider "${provider}", so there is no key variable to give it a key.${providerRenameHint(provider, { models, piProviders: piProviders() })} Use one of pi's provider ids with its key in the worker environment or in pi's auth.json, or, ${KEYLESS_HOW}.`;
+function unknownProviderMessage(provider, overlay = {}) {
+	return `pi has no provider "${provider}", so there is no key variable to give it a key.${providerRenameHint(provider, { ...overlay, piProviders: piProviders() })} Use one of pi's provider ids with its key in the worker environment or in pi's auth.json, or, ${KEYLESS_HOW}.`;
+}
+
+/**
+ * The overlay models.json the rename hint is judged on (issue #587's gate): the pickup's snapshot when it read one, else
+ * the overlay itself, read here, only for an id pi renamed. The snapshot reads the overlay only when an endpoint is
+ * declared, so a full custom provider under the old id, with no endpoint, was told "did you mean". A read that fails
+ * is `overlayUnread`: no guess.
+ */
+function hintOverlay(provider, modelEndpoints, hostEnv) {
+	if (modelEndpoints?.models) return { models: modelEndpoints.models };
+	if (!Object.hasOwn(RENAMED_PROVIDERS, provider)) return {};
+	try {
+		return { models: readOverlayModels(hostEnv?.PI_GLOBAL_PI_DIR) };
+	} catch {
+		return { overlayUnread: true };
+	}
 }
 
 function defaultAgentDir(hostEnv) {

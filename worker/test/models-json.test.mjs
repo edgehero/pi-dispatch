@@ -172,7 +172,7 @@ test("the mirror is transcribed from the pinned pi's own files: a file that chan
 	// would pass it green. So the source files are pinned here by content: a bump that changes either fails this line,
 	// by name, until someone re-reads it and updates models-json.mjs and model-catalog.mjs (overlayProviderProblem).
 	for (const [file, sha256] of Object.entries(MIRRORED_PI_FILES)) {
-		assert.equal(createHash("sha256").update(readFileSync(new URL(file, PI))).digest("hex"), sha256, `pi-coding-agent ${piVersion}'s ${file} changed: re-transcribe ModelsConfigSchema (models-json.mjs) or applyModelsJson/modelFromJson (model-catalog.mjs overlayProviderProblem) from it, then update this hash`);
+		assert.equal(createHash("sha256").update(readFileSync(new URL(file, PI))).digest("hex"), sha256, `pi-coding-agent ${piVersion}'s ${file} changed: re-transcribe ModelsConfigSchema (models-json.mjs) or applyModelsJson/modelFromJson (model-catalog.mjs overlayProviderProblem) from it, and worker/src/output-cap.mjs (outputCapView, which composes api, baseUrl and maxTokensField the same way) from it, then update this hash`);
 	}
 });
 

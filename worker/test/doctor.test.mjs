@@ -704,11 +704,27 @@ test("doctor: PI_PROVIDER=azure-openai-responses names pi 1.0.3's rename to azur
 	assert.doesNotMatch(other.text(), /renamed/, "only an id pi renamed gets the hint");
 });
 
+test("doctor: an overlay that declares the old azure id as a provider of its own gets no rename hint, with no endpoint declared (issue #587)", { skip: skipNoPi }, async () => {
+	// The hint read the overlay only through the keyless snapshot, which exists only when model-endpoints.json declares
+	// an endpoint; a full custom provider under the old id then got "did you mean azure". It reads the overlay itself.
+	const custom = overlay({ models: JSON.stringify({ providers: { "azure-openai-responses": { baseUrl: "https://x.openai.azure.com/openai/v1", api: "azure-openai-responses", apiKey: "$AZURE_OPENAI_API_KEY", models: [{ id: "my-deployment" }] } } }) });
+	const declared = capture();
+	await runDoctor(overlayEnv(custom, { PI_PROVIDER: "azure-openai-responses" }), overlayDeps(declared.out));
+	assert.match(declared.text(), /PI_PROVIDER is "azure-openai-responses", which is not a provider pi has/);
+	assert.doesNotMatch(declared.text(), /did you mean/, "the overlay declares it: no hint");
+	const unrelated = capture();
+	await runDoctor(overlayEnv(overlay({ models: JSON.stringify({ providers: { ollama: { baseUrl: "http://gpu.lan:11434/v1", api: "openai-completions", models: [{ id: "q" }] } } }) }), { PI_PROVIDER: "azure-openai-responses" }), overlayDeps(unrelated.out));
+	assert.match(unrelated.text(), /did you mean "azure"\?/, "an overlay that does not declare it: the hint");
+	const broken = capture();
+	await runDoctor(overlayEnv(overlay({ models: "{ not json" }), { PI_PROVIDER: "azure-openai-responses" }), overlayDeps(broken.out));
+	assert.doesNotMatch(broken.text(), /did you mean/, "an overlay that cannot be read: no guess");
+});
+
 test("doctor: an overlay entry under the old azure id that only moves the baseUrl is flagged, a full custom provider is not (issue #587)", async () => {
 	for (const entry of [{ baseUrl: "https://x.openai.azure.com/openai/v1" }, { baseUrl: "https://x.openai.azure.com/openai/v1", api: "azure-openai-responses" }, { api: "azure-openai-responses", models: [{ id: "gpt-5.4", baseUrl: "https://x.openai.azure.com/openai/v1" }] }, { modelOverrides: { "gpt-5.4": { maxTokens: 1000 } } }]) {
 		const a = capture();
 		await runDoctor(overlayEnv(overlay({ models: JSON.stringify({ providers: { "azure-openai-responses": entry } }) })), overlayDeps(a.out));
-		assert.match(a.text(), /⚠ Overlay models\.json entry "azure-openai-responses" no longer overrides anything: pi 1\.0\.3 renamed that provider to "azure", so this entry is now a provider of its own with no models, and the azure models do not get its settings\n {4}→ rename the entry to "azure" in /, JSON.stringify(entry));
+		assert.match(a.text(), /⚠ Overlay models\.json entry "azure-openai-responses" no longer overrides anything: pi 1\.0\.3 renamed that provider to "azure", so this entry is now a provider of its own, holding only what it declares itself, and the azure models do not get its settings\n {4}→ rename the entry to "azure" in /, JSON.stringify(entry));
 	}
 	for (const providers of [{ "azure-openai-responses": { baseUrl: "https://x.openai.azure.com/openai/v1", api: "azure-openai-responses", models: [{ id: "my-deployment" }] } }, { azure: { baseUrl: "https://x.openai.azure.com/openai/v1" } }]) {
 		const b = capture();

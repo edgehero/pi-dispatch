@@ -11,16 +11,17 @@ import { pathToFileURL } from "node:url";
  * pi-tui's own `visibleWidth`, the oracle.
  *
  * Resolved from the pinned pi installation rather than declared as a dependency: `admin` does not depend on
- * pi-tui directly, it is nested under `pi-coding-agent`, and `CONST-PI-VERSION-PINNED` says to verify
- * against the pinned artifact rather than a range. A hard-coded nested path would break on a flat install.
+ * pi-tui directly, it is `pi-coding-agent`'s dependency (wherever npm puts it: nested under pi up to 0.99.1's
+ * shrinkwrap, at the top beside it since 1.0.1), and `CONST-PI-VERSION-PINNED` says to verify against the pinned
+ * artifact rather than a range. A hard-coded path would break on the other layout.
  *
  * THE TWO RESOLVERS ARE BOTH NEEDED, and each fails where the other works:
  *   - `import.meta.resolve` finds pi itself. The CJS `require.resolve` does NOT: pi's export map carries no
  *     `require` condition, so it throws ERR_PACKAGE_PATH_NOT_EXPORTED. This is why `dashboard.test.mjs:14`
  *     builds its own `createRequire` from `import.meta.resolve` rather than from a package.json URL.
- *   - `require.resolve` then finds pi-tui NESTED under pi. `import.meta.resolve` with pi's entry as the
- *     parent does not, because the ESM resolver reads pi's own dependency graph rather than walking
- *     `node_modules` upward, and pi-tui is not one of `admin`'s dependencies.
+ *   - `require.resolve` then finds the pi-tui pi's own lookup reaches, nested or not. `import.meta.resolve`
+ *     cannot be given pi's entry as its parent without a flag, and from this file it would find whatever copy
+ *     sits above `admin`, which is not a dependency of `admin`'s at all.
  * It returns the file PATH, and pi-tui is ESM, so the path is imported rather than required.
  */
 export async function loadVisibleWidth() {

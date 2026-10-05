@@ -634,6 +634,32 @@ test("a provider id pi renamed refuses as before, naming the new id, unless mode
 	assert.equal(providerRenameHint("azure-openai-responses", { piProviders: [...piProviders(), "azure-openai-responses"] }), "", "not while pi still has the old id");
 });
 
+test("the worker's rename hint reads the overlay models.json itself, with or without a declared endpoint (issue #587)", { skip }, async () => {
+	const { tempDir } = await import("./helpers/temp-dir.mjs");
+	const { mkdirSync, writeFileSync } = await import("node:fs");
+	const { join } = await import("node:path");
+	const overlay = (models) => {
+		const dir = tempDir("pi-global-hint-");
+		mkdirSync(dir, { recursive: true });
+		if (models !== undefined) writeFileSync(join(dir, "models.json"), models);
+		return dir;
+	};
+	const refusal = (dir) => {
+		try {
+			mod.resolveProviderCredential({ provider: "azure-openai-responses", hostEnv: { PI_GLOBAL_PI_DIR: dir }, modelEndpoints: null });
+		} catch (error) {
+			return error.message;
+		}
+		return "admitted";
+	};
+	const declared = overlay(JSON.stringify({ providers: { "azure-openai-responses": { baseUrl: "https://x.openai.azure.com/openai/v1", api: "azure-openai-responses", apiKey: "k", models: [{ id: "my-deployment" }] } } }));
+	assert.doesNotMatch(refusal(declared), /did you mean/, "the overlay declares the old id: its own provider, no hint");
+	assert.match(refusal(overlay(JSON.stringify({ providers: {} }))), /did you mean "azure"\?/);
+	assert.match(refusal(overlay()), /did you mean "azure"\?/, "no models.json at all");
+	assert.doesNotMatch(refusal(overlay("{ not json")), /did you mean/, "an overlay that cannot be read: no guess");
+	assert.match(refusal(declared), /^pi has no provider "azure-openai-responses"/, "the refusal itself is unchanged");
+});
+
 test("a prototype-key provider id refuses instead of coercing a name out of pi's lookup", { skip }, () => {
 	// pi looks its provider up in a plain object literal, so `__proto__` resolves up the prototype chain
 	// and hands back a non-string. providerKeyCandidates filters those out, which leaves an empty list,
