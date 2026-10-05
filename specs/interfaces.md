@@ -6462,9 +6462,13 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   provider or its `modelOverrides` entry). Without it pi sends the output cap as `max_completion_tokens`, which Ollama
   ignores, so the runner's cost guard counts each such call unboundable and refuses it under a dollar cap: the cap
   holds by construction, and the job ends `cost-cap` at its first call. The rule is the runner's
-  (`completionsOwnServer`) and covers every host outside the pinned catalog's and `api.openai.com`, declared or not. `doctor` warns, naming
-  each such model (`ignoredOutputCapModels`, composed as pi composes compat), when at least one endpoint is
-  declared. A zero-rated model needs no field: its bound is `0`.
+  (`completionsOwnServer`) and covers every host outside the pinned catalog's and `api.openai.com`, declared or not. `doctor` warns twice over,
+  one line per model: its cost-cap line names every such model a job under a per-job cap may use, on any host, as
+  refused at every call (`costCapFitChecks` with `outputUnboundable`), and a declared-endpoint line names the other
+  priced models a declared endpoint serves (`ignoredOutputCapModels`). Both compose the model as pi does (api,
+  baseUrl and compat from the overlay over the catalog, `outputCapView`) through `worker/src/output-cap.mjs`, a copy
+  of the runner's rule that `worker/test/output-cap.test.mjs` holds to it: the image ships the runner alone and the
+  worker package its `src` alone, so neither imports the other. A zero-rated model needs no field: its bound is `0`.
 - **Render**: the include is deterministic, endpoints sorted by id, after a fixed header (generated, do not edit,
   regenerate with `pi-dispatch egress render`). Per endpoint:
   `acl pde_<id>_host dstdomain -n <host>`, `acl pde_<id>_port port <port>`,
@@ -7417,3 +7421,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**, the `fpEnvelope` paragraph: doctor's line for THIS host's envelope mismatch (and for this host having none) names the host, `this host (<PI_WORKER_NAME>)`, as the peer lines name theirs; on a two-host fleet the mismatching host's line said only "this host's envelope". The comparison and its failure UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`INT-CONTAINER-JOB-INPUTS` AMENDED**, the portfolio snapshot's `plan`: `plan.writer` is the split's last writer, so after a re-base it is `envelope-change` with the plan's id kept; the plan's author stays in `alloc:log`. The example report now says "re-based onto a changed envelope" for it, where it printed "from envelope-change" as if the envelope change had written the plan. Rejected: a second writer field in the state and the snapshot (a state shape change for one sentence). The snapshot's fields UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, the review of the output-cap rule. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the Output cap bullet: the trusted hosts are the catalog's plus `api.openai.com`. The rest of the bullet UNCHANGED, checked. |
+| 2026-10-05 | Issue #507, the review of the doctor half. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the Output cap bullet: doctor's cost-cap line now names every model a capped job may use whose output the runner cannot bound, on any host (a gateway, a remote server, a builtin provider pointed at a proxy), and the declared-endpoint line names only the rest. The rule is `worker/src/output-cap.mjs`, a copy of the runner's held equal by test. The file's shape UNCHANGED, checked. |

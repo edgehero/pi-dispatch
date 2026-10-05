@@ -12,7 +12,8 @@ import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS, runInit } from "../src/init.mjs";
-import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINT_ID_RE, ignoredOutputCapModels, loadModelEndpoints, parseModelEndpoints, renderEndpointsInclude, unreportedUsageModels } from "../src/model-endpoints.mjs";
+import { ignoredOutputCapModels } from "../src/output-cap.mjs";
+import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINT_ID_RE, loadModelEndpoints, parseModelEndpoints, renderEndpointsInclude, unreportedUsageModels } from "../src/model-endpoints.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe, egressEndpointProbe } from "../src/egress.mjs";
 import { LIVE_PREFIX, egressVerdict } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -4114,6 +4115,13 @@ test("doctor: a priced model on a declared endpoint whose output cap travels as 
 	assert.doesNotMatch(await run(), /maxTokensField|max_completion_tokens/, "the documented fix silences it");
 	write({ id: "qwen2.5:3b", cost: free, contextWindow: 32768, maxTokens: 256 });
 	assert.doesNotMatch(await run(), /max_completion_tokens/, "a zero-rated model is bounded at 0 and needs no output cap");
+	// A capped job that may use it (review of #507): the cost-cap line names it, and the overlay line leaves it out, so
+	// one model gets one line.
+	write({ id: "qwen2.5:3b", cost: priced, contextWindow: 32768, maxTokens: 256 });
+	const capped = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay, PI_PROVIDER: "ollama", PI_MODEL: "qwen2.5:3b", PI_MAX_COST_USD: "2" }), { ...ghDeps(capped.out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync, declaredEndpoints: () => endpoints });
+	assert.match(capped.text(), /⚠ A job under a per-job cost cap may use a model whose output cap travels as max_completion_tokens to a server that may ignore it \(one outside pi's own hosted providers\), so the runner counts every call to it unboundable and refuses it under the cap: ollama\/qwen2\.5:3b \(the main model/);
+	assert.doesNotMatch(capped.text(), /Overlay models\.json sends the output cap/, "not twice");
 });
 
 test("doctor: an allowlist naming a host alias is ⚠, pointing at model-endpoints.json (#503)", async () => {

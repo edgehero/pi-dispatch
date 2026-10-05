@@ -65,7 +65,8 @@ import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs"
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
-import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, ignoredOutputCapModels, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
+import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
+import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows, parseScopeString } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -2746,8 +2747,11 @@ export async function collectChecks(shellVars, seams) {
 				// Issue #507: a priced model on a declared endpoint whose output cap would travel as max_completion_tokens,
 				// which Ollama ignores. The runner's cost guard counts every such call unboundable, so a job under a dollar
 				// cap is refused at its first call. The endpoints as the service reads them, through the keyless line's io.
+				// A model a capped job may use is named by the cost-cap line below (`costCapFitChecks`), which runs on the
+				// same catalog seam, so this line names only the rest: one line per model.
 				const capEndpoints = (seams.declaredEndpoints ?? ((a) => declaredEndpointsIn({ ...a, fs: keylessIo })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform, valkeyUrl: keylessValkey });
-				const uncapped = ignoredOutputCapModels({ models: overlayModels, endpoints: capEndpoints, builtinModel: usageCatalog?.builtinModel, builtinChatModels: usageCatalog?.builtinChatModels });
+				const capped = usageCatalog ? cappedModelNames(env, { runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists) }) : new Set();
+				const uncapped = ignoredOutputCapModels({ models: overlayModels, endpoints: capEndpoints, builtinModel: usageCatalog?.builtinModel, builtinChatModels: usageCatalog?.builtinChatModels }).filter((m) => !capped.has(`${m.provider}/${m.modelId}`));
 				if (uncapped.length > 0) {
 					const SHOWN = 5;
 					const named = uncapped.slice(0, SHOWN).map((m) => `${quotedShown(m.provider)}/${quotedShown(m.modelId)}`).join(", ");
@@ -3079,7 +3083,7 @@ export async function collectChecks(shellVars, seams) {
 			}
 			const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList });
 			checks.push(...unknownModelChecks(subjects, catalog.checkModelsKnown, readOverlayDoc));
-			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc })));
+			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc }), { unboundable: (ref) => outputUnboundable(outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel })) }));
 			checks.push(
 				...listedProviderCredentialChecks(subjects, {
 					candidatesOf: (name) => (typeof oracle?.providerKeyCandidates === "function" ? oracle.providerKeyCandidates(name) : []),
@@ -4941,12 +4945,37 @@ export function modelSubjects({ runs = [], deployment, envList = null }) {
 }
 
 /**
+ * The `provider/id` of every model a job under a per-job dollar cap may use (the main model and the list, as
+ * `modelSubjects` resolves them), for the overlay's output-cap line to leave to `costCapFitChecks` (issue #507). Empty
+ * when the settings cannot be read.
+ */
+export function cappedModelNames(env, { runs, deployment }) {
+	let envList = null;
+	try {
+		envList = allowedModelsFrom(env);
+	} catch {
+		// A malformed PI_ALLOWED_MODELS is its own line.
+	}
+	const names = new Set();
+	for (const s of modelSubjects({ runs, deployment, envList })) {
+		if (s.cap === null || s.cap === undefined) continue;
+		for (const ref of [s.main, ...s.list]) names.add(`${ref.provider}/${ref.id}`);
+	}
+	return names;
+}
+
+/**
  * Issue #501's open question, answered with a warning: a per-job cap below one full-output call of the main model,
  * or of a listed model, is a cap the runner can never admit that call under (`firstCallFloorMicros`). One line,
  * grouped by model and cap so a deployment default every trigger inherits is named once.
+ *
+ * Issue #507: `unboundable(ref)` says the runner cannot bound the model's output at all (`outputUnboundable`,
+ * output-cap.mjs: openai-completions to a server off the trusted hosts without `compat.maxTokensField: "max_tokens"`),
+ * so every call to it is refused under any cap. Such a model gets a line of its own, grouped by model, and no floor.
  */
-export function costCapFitChecks(subjects, modelOf) {
+export function costCapFitChecks(subjects, modelOf, { unboundable = () => false } = {}) {
 	const groups = new Map();
+	const unbounded = new Map();
 	for (const s of subjects) {
 		if (s.cap === null || s.cap === undefined) continue;
 		const seen = new Set();
@@ -4954,6 +4983,13 @@ export function costCapFitChecks(subjects, modelOf) {
 			const name = `${ref.provider}/${ref.id}`;
 			if (seen.has(name)) continue;
 			seen.add(name);
+			if (unboundable(ref)) {
+				if (!unbounded.has(name)) unbounded.set(name, { main: false, labels: [] });
+				const u = unbounded.get(name);
+				u.main ||= ref === s.main;
+				u.labels.push(s.label);
+				continue;
+			}
 			const floor = firstCallFloorMicros(modelOf(ref));
 			if (floor === null || s.cap >= floor) continue;
 			const main = ref === s.main;
@@ -4962,9 +4998,20 @@ export function costCapFitChecks(subjects, modelOf) {
 			groups.get(key).labels.push(s.label);
 		}
 	}
-	if (groups.size === 0) return [];
+	const out = [];
+	if (unbounded.size > 0) {
+		const items = [...unbounded].map(([name, u]) => `${printable(name)}${u.main ? " (the main model, so such a job makes no call at all)" : ""} (${u.labels.join(", ")})`);
+		out.push({
+			ok: false,
+			warn: true,
+			label: `A job under a per-job cost cap may use a model whose output cap travels as max_completion_tokens to a server that may ignore it (one outside pi's own hosted providers), so the runner counts every call to it unboundable and refuses it under the cap: ${items.join("; ")}`,
+			fix: "set \"compat\": { \"maxTokensField\": \"max_tokens\" } on the model or its provider in models.json, or set its cost to zeros if it is free: docs/egress.md, \"Local model servers\"",
+		});
+	}
+	if (groups.size === 0) return out;
 	const items = [...groups.values()].map((g) => `${printable(g.name)}${g.main ? " (the main model, so such a job makes no call at all)" : ""} needs at least $${formatMicros(g.floor)} a call under a $${formatMicros(g.cap)} cap (${g.labels.join(", ")})`);
 	return [
+		...out,
 		{
 			ok: false,
 			warn: true,
