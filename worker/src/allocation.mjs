@@ -574,7 +574,8 @@ export function makeAllocationState({ redis, host = "", audit, log = () => {}, l
 			return { outcome: "refused", reason };
 		};
 		if (!envelope?.delegation?.enabled) return refused("delegation-off");
-		const toNeutral = target?.outcome === "expired" || typeof target?.planId !== "string";
+		// Only a real log row: a missing target, or a row with no weights (a refusal), still refuses as plan-incomplete.
+		const toNeutral = weights !== null && typeof weights === "object" && (target.outcome === "expired" || typeof target.planId !== "string");
 		const keys = Object.keys(weights ?? {}).sort();
 		if (!toNeutral && (keys.length !== entries.length || keys.some((k, i) => k !== entries[i]))) return refused("plan-incomplete");
 		const { state, mismatch } = await reconcile({ envelope, digest, now });
