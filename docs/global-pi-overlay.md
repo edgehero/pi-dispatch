@@ -128,7 +128,9 @@ folder itself may be a link.
 absolute path: with a relative one the worker refuses to start, since the worker and the container runtime would
 resolve it differently. `pi-dispatch import-pi` prints the absolute path to set.
 A main model that only an extension defines (`pi.registerProvider`) was already refused inside the container,
-after the budget slot; it is now refused for free. Declare it here. A virtual model cannot be the main model:
+after the budget slot; it is now refused for free. Declare it here. Under a dollar cap the same holds for any
+model a job calls, not only the main one: a model only an extension registers has no price in the table pinned at
+start, so its calls are refused. A virtual model cannot be the main model:
 set `PI_MODEL` or `run.model` to a physical one.
 
 ### The key is already in pi (on by default)
