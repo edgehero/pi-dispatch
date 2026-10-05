@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
-import { authenticExitLines, buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -1466,6 +1466,53 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	assert.ok(runnerSrc.includes('reason: "provider-auth-refused"'), "the runner's issue #437 literal moved");
 });
 
+// Issue #507: a cost-cap stop said only `cost-cap` with $0, because which rule of the guard refused reached the job log
+// alone (`cost_refused`), never the record.
+test("parseExitWhy keeps a cost-cap line's why only from the closed set, only on code 2, and only beside cost-cap (#507)", () => {
+	for (const why of COST_CAP_WHYS) assert.equal(parseExitWhy(exitLine({ code: 2, reason: "cost-cap", why })), why);
+	for (const [fields, label] of [
+		[{ code: 2, reason: "cost-cap" }, "no why: a stop the guard did not refuse"],
+		[{ code: 2, reason: "cost-cap", why: "qwen2.5:3b" }, "a model id, or any other container-written string, never passes"],
+		[{ code: 2, reason: "cost-cap", why: "Unboundable" }, "exact, case-sensitive"],
+		[{ code: 2, reason: "cost-cap", why: ["unboundable"] }, "not a string"],
+		[{ code: 2, reason: "model-not-allowed", why: "unboundable" }, "only beside cost-cap"],
+		[{ code: 1, reason: "cost-cap", why: "unboundable" }, "only on a line that says code 2"],
+	]) {
+		assert.equal(parseExitWhy(exitLine(fields)), null, label);
+	}
+	// The LAST exit line decides, as for parseExitReason.
+	assert.equal(parseExitWhy(exitLine({ code: 2, reason: "cost-cap", why: "unboundable" }) + exitLine({ code: 2, reason: "cost-cap" })), null);
+	assert.equal(parseExitWhy(exitLine({ code: 2, reason: "cost-cap" }) + "agent noise\n" + exitLine({ code: 2, reason: "cost-cap", why: "over-cap" })), "over-cap");
+	for (const text of [undefined, null, 42, "", "{not json", '{"event":"start","code":2,"reason":"cost-cap","why":"unboundable"}']) {
+		assert.doesNotThrow(() => parseExitWhy(text));
+		assert.equal(parseExitWhy(text), null, JSON.stringify(text));
+	}
+});
+
+test("COST_CAP_WHYS is the runner's COST_REFUSALS, read from its source (the worker cannot import the runner) (#507)", () => {
+	const runnerSrc = readFileSync(new URL("../../image/runner/src/outcome.mjs", import.meta.url), "utf8");
+	const m = runnerSrc.match(/export const COST_REFUSALS = Object\.freeze\((\[[^\]]*\])\);/);
+	assert.ok(m, "image/runner/src/outcome.mjs no longer declares COST_REFUSALS in a form this pin can read");
+	assert.deepEqual([...COST_CAP_WHYS], JSON.parse(m[1]));
+	for (const why of COST_CAP_WHYS) assert.match(why, /^[a-z][a-z0-9-]{0,63}$/, "every member passes the record's own `why` charset");
+});
+
+test("makeLogSink close carries exitWhy only when the line named one, so every other close returns the object it always did (#507)", async () => {
+	const fs = makeFakeFs({ stream: makeFakeStream() });
+	const named = makeLogSink({ logsDir: "/logs", enabled: false, fs })("gh-why");
+	named.write(Buffer.from(exitLine({ code: 2, reason: "cost-cap", why: "unboundable" })));
+	const closed = await named.close();
+	assert.equal(closed.exitReason, "cost-cap");
+	assert.equal(closed.exitWhy, "unboundable");
+	const plain = makeLogSink({ logsDir: "/logs", enabled: false, fs })("gh-plain");
+	plain.write(Buffer.from(exitLine({ code: 2, reason: "cost-cap" })));
+	assert.equal(Object.hasOwn(await plain.close(), "exitWhy"), false);
+	// Through to the record: the processor's result carries it as `why`, and buildRecord keeps it.
+	const record = buildRecord({ job: { id: "gh-1", name: "github", data: { kind: "github" }, attemptsMade: 0 }, result: { outcome: "policy", reason: "cost-cap", why: "unboundable" }, startedAt: null, endedAt: null });
+	assert.equal(record.reason, "cost-cap");
+	assert.equal(record.why, "unboundable");
+});
+
 test("a 16 KB provider error body keeps the exit-2 label: the runner caps the exit line's message before the 8 KiB tail sees it", async () => {
 	// Issue #437 review. The runner writes the terminal errorMessage onto the exit line, and the worker
 	// reads that line from the LAST 8 KiB of stdout. An HTML 403 page is easily 15 KB; uncapped, the line's
@@ -1578,9 +1625,9 @@ test("parseExitCode: the LAST exit line's own integer code, else null; the sink 
 
 test("the runner writes the code it exits with on BOTH exit lines (pinned: the settlement compares it with the container's)", () => {
 	const src = readFileSync(new URL("../../image/runner/run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /exitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
+	assert.match(src, /exitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
 	assert.match(src, /\n\treturn outcome\.code;\n\}/, "and returns that same code as the process exit code");
-	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
+	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
 });
 
 // ---- issue #545: with a key, only the runner's signed exit line is read ----

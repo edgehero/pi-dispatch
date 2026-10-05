@@ -282,6 +282,26 @@ test("exit 2 with any reason outside the closed set, or none, stays runner-polic
 	}
 });
 
+test("a cost-cap exit names the guard's rule in the record's why, from the closed set only, and nothing else gets one (#507)", async () => {
+	for (const exitWhy of ["unboundable", "external", "over-cap"]) {
+		const { deps: d } = deps({ runContainer: async () => ({ code: 2, aborted: false, turns: 1, tokens: { total: 0 }, exitReason: "cost-cap", exitWhy }) });
+		const r = await runJob(ghJob, d);
+		assert.equal(r.reason, "cost-cap");
+		assert.equal(r.why, exitWhy);
+		const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r, startedAt: null, endedAt: null });
+		assert.equal(record.why, exitWhy, "the record carries it");
+	}
+	// A value outside the set (an injected runContainer is not parseExitWhy), a missing one, and a why beside any other reason.
+	for (const [exitReason, exitWhy] of [["cost-cap", "qwen2.5:3b"], ["cost-cap", undefined], ["cost-cap", null], ["model-not-allowed", "unboundable"], [undefined, "unboundable"]]) {
+		const { deps: d } = deps({ runContainer: async () => ({ code: 2, aborted: false, exitReason, exitWhy }) });
+		const r = await runJob(ghJob, d);
+		assert.equal(Object.hasOwn(r, "why"), false, JSON.stringify([exitReason, exitWhy]));
+	}
+	// Never on another exit code: the label and its detail are exit-2-only.
+	const { deps: d0 } = deps({ runContainer: async () => ({ code: 0, aborted: false, exitReason: "cost-cap", exitWhy: "unboundable" }) });
+	assert.equal(Object.hasOwn(await runJob(ghJob, d0), "why"), false);
+});
+
 test("an InfraRetry throw comments NOTHING from runJob -- once-ness for the infra class lives at the terminal seam", async () => {
 	for (const code of [1, 99, 125]) {
 		const { deps: d, calls } = deps({ runContainer: async () => ({ code, aborted: false }) });

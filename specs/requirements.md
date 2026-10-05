@@ -678,7 +678,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   history rows the same way. A run's drill-in shows the
   record's `plan` (outcome, enum reason, clamped, plan id) and the dollars it settled with their basis, each only
   when the record carries it, and says in words whether the run kept a global job-count slot (`budget slot held`
-  or `no budget slot`, from the record's `budgetReserved`; nothing for an older record), and a trigger with `run.portfolio: true` carries a `[portfolio]` badge on its row,
+  or `no budget slot`, from the record's `budgetReserved`; nothing for an older record), and its header names the
+  record's `why` in parentheses after the reason (`cost-cap (over-cap)`, with `: see compat.maxTokensField` added for
+  `cost-cap (unboundable)`; nothing when the record has no `why`), and a trigger with `run.portfolio: true` carries a `[portfolio]` badge on its row,
   in `/dispatch triggers` and as a drill-in line, and a line in its insights tooltip.
   `/dispatch priorities` shows the same without reasons and `/dispatch priorities set <id>=<weight> ...` applies a
   plan as `operator-session`; both are zero-spend. A `tool_call` handler blocks pi's built-in `write` and `edit` (and
@@ -3214,6 +3216,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-05 | Issue #507, found by its end-to-end test: a run the cost guard refused as unboundable recorded only `cost-cap` with $0. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a run's drill-in header names the record's `why` after the reason, and points an unboundable `cost-cap` at `compat.maxTokensField`. `REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked: no cap, bound or refusal rule moved; the record only names which rule refused. |
 | 2026-10-05 | Issue #507, the review of the allocation totals. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: during an envelope mismatch the ALLOCATION rows, on the panel, `/dispatch priorities` and the insights page, also list each entry the applied split allocates that this host's file does not name, marked "not in this host's file" (render.mjs `allocationRowIds`); before, such an allocation counted in the shown total and was listed nowhere. With the digests equal the rows are the file's entries alone, UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the panel's job-count meter with no overlay cap read `N / ? (cap unknown)` while the worker ran under `PI_DAILY_CAP` from its `.env`. By design the panel reads job-count caps from the overlay only (the lab drove the panel with no overlay); the meter now reads `N / ? (worker env cap)`, as `/dispatch budget` and the insights page already said where the cap lives. Reading the env was rejected: without a pointer it is pi's own. The caps the panel reads UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: during an envelope mismatch the ALLOCATION view's header and headroom showed this host's unapplied envelope total ($30) beside the applied split's allocations ($28). Every total shown beside the split is now the split's own, on the panel, `/dispatch priorities` and the insights page (render.mjs `splitTotalMicros`), and the mismatch line says this host's file holds another total. The outside-edit notice, the plan line and the history UNCHANGED, checked. |

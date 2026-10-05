@@ -731,6 +731,29 @@ test("RUN_DETAIL shows a portfolio run's plan and the dollars a run settled, and
   assert.deepEqual(nulls, older, "a record with null fields renders byte-identical to one written before them");
 });
 
+test("RUN_DETAIL names the reason's detail after it, and points an unboundable cost-cap at the one field that fixes it (#507)", async () => {
+  // The record's `why` (a fixed token) beside its reason. Before, a run the cost guard refused as unboundable read only
+  // "cost-cap" with $0, which looks like a cap set too low.
+  const header = async (extra) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], ...extra }] }) }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const lines = comp.render(80).map(stripAnsi);
+    await comp.dispose();
+    return lines.map((l) => l.trim()).find((l) => /^│ [⚠✔✘] /.test(l)) ?? null;
+  };
+  const row = (value) => `│ ${value.padEnd(66)} │`;
+  assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "unboundable" }), row("⚠ policy · cost-cap (unboundable: see compat.maxTokensField)"));
+  assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "over-cap" }), row("⚠ policy · cost-cap (over-cap)"));
+  assert.equal(await header({ outcome: "policy", reason: "model-unknown", why: "overlay-link" }), row("⚠ policy · model-unknown (overlay-link)"));
+  assert.equal(await header({ outcome: "policy", reason: "model-unknown", why: "unboundable" }), row("⚠ policy · model-unknown (unboundable)"), "the pointer is cost-cap's alone");
+  // No `why` (null, absent, empty): the header is what it always was.
+  for (const extra of [{}, { why: null }, { why: "" }]) {
+    assert.equal(await header({ outcome: "policy", reason: "cost-cap", ...extra }), row("⚠ policy · cost-cap"), JSON.stringify(extra));
+  }
+});
+
 test("RUN_DETAIL says in words whether a run kept a budget slot, and nothing for a value the record contract has not got (#507)", async () => {
   // `budgetReserved` is a boolean or null (INT-RUN-HISTORY-FILE-CONTRACT). The line used to print the value itself:
   // "true budget slot". Pinned as the whole framed row, so the words and their place on the line are both held.

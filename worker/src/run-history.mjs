@@ -158,6 +158,35 @@ export function parseExitReason(text) {
 }
 
 /**
+ * The cost guard's refusal rules a `cost-cap` exit line may name as its `why` (issue #507): the runner's
+ * `COST_REFUSALS` (`image/runner/src/outcome.mjs`), restated because the shipped worker cannot import the runner, and
+ * pinned to it by a test that reads that source. CLOSED, because the value reaches the PII-free record.
+ */
+export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap"]);
+
+/**
+ * The `why` off the LAST runner exit line, or `null`: a member of `COST_CAP_WHYS`, and only when that same line says
+ * `code: 2` and `reason: "cost-cap"`. Scanned from the end exactly as `parseExitReason` is, and NEVER throws.
+ *
+ * The line is container-written, so nothing it carries is trusted as text: a value outside the closed set is null,
+ * never a string copied through. It feeds no classification. The processor reads it only in its exit-2 branch, and
+ * only beside a `cost-cap` reason, where it becomes the record's `why`: the worst a forged line can do is name the
+ * wrong rule of the three.
+ */
+export function parseExitWhy(text) {
+	if (typeof text !== "string") return null;
+	const lines = text.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (line === "") continue;
+		const parsed = parseTailLine(line);
+		if (parsed?.event !== "exit") continue;
+		return parsed?.code === 2 && parsed?.reason === "cost-cap" && COST_CAP_WHYS.includes(parsed?.why) ? parsed.why : null;
+	}
+	return null;
+}
+
+/**
  * The LAST runner exit line's own `code`, an integer, or `null` (issue #501, PR #542's review round 3). Scanned from
  * the end exactly as its siblings are, repairing a glued line through `parseTailLine`, and NEVER throws.
  *
@@ -818,6 +847,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const exitAuth = exitText === "" ? "unverified" : "verified";
 			const exitReason = parseExitReason(exitText);
 			const exitLineCode = parseExitCode(exitText);
+			const exitWhy = parseExitWhy(exitText);
 			const turns = parseExitTurns(exitText);
 			const tokens = parseExitTokens(exitText);
 			const session = parseExitSession(exitText);
@@ -846,8 +876,9 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			} catch (err) {
 				log("log_sink_error", { jobId, reason: err?.message });
 			}
-			// `exitAuth` only when a key was issued, so a keyless close returns exactly the object it always did.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(keyed ? { exitAuth } : {}) };
+			// `exitAuth` only when a key was issued, so a keyless close returns exactly the object it always did. `exitWhy`
+			// (issue #507) only when the line named one, for the same reason.
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

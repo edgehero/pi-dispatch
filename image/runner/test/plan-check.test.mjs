@@ -91,6 +91,6 @@ test("run-job.mjs calls the pre-check as a bare guarded statement right before t
 	assert.match(src, /\n\ttry \{\n\t\tprecheckAtExit\(\{ log \}\);\n\t\} catch \{\}\n/, "a bare statement inside its own try, its result discarded");
 	assert.equal(src.match(/precheckAtExit\(/g).length, 1, "called once, on the decided path only");
 	assert.doesNotMatch(src, /=\s*precheckAtExit\(|precheckAtExit\([^)]*\)\s*[?|&]/, "its result is never read");
-	assert.match(src, /\} catch \{\}\n(?:\t\/\/[^\n]*\n)*\texitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), turns: /, "the exit line follows, unchanged");
+	assert.match(src, /\} catch \{\}\n(?:\t\/\/[^\n]*\n)*\texitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), turns: /, "the exit line follows, unchanged");
 	assert.match(src, /\n\treturn outcome\.code;\n\}/, "and the exit code is still the decided outcome's");
 });

@@ -10,6 +10,8 @@ import {
 	configError,
 	COST_CAP,
 	COST_CAP_UNENFORCEABLE,
+	COST_REFUSALS,
+	costRefusalField,
 	decideExit,
 	EXIT_COMPLETED,
 	EXIT_INFRA,
@@ -536,7 +538,7 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	const exitLines = src.match(/exitWriter\.writeExit\(\{[^\n]*/g) ?? [];
 	assert.equal(exitLines.length, 2, "the runner has two exit-line paths (the decided outcome and the preflight throw)");
 	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
-	assert.match(src, /const capped = capExitMessage\(outcome\);\s*exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the throw path's exit line must be capped");
+	assert.match(src, /const capped = capExitMessage\(outcome\);\s*exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
 	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\trejected,\n\t\}\);/, "decideExit must receive isRetryable, and the classified rejection");
 });
@@ -672,4 +674,15 @@ test("classifyThrow honours the tag of both unenforceable refusals: exit 2, its 
 		const outcome = classifyThrow(configError("PI_MAX_COST_MICROS is set but cannot be enforced before a call: no guard", reason));
 		assert.deepEqual([outcome.code, outcome.reason], [EXIT_POLICY, reason]);
 	}
+});
+
+test("costRefusalField: a `why` only on a cost-cap outcome and only from COST_REFUSALS, else nothing at all (#507)", () => {
+	assert.deepEqual([...COST_REFUSALS], ["unboundable", "external", "over-cap"]);
+	for (const why of COST_REFUSALS) assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, why), { why });
+	assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, null), {}, "a cost-cap stop the guard did not refuse");
+	assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, "something-else"), {});
+	for (const reason of [MODEL_NOT_ALLOWED, TOKEN_BUDGET, COST_CAP_UNENFORCEABLE, "stop"]) {
+		assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason }, "unboundable"), {}, reason);
+	}
+	assert.deepEqual(costRefusalField(undefined, "unboundable"), {});
 });

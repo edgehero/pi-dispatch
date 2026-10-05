@@ -359,7 +359,11 @@ is an open issue.
 - **Calls that cannot be bounded are refused under a cap**: an api outside the priced set, `generateImages`,
   `streamDeferred`, a priced classifier, a virtual model outside `streamSimple`, and a priced openai-completions
   model on a server that is not one of pi's own hosted providers (or `api.openai.com`) whose `compat.maxTokensField`
-  is not `"max_tokens"` ([local model servers](egress.md#local-model-servers)).
+  is not `"max_tokens"` ([local model servers](egress.md#local-model-servers)). The run record says which rule
+  refused in its `why`: `unboundable` for these, `over-cap` when the call's bound would pass the cap, and `external`
+  when the subprocesses' spend could not be read. The run detail shows it after the reason, as
+  `cost-cap (unboundable: see compat.maxTokensField)`. A `cost-cap` stop with no `why` came from a subprocess or a
+  displaced compat entry, not from a refused call of the runner's own.
 - **Your own server on another api is trusted** to honour that api's own output-cap field (`max_output_tokens`,
   `max_tokens`). One that ignores it can answer past the bound; `boundExceeded` is the evidence.
 - **Old images are refused.** A job with a dollar cap on an image that does not declare `costCap` is refused before

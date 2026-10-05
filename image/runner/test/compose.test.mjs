@@ -262,7 +262,7 @@ test("run-job installs the meter and the guards before any extension loads, and 
 	// that spent before a later refusal (command-unregistered) must reach the settlement.
 	const armed = src.indexOf("\t\tmeteredExitFields = () => {");
 	assert.ok(armed > install && armed < loader, "the exit fields are armed right after the install, before any extension loads");
-	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields");
+	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields");
 	assert.match(src, /const tokens = usageMeter\.ok \? meteredExitFields\(\)\.tokens :/, "the success line reads the same fields");
 	// `usage` rides only when a call was observed: a run with none keeps the key absent, never `usage: null`.
 	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\) \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");
@@ -368,4 +368,15 @@ test("run-job decides nested or not FIRST, and a nested runner never reaches the
 	assert.equal((src.match(/readExitKey\(/g) ?? []).length, 1, "one key read");
 	assert.equal((src.match(/^\s*main\(\)$/gm) ?? []).length, 1, "one main call");
 	assert.equal((src.match(/process\.on\("SIGTERM"/g) ?? []).length, 1, "one handler");
+});
+
+test("both exit-line paths of run-job.mjs name the cost guard's rule on a cost-cap stop -- worker parseExitWhy depends on it (#507)", () => {
+	// Same tactic as the guards above: main() self-runs on import. Every writeExit that writes a decided outcome (the
+	// prompt's end and the outer catch; the SIGTERM line is always `terminated`) spreads costRefusalField, and the
+	// accessor is set from the policy guard once it exists.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const writes = src.match(/exitWriter\.writeExit\([^\n]*/g) ?? [];
+	assert.equal(writes.length, 2, "two decided exit lines");
+	for (const line of writes) assert.match(line, /\.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\)/, line);
+	assert.match(src, /costRefusalWhy = \(\) => policyGuard\?\.refusedWhy\(\) \?\? null;/);
 });
