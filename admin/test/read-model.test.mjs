@@ -604,6 +604,23 @@ test("readTriggers normalizes each on.type into its discriminated display record
   ]);
 });
 
+test("a cron trigger's portfolio flag reaches the display record only when true, and nothing else changes (#507)", () => {
+  const files = {
+    "triggers.json": JSON.stringify({
+      triggers: [
+        { on: { type: "cron", id: "plan", pattern: "0 6 * * 1" }, run: { kind: "local", folder: "/srv/p", flow: "plan-week", task: "t", portfolio: true } },
+        { on: { type: "cron", id: "off", pattern: "0 6 * * 1" }, run: { kind: "local", folder: "/srv/p", flow: "plan-week", task: "t", portfolio: false } },
+        { on: { type: "cron", id: "junk", pattern: "0 6 * * 1" }, run: { kind: "local", folder: "/srv/p", flow: "plan-week", task: "t", portfolio: "yes" } },
+      ],
+    }),
+  };
+  const [on, off, junk] = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) }).triggers;
+  const base = { type: "cron", pattern: "0 6 * * 1", folder: "/srv/p", flow: "plan-week", command: null, model: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null };
+  assert.deepEqual(on, { ...base, id: "plan", portfolio: true, index: 0 });
+  assert.deepEqual(off, { ...base, id: "off", index: 1 }, "false is the ordinary cron record, key for key");
+  assert.deepEqual(junk, { ...base, id: "junk", index: 2 }, "a non-boolean is no flag: the loader refuses it, the display never claims it");
+});
+
 test("normalizeTriggerForDisplay renders an issue trigger: action + number + the one-shot fields (#231)", () => {
   // The armed one-shot, pinned whole: number and once ride the on side, the run side mirrors the other
   // webhook kinds. No `disarmed` key at all while the rule is armed -- consumers test presence.

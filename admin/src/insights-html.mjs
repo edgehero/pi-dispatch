@@ -78,6 +78,12 @@ const CUM_MT = 14;
 // Budget meter geometry: the panel `meter` idiom in SVG -- a fixed track the fill clamps inside
 // (overflow is carried by the state WORD, never by geometry past the track).
 const METER_W = 220;
+// The split's bars (issue #507): the bar-list idiom (a label column, then the track, then the text), wider than a
+// breakdown list because the split is one panel across the page, not half of a grid.
+const SPLIT_W = 900;
+const SPLIT_LABEL_W = 110;
+const SPLIT_TRACK_W = 380;
+const SPLIT_ROW_H = 22;
 
 // The states the worker's own windowState emits; junk degrades to "ok" -- toward SILENCE, the
 // NO_BASELINE direction: a malformed payload may hide an alarm but can never invent one.
@@ -428,6 +434,122 @@ function normScopedRow(v) {
     week: win(v.week),
     month: win(v.month),
     concurrent: Number.isInteger(v.concurrent) && v.concurrent > 0 ? v.concurrent : null,
+  };
+}
+
+// ---- the budget split (issue #507) ----
+
+// The words a split row may carry: the worker's own enums and ids, never free text. A writer, an outcome or a reason is
+// a lowercase token (the record's `why` charset), a plan id its 16-hex content hash, an instant an ISO string. Anything
+// else degrades to "?" or absence, so a row another writer set cannot put text on a shareable page.
+const SPLIT_WORD = /^[a-z][a-z0-9-]{0,63}$/;
+const SPLIT_PLAN_ID = /^[0-9a-f]{16}$/;
+const SPLIT_AT = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/;
+const SPLIT_WINDOWS = Object.freeze(["day", "week", "month"]);
+const SPLIT_PROBLEMS = Object.freeze(["newer", "unreadable"]);
+// The four refusals of the split a run record can carry, in the assembler's order (index.ts `SPLIT_REFUSALS`).
+const SPLIT_REFUSALS = Object.freeze(["allocation-cap", "envelope-mismatch", "portfolio-no-envelope", "portfolio-snapshot-oversize"]);
+const SPLIT_LOG_ROWS = 20;
+// The entry no project lists (worker/src/priorities.mjs `OTHER`): an envelope id, though not a project id.
+const SPLIT_OTHER = "_other";
+
+function microsOr(v) {
+  return Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
+
+function splitWord(v) {
+  return typeof v === "string" && SPLIT_WORD.test(v) ? v : null;
+}
+
+/**
+ * Integer micro-dollars as dollars, exactly: `formatMicros` (worker/src/money.mjs) restated, because this module loads
+ * nothing from the worker; `insights-html.test.mjs` holds the two equal. NOT fmtCost or fmtUsd, on purpose: those render
+ * a PRICED cost with its class, and a split amount is neither priced nor estimated. It is the envelope's arithmetic and
+ * a counter's integer, which the panel's `b` view and `/dispatch priorities` print to the micro-dollar, and a page that
+ * rounded $70.00 to "$70" would disagree with them on the screen beside it. Null renders "-", never $0.
+ */
+export function microsUsd(m) {
+  if (!Number.isSafeInteger(m) || m < 0) return "-";
+  const whole = Math.floor(m / 1000000);
+  const fraction = String(m % 1000000).padStart(6, "0").replace(/0+$/, "").padEnd(2, "0");
+  return `$${whole}.${fraction}`;
+}
+
+/** An instant as `YYYY-MM-DD HH:MM UTC`, or "?" for anything that is not an ISO instant. */
+function splitAt(v) {
+  const m = typeof v === "string" ? SPLIT_AT.exec(v) : null;
+  return m ? `${m[1]} ${m[2]} UTC` : "?";
+}
+
+/** A `{ id: micros }` map with ids the envelope can name (a project id or `_other`), sorted; junk entries drop. */
+function splitMicrosMap(v) {
+  const out = new Map();
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return out;
+  for (const id of Object.keys(v).sort()) {
+    if (id !== SPLIT_OTHER && !PROJECT_ID.test(id)) continue;
+    out.set(id, microsOr(v[id]));
+  }
+  return out;
+}
+
+/** `{ reason: count }` over the allowed keys, or null when the assembler said it did not count (the scan was unread). */
+function splitCountMap(v, keys) {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return null;
+  const out = new Map();
+  for (const k of keys ?? Object.keys(v).sort()) {
+    if (splitWord(k) === null) continue;
+    const n = v[k];
+    out.set(k, Number.isSafeInteger(n) && n >= 0 ? n : 0);
+  }
+  return out;
+}
+
+/**
+ * The split slice's allowlist (issue #507), shaped like normBudget: explicit fields, never a spread, and FOUR shapes the
+ * renderer keeps apart. `{ unset }`: no envelope file is set. `{ problem }`: an envelope is named and does not load,
+ * with its text. `{ unreachable }`: the envelope loads and Valkey could not be read, so no number is drawn. Otherwise
+ * live. Null when the payload has no slice (an older payload): no section at all, the stated-absence idiom's other half.
+ */
+function normAllocation(v) {
+  if (v === null || v === undefined || typeof v !== "object") return null;
+  if (v.unset === true) return { kind: "unset" };
+  if (typeof v.problem === "string" && v.problem !== "") return { kind: "problem", problem: clip(escapeInterpreted(v.problem), 240) };
+  const window = SPLIT_WINDOWS.includes(v.window) ? v.window : null;
+  const totalMicros = microsOr(v.totalMicros);
+  if (typeof v.unreachable === "string" && v.unreachable !== "") return { kind: "unreachable", unreachable: clip(escapeInterpreted(v.unreachable), 160), window };
+  const st = v.state !== null && v.state !== undefined && typeof v.state === "object" ? v.state : null;
+  const floors = splitMicrosMap(v.floors);
+  const spend = v.spend !== null && v.spend !== undefined && typeof v.spend === "object" ? v.spend : {};
+  const spent = splitMicrosMap(spend.projects);
+  const allocations = st ? splitMicrosMap(st.allocations) : new Map();
+  // One row per entry the envelope floors (the panel's rule: the floors name every entry, `_other` included).
+  const rows = [...floors.keys()].map((id) => ({ id, floor: floors.get(id), allocation: allocations.get(id) ?? null, spent: spent.get(id) ?? null }));
+  const log = [];
+  for (const h of Array.isArray(v.log) ? v.log.slice(0, SPLIT_LOG_ROWS) : []) {
+    if (h === null || typeof h !== "object") continue;
+    log.push({ at: splitAt(h.at), writer: splitWord(h.writer) ?? "?", outcome: splitWord(h.outcome) ?? "?", reason: splitWord(h.reason), planId: typeof h.planId === "string" && SPLIT_PLAN_ID.test(h.planId) ? h.planId : null });
+  }
+  const c = v.counts !== null && v.counts !== undefined && typeof v.counts === "object" ? v.counts : null;
+  return {
+    kind: "live",
+    window,
+    totalMicros,
+    delegation: v.delegation === true,
+    stateProblem: SPLIT_PROBLEMS.includes(v.stateProblem) ? v.stateProblem : null,
+    state: st && {
+      planId: typeof st.planId === "string" && SPLIT_PLAN_ID.test(st.planId) ? st.planId : null,
+      writer: splitWord(st.writer) ?? "?",
+      appliedAt: splitAt(st.appliedAt),
+      validUntil: typeof st.validUntil === "string" ? splitAt(st.validUntil) : null,
+      clamped: st.clamped === true,
+      unallocated: microsOr(st.unallocated),
+    },
+    mismatch: v.mismatch === true,
+    deploymentSpent: microsOr(spend.deployment),
+    rows,
+    log,
+    refusals: c === null ? null : splitCountMap(c.refusals, SPLIT_REFUSALS),
+    plans: c === null ? null : splitCountMap(c.plans, null),
   };
 }
 
@@ -926,6 +1048,104 @@ function budgetSectionHtml(nb) {
   return `<div id="budget">${rows.join("")}</div>`;
 }
 
+/**
+ * Pure geometry for the split's bars (issue #507), exported so the rules are testable as numbers. ONE scale for every
+ * row: the envelope total, or a larger spend or allocation when one exceeds it (an envelope lowered under what a
+ * project already spent), so no bar is drawn past its track and every row compares with every other. The allocation is
+ * the outlined bar, the spend the solid bar inside it, the floor an amber tick; overspend is carried by the WORD beside
+ * the row, never by geometry alone.
+ */
+export function layoutSplitBars(rows, totalMicros) {
+  const list = Array.isArray(rows) ? rows : [];
+  let scale = Number.isSafeInteger(totalMicros) && totalMicros > 0 ? totalMicros : 0;
+  for (const r of list) scale = Math.max(scale, r?.allocation ?? 0, r?.spent ?? 0, r?.floor ?? 0);
+  const w = (m) => (scale > 0 && Number.isSafeInteger(m) && m > 0 ? Math.max(1, Math.round((m / scale) * SPLIT_TRACK_W)) : 0);
+  return list.map((r, i) => ({
+    y: i * SPLIT_ROW_H,
+    allocW: w(r.allocation),
+    spentW: Math.min(w(r.spent), SPLIT_TRACK_W),
+    floorX: r.floor !== null && r.floor > 0 && scale > 0 ? Math.round((r.floor / scale) * SPLIT_TRACK_W) : null,
+    over: r.allocation !== null && r.spent !== null && r.spent > r.allocation,
+  }));
+}
+
+function splitBarsSvg(na, tips, names) {
+  const laid = layoutSplitBars(na.rows, na.totalMicros);
+  const height = laid.length * SPLIT_ROW_H + 4;
+  const parts = [`<svg width="${fmt(SPLIT_W)}" height="${fmt(height)}" role="img" aria-label="allocation and spend by project">`];
+  laid.forEach((g, i) => {
+    const r = na.rows[i];
+    const text = `${microsUsd(r.spent)} spent of ${microsUsd(r.allocation)} · floor ${microsUsd(r.floor)}`;
+    const name = names.get(r.id);
+    const idx = tips.push(`${r.id}${name !== undefined ? ` (${name})` : ""} · allocated ${microsUsd(r.allocation)} · spent ${microsUsd(r.spent)} · floor ${microsUsd(r.floor)}${g.over ? " · over its allocation" : ""}`) - 1;
+    const base = g.y + 14;
+    const bx = SPLIT_LABEL_W;
+    parts.push(`<g data-tip="${fmt(idx)}">`);
+    // Cut in COLUMNS to the 110px label column (issue #418's rule): an id may run to 32 characters, and it would run
+    // into its own track. The tip carries the whole id; the page's view-time fit shortens one the estimate let through.
+    parts.push(`<text x="0" y="${fmt(base)}" font-size="11" fill="${PAGE_THEME.fg}">${escapeHtml(clipColumns(r.id, 16))}</text>`);
+    parts.push(`<rect x="${fmt(bx)}" y="${fmt(g.y + 4)}" width="${fmt(SPLIT_TRACK_W)}" height="13" rx="2" fill="none" stroke="${PAGE_THEME.border}"/>`);
+    if (g.allocW > 0) parts.push(`<rect x="${fmt(bx)}" y="${fmt(g.y + 4)}" width="${fmt(g.allocW)}" height="13" rx="2" fill="${PAGE_THEME.accent}" fill-opacity=".18" stroke="${PAGE_THEME.accent}"/>`);
+    if (g.spentW > 0) parts.push(`<rect x="${fmt(bx)}" y="${fmt(g.y + 7)}" width="${fmt(g.spentW)}" height="7" rx="1" fill="${g.over ? PAGE_THEME.danger : PAGE_THEME.accent}"/>`);
+    if (g.floorX !== null) parts.push(`<rect x="${fmt(bx + g.floorX)}" y="${fmt(g.y + 1)}" width="2" height="19" fill="${PAGE_THEME.amber}"/>`);
+    parts.push(`<text x="${fmt(bx + SPLIT_TRACK_W + 10)}" y="${fmt(base)}" font-size="11" fill="${PAGE_THEME.dim}">${escapeHtml(text)}${g.over ? ` <tspan fill="${PAGE_THEME.danger}" font-weight="600">over</tspan>` : ""}</text>`);
+    parts.push("</g>");
+  });
+  parts.push("</svg>");
+  return parts.join("");
+}
+
+/** The count line: every reason with its number, or the stated absence when the scan was not read. */
+function splitCountsLine(label, counts, empty) {
+  if (counts === null) return `${label}: not counted (the spend scan could not be read)`;
+  if (counts.size === 0) return `${label}: ${empty}`;
+  return `${label}: ${[...counts].map(([k, n]) => `${k} ${fmt(n)}`).join(" · ")}`;
+}
+
+/**
+ * The budget split section (issue #507): what the envelope holds, how it is split, what each project spent in the
+ * envelope's window, and what the plans and refusals came to. FACTS ONLY, the budget panel's doctrine: amounts are the
+ * worker's integers, outcomes and reasons its enum words, and the plans' own reason TEXT never reaches this page (it is
+ * agent text, drawn only in the panel's `b` view). No host is named: the page is a file meant to be shared.
+ */
+function splitSectionHtml(na, tips, names, windowLabel) {
+  if (na.kind === "unset") return '<div id="split" class="dim">no envelope (PI_ENVELOPE_FILE is unset), so there is no split and delegation is off</div>';
+  if (na.kind === "problem") return `<div id="split"><div class="row"><span class="state over">envelope problem</span><span>${escapeHtml(na.problem)}</span></div></div>`;
+  if (na.kind === "unreachable") return '<div id="split" class="dim">the split could not be read from the queue, so no number is shown (see the banner)</div>';
+  const rows = [];
+  const per = na.window !== null ? ` per ${na.window}` : "";
+  rows.push(`<div class="row"><span class="wl">envelope</span><span>${escapeHtml(`${microsUsd(na.totalMicros)}${per} · delegation ${na.delegation ? "on" : "off"}`)}</span></div>`);
+  const st = na.state;
+  if (na.stateProblem === "newer") rows.push('<div class="row"><span class="state">the applied split was written by a newer pi-dispatch: upgrade this console</span></div>');
+  else if (na.stateProblem === "unreadable") rows.push('<div class="row"><span class="state">the applied split does not decode; the next pickup replaces it with the neutral split</span></div>');
+  if (st) {
+    const plan = st.planId !== null ? `plan ${st.planId}` : "neutral split, no plan";
+    const bits = [plan, `written by ${st.writer}`, `applied ${st.appliedAt}`];
+    if (st.validUntil !== null) bits.push(`until ${st.validUntil}`);
+    if (st.clamped) bits.push("clamped by the step");
+    rows.push(`<div class="row"><span class="wl">plan</span><span>${escapeHtml(bits.join(" · "))}</span></div>`);
+    if (na.mismatch) rows.push('<div class="row"><span class="state">the split was made for another envelope: governed jobs refuse as envelope-mismatch until it is re-based</span></div>');
+  } else if (na.stateProblem === null) {
+    rows.push('<div class="row dim">no split applied yet: the first host to look writes the neutral one</div>');
+  }
+  if (na.rows.length > 0) {
+    rows.push(splitBarsSvg(na, tips, names));
+    rows.push(projectNamesHtml(na.rows.map((r) => ({ key: r.id })), names));
+  }
+  if (st) rows.push(`<div class="row"><span class="wl">headroom</span><span>${escapeHtml(`unallocated ${microsUsd(st.unallocated)} · deployment spent ${microsUsd(na.deploymentSpent)} of ${microsUsd(na.totalMicros)}`)}</span></div>`);
+  rows.push(`<div class="dim small">amounts are this ${escapeHtml(na.window ?? "envelope")} window's; the bar is the allocation, the solid bar the spend (held included), the amber tick the floor</div>`);
+  rows.push(`<div class="small">${escapeHtml(splitCountsLine(`refusals in the spend window (${windowLabel})`, na.refusals, "none"))}</div>`);
+  rows.push(`<div class="small">${escapeHtml(splitCountsLine("plans collected in the spend window", na.plans, "none"))}</div>`);
+  if (na.log.length > 0) {
+    const tr = na.log.map((h) => `<tr><td>${escapeHtml(h.at)}</td><td>${escapeHtml(h.writer)}</td><td>${escapeHtml(h.outcome)}</td><td>${escapeHtml(h.reason ?? "")}</td><td class="pid">${escapeHtml(h.planId ?? "")}</td></tr>`);
+    rows.push(`<h3>history, newest first (alloc:log)</h3><table class="alog"><tr><th>at</th><th>writer</th><th>outcome</th><th>reason</th><th>plan</th></tr>${tr.join("")}</table>`);
+  } else {
+    rows.push('<div class="dim small">no outcomes yet</div>');
+  }
+  rows.push('<div class="lever">change it: /dispatch priorities set &lt;project&gt;=&lt;weight&gt; · or press b in the /dispatch panel, where each plan\'s reasons are shown</div>');
+  return `<div id="split">${rows.join("")}</div>`;
+}
+
 function barListSvg(rows, aria, tips) {
   const laid = layoutBarList(rows, { width: LIST_W });
   const height = laid.length * LIST_ROW_H + 6;
@@ -1103,10 +1323,12 @@ function footerHtml(nf, windowLabel) {
   return `<div id="prov">${lines.map((l) => `<div>${escapeHtml(l)}</div>`).join("")}</div>`;
 }
 
-function costBannersHtml(p, nf, nb) {
+function costBannersHtml(p, nf, nb, na) {
   const banners = [];
   if (typeof p.costsUnreachable === "string" && p.costsUnreachable !== "") banners.push(`costs unreachable: ${clip(p.costsUnreachable, 160)}`);
   if (nb !== null && nb !== undefined && nb.unreachable !== null) banners.push(`budget unreachable: ${nb.unreachable}`);
+  // The split's unreachable shape is a banner too (issue #507), the budget's twin: the section then draws no number.
+  if (na !== null && na !== undefined && na.kind === "unreachable") banners.push(`budget split unreachable: ${na.unreachable}`);
   if (nf !== null && nf.provenance.runsTotal === 0) banners.push("no runs in the spend window");
   // Only with the caller's explicit flag: an empty plans array alone also means "operator declared
   // nothing", and accusing a missing file on that evidence would be wrong half the time.
@@ -1153,6 +1375,17 @@ h3{font-size:12px;color:${PAGE_THEME.dim};margin:0 0 4px}
 #budget .state{color:${PAGE_THEME.amber};font-weight:600}
 #budget .state.over{color:${PAGE_THEME.danger}}
 #budget .lever{margin-top:8px;color:${PAGE_THEME.dim};font-size:11px}
+#split{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:10px 12px;font-size:12px}
+#split .row{display:flex;align-items:center;gap:8px;margin:3px 0}
+#split .wl{color:${PAGE_THEME.dim};min-width:86px}
+#split .state{color:${PAGE_THEME.amber};font-weight:600}
+#split .state.over{color:${PAGE_THEME.danger}}
+#split .small{margin:3px 0}
+#split h3{margin-top:10px}
+#split .lever{margin-top:8px;color:${PAGE_THEME.dim};font-size:11px}
+.alog{border-collapse:collapse;font-size:11px}
+.alog th{color:${PAGE_THEME.dim};font-weight:400;text-align:left;padding:1px 14px 1px 0}
+.alog td{padding:1px 14px 1px 0;white-space:nowrap}
 .bl{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:8px 10px;overflow:hidden}
 .rowlink{cursor:pointer}
 #wrap{position:relative;border:1px solid ${PAGE_THEME.border};border-radius:6px}
@@ -1259,6 +1492,14 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
   } catch {
     nb = null;
   }
+  let na;
+  try {
+    // Its own try too (issue #507): the split is read apart from the spend scan and the budget, and a hostile slice
+    // must take neither down, nor be taken down by them.
+    na = normAllocation(p.allocation);
+  } catch {
+    na = null;
+  }
 
   const windowLabel = p.window === "7d" ? "last 7d" : p.window === "30d" ? "last 30d" : p.window === "mtd" ? "month to date" : "—";
   const windowDays = scene.norm.caps.windowDays ?? "?";
@@ -1297,23 +1538,26 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
   bodyParts.push(`<span id="windows">${escapeHtml(dualWindow)}</span>`);
   bodyParts.push("</div>");
   bodyParts.push(bannersHtml(scene.norm));
-  bodyParts.push(costBannersHtml(p, nf, nb));
+  bodyParts.push(costBannersHtml(p, nf, nb, na));
 
   if (nf !== null) bodyParts.push(`<section>${kpisHtml(nf)}</section>`);
   // Budget sits SECOND, beside the headline spend and above everything it can act on: the caps are
   // the operator's one real lever on cost, and it renders whether or not the spend scan was readable.
   bodyParts.push(`<section><h2>budget</h2>${budgetSectionHtml(nb)}</section>`);
+  // The split right under the caps (issue #507): both are the operator's levers on cost, and the split renders whether
+  // or not the spend scan was readable (its counts then say "not counted"). No section for a payload without the slice.
+  let names;
+  try {
+    names = normProjectNames(p.projects);
+  } catch {
+    names = new Map(); // a hostile getter in a junk payload: the bars still render, without names
+  }
+  if (na !== null) bodyParts.push(`<section><h2>budget split</h2>${splitSectionHtml(na, tips, names, windowLabel)}</section>`);
   if (nf !== null) {
     if (nf.plans.length > 0) bodyParts.push(`<section><h2>plans</h2>${planCardsHtml(nf.plans)}</section>`);
     bodyParts.push(`<section><h2>daily spend</h2>${dailyChartHtml(nf.daily, tips)}${cumulativeHtml(nf.daily, tips)}</section>`);
     const flows = flowLinesHtml(nf, tips);
     if (flows !== null) bodyParts.push(`<section><h2>daily spend by flow</h2>${flows}</section>`);
-    let names;
-    try {
-      names = normProjectNames(p.projects);
-    } catch {
-      names = new Map(); // a hostile getter in a junk payload: the bars still render, without names
-    }
     bodyParts.push(`<section><h2>breakdown</h2>${breakdownHtml(nf, minted, tips, names)}</section>`);
   } else {
     bodyParts.push('<section><div class="dim">no cost data in this payload</div></section>');

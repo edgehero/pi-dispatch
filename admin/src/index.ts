@@ -147,7 +147,7 @@ import { applyDeploymentPointer, pointerPath, pointerState, readPointer, takePoi
 import * as nodeFs from "node:fs";
 // The audit rows' host name for a plan this session applies (issue #504 part C): PI_WORKER_NAME, else this machine's.
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { COSTS_WINDOWS, PROJECT_KEY_RE, costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo, whatIfFlow } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
@@ -2417,6 +2417,61 @@ async function assembleBudgetView(paths: any): Promise<any> {
   };
 }
 
+/** The run-record refusals that belong to the split (issue #507): what the insights page counts beside it. */
+const SPLIT_REFUSALS = ["allocation-cap", "envelope-mismatch", "portfolio-no-envelope", "portfolio-snapshot-oversize"];
+
+/**
+ * The split's counts over the SPEND window (issue #507), from the records the assembler already scanned: governed
+ * jobs refused for a reason of the split, by `record.reason`, and what each portfolio run's plan came to, by
+ * `record.plan.reason` (an applied plan has none, so it counts as `applied`). Null when the scan could not be read:
+ * the page then says "not counted", because a 0 would claim a count nobody made.
+ */
+export function splitCounts(records: any): any {
+  if (!Array.isArray(records)) return null;
+  const refusals: Record<string, number> = Object.fromEntries(SPLIT_REFUSALS.map((r) => [r, 0]));
+  const plans: Record<string, number> = {};
+  for (const r of records) {
+    if (typeof r?.reason === "string" && SPLIT_REFUSALS.includes(r.reason)) refusals[r.reason] += 1;
+    const p = r?.plan;
+    if (p !== null && typeof p === "object" && typeof p.outcome === "string") {
+      const key = typeof p.reason === "string" && p.reason !== "" ? p.reason : p.outcome;
+      plans[key] = (plans[key] ?? 0) + 1;
+    }
+  }
+  return { refusals, plans };
+}
+
+/**
+ * The budget split slice of the insights payload (issue #507): the envelope, the applied split and its spend, and the
+ * newest `alloc:log` outcomes, through the same `readAllocations` the panel's `b` view and `/dispatch priorities` use,
+ * read WITHOUT reasons (a plan's reasons are agent text, and the panel's view is the one place they are drawn). Valkey
+ * is read only when an envelope is set. Each row is cut to its enum fields here, so no host name and no reason text
+ * reaches a file meant to be shared. A problem text has the envelope path cut to its basename for the same reason.
+ * Exported for its tests, as `splitCounts` is: the rest of the insights assembly dials the real queue.
+ */
+export async function assembleAllocationView(paths: any, counts: any): Promise<any> {
+  if (!paths.envelopeFile) return { unset: true };
+  const read: any = readEnvelope({ envelopeFile: paths.envelopeFile, projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env: deploymentEnv() }) });
+  if (!read.envelope) return { problem: envelopeProblem(read).split(String(paths.envelopeFile)).join(basename(String(paths.envelopeFile))) };
+  const e = read.envelope;
+  const head = { window: e.window, totalMicros: e.totalMicros, floors: { ...e.floors }, delegation: e.delegation?.enabled === true };
+  const alloc: any = await readAllocations({ url: paths.valkeyUrl, envelope: e, projects: read.projects, now: allocNow(), withReasons: false, ...allocRedis() });
+  if (alloc?.unreachable) return { ...head, unreachable: String(alloc.unreachable) };
+  const st = alloc.state ?? null;
+  return {
+    ...head,
+    stateProblem: alloc.stateProblem ?? null,
+    state: st && { planId: st.planId ?? null, writer: st.writer ?? null, appliedAt: st.appliedAt ?? null, validUntil: st.validUntil ?? null, clamped: st.clamped === true, allocations: { ...(st.allocations ?? {}) }, unallocated: st.unallocated ?? null },
+    mismatch: st !== null && st.envelopeDigest !== read.digest,
+    spend: {
+      deployment: alloc.spend?.deployment?.micros ?? null,
+      projects: Object.fromEntries(Object.entries(alloc.spend?.projects ?? {}).map(([id, v]: [string, any]) => [id, v?.micros ?? null])),
+    },
+    log: (Array.isArray(alloc.log) ? alloc.log : []).slice(0, 20).map((h: any) => ({ at: h.at, writer: h.writer, outcome: h.outcome, reason: h.reason ?? null, planId: h.planId ?? null })),
+    counts,
+  };
+}
+
 async function assembleInsights(paths: any, window: string): Promise<any> {
   const graph = await assembleGraph(paths);
   const costs = assembleCosts(paths, window);
@@ -2424,7 +2479,9 @@ async function assembleInsights(paths: any, window: string): Promise<any> {
   // and the lever does not depend on the spend scan being readable.
   const budget = await assembleBudgetView(paths);
   if (costs?.unreachable) {
-    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null, budget };
+    // The split too, for the budget's reason; its counts are the records', so here they were not made.
+    const allocation = await assembleAllocationView(paths, null);
+    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null, budget, allocation };
   }
   const fold = costs?.fold ?? null;
   // Re-fold the spend map at the requested window so badge and table agree. assembleCosts already
@@ -2443,7 +2500,8 @@ async function assembleInsights(paths: any, window: string): Promise<any> {
   // name; members are not carried, the page shows spend by id.
   const pv: any = readProjects({ projectsPath: paths.projectsFile });
   const projects = Array.isArray(pv?.projects) ? pv.projects.map((x: any) => ({ id: x.id, name: x.name })) : [];
-  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget, projects };
+  const allocation = await assembleAllocationView(paths, splitCounts(records));
+  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget, projects, allocation };
 }
 
 /**

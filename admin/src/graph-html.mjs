@@ -473,6 +473,8 @@ function normalizeModel(model) {
       disarmed: n.disarmed !== null && n.disarmed !== undefined && typeof n.disarmed === "object" && !Array.isArray(n.disarmed)
         ? { at: typeof n.disarmed.at === "string" ? clip(n.disarmed.at, 40) : Number.isFinite(n.disarmed.at) ? n.disarmed.at : null }
         : null,
+      // The portfolio flag (issue #507): a strict boolean, rendered as one tip line and nothing else on the scene.
+      portfolio: n.portfolio === true,
       folderKey: typeof n.folderKey === "string" ? n.folderKey : null,
       runs: intOr(n.runs, 0),
       lastOutcome: typeof n.lastOutcome === "string" ? n.lastOutcome : null,
@@ -1445,6 +1447,8 @@ function buildTip(n, flags, groupLabel, nowMs) {
     // relTime -- it is provenance the worker wrote down, not a freshness for the page to re-derive.
     if (n.disarmed !== null) lines.push(`one-shot, spent${n.disarmed.at !== null ? ` ${n.disarmed.at}` : ""}`);
     else if (n.once) lines.push("one-shot (armed)");
+    // The panel row's [portfolio] in words (issue #507): the chip stays a plain cron chip, the tip says what it writes.
+    if (n.portfolio) lines.push("portfolio: its jobs write the budget split");
   }
   if (n.aiTrigger) lines.push("chainable: ai-trigger allow");
   if (n.kind === "skill" && n.loops.length > 0) {

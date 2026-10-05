@@ -539,3 +539,45 @@ test("a webhook trigger's own model, provider and turn limit reach the record an
   assert.deepEqual(kvValues(plain, "model"), ["deployment default"]);
   assert.equal(stripAnsi(plain.join("\n")).includes("maxTurns"), false);
 });
+
+// --- issue #507: the portfolio flag ---
+
+const PORTFOLIO = { type: "cron", id: "plan-week", pattern: "0 6 * * 1", folder: "/srv/ops", flow: "portfolio-manager", packages: false, portfolio: true };
+
+test("a portfolio cron row carries [portfolio] in accent, last of its badges, and a row without it is unchanged (#507)", async () => {
+  const row = stripAnsi((await renderList([PORTFOLIO], 100)).find((l) => stripAnsi(l).includes("plan-week")));
+  assert.equal(row, "│ › cron          plan-week  0 6 * * 1 → local ops/portfolio-manager [portfolio]                   │");
+  const raw = (await renderList([PORTFOLIO], 100, THEME)).find((l) => stripAnsi(l).includes("plan-week"));
+  assert.ok(raw.includes(painted("accent", "[portfolio]")), "accent: an override of the neutral split, never a risk badge");
+  const { portfolio, ...plain } = PORTFOLIO;
+  assert.equal(portfolio, true);
+  const without = await renderList([plain], 100, THEME);
+  const withFalse = await renderList([{ ...plain, portfolio: false }], 100, THEME);
+  assert.deepEqual(withFalse, without, "false renders as absent, byte for byte");
+  assert.ok(!without.join("\n").includes("[portfolio]"));
+});
+
+test("[portfolio] is not a risk badge: the width budget's floor formula is unchanged, and a crowded row gives it up first (#507)", async () => {
+  // floorWidth above counts the risk badges only, and [portfolio] is not one: at every width the formula allows,
+  // the floor and the risk badges still survive beside it, and with room to spare it renders.
+  const cron = { ...PORTFOLIO, packages: true, resume: true, secrets: 2, secretsProfile: "production", image: IMG };
+  for (let w = floorWidth(cron); w <= 170; w += 2) {
+    const row = stripAnsi((await renderList([cron], w)).find((l) => stripAnsi(l).includes("portfolio-manager")));
+    assert.match(row, /\[packages\] .*\[resume\] \[secrets 2[^\]]*\]/, `every risk badge survives at ${w}: ${row}`);
+    assert.match(row, /plan-week/, `the cron id survives at ${w}: ${row}`);
+  }
+  const narrow = stripAnsi((await renderList([cron], floorWidth(cron))).find((l) => stripAnsi(l).includes("portfolio-manager")));
+  assert.doesNotMatch(narrow, /\[portfolio\]/, "at the floor it is dropped before any risk badge");
+  const wide = stripAnsi((await renderList([cron], 170)).find((l) => stripAnsi(l).includes("portfolio-manager")));
+  assert.match(wide, /\[secrets 2 via production\] \[portfolio\] +│$/, "with room it renders, after the cap and before health");
+});
+
+test("TRIGGER_DETAIL says what a portfolio trigger's jobs write, and only on that trigger (#507)", async () => {
+  const lines = await openDetail(PORTFOLIO, {}, THEME);
+  assert.deepEqual(kvValues(lines, "portfolio"), ["its jobs write the budget split"]);
+  assert.ok(lines.some((l) => l.includes(painted("accent", "its jobs write the budget split"))));
+  const { portfolio, ...plain } = PORTFOLIO;
+  assert.equal(portfolio, true);
+  const rows = (await openDetail(plain, {}, THEME)).map((l) => stripAnsi(l));
+  assert.ok(!rows.some((r) => r.includes(" portfolio ")), "no row for a trigger without the flag");
+});

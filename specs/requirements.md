@@ -659,6 +659,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   spend, the applied plan with its per-project reasons drawn through the control-byte gate, and the history from
   `alloc:log`); `r` on a history row reverts to it after a y/n in the frame, as `operator-revert`, and a banner
   shows while an `envelope-changed-externally` outcome is newer than the last re-base or applied plan.
+  Since issue #507 that view is framed at up to 80 columns, wider than the other drill-ins, and a history row
+  shows its time as `MM-DD HH:MM`, the host only when the rows shown name more than one host, and the plan id's
+  first 8 digits, so a refusal row fits whole; the headroom line reads `unallocated $X · deployment spent $Y of
+  $Total`, and a revert's note adds that a due plan may move the split again. A run's drill-in shows the
+  record's `plan` (outcome, enum reason, clamped, plan id) and the dollars it settled with their basis, each only
+  when the record carries it, and a trigger with `run.portfolio: true` carries a `[portfolio]` badge on its row,
+  in `/dispatch triggers` and as a drill-in line, and a line in its insights tooltip.
   `/dispatch priorities` shows the same without reasons and `/dispatch priorities set <id>=<weight> ...` applies a
   plan as `operator-session`; both are zero-spend. A `tool_call` handler blocks pi's built-in `write` and `edit` (and
   a `powershell` command naming one) whose target is the envelope, `projects.json`, `scoped-limits.json`,
@@ -1517,8 +1524,16 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   for the day/week/month job-slot windows and the daily token counter, states computed by the
   worker's own classifier and carried in the payload as words, the lever named — `/dispatch set …`,
   the panel's `s`), plan verdict cards, a daily spend column chart with a **cumulative mini-chart**
-  beneath it, **per-flow daily spend as small multiples** (top flows, one panel each), and the four
-  breakdown bar lists (flow / trigger / model / repo). Every labeling rule of `REQ-COST-ANALYTICS`
+  beneath it, **per-flow daily spend as small multiples** (top flows, one panel each), the five
+  breakdown bar lists (flow / trigger / model / repo / project), and a **budget split** section
+  (issue #507) under the budget panel when an envelope is set: the envelope's total and window, one
+  bar per envelope entry with its allocation, its spend in the envelope window and its floor tick,
+  the unallocated headroom beside the deployment's spend of the total, the applied plan (id,
+  writer, applied, until, clamped), the newest 20 `alloc:log` outcomes, and, over the spend window,
+  the governed refusals by reason (`allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`,
+  `portfolio-snapshot-oversize`) and the collected plans by reason. An unset envelope is one line,
+  an envelope that does not load shows its problem, and an unreadable split is a banner with no
+  number. Every labeling rule of `REQ-COST-ANALYTICS`
   (a)-(g) applies to this surface verbatim, plus the visual clauses this surface adds:
   (a) an estimated figure renders dashed and translucent beside its `~ est.` text — hue is never
   the sole encoding of a cost class;
@@ -1551,7 +1566,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   window is **30d**, not the old costs mtd, because the topology half is pinned at a 30-day record
   window and one page's two halves should describe the same period unless the operator asks
   otherwise. The what-if is the `insights whatif` command; `seeded` dollars never render on the
-  page. Zero new dependencies.
+  page. The budget split carries the envelope's numbers in exact micro-dollars, plan ids, and the
+  worker's enum words for writers, outcomes and reasons only: no host name, and never a plan's
+  reason text, which is agent text and is drawn only in the panel's `b` view
+  (`REQ-ADMIN-VIA-PI-EXTENSION`). Its counts come from the records the page already scans; when
+  that scan cannot be read they say "not counted", never 0. Zero new dependencies.
 - **Why**: A terminal frame communicates 76 columns at a time; a human reading "what is this
   deployment doing and what does it cost" reads a chart faster than a table and a topology faster
   than either — and the two questions answer each other, so they belong on one page, and one page
@@ -1581,7 +1600,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   given a window past its soft-hold floor, then the row carries the word `soft-hold`; given a flow
   series whose day is estimated, then the segments touching it are dashed and its point tip carries
   `~ est.`; given a fold without the per-flow series, then the section is absent, never an empty
-  grid.
+  grid; given an envelope and a readable split, then the budget split section shows each entry's
+  allocation, spend and floor, the headroom, the plan line, the history and the counts, and no
+  host and no plan reason text appear on the page; given no envelope, then the section is one
+  line and no Valkey read is made for it; given an unreadable split, then a banner says so and the
+  section draws no number; given an unreadable spend scan, then both counts read "not counted".
 
 ## REQ-SCOPED-PAUSE-WINDOWS
 
@@ -3169,6 +3192,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-05 | Issue #507, PR 2 (the allocation surfaces). **`REQ-INSIGHTS-HTML-EXPORT` AMENDED**: the Statement names the budget split section (the envelope, each entry's allocation, spend and floor, the headroom, the plan line, the last 20 `alloc:log` outcomes, and the split's refusals and plans counted over the spend window) and corrects "the four breakdown bar lists" to five, with by-project, which shipped in #499 part C without this sentence; the Scope says the section carries amounts, plan ids and enum words only, no host and no reason text, and that an unread scan is "not counted", never 0; the Acceptance adds the four shapes. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the `b` view's frame, row and headroom text, the revert note, the run drill-in's plan and dollars lines, and the `[portfolio]` badge. `REQ-DELEGATED-ALLOCATION` UNCHANGED, checked: no rule of the split moved. |
 | 2026-10-05 | Issue #507, the review of the refusal fold. **`REQ-COST-ANALYTICS` AMENDED**, (d): a run refused before any spend takes no part in a bucket's class or coverage, and the sentence says most pre-spend refusals match rather than every one: a refusal that keeps its global slot (`over-budget`, the soft hold, or any refusal whose give-back failed) stays a floor. `REQ-DELEGATED-ALLOCATION` UNCHANGED, checked: its acceptance already says a job that completes without a plan. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`REQ-DELEGATED-ALLOCATION` AMENDED**, Acceptance: a confirmed portfolio job that completes without a plan is a recorded refused attempt, `plan-absent`, in its run record, the audit file and `alloc:log`, with the split unchanged; any other job that writes no plan records nothing beyond `plan: null`; and a later plan that meets the ladder after an operator revert applies (a revert does not pause delegation). **`REQ-COST-ANALYTICS` AMENDED**, (d): a run refused before any spend (no `tokens`, no `exitCode`, `budgetReserved: false`) is not a pre-meter record; it contributes an exact metered $0, is no floor and is not unmetered, and a record lacking any of the three keeps the floor; the Acceptance gains both cases. `REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked: its "fully ledgered" count now holds such runs, which had nothing to ledger. |
 | 2026-10-04 | Issue #504, part C (the operator surfaces). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Statement names the three tools in its list, `dispatch_allocations` among the reads, `dispatch_envelope_set` among the confirm-gated writes, and the new kind, the delegated allocation write `dispatch_priorities_set` (part A described them in prose, because the wiring scan matches the registered tools exactly; #504's same-change spec acceptance is met across part A and this part); it adds the envelope write's order (the expected digest before the file), the writers' cross-check against the live envelope, the panel's `b` view with its revert and banner, `/dispatch priorities`, and the write guard on pi's `write` and `edit` (the money files, the deployment's `.env` and the pointer, a set that never shrinks within a session) with `bash` a named residual; the Acceptance gains the headless 3:1 apply ($70 and $30 with `_other` at 0), the envelope write refused headless and writing nothing on decline, no reason text in any tool result or message, the in-frame revert as `operator-revert`, the cross-check refusals (the tools and the operator-typed paths), the guard's spellings, its fold and nested calls, a session with no deployment that leaves a repository's own `triggers.json`, `scoped-limits.json` and `projects.json` alone, and an `init` and `up` deployment whose `.env` names the files the guard then holds. **`REQ-DELEGATED-ALLOCATION` AMENDED**, wording only: part C is named as shipped. **`REQ-SCOPED-LIMITS`** UNCHANGED, checked: its Why already says a delegated allocation never goes above a limit the operator wrote, and the limit writers' new refusal only keeps a row from going below a floor. **`CONST-BUDGET-BEFORE-TOKENS`** UNCHANGED, checked: no gate moved. |
