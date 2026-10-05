@@ -556,10 +556,13 @@ export function makeAllocationState({ redis, host = "", audit, log = () => {}, l
 	 * then the only state), while this host's envelope is not the applied one, or while another apply holds the lock.
 	 * Weights that do not cover exactly the envelope's entries (an older envelope's row) refuse as `plan-incomplete`.
 	 *
-	 * A revert to an `expired` row restores the NEUTRAL split it records, with no plan id and no expiry (issue #507). That
-	 * row names the plan that expired beside the neutral weights that replaced it, and taking its id would put "plan X
-	 * until ..." over neutral weights, a plan nobody wrote, on every surface. The row keeps the id: it is the audit's
-	 * answer to "which plan ran out", and the next manager reads it.
+	 * A revert to a row with NO plan (a neutral, default, re-based-neutral or `expired` row) restores the CURRENT neutral
+	 * split: this envelope's default weights, no plan id, no expiry (issue #507). The row's own weights are the neutral
+	 * of the envelope it was written under, and restoring them would label an older envelope's weights "neutral" and
+	 * keep them for ever, since nothing expires a split with no plan. An `expired` row counts as one: it names the plan
+	 * that ran out beside the neutral weights that replaced it, and taking that id put "plan X until ..." over neutral
+	 * weights. The row keeps the id, as the audit file's answer to which plan ran out. A revert to a plan's row is as it
+	 * was: that plan's weights, its id, a fresh expiry.
 	 */
 	async function revert({ envelope, digest = envelope ? envelopeDigest(envelope) : null, target, now }) {
 		const at = iso(now);
@@ -571,27 +574,27 @@ export function makeAllocationState({ redis, host = "", audit, log = () => {}, l
 			return { outcome: "refused", reason };
 		};
 		if (!envelope?.delegation?.enabled) return refused("delegation-off");
+		const toNeutral = target?.outcome === "expired" || typeof target?.planId !== "string";
 		const keys = Object.keys(weights ?? {}).sort();
-		if (keys.length !== entries.length || keys.some((k, i) => k !== entries[i])) return refused("plan-incomplete");
+		if (!toNeutral && (keys.length !== entries.length || keys.some((k, i) => k !== entries[i]))) return refused("plan-incomplete");
 		const { state, mismatch } = await reconcile({ envelope, digest, now });
 		if (mismatch) return refused(ENVELOPE_MISMATCH_REASON, state);
 		const mine = await takeLock();
 		if (mine === null) return refused("plan-busy", state);
 		try {
-			const repoWeights = Object.fromEntries(Object.entries(target?.repoWeights ?? {}).filter(([k]) => entries.includes(k) && k !== OTHER));
-			const result = allocate({ envelope, weights, current: null, repos: repoWeights });
+			const repoWeights = toNeutral ? {} : Object.fromEntries(Object.entries(target?.repoWeights ?? {}).filter(([k]) => entries.includes(k) && k !== OTHER));
+			const result = toNeutral ? null : allocate({ envelope, weights, current: null, repos: repoWeights });
 			const validUntil = new Date(nowMs(now) + envelope.delegation.maxPlanDays * 86400000).toISOString();
-			const planId = target?.outcome !== "expired" && typeof target?.planId === "string" ? target.planId : null;
-			const next = {
+			const next = toNeutral ? { ...neutralState(envelope, digest, now, { writer: "operator-revert", lastPlanAt: at }), basis: state.planId } : {
 				version: ALLOC_STATE_VERSION,
-				planId,
+				planId: target.planId,
 				basis: state.planId,
 				writer: "operator-revert",
 				jobId: null,
 				triggerId: null,
 				appliedAt: at,
 				lastPlanAt: at,
-				validUntil: planId !== null ? validUntil : null,
+				validUntil,
 				envelopeDigest: digest,
 				weights: { ...weights },
 				repoWeights,
