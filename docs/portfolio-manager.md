@@ -77,6 +77,8 @@ moves 25/31.25 of the way, to shop $25.00, platform $60.00 and ops $15.00.
                         "REPORT_WEBHOOK_URL": "op://ops/pm-report/webhook" } } }
 ```
 
+- The panel's trigger list and `/dispatch triggers` mark it `[portfolio]`. After a run, the run's detail shows
+  the plan's outcome and id, and the panel's `b` view and the insights page show the split it led to.
 - It runs Monday at 06:00 UTC, at the start of the week window. The flow writes no `validUntil`, so its plan
   stays in force for `maxPlanDays` (14 in the example) unless a newer plan replaces it, which outlives a
   weekly run.
@@ -142,6 +144,17 @@ The flow proposes. The host decides, after the job exits, by the rules in `INT-P
   view (`b`) shows the history, and `r` on a row reverts to it.
 
 The full rules are `REQ-DELEGATED-ALLOCATION`, `INT-ENVELOPE-FILE-CONTRACT` and `INT-OUTBOX-CONTRACT`.
+
+## Turn it off
+
+- **Stop the manager only.** Delete its trigger to stop its runs. Removing only `"portfolio": true` leaves a
+  weekly job that still runs and costs: any plan it writes is refused as `plan-not-portfolio`, and the split
+  stays as it is.
+- **Stop every plan.** Set `enabled` to false with `dispatch_envelope_set`. The neutral split returns, and a
+  portfolio job is refused as `portfolio-no-envelope` before it costs anything. An operator plan is refused too.
+- **Remove the split.** Follow "Several hosts" in [allocation](allocation.md#several-hosts): remove
+  `PI_ENVELOPE_FILE` from every host, then delete the split and its digest:
+  `valkey-cli DEL alloc:plan alloc:envelope:expected`.
 
 ## What the snapshot holds
 

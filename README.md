@@ -20,17 +20,25 @@ system. pi-dispatch adds exactly that layer and nothing else. It is not another 
 the one you use. It is the queue, the budget and the box around the pi you already run, steered by the
 `.pi/` setup your repo already has.
 
-![The /dispatch dashboard: live queue state, day, week and month spend meters with a daily token counter, the triggers pane, pause windows, scoped limits, held and failed jobs, and the interactive runs list, in one framed terminal view](docs/images/dispatch-dashboard.svg?v=2.0.0)
+![The /dispatch dashboard: live queue state, day, week and month job meters with a daily token counter, the dollar windows, the triggers pane with a portfolio trigger, pause windows, scoped limits with a project row and a model row showing their dollar caps, held and failed jobs, and the interactive runs list with each run's project, in one framed terminal view](docs/images/dispatch-dashboard.svg?v=2026-10-05)
 
 What you get:
 
 - **A container around every job.** Each job runs non root, with every Linux capability dropped, in a
   container that is deleted afterwards. Its instructions are mounted read only. That container is pi's
   missing permission system. It runs on Docker or Podman ([`docs/backends.md`](docs/backends.md)).
-- **Spend limits that apply before anything is spent.** A turn limit per job, daily, weekly and monthly
-  caps for the whole deployment, and optional caps per repo or folder. A job over a cap is refused before
-  its container starts. The insights page then shows spend per flow, trigger, model, day and repo
-  ([`docs/costs.md`](docs/costs.md)).
+- **Spend limits that apply before anything is spent.** A turn limit per job, job and token caps for the
+  whole deployment, and dollar caps per day, week and month. Each job can also have a dollar cap of its own: the
+  job is stopped before any model call that could take it past that cap. Caps can apply per repo, folder,
+  model or project too. A job over a cap is refused before its container starts. The insights page then
+  shows spend per flow, trigger, model, repo, project and day ([`docs/costs.md`](docs/costs.md)).
+- **Projects and a budget split.** Group repos and folders into projects and cap each project as one. Set a
+  dollar total per day, week or month with a floor per project, and a portfolio manager flow can move money
+  between projects inside it with no keypress. Every move is logged and can be reverted
+  ([`docs/projects.md`](docs/projects.md), [`docs/allocation.md`](docs/allocation.md)).
+- **Model allow lists.** A trigger's `run.models`, or `PI_ALLOWED_MODELS` for the whole deployment, names the
+  models a job may use. The job is stopped before it calls any other model
+  ([`docs/triggers.md`](docs/triggers.md)).
 - **An image you control.** The job image ships git, `gh`, Playwright and Chromium, so a job can build a
   frontend and look at it. Add your own toolchain in [`image/Dockerfile`](image/Dockerfile), or give one
   trigger its own image ([`docs/job-image.md`](docs/job-image.md)).
@@ -60,7 +68,7 @@ chained to what ([`docs/graph.md`](docs/graph.md)), and **insights** shows
 what each of them costs and whether a subscription pays off ([`docs/insights.md`](docs/insights.md)).
 `/dispatch insights` writes both into one file that your browser opens from disk:
 
-![The insights page: KPI tiles, budget dials, a plan verdict, daily and cumulative spend charts, per flow trends, four breakdowns, and the trigger and flow topology with spend shown on each trigger](docs/images/insights-view.png?v=2.0.0)
+![The insights page: KPI tiles, budget dials, the budget split with each project's share, spend and floor and the split's history, a plan verdict, daily and cumulative spend charts, per flow trends, five breakdowns (flow, trigger, model, repo and project), and the trigger and flow topology with spend shown on each trigger](docs/images/insights-view.png?v=2026-10-05)
 
 ## Quickstart
 
@@ -253,7 +261,8 @@ job is refused before any spend; over the concurrency ceiling it waits. Local jo
 one job per folder at a time, because two agents editing one working tree race each other with no gate
 and no undo. The guard lives in the worker process, and one worker per container daemon is the supported
 setup. Version 2 of the file adds dollar caps per day, week and month for a repo, a folder or a model.
-Manage limits with `m` in the panel ([`docs/scoped-limits.md`](docs/scoped-limits.md)). Group repos and folders into
+A bare `acme/web` covers that repo on every forge. Write it with its forge, `github:acme/web`, to limit it on
+that forge only. Manage limits with `m` in the panel ([`docs/scoped-limits.md`](docs/scoped-limits.md)). Group repos and folders into
 projects, recorded per run, shown by project in the cost views and the panel (`j`), and capped as one, with
 [`docs/projects.md`](docs/projects.md). Set a dollar total for a day, a week or a month, with a floor per
 project, and an agent may move money between projects inside it with no keypress, never above the total or below
@@ -270,7 +279,11 @@ script says go. The script gets only the job's target id, never a title or a bod
 Set a dollar total per week and a floor per project, and let a weekly flow move the rest between projects by
 weight. The worker does the arithmetic, bounds each move and keeps an audit log you can revert from
 ([`docs/allocation.md`](docs/allocation.md)). The portfolio manager example plans the week and reports what
-it asked for ([`docs/portfolio-manager.md`](docs/portfolio-manager.md)).
+it asked for ([`docs/portfolio-manager.md`](docs/portfolio-manager.md)). Its cron trigger carries a
+`[portfolio]` badge in the panel. `b` in the panel shows the split, the plan in force with the reasons it gave,
+and the history, where `r` reverts to an earlier row:
+
+![The panel's budget split view: the weekly envelope and its delegation rules, each project's floor, weight, share and spend with the Valkey key it counts under, the headroom, the applied plan clamped by the step with its reasons, and the history across two hosts with a revert and a refused plan](docs/images/dispatch-allocation.svg?v=2026-10-05)
 
 ### More than one machine
 
@@ -323,7 +336,7 @@ chain. Where a workflow keeps its state differs between cron and forge jobs:
 ```mermaid
 flowchart LR
   CLI["pi-dispatch run ./folder --task ..."] -->|enqueue| Q[("Valkey + BullMQ<br/>the wait-list, AOF")]
-  Q --> B{"under the deployment and scope caps<br/>and turn budget?"}
+  Q --> B{"under the deployment and scope caps,<br/>the project's share of the envelope<br/>and the turn budget?"}
   B -->|no| STOP["refused before any spend"]
   B -->|yes| C["one ephemeral container, removed after the job<br/>all capabilities dropped, non-root, no-new-privileges<br/>/job read-only, /workspace = your folder"]
   C --> PI["pi + Playwright + git + gh<br/>guardrails + your .pi/"]
@@ -447,19 +460,23 @@ In the panel:
 | `p` `r` | pause and resume the queue |
 | `s` | set a limit |
 | `w` `m` | manage quiet hours, manage scoped limits |
+| `j` | show the projects, their members and spend; `Enter` on one filters the runs list |
+| `b` | show the budget split (the list's `b`; in an opened run, `b` reopens its workspace) |
 | `h` `f` | show held jobs, show failed jobs |
 | `l` `o` | open the running job's live log, change the runs sort |
 | `x` on a running job | cancel it (asks first) |
 | `i` | open the insights page |
 
-`Enter` on a run opens its full record, and `b` there reopens its workspace:
+`Enter` on a run opens its full record. In that view, `b` reopens the run's workspace, which is not the
+list's `b`:
 
-![The run detail view: outcome, target, host and backend, timing, turns and attempt, tokens and cost, replica and chain lines, and the retained sandbox with its egress setting](docs/images/dispatch-run-detail.svg?v=2.0.0)
+![The run detail view of a portfolio manager run: outcome, target and flow, timing, host and backend, its project, the plan it wrote (applied, clamped by the step) with the plan id, the dollars it settled, turns, tokens and cost, the chain line, and the retained sandbox with its egress setting](docs/images/dispatch-run-detail.svg?v=2026-10-05)
 
 The same data is there as plain commands, all local, with no model involved: `/dispatch status | runs |
-logs | budget | triggers | insights | run | pause | resume | set | unset | settings | setup | secrets`.
+logs | budget | triggers | insights | run | pause | resume | set | unset | settings | priorities | setup |
+secrets`.
 
-![Transcript of /dispatch status, runs and triggers: queue counts and budget, the run history table with tokens, cost, chain and replica per job, and the triggers list](docs/images/dispatch-commands.svg?v=2.0.0)
+![Transcript of /dispatch status, budget, runs, triggers and priorities: queue counts and budget, the scoped limits with their dollar rows, the run history table with tokens, cost, chain and replica per job, the triggers list with a portfolio trigger, and the budget split with its history](docs/images/dispatch-commands.svg?v=2026-10-05)
 
 The insights page also draws the trigger and flow topology ([`docs/graph.md`](docs/graph.md)):
 

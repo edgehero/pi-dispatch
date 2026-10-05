@@ -31,11 +31,21 @@ tab you keep open picks the new fold up through its Reload/auto-reload controls.
 - **Budget**: the operator's one real lever on cost, beside the spend it limits — reserved vs cap
   for the day/week/month job-slot windows and the daily token counter, states as words
   (`soft-hold`, `over`), an overlay-unset cap shown as unknown or off with no bar and no invented
-  denominator, and the lever named (`/dispatch set …`, the panel's `s` key).
+  denominator, and the lever named (`/dispatch set …`, the panel's `s` key). Under them, one line per
+  `scoped-limits.json` row: its job counts against their caps, and its dollar windows as spent and held
+  against the cap ([scoped limits](scoped-limits.md)).
+- **Budget split**: with an allocation envelope ([allocation](allocation.md)), the envelope, one bar per
+  project (its share, its spend in the envelope's window and an amber tick at its floor), the headroom, the plan
+  in force (who wrote it, when, until when, and whether the step clamped it), and the newest 20 outcomes of the
+  split's history. Under it, two counts over the spend window from this host's run records: jobs refused for a
+  reason of the split (`allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`,
+  `portfolio-snapshot-oversize`), and what each portfolio run's plan came to. No host name and no plan reason
+  reaches the page. With no envelope the section says so; when Valkey cannot be read it says that and shows no
+  number.
 - **Trend lines**: a cumulative window-spend line under the daily columns (dashed from the first
   estimated day onward — once an estimate enters a running total it never leaves), and per-flow
   daily spend as small panels on one shared scale, dashed wherever an estimated day touches.
-- **Breakdowns**: spend by flow, by trigger, by model, by repo and by project, drawn as bars. Clicking a trigger
+- **Breakdowns**: five, spend by flow, by trigger, by model, by repo and by project, drawn as bars. Clicking a trigger
   row highlights its node in the topology below. The by-project bars carry the id each run recorded, and runs
   outside every project, or from before projects existed, are `(no project)` ([projects](projects.md)).
 - **Topology**: the trigger/flow graph, pan/zoom/hover and all ([`graph.md`](graph.md) explains

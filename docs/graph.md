@@ -45,7 +45,9 @@ A trigger row also states its schedule and its money, when the model knows them:
 shows `next 4h` (counted from the moment the model was assembled) or `overdue 2h` (from the resident
 scheduler, the money backstop's own signal), and any trigger that spent in the window shows its
 typed spend through the costs formatter, so a plan-covered trigger reads `plan:<id>` here too, never
-`$0.00`. See [`costs.md`](costs.md) for what the spend classes mean.
+`$0.00`. See [`costs.md`](costs.md) for what the spend classes mean. A cron trigger with `run.portfolio`
+keeps a plain cron chip; its tip adds `portfolio: its jobs write the budget split`
+([`allocation.md`](allocation.md#portfolio-jobs)).
 
 A mention is not a promise: chains are agent-requested at runtime, so a potential edge says "the
 skill talks about it", never "this happens". An observed edge says "this happened N times", never

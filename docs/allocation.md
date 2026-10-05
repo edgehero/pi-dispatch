@@ -246,7 +246,9 @@ naming the conflict. An envelope that already does not load does not block them.
 Press `b` in the panel list (`p` and `r` are pause and resume there). The view shows the envelope, each project's
 floor, weight, share and spend this window with the Valkey key it counts under, the applied plan with the reason it
 gave per project, and the newest 20 outcomes from `alloc:log`. Reasons are shown escaped: an invisible or
-direction-changing character prints as `\u{...}`.
+direction-changing character prints as `\u{...}`. A history row reads the instant (`MM-DD HH:MM`, UTC), the
+host when the rows name more than one, the writer, the first 8 digits of the plan id, then the outcome and its
+reason. The headroom line names the unallocated amount and the deployment's spend `of` the envelope total.
 
 `r` on a history row asks, in the panel, whether to revert to it. `y` applies that row's weights as
 `operator-revert`: an operator act, so it skips the interval and the step, but it is still refused while delegation
@@ -263,6 +265,18 @@ made for, the view, `/dispatch priorities` and the insights page show "a host re
 not the one the split was made for (<digest>); a host still on it refuses governed jobs as envelope-mismatch". It is
 history, not a live check: a host logs each digest once per process, so the log cannot say whether that host still
 runs the edited file, and it cannot see a hand edit put back. Check the host's log or restart it to be sure.
+
+### The other surfaces
+
+- **The insights page** has a budget split section: the envelope, one bar per entry (its share, its spend and
+  its floor), the headroom, the plan in force, the newest 20 outcomes from `alloc:log`, and, over the spend
+  window, the split's refusals and the plans collected, counted from this host's run records. It names no host
+  and holds no reason text, because the page is a file you may share ([insights](insights.md)).
+- **A run's detail** shows a `plan` line for a run that left one (the outcome, its reason, `clamped`, the plan
+  id) and a `dollars` line (what the run settled, and on what basis).
+- **A portfolio trigger** carries `[portfolio]` in the panel's trigger list and in `/dispatch triggers`. Its
+  drill-in and its tip on the insights page's topology say that its jobs write the budget split.
+- **`/dispatch priorities`** shows the same split as text, with the history, but not the reasons a plan gave.
 
 ## The guard on pi's file tools
 
