@@ -164,6 +164,16 @@ test("pi's own ModelRuntime composes samplingParamsByThinkingLevel from models[]
 	assert.equal(guard.admit({ method: "streamSimple", model: { ...overridden, samplingParamsByThinkingLevel: undefined }, args: [{}, {}] }), null, "the same model without the level passes");
 });
 
+test("loadPiAuthStorage fails CLOSED: a pi whose AuthStorage has no inMemory is a config error, never the file store (issue #587)", async () => {
+	const resolve = () => "file:///pi/dist/index.js";
+	for (const module of [{}, { AuthStorage: null }, { AuthStorage: {} }, { AuthStorage: { inMemory: "no" } }]) {
+		await assert.rejects(loadPiAuthStorage({ resolve, load: async () => module }), (error) => error.piDispatchExit === 2 && /AuthStorage\.inMemory/.test(error.message), JSON.stringify(module));
+	}
+	await assert.rejects(loadPiAuthStorage({ resolve, load: async () => Promise.reject(new Error("gone")) }), (error) => error.piDispatchExit === 2);
+	const AuthStorage = { inMemory: () => ({}) };
+	assert.equal(await loadPiAuthStorage({ resolve, load: async (url) => (assert.equal(url, "file:///pi/dist/core/auth-storage.js"), { AuthStorage }) }), AuthStorage);
+});
+
 test("the job's credentials are read ONCE at start: an auth.json the job writes later changes nothing pi resolves (issue #587)", { skip }, async () => {
 	// pi's file store re-reads auth.json whenever its revision changes, and a credential's `env` is merged into every
 	// request's options.env after the guards ran (ModelRuntime.prepareRequest): a job that wrote

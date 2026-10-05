@@ -676,7 +676,7 @@ export function buildResourceLoader({
  * REQ-GLOBAL-PI-OVERLAY's "repo wins on conflict", for prompt templates. The shape is
  * enforceProtectedSkillPrecedence's; the substitute source differs by necessity: pi exports
  * loadSkillsFromDir but no per-dir prompt loader (the exports map is closed, so the dist module is
- * unreachable), which is why the protected set arrives PRE-LOADED as a Map -- read by pi's own
+ * not reachable by a bare specifier), which is why the protected set arrives PRE-LOADED as a Map -- read by pi's own
  * loader machinery in loadProtectedPrompts, never by a second hand-rolled parser of a format we do
  * not own.
  *

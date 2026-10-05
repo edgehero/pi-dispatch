@@ -27,6 +27,7 @@
  * (createJobModelRuntime below).
  */
 import { readFileSync } from "node:fs";
+import { configError } from "./outcome.mjs";
 export const DISCARDING_MODELS_STORE = Object.freeze({
 	async read() {
 		return undefined;
@@ -56,11 +57,19 @@ export function readAuthSnapshot(path, { readFile = readFileSync } = {}) {
 
 /**
  * pi's own AuthStorage class, from pi-coding-agent's dist by file URL (it is not exported from the package root at
- * the pin; pinned-api.test.mjs holds the path and `inMemory`). `resolve` and `load` are injected for tests.
+ * the pin; pinned-api.test.mjs holds the path and `inMemory`). `resolve` and `load` are injected for tests. Fails
+ * CLOSED (issue #587's review): a pi whose module or `AuthStorage.inMemory` cannot be had is a config error, because
+ * falling back to pi's file store would let the job's own auth.json writes reach its requests again.
  */
 export async function loadPiAuthStorage({ resolve = (spec) => import.meta.resolve(spec), load = (url) => import(url) } = {}) {
-	const module = await load(new URL("./core/auth-storage.js", resolve("@earendil-works/pi-coding-agent")).href);
-	return module?.AuthStorage ?? null;
+	let module;
+	try {
+		module = await load(new URL("./core/auth-storage.js", resolve("@earendil-works/pi-coding-agent")).href);
+	} catch {
+		module = null;
+	}
+	if (typeof module?.AuthStorage?.inMemory !== "function") throw configError("pi's AuthStorage.inMemory is not where the pinned pi has it (core/auth-storage.js): the job's credentials cannot be held in memory");
+	return module.AuthStorage;
 }
 
 /**
