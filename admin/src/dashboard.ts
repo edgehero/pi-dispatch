@@ -1623,7 +1623,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   // Triggers are selectable and come FIRST in buildRows, so a trigger's file index == its selection index.
   const trg = triggerLines(snapshot, selected, inner, styler);
   const pw = pauseLines(snapshot.pauseWindows, inner, styler, snapshot.fetchedAt);
-  const sl = limitLines(snapshot.scopedLimits, snapshot.scopedBudget, inner, styler, snapshot.projects);
+  const sl = limitLines(snapshot.scopedLimits, snapshot.scopedBudget, inner, styler, snapshot.projects, snapshot.dollars);
   // Active + run rows follow the triggers in buildRows, so offset the selection index by the trigger count.
   const runRows = buildRows(snapshot, runSort, runProject).slice(trg.count);
   // Under a project filter (issue #499 part C) the count is of the runs shown, and the divider names the filter.
@@ -1713,10 +1713,23 @@ function dollarRow(r: any, inner: number, styler: any): string {
     styler.fg(full ? "warning" : "text", `${usd(r.counterMicros)}/${usd(r.capMicros)}${full ? " full" : ""}`),
   ];
   if (r.records) {
+    // Fitted to 80 columns with exact micro-dollar amounts (issue #507): the amounts are the one part a reader cannot
+    // round, so the words around them got shorter. `boundExceeded` is drawn only when it is above zero, amber and
+    // BEFORE the settled part, because a non-zero count is the evidence that reopens the bound and a zero is the
+    // normal case; the plain-text path (`renderDollarWindows`) still prints the 0. The runs are counted by basis alone
+    // ("13 metered, 1 floor") when those counts add up to the runs, so the total is implied; a run with a basis this
+    // panel does not know keeps the long form, "5 runs (4 metered)", which says that one run is not in a count.
+    if (r.records.boundExceeded > 0) bits.push(styler.fg("warning", `boundExceeded ${r.records.boundExceeded}`));
     const b = r.records.basis ?? {};
-    const counts = ["metered", "floor", "refunded", "unreserved"].filter((k) => Number(b[k]) > 0).map((k) => `${b[k]} ${k}`);
-    bits.push(styler.fg("dim", `settled ${usd(r.records.settledMicros)} · ${r.records.runs} run${r.records.runs === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts.join(", ")})` : ""}`));
-    bits.push(styler.fg(r.records.boundExceeded > 0 ? "warning" : "dim", `boundExceeded ${r.records.boundExceeded}`));
+    const runs = r.records.runs;
+    const present = ["metered", "floor", "refunded", "unreserved"].filter((k) => Number(b[k]) > 0);
+    const counts = present.map((k) => `${b[k]} ${k}`);
+    const counted = present.reduce((n, k) => n + Number(b[k]), 0);
+    const how =
+      counts.length > 0 && counted === runs
+        ? counts.join(", ")
+        : `${runs} run${runs === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts.join(", ")})` : ""}`;
+    bits.push(styler.fg("dim", `settled ${usd(r.records.settledMicros)} · ${how}`));
   } else {
     bits.push(styler.fg("dim", "records n/a"));
   }
@@ -2234,17 +2247,21 @@ function pauseRow(w: any, now: number, inner: number, styler: any): string {
 }
 
 /** The scoped limits (issue #242) as colored rows: used/cap per capped window, config-only concurrency. */
-function limitLines(scopedLimits: any, scopedBudget: any, inner: number, styler: any, projects: any = null): { count: number; lines: string[] } {
+function limitLines(scopedLimits: any, scopedBudget: any, inner: number, styler: any, projects: any = null, dollars: any = null): { count: number; lines: string[] } {
   const lines: string[] = [];
   if (scopedLimits && scopedLimits.missing) { lines.push(styler.cell("(no scoped limits · m to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
   if (scopedLimits && scopedLimits.invalid) { lines.push(styler.cell(`(scoped-limits file invalid: ${scopedLimits.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
   const list = (scopedLimits && scopedLimits.limits) ?? [];
   if (list.length === 0) { lines.push(styler.cell("(no scoped limits · m to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
-  list.forEach((l: any, i: number) => lines.push(limitRow(l, scopedBudget?.rows?.[i] ?? null, inner, styler, projects)));
+  // A row's dollar windows are the DOLLAR WINDOWS section's rows for the same file index (issue #507): the same
+  // counter and the same `full` verdict, read once, so the two sections cannot disagree. A deployment row's index is
+  // null, so it never matches a file row.
+  const dollarRows: any[] = Array.isArray(dollars?.rows) ? dollars.rows : [];
+  list.forEach((l: any, i: number) => lines.push(limitRow(l, scopedBudget?.rows?.[i] ?? null, inner, styler, projects, dollarRows.filter((r: any) => r?.index === i))));
   return { count: list.length, lines };
 }
 
-function limitRow(l: any, used: any, inner: number, styler: any, projects: any = null): string {
+function limitRow(l: any, used: any, inner: number, styler: any, projects: any = null, dollarRows: any[] = []): string {
   // The dot goes amber when any capped window's used count has reached its cap (the next job refuses
   // scope-cap, or project-cap on a `project:<id>` row). Concurrency never drives the dot: per-scope in-flight is worker-process state this
   // panel cannot see, and the panel never invents a number -- `≤K at once` is config, stated as such.
@@ -2257,9 +2274,20 @@ function limitRow(l: any, used: any, inner: number, styler: any, projects: any =
     if (over) atCap = true;
     windows.push(styler.fg(over ? "warning" : "text", `${key} ${u ?? "-"}/${l[key]}`));
   }
+  // The row's dollar windows (issue #507): a dollar-only row (a `model:` row, or a `project:` row with `weekUsd`) used to
+  // show no cap at all here. Each is `window $spent+held/$cap`, after the concurrency, the order of the plain-text path
+  // (`renderScopedLimits`). Amber and `full`, and the dot with it, on the DOLLAR WINDOWS row's own verdict: the next job
+  // at the deployment's per-job cap would be refused `dollar-cap`, which is what the dot means for a count window.
+  const usdWindows: string[] = [];
+  for (const d of dollarRows) {
+    const full = d?.full === true;
+    if (full) atCap = true;
+    usdWindows.push(styler.fg(full ? "warning" : "text", `${d?.window ?? "-"} ${usd(d?.counterMicros)}/${usd(d?.capMicros)}${full ? " full" : ""}`));
+  }
   const dot = atCap ? styler.fg("warning", "●") : styler.fg("dim", "○");
   const bits = [`${dot} ${styler.fg("accent", l.scope ?? "-")}`, ...windows];
   if (Number.isInteger(l.concurrent)) bits.push(styler.fg("muted", `≤${l.concurrent} at once`));
+  bits.push(...usdWindows);
   // A project row (issue #499 part C) says how many members it caps, or that its project is missing, which the worker
   // refuses (doctor names it). Read from the projects file the worker reads; nothing when that is unreadable.
   const note = projectRowNote(l, projects);
@@ -3205,7 +3233,11 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
 
   // turns · exit · budget slot · attempt (each present only when the field is).
   const turnBits = [`${show(r.turns)} turns`, `exit ${show(r.exitCode)}`];
-  if (r.budgetReserved !== null && r.budgetReserved !== undefined) turnBits.push(`${show(r.budgetReserved)} budget slot`);
+  // `budgetReserved` is a boolean or null in every record the worker has written (INT-RUN-HISTORY-FILE-CONTRACT): did
+  // this run keep a global job-count slot. Said in words (issue #507): printing the value gave "true budget slot". Any
+  // other value is not a record this contract describes, so nothing is said for it rather than a guess.
+  if (r.budgetReserved === true) turnBits.push("budget slot held");
+  else if (r.budgetReserved === false) turnBits.push("no budget slot");
   if (r.attempt !== null && r.attempt !== undefined) turnBits.push(`attempt ${show(r.attempt)}`);
   out.push(kv("turns", turnBits.join(" · ")));
 

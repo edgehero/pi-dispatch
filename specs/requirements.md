@@ -672,7 +672,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   revert's note adds that a due plan may move the split again. `/dispatch priorities` composes its plan line and
   history rows the same way. A run's drill-in shows the
   record's `plan` (outcome, enum reason, clamped, plan id) and the dollars it settled with their basis, each only
-  when the record carries it, and a trigger with `run.portfolio: true` carries a `[portfolio]` badge on its row,
+  when the record carries it, and says in words whether the run kept a global job-count slot (`budget slot held`
+  or `no budget slot`, from the record's `budgetReserved`; nothing for an older record), and a trigger with `run.portfolio: true` carries a `[portfolio]` badge on its row,
   in `/dispatch triggers` and as a drill-in line, and a line in its insights tooltip.
   `/dispatch priorities` shows the same without reasons and `/dispatch priorities set <id>=<weight> ...` applies a
   plan as `operator-session`; both are zero-spend. A `tool_call` handler blocks pi's built-in `write` and `edit` (and
@@ -687,8 +688,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`model`/`maxTurns`/`dailyCap`/`concurrency`).
   Since issue #501's part 7 the dollar caps have operator surfaces. The panel shows each ACTIVE dollar window
   (the deployment's, then each scoped-limits dollar row) with its counter (spent and held) and, from the run
-  records, what settled, how each run settled (`metered`, `floor`, `refunded`, `unreserved`) and the
-  `boundExceeded` count; numbers and the operator's own scope and model names only. `dispatch_costs` returns the
+  records, what settled, how each run settled (`metered`, `floor`, `refunded`, `unreserved`) and a
+  `boundExceeded` count above zero; numbers and the operator's own scope and model names only. A row with exact
+  micro-dollar amounts fits an 80-column panel. The panel's scoped limits rows show each row's dollar windows too
+  (counter over cap), so a dollar-only row is never drawn without its cap. `dispatch_costs` returns the
   same windows and each run's `dollars`; `dispatch_limits` gives each row its dollar windows with their counters.
   The scoped-limit writers take `dayUsd`, `weekUsd` and `monthUsd`, and `dispatch_set` the four dollar keys, each
   judged by the worker's own parser before the confirm. Neither trigger write tool can set a trigger's
@@ -1531,7 +1534,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   cost, so the page that prices everything shows the dial beside the spend: reserved-vs-cap facts
   for the day/week/month job-slot windows and the daily token counter, states computed by the
   worker's own classifier and carried in the payload as words, the lever named — `/dispatch set …`,
-  the panel's `s`), plan verdict cards, a daily spend column chart with a **cumulative mini-chart**
+  the panel's `s`; each scoped-limits row with its job-count windows, its configured concurrency and,
+  since issue #507, its dollar windows as spent and held over the cap in exact micro-dollars, with no
+  state word), plan verdict cards, a daily spend column chart with a **cumulative mini-chart**
   beneath it, **per-flow daily spend as small multiples** (top flows, one panel each), the five
   breakdown bar lists (flow / trigger / model / repo / project), and a **budget split** section
   (issue #507) under the budget panel when an envelope is set: the envelope's total and window, one
@@ -3200,6 +3205,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-05 | Issue #507, found by rendering the README images. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a run's drill-in says whether the run kept a global job-count slot in words (`budget slot held`, `no budget slot`) instead of printing `true budget slot`; the panel's dollar window rows show a `boundExceeded` count only above zero and fit 80 columns with exact micro-dollar amounts; the scoped limits rows show their dollar windows. **`REQ-INSIGHTS-HTML-EXPORT` AMENDED**, the budget panel: a scoped row shows its dollar windows (spent and held over the cap, exact micro-dollars, no state word), so a `model:` or dollar-only `project:` row is no longer drawn with no number. `REQ-COST-ANALYTICS` UNCHANGED, checked: no fold, basis or count changed, only how the panel words them. |
 | 2026-10-05 | Issue #507 (the allocation surfaces). **`REQ-INSIGHTS-HTML-EXPORT` AMENDED**: the Statement names the budget split section (the envelope, each entry's allocation, spend and floor, the headroom, the plan line, the last 20 `alloc:log` outcomes, and the split's refusals and plans counted over the spend window) and corrects "the four breakdown bar lists" to five, with by-project, which shipped in #499 part C without this sentence; the Scope says the section carries amounts, plan ids and enum words only, no host and no reason text, and that an unread scan is "not counted", never 0; the Acceptance adds the four shapes. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the `b` view's frame (up to 80 of the overlay's columns, the overlay being 75% of the terminal), its history row (the plan id before the outcome and reason, so a clip takes the reason's tail), the wrapped plan line, the headroom text, the revert note, `/dispatch priorities` composed the same way, the run drill-in's plan and dollars lines, and the `[portfolio]` badge. The outside-edit notice has a simpler rule on every surface (the panel, `/dispatch priorities`, the insights page): it shows while the newest `envelope-changed-externally` row reports another digest than the applied split's, in historical words, since the log cannot see a hand restore. The insights split also says when this host's envelope differs from the applied split's, and that its counts are this host's run records. **`REQ-TOPOLOGY-GRAPH` AMENDED**: the portfolio flag joins spend and schedule as a node fact. `REQ-DELEGATED-ALLOCATION` UNCHANGED, checked: no rule of the split moved. |
 | 2026-10-05 | Issue #507, the review of the refusal fold. **`REQ-COST-ANALYTICS` AMENDED**, (d): a run refused before any spend takes no part in a bucket's class or coverage, and the sentence says most pre-spend refusals match rather than every one: a refusal that keeps its global slot (`over-budget`, the soft hold, or any refusal whose give-back failed) stays a floor. `REQ-DELEGATED-ALLOCATION` UNCHANGED, checked: its acceptance already says a job that completes without a plan. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`REQ-DELEGATED-ALLOCATION` AMENDED**, Acceptance: a confirmed portfolio job that completes without a plan is a recorded refused attempt, `plan-absent`, in its run record, the audit file and `alloc:log`, with the split unchanged; any other job that writes no plan records nothing beyond `plan: null`; and a later plan that meets the ladder after an operator revert applies (a revert does not pause delegation). **`REQ-COST-ANALYTICS` AMENDED**, (d): a run refused before any spend (no `tokens`, no `exitCode`, `budgetReserved: false`) is not a pre-meter record; it contributes an exact metered $0, is no floor and is not unmetered, and a record lacking any of the three keeps the floor; the Acceptance gains both cases. `REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked: its "fully ledgered" count now holds such runs, which had nothing to ledger. |

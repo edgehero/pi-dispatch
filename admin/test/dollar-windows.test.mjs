@@ -242,8 +242,63 @@ test("the panel shows each window's counter over its cap, then what the records 
     { ledger: "scope", name: "/srv/site", window: "week", capMicros: 7_000_000, counterMicros: 7_000_000, records: null, unattributed: UNATTRIBUTED.folder },
   ] } });
   assert.ok(lines.some((l) => /dollar windows/i.test(l)));
-  assert.ok(lines.some((l) => /day\s+deployment\s+\$2\.40\/\$10\.00\s+settled \$0\.40 · 2 runs \(1 metered, 1 floor\)\s+boundExceeded 3/.test(l)), lines.join("\n"));
+  // A non-zero boundExceeded is drawn amber BEFORE the settled part (issue #507), so the settled part is what clips.
+  assert.ok(lines.some((l) => /day\s+deployment\s+\$2\.40\/\$10\.00\s+boundExceeded 3\s+settled \$0\.40 · 1 metered, 1 floor/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /week\s+\/srv\/site\s+\$7\.00\/\$7\.00\s+records n\/a/.test(l)));
+});
+
+// The rows the README's canned deployment exposed clipping at 80 columns (issue #507): exact micro-dollar amounts, so
+// the words around them are what got shorter. Pinned as whole framed lines at width 80, where `inner` is 76.
+const framed = (content) => `│ ${content.padEnd(76)} │`;
+const metered = (runs, settledMicros, more = {}) => ({ runs, settledMicros, basis: { metered: runs, floor: 0, refunded: 0, unreserved: 0, ...more }, boundExceeded: 0, malformed: 0 });
+
+test("a dollar window row with exact micro-dollar amounts fits the panel at 80 columns (#507)", async () => {
+  const lines = await renderSnapshot({ ...BASE, dollars: { rows: [
+    { ledger: "deployment", name: null, index: null, window: "day", capMicros: 25_000_000, counterMicros: 4_380_627, full: false, records: metered(4, 2_380_627) },
+    { ledger: "deployment", name: null, index: null, window: "week", capMicros: 120_000_000, counterMicros: 8_938_198, full: false, records: metered(14, 6_938_198) },
+    { ledger: "scope", name: "project:shop", index: 1, window: "week", capMicros: 45_000_000, counterMicros: 6_340_917, full: false, records: metered(5, 4_340_917) },
+    { ledger: "deployment", name: null, index: null, window: "month", capMicros: 300_000_000, counterMicros: 8_938_198, full: false, records: { ...metered(13, 6_938_198), basis: { metered: 13, floor: 1, refunded: 0, unreserved: 0 }, runs: 14 } },
+    { ledger: "scope", name: "acme/web", index: 0, window: "day", capMicros: 5_000_000, counterMicros: 0, full: false, records: { ...metered(0, 0), basis: { metered: 0, floor: 0, refunded: 0, unreserved: 0 } } },
+  ] } }, 80);
+  for (const want of [
+    "day   deployment  $4.380627/$25.00  settled $2.380627 · 4 metered",
+    "week  deployment  $8.938198/$120.00  settled $6.938198 · 14 metered",
+    "week  project:shop  $6.340917/$45.00  settled $4.340917 · 5 metered",
+    // A mix is counted by basis, the total implied, and still fits.
+    "month deployment  $8.938198/$300.00  settled $6.938198 · 13 metered, 1 floor",
+    "day   acme/web  $0.00/$5.00  settled $0.00 · 0 runs",
+  ]) assert.ok(lines.includes(framed(want)), `${want}\n${lines.join("\n")}`);
+  assert.ok(!lines.some((l) => l.includes("boundExceeded")), "a zero boundExceeded is the normal case and is not drawn");
+  assert.ok(!lines.some((l) => l.includes("…")), "no dollar row clips");
+});
+
+test("a dollar window row whose basis counts do not add up to its runs keeps the run total (#507)", async () => {
+  // A record with a basis this panel does not know is a run in no count; "4 metered" alone would hide it.
+  const lines = await renderSnapshot({ ...BASE, dollars: { rows: [
+    { ledger: "deployment", name: null, index: null, window: "day", capMicros: 25_000_000, counterMicros: 4_000_000, full: false, records: { ...metered(4, 2_000_000), runs: 5 } },
+  ] } }, 80);
+  assert.ok(lines.includes(framed("day   deployment  $4.00/$25.00  settled $2.00 · 5 runs (4 metered)")), lines.join("\n"));
+});
+
+test("a scoped limit row shows its dollar windows from the DOLLAR WINDOWS rows of its own index (#507)", async () => {
+  // A dollar-only row (a model row, a project row with weekUsd) used to show its scope and no cap at all.
+  const scopedLimits = { limits: [
+    { scope: "github:acme/web", day: 10, week: 40, month: null, concurrent: 1, dayUsd: null, weekUsd: null, monthUsd: null },
+    { scope: "project:shop", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: "45", monthUsd: null },
+    { scope: "model:anthropic/claude-sonnet-4-5", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: "80", monthUsd: null },
+  ] };
+  const scopedBudget = { rows: [{ day: 2, week: 4 }, {}, {}] };
+  const projects = { projects: [{ id: "shop", members: ["github:acme/web", "github:acme/api"] }] };
+  const dollars = { rows: [
+    { ledger: "deployment", name: null, index: null, window: "week", capMicros: 120_000_000, counterMicros: 8_938_198, full: false, records: metered(14, 6_938_198) },
+    { ledger: "scope", name: "project:shop", index: 1, window: "week", capMicros: 45_000_000, counterMicros: 6_340_917, full: false, records: metered(5, 4_340_917) },
+    { ledger: "model", name: "anthropic/claude-sonnet-4-5", index: 2, window: "week", capMicros: 80_000_000, counterMicros: 79_000_000, full: true, records: null },
+  ] };
+  const lines = await renderSnapshot({ ...BASE, scopedLimits, scopedBudget, projects, dollars }, 80);
+  assert.ok(lines.includes(framed("○ github:acme/web  day 2/10  week 4/40  ≤1 at once")), "a count-only row is unchanged, and takes no deployment window");
+  assert.ok(lines.includes(framed("○ project:shop  week $6.340917/$45.00  2 members")), lines.join("\n"));
+  // Full on the DOLLAR WINDOWS row's own verdict: amber, the word, and the dot.
+  assert.ok(lines.includes(framed("● model:anthropic/claude-sonnet-4-5  week $79.00/$80.00 full")), lines.join("\n"));
 });
 
 test("the panel's REAL deps read the counters every tick and the records at most once per interval", async () => {
