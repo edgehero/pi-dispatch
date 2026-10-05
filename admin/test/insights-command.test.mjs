@@ -357,6 +357,52 @@ test("with an envelope set, the split is read through readAllocations, without h
   assert.equal(dials, 0, "no queue read for an unset or a broken envelope");
 });
 
+test("during an envelope mismatch every total shown is the applied split's, and the mismatch line says this host's file differs, on the text twin, the assembler and the insights page (#507)", async () => {
+  const { fakeAllocRedis } = await import("./helpers/fake-alloc-redis.mjs");
+  const { fileTotalText, renderAllocations, splitTotalMicros } = await import("../src/render.mjs");
+  const { readEnvelope } = await import("../src/read-model.mjs");
+  const { buildInsightsHtml } = await import("../src/insights-html.mjs");
+  const dir = tempDir("admin-insights-total-");
+  const files = { envelope: join(dir, "envelope.json"), projects: join(dir, "projects.json"), settings: join(dir, "settings.json") };
+  writeFileSync(files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+  // This host's file says $30; the applied split was made for a $28 envelope (the e2e's outside edit).
+  writeFileSync(files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "30", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: true, writers: ["portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+  writeFileSync(files.settings, JSON.stringify({ maxCostUsd: "2" }));
+  const read = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 });
+  const paths = { envelopeFile: files.envelope, projectsFile: files.projects, settingsFile: files.settings, valkeyUrl: "redis://127.0.0.1:6390" };
+  const M = 1_000_000;
+  const made = "5428cdb615bcf0d2";
+  const state = { version: 1, envelopeDigest: made, planId: "13a11619b5ea3d49", writer: "portfolio-job", appliedAt: "2026-10-05T10:06:00.000Z", weights: { shop: 1, _other: 0 }, allocations: { shop: 27 * M, _other: 0 }, unallocated: 1 * M, repos: {}, clamped: false };
+  assert.equal(splitTotalMicros(state, 30 * M), 28 * M);
+  assert.equal(splitTotalMicros(null, 30 * M), 30 * M, "no split: the envelope's");
+  assert.equal(splitTotalMicros({ ...state, unallocated: -1 }, 30 * M), 30 * M, "a split that does not decode: the envelope's");
+  const redis = fakeAllocRedis();
+  redis.store.set("t507t:plan", JSON.stringify(state));
+  mod._setAllocationSeamsForTests({ redisFn: () => redis, prefix: "t507t", now: () => new Date(Date.parse("2026-10-05T14:00:00Z")) });
+  let slice;
+  try {
+    slice = await mod.assembleAllocationView(paths, null);
+  } finally {
+    mod._setAllocationSeamsForTests({});
+  }
+  assert.deepEqual([slice.totalMicros, slice.fileTotalMicros, slice.mismatch], [28 * M, 30 * M, true]);
+  const note = fileTotalText("$30.00");
+  assert.equal(note, " This host's file says total $30.00; the totals shown are the split's.");
+  const text = renderAllocations({ envelope: read.envelope, digest: read.digest, alloc: { state, log: [], spend: { deployment: { micros: 8 * M } } } }).split("\n");
+  assert.match(text[0], /^ALLOCATION · week · total \$28\.00 · /);
+  assert.ok(text.includes(`made for envelope ${made}, not this host's: governed jobs here refuse as envelope-mismatch.${note}`), text.join("\n"));
+  assert.ok(text.includes("  unallocated $1.00 · deployment spent $8.00 of $28.00"), text.join("\n"));
+  const page = buildInsightsHtml({ allocation: slice, window: "30d" }, { now: 0 });
+  assert.ok(page.includes("<span>$28.00 per week · delegation on</span>"), "the envelope row");
+  assert.ok(page.includes(`governed jobs on this host refuse as envelope-mismatch.${note}</span>`), "the page's mismatch line, in render.mjs' words");
+  assert.ok(page.includes("of $28.00</span>"), "the headroom");
+  assert.ok(!page.includes("of $30.00"));
+  // The same split on a host whose file agrees: no note, and the totals are the same number.
+  const agreeing = renderAllocations({ envelope: { ...read.envelope, totalMicros: 28 * M }, digest: read.digest, alloc: { state, log: [], spend: {} } });
+  assert.ok(!agreeing.includes("This host's file says"), agreeing);
+  assert.ok(agreeing.includes(`made for envelope ${made}, not this host's: governed jobs here refuse as envelope-mismatch\n`), "the line ends where it always did");
+});
+
 test("the outside-edit notice is one rule and one sentence on the panel's text twin, the assembler and the insights page (#507)", async () => {
   const { fakeAllocRedis } = await import("./helpers/fake-alloc-redis.mjs");
   const { outsideEdit, outsideEditText, renderAllocations } = await import("../src/render.mjs");

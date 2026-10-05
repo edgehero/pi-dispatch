@@ -31,7 +31,7 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
-import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText } from "./render.mjs";
+import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -2446,7 +2446,11 @@ function revertNote(res: any): string {
  */
 function allocationView(info: any, selected: number, iw: number, styler: any): { title: string; lines: string[] } {
   const e = info?.envelope;
-  const title = e ? `allocation · ${cellOf(e.window)} · total ${usd(e.totalMicros)}` : "allocation";
+  // The applied split's own total beside the split (issue #507, render.mjs `splitTotalMicros`): during an envelope
+  // mismatch this host's file may hold another total, and the mismatch line below says which.
+  const shownState = info && !info.loading && !info.unwired && !info.unreachable && !info.alloc?.unreachable ? info.alloc?.state ?? null : null;
+  const total = e ? splitTotalMicros(shownState, e.totalMicros) : null;
+  const title = e ? `allocation · ${cellOf(e.window)} · total ${usd(total)}` : "allocation";
   const dim = (t: string) => styler.cell(t, iw, { color: "dim" });
   const wrapped = (t: string, color: string) => wrapColumns(t, iw, styler).map((l) => styler.cell(l, iw, { color }));
   if (!info || info.loading) return { title, lines: [dim("reading the split")] };
@@ -2467,7 +2471,7 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
   if (a.stateProblem === "newer") lines.push(...wrapped("the applied split was written by a newer pi-dispatch: upgrade this console", "warning"));
   else if (a.stateProblem === "unreadable") lines.push(...wrapped("the applied split does not decode; the next pickup replaces it with the neutral split", "warning"));
   const st = a.state ?? null;
-  if (st && st.envelopeDigest !== info.digest) lines.push(...wrapped(`the split was made for envelope ${cellOf(st.envelopeDigest)}, not this host's ${cellOf(info.digest)}: governed jobs here refuse as envelope-mismatch`, "warning"));
+  if (st && st.envelopeDigest !== info.digest) lines.push(...wrapped(`the split was made for envelope ${cellOf(st.envelopeDigest)}, not this host's ${cellOf(info.digest)}: governed jobs here refuse as envelope-mismatch${total !== e.totalMicros ? `.${fileTotalText(usd(e.totalMicros))}` : ""}`, "warning"));
   const spend = a.spend ?? null;
   for (const id of Object.keys(e.floors ?? {})) {
     const weight = st?.weights?.[id] ?? e.defaultWeights?.[id];
@@ -2481,8 +2485,8 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
     lines.push(fitLine(bits.join("  "), iw, styler));
     if (spend?.projects?.[id]?.key) lines.push(fitLine(`    ${styler.fg("dim", cellOf(spend.projects[id].key))}`, iw, styler));
   }
-  // The headroom against the envelope it is headroom of (issue #507), `/dispatch priorities`' line word for word.
-  if (st) lines.push(dim(`unallocated ${usd(st.unallocated)} · deployment spent ${usd(spend?.deployment?.micros)} of ${usd(e.totalMicros)}`));
+  // The headroom against the split it is headroom of (issue #507), `/dispatch priorities`' line word for word.
+  if (st) lines.push(dim(`unallocated ${usd(st.unallocated)} · deployment spent ${usd(spend?.deployment?.micros)} of ${usd(total)}`));
   if (st) {
     const plan = st.planId ? `plan ${cellOf(st.planId)}` : "neutral, no plan";
     // The applied instant as the history shows one (`allocAt`, issue #507), so the line keeps its `until` at 80 columns.

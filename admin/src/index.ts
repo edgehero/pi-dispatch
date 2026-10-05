@@ -157,7 +157,7 @@ import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGl
 import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
-import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations, outsideEdit } from "./render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations, outsideEdit, splitTotalMicros } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -2492,6 +2492,10 @@ export async function assembleAllocationView(paths: any, counts: any, { fullPath
   const st = alloc.state ?? null;
   return {
     ...head,
+    // The split's own total beside the split (issue #507, `splitTotalMicros`); the file's rides beside it for the
+    // mismatch line, which says this host's file holds another total.
+    totalMicros: splitTotalMicros(st, e.totalMicros),
+    fileTotalMicros: e.totalMicros,
     stateProblem: alloc.stateProblem ?? null,
     state: st && { planId: st.planId ?? null, writer: st.writer ?? null, appliedAt: st.appliedAt ?? null, validUntil: st.validUntil ?? null, clamped: st.clamped === true, allocations: { ...(st.allocations ?? {}) }, unallocated: st.unallocated ?? null },
     mismatch: st !== null && st.envelopeDigest !== read.digest,

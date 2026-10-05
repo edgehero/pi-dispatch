@@ -3514,6 +3514,29 @@ test("ALLOCATION: the outside-edit notice shows while the newest changed-externa
   assert.ok(!(await open([{ ...outside, envelopeDigest: "d1d1d1d1d1d1d1d1" }, older])).includes("a host reported envelope"));
 });
 
+test("ALLOCATION: during an envelope mismatch the header and the headroom show the applied split's total, and the mismatch line says this host's file differs (#507)", async () => {
+  const open = async (info) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => info }) });
+    await flush();
+    comp.handleInput("b");
+    await flush();
+    const out = stripAnsi(comp.render(100).join("\n")).replace(/\s*│\s*│?\s*/g, " ");
+    await comp.dispose();
+    return out;
+  };
+  const base = allocInfo();
+  // The applied split was made for a $90 envelope; this host's file says $100.
+  const mismatched = { ...base, alloc: { ...base.alloc, state: { ...base.alloc.state, envelopeDigest: "e2e2e2e2e2e2e2e2", allocations: { _other: 0, platform: 30 * M504, shop: 55 * M504 }, unallocated: 5 * M504 } } };
+  const out = await open(mismatched);
+  assert.match(out, /allocation · week · total \$90\.00/, out);
+  assert.match(out, /deployment spent \$0\.00 of \$90\.00/);
+  assert.ok(out.includes("the split was made for envelope e2e2e2e2e2e2e2e2, not this host's d1d1d1d1d1d1d1d1: governed jobs here refuse as envelope-mismatch. This host's file says total $100.00; the totals shown are the split's."), out);
+  assert.doesNotMatch(out, /\$100\.00(?!; the totals)/, "the file's total appears only in that note");
+  const agreeing = await open(base);
+  assert.match(agreeing, /allocation · week · total \$100\.00/);
+  assert.doesNotMatch(agreeing, /This host's file says/);
+});
+
 test("ALLOCATION: with no seam the view says so; an unset envelope says why; `b split` rides the spend divider only with an envelope", async () => {
   const bare = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
   await flush();
