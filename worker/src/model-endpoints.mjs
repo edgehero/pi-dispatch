@@ -351,6 +351,18 @@ function modelsOf(entry) {
 	return Array.isArray(entry?.models) ? entry.models.filter((m) => m !== null && typeof m === "object" && typeof m.id === "string") : [];
 }
 
+/**
+ * A model's overlay pieces (issue #507, output-cap.mjs): its provider entry, its own definition and its `modelOverrides`
+ * entry, each null when absent. Own keys only.
+ */
+export function modelEntryOf(models, provider, modelId) {
+	const entry = providerOf(models, provider);
+	const defined = entry === null ? null : (modelsOf(entry).find((m) => m.id === modelId) ?? null);
+	const overrides = entry?.modelOverrides;
+	const override = overrides !== null && typeof overrides === "object" && !Array.isArray(overrides) && Object.hasOwn(overrides, modelId) ? overrides[modelId] : null;
+	return { entry, defined, override: override !== null && typeof override === "object" ? override : null };
+}
+
 function matching(baseUrl, endpoints) {
 	const target = baseUrlTarget(baseUrl);
 	if (target === null || !Array.isArray(endpoints)) return [];
@@ -393,7 +405,7 @@ export function endpointsForProvider({ models, provider, endpoints }) {
  *   2. the OVERRIDE: `modelOverrides.<id>.cost`, field by field over the base (`applyModelOverride`), and only on a
  *      chat model (pi skips the override on an image or classifier model). The overlay's own models are chat models.
  */
-function composedCost({ models, provider, modelId, builtinModel }) {
+export function composedCost({ models, provider, modelId, builtinModel }) {
 	const entry = providerOf(models, provider);
 	const defined = modelsOf(entry).find((m) => m.id === modelId);
 	let base;
@@ -418,7 +430,7 @@ function composedCost({ models, provider, modelId, builtinModel }) {
 const RATE_KEYS = ["input", "output", "cacheRead", "cacheWrite"];
 
 /** Every rate of a cost table and of each of its tiers is exactly 0. A rate that is absent or not a number is not 0. */
-function isZeroCost(cost) {
+export function isZeroCost(cost) {
 	if (cost === null || typeof cost !== "object") return false;
 	if (!RATE_KEYS.every((k) => cost[k] === 0)) return false;
 	if (cost.tiers === undefined || cost.tiers === null) return true;
@@ -498,48 +510,6 @@ export function unreportedUsageModels(models, { builtinModel = () => null, built
 			const cost = composedCost({ models, provider, modelId: builtin.id, builtinModel: () => builtin });
 			if (cost !== null && isZeroCost(cost)) continue;
 			found.push({ provider, modelId: builtin.id });
-		}
-	}
-	return found;
-}
-
-/**
- * The priced models a declared endpoint serves on openai-completions whose output cap does not travel as `max_tokens`
- * (issue #507), as `[{ provider, modelId }]`. pi 0.99.1 sends the cap as `max_completion_tokens` unless the model's
- * composed `compat.maxTokensField` is `"max_tokens"`, and Ollama ignores that field, so the runner's cost guard
- * (`completionsOwnServer`, image/runner/src/usage-meter.mjs) counts every such call unboundable and refuses it under a
- * dollar cap. Composed the way unreportedUsageModels composes `supportsUsageInStreaming`: a defined model's provider
- * compat, then its own, then its `modelOverrides` entry; a builtin chat model's catalog compat, then the provider's,
- * then the override. Only models `endpointsForModel` puts on a declared endpoint, and not zero-rated ones (a zero
- * bound needs no output cap). A model whose api is set to another api is skipped. In the overlay's order.
- */
-export function ignoredOutputCapModels({ models, endpoints, builtinModel = () => null, builtinChatModels = () => [] }) {
-	const providers = models?.providers;
-	if (providers === null || typeof providers !== "object" || Array.isArray(providers) || !Array.isArray(endpoints) || endpoints.length === 0) return [];
-	const found = [];
-	const field = (compat) => (compat !== null && typeof compat === "object" ? compat.maxTokensField : undefined);
-	const judge = (provider, modelId, maxTokensField, cost) => {
-		if (maxTokensField === "max_tokens") return;
-		if (endpointsForModel({ models, provider, modelId, endpoints }).length === 0) return;
-		if (cost !== null && isZeroCost(cost)) return;
-		found.push({ provider, modelId });
-	};
-	for (const provider of Object.keys(providers)) {
-		const entry = providerOf(models, provider);
-		if (entry === null) continue;
-		const overrides = entry.modelOverrides !== null && typeof entry.modelOverrides === "object" && !Array.isArray(entry.modelOverrides) ? entry.modelOverrides : {};
-		const overrideOf = (id) => (Object.hasOwn(overrides, id) ? overrides[id] : undefined);
-		const defined = modelsOf(entry);
-		for (const model of defined) {
-			const api = model.api ?? entry.api;
-			if (typeof api === "string" && api !== "openai-completions") continue;
-			judge(provider, model.id, field(overrideOf(model.id)?.compat) ?? field(model.compat) ?? field(entry.compat), composedCost({ models, provider, modelId: model.id, builtinModel }));
-		}
-		const listed = typeof builtinChatModels === "function" ? builtinChatModels(provider) : [];
-		for (const builtin of Array.isArray(listed) ? listed : []) {
-			if (builtin === null || typeof builtin !== "object" || typeof builtin.id !== "string") continue;
-			if (defined.some((m) => m.id === builtin.id) || builtin.api !== "openai-completions") continue;
-			judge(provider, builtin.id, field(overrideOf(builtin.id)?.compat) ?? field(entry.compat) ?? field(builtin.compat), composedCost({ models, provider, modelId: builtin.id, builtinModel: () => builtin }));
 		}
 	}
 	return found;
