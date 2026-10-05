@@ -3083,7 +3083,7 @@ export async function collectChecks(shellVars, seams) {
 			}
 			const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList });
 			checks.push(...unknownModelChecks(subjects, catalog.checkModelsKnown, readOverlayDoc));
-			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc }), { unboundable: (ref) => outputUnboundable(outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel })) }));
+			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc }), { unboundable: (ref) => outputUnboundable(outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })) }));
 			checks.push(
 				...listedProviderCredentialChecks(subjects, {
 					candidatesOf: (name) => (typeof oracle?.providerKeyCandidates === "function" ? oracle.providerKeyCandidates(name) : []),

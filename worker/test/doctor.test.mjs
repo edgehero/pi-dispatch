@@ -4122,6 +4122,12 @@ test("doctor: a priced model on a declared endpoint whose output cap travels as 
 	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay, PI_PROVIDER: "ollama", PI_MODEL: "qwen2.5:3b", PI_MAX_COST_USD: "2" }), { ...ghDeps(capped.out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync, declaredEndpoints: () => endpoints });
 	assert.match(capped.text(), /⚠ A job under a per-job cost cap may use a model whose output cap travels as max_completion_tokens to a server that may ignore it \(one outside pi's own hosted providers\), so the runner counts every call to it unboundable and refuses it under the cap: ollama\/qwen2\.5:3b \(the main model/);
 	assert.doesNotMatch(capped.text(), /Overlay models\.json sends the output cap/, "not twice");
+	// A model the overlay adds to a builtin provider with no api of its own (final review of #507): pi takes the api of
+	// groq's first openai-completions model, and the provider's proxy baseUrl, so the cost-cap line names it.
+	writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { groq: { baseUrl: "http://proxy.lan:8080/openai/v1", models: [{ id: "new-groq", cost: priced }] } } }));
+	const added = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay, PI_PROVIDER: "groq", PI_MODEL: "new-groq", PI_MAX_COST_USD: "2" }), { ...ghDeps(added.out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync, declaredEndpoints: () => endpoints });
+	assert.match(added.text(), /refuses it under the cap: groq\/new-groq \(the main model/);
 });
 
 test("doctor: an allowlist naming a host alias is ⚠, pointing at model-endpoints.json (#503)", async () => {

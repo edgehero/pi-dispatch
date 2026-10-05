@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { callCostBound, COMPLETIONS_CATALOG_HOSTS as RUNNER_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS as RUNNER_EXTRA_HOSTS, completionsOwnServer as runnerOwnServer } from "../../image/runner/src/usage-meter.mjs";
 import { costCapFitChecks, modelSubjects } from "../src/doctor.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { builtinChatModels as catalogChatModels, builtinModel as catalogModel } from "../src/model-catalog.mjs";
 import { COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, completionsOwnServer, outputCapView, outputUnboundable } from "../src/output-cap.mjs";
 
 /**
@@ -60,6 +64,62 @@ test("outputCapView composes api, baseUrl and the field as pi's provider compose
 	assert.equal(outputUnboundable(outputCapView({ models: defined, provider: "lan", modelId: "r" })), false, "another api");
 	assert.equal(outputUnboundable(outputCapView({ models: defined, provider: "lan", modelId: "s" })), false, "no cost is all zeros in pi");
 	assert.equal(outputCapView({ models: defined, provider: "lan", modelId: "nope" }), null);
+	// A defined model with no api of its own or its provider's (final review of #507): pi takes its DEFAULTS model's,
+	// `findModelDefaults` over the provider's chat models, here groq's first openai-completions model.
+	const chat = (p) => (p === "groq" ? [{ id: "a", api: "anthropic-messages", baseUrl: "https://api.groq.com/x" }, groq] : []);
+	const added = { providers: { groq: { baseUrl: "http://proxy.lan:8080/openai/v1", models: [{ id: "new-groq", cost: PRICED }] } } };
+	assert.deepEqual(outputCapView({ models: added, provider: "groq", modelId: "new-groq", builtinModel, builtinChatModels: chat }), { api: "openai-completions", baseUrl: "http://proxy.lan:8080/openai/v1", maxTokensField: undefined, cost: PRICED });
+	assert.equal(outputUnboundable(outputCapView({ models: added, provider: "groq", modelId: "new-groq", builtinModel, builtinChatModels: chat })), true);
+	// The defaults list grows with each definition in the file's order, and one with an api picks a model of that api.
+	const chain = { providers: { lan: { baseUrl: "http://gpu.lan:8000/v1", models: [{ id: "first", api: "openai-completions", cost: PRICED }, { id: "second", cost: PRICED }, { id: "third", api: "anthropic-messages", cost: PRICED }] } } };
+	assert.equal(outputCapView({ models: chain, provider: "lan", modelId: "second" }).api, "openai-completions", "the earlier definition is the default");
+	assert.equal(outputCapView({ models: chain, provider: "lan", modelId: "third" }).api, "anthropic-messages");
+});
+
+// pi's own composer, at the pin: the view must say what pi's ModelRuntime composes for each model of a few overlays.
+let piCore = null;
+try {
+	const entry = import.meta.resolve("@earendil-works/pi-coding-agent");
+	piCore = {
+		ModelRuntime: (await import(new URL("core/model-runtime.js", entry).href)).ModelRuntime,
+		AuthStorage: (await import(new URL("core/auth-storage.js", entry).href)).AuthStorage,
+		Store: (await import(new URL("core/models-store.js", entry).href)).InMemoryCodingAgentModelsStore,
+	};
+} catch (error) {
+	if (process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") throw new Error(`output-cap's parity with pi's composer REQUIRES pi-coding-agent here: ${error}`);
+}
+
+test("outputCapView agrees with pi's own ModelRuntime on api, baseUrl and the field, over overlays that lean on each composer rule (#507)", { skip: piCore ? false : "pi-coding-agent not importable" }, async (t) => {
+	const overlay = {
+		providers: {
+			litellm: { api: "openai-completions", baseUrl: "http://litellm.lan:4000/v1", apiKey: "x", models: [{ id: "gw", cost: PRICED }] },
+			groq: { baseUrl: "http://proxy.lan:8080/openai/v1", compat: { maxTokensField: "max_tokens" }, models: [{ id: "new-groq", cost: PRICED }, { id: "own", cost: PRICED, compat: { maxTokensField: "max_completion_tokens" } }], modelOverrides: { "llama-3.1-8b-instant": { compat: { maxTokensField: "max_completion_tokens" } } } },
+			ollama: { api: "openai-completions", baseUrl: "http://host.docker.internal:11434/v1", apiKey: "x", models: [{ id: "qa", cost: PRICED, compat: { maxTokensField: "max_tokens" } }, { id: "qb", cost: PRICED }, { id: "qc", baseUrl: "http://gpu.lan:8000/v1" }] },
+			openrouter: { baseUrl: "http://or-proxy.lan/v1" },
+		},
+	};
+	// Removed here as well as by the helper: with this file's top-level await for pi's modules, the helper's root
+	// `after()` hook alone left the directory behind (measured: one per run under a TMPDIR of its own).
+	const dir = tempDir("output-cap-pi-");
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const path = join(dir, "models.json");
+	writeFileSync(path, JSON.stringify(overlay));
+	const saved = process.env.PI_OFFLINE;
+	process.env.PI_OFFLINE = "1";
+	let rt;
+	try {
+		rt = await piCore.ModelRuntime.create({ modelsPath: path, credentials: piCore.AuthStorage.inMemory(), modelsStore: new piCore.Store(), refreshOnCreate: false });
+	} finally {
+		if (saved === undefined) delete process.env.PI_OFFLINE;
+		else process.env.PI_OFFLINE = saved;
+	}
+	const refs = [["litellm", "gw"], ["groq", "new-groq"], ["groq", "own"], ["ollama", "qa"], ["ollama", "qb"], ["ollama", "qc"], ...catalogChatModels("groq").slice(0, 3).map((m) => ["groq", m.id]), ...catalogChatModels("openrouter").slice(0, 3).map((m) => ["openrouter", m.id])];
+	for (const [provider, modelId] of refs) {
+		const m = rt.getModel(provider, modelId);
+		assert.ok(m, `${provider}/${modelId}: pi composes it`);
+		const view = outputCapView({ models: overlay, provider, modelId, builtinModel: catalogModel, builtinChatModels: catalogChatModels });
+		assert.deepEqual([view.api, view.baseUrl, view.maxTokensField], [m.api, m.baseUrl, m.compat?.maxTokensField], `${provider}/${modelId}`);
+	}
 });
 
 test("costCapFitChecks names a capped job's unboundable model once, on a line of its own, and gives it no floor (#507)", () => {
