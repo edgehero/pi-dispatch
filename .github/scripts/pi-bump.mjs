@@ -20,10 +20,11 @@
  *      the 0.99.1 to 1.0.3 bump: with the old lockfile as the base, npm kept pi-coding-agent NESTED once per workspace
  *      instead of hoisting it, because the old tree had it there. A pi package the new release adds is pinned in the
  *      overrides and resolved again, so pi-pin-check holds it too.
- *   3. Refuses a result it cannot vouch for (`bumpProblems`): a lockfile entry not resolved from the npm registry
- *      with an integrity hash, a workspace or link entry that changed beyond its pi pins, a package that gains an
- *      install script, a package.json that changed beyond its pin, a pin pi-pin-check rejects, or any file in the
- *      working tree other than the pin files and the lockfile.
+ *   3. Refuses a result it cannot vouch for: a lockfile entry not resolved from the npm registry with an integrity
+ *      hash, a key npm would not make, a workspace or link entry that changed beyond its pi pins, a package whose
+ *      registry metadata gains an install script (it cannot see a binding.gyp, which npm builds at install; the pull
+ *      request's review and CI are the real check), a package.json that changed beyond its pin, a pin pi-pin-check
+ *      rejects, or any file in the working tree other than the pin files and the lockfile.
  *
  * WHAT IT DOES NOT DO, deliberately: regenerate the derived pi tables (that runs pi's code; a person runs
  * `node .github/scripts/pi-derived.mjs --write` on the branch when worker/test/pi-derived.test.mjs goes red), or
@@ -49,8 +50,8 @@ export const ROOT_PACKAGE = "package.json";
 export const BRANCH = "chore/pi-bump";
 export const REGISTRY = "https://registry.npmjs.org/";
 export const PI_RELEASES = "https://github.com/earendil-works/pi/releases/tag/v";
-/** Exact, and no prerelease: a prerelease is not a release a job may run on. */
-export const EXACT_VERSION_RE = /^\d+\.\d+\.\d+$/;
+/** Exact, no leading zeros, and no prerelease: a prerelease is not a release a job may run on. */
+export const EXACT_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 /**
  * Every hand-written pi pin. `json` is a path into a package.json; `line` a pattern whose group 1 is the version. The
@@ -148,6 +149,9 @@ export function prunePiTree(text) {
 	return `${JSON.stringify(lock, null, 2)}\n`;
 }
 
+/** A lockfile key below the root: `node_modules/<name>` segments, each name scoped or not, never `.`-led. */
+const INSTALL_PATH_RE = /^(node_modules\/(@[^/]+\/)?[^/.][^/]*\/)*node_modules\/(@[^/]+\/)?[^/.][^/]*$/;
+
 /** An entry with every pi dependency spec blanked, so two entries can be compared on everything else. */
 function withoutPiSpecs(entry) {
 	const copy = structuredClone(entry ?? null);
@@ -162,24 +166,36 @@ function withoutPiSpecs(entry) {
  * pull request's checks will `npm ci` it, so it is held to what a pi bump can honestly change:
  *   - every installed entry comes from the npm registry, with an integrity hash;
  *   - the root, workspace and link entries are unchanged except for their pi dependency specs;
- *   - no package gains an install script it did not have. Versions of pi's own dependencies DO move (pi-ai pins its
- *     SDKs exactly: the 1.0.3 bump moved @anthropic-ai/sdk and esbuild), so a changed entry is allowed when it obeys
- *     the rest.
+ *   - no package (by its real name, so an alias cannot borrow another package's standing) gains an install script
+ *     its registry metadata did not declare before. That is the metadata's `hasInstallScript` and nothing more: it
+ *     cannot see a tarball's binding.gyp, which npm builds with node-gyp at install whatever the metadata says. The
+ *     pull request's review and its own CI are the real check on what a package runs. Versions of pi's own
+ *     dependencies DO move (pi-ai pins its SDKs exactly: the 1.0.3 bump moved @anthropic-ai/sdk and esbuild), so a
+ *     changed entry is allowed when it obeys the rest;
+ *   - every key is an install path npm makes: the root, a workspace, or a chain of `node_modules/<name>` segments,
+ *     optionally under a workspace. No `..`, no dot-led name, nothing npm would write outside node_modules.
  */
 export function lockfileProblems(beforeText, afterText) {
-	const before = JSON.parse(beforeText).packages ?? {};
-	const after = JSON.parse(afterText).packages ?? {};
+	const { packages: before = {}, ...beforeTop } = JSON.parse(beforeText);
+	const { packages: after = {}, ...afterTop } = JSON.parse(afterText);
 	const problems = [];
-	const scripted = new Set(Object.entries(before).filter(([, entry]) => entry?.hasInstallScript).map(([path]) => nameAt(path)));
+	if (JSON.stringify(afterTop) !== JSON.stringify(beforeTop)) problems.push("package-lock.json's top level changed beyond its packages");
+	const realName = (path, entry) => (typeof entry?.name === "string" ? entry.name : nameAt(path));
+	const scripted = new Set(Object.entries(before).filter(([, entry]) => entry?.hasInstallScript).map(([path, entry]) => realName(path, entry)));
+	const workspaces = Object.keys(before).filter((path) => path !== "" && nameAt(path) === null);
 	for (const [path, entry] of Object.entries(after)) {
 		const name = nameAt(path);
-		if (name === null || entry?.link) {
+		if (path !== "" && !workspaces.includes(path)) {
+			const local = workspaces.find((ws) => path.startsWith(`${ws}/node_modules/`));
+			if (!INSTALL_PATH_RE.test(local ? path.slice(local.length + 1) : path)) problems.push(`package-lock.json's key ${JSON.stringify(path)} is not an install path npm makes`);
+		}
+		if (name === null || entry?.link || before[path]?.link) {
 			if (withoutPiSpecs(entry) !== withoutPiSpecs(before[path])) problems.push(`package-lock.json's ${JSON.stringify(path)} changed beyond its pi pins`);
 			continue;
 		}
 		if (typeof entry?.resolved !== "string" || !entry.resolved.startsWith(REGISTRY)) problems.push(`package-lock.json's ${path} is not resolved from ${REGISTRY}`);
 		if (typeof entry?.integrity !== "string" || !/^sha512-/.test(entry.integrity)) problems.push(`package-lock.json's ${path} has no sha512 integrity`);
-		if (entry?.hasInstallScript && !scripted.has(name)) problems.push(`package-lock.json's ${path} gains an install script`);
+		if (entry?.hasInstallScript && !scripted.has(realName(path, entry))) problems.push(`package-lock.json's ${path} gains an install script`);
 	}
 	for (const path of Object.keys(before)) if ((nameAt(path) === null || before[path]?.link) && !(path in after)) problems.push(`package-lock.json's ${JSON.stringify(path)} is gone`);
 	return problems;
@@ -308,7 +324,9 @@ export function bump({ repo, version, npm = "npm", run = defaultRun, log = (line
 	write(ROOT_PACKAGE, rewriteOverrides(read(ROOT_PACKAGE), version));
 	write(LOCKFILE, prunePiTree(read(LOCKFILE)));
 	const npmArgs = npm.split(" ");
-	const lockOnly = () => run(npmArgs[0], [...npmArgs.slice(1), "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd });
+	// --git=/usr/bin/false: a dependency from a git URL would make npm run git (and that repository's prepare script)
+	// to resolve it. The tree has none, and a bump that brings one fails here instead of fetching it.
+	const lockOnly = () => run(npmArgs[0], [...npmArgs.slice(1), "install", "--package-lock-only", "--ignore-scripts", "--git=/usr/bin/false", "--no-audit", "--no-fund"], { cwd });
 	log(`pi-bump: ${from} -> ${version}: resolving the lockfile (metadata only, no package code runs)`);
 	lockOnly();
 	// A pi package the new release brings in is pinned too, then resolved again: once is enough, since an override adds

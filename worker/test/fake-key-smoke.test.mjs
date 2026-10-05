@@ -70,7 +70,7 @@ test("the smoke runs on main, the schedule, a manual run and the pi bump's branc
 	assert.equal(smokeWanted({ event: "schedule", headRef: "", changed: [] }).run, true);
 	assert.equal(smokeWanted({ event: "workflow_dispatch", headRef: "", changed: [] }).run, true);
 	assert.equal(smokeWanted({ event: "pull_request", headRef: "chore/pi-bump", changed: ["docs/x.md"] }).run, true);
-	for (const path of ["package-lock.json", "package.json", "image/runner/package.json", "worker/package.json", "admin/package.json", "admin/src/index.ts", "image/Dockerfile", "image/runner/src/usage-meter.mjs", ".github/scripts/fake-key-smoke.mjs"]) {
+	for (const path of ["package-lock.json", "package.json", "image/runner/package.json", "worker/package.json", "admin/package.json", "admin/src/index.ts", "image/Dockerfile", "image/runner/src/usage-meter.mjs", ".github/scripts/fake-key-smoke.mjs", ".github/workflows/pi-upgrade-check.yml"]) {
 		assert.deepEqual(smokeWanted({ event: "pull_request", headRef: "fix/x", changed: ["docs/a.md", path] }), { run: true, why: `the pull request changes ${path}` }, path);
 	}
 	for (const changed of [[], ["docs/a.md", "worker/src/doctor.mjs", "admin/src/panel.mjs", "imagery.md"]]) {

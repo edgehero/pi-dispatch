@@ -113,10 +113,11 @@ export function smoke({ image, piVersion, docker = defaultDocker, jobDir }) {
 }
 
 /**
- * The paths whose change can move what this smoke proves: every pi pin site, the lockfile, the image, and this script.
+ * The paths whose change can move what this smoke proves: every pi pin site, the lockfile, the image, this script and
+ * the workflow that runs it.
  * pi-bump.mjs's table is the list of pin sites, so a site added there is a site that triggers the smoke here.
  */
-export const SMOKE_PATHS = Object.freeze([...BUMP_PATHS, "image/", ".github/scripts/fake-key-smoke.mjs"]);
+export const SMOKE_PATHS = Object.freeze([...BUMP_PATHS, "image/", ".github/scripts/fake-key-smoke.mjs", ".github/workflows/pi-upgrade-check.yml"]);
 
 /**
  * Whether the smoke runs, or why not. It reaches a real provider, so a pull request that cannot move the result (a docs

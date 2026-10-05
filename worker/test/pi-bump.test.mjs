@@ -102,6 +102,21 @@ test("a resolved lockfile is refused unless every entry is from the registry wit
 	refused((a) => (a[""].workspaces = ["worker", "evil"]), 'package-lock.json\'s "" changed beyond its pi pins');
 	refused((a) => (a["node_modules/@edgehero/w"].resolved = "evil"), 'package-lock.json\'s "node_modules/@edgehero/w" changed beyond its pi pins');
 	refused((a) => delete a.worker, 'package-lock.json\'s "worker" is gone');
+	assert.deepEqual(lockfileProblems(lock(before), JSON.stringify({ lockfileVersion: 3, evil: 1, packages: bumped() })), ["package-lock.json's top level changed beyond its packages"]);
+	refused((a) => (a["node_modules/esbuild-alias"] = entry("evil", "1.0.0", { name: "evil", hasInstallScript: true })), "package-lock.json's node_modules/esbuild-alias gains an install script");
+	refused((a) => (a["node_modules/bullmq"] = { ...a["node_modules/bullmq"], name: "evil", hasInstallScript: true }), "package-lock.json's node_modules/bullmq gains an install script");
+	refused((a) => (a["node_modules/@edgehero/w"] = entry("@edgehero/w")), 'package-lock.json\'s "node_modules/@edgehero/w" changed beyond its pi pins');
+	refused((a) => (a["node_modules/@earendil-works/pi-ai/node_modules/../../../../evil"] = entry("evil")), 'package-lock.json\'s key "node_modules/@earendil-works/pi-ai/node_modules/../../../../evil" is not an install path npm makes');
+	refused((a) => (a["node_modules/.bin"] = entry("x")), 'package-lock.json\'s key "node_modules/.bin" is not an install path npm makes');
+	refused((a) => (a["node_modules/x/lib"] = entry("x")), 'package-lock.json\'s key "node_modules/x/lib" is not an install path npm makes');
+	const nested = bumped();
+	nested["worker/node_modules/@earendil-works/pi-ai"] = entry("@earendil-works/pi-ai", "1.0.4");
+	nested["node_modules/@scope/a/node_modules/b"] = entry("b");
+	assert.deepEqual(lockfileProblems(lock(before), lock(nested)), [], "a workspace's own node_modules and a nested scoped install are paths npm makes");
+	const realScripted = structuredClone(before);
+	realScripted["node_modules/genai"] = entry("genai", "1.0.0", { name: "@google/genai", hasInstallScript: true });
+	const moved = { ...bumped(), "node_modules/@google/genai": entry("@google/genai", "1.1.0", { hasInstallScript: true }) };
+	assert.deepEqual(lockfileProblems(lock(realScripted), lock({ ...moved, "node_modules/genai": realScripted["node_modules/genai"] })), [], "standing follows the real name, wherever it is installed");
 });
 
 test("a package.json may change only by its pin, and the root only by its pi overrides", () => {
@@ -146,7 +161,7 @@ test("only an exact newer release is bumped to, once: not a prerelease, a downgr
 	assert.match(skipReason({ pinned: "1.0.3", target: "1.0.3" }), /already the pin/);
 	assert.match(skipReason({ pinned: "1.0.3", target: "1.0.2" }), /older than the pin 1\.0\.3/);
 	assert.match(skipReason({ pinned: "0.99.10", target: "0.99.9" }), /older/, "numeric, not string, order");
-	for (const bad of ["latest", "1.0.4-rc.1", "^1.0.4", "1.0", " 1.0.4", "1.0.4\nx", undefined]) assert.match(skipReason({ pinned: "1.0.3", target: bad }), /not an exact release version/, String(bad));
+	for (const bad of ["latest", "1.0.4-rc.1", "^1.0.4", "1.0", " 1.0.4", "1.0.4\nx", "01.0.4", "1.00.4", "1.0.04", undefined]) assert.match(skipReason({ pinned: "1.0.3", target: bad }), /not an exact release version/, String(bad));
 	assert.match(skipReason({ pinned: "1.0.3", target: "1.0.4", openTitles: [titleFor("1.0.4")] }), /already carries pi 1\.0\.4/);
 	assert.equal(skipReason({ pinned: "1.0.3", target: "1.0.5", openTitles: [titleFor("1.0.4")] }), null, "a newer release replaces the open one");
 	assert.match(skipReason({ pinned: "1.0.3", target: "1.0.4", closedTitles: [titleFor("1.0.4")] }), /closed unmerged/);
@@ -202,7 +217,7 @@ test("a bump rewrites the pins, resolves the pruned tree metadata-only, pins a n
 	const at = scratch();
 	const { run, calls } = fakeTools(at, { newPackage: true });
 	const summary = bump({ repo: at, version: "9.9.9", npm: "npx npm@10.9.3", run, log: () => {} });
-	const lockRun = "npx npm@10.9.3 install --package-lock-only --ignore-scripts --no-audit --no-fund";
+	const lockRun = "npx npm@10.9.3 install --package-lock-only --ignore-scripts --git=/usr/bin/false --no-audit --no-fund";
 	assert.deepEqual(calls, [lockRun, lockRun, "git status --porcelain=v1 -z --untracked-files=all"]);
 	assert.equal(summary.from, PIN);
 	assert.equal(summary.to, "9.9.9");
