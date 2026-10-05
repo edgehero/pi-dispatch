@@ -206,7 +206,8 @@ The line names each failed extension by its path inside `extensions/` (for examp
 folder it came from. It never carries the file's content or pi's error text. `kind` is `load` for a failed
 load, `conflict` for an extension that loaded but shares a tool or flag name with another, and
 `manifest-dir` for a `pi.extensions` entry naming a folder, which is skipped.
-The line covers the repo's extensions and staged packages too.
+The line covers the repo's extensions and staged packages too. Since pi 1.0.3 a command registered without a
+`handler` function, or with an empty name, is a throw while loading, so such an extension now fails this way.
 
 **Three sources of extension code reach a job, and only one of them is this overlay.** Worth stating in one
 place, because two of them are easy to forget and #58 originally called the third a non-goal:

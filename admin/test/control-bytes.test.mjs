@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { box, clip, clipData, columnsOf, hasControls, scrubControls } from "../src/panel.mjs";
 import { frame, makeStyler, PLAIN_THEME, stripAnsi, visibleLen } from "../src/style.mjs";
 import { renderRuns, renderTriggers } from "../src/render.mjs";
+import { loadVisibleWidth as loadPinnedVisibleWidth } from "./helpers/renderer.mjs";
 
 /** The TypeScript dashboard, through the loader the other suites use: `dashboard.ts` is not plain ESM. */
 async function tsLoader() {
@@ -24,18 +25,14 @@ async function tsLoader() {
 // already deleting.
 
 /**
- * The pinned renderer's own width, as the oracle for what "draws as nothing" means.
- *
- * Loaded the way `width.test.mjs` loads it, with the VERSION asserted rather than assumed: pi depends on
- * pi-tui by a range, and a class checked against the wrong renderer is not checked.
+ * The pinned renderer's own width, as the oracle for what "draws as nothing" means. Loaded the way
+ * `width.test.mjs` loads it (helpers/renderer.mjs), which asserts the renderer IS the pinned artifact by the
+ * content of the file the width comes from: pi depends on pi-tui by a range, and a class checked against the wrong
+ * renderer is not checked.
  */
 async function loadVisibleWidth() {
-	const { createRequire } = await import("node:module");
-	const { pathToFileURL } = await import("node:url");
-	const pi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
-	assert.equal(pi("@earendil-works/pi-tui/package.json").version, "0.99.1", "the oracle must be the pinned renderer");
-	const { visibleWidth } = await import(pathToFileURL(pi.resolve("@earendil-works/pi-tui")).href);
-	assert.equal(typeof visibleWidth, "function", "and it must actually load");
+	const visibleWidth = await loadPinnedVisibleWidth();
+	assert.equal(typeof visibleWidth, "function", "the pinned renderer's visibleWidth must actually load");
 	return visibleWidth;
 }
 

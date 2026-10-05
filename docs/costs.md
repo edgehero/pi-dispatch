@@ -359,12 +359,22 @@ is an open issue.
 - **Calls that cannot be bounded are refused under a cap**: an api outside the priced set, `generateImages`,
   `streamDeferred`, a priced classifier, a virtual model outside `streamSimple`, and a priced openai-completions
   model on a server that is not one of pi's own hosted providers (or `api.openai.com`) whose `compat.maxTokensField`
-  is not `"max_tokens"` ([local model servers](egress.md#local-model-servers)). The run record says which rule
+  is not `"max_tokens"` ([local model servers](egress.md#local-model-servers)). That includes a builtin model with
+  no `baseUrl` in pi's catalog: since pi 1.0.3 every `azure` model has none, and `azure/deepseek-v4-pro` runs on
+  openai-completions, so its server is whatever you configure. The way out is yours, when that server reads
+  `max_tokens`: `"providers": {"azure": {"modelOverrides": {"deepseek-v4-pro": {"compat": {"maxTokensField":
+  "max_tokens"}}}}}` in the overlay `models.json`. The run record says which rule
   refused in its `why`: `unboundable` for these, `over-cap` when the call's bound would pass the cap, and `external`
   when the subprocesses' spend could not be read. The run detail shows it after the reason, as
   `cost-cap (unboundable: see compat.maxTokensField)`. A `cost-cap` stop with no `why` came from a subprocess, an
   unmetered child or a displaced compat entry, not from a refused call of the runner's own, or it ran on an older
   image or its exit line could not be verified.
+- **Sampling parameters count at every thinking level.** A model in `models.json` may carry `samplingParams` and,
+  since pi 1.0.2, `samplingParamsByThinkingLevel`, which pi merges per call for the thinking level it picks. On
+  openai-completions, openai-responses and azure both reach the request after the output cap. The bound reads every
+  level: the largest `max_tokens`, `max_completion_tokens` or `max_output_tokens` in any of them, times the largest
+  `n`. Any other key there that is not a plain sampling knob (`model`, `service_tier`, `tools`) makes the call
+  unboundable under a cap, at any level.
 - **Your own server on another api is trusted** to honour that api's own output-cap field (`max_output_tokens`,
   `max_tokens`). One that ignores it can answer past the bound; `boundExceeded` is the evidence.
 - **Old images are refused.** A job with a dollar cap on an image that does not declare `costCap` is refused before

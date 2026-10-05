@@ -522,7 +522,7 @@ at a proxy of your own and would read exactly like the control working.
 
 **And then loading pi took the proxy away (issue #427).** Every measurement above was of `fetch` and the SDK
 on their own, never after pi was loaded, which is the runner's case. The pinned pi (0.80.7 at the time) depended on npm
-`undici` 8.5.0 (0.99.1, the pin now, carries 8.10.2 and does the same, issue #509), and loading it replaces the global dispatcher the flag installs with one that ignores the proxy
+`undici` 8.5.0 (0.99.1 carried 8.10.2 and did the same, issue #509; so does 1.0.3, the pin now), and loading it replaces the global dispatcher the flag installs with one that ignores the proxy
 variables. In the job image, on an internal network with the proxy attached:
 
 | | |

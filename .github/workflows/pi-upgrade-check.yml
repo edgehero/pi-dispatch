@@ -99,6 +99,17 @@ jobs:
           fi
           echo "OK: image label and runner pin agree ($pinned)"
 
+      - name: Every pi package is the runner's pin, in the overrides and the lockfile
+        run: |
+          # Issue #587. pi 1.0.1 dropped its npm-shrinkwrap.json and depends on its sibling packages by a
+          # range (^1.0.3), so a lockfile regenerated on another day can resolve pi-tui or pi-agent-core to
+          # a release nobody verified while every package.json still shows an exact pin. The root
+          # package.json's overrides pin every @earendil-works package to the runner's pin; this holds the
+          # overrides, every pi entry in package-lock.json and the hand-written pins (worker, admin,
+          # SUPPORTED_PI_VERSION, the Dockerfile's PI_VERSION) to that one version. Its rule is tested in
+          # worker/test/pi-pin-check.test.mjs.
+          node .github/scripts/pi-pin-check.mjs
+
       - name: Base image is pinned by digest
         run: |
           # Same reasoning, different vendor. A floating base tag is the identical silent break.
@@ -671,21 +682,17 @@ jobs:
             || { echo "::error::PI_OFFLINE=1 did not make an unresolvable npm: source a clean skip -- pi may have tried to install at load time."; exit 1; }
 
       # --- DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY (trap (g) in INT-SDK-SESSION-OPTIONS) ---
-      # The meter's compat half must bind pi-coding-agent's OWN nested pi-ai: that is the pi-ai pi hands its
+      # The meter's compat half must bind pi-coding-agent's OWN pi-ai: that is the pi-ai pi hands its
       # extensions, whose module-level api-provider registry legacy extension calls dispatch through, and a
-      # bare `import "@earendil-works/pi-ai"` binds something else and meters nothing while reporting success.
-      # Since the pi 0.99.1 pin (issue #509) a session's own calls go through ModelRuntime instead, so the
-      # process-wide choke point is ModelRuntime.prototype; the step after this one asserts that half.
+      # copy pi does not import meters nothing while reporting success. Since the pi 0.99.1 pin (issue #509)
+      # a session's own calls go through ModelRuntime instead, so the process-wide choke point is
+      # ModelRuntime.prototype; the step after this one asserts that half.
       #
-      # What this step deliberately does NOT assert is "pi-ai is installed twice". That is FALSE HERE, and
-      # an earlier version of this step failed on it. The image installs the ROOT lockfile against
-      # `image/runner/package.json` ONLY, which declares pi-coding-agent and @playwright/cli and NOT
-      # pi-ai; the hoisted copy a dev checkout has is the WORKER's dependency, and the worker is not
-      # installed in this image. So in the image the nested copy is the ONLY copy and a bare specifier
-      # does not resolve at all. The dual-copy fact is still pinned, just where it is true:
-      # image/runner/test/pinned-api.test.mjs asserts it in the contract-tests job, which does a full
-      # workspace install. Duplicating it here would only re-assert a dev-box layout inside a container
-      # that does not have it.
+      # What this step deliberately does NOT assert is a layout. Up to pi 0.99.1 pi-coding-agent's shrinkwrap
+      # nested pi-ai under it; pi 1.0.1 dropped the shrinkwrap, and at the 1.0.3 pin (issue #587) pi-ai sits at
+      # /app/node_modules beside it. resolvePiAiCompat finds pi's copy by pi-coding-agent's own node_modules
+      # lookup (piOwnPackageDir), whatever the layout, and image/runner/test/pinned-api.test.mjs pins that the
+      # first candidate IS the module pi's VIRTUAL_MODULES hands an extension.
       #
       # So assert what IS load-bearing here, and assert it by running OUR OWN resolver inside the built
       # image rather than re-deriving the layout in shell -- a shell re-derivation encodes a rule the
@@ -693,29 +700,29 @@ jobs:
       # unresolvable candidate instead of throwing. No `cd /app`: the import is an absolute file:// URL
       # and resolvePiAiCompat resolves from usage-meter.mjs's own URL, which is what lets the real runner
       # work from cwd=/workspace.
-      - name: "RUNNER: the meter's resolver offers pi-coding-agent's nested pi-ai first, inside the image"
+      - name: "RUNNER: the meter's resolver offers pi-coding-agent's own pi-ai first, inside the image"
         run: |
           PROBE='import { existsSync } from "node:fs";
           import { fileURLToPath } from "node:url";
           import { resolvePiAiCompat } from "file:///app/image/runner/src/usage-meter.mjs";
           const candidates = resolvePiAiCompat();
           if (candidates.length === 0) { console.error("resolvePiAiCompat() offered NO pi-ai compat candidate at all"); process.exit(1); }
-          if (candidates[0].tag !== "nested") { console.error("first candidate is tagged " + candidates[0].tag + ", want nested"); process.exit(1); }
-          if (!existsSync(fileURLToPath(candidates[0].url))) { console.error("the nested candidate is not on disk"); process.exit(1); }
+          if (candidates[0].tag !== "pi") { console.error("first candidate is tagged " + candidates[0].tag + ", want pi"); process.exit(1); }
+          if (!existsSync(fileURLToPath(candidates[0].url))) { console.error("pi's own candidate is not on disk"); process.exit(1); }
           const mod = await import(candidates[0].url);
           for (const fn of ["getApiProvider", "getApiProviders", "registerApiProvider", "resetApiProviders"]) {
-            if (typeof mod[fn] !== "function") { console.error("the nested compat copy no longer exports " + fn + "()"); process.exit(1); }
+            if (typeof mod[fn] !== "function") { console.error("pi's own compat copy no longer exports " + fn + "()"); process.exit(1); }
           }
-          console.log("OK: " + candidates.length + " candidate(s), nested first, compat surface intact");'
+          console.log("OK: " + candidates.length + " candidate(s), pi's own first, compat surface intact");'
           docker run --rm --network none -e PROBE="$PROBE" \
             --entrypoint sh "$IMAGE_REF" -c 'node --input-type=module -e "$PROBE"' \
-            || { echo "::error::The usage meter no longer offers pi-coding-agent's NESTED pi-ai first in this image. That copy is the pi-ai pi hands its extensions, whose registry the meter's compat half arms for legacy extension calls; the process-wide choke point is ModelRuntime.prototype, and installProcessUsageMeter accepts the compat copy by identity with pi's VIRTUAL_MODULES, so this step is about the ORDER and the surface, not the decision. If the layout moved, re-verify in this order: resolvePiAiCompat's nested-path derivation in image/runner/src/usage-meter.mjs, the compat exports the probe and the wrapper call (getApiProvider/getApiProviders/registerApiProvider/resetApiProviders, createAssistantMessageEventStream), trap (g) in specs/interfaces.md, and image/runner/test/pinned-api.test.mjs -- which pins the dual-copy layout in contract-tests, where the worker's hoisted pi-ai is installed too."; exit 1; }
+            || { echo "::error::The usage meter no longer offers pi-coding-agent's OWN pi-ai first in this image. That copy is the pi-ai pi hands its extensions, whose registry the meter's compat half arms for legacy extension calls; the process-wide choke point is ModelRuntime.prototype, and installProcessUsageMeter accepts the compat copy by identity with pi's VIRTUAL_MODULES, so this step is about the ORDER and the surface, not the decision. If the layout moved, re-verify in this order: piOwnPackageDir and resolvePiAiCompat in image/runner/src/usage-meter.mjs, the compat exports the probe and the wrapper call (getApiProvider/getApiProviders/registerApiProvider/resetApiProviders, createAssistantMessageEventStream), trap (g) in specs/interfaces.md, and image/runner/test/pinned-api.test.mjs."; exit 1; }
 
-      # The process-wide half (issue #509): at the pi 0.99.1 pin a session dispatches every model call through
+      # The process-wide half (issue #509): since the pi 0.99.1 pin a session dispatches every model call through
       # a ModelRuntime instance, so the meter wraps ModelRuntime.prototype, and the brake's stream factory
-      # comes from the accepted compat copy. Asserted inside the built image, where only the nested copy
-      # exists: the install must succeed, accept the NESTED compat copy, and have a brake for a capped job.
-      - name: "RUNNER: the usage meter installs on ModelRuntime inside the image, compat half nested"
+      # comes from the accepted compat copy. Asserted inside the built image: the install must succeed, accept
+      # pi's own compat copy, and have a brake for a capped job.
+      - name: "RUNNER: the usage meter installs on ModelRuntime inside the image, compat half on pi's own pi-ai"
         run: |
           PROBE='import { ModelRuntime } from "@earendil-works/pi-coding-agent";
           import { createUsageMeter, installProcessUsageMeter } from "file:///app/image/runner/src/usage-meter.mjs";
@@ -723,7 +730,7 @@ jobs:
           const handle = await installProcessUsageMeter({ ModelRuntime, meter: createUsageMeter({ maxTokens: 1000 }), log: (event, fields) => logged.push({ event, ...fields }) });
           handle.uninstall();
           const line = logged.find((l) => l.event === "usage_meter");
-          if (!handle.ok || line?.compat !== "nested" || line?.brake !== true) { console.error(JSON.stringify(logged)); process.exit(1); }
+          if (!handle.ok || line?.compat !== "pi" || line?.brake !== true) { console.error(JSON.stringify(logged)); process.exit(1); }
           console.log("OK: " + JSON.stringify(line));'
           docker run --rm --network none -e PROBE="$PROBE" \
             --entrypoint sh "$IMAGE_REF" -c 'cd /app && node --input-type=module -e "$PROBE"' \

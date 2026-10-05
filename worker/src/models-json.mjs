@@ -1,5 +1,5 @@
 /**
- * The overlay `models.json`, read the way pi reads it (issue #502, PR #536's review): pi 0.99.1's
+ * The overlay `models.json`, read the way pi reads it (issue #502, PR #536's review): pi's
  * `ModelConfig.load` (`pi-coding-agent/dist/core/model-config.js`) strips a leading BOM, strips `//` comments and
  * trailing commas outside strings, parses, and then checks the whole document against its TypeBox schema. ANY
  * schema error drops the WHOLE file: pi then knows none of its providers or models.
@@ -121,7 +121,8 @@ const T = {
 const opt = (check) => [check, true];
 const req = (check) => [check, false];
 
-// The schema, transcribed from model-config.js at the 0.99.1 pin, in its order.
+// The schema, transcribed from model-config.js at the pin (1.0.3; worker/test/models-json.test.mjs holds the file's
+// content hash), in its order.
 const PercentileCutoffs = T.obj({ p50: opt(T.num()), p75: opt(T.num()), p90: opt(T.num()), p99: opt(T.num()) });
 const numOrStr = T.union(T.num(), T.str());
 const OpenRouterRouting = T.obj({
@@ -142,6 +143,9 @@ const OpenRouterRouting = T.obj({
 const VercelGatewayRouting = T.obj({ only: opt(T.arr(T.str())), order: opt(T.arr(T.str())) });
 const ThinkingValue = T.union(T.str(), T.nul());
 const ThinkingLevelMap = T.obj({ off: opt(ThinkingValue), minimal: opt(ThinkingValue), low: opt(ThinkingValue), medium: opt(ThinkingValue), high: opt(ThinkingValue), xhigh: opt(ThinkingValue), max: opt(ThinkingValue) });
+// pi 1.0.2 (issue #587): a model's sampling parameters, and the same per thinking level, merged per call over them.
+const SamplingParams = T.rec(T.unknown());
+const SamplingParamsByThinkingLevel = T.obj({ off: opt(SamplingParams), minimal: opt(SamplingParams), low: opt(SamplingParams), medium: opt(SamplingParams), high: opt(SamplingParams), xhigh: opt(SamplingParams), max: opt(SamplingParams) });
 const KwargScalar = T.union(T.str(), T.num(), T.bool(), T.nul());
 const KwargVariable = T.obj({ $var: req(T.union(T.lit("thinking.enabled"), T.lit("thinking.effort"))), omitWhenOff: opt(T.bool()) });
 const Kwarg = T.union(KwargScalar, KwargVariable);
@@ -214,7 +218,8 @@ const ModelDefinition = T.obj({
 	promptCache: opt(ModelPromptCache),
 	contextWindow: opt(T.num()),
 	maxTokens: opt(T.num()),
-	samplingParams: opt(T.rec(T.unknown())),
+	samplingParams: opt(SamplingParams),
+	samplingParamsByThinkingLevel: opt(SamplingParamsByThinkingLevel),
 	headers: opt(headers),
 	compat: opt(ProviderCompat),
 });
@@ -228,7 +233,8 @@ const ModelOverride = T.obj({
 	promptCache: opt(ModelPromptCache),
 	contextWindow: opt(T.num()),
 	maxTokens: opt(T.num()),
-	samplingParams: opt(T.rec(T.unknown())),
+	samplingParams: opt(SamplingParams),
+	samplingParamsByThinkingLevel: opt(SamplingParamsByThinkingLevel),
 	headers: opt(headers),
 	compat: opt(ProviderCompat),
 });

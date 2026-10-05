@@ -173,7 +173,7 @@ export const REVIEW_STATES = new Set(["approved", "changes_requested", "commente
 const REVIEW_ACTION = "review_submitted";
 
 /**
- * The pi tool names a trigger may exclude (issue #291) -- the built-in set of the PINNED pi, 0.99.1, in pi's
+ * The pi tool names a trigger may exclude (issue #291) -- the built-in set of the PINNED pi, 1.0.3, in pi's
  * own `allToolNames` order. `powershell` joined it at the 0.99.1 bump (issue #509): pi registers it as a
  * built-in but does not activate it by default (`DEFAULT_TOOL_NAMES` is read, bash, edit, write), so a
  * trigger that means "no shell" names it beside `bash`.

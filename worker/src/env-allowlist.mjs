@@ -33,7 +33,7 @@ import { egressEnv } from "./egress.mjs";
 import { forgeSpec } from "./forges.mjs";
 import { apiKeyVariable } from "./provider-key.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
-import { KEYLESS_HOW, keylessVerdict } from "./model-endpoints.mjs";
+import { KEYLESS_HOW, keylessVerdict, providerRenameHint } from "./model-endpoints.mjs";
 import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
 
 function configError(message) {
@@ -161,7 +161,7 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
 			error.code = unreadable.code;
 			throw error;
 		}
-		throw configError(unknownProviderMessage(provider));
+		throw configError(unknownProviderMessage(provider, modelEndpoints?.models ?? null));
 	}
 	const held = candidates
 		.map((name) => [name, hostEnv[name]])
@@ -209,8 +209,8 @@ export function keylessEndpointsFor(provider, modelEndpoints) {
 	return verdict.keyless ? verdict.endpoints : null;
 }
 
-function unknownProviderMessage(provider) {
-	return `pi has no provider "${provider}", so there is no key variable to give it a key. Use one of pi's provider ids with its key in the worker environment or in pi's auth.json, or, ${KEYLESS_HOW}.`;
+function unknownProviderMessage(provider, models = null) {
+	return `pi has no provider "${provider}", so there is no key variable to give it a key.${providerRenameHint(provider, { models, piProviders: piProviders() })} Use one of pi's provider ids with its key in the worker environment or in pi's auth.json, or, ${KEYLESS_HOW}.`;
 }
 
 function defaultAgentDir(hostEnv) {

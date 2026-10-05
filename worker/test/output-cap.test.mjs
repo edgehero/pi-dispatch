@@ -19,7 +19,7 @@ const FREE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 test("the host lists and the own-server predicate are the runner's, over a matrix of baseUrls", () => {
 	assert.deepEqual([...COMPLETIONS_CATALOG_HOSTS], [...RUNNER_CATALOG_HOSTS]);
 	assert.deepEqual([...COMPLETIONS_EXTRA_HOSTS], [...RUNNER_EXTRA_HOSTS]);
-	const urls = ["http://host.docker.internal:11434/v1", "https://openrouter.ai/api/v1", "https://API.GROQ.COM/openai/v1", "https://api.openai.com/v1", "http://api.groq.com@127.0.0.1:11434/v1", "not a url", undefined, "http://[fd00::2]:8000/v1"];
+	const urls = ["http://host.docker.internal:11434/v1", "https://openrouter.ai/api/v1", "https://API.GROQ.COM/openai/v1", "https://api.openai.com/v1", "http://api.groq.com@127.0.0.1:11434/v1", "not a url", undefined, "", "http://[fd00::2]:8000/v1"];
 	for (const baseUrl of urls) {
 		for (const api of ["openai-completions", "openai-responses", "anthropic-messages"]) {
 			assert.equal(completionsOwnServer({ api, baseUrl }), runnerOwnServer({ api, baseUrl }), `${api} ${baseUrl}`);
@@ -76,6 +76,18 @@ test("outputCapView composes api, baseUrl and the field as pi's provider compose
 	assert.equal(outputCapView({ models: chain, provider: "lan", modelId: "third" }).api, "anthropic-messages");
 });
 
+test("an empty catalog baseUrl is the operator's own server: unbounded under a cap until compat sends max_tokens (issue #587)", () => {
+	// pi 1.0.3: every azure row has baseUrl "", azure/deepseek-v4-pro on openai-completions among them. The real host is
+	// whatever the operator configures (their own server, possibly), so the guard stays fail closed there.
+	const deepseek = catalogModel("azure", "deepseek-v4-pro");
+	assert.equal(deepseek?.api, "openai-completions", "the premise: the pinned catalog serves it on openai-completions");
+	assert.equal(deepseek.baseUrl, "", "the premise: with no baseUrl");
+	assert.equal(completionsOwnServer(deepseek), true);
+	assert.equal(outputUnboundable(outputCapView({ models: null, provider: "azure", modelId: "deepseek-v4-pro", builtinModel: catalogModel, builtinChatModels: catalogChatModels })), deepseek.cost.output > 0, "priced: unbounded");
+	const wayOut = { providers: { azure: { modelOverrides: { "deepseek-v4-pro": { compat: { maxTokensField: "max_tokens" } } } } } };
+	assert.equal(outputUnboundable(outputCapView({ models: wayOut, provider: "azure", modelId: "deepseek-v4-pro", builtinModel: catalogModel, builtinChatModels: catalogChatModels })), false, "the documented override bounds it");
+});
+
 // pi's own composer, at the pin: the view must say what pi's ModelRuntime composes for each model of a few overlays.
 let piCore = null;
 try {
@@ -96,6 +108,9 @@ test("outputCapView agrees with pi's own ModelRuntime on api, baseUrl and the fi
 			groq: { baseUrl: "http://proxy.lan:8080/openai/v1", compat: { maxTokensField: "max_tokens" }, models: [{ id: "new-groq", cost: PRICED }, { id: "own", cost: PRICED, compat: { maxTokensField: "max_completion_tokens" } }], modelOverrides: { "llama-3.1-8b-instant": { compat: { maxTokensField: "max_completion_tokens" } } } },
 			ollama: { api: "openai-completions", baseUrl: "http://host.docker.internal:11434/v1", apiKey: "x", models: [{ id: "qa", cost: PRICED, compat: { maxTokensField: "max_tokens" } }, { id: "qb", cost: PRICED }, { id: "qc", baseUrl: "http://gpu.lan:8000/v1" }] },
 			openrouter: { baseUrl: "http://or-proxy.lan/v1" },
+			// pi 1.0.3's azure catalog serves deepseek-v4-pro on openai-completions with an empty baseUrl (issue #587):
+			// the documented way out of the fail-closed bound is this override.
+			azure: { modelOverrides: { "deepseek-v4-pro": { compat: { maxTokensField: "max_tokens" } } } },
 		},
 	};
 	const dir = tempDir("output-cap-pi-");
@@ -110,7 +125,7 @@ test("outputCapView agrees with pi's own ModelRuntime on api, baseUrl and the fi
 		if (saved === undefined) delete process.env.PI_OFFLINE;
 		else process.env.PI_OFFLINE = saved;
 	}
-	const refs = [["litellm", "gw"], ["groq", "new-groq"], ["groq", "own"], ["ollama", "qa"], ["ollama", "qb"], ["ollama", "qc"], ...catalogChatModels("groq").slice(0, 3).map((m) => ["groq", m.id]), ...catalogChatModels("openrouter").slice(0, 3).map((m) => ["openrouter", m.id])];
+	const refs = [["litellm", "gw"], ["groq", "new-groq"], ["groq", "own"], ["ollama", "qa"], ["ollama", "qb"], ["ollama", "qc"], ...catalogChatModels("groq").slice(0, 3).map((m) => ["groq", m.id]), ...catalogChatModels("openrouter").slice(0, 3).map((m) => ["openrouter", m.id]), ["azure", "deepseek-v4-pro"], ["azure", "gpt-5.4"]];
 	for (const [provider, modelId] of refs) {
 		const m = rt.getModel(provider, modelId);
 		assert.ok(m, `${provider}/${modelId}: pi composes it`);

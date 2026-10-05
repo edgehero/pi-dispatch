@@ -9,7 +9,7 @@ import { test } from "node:test";
 // Pure -- no static pi import in its module graph -- so it needs none of the gating below. Importing
 // the runner's OWN candidate resolver is deliberate: the layout fact it encodes is the thing that
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
-import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, IMAGE_RESIZE_MAX, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
+import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, completionsOwnServer, IMAGE_RESIZE_MAX, piOwnPackageDir, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
 import * as catalogModels from "./helpers/catalog-models.mjs";
 import { classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
 import { jobSettings } from "../src/config.mjs";
@@ -565,24 +565,24 @@ test("the runner never imports pi-ai directly -- a static import makes the meter
 	assert.match(runJob, /usageMeter\.arm\(\)/, "run-job.mjs must re-arm the meter AFTER createAgentSession");
 });
 
-test("the nested pi-ai copy exists and is NOT the one a bare specifier resolves to", { skip }, () => {
-	// The layout fact, pinned. If npm ever flattens this tree the nested candidate disappears and the
-	// meter falls back to the hoisted copy -- which is correct THEN and catastrophic now, so the
-	// fallback must never become the silent default while the nested copy still exists.
+test("the runner's first pi-ai candidate IS the copy pi hands its extensions, wherever npm put it (issue #587)", { skip }, async () => {
+	// The layout fact this replaced ("the nested copy exists and is not the hoisted one") held while pi-coding-agent
+	// shipped a shrinkwrap. pi 1.0.1 dropped it, and at the 1.0.3 pin the root overrides keep ONE copy of every pi
+	// package, so a dev checkout and the image now look alike. What the meter depends on is not the layout but the
+	// identity, so the identity is what is pinned: the first candidate, found by pi-coding-agent's own lookup, loads
+	// the very module object pi's VIRTUAL_MODULES hands an extension for a bare pi-ai import.
 	const candidates = resolvePiAiCompat();
 	assert.ok(candidates.length > 0, "the runner must find at least one pi-ai compat candidate");
-	assert.equal(candidates[0].tag, "nested", "the NESTED copy must be tried first -- it is the one pi mutates");
-
-	const nested = fileURLToPath(candidates[0].url);
-	assert.ok(existsSync(nested), "the nested pi-coding-agent/node_modules copy of pi-ai/dist/compat.js must exist");
-
-	const hoisted = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/compat"));
-	assert.notEqual(
-		nested,
-		hoisted,
-		"the nested and hoisted pi-ai copies collapsed into one file -- re-verify usage-meter.mjs's probe, " +
-			"which exists solely because import.meta.resolve names the copy pi does NOT use",
-	);
+	assert.equal(candidates[0].tag, "pi", "pi's OWN copy must be tried first -- it is the one pi mutates");
+	assert.ok(existsSync(fileURLToPath(candidates[0].url)), "pi's own pi-ai/dist/compat.js must exist");
+	const { VIRTUAL_MODULES } = await import(new URL("./core/extensions/virtual-modules.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
+	assert.equal(await import(candidates[0].url), VIRTUAL_MODULES["@earendil-works/pi-ai"], "the first candidate is not the module pi hands its extensions");
+	// And pi-agent-core, the other package pinned facts are read from, is found the same way and is the version pi declares.
+	const agentDeps = JSON.parse(readFileSync(join(agentPackageDir(), "package.json"), "utf8")).dependencies;
+	for (const name of ["pi-ai", "pi-agent-core"]) {
+		const version = JSON.parse(readFileSync(join(piOwnPackageDir(name), "package.json"), "utf8")).version;
+		assert.equal(`^${version}`, agentDeps[`@earendil-works/${name}`], `${name}: the copy pi's lookup finds is not the release pi depends on`);
+	}
 });
 
 test("the accepted compat copy still has a providers/all.js sibling exposing a POPULATED builtin catalog", { skip }, async () => {
@@ -958,7 +958,7 @@ const AUTH_REFUSAL_TABLE = [
 		cases: [refusal(401, OPENAI_BODY(401)), refusal(403, OPENAI_BODY(403)), transient(403, OPENROUTER_UPSTREAM_403, JSON_TYPE), transient(403, HTML_RETRY_403, "text/html")],
 	},
 	{ api: "openai-responses", provider: "openai", path: "/v1", cases: [refusal(401, OPENAI_BODY(401)), refusal(403, OPENAI_BODY(403))] },
-	{ api: "azure-openai-responses", provider: "azure-openai-responses", path: "/openai/v1", cases: [refusal(401, OPENAI_BODY(401)), refusal(403, OPENAI_BODY(403))] },
+	{ api: "azure-openai-responses", provider: "azure", path: "/openai/v1", cases: [refusal(401, OPENAI_BODY(401)), refusal(403, OPENAI_BODY(403))] },
 	{ api: "mistral-conversations", provider: "mistral", path: "", cases: [refusal(401, OPENAI_BODY(401)), refusal(403, OPENAI_BODY(403))] },
 	// pi's own relay protocol: `<status> <statusText>: <message> (<code>)`, which the bare shape reads.
 	{
@@ -1573,21 +1573,32 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	// The session's before_provider_request hooks reach the provider through that same option.
 	assert.match(agentDistFile("core", "sdk.js"), /onPayload: transformProviderPayload,/);
 	assert.match(agentDistFile("core", "sdk.js"), /return runner\.emitBeforeProviderRequest\(payload\);/);
-	assert.match(readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..", "node_modules", "@earendil-works", "pi-agent-core", "dist", "agent.js"), "utf8"), /onPayload: this\.onPayload,/, "the agent loop hands its onPayload to each request");
+	assert.match(readFileSync(join(piOwnPackageDir("pi-agent-core"), "dist", "agent.js"), "utf8"), /onPayload: this\.onPayload,/, "the agent loop hands its onPayload to each request");
 	// The routing fields PAYLOAD_ROUTING_KEYS compares: `model` everywhere, `modelId` on bedrock, `fallbacks` on anthropic.
 	assert.match(nestedPiAi("api", "bedrock-converse-stream.js"), /modelId: model\.id,/);
 	assert.match(nestedPiAi("api", "anthropic-messages.js"), /params\.fallbacks = allowedFallbackModels\.map\(\(fallback\) => \(\{ model: fallback\.model \}\)\);/, "pi sends fallback ids only, so the guard pairs them with the model's provider");
-	// samplingParams are merged after the request is built, so a `model` key there replaces the requested one.
+	// Sampling parameters are merged after the request is built, so a `model` key there replaces the requested one.
+	// Since pi 1.0.2 the merged object is resolveSamplingParams' (the model's, the thinking level's, the call's), and
+	// the guards read every layer of it (samplingLayers); the merge itself is pinned in the #534 test below.
 	for (const file of ["openai-completions.js", "openai-responses.js", "azure-openai-responses.js"]) {
-		assert.match(nestedPiAi("api", file), /Object\.assign\(params, model\.samplingParams, options\?\.samplingParams\);/, file);
+		assert.match(nestedPiAi("api", file), /const samplingParams = resolveSamplingParams\(model, [^;]*?, options\?\.samplingParams\);\s*if \(samplingParams\) \{\s*Object\.assign\(params, samplingParams\);/, file);
 	}
-	// azure picks its deployment from the call before model.id.
-	assert.match(nestedPiAi("api", "azure-openai-responses.js"), /if \(options\?\.azureDeploymentName\) \{\s*return options\.azureDeploymentName;\s*\}\s*const mappedDeployment = parseDeploymentNameMap\(getProviderEnvValue\("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", options\?\.env\)\)\.get\(model\.id\);/);
+	// azure picks its deployment from the call before model.id, in one function since pi 1.0.3 (issue #587)...
+	assert.match(nestedPiAi("api", "azure-openai-config.js"), /export function resolveDeploymentName\(model, options\) \{\s*if \(options\?\.azureDeploymentName\) \{\s*return options\.azureDeploymentName;\s*\}\s*const mappedDeployment = parseDeploymentNameMap\(getProviderEnvValue\("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", options\?\.env\)\)\.get\(model\.id\);/);
+	// ...which the azure-openai-responses api calls for any provider, and the `azure` provider calls for EVERY api it
+	// serves, rewriting payload.model in its own onPayload wrapper (so the guard's payload check never sees it). That
+	// is why the model guard keys the deployment check on the api OR the provider. Exactly these two callers.
+	const callers = [...modules.map((name) => `api/${name}`), ...readdirSync(join(apiDir, "..", "providers")).filter((name) => name.endsWith(".js")).map((name) => `providers/${name}`)].filter((file) => file !== "api/azure-openai-config.js" && /\bresolveDeploymentName\(/.test(nestedPiAi(...file.split("/")))).sort();
+	assert.deepEqual(callers, ["api/azure-openai-responses.js", "providers/azure.js"]);
+	const azureProvider = nestedPiAi("providers", "azure.js");
+	assert.match(azureProvider, /id: "azure",/, "the azure provider id moved: the model guard's AZURE_PROVIDER must follow it");
+	assert.match(azureProvider, /const deploymentName = resolveDeploymentName\(model, options\);[\s\S]*?const params = \{ \.\.\.payload, model: deploymentName \};/, "the provider's deployment rewrite moved");
+	assert.match(azureProvider, /"openai-completions": azureStreams\(openAICompletionsApi\(\)\),/, "the azure provider no longer rewrites the deployment on openai-completions");
 	// A caller's own fetch sends the request after every hook: the guard refuses it, and pi passes none itself.
 	assert.doesNotMatch(agentDistFile("core", "sdk.js"), /\bfetch: /, "pi's session now passes a fetch of its own: the guard's fetch refusal would stop every listed job");
 	// ...nor does the agent loop's per-request config, nor the cache warmer's call (the other two places that build the
 	// options a session call carries).
-	const agentCore = readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..", "node_modules", "@earendil-works", "pi-agent-core", "dist", "agent.js"), "utf8");
+	const agentCore = readFileSync(join(piOwnPackageDir("pi-agent-core"), "dist", "agent.js"), "utf8");
 	const loopConfig = agentCore.match(/\n {4}createLoopConfig\(options = \{\}\) \{([\s\S]*?)\n {4}\}\n/)?.[1];
 	assert.ok(loopConfig, "createLoopConfig moved: re-check what options the agent loop passes");
 	assert.doesNotMatch(loopConfig, /\bfetch\b/, "the agent loop now passes a fetch");
@@ -1635,10 +1646,25 @@ test("the output-bound rules: who sends maxTokens, the 16 floor, the reasoning c
 test("COMPLETIONS_CATALOG_HOSTS is exactly the hosts the pinned catalog serves openai-completions on, and pi picks the cap's field from compat (issue #507)", { skip }, () => {
 	const dataDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "providers", "data");
 	const hosts = new Set();
+	const empty = [];
 	for (const file of readdirSync(dataDir).filter((name) => name.endsWith(".json"))) {
-		for (const row of Object.values(JSON.parse(readFileSync(join(dataDir, file), "utf8"))["openai-completions"] ?? {})) hosts.add(new URL(row.baseUrl).hostname);
+		for (const row of Object.values(JSON.parse(readFileSync(join(dataDir, file), "utf8"))["openai-completions"] ?? {})) {
+			// An empty baseUrl names no host: the server is whatever the operator configures (pi 1.0.3's azure rows,
+			// azure/deepseek-v4-pro on openai-completions among them; issue #587). It is never trusted, so it is skipped
+			// here and completionsOwnServer counts it as the operator's own server (asserted below).
+			if (row.baseUrl === "") empty.push(`${row.provider}/${row.id}`);
+			else hosts.add(new URL(row.baseUrl).hostname);
+		}
 	}
 	assert.deepEqual([...COMPLETIONS_CATALOG_HOSTS], [...hosts].sort(), "a catalog host came or went: re-check which field pi sends there before trusting it");
+	assert.ok(empty.includes("azure/deepseek-v4-pro"), "the premise: the pinned catalog serves an openai-completions model with no baseUrl");
+	for (const ref of empty) {
+		const [provider, id] = ref.split("/");
+		const model = { api: "openai-completions", provider, id, baseUrl: "" };
+		assert.equal(completionsOwnServer(model), true, `${ref}: an empty baseUrl must count as the operator's own server (fail closed)`);
+		assert.equal(callCostBound("streamSimple", { ...model, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, maxTokens: 1000 }, "", {}, {}), Infinity, `${ref}: unbounded unless its compat sends max_tokens`);
+		assert.notEqual(callCostBound("streamSimple", { ...model, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, maxTokens: 1000, compat: { maxTokensField: "max_tokens" } }, "", {}, {}), Infinity, `${ref}: the documented way out (compat.maxTokensField) bounds it`);
+	}
 	const src = nestedPiAi("api", "openai-completions.js");
 	// The one host trusted beside the catalog's, for its own reason: not a catalog openai-completions host, and pi's
 	// detection sends it max_completion_tokens (no rule names it), which OpenAI reads.
@@ -1652,9 +1678,13 @@ test("COMPLETIONS_CATALOG_HOSTS is exactly the hosts the pinned catalog serves o
 
 test("the catalog rows the bound tests price against are the pinned catalog's (issue #501)", { skip }, () => {
 	const dataDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "providers", "data");
-	for (const [name, [file, api, key]] of Object.entries(catalogModels.CATALOG_ROWS)) {
-		const row = JSON.parse(readFileSync(join(dataDir, file), "utf8"))[api]?.[key];
-		assert.ok(row, `${name}: ${file} ${api} ${key} is gone`);
+	// Every row of every catalog file, found by what it IS (provider, api, id), never by the file it sits in: pi 1.0.3
+	// renamed azure-openai-responses.json to azure.json along with the provider (issue #587).
+	const rows = readdirSync(dataDir).filter((name) => name.endsWith(".json") && !name.startsWith(".")).flatMap((file) => Object.values(JSON.parse(readFileSync(join(dataDir, file), "utf8"))).flatMap((byKey) => Object.values(byKey)));
+	for (const [name, [provider, api, id]] of Object.entries(catalogModels.CATALOG_ROWS)) {
+		const found = rows.filter((row) => row.provider === provider && row.api === api && row.id === id);
+		assert.equal(found.length, 1, `${name}: ${provider} ${api} ${id} is ${found.length === 0 ? "gone" : "ambiguous"}`);
+		const row = found[0];
 		const fixture = catalogModels[name];
 		for (const field of ["id", "api", "provider", "baseUrl", "cost", "contextWindow", "maxTokens"]) {
 			assert.deepEqual(fixture[field], row[field], `${name}.${field} drifted from the pinned catalog`);
@@ -1670,12 +1700,29 @@ test("review of #534: the samplingParams merge comes after the output cap, and p
 	// PR #534's review: on exactly these three apis a samplingParams key overrides the cap the request was built with, so
 	// callCostBound reads the merged keys (samplingOutput). Placed AFTER the cap is the whole point of the needle.
 	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
-	const merging = readdirSync(apiDir).filter((name) => name.endsWith(".js") && readFileSync(join(apiDir, name), "utf8").includes("Object.assign(params, model.samplingParams, options?.samplingParams);")).sort();
+	const MERGE = "Object.assign(params, samplingParams);";
+	const merging = readdirSync(apiDir).filter((name) => name.endsWith(".js") && readFileSync(join(apiDir, name), "utf8").includes(MERGE)).sort();
 	assert.deepEqual(merging, ["azure-openai-responses.js", "openai-completions.js", "openai-responses.js"]);
 	for (const [file, cap] of [["openai-completions.js", "params.max_completion_tokens = options.maxTokens;"], ["openai-responses.js", "params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);"], ["azure-openai-responses.js", "params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);"]]) {
 		const src = nestedPiAi("api", file);
-		assert.ok(src.indexOf(cap) > 0 && src.indexOf(cap) < src.indexOf("Object.assign(params, model.samplingParams, options?.samplingParams);"), `${file}: samplingParams no longer merge after the cap`);
+		assert.ok(src.indexOf(cap) > 0 && src.indexOf(cap) < src.indexOf(MERGE), `${file}: samplingParams no longer merge after the cap`);
 	}
+	// Issue #587: what is merged is resolveSamplingParams' object, the model's params, then the thinking level's, then
+	// the call's, with the level clamped per model. streamSimple resolves once in buildBaseOptions and the api again, so
+	// two levels can meet in one request. callCostBound and the model guard read every level (samplingLayers).
+	const simple = nestedPiAi("api", "simple-options.js");
+	assert.match(simple, /export function resolveSamplingParams\(model, thinkingLevel, requestParams\) \{\s*const effectiveThinkingLevel = clampThinkingLevel\(model, thinkingLevel\);\s*const thinkingLevelParams = model\.samplingParamsByThinkingLevel\?\.\[effectiveThinkingLevel\];\s*return model\.samplingParams \|\| thinkingLevelParams \|\| requestParams\s*\? \{ \.\.\.model\.samplingParams, \.\.\.thinkingLevelParams, \.\.\.requestParams \}\s*: undefined;\s*\}/, "resolveSamplingParams' merge moved");
+	assert.match(simple, /export function buildBaseOptions\(model, context, options, apiKey\) \{\s*const samplingParams = resolveSamplingParams\(model, options\?\.reasoning \?\? "off", options\?\.samplingParams\);/, "streamSimple's first resolution moved");
+	// The model fields any of pi-ai reads sampling parameters from: exactly the two the guards read as layers.
+	const fields = new Set();
+	const walk = (dir) => {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			if (entry.isDirectory()) walk(join(dir, entry.name));
+			else if (entry.name.endsWith(".js")) for (const match of readFileSync(join(dir, entry.name), "utf8").matchAll(/\bmodel\??\.(sampling\w*)/g)) fields.add(match[1]);
+		}
+	};
+	walk(join(apiDir, ".."));
+	assert.deepEqual([...fields].sort(), ["samplingParams", "samplingParamsByThinkingLevel"], "a new model field feeds the request's sampling parameters: samplingLayers must read it");
 	// PR #534's review: the box pi fits an image into before it enters the conversation, the per-image ceiling's input.
 	const resize = agentDistFile("utils", "image-resize-core.js");
 	assert.match(resize, new RegExp(`maxWidth: ${IMAGE_RESIZE_MAX.width},\\s*maxHeight: ${IMAGE_RESIZE_MAX.height},`), "pi's default image resize box moved -- IMAGE_RESIZE_MAX must follow it");
@@ -1832,8 +1879,8 @@ test("the child route's own files: the preload imports no pi module, the child m
 	const runtimeSrc = readFileSync(runtimePath, "utf8");
 	assert.match(runtimeSrc, /^export class ModelRuntime \{/m, "model-runtime.js no longer declares the class the hook hands over");
 	const runtimeUrl = pathToFileURL(runtimePath).href;
-	// pi's own pi-ai copy, as model-runtime.js resolves it (the nested one; its exports map gives both subpaths).
-	const nestedAi = join(agentPackageDir(), "node_modules", "@earendil-works", "pi-ai");
+	// pi's own pi-ai copy, as model-runtime.js resolves it (piOwnPackageDir; its exports map gives both subpaths).
+	const nestedAi = piOwnPackageDir("pi-ai");
 	const aiExports = JSON.parse(readFileSync(join(nestedAi, "package.json"), "utf8")).exports;
 	assert.ok(aiExports["./compat"] && aiExports["./providers/*"], "model-runtime.js's pi-ai no longer exports ./compat and ./providers/*");
 	const next = (specifier) => ({ url: specifier === "@earendil-works/pi-ai/compat" ? pathToFileURL(join(nestedAi, "dist", "compat.js")).href : specifier === "@earendil-works/pi-ai/providers/all" ? pathToFileURL(join(nestedAi, "dist", "providers", "all.js")).href : specifier, format: "module" });

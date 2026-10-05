@@ -91,7 +91,7 @@ function overlayDeclares(overlay, provider, id) {
 
 /**
  * Would pi COMPOSE this overlay provider (PR #536's review)? A file that passes pi's schema can still lose a provider
- * at the next step: pi 0.99.1's `applyModelsJson` and `modelFromJson` (`pi-coding-agent/dist/core/provider-composer.js`)
+ * at the next step: the pinned pi's `applyModelsJson` and `modelFromJson` (`pi-coding-agent/dist/core/provider-composer.js`)
  * throw for `oauth` with no `baseUrl`, and per model no resolvable `api` or
  * `baseUrl`, or a `contextWindow` or `maxTokens` at or below zero. pi then keeps the provider's BUILTIN models
  * (`ModelRuntime.composeProvider` falls back to the base) and drops every model the overlay added, so such a model

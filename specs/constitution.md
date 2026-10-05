@@ -969,8 +969,9 @@ passing, on the record — issue #80.)
 
 ## CONST-PI-VERSION-PINNED
 
-- **Statement**: The job image shall pin an exact pi version (currently **0.99.1**). Upgrading is an
-  explicit commit that changes a version string, gated by the upstream contract tests.
+- **Statement**: The job image shall pin an exact pi version (the one `image/runner/package.json` pins for
+  `@earendil-works/pi-coding-agent`). Upgrading is an explicit commit that changes a version string, gated by
+  the upstream contract tests.
 - **Why**: pi breaks between **minors**, not just majors — a past regression silently dropped
   `sendUserMessage` after `newSession`, and the npm package was renamed from `@mariozechner` to
   `@earendil-works` mid-flight. A floating range turns a silent upstream minor into every queued job
@@ -983,6 +984,10 @@ passing, on the record — issue #80.)
   `[Unreleased]` change shipped before `0.99.1`, the pin since issue #509, whose bump is the worked example
   of this entry: the model/auth wiring, the usage meter's choke point, the stop reasons, a key variable and
   the steering set all moved between two exact version strings, and the move was one reviewed commit.
+  pi 1.0.1 removed the shrinkwrap that used to lock pi's own sibling packages (pi-ai, pi-agent-core, pi-tui
+  and the rest), and pi-coding-agent depends on them by a range, so an exact pin on pi-coding-agent no
+  longer fixes them by itself (issue #587, the 1.0.3 bump). The root `package.json` therefore carries an
+  `overrides` entry pinning every `@earendil-works` package to the same version.
   **Two upgrade gates now hang off this entry rather than one** (issue #314). `findEnvKeys` was the first:
   it answers which variable a provider's key is read from, and `worker/test/env-allowlist.test.mjs` round
   trips it. The second is `PROVIDER_STEERING_VARS`, which answers which variables STEER a provider -- where
@@ -995,7 +1000,11 @@ passing, on the record — issue #80.)
   nothing happening, and here the failure mode is a trigger choosing the host this deployment's own
   credential is sent to.
 - **Traces to**: `REQ-UPSTREAM-CONTRACT-TESTS`, `OQ-005`
-- **Acceptance**: `package.json` / Dockerfile contain no `^` or `~` on any pi package. An **operator-staged
+- **Acceptance**: `package.json` / Dockerfile contain no `^` or `~` on any pi package. Every
+  `@earendil-works` entry in `package-lock.json`, every such entry in the root `overrides`, the worker's
+  pi-ai, the admin devDependency, `SUPPORTED_PI_VERSION` and the Dockerfile's `PI_VERSION` equal the runner's
+  pin (`.github/scripts/pi-pin-check.mjs`, run by the `pins are exact` job and tested by
+  `worker/test/pi-pin-check.test.mjs`). An **operator-staged
   third-party pi package** is pinned by the same reasoning and is enforced at **stage time**, not here: the
   version in `pi-packages.json` must be exact and `import-pi --with-packages` refuses a range, a tag, or a
   wildcard and stages nothing (`INT-PI-PACKAGES-FILE-CONTRACT`). This constraint's own statement and scope
@@ -1014,6 +1023,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-05 | Issue #587 (pi 1.0.3). **`CONST-PI-VERSION-PINNED` AMENDED**: the Statement names the pin's file (`image/runner/package.json`) instead of a number, so a bump no longer edits this article; the Evidence records that pi 1.0.1 dropped the shrinkwrap that locked pi's own sibling packages and that pi-coding-agent depends on them by a range, so the root `package.json` pins every `@earendil-works` package in `overrides`; the Acceptance adds that every pi entry in the lockfile, every pi override and every hand-written copy of the pin equal the runner's pin (`.github/scripts/pi-pin-check.mjs`, in the `pins are exact` job). The pin itself moves from 0.99.1 to 1.0.3 in the same commit. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new refusals (a routing key under any thinking level, an Azure deployment option on provider `azure`) are the model guard's and the cost guard's, inside the container before a provider call, and no worker gate moved; the renamed Azure provider is refused before any spend as any id pi does not have, now with the new id named. **`CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: the new script and workflow step merge nothing and name no merge call. |
 | 2026-10-04 | Found this round (no issue): a scheduled job whose run finished while Valkey was unreachable longer than the lock renewal window was run again, paid. **`CONST-RETRY-INFRA-ONLY` AMENDED**, the Why only: a scheduled job that stalls after its completion was recorded is returned as its record says, without running (the processor's lost-lock gate: `stalledCounter > 0`, `attempt` equal to `attemptsMade + 1`, outcome not `failed`, started no earlier than the job less a 5 minute clock tolerance; a record found and refused is logged as `job_lost_lock_record_rejected`); a job with no such record runs as before, and the stall guard still counts the stall. The Statement and Acceptance are UNCHANGED, checked: a re-run of a completed job was a retry of a determinate outcome, which the Statement already forbids. **Code evidence**: worker/src/index.mjs -> makeProcessor (the first gate); worker/src/run-history.mjs -> makeSettledRecord. |
 | 2026-10-04 | Issue #504, part A (delegated allocation: the doctrine and the pure modules). **No article changed.** **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the ordering is untouched; a delegated allocation changes only the values the dollar reserve compares against (a project's cap becomes the smaller of its row and its allocation), never when the reserve runs. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the operator's session still processes no adversarial input by premise; a model there that reads issue text breaks that premise, and `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` names it as a residual of the session tool, whose judgement belongs in a portfolio job (issue #505). |
 | 2026-10-02 | Issue #501, parts 3 and 4, and #503 part 7 (dollar windows, reserved before the run and settled after it). **`CONST-BUDGET-BEFORE-TOKENS` AMENDED**: the Statement is the issue's: every spend cap is checked and reserved before a run, there are two ledgers (a job count and, when configured, dollars), a dollar reservation is the job's per-job cap held against every window that applies and replaced after the run by the metered cost or kept whole when the cost is not fully known, and the per-job cap is enforced in the container before each call; the constraint governs the ordering, the same for both ledgers. The Why gains why dollars reserve after both job-count reserves and before the container, why the amount is the per-job cap, why a refused dollar reservation is given back (the one departure from "a refused slot still counts"), and why a zero-rated local job reserves nothing yet keeps the ordering (a cap of 0 before each call). The Acceptance gains: given a dollar window is exhausted, a new trigger consumes zero provider tokens. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: `dollar-cap` is a returned policy refusal; a Valkey fault in the dollar reserve is a never-started retry that refunds both ledgers. **Code evidence**: worker/src/dollar-budget.mjs; worker/src/processor.mjs -> runJob, isNeverStartedExit. The Statement says at least the reservation when the cost is not fully known, and that the per-job cap bounds what a job can spend before it runs, with the residuals named in `DES-DOLLAR-RESERVE-AND-SETTLE`, rather than that a job cannot spend more than it reserved. |

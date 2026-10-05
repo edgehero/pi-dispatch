@@ -10,6 +10,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,9 @@ import { calculateCost } from "@earendil-works/pi-ai";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "../src/pricing.mjs";
+
+/** The pi-ai release worker/package.json pins: what every price here is read from. */
+const PINNED_PI_AI = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["@earendil-works/pi-ai"];
 
 /** A full zeroed quad with overrides -- reprice's input shape. */
 const quad = (overrides = {}) => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, ...overrides });
@@ -128,7 +132,7 @@ test("reprice at 300k input on gpt-5.4 prices the WHOLE request at tier rates", 
 	const result = reprice(quad({ input: 300000, output: 10000 }), GPT54);
 	// 300000 > 272000 -> tier {5, 22.5}. Expected mirrors pi-ai's operand order for bit-exactness.
 	assert.equal(result.usd, (5 / 1e6) * 300000 + (22.5 / 1e6) * 10000);
-	assert.equal(result.ratesVersion, "0.99.1");
+	assert.equal(result.ratesVersion, PINNED_PI_AI, "stamped with the pinned release");
 });
 
 test("reprice at 100k input on gpt-5.4 stays on base rates", () => {
@@ -234,12 +238,17 @@ test("piAiVersion with a throwing reader is null, never a throw", () => {
 	assert.equal(piAiVersion({ readText }), null);
 });
 
-test("piAiVersion default path resolves the real pin -- a bump must update this test consciously", () => {
+test("piAiVersion default path resolves the real pin, and the pricing surface is the file this façade was verified against", () => {
 	// The real file, found the same way the façade finds it: from the resolved ESM entry (dist/index.js)
 	// up to the package root. pi-ai's exports map has no ./package.json entry, so disk is the only way.
 	const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
 	const realPackage = JSON.parse(readFileSync(join(dirname(entry), "..", "package.json"), "utf8"));
 	assert.equal(piAiVersion(), realPackage.version);
-	assert.equal(realPackage.version, "0.99.1", "pi-ai pin bumped: re-verify the pricing surface, then update this pin");
+	assert.equal(realPackage.version, PINNED_PI_AI, "the installed pi-ai is not worker/package.json's pin");
+	// The pricing surface by CONTENT, not by version (issue #587): calculateCost lives in dist/models.js, and a
+	// version literal went red on every bump whether that file moved or not. Re-verified at 1.0.3: models.js
+	// changed only in its OAuth refresh; calculateCost is byte-identical to 0.99.1's.
+	const models = readFileSync(join(dirname(entry), "models.js"));
+	assert.equal(createHash("sha256").update(models).digest("hex"), "633161a0067abbb20a434acc3605f8f25d2fa6d32f903cc7edcdcaa7e0ba7083", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
 	assert.equal(piAiVersion(), piAiVersion(), "cached: repeated calls agree");
 });

@@ -66,7 +66,7 @@ import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
-import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
+import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, RENAMED_PROVIDERS, baseUrlTarget, keylessVerdict, loadModelEndpoints, providerRenameHint, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows, parseScopeString } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -2692,7 +2692,20 @@ export async function collectChecks(shellVars, seams) {
 				// `overlayProviderProblem`). pi drops that whole entry, so the worker refuses every job on the provider.
 				const providers = overlayModels?.providers;
 				for (const name of providers !== null && typeof providers === "object" && !Array.isArray(providers) ? Object.keys(providers) : []) {
-					const problem = overlayProviderProblem(providers[name], name);
+					// Issue #587: an entry under an id pi renamed that lacks what a provider of its own needs (an api, a baseUrl
+					// and models). It was an override of the builtin provider; under the new pi it is a custom provider with no
+					// models, so it overrides nothing, and the builtin models it meant run with their own (empty) baseUrl.
+					const entry = providers[name];
+					if (Object.hasOwn(RENAMED_PROVIDERS, name) && entry !== null && typeof entry === "object" && !Array.isArray(entry) && (entry.api === undefined || entry.baseUrl === undefined || !Array.isArray(entry.models))) {
+						const renamedTo = RENAMED_PROVIDERS[name];
+						checks.push({
+							ok: false,
+							warn: true,
+							label: `Overlay models.json entry ${JSON.stringify(name)} no longer overrides anything: pi 1.0.3 renamed that provider to ${JSON.stringify(renamedTo)}, so this entry is now a provider of its own with no models, and the ${renamedTo} models do not get its settings`,
+							fix: `rename the entry to ${JSON.stringify(renamedTo)} in ${modelsPath} (and every ${name}/ model reference in the triggers to ${renamedTo}/), then re-run doctor`,
+						});
+					}
+					const problem = overlayProviderProblem(entry, name);
 					if (problem === null) continue;
 					checks.push({
 						ok: false,
@@ -4241,10 +4254,14 @@ function noKeyVariableCheck(provider, oracle, keyless = null) {
 	const owner = oracle.piProviders().find((id) => oracle.providerKeyCandidates(id).includes(wanted));
 	// Why a custom provider the overlay defines is not keyless, when it is one: the one fact the operator has to change.
 	const why = verdict.why ? `; it is not keyless because ${verdict.why}` : "";
+	// Issue #587: an id pi renamed (azure-openai-responses is `azure` since pi 1.0.3), named, unless the overlay declares it.
+	const renamed = providerRenameHint(provider, { models: keyless?.models ?? null, piProviders: oracle.piProviders() });
 	return {
 		ok: false,
-		label: `PI_PROVIDER is ${JSON.stringify(provider)}, which is not a provider pi has${why}`,
-		fix: owner
+		label: `PI_PROVIDER is ${JSON.stringify(provider)}, which is not a provider pi has${why}${renamed ? `;${renamed}` : ""}`,
+		fix: renamed
+			? `set PI_PROVIDER=${RENAMED_PROVIDERS[provider]}, and rename the provider in every trigger's model and allowed-models entries and in models.json the same way (docs/triggers.md)`
+			: owner
 			? `set PI_PROVIDER=${owner}, the provider pi reads ${wanted} from -- or unset it for the default \`anthropic\`; or, ${KEYLESS_HOW}`
 			: `set PI_PROVIDER to a provider id pi has, or unset it for the default \`anthropic\`: ${oracle.piProviders().join(", ")}; or, ${KEYLESS_HOW}`,
 	};

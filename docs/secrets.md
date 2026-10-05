@@ -407,7 +407,11 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    is rejected and `doctor` says so, rather than per delivery.
    `ANTHROPIC_CUSTOM_HEADERS` and `OPENAI_CUSTOM_HEADERS` are refused too: a line in either naming the
    credential header replaces your key with the trigger's (measured at pi 0.99.1).
-   `ANTHROPIC_AUTH_TOKEN` stays refused for every trigger, whichever provider the job runs on.
+   `ANTHROPIC_AUTH_TOKEN` stays refused for every trigger, whichever provider the job runs on. So do the
+   five variables pi reads for Anthropic workload identity federation when no key is set
+   (`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_IDENTITY_TOKEN_FILE`,
+   `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID`): the organization and workspace decide who pays.
+   A job cannot use federation; it gets an API key.
    The list is not maintained by hand: it is extracted from the pinned pi and from every package pi builds
    a client with, and a test compares the two in both directions, so an upgrade that starts reading a new
    variable fails the build. The scan also reads those packages' own dependencies, one level down. That

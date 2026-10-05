@@ -61,7 +61,10 @@ Two consequences worth internalising before you design anything:
   that can never succeed, or dropping real work behind a silent success.
 - **Exact pins only** (`CONST-PI-VERSION-PINNED`). No `^`, `~`, `latest` or a floating tag for pi, for
   staged pi packages, or for image bases. A floating range turns an upstream release into every queued job
-  quietly losing a tool while the queue still reports success.
+  quietly losing a tool while the queue still reports success. pi depends on its own sibling packages by a
+  range and ships no shrinkwrap since 1.0.1, so the root `package.json` pins every `@earendil-works` package in
+  `overrides`; `.github/scripts/pi-pin-check.mjs` holds those, the lockfile and every hand-written copy of the
+  pin to the runner's. A copy of a pi file's logic is pinned by that file's content hash, not by pi's version.
 - **No secrets or PII in logs.** Log key *names*, never values, and never payload text. The run record is
   PII-free by construction: it holds no attacker-chosen string.
 - **Fail loudly, or fail open and say which.** A silent no-op is the worst outcome available here. If a

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readPidNamespace, runnerIdentity } from "./child-route.mjs";
 import { parseAllowedModels, parseCostMicros } from "./config.mjs";
@@ -47,12 +47,12 @@ import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, MODEL_NOT_ALLOWED, MODEL
  *
  * Traps, each verified by probe rather than by reading source:
  *
- * 1. A BARE pi-ai SPECIFIER IS NEVER THE COPY pi USES. Where the WORKER's deps are installed too (a dev
- *    checkout, the contract-tests job) pi-ai is on disk TWICE, with separate module-level registries: the
- *    hoisted `node_modules/@earendil-works/pi-ai` (the WORKER's dependency) and the nested
- *    `node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai`, which pi uses. The
- *    job image installs the runner's deps only, and there the nested copy is the only copy. Hence: no
- *    static pi import anywhere in this file. The ModelRuntime CLASS is injected by run-job.mjs, which
+ * 1. A BARE pi-ai SPECIFIER IS NOT ASSUMED TO BE THE COPY pi USES. Up to pi 0.99.1, where the WORKER's deps
+ *    were installed too (a dev checkout, the contract-tests job), pi-ai was on disk TWICE, with separate
+ *    module-level registries: the hoisted one (the WORKER's dependency) and the one nested under
+ *    pi-coding-agent by its shrinkwrap, which pi used. pi 1.0.1 dropped the shrinkwrap and the root `overrides`
+ *    now pin every pi package to one version, so at the 1.0.3 pin there is one copy; but a layout is a fact
+ *    about one install, not a guarantee (issue #587). Hence: no static pi import anywhere in this file. The ModelRuntime CLASS is injected by run-job.mjs, which
  *    imports it from pi-coding-agent itself, so there is no candidate to choose between; and the compat
  *    half's copy is decided at runtime by IDENTITY with the module pi hands its extensions
  *    (installProcessUsageMeter), never by a resolved path.
@@ -988,41 +988,66 @@ function tryResolve(resolve, specifier) {
 }
 
 /**
+ * The package directory of the copy of `@earendil-works/<name>` that pi-coding-agent's OWN bare imports resolve
+ * to, or null. Found by identity of position, not by a fixed path: pi-coding-agent's package root is located from
+ * its resolved entry, and then Node's own lookup for a bare import made from inside that package is walked (its
+ * `node_modules`, then each ancestor's, skipping a directory that is itself a `node_modules`). Whatever npm does
+ * with the tree, the first hit is the file pi's own `import "@earendil-works/<name>"` loads.
+ *
+ * Why not a fixed nested path (issue #587): up to pi 0.99.1 pi-coding-agent shipped an npm-shrinkwrap.json, so
+ * pi-ai and pi-agent-core were always NESTED under it, and every site that wanted pi's copy hard-coded
+ * `pi-coding-agent/node_modules/@earendil-works/...`. pi-coding-agent 1.0.1 dropped the shrinkwrap; at 1.0.3 the
+ * siblings dedupe to the top level and every one of those paths named a file that no longer exists. Why not
+ * `createRequire(entry).resolve`: pi's packages export only an `import` condition (and no ./package.json), so the
+ * CJS resolver throws ERR_PACKAGE_PATH_NOT_EXPORTED. `resolve` and `exists` are injected so this stays pure.
+ */
+export function piOwnPackageDir(name, { resolve = (spec) => import.meta.resolve(spec), exists = defaultExists } = {}) {
+	const agentEntry = tryResolve(resolve, "@earendil-works/pi-coding-agent");
+	if (!agentEntry) return null;
+	// dist/index.js -> dist -> package root.
+	for (let dir = dirname(dirname(fileURLToPath(agentEntry))); ; dir = dirname(dir)) {
+		if (basename(dir) !== "node_modules") {
+			const candidate = join(dir, "node_modules", "@earendil-works", name);
+			if (exists(pathToFileURL(join(candidate, "package.json")).href)) return candidate;
+		}
+		if (dirname(dir) === dir) return null;
+	}
+}
+
+/**
  * The ORDERED compat candidate list, most-likely-correct first.
  *
  * WHY pi-ai IS NOT IN THE RUNNER'S package.json, even though this module depends on it. What the
  * meter needs is not "a pi-ai" but pi-coding-agent's OWN pi-ai -- the copy pi hands its extensions (trap
  * #1 above). No dependency declaration can express that: a declared `@earendil-works/pi-ai` is a request
- * for a copy at the runner's own tree position, which npm may satisfy by hoisting a THIRD one, and the
+ * for a copy at the runner's own tree position, which npm may satisfy with a different one, and the
  * meter would then have more wrong answers to choose between, not fewer. So the dependency stays
  * deliberately undeclared and the binding is settled where it can actually be settled: at runtime, by the
  * identity check in installProcessUsageMeter. (package.json admits no comment, which is why this note lives
  * here.)
  *
- * NESTED first because pi-coding-agent's own imports resolve there. HOISTED second only as a degraded
- * fallback for a flattened install tree where the nested copy does not exist. This ordering is a
- * hypothesis, not a conclusion -- installProcessUsageMeter proves a candidate before trusting it, because
- * `import.meta.resolve` is exactly the thing that lies here. Also read by the image contract job
- * (.github/workflows/pi-upgrade-check.yml), and by loadRetryPredicate for a runner whose compat half did
- * not install.
+ * pi's OWN copy first (`pi`, piOwnPackageDir): the file pi-coding-agent's own imports resolve to, whatever the
+ * layout. A bare specifier from this file (`hoisted`) second, only when it names ANOTHER file, as a degraded
+ * fallback. At the 1.0.3 pin the two are one file in a dev checkout (the root `overrides` pin every pi package to
+ * one version, so npm keeps one copy) and in the image (only the runner's tree is installed), so the list has one
+ * entry. The ordering is a hypothesis, not a conclusion -- installProcessUsageMeter proves a candidate before
+ * trusting it, because a resolved path is exactly the thing that lies here. Also read by the image contract job
+ * (.github/workflows/pi-upgrade-check.yml), and by loadRetryPredicate for a runner whose compat half did not
+ * install.
  *
  * `resolve` and `exists` are injected so this stays pure and testable.
  */
 export function resolvePiAiCompat({ resolve = (spec) => import.meta.resolve(spec), exists = defaultExists } = {}) {
 	const candidates = [];
 
-	const agentEntry = tryResolve(resolve, "@earendil-works/pi-coding-agent");
-	if (agentEntry) {
-		// dist/index.js -> dist -> package root.
-		const packageDir = dirname(dirname(fileURLToPath(agentEntry)));
-		const nested = pathToFileURL(
-			join(packageDir, "node_modules", "@earendil-works", "pi-ai", "dist", "compat.js"),
-		).href;
-		if (exists(nested)) candidates.push({ tag: "nested", url: nested });
+	const own = piOwnPackageDir("pi-ai", { resolve, exists });
+	if (own) {
+		const url = pathToFileURL(join(own, "dist", "compat.js")).href;
+		if (exists(url)) candidates.push({ tag: "pi", url });
 	}
 
 	const hoisted = tryResolve(resolve, "@earendil-works/pi-ai/compat");
-	if (hoisted) candidates.push({ tag: "hoisted", url: hoisted });
+	if (hoisted && !candidates.some((candidate) => candidate.url === hoisted)) candidates.push({ tag: "hoisted", url: hoisted });
 
 	return candidates;
 }
@@ -1479,7 +1504,7 @@ export function policyEnforcement(handle) {
 // pi-ai rates are dollars per million tokens, so tokens x rate is already micro-dollars.
 
 /**
- * The api ids whose provider prices a call from the model's cost table, at the 0.99.1 pin: exactly the
+ * The api ids whose provider prices a call from the model's cost table, at the pin (re-verified at 1.0.3): exactly the
  * dist/api modules that reach pi-ai's `calculateCost` (directly, or through openai-responses-shared.js and
  * system-one-shared.js). pinned-api.test.mjs derives that set from the pinned source and requires it to equal
  * this list, so a new priced api fails the pin rather than the budget. An api NOT here prices itself or not at
@@ -1607,7 +1632,7 @@ function sendsMaxTokens(model, options) {
  * Infinity when the call cannot be bounded (the guard refuses those under a cap). Pure. `env` is the process
  * environment, injected (PI_CACHE_RETENTION).
  *
- * The steps, each a fact about pi-ai 0.99.1 that pinned-api.test.mjs holds by needle:
+ * The steps, each a fact about the pinned pi-ai (re-verified at 1.0.3) that pinned-api.test.mjs holds by needle:
  *   1. An api outside PRICED_APIS: Infinity.
  *   2. The rate tables: model.cost, each compat.allowedFallbackModels cost (anthropic-messages bills a fallback
  *      answer at the fallback's rates), each table's `tiers` entry that the input could reach, and, for a table
@@ -1726,9 +1751,9 @@ export function callCostBound(method, model, context, options, env = process.env
 }
 
 /**
- * The apis that merge `model.samplingParams` and `options.samplingParams` into the request AFTER the output cap
- * (`Object.assign(params, model.samplingParams, options?.samplingParams)`, pinned by needle), so a key there
- * overrides it. Issue #501, PR #534's review.
+ * The apis that merge the resolved sampling parameters into the request AFTER the output cap
+ * (`Object.assign(params, samplingParams)` on `resolveSamplingParams(model, level, options?.samplingParams)`, pinned
+ * by needle), so a key there overrides it. Issue #501, PR #534's review.
  */
 const SAMPLING_OVERRIDE_APIS = new Set(["openai-completions", "openai-responses", "azure-openai-responses"]);
 const SAMPLING_OUTPUT_KEYS = Object.freeze(["max_tokens", "max_completion_tokens", "max_output_tokens"]);
@@ -1740,37 +1765,71 @@ const SAMPLING_OUTPUT_KEYS = Object.freeze(["max_tokens", "max_completion_tokens
 export const SAMPLING_SAFE_KEYS = Object.freeze(["temperature", "top_p", "top_k", "seed", "stop", "presence_penalty", "frequency_penalty", ...SAMPLING_OUTPUT_KEYS, "n"]);
 
 /**
- * Whether a call's samplingParams (the model's, then the call's) hold a key outside SAMPLING_SAFE_KEYS on an api that
- * merges them into the request AFTER it is built, so the key overrides the request itself: its price for the cost
- * guard, and for the model guard its `model` (issue #502, PR #538's review). One rule, read by both guards.
+ * Every sampling-parameter object that can reach a call's request, or null when one cannot be read (fail closed).
+ * pi 1.0.2 added `model.samplingParamsByThinkingLevel` (issue #587): `resolveSamplingParams` merges
+ * `{ ...model.samplingParams, ...byLevel[level], ...options.samplingParams }`, with the level clamped per model and
+ * chosen per call, and streamSimple resolves twice (buildBaseOptions, then the api), so keys of two levels can meet in
+ * one request. The guards track no level: they read EVERY level, the model's own params and the call's, as layers.
+ * A key in any layer counts, and an output bound takes the largest value any layer holds.
  */
-export function samplingOverridesRequest(model, options) {
-	if (!SAMPLING_OVERRIDE_APIS.has(model?.api)) return false;
-	const merged = { ...(model?.samplingParams ?? {}), ...(options?.samplingParams ?? {}) };
-	return Object.keys(merged).some((key) => !SAMPLING_SAFE_KEYS.includes(key));
+function samplingLayers(model, options) {
+	const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+	const layers = [];
+	for (const layer of [model?.samplingParams, options?.samplingParams]) {
+		if (layer === undefined || layer === null) continue;
+		if (!isObject(layer)) return null;
+		layers.push(layer);
+	}
+	const byLevel = model?.samplingParamsByThinkingLevel;
+	if (byLevel !== undefined && byLevel !== null) {
+		if (!isObject(byLevel)) return null;
+		for (const layer of Object.values(byLevel)) {
+			if (layer === undefined || layer === null) continue;
+			if (!isObject(layer)) return null;
+			layers.push(layer);
+		}
+	}
+	return layers;
 }
 
 /**
- * The output bound once samplingParams have had their say: the larger of the bound and any output-cap key there,
- * times `n` (completions answer n choices, each up to the cap). A key that is present but not a positive finite
- * number (null sends the provider's default; a string is whatever the server makes of it) is Infinity.
+ * Whether a call's sampling layers (samplingLayers: the model's, every thinking level's, the call's) hold a key
+ * outside SAMPLING_SAFE_KEYS on an api that merges them into the request AFTER it is built, so the key overrides the
+ * request itself: its price for the cost guard, and for the model guard its `model` (issue #502, PR #538's review).
+ * One rule, read by both guards. A layer that cannot be read counts as such a key.
+ */
+export function samplingOverridesRequest(model, options) {
+	if (!SAMPLING_OVERRIDE_APIS.has(model?.api)) return false;
+	const layers = samplingLayers(model, options);
+	if (layers === null) return true;
+	return layers.some((layer) => Object.keys(layer).some((key) => !SAMPLING_SAFE_KEYS.includes(key)));
+}
+
+/**
+ * The output bound once the sampling layers have had their say: the larger of the bound and any output-cap key in
+ * ANY layer, times the largest `n` in any layer (completions answer n choices, each up to the cap). Taken across
+ * layers rather than on one merged object, so whichever level pi picks, and whichever layers meet in the request, the
+ * bound is not lower than what is sent. A key that is present but not a positive finite number (null sends the
+ * provider's default; a string is whatever the server makes of it) is Infinity.
  */
 function samplingOutput(model, options, output) {
 	if (!SAMPLING_OVERRIDE_APIS.has(model.api)) return output;
 	if (samplingOverridesRequest(model, options)) return Infinity;
-	const merged = { ...(model.samplingParams ?? {}), ...(options?.samplingParams ?? {}) };
 	const positive = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
 	let bound = output;
-	for (const key of SAMPLING_OUTPUT_KEYS) {
-		if (!Object.hasOwn(merged, key)) continue;
-		if (!positive(merged[key])) return Infinity;
-		bound = Math.max(bound, merged[key]);
+	let choices = 1;
+	for (const layer of samplingLayers(model, options)) {
+		for (const key of SAMPLING_OUTPUT_KEYS) {
+			if (!Object.hasOwn(layer, key)) continue;
+			if (!positive(layer[key])) return Infinity;
+			bound = Math.max(bound, layer[key]);
+		}
+		if (Object.hasOwn(layer, "n")) {
+			if (!positive(layer.n) || !Number.isInteger(layer.n)) return Infinity;
+			choices = Math.max(choices, layer.n);
+		}
 	}
-	if (Object.hasOwn(merged, "n")) {
-		if (!positive(merged.n) || !Number.isInteger(merged.n)) return Infinity;
-		bound *= merged.n;
-	}
-	return bound;
+	return bound * choices;
 }
 
 /** pi's default image resize box (pi-coding-agent utils/image-resize-core.js, pinned by needle). */
@@ -2122,16 +2181,19 @@ const FALLBACK_API = "anthropic-messages";
 const SAMPLING_ROUTING_KEYS = Object.freeze(["model", "modelId", "models", "fallbacks", "providerOptions"]);
 
 /**
- * Whether a call's samplingParams (the model's, then the call's) name a routing key (SAMPLING_ROUTING_KEYS), on the three
- * apis that merge them into the request after it is built (`Object.assign(params, model.samplingParams,
- * options?.samplingParams)`, pinned). Only those keys, by decision (PR #538's review, round 2): any other key (`min_p`,
- * `reasoning_effort`, `chat_template_kwargs`, `service_tier`) changes how the model answers, never which model
- * answers, so it passes under a list alone. The cost guard keeps its own, wider price rule (`samplingOverridesRequest`).
+ * Whether a call's sampling layers (samplingLayers: the model's samplingParams, EVERY samplingParamsByThinkingLevel
+ * level, the call's) name a routing key (SAMPLING_ROUTING_KEYS), on the three apis that merge them into the request
+ * after it is built (`resolveSamplingParams`, pinned). Every level, because pi picks the level per call (issue #587).
+ * Only those keys, by decision (PR #538's review, round 2): any other key (`min_p`, `reasoning_effort`,
+ * `chat_template_kwargs`, `service_tier`) changes how the model answers, never which model answers, so it passes under
+ * a list alone. The cost guard keeps its own, wider price rule (`samplingOverridesRequest`). A layer that cannot be
+ * read routes, so a list refuses it.
  */
 function samplingRoutes(model, options) {
 	if (!SAMPLING_OVERRIDE_APIS.has(model?.api)) return false;
-	const merged = { ...(model?.samplingParams ?? {}), ...(options?.samplingParams ?? {}) };
-	return SAMPLING_ROUTING_KEYS.some((key) => Object.hasOwn(merged, key));
+	const layers = samplingLayers(model, options);
+	if (layers === null) return true;
+	return layers.some((layer) => SAMPLING_ROUTING_KEYS.some((key) => Object.hasOwn(layer, key)));
 }
 
 /**
@@ -2264,8 +2326,15 @@ function payloadAfterHook(before, result) {
 	return ordered;
 }
 
-/** The azure-openai-responses options that pick the deployed model instead of model.id (azure-openai-responses.js, pinned). */
+/**
+ * The options that pick the deployed model instead of model.id (`resolveDeploymentName` in pi-ai's
+ * api/azure-openai-config.js, pinned): read by the azure-openai-responses api for any provider, and, since pi 1.0.3,
+ * by the `azure` provider for EVERY api it serves (providers/azure.js rewrites `payload.model` in an onPayload wrapper
+ * of its own, outside this guard's, so the payload check never sees the change; issue #587). Before 1.0.3 the
+ * provider was `azure-openai-responses` and served one api.
+ */
 const AZURE_API = "azure-openai-responses";
+const AZURE_PROVIDER = "azure";
 const AZURE_DEPLOYMENT_MAP = "AZURE_OPENAI_DEPLOYMENT_NAME_MAP";
 
 /**
@@ -2299,8 +2368,8 @@ function fallbackOf(model, message) {
  *   - samplingParams naming a routing key (`samplingRoutes`, SAMPLING_ROUTING_KEYS) on the three apis that merge them
  *     after the request is built: a `model` key there replaces the requested one;
  *   - a call option `fetch`, which sends the request after every hook and so could rewrite it unseen (pi passes none);
- *   - on azure-openai-responses, `options.azureDeploymentName` or a per-call `options.env` deployment map, either of
- *     which picks the deployment instead of model.id;
+ *   - on api azure-openai-responses, and on provider `azure` whatever the api (issue #587), `options.azureDeploymentName`
+ *     or a per-call `options.env` deployment map, either of which picks the deployment instead of model.id;
  *   - on anthropic-messages, a `compat.allowedFallbackModels` entry whose pair (the model's provider and the
  *     fallback's id, which is what pi sends) is not on the list: pi sends those ids as `fallbacks`, and the provider
  *     may answer with any of them.
@@ -2340,7 +2409,7 @@ export function createModelGuard({ allowedModels, log = () => {} }) {
 		// A caller's own `fetch` sends the request after every hook ran, so it could rewrite the body unseen. pi never
 		// passes one itself (only a caller does), so under a list it is refused rather than trusted.
 		if (options?.fetch !== undefined) return "fetch";
-		if (model.api === AZURE_API && (options?.azureDeploymentName !== undefined || options?.env?.[AZURE_DEPLOYMENT_MAP] !== undefined)) return "deployment";
+		if ((model.api === AZURE_API || provider === AZURE_PROVIDER) && (options?.azureDeploymentName !== undefined || options?.env?.[AZURE_DEPLOYMENT_MAP] !== undefined)) return "deployment";
 		if (model.api === FALLBACK_API) {
 			const fallbacks = Array.isArray(model.compat?.allowedFallbackModels) ? model.compat.allowedFallbackModels : [];
 			if (fallbacks.some((fallback) => !allowed.has(pairKey(provider, fallback?.model)))) return "fallback";

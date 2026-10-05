@@ -56,7 +56,7 @@ export function completionsOwnServer(model) {
 }
 
 /**
- * The parts of a model the rule reads, composed as pi 0.99.1's provider-composer.js composes them from the overlay
+ * The parts of a model the rule reads, composed as the pinned pi's provider-composer.js composes them from the overlay
  * `models.json` (`models`, parsed, or null) and the builtin catalog (`builtinModel(provider, id)`, injected):
  *   - a model the overlay DEFINES: its own `api` and `baseUrl`, else its provider's, else those of pi's DEFAULTS
  *     model (`findModelDefaults`, mirrored in `definedDefaults`); its compat field from its `modelOverrides` entry,
@@ -94,7 +94,7 @@ export function outputCapView({ models, provider, modelId, builtinModel = () => 
 const str = (v) => (typeof v === "string" ? v : undefined);
 
 /**
- * The `{ api, baseUrl }` pi 0.99.1 composes for the overlay-defined model `modelId` (provider-composer.js
+ * The `{ api, baseUrl }` the pinned pi composes for the overlay-defined model `modelId` (provider-composer.js
  * `applyModelsJson`): the provider's chat models start as the catalog's (each on the provider's `baseUrl` when it sets
  * one), and each definition in the file's order is composed and then replaces the model of its id or joins the list.
  * A definition's `api` is its own, else the provider's, else its DEFAULTS model's, and its `baseUrl` likewise, where the

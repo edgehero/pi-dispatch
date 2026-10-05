@@ -248,8 +248,8 @@ test("two concurrent sessions: the process-wide meter sees both, the session bus
 		assert.equal(installed.ok, true, `the runtime half must install at the pin; logged ${JSON.stringify(logged)}`);
 		// Both halves healthy at the pin: the compat copy proven by identity, and the brake present, so a
 		// degraded install cannot pass here while reporting itself fine.
-		assert.equal(installed.tag, "nested", `the compat half must accept pi's own copy; logged ${JSON.stringify(logged)}`);
-		assert.equal(logged[0]?.fields?.compat, "nested");
+		assert.equal(installed.tag, "pi", `the compat half must accept pi's own copy; logged ${JSON.stringify(logged)}`);
+		assert.equal(logged[0]?.fields?.compat, "pi");
 
 		// The OTHER session's runtime is built AFTER the install, as a subagent extension's would be: the
 		// prototype wrapper must cover it without any re-arm.
