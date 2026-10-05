@@ -363,10 +363,11 @@ is an open issue.
   no `baseUrl` in pi's catalog: since pi 1.0.3 every `azure` model has none, and `azure/deepseek-v4-pro` runs on
   openai-completions, so its server is whatever you configure. The way out is yours, when that server reads
   `max_tokens`: `"providers": {"azure": {"modelOverrides": {"deepseek-v4-pro": {"compat": {"maxTokensField":
-  "max_tokens"}}}}}` in the overlay `models.json`. Also refused: a call on a model the job's own model registry
-  does not know, or one whose cost, compat or api differs from the registry's entry for it. A price is never taken
-  from the caller (an extension could pass a model with its prices set to zero). A model an extension registers with
-  `registerProvider` is in the registry. The run record says which rule
+  "max_tokens"}}}}}` in the overlay `models.json`. Also refused: a call on a model that is not in the price table
+  the job pins when it starts (pi's catalog plus your overlay `models.json`, read once, before any extension loads),
+  or one whose cost, compat or api differs from that table's entry. A price is never taken from the caller or from
+  anything that changes during the run, so a model an extension registers itself cannot run under a cap. A pi
+  process the job starts prices from the same table. The run record says which rule
   refused in its `why`: `unboundable` for these, `over-cap` when the call's bound would pass the cap, and `external`
   when the subprocesses' spend could not be read. The run detail shows it after the reason, as
   `cost-cap (unboundable: see compat.maxTokensField)`. A `cost-cap` stop with no `why` came from a subprocess, an

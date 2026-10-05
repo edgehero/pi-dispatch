@@ -53,6 +53,7 @@ import {
 	meterStopHandler,
 	openChildLedger,
 	policyEnforcement,
+	publishPriceTable,
 	resolvePiAiCompat,
 } from "./src/usage-meter.mjs";
 
@@ -266,6 +267,16 @@ async function main() {
 	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external() });
 	costRefusalWhy = () => policyGuard?.refusedWhy() ?? null;
 	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
+	// The price table the meter pinned from this runtime, before any extension loads, handed to pi children (issue #587's
+	// review): a child prices every capped call from it. A table that cannot be written leaves a child with none, which
+	// refuses its capped calls.
+	if (childLedger.dir && usageMeter.prices instanceof Map) {
+		try {
+			publishPriceTable({ dir: childLedger.dir, table: usageMeter.prices, env: process.env });
+		} catch (error) {
+			log("price_table_unavailable", { reason: error?.code ?? "write-failed" });
+		}
+	}
 	if (usageMeter.ok) {
 		meteredExitFields = () => {
 			const usage = meter.usageSnapshot();

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 // Pure: no static pi import in their module graph, so they load unconditionally and the gate below applies to pi only.
 import { createChildWatch, linuxProc } from "../src/child-watch.mjs";
 import { COST_CAP, TOKEN_BUDGET } from "../src/outcome.mjs";
-import { CHILD_LEDGER_NAME, childLedger, createUsageMeter, STOP_MESSAGES, writeFileAtomic } from "../src/usage-meter.mjs";
+import { CHILD_LEDGER_NAME, childLedger, createUsageMeter, pinPriceTable, publishPriceTable, STOP_MESSAGES, writeFileAtomic } from "../src/usage-meter.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -58,6 +58,19 @@ export default function fakeProvider(pi) {
 	});
 }
 `;
+
+/**
+ * Publish the parent's price table for the fake model into the world's ledger directory, as the runner does (issue
+ * #587's review): a pi child prices every capped call from the parent's table, and the fake provider is an extension
+ * the parent never saw, so without this a capped child refuses its first call.
+ */
+function priceFake(w, api) {
+	const env = {};
+	const model = { provider: "fake", id: "m1", api, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" } };
+	publishPriceTable({ dir: w.ledger, table: pinPriceTable({ getAllModels: () => [model] }), env });
+	Object.assign(w.env, env);
+	return w;
+}
 
 function world({ api = "pi-dispatch-child-fake" } = {}) {
 	const root = tempDir("pi-dispatch-watch-it-");
@@ -141,7 +154,7 @@ test("a parent plus a pi child pushed over maxTokens: STOP is written and the ch
 
 test("the same under a dollar cap: the child judges against SPENT, the parent stops cost-cap and the child is braked (issue #500)", { skip }, async () => {
 	// A priced api, so the child's guard has a finite bound to judge.
-	const w = world({ api: "openai-completions" });
+	const w = priceFake(world({ api: "openai-completions" }), "openai-completions");
 	const cap = 1_000_000;
 	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
 	let own = { spentMicros: 900_000, inflightMicros: 0 };

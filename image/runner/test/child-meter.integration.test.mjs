@@ -6,7 +6,7 @@ import { crc32, deflateSync } from "node:zlib";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 // Pure: no static pi import in their module graph, so they load unconditionally and the gate below applies to pi only.
-import { CHILD_LEDGER_NAME, foldChildLedgers, parseChildLedger, resolvePiAiCompat, spentFile, STOP_MESSAGES, stopFile, writeFileAtomic } from "../src/usage-meter.mjs";
+import { CHILD_LEDGER_NAME, foldChildLedgers, parseChildLedger, pinPriceTable, publishPriceTable, resolvePiAiCompat, spentFile, STOP_MESSAGES, stopFile, writeFileAtomic } from "../src/usage-meter.mjs";
 import { TOKEN_BUDGET } from "../src/outcome.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -66,6 +66,19 @@ export default function fakeProvider(pi) {
 `;
 
 /** One test's world: an agent dir, a ledger dir (0700, as mkdtemp makes it), the provider file and its call log. */
+/**
+ * Publish the parent's price table for the fake model into the world's ledger directory, as the runner does (issue
+ * #587's review): a pi child prices every capped call from the parent's table, and the fake provider is an extension
+ * the parent never saw, so without this a capped child refuses its first call.
+ */
+function priceFake(w, api) {
+	const env = {};
+	const model = { provider: "fake", id: "m1", api, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" } };
+	publishPriceTable({ dir: w.ledger, table: pinPriceTable({ getAllModels: () => [model] }), env });
+	Object.assign(w.env, env);
+	return w;
+}
+
 function world({ api = "pi-dispatch-child-fake" } = {}) {
 	const root = tempDir("pi-dispatch-child-");
 	const agentDir = join(root, "agent");
@@ -239,7 +252,7 @@ test("an off-list model is refused in the child, with modelRefused 1 in its ledg
 
 test("a SPENT that leaves no room under the child's cost cap refuses its call; with room it passes (issue #500)", { skip }, async () => {
 	// A priced api, so the guard has a finite bound to judge (an unpriced one is refused at any cap).
-	const roomy = world({ api: "openai-completions" });
+	const roomy = priceFake(world({ api: "openai-completions" }), "openai-completions");
 	const capped = { PI_MAX_COST_MICROS: "1000000" };
 	const ok = await run([entry("dist/bundle/cli.js"), ...printArgs(roomy), "hello"], { env: { ...roomy.env, ...capped }, cwd: roomy.root });
 	assert.equal(ok.code, 0, ok.stderr);
@@ -248,7 +261,7 @@ test("a SPENT that leaves no room under the child's cost cap refuses its call; w
 	assert.equal(okLedger.spentMicros, 777);
 	assert.equal(okLedger.costRefused, 0);
 
-	const tight = world({ api: "openai-completions" });
+	const tight = priceFake(world({ api: "openai-completions" }), "openai-completions");
 	// The rest of the job has spent all but one micro-dollar.
 	writeFileAtomic({ dir: tight.ledger, name: "SPENT", text: JSON.stringify(spentFile(null, 999_999)) });
 	const refused = await run([entry("dist/bundle/cli.js"), ...printArgs(tight), "hello"], { env: { ...tight.env, ...capped }, cwd: tight.root });

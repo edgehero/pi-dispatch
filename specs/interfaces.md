@@ -1704,7 +1704,9 @@ refactor apart.
     report their spend (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`, the child route). They are in `RUNNER_ENV_NAMES`
     (`worker/src/reserved-env.mjs`). A trigger's `run.secrets` cannot bind either, `PI_FORWARD_ENV` refuses both at
     config load, and `buildContainerEnv` deletes both after its loops as the backstop. No mount, flag or capability
-    token changes: the ledger directory is made inside the container, under its own `/tmp`.
+    token changes: the ledger directory is made inside the container, under its own `/tmp`. A third,
+    `PI_DISPATCH_PRICE_TABLE` (issue #587's review), is reserved the same way: the sha256 of the price table the
+    runner pins and writes into that directory for its children (`DES-DOLLAR-RESERVE-AND-SETTLE`).
   - **`PI_OFFLINE=1` is set UNCONDITIONALLY, on every job — the one env addition here that is not opt-in.**
     Every other variable above is forwarded only when something armed it; this one is not, and the reason is
     that it is a **narrowing, never a capability**. pi's package resolver shells out to a real `npm install`

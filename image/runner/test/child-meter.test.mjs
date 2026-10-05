@@ -10,7 +10,11 @@ import {
 	childLedgerName,
 	openChildLedger,
 	parseChildLedger,
+	pinPriceTable,
+	PRICE_TABLE_ENV,
+	publishPriceTable,
 	readExternal,
+	readPriceTable,
 	readStop,
 	RUNNER_PID_ENV,
 	spentFile,
@@ -188,6 +192,40 @@ async function startIn({ env = {}, install, ModelRuntime = ChildRuntime, compat 
 	const read = () => JSON.parse(readFileSync(join(dir, name), "utf8"));
 	return { child, dir, name, exits, read, state };
 }
+
+test("the parent's pinned price table reaches a child through the ledger directory, checked by its hash (issue #587)", async () => {
+	// A pi child has no runtime of the job's to pin from, and its own is the job's to poison, so it prices from the
+	// parent's table: written once into the ledger directory, its sha256 in the environment the child inherits.
+	const LISTED = { provider: "p", id: "m", api: "openai-completions", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" } };
+	const table = pinPriceTable({ getAllModels: () => [LISTED] });
+	const dir = tempDir("pi-dispatch-prices-");
+	const env = {};
+	publishPriceTable({ dir, table, env });
+	assert.match(env[PRICE_TABLE_ENV], /^[0-9a-f]{64}$/);
+	const read = readPriceTable({ dir, env });
+	assert.deepEqual([...read.keys()], [...table.keys()]);
+	assert.deepEqual(read.get([...table.keys()][0]), table.get([...table.keys()][0]));
+	// Tampered, missing, or with no hash to check: an EMPTY table, so every capped call is refused, never unchecked.
+	const tampered = tempDir("pi-dispatch-prices-");
+	const tamperedEnv = {};
+	publishPriceTable({ dir: tampered, table, env: tamperedEnv });
+	const file = join(tampered, "PRICES");
+	rmSyncReal(file, { force: true });
+	writeFileSync(file, readFileSync(join(dir, "PRICES"), "utf8").replace('"output":2', '"output":0'));
+	assert.equal(readPriceTable({ dir: tampered, env: tamperedEnv }).size, 0, "a file that does not match its hash");
+	assert.equal(readPriceTable({ dir: tempDir("pi-dispatch-prices-"), env }).size, 0, "no file");
+	assert.equal(readPriceTable({ dir, env: {} }).size, 0, "no hash");
+	// The child meter installs with the table it read.
+	const fake = fakeInstall();
+	const childDir = tempDir("pi-dispatch-child-unit-");
+	const childEnv = { PI_MAX_COST_MICROS: "1000000" };
+	publishPriceTable({ dir: childDir, table, env: childEnv });
+	await startChildMeter({ ModelRuntime: ChildRuntime, compat: FAKE_COMPAT, env: childEnv, dir: childDir, name: "98.0123456789abcdef.json", state: {}, install: fake.install, onExit: () => {} });
+	assert.deepEqual([...fake.calls[0].prices.keys()], [...table.keys()]);
+	const bare = fakeInstall();
+	await startChildMeter({ ModelRuntime: ChildRuntime, compat: FAKE_COMPAT, env: { PI_MAX_COST_MICROS: "1000000" }, dir: tempDir("pi-dispatch-child-unit-"), name: "97.0123456789abcdef.json", state: {}, install: bare.install, onExit: () => {} });
+	assert.ok(bare.calls[0].prices instanceof Map && bare.calls[0].prices.size === 0, "no table handed down: an empty one, never none");
+});
 
 test("startChildMeter: installs on the class it is given with brake, isStopped and the injected compat copy, writes running, and done at exit", async () => {
 	const fake = fakeInstall();

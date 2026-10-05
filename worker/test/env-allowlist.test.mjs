@@ -1338,10 +1338,11 @@ test("keyless: PI_DISPATCH_KEYLESS is settled after the forward and secrets loop
 });
 
 test("the runner's child-ledger names never reach a container from outside: a secret or a forwarded value is deleted (issue #500)", { skip }, () => {
-	const names = ["PI_DISPATCH_CHILD_LEDGER", "PI_DISPATCH_RUNNER_PID"];
+	// Issue #587's review added the price table's hash: a value arriving first would name a table the agent wrote.
+	const names = ["PI_DISPATCH_CHILD_LEDGER", "PI_DISPATCH_PRICE_TABLE", "PI_DISPATCH_RUNNER_PID"];
 	const base = mod.buildContainerEnv({ ...secretsBase });
 	for (const name of names) assert.equal(name in base, false, `${name}: the worker never writes it`);
-	const smuggled = mod.buildContainerEnv({ ...secretsBase, hostEnv: { ...HOST, PI_DISPATCH_CHILD_LEDGER: "/workspace/l", PI_DISPATCH_RUNNER_PID: "1" }, forwardEnv: names, secrets: { PI_DISPATCH_CHILD_LEDGER: "/tmp/x", PI_DISPATCH_RUNNER_PID: "2" } });
+	const smuggled = mod.buildContainerEnv({ ...secretsBase, hostEnv: { ...HOST, PI_DISPATCH_CHILD_LEDGER: "/workspace/l", PI_DISPATCH_PRICE_TABLE: "0".repeat(64), PI_DISPATCH_RUNNER_PID: "1" }, forwardEnv: names, secrets: { PI_DISPATCH_CHILD_LEDGER: "/tmp/x", PI_DISPATCH_PRICE_TABLE: "1".repeat(64), PI_DISPATCH_RUNNER_PID: "2" } });
 	for (const name of names) assert.equal(name in smuggled, false, `${name}: the backstop deletes it after both loops`);
 });
 

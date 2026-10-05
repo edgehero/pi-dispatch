@@ -195,7 +195,7 @@ function forwardEnvList(raw, egressArmed = false) {
 	if (owned.length > 0) {
 		throw configError(`PI_FORWARD_ENV must not forward ${owned.join(", ")} -- the worker writes ${owned.length === 1 ? "it" : "them"} into every job's container itself, and a forwarded host value would replace the per-job one (a forwarded PI_MODEL runs a model the pre-spend checks never saw)`);
 	}
-	// Issue #500: the two names the runner sets in its own environment for its descendants (RUNNER_ENV_NAMES). A forwarded
+	// Issue #500: the names the runner sets in its own environment for its descendants (RUNNER_ENV_NAMES). A forwarded
 	// host value would sit in the runner's environment before the runner sets its own.
 	const runnerOwned = names.filter((n) => RUNNER_ENV_NAMES.has(n));
 	if (runnerOwned.length > 0) {
