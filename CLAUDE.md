@@ -114,7 +114,8 @@ Two consequences worth internalising before you design anything:
   things on purpose and neither subsumes the other. Pass `now`; never move the fixture date forward.
 - **A test directory comes from the workspace helper, always** (issue #351):
   `import { tempDir } from "./helpers/temp-dir.mjs"`, which removes every directory the file made in an
-  `after()` hook. A bare `mkdtempSync(join(tmpdir(), ...))` in a test file is refused by
+  `after()` hook, and again at process exit for any made after it ran (node:test runs root hooks early when a
+  file declares tests before a top-level await). A bare `mkdtempSync(join(tmpdir(), ...))` in a test file is refused by
   `.github/scripts/temp-dir-check.mjs`, and the same job runs the suite under a `TMPDIR` of its own and
   fails if anything is left in it (two fixed-name tooling caches, `jiti` and `node-compile-cache`, are
   excluded by exact name; `mkdtemp` always appends random characters, so no test directory can match one). Same fast-hint-plus-oracle pairing as the clock guards above, and for
