@@ -11846,11 +11846,13 @@ test("appliedSplitChecks: the applied split's digest and the hosts matching it; 
 	const bad = appliedSplitChecks({ digest: d }, "fedcba9876543210", "mini1", [{ name: "mini2", fpEnvelope: d }, { name: "mini3", fpEnvelope: "none" }, { name: "old" }]);
 	assert.match(bad[0].label, /mini2 matches it/);
 	assert.equal(bad[1].ok, false);
+	assert.equal(bad[1].label, "this host (mini1) carries envelope fedcba9876543210, not the one the applied budget split was made for (0123456789abcdef), so it refuses every governed job as envelope-mismatch", "the host is named, as a peer is (#507)");
 	assert.notEqual(bad[1].warn, true, "a failure: this host refuses its governed jobs");
 	assert.match(bad[1].fix, /SET alloc:envelope:expected fedcba9876543210/);
 	assert.match(bad[2].label, /^mini3 carries no envelope, not the one the applied budget split was made for/);
 	const none = appliedSplitChecks({ digest: d }, "none", "mini1", []);
-	assert.match(none[1].label, /no envelope while the fleet has an applied budget split/);
+	assert.match(none[1].label, /^this host \(mini1\) has no envelope while the fleet has an applied budget split/);
+	assert.match(appliedSplitChecks({ digest: d }, "none", "", [])[1].label, /^this host has no envelope/, "no name to give: the bare words");
 	assert.match(none[1].fix, /DEL alloc:plan/);
 });
 
@@ -11861,7 +11863,7 @@ test("doctor reads the applied split when this host has an envelope, and fails a
 	const read = async (url) => (asked.push(url), { digest: "fedcba9876543210" });
 	const checks = await collectChecks(ok.env, collectSeams(green, { cwd: ok.dir, nodeVersion: "22.19.0", probeValkey: async () => true, readAppliedSplit: read }));
 	assert.equal(asked.length, 1);
-	const fail = checks.find((c) => /is not the one the applied budget split was made for/.test(c.label));
+	const fail = checks.find((c) => /^this host \([^)]+\) carries envelope [0-9a-f]{16}, not the one the applied budget split was made for/.test(c.label));
 	assert.ok(fail && fail.ok === false && fail.warn !== true);
 	assert.ok(fail.label.includes(digest));
 });
@@ -11871,7 +11873,7 @@ test("doctor reads the applied split on a single host with NO envelope too, and 
 	const seams = (read) => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true, readAppliedSplit: read });
 	const bare = imgEnv({ PI_SETTINGS_FILE: noOverlay() });
 	const governed = await collectChecks(bare, seams(async () => ({ digest: "0123456789abcdef" })));
-	const fail = governed.find((c) => /this host has no envelope while the fleet has an applied budget split/.test(c.label));
+	const fail = governed.find((c) => /this host \([^)]+\) has no envelope while the fleet has an applied budget split/.test(c.label));
 	assert.ok(fail && fail.ok === false && fail.warn !== true, "a host that refuses every job is a failure");
 	assert.match(fail.fix, /DEL alloc:plan alloc:envelope:expected/);
 	const summary = governed.find((c) => /^Applied budget split/.test(c.label));
@@ -11879,7 +11881,7 @@ test("doctor reads the applied split on a single host with NO envelope too, and 
 	assert.equal(summary.warn, true);
 	const garbled = await collectChecks(bare, seams(async () => ({ undecodable: true })));
 	assert.ok(garbled.some((c) => /alloc:plan exists but is not a budget split/.test(c.label) && c.warn === true));
-	assert.ok(garbled.some((c) => /this host has no envelope/.test(c.label)), "the worker's EXISTS counts it as governed");
+	assert.ok(garbled.some((c) => /this host \([^)]+\) has no envelope/.test(c.label)), "the worker's EXISTS counts it as governed");
 	const never = await collectChecks(bare, seams(async () => null));
 	assert.ok(!never.some((c) => /alloc:plan|budget split/.test(c.label)), "a deployment that never delegated hears nothing");
 });

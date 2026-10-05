@@ -4552,7 +4552,10 @@ export function fleetEnvelopeChecks(mine, peers) {
  */
 export function appliedSplitChecks(applied, mine, myName, peers) {
 	const TURN_OFF = "remove PI_ENVELOPE_FILE from every host, then `valkey-cli DEL alloc:plan alloc:envelope:expected`";
-	const noEnvelopeHere = { ok: false, label: "this host has no envelope while the fleet has an applied budget split (alloc:plan), so it refuses every job as envelope-mismatch", fix: `install the fleet's envelope here (PI_ENVELOPE_FILE), or turn delegation off for the whole fleet: ${TURN_OFF}` };
+	// Named as the peer lines name theirs (issue #507): on a fleet each host's doctor says "this host", and the line read
+	// beside another host's output did not say which host refuses.
+	const me = typeof myName === "string" && myName !== "" ? `this host (${myName})` : "this host";
+	const noEnvelopeHere = { ok: false, label: `${me} has no envelope while the fleet has an applied budget split (alloc:plan), so it refuses every job as envelope-mismatch`, fix: `install the fleet's envelope here (PI_ENVELOPE_FILE), or turn delegation off for the whole fleet: ${TURN_OFF}` };
 	if (applied.undecodable) {
 		// The key exists and is no split this build can read: a host with an envelope replaces it with the neutral split at
 		// its next job, while a host without one counts it as governed and refuses.
@@ -4572,7 +4575,7 @@ export function appliedSplitChecks(applied, mine, myName, peers) {
 		checks.push(
 			mine === NO_ENVELOPE_FINGERPRINT
 				? noEnvelopeHere
-				: { ok: false, label: `this host's envelope (${mine}) is not the one the applied budget split was made for (${d}), so it refuses every governed job as envelope-mismatch`, fix: `copy the fleet's envelope here; or, to make this one the fleet's, copy it to every host and run \`valkey-cli SET alloc:envelope:expected ${mine}\`` },
+				: { ok: false, label: `${me} carries envelope ${mine}, not the one the applied budget split was made for (${d}), so it refuses every governed job as envelope-mismatch`, fix: `copy the fleet's envelope here; or, to make this one the fleet's, copy it to every host and run \`valkey-cli SET alloc:envelope:expected ${mine}\`` },
 		);
 	}
 	const off = peers.filter((h) => typeof h.fpEnvelope === "string" && h.fpEnvelope !== "" && h.fpEnvelope !== d);
