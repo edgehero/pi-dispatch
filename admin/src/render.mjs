@@ -16,7 +16,7 @@ import { formatMicros } from "@edgehero/pi-dispatch/money";
 // Pure-to-pure, the same standing as the windowState import above: panel.mjs is the admin's other no-I/O
 // text module (asserted so by panel.test.mjs), and fmtCost is THE single renderer of typed cost values,
 // so the what-if below routes every dollar through it rather than grow a second money formatter here.
-import { columnsOf, fmtCost, pad, scrubControls } from "./panel.mjs";
+import { clip, columnsOf, fmtCost, pad, scrubControls, sliceColumns } from "./panel.mjs";
 // The overlay keys, IMPORTED rather than retyped. This was a verbatim copy of the worker's array, in the
 // order the worker declares them, and the worker's side is pinned while this side was not -- so a key
 // added there would have failed a test, been added, and left the settings VIEW silently ten keys wide
@@ -379,9 +379,13 @@ function triggerLine(t) {
   // its per-job dollar cap. Listed in full: the models a job can reach are not a fact to summarize as a count.
   // Absent when unset, appended last, so every existing line is byte-identical.
   const pol = `${Array.isArray(t?.models) && t.models.length > 0 ? `  [models ${t.models.join(", ")}]` : ""}${t?.maxCostUsd ? `  [max $${t.maxCostUsd}]` : ""}`;
+  // A portfolio trigger (issue #505) says so (issue #507): its jobs write the budget split every other project spends
+  // under, and a trigger that sets the split must not read like one that only spends inside it. Cron only (the loader
+  // refuses it elsewhere), the panel row's text (#482 parity), appended last so every other line is byte-identical.
+  const pfo = t?.portfolio === true ? "  [portfolio]" : "";
   switch (t?.type) {
     case "cron":
-      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}`;
+      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}${pfo}`;
     case "label":
       return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}`;
     case "comment":
@@ -512,14 +516,52 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
   ]);
   const widths = rows.reduce((w, r) => r.map((c, i) => Math.max(w[i] ?? 0, c.length)), []);
   for (const r of rows) lines.push(`  ${r.map((c, i) => pad(c, widths[i])).join("  ").trimEnd()}`);
-  if (s) lines.push(`  unallocated ${usd(s.unallocated)} · deployment spent ${usd(alloc.spend?.deployment?.micros)}`);
+  // The headroom beside the envelope it is headroom of (issue #507): the deployment's spend against the total.
+  if (s) lines.push(`  unallocated ${usd(s.unallocated)} · deployment spent ${usd(alloc.spend?.deployment?.micros)} of ${usd(envelope.totalMicros)}`);
   const history = Array.isArray(alloc.log) ? alloc.log.slice(0, historyRows) : [];
   if (history.length > 0) {
     lines.push("history (newest first):");
+    const hosts = allocHostsShown(history);
     for (const h of history) {
       const why = h.reason ? ` ${cell(h.reason)}${h.field ? ` (${cell(h.field)}: ${cell(h.rule)})` : ""}` : "";
-      lines.push(`  ${cell(h.at)}  ${cell(h.writer)}  ${cell(h.outcome)}${why}${h.planId ? `  ${cell(h.planId)}` : ""}${h.clamped ? "  clamped" : ""}`);
+      lines.push(`  ${allocAt(h.at)}  ${hosts ? `${allocHost(h.host)}  ` : ""}${cell(h.writer)}  ${cell(h.outcome)}${why}${h.planId ? `  ${allocPlanId(h.planId)}` : ""}${h.clamped ? "  clamped" : ""}`);
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * The cells of an `alloc:log` history row, shared by this text and the panel's `b` view (issue #507), so the two cannot
+ * disagree about what a row says. A row is the instant, the host when it tells rows apart, the writer, the outcome with
+ * its enum reason, and the plan id, and it fits 80 columns: with the full ISO instant and id a refusal ran to 85 here,
+ * and the panel clipped the plan id off the end of every refusal row.
+ *
+ * The instant as `MM-DD HH:MM`, in UTC as written: a split is planned in days and the year is the one on the screen.
+ * A value that is not an ISO instant (a row another writer set) is shown as its first 11 columns, never parsed.
+ */
+export function allocAt(at) {
+  const m = /^\d{4}-(\d{2}-\d{2})T(\d{2}:\d{2})/.exec(String(at ?? ""));
+  return m ? `${m[1]} ${m[2]}` : sliceColumns(cell(at), 11);
+}
+
+/**
+ * Whether the host column earns its place: only when the rows shown name more than one host. On one host it says the
+ * same word on every row and costs a sixth of the line; on a fleet it is what tells two hosts' refusals apart.
+ */
+export function allocHostsShown(rows) {
+  const hosts = new Set((Array.isArray(rows) ? rows : []).map((r) => (typeof r?.host === "string" ? r.host : "")));
+  return hosts.size > 1;
+}
+
+/** A row's host, cut to 10 columns with the ellipsis (a host name is the operator's, and its tail is rarely the part that differs). */
+export function allocHost(host) {
+  return clip(cell(host ?? "-"), 10);
+}
+
+/**
+ * A row's plan id as its first 8 hex digits, the git short-id idiom: 16 is the content hash, 8 still tells the rows of
+ * one history apart, and the full id stays on the applied-plan line, in `dispatch_allocations` and in the audit file.
+ */
+export function allocPlanId(id) {
+  return sliceColumns(cell(id), 8);
 }

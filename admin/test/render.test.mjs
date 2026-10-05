@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
-import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, commandSlashLabel } from "../src/render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, commandSlashLabel, renderAllocations } from "../src/render.mjs";
 
 test("render.mjs has no path to raw .log content", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/render.mjs", import.meta.url)), "utf8");
@@ -458,4 +458,32 @@ test("the status line NAMES the workers when the registry can, and is unchanged 
 
   const unknown = renderStatus({ pausedState: false, counts: { waiting: 0, active: 0, delayed: 0, failed: 0 } });
   assert.match(unknown, /workers: unknown/);
+});
+
+test("a portfolio cron's plain line ends in [portfolio], the panel row's text; false and absent render alike (#507)", () => {
+  const line = (t) => renderTriggers({ schedulers: [], triggers: { triggers: [t] } }).split("\n").find((l) => l.includes("plan-week"));
+  const cron = { type: "cron", id: "plan-week", pattern: "0 6 * * 1", folder: "/srv/ops", flow: "portfolio-manager", maxCostUsd: "2" };
+  assert.equal(line({ ...cron, portfolio: true }).trim(), "cron  plan-week  0 6 * * 1 → /srv/ops/portfolio-manager  [max $2]  [portfolio]");
+  assert.equal(line({ ...cron, portfolio: false }), line(cron), "false is the ordinary line, byte for byte");
+  assert.ok(!line(cron).includes("[portfolio]"));
+});
+
+test("/dispatch priorities: the history row fits 80 columns, names a host only on a fleet, and the headroom names the total (#507)", () => {
+  const M = 1_000_000;
+  const envelope = { window: "week", totalMicros: 100 * M, floors: { _other: 0, shop: 10 * M }, defaultWeights: { _other: 0, shop: 1 }, delegation: { enabled: true, writers: ["operator-session", "portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } };
+  const state = { planId: "3f9a0c1d2e4b5a67", writer: "operator-session", appliedAt: "2026-10-05T12:00:00.000Z", envelopeDigest: "d", weights: { _other: 0, shop: 1 }, allocations: { _other: 0, shop: 100 * M }, unallocated: 0 };
+  const refused = { at: "2026-10-05T12:30:00.000Z", host: "mini1", writer: "operator-session", outcome: "refused", reason: "plan-too-soon", planId: "aaaaaaaaaaaaaaaa" };
+  const applied = { at: "2026-10-05T12:00:00.000Z", host: "mini1", writer: "operator-session", outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67", clamped: true };
+  const text = (log) => renderAllocations({ envelope, digest: "d", alloc: { state, log, spend: { deployment: { micros: 76 * M }, projects: {} } } }).split("\n");
+  const one = text([refused, applied]);
+  assert.ok(one.includes("  unallocated $0.00 · deployment spent $76.00 of $100.00"), one.join("\n"));
+  assert.ok(one.includes("  10-05 12:30  operator-session  refused plan-too-soon  aaaaaaaa"));
+  assert.ok(one.includes("  10-05 12:00  operator-session  applied  3f9a0c1d  clamped"));
+  const fleet = text([{ ...refused, host: "build-host-number-7" }, applied]);
+  const row = "  10-05 12:30  build-hos…  operator-session  refused plan-too-soon  aaaaaaaa";
+  assert.ok(fleet.includes(row), fleet.join("\n"));
+  assert.ok(fleet.includes("  10-05 12:00  mini1  operator-session  applied  3f9a0c1d  clamped"));
+  assert.ok(row.length <= 80, "the widest common row, on a fleet, fits 80 columns");
+  const odd = text([{ ...refused, at: "yesterday, roughly at noon" }]);
+  assert.ok(odd.includes("  yesterday,   operator-session  refused plan-too-soon  aaaaaaaa"), "an instant that is not ISO is cut, never parsed");
 });

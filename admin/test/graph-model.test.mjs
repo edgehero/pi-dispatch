@@ -587,3 +587,18 @@ test("junk tier inputs degrade to unknown-tier behaviour, never a throw", () => 
   const node = m.nodes.find((n) => n.id === "skill:folder:/srv/site:deleted-flow");
   assert.equal(node.kind, "skill-not-at-head", "a malformed read proves nothing; only a well-formed result can produce a known miss");
 });
+
+test("the portfolio flag rides a trigger node as a strict boolean fact, and no vocabulary grows (#507)", () => {
+  const inputs = CANNED();
+  inputs.triggers.triggers[0] = { ...inputs.triggers.triggers[0], portfolio: true };
+  inputs.triggers.triggers[2] = { ...inputs.triggers.triggers[2], portfolio: "yes" };
+  const m = buildGraphModel(inputs);
+  assert.equal(m.nodes.find((n) => n.id === "trigger:0").portfolio, true);
+  assert.equal(m.nodes.find((n) => n.id === "trigger:1").portfolio, false, "a kind that cannot carry it reads false");
+  assert.equal(m.nodes.find((n) => n.id === "trigger:2").portfolio, false, "a non-boolean is no flag");
+  assert.deepEqual([...GRAPH_EDGE_KINDS], ["config", "observed", "potential", "cron-rearm"]);
+  assert.ok(!GRAPH_FLAGS.includes("portfolio"), "no portfolio flag exists");
+  assert.ok(!GRAPH_NODE_KINDS.includes("portfolio"), "no portfolio node kind exists");
+  const plain = buildGraphModel(CANNED());
+  assert.deepEqual(m.edges, plain.edges, "the flag draws no edge");
+});

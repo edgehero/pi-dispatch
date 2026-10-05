@@ -509,3 +509,51 @@ test("`/dispatch priorities` text carries no reason at all, whatever the split h
 	assert.ok(!text.includes("secret"), "a reason is never rendered here");
 	assert.ok(!hasControls(text.replace(/\n/g, " ")), "and every cell is gated");
 });
+
+test("the #507 cells go through the gate: a run's plan and dollars, an allocation row's host, the priorities text (#507)", async () => {
+	const jiti = await tsLoader();
+	const { makeDashboard } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
+	const flush = () => new Promise((r) => setImmediate(r));
+	const deps = (over) => ({ fetchSnapshot: async () => ({ queue: { counts: {} } }), pause: async () => {}, resume: async () => {}, dispose: async () => {}, now: () => 0, ...over });
+	// A record file is read back from disk, so its plan and dollars are held to the gate like every record string.
+	const run = { jobId: "j1", target: "o/r#5", flow: "fix", outcome: "completed", turns: 1, plan: { outcome: "refused\u001b[2J", reason: "plan-stale\u001b[31m", planId: "abc\u0007", clamped: true }, dollars: { settledMicros: 1, basis: "metered\u001b]52;c;Zm9v\u0007" } };
+	const detail = makeDashboard({ paths: {}, done() {}, tui: { requestRender() {} }, intervalMs: 100000, deps: deps({ fetchSnapshot: async () => ({ queue: { counts: {} }, runs: [run] }) }) });
+	await flush();
+	detail.handleInput("\r");
+	await flush();
+	const lines = detail.render(80).map(stripAnsi);
+	await detail.dispose();
+	for (const l of lines) assert.ok(!hasControls(l), `a run-detail line carries a control byte: ${JSON.stringify(l)}`);
+	const row = (label) => lines.map((l) => l.trim()).find((l) => l.startsWith(`│ ${label} `));
+	assert.equal(row("plan"), `│ ${"plan".padEnd(12)} ${"refused [2J plan-stale [31m · clamped · abc ".padEnd(53)} │`);
+	assert.equal(row("dollars"), `│ ${"dollars".padEnd(12)} ${"settled $0.000001 (metered ]52;c;Zm9v )".padEnd(53)} │`);
+	// Under a theme the pane gate keeps SGR, because the styler emits it, so a data SGR (here the C1 CSI form) is stopped
+	// only where the field enters the renderer: `show`, per field. The raw line must carry the styler's escapes alone.
+	const theme = { fg: (_c, t) => `\x1b[38;5;42m${t}\x1b[39m`, bold: (t) => `\x1b[1m${t}\x1b[22m`, bg: (_c, t) => t };
+	const themed = makeDashboard({ paths: {}, done() {}, tui: { requestRender() {} }, intervalMs: 100000, theme, deps: deps({ fetchSnapshot: async () => ({ queue: { counts: {} }, runs: [run] }) }) });
+	await flush();
+	themed.handleInput("\r");
+	await flush();
+	const raw = themed.render(80).find((l) => stripAnsi(l).includes("plan-stale"));
+	await themed.dispose();
+	assert.ok(!raw.includes("\u001b[31m") && !raw.includes("\u001b[2J"), `a data escape reached the terminal: ${JSON.stringify(raw)}`);
+	// Two hosts, so the host column shows, and one of them carries an escape and a bidi override.
+	const M = 1_000_000;
+	const info = {
+		envelope: { window: "week", totalMicros: 100 * M, floors: { shop: 10 * M }, defaultWeights: { shop: 1 }, delegation: { enabled: false } },
+		digest: "d",
+		alloc: { state: null, log: [{ at: "2026-10-05T12:00:00.000Z", host: "h\u001b[31m‮1", writer: "operator-session", outcome: "applied", planId: "3f9a0c1d2e4b5a67", weights: { shop: 1 } }, { at: "2026-10-05T11:00:00.000Z", host: "h2", writer: "default", outcome: "neutral", weights: { shop: 1 } }] },
+	};
+	const alloc = makeDashboard({ paths: {}, done() {}, tui: { requestRender() {} }, intervalMs: 100000, deps: deps({ allocationInfo: async () => info }) });
+	await flush();
+	alloc.handleInput("b");
+	await flush();
+	const view = alloc.render(80).map(stripAnsi);
+	await alloc.dispose();
+	for (const l of view) assert.ok(!hasControls(l), `an allocation line carries a control byte: ${JSON.stringify(l)}`);
+	assert.ok(view.includes(`│ ${"› 10-05 12:00  h\\u{001B}…  operator-session  applied  3f9a0c1d".padEnd(76)} │`), view.join("\n"));
+	const { renderAllocations } = await import("../src/render.mjs");
+	const text = renderAllocations({ envelope: info.envelope, digest: "d", alloc: info.alloc });
+	assert.ok(!hasControls(text.replace(/\n/g, " ")), "the text twin's host cell is gated too");
+	assert.ok(text.split("\n").some((l) => l.startsWith("  10-05 12:00  h [31m") && l.endsWith("  operator-session  applied  3f9a0c1d")), text);
+});

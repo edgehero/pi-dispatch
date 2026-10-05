@@ -31,7 +31,7 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
-import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename } from "./render.mjs";
+import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -54,6 +54,8 @@ const MIN_WIDTH = 8;
 // Drill-in views (TRIGGER_DETAIL, RUN_DETAIL) are small; they frame to a compact width and center within
 // the wider overlay rather than stretching a handful of key/value lines across the full LIST width.
 const DRILL_WIDTH = 70;
+// The ALLOCATION view's frame (issue #507): its history row needs the columns DRILL_WIDTH leaves out; see the view.
+const ALLOC_WIDTH = 80;
 // The runs list's project filter when it shows every run (issue #499 part C). A symbol, because null is a filter value
 // of its own: the runs recorded under no project.
 const ALL_RUNS = Symbol("all runs");
@@ -1405,17 +1407,23 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   }
 
   if (view === "ALLOCATION") {
-    const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
+    // ALLOC_WIDTH, not DRILL_WIDTH (issue #507): this pane's history row is the widest line in the panel (an instant, a
+    // host on a fleet, a writer, an outcome with its reason, a plan id), and at 70 every refusal lost its plan id to
+    // the clip. 80 is the terminal the rest of the panel is pinned at, so the frame still fits it whole.
+    const dw = framed ? Math.min(Math.trunc(width), ALLOC_WIDTH) : Math.trunc(width);
     const iw = framed ? dw - 4 : 24;
     const { title: detailTitle, lines } = allocationView(state.allocInfo, state.allocSelected ?? 0, iw, styler);
     // The armed question is a BODY line (wrapped, never clipped: it names what a `y` does), and the footer the keys.
     const question = state.pendingRevert ? `revert to ${revertTargetName(state.pendingRevert)} as operator-revert? it skips the interval and the step` : null;
     if (question) lines.push(...wrapColumns(question, iw, styler).map((l) => styler.cell(l, iw, { color: "warning" })));
-    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", question ? "y/n" : (state.allocNote ? `${cellOf(state.allocNote)} · ` : "") + "↑↓ select · r revert · esc back"];
+    // A revert's outcome is a body line too (issue #507), wrapped, for the question's reason: it grew the sentence that a
+    // due plan may move the split again, and in the footer the clip took that sentence and the keys with it.
+    else if (state.allocNote) lines.push(...wrapColumns(cellOf(state.allocNote), iw, styler).map((l) => styler.cell(l, iw, { color: "warning" })));
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", question ? "y/n" : "↑↓ select · r revert · esc back"];
     const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
     const footer = question
       ? fitLine([k("y", "revert"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")), iw, styler)
-      : fitLine((state.allocNote ? styler.fg("warning", cellOf(state.allocNote)) + styler.fg("dim", " · ") : "") + [k("↑↓", "select"), k("r", "revert"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
+      : fitLine([k("↑↓", "select"), k("r", "revert"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer });
     return centerBlock(boxed, Math.trunc(width), dw);
   }
@@ -2071,7 +2079,14 @@ function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: a
   // ([once], [image]), never amber. The model list is free text that may be clipped; the drill-in lists it whole.
   const mdl = Array.isArray(t?.models) && t.models.length > 0 ? rowBadge("accent", false, "[models ", cellOf(t.models.join(", ")), "]") : null;
   const cap = t?.maxCostUsd ? rowBadge("accent", false, "[max $", cellOf(t.maxCostUsd), "]") : null;
-  const badges = [pkgs, img, skl, ins, res, rep, sec, shot, mdl, cap, health].filter((b): b is RowBadge => b !== null);
+  // A portfolio trigger (issues #505 and #507): its jobs write the budget split. `accent`, NOT `warning`: amber marks
+  // what raises the bill ([xN]), what a job can reach ([secrets]) or what leaves it ([resume]), and a plan can do none
+  // of those. It moves money between projects only inside the operator's envelope, above every floor and by at most
+  // the envelope's step, so the total never rises. What it is, is an override of the neutral split the envelope would
+  // apply, which is `accent`'s meaning on this row. Not a risk badge, so a narrow row may drop it; the drill-in keeps
+  // the fact on its own line. Cron only, absent otherwise, appended after the cap so every other row is byte-identical.
+  const pfo = t?.portfolio === true ? rowBadge("accent", false, "[portfolio]") : null;
+  const badges = [pkgs, img, skl, ins, res, rep, sec, shot, mdl, cap, pfo, health].filter((b): b is RowBadge => b !== null);
   const match = matchColored(t, styler);
   return fitTriggerRow(`${cursor} ${badge} `, match, targetColored(t, styler), badges, inner, styler, rowFloorMatch(t, match, styler));
 }
@@ -2361,7 +2376,9 @@ function revertTargetName(row: any): string {
 
 /** One sentence for the footer from a revert's result: every branch names what happened, never a reason text. */
 function revertNote(res: any): string {
-  if (res?.outcome === "reverted") return `reverted to ${res.planId ? cellOf(res.planId) : "the neutral weights"} (operator-revert)`;
+  // "a due plan may move it again" (issue #507): a revert is a split, not a hold. The next portfolio run applies its plan
+  // over it once the interval allows, and #507's end-to-end test saw a weekly portfolio cron do exactly that.
+  if (res?.outcome === "reverted") return `reverted to ${res.planId ? cellOf(res.planId) : "the neutral weights"} (operator-revert); a due plan may move it again`;
   if (res?.outcome === "apply-failed") return `revert lost a race (${cellOf(res.reason)}): the split changed meanwhile, look again`;
   return `revert refused: ${cellOf(res?.reason ?? "unknown")}`;
 }
@@ -2398,7 +2415,8 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
   }
   if (a.unreachable) lines.push(...wrapped(`split unreadable (${cellOf(a.unreachable)})`, "error"));
   const d = e.delegation ?? {};
-  lines.push(dim(d.enabled ? `delegation on · ${(d.writers ?? []).join(", ")} · step ${d.maxStepPct}% · every ${d.minIntervalHours}h · plans up to ${d.maxPlanDays}d` : "delegation off: the neutral split applies"));
+  // Wrapped, not clipped (issue #507): with both writers named the rules ran past the frame and lost the plan length.
+  lines.push(...wrapped(d.enabled ? `delegation on · ${(d.writers ?? []).join(", ")} · step ${d.maxStepPct}% · every ${d.minIntervalHours}h · plans up to ${d.maxPlanDays}d` : "delegation off: the neutral split applies", "dim"));
   if (a.stateProblem === "newer") lines.push(...wrapped("the applied split was written by a newer pi-dispatch: upgrade this console", "warning"));
   else if (a.stateProblem === "unreadable") lines.push(...wrapped("the applied split does not decode; the next pickup replaces it with the neutral split", "warning"));
   const st = a.state ?? null;
@@ -2416,10 +2434,12 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
     lines.push(fitLine(bits.join("  "), iw, styler));
     if (spend?.projects?.[id]?.key) lines.push(fitLine(`    ${styler.fg("dim", cellOf(spend.projects[id].key))}`, iw, styler));
   }
-  if (st) lines.push(dim(`unallocated ${usd(st.unallocated)} · deployment spent ${usd(spend?.deployment?.micros)}`));
+  // The headroom against the envelope it is headroom of (issue #507), `/dispatch priorities`' line word for word.
+  if (st) lines.push(dim(`unallocated ${usd(st.unallocated)} · deployment spent ${usd(spend?.deployment?.micros)} of ${usd(e.totalMicros)}`));
   if (st) {
     const plan = st.planId ? `plan ${cellOf(st.planId)}` : "neutral, no plan";
-    lines.push(fitLine(styler.fg("text", `${plan} · ${cellOf(st.writer)} · ${cellOf(String(st.appliedAt ?? "-").slice(0, 16))}${st.validUntil ? ` · until ${cellOf(String(st.validUntil).slice(0, 10))}` : ""}${st.clamped ? " · clamped" : ""}`), iw, styler));
+    // The applied instant as the history shows one (`allocAt`, issue #507), so the line keeps its `until` at 80 columns.
+    lines.push(fitLine(styler.fg("text", `${plan} · ${cellOf(st.writer)} · ${cellOf(allocAt(st.appliedAt))}${st.validUntil ? ` · until ${cellOf(String(st.validUntil).slice(0, 10))}` : ""}${st.clamped ? " · clamped" : ""}`), iw, styler));
     const reasons = st.reasons && typeof st.reasons === "object" ? st.reasons : {};
     for (const id of Object.keys(reasons).sort()) {
       lines.push(fitLine(`  ${styler.fg("accent", textCell(id))}${styler.fg("dim", ": ")}${styler.fg("text", textCell(reasons[id]))}`, iw, styler));
@@ -2429,14 +2449,19 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
   }
   lines.push(dim("history, newest first (alloc:log)"));
   if (log.length === 0) lines.push(dim("(no outcomes yet)"));
+  // The row's cells are `/dispatch priorities`' (render.mjs `allocAt`, `allocHostsShown`, `allocPlanId`, issue #507):
+  // the instant as MM-DD HH:MM, the host only when the history names more than one, the plan id's first 8 digits, so a
+  // refusal row fits the frame whole instead of losing its plan id to the clip.
+  const hosts = allocHostsShown(log);
   log.forEach((h: any, i: number) => {
     const cursor = i === selected ? styler.fg("accent", "›") : " ";
     const why = h.reason ? ` ${textCell(h.reason)}` : "";
     const bits = [
-      `${cursor} ${styler.fg("dim", textCell(String(h.at ?? "-").slice(0, 16)))}`,
+      `${cursor} ${styler.fg("dim", textCell(allocAt(h.at)))}`,
+      ...(hosts ? [styler.fg("dim", clip(textCell(h.host), 10))] : []),
       styler.fg("muted", textCell(h.writer)),
       styler.fg(h.outcome === "refused" || h.outcome === "apply-failed" || h.outcome === "envelope-changed-externally" ? "warning" : "text", `${textCell(h.outcome)}${why}`),
-      ...(h.planId ? [styler.fg("dim", textCell(h.planId))] : []),
+      ...(h.planId ? [styler.fg("dim", textCell(allocPlanId(h.planId)))] : []),
       ...(h.clamped ? [styler.fg("dim", "clamped")] : []),
     ];
     lines.push(fitLine(bits.join("  "), iw, styler));
@@ -2662,6 +2687,9 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
   // under the deployment's list and cap, and a trigger that sets neither keeps exactly the pane it had.
   if (Array.isArray(t.models) && t.models.length > 0) kvWrap("models", t.models.map((m: any) => cellOf(m)).join(", "), "accent");
   if (t.maxCostUsd) out.push(kv("max cost", `$${cellOf(t.maxCostUsd)} per job`, "accent"));
+  // The portfolio flag (issue #507), the row badge's fact in words: what the job may write back. A row only when set, so
+  // every other pane is byte-identical; `accent` for the row badge's reason.
+  if (t.portfolio === true) out.push(kv("portfolio", "its jobs write the budget split", "accent"));
   // A command trigger's full `/name args` line (issue #189): the list and header show the name only,
   // and this drill-in is where the args belong -- the reviewed file staged them, the operator's own
   // session shows them. Rendered only when armed, on both branches, because all four kinds can carry
@@ -3152,6 +3180,20 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // WHICH PROJECT (issue #499 part C): the id the worker resolved at pickup and wrote into the record. Absent for a run
   // outside every project and for one recorded before projects existed, which are never re-attributed.
   if (recordProject(r) !== null) out.push(kv("project", recordProject(r)));
+  // WHAT A PORTFOLIO RUN ASKED FOR (issue #507): the record's `plan` (issue #505), its outcome, the reason as the enum
+  // word the worker wrote (there is no reason-to-words table, and the plan's own reason TEXT is never in a record), and
+  // the plan id the `b` view's history names. A line only when the record carries the object, so every older record,
+  // and every run that left no plan, renders byte-identical. Every field through `show`: a record file is read back.
+  if (r.plan !== null && typeof r.plan === "object" && !Array.isArray(r.plan)) {
+    const p = r.plan;
+    const head = p.reason ? `${show(p.outcome)} ${show(p.reason)}` : show(p.outcome);
+    out.push(kv("plan", [head, ...(p.clamped === true ? ["clamped"] : []), ...(p.planId ? [show(p.planId)] : [])].join(" · ")));
+  }
+  // WHAT THE RUN SETTLED in dollars (issue #501's `dollars`), so the drill-in and the other surfaces can be held to one
+  // number (issue #507). The basis is the worker's fixed token. Absent on a record with no dollar window.
+  if (r.dollars !== null && typeof r.dollars === "object" && !Array.isArray(r.dollars)) {
+    out.push(kv("dollars", `settled ${usd(r.dollars.settledMicros)} (${show(r.dollars.basis)})`));
+  }
 
   // turns · exit · budget slot · attempt (each present only when the field is).
   const turnBits = [`${show(r.turns)} turns`, `exit ${show(r.exitCode)}`];

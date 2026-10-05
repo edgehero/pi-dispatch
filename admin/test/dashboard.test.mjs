@@ -702,6 +702,35 @@ test("Enter on a run opens its detail dump, and Esc backs out to the list withou
   assert.equal(closed, 0, "Esc from a sub-view never closes the overlay");
 });
 
+test("RUN_DETAIL shows a portfolio run's plan and the dollars a run settled, and an older record not at all (#507)", async () => {
+  const openRun = async (extra) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], ...extra }] }) }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const lines = comp.render(80).map(stripAnsi);
+    await comp.dispose();
+    return lines;
+  };
+  // The drill-in is framed at DRILL_WIDTH (70) and centred: the row is the frame's, its value after a 12-column label.
+  const row = (lines, label) => lines.map((l) => l.trim()).find((l) => l.startsWith(`│ ${label} `)) ?? null;
+  const kvRow = (label, value) => `│ ${`${label.padEnd(12)} ${value}`.padEnd(66)} │`;
+  const applied = await openRun({ plan: { outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67", clamped: true }, dollars: { reservedMicros: 2_000_000, settledMicros: 1_234_500, basis: "metered", modelBasis: null } });
+  assert.equal(row(applied, "plan"), kvRow("plan", "applied · clamped · 3f9a0c1d2e4b5a67"));
+  assert.equal(row(applied, "dollars"), kvRow("dollars", "settled $1.2345 (metered)"));
+  const refused = await openRun({ plan: { outcome: "refused", reason: "plan-stale", planId: "aaaaaaaaaaaaaaaa", clamped: false } });
+  assert.equal(row(refused, "plan"), kvRow("plan", "refused plan-stale · aaaaaaaaaaaaaaaa"));
+  const absent = await openRun({ plan: { outcome: "refused", reason: "plan-absent", planId: null, clamped: false } });
+  assert.equal(row(absent, "plan"), kvRow("plan", "refused plan-absent"), "no id, no trailing separator");
+  const floor = await openRun({ dollars: { reservedMicros: 2_000_000, settledMicros: 2_000_000, basis: "floor", modelBasis: null } });
+  assert.equal(row(floor, "dollars"), kvRow("dollars", "settled $2.00 (floor)"));
+  const older = await openRun({});
+  const nulls = await openRun({ plan: null, dollars: null });
+  assert.equal(row(older, "plan"), null);
+  assert.equal(row(older, "dollars"), null);
+  assert.deepEqual(nulls, older, "a record with null fields renders byte-identical to one written before them");
+});
+
 test("RUN_DETAIL breaks out other sessions and subprocesses, and shows nothing for a pre-metering record", async () => {
   const openRun = async (tokens) => {
     const comp = makeDashboard({
@@ -3327,7 +3356,7 @@ test("`b` opens the ALLOCATION view: envelope, each project's split and spend wi
   assert.match(out, /budget:usd:s:00112233aabbccdd:w:2026-10-05/, "the key an operator seeds or reads with valkey-cli");
   assert.match(out, /plan 3f9a0c1d2e4b5a67 · operator-session/);
   assert.match(out, /shop: launch on Friday/, "the plan's reason, drawn here and nowhere else");
-  assert.match(out, /› 2026-10-05T12:30\s+operator-session\s+refused plan-too-soon/, "the history, newest first, the cursor on the first row");
+  assert.match(out, /› 10-05 12:30 {2}operator-session {2}refused plan-too-soon {2}aaaaaaaa /, "the history, newest first, the cursor on the first row");
   assert.match(out, /r revert/);
 });
 
@@ -3350,7 +3379,7 @@ test("ALLOCATION: `r` asks a y/n in the frame; `n` stands down, `y` reverts to t
   comp.handleInput("\u001b[B"); // down, to the applied row
   comp.handleInput("r");
   await flush();
-  assert.match(stripAnsi(comp.render(100).join("\n")), /revert to plan 3f9a0c1d2e4b5a67 as operator-revert\? it skips the\s*│?\s*│?\s*interval and the step[\s\S]*y revert\s+·\s+n cancel/);
+  assert.match(stripAnsi(comp.render(100).join("\n")), /revert to plan 3f9a0c1d2e4b5a67 as operator-revert\? it skips the\s*│?\s*│?\s*interval\s*│?\s*│?\s*and the step[\s\S]*y revert\s+·\s+n cancel/);
   comp.handleInput("q");
   comp.handleInput("n");
   await flush();
@@ -3368,6 +3397,51 @@ test("ALLOCATION: `r` asks a y/n in the frame; `n` stands down, `y` reverts to t
   await flush();
   assert.match(stripAnsi(comp.render(100).join("\n")), /pi-dispatch/, "Esc backs out to the LIST");
   await comp.dispose();
+});
+
+/** A body line of the ALLOCATION frame at 80 columns: the text padded to the frame's 76 inner columns. */
+const boxed = (text) => `│ ${text.padEnd(76)} │`;
+
+test("ALLOCATION at 80 columns: the frame is the terminal's, and every history row is composed whole, host only on a fleet (#507)", async () => {
+  const open = async (log) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ allocationInfo: async () => allocInfo({ log }) }) });
+    await flush();
+    comp.handleInput("b");
+    await flush();
+    const lines = comp.render(80).map(stripAnsi);
+    await comp.dispose();
+    return lines;
+  };
+  const one = await open([REFUSED_ROW, APPLIED_ROW]);
+  for (const l of one) assert.equal(visibleLen(l), 80, `the frame fills the 80 columns: ${l}`);
+  assert.ok(one.includes(boxed("› 10-05 12:30  operator-session  refused plan-too-soon  aaaaaaaa")), one.join("\n"));
+  assert.ok(one.includes(boxed("  10-05 12:00  operator-session  applied  3f9a0c1d")));
+  assert.ok(one.includes(boxed("unallocated $0.00 · deployment spent $0.00 of $100.00")), "the headroom names the total it is headroom of");
+  assert.ok(one.includes(boxed("plan 3f9a0c1d2e4b5a67 · operator-session · 10-05 12:00 · until 2026-10-19")), "the plan line keeps its until");
+  assert.ok(one.includes(boxed("plans up to 14d")), "the delegation rules wrap, never clip");
+  const fleet = await open([{ ...REFUSED_ROW, host: "mini2" }, APPLIED_ROW]);
+  assert.ok(fleet.includes(boxed("› 10-05 12:30  mini2  operator-session  refused plan-too-soon  aaaaaaaa")), fleet.join("\n"));
+  assert.ok(fleet.includes(boxed("  10-05 12:00  mini1  operator-session  applied  3f9a0c1d")));
+  const long = await open([{ ...REFUSED_ROW, host: "build-host-number-7" }, APPLIED_ROW]);
+  assert.ok(long.includes(boxed("› 10-05 12:30  build-hos…  operator-session  refused plan-too-soon  aaaaaaaa")), "a long host is cut at 10 columns, and the row still fits");
+});
+
+test("ALLOCATION: a revert's note is a body line that says a due plan may move the split again (#507)", async () => {
+  const comp = makeDashboard({
+    paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000,
+    deps: cannedDeps({ allocationInfo: async () => allocInfo({ log: [APPLIED_ROW] }), revertAllocation: async ({ target }) => ({ outcome: "reverted", reason: null, planId: target.planId }) }),
+  });
+  await flush();
+  comp.handleInput("b");
+  await flush();
+  comp.handleInput("r");
+  comp.handleInput("y");
+  await flush();
+  await flush();
+  const lines = comp.render(80).map(stripAnsi);
+  await comp.dispose();
+  assert.ok(lines.includes(boxed("reverted to 3f9a0c1d2e4b5a67 (operator-revert); a due plan may move it again")), lines.join("\n"));
+  assert.ok(lines.includes(boxed("↑↓ select  ·  r revert  ·  esc back")), "the footer keeps its keys");
 });
 
 test("ALLOCATION: the banner says the envelope changed outside the panel when an envelope-changed-externally row is newer than the last rebase or applied plan", async () => {

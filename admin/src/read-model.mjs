@@ -2438,6 +2438,10 @@ export function normalizeTriggerForDisplay(entry) {
         resume,
         secrets,
         secretsProfile,
+        // The portfolio flag (issue #505): this trigger's jobs write the budget split for every project, so the row and
+        // the drill-in say so (issue #507). Cron only, as the loader allows it. Spread only when true, so every other cron
+        // record keeps exactly its keys, and `dispatch_triggers` shows the boolean only on the trigger that carries it.
+        ...(run.portfolio === true && { portfolio: true }),
       };
     case "label":
       return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, ...modelRef, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };

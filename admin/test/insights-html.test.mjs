@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
+import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, microsUsd, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
+import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { buildGraphModel } from "../src/graph-model.mjs";
 import { buildGraphScene, drawnColumns } from "../src/graph-html.mjs";
@@ -899,4 +900,132 @@ test("a key that is not an id JOINS the one (no project) bar, never a second one
   const out = buildInsightsHtml(p, { now: NOW });
   assert.equal(out.split(">(no project)</text>").length - 1, 1, "one bar");
   assert.ok(out.includes("$3.00"), "it carries both rows' spend");
+});
+
+// ---- the budget split (issue #507) ----
+
+const SM = 1_000_000;
+/** The assembler's split slice for a live envelope, with a host, a plan's reason and junk the page must not carry. */
+const SPLIT = () => ({
+  window: "week",
+  totalMicros: 100 * SM,
+  floors: { _other: 0, platform: 10 * SM, shop: 10 * SM },
+  delegation: true,
+  stateProblem: null,
+  state: { planId: "3f9a0c1d2e4b5a67", writer: "portfolio-job", appliedAt: "2026-10-05T06:01:12.000Z", validUntil: "2026-10-19T06:01:12.000Z", clamped: true, allocations: { _other: 0, platform: 30 * SM, shop: 70 * SM }, unallocated: 0, reasons: { shop: "CANARY-REASON-TEXT" } },
+  mismatch: false,
+  spend: { deployment: 82_500_000, projects: { _other: 1_250_000, platform: 4_250_000, shop: 77 * SM } },
+  log: [
+    { at: "2026-10-05T12:30:00.000Z", host: "CANARY-HOST", writer: "operator-session", outcome: "refused", reason: "plan-too-soon", planId: "aaaaaaaaaaaaaaaa" },
+    { at: "2026-10-05T06:01:12.000Z", host: "CANARY-HOST", writer: "portfolio-job", outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67" },
+  ],
+  counts: { refusals: { "allocation-cap": 3, "envelope-mismatch": 0, "portfolio-no-envelope": 0, "portfolio-snapshot-oversize": 1 }, plans: { applied: 2, "plan-stale": 1 } },
+});
+const splitPage = (allocation, over = {}) => buildInsightsHtml({ ...CANNED_PAYLOAD(), allocation, ...over }, { now: NOW });
+
+test("the budget split's live shape: the envelope, the plan, the headroom, the counts and the history, composed exactly (#507)", () => {
+  const out = splitPage(SPLIT());
+  assert.ok(out.includes("<section><h2>budget split</h2>"), "a section under the caps");
+  assert.ok(out.indexOf("<h2>budget split</h2>") > out.indexOf("<h2>budget</h2>") && out.indexOf("<h2>budget split</h2>") < out.indexOf("<h2>daily spend</h2>"));
+  assert.ok(out.includes('<div class="row"><span class="wl">envelope</span><span>$100.00 per week · delegation on</span></div>'));
+  assert.ok(out.includes('<div class="row"><span class="wl">plan</span><span>plan 3f9a0c1d2e4b5a67 · written by portfolio-job · applied 2026-10-05 06:01 UTC · until 2026-10-19 06:01 UTC · clamped by the step</span></div>'));
+  assert.ok(out.includes('<div class="row"><span class="wl">headroom</span><span>unallocated $0.00 · deployment spent $82.50 of $100.00</span></div>'));
+  assert.ok(out.includes('<div class="small">refusals in the spend window (last 30d): allocation-cap 3 · envelope-mismatch 0 · portfolio-no-envelope 0 · portfolio-snapshot-oversize 1</div>'));
+  assert.ok(out.includes('<div class="small">plans collected in the spend window: applied 2 · plan-stale 1</div>'));
+  assert.ok(out.includes('<tr><td>2026-10-05 12:30 UTC</td><td>operator-session</td><td>refused</td><td>plan-too-soon</td><td class="pid">aaaaaaaaaaaaaaaa</td></tr>'));
+  assert.ok(out.includes('<tr><td>2026-10-05 06:01 UTC</td><td>portfolio-job</td><td>applied</td><td></td><td class="pid">3f9a0c1d2e4b5a67</td></tr>'));
+  assert.ok(out.includes('$77.00 spent of $70.00 · floor $10.00 <tspan fill="'), "the overspent row says over in words");
+  assert.ok(out.includes(">$4.25 spent of $30.00 · floor $10.00</text>"), "a row within its allocation carries no word");
+  const tips = JSON.parse(/var INSIGHTS = (.*);/.exec(out)[1]).tips;
+  assert.ok(tips.includes("shop · allocated $70.00 · spent $77.00 · floor $10.00 · over its allocation"));
+  assert.ok(tips.includes("platform · allocated $30.00 · spent $4.25 · floor $10.00"));
+  assert.ok(!out.includes("CANARY-HOST"), "no host reaches a page meant to be shared");
+  assert.ok(!out.includes("CANARY-REASON-TEXT"), "a plan's reason text is the panel's alone");
+  assert.equal(splitPage(SPLIT()), out, "byte-deterministic");
+  const permuted = SPLIT();
+  permuted.floors = Object.fromEntries(Object.entries(permuted.floors).reverse());
+  permuted.spend.projects = Object.fromEntries(Object.entries(permuted.spend.projects).reverse());
+  assert.equal(splitPage(permuted), out, "a permuted map does not move a byte");
+});
+
+test("the split's counts say not counted when the spend scan was unread, never 0 (#507)", () => {
+  const out = splitPage({ ...SPLIT(), counts: null });
+  assert.ok(out.includes('<div class="small">refusals in the spend window (last 30d): not counted (the spend scan could not be read)</div>'));
+  assert.ok(out.includes('<div class="small">plans collected in the spend window: not counted (the spend scan could not be read)</div>'));
+  assert.ok(!out.includes("allocation-cap 0"), "no invented zero");
+  const none = splitPage({ ...SPLIT(), counts: { refusals: { "allocation-cap": 0 }, plans: {} } });
+  assert.ok(none.includes("refusals in the spend window (last 30d): allocation-cap 0 · envelope-mismatch 0 · portfolio-no-envelope 0 · portfolio-snapshot-oversize 0</div>"), "a count that was made says 0 for every reason");
+  assert.ok(none.includes("plans collected in the spend window: none</div>"));
+});
+
+test("the split's other three shapes: unset is one line, a problem its text, unreachable a banner and no number (#507)", () => {
+  const unset = splitPage({ unset: true });
+  assert.ok(unset.includes('<section><h2>budget split</h2><div id="split" class="dim">no envelope (PI_ENVELOPE_FILE is unset), so there is no split and delegation is off</div></section>'));
+  const problem = splitPage({ problem: "the envelope file does not load: envelope file: window must be one of day, week, month: envelope.json <b>" });
+  assert.ok(problem.includes('<div id="split"><div class="row"><span class="state over">envelope problem</span><span>the envelope file does not load: envelope file: window must be one of day, week, month: envelope.json &lt;b&gt;</span></div></div>'));
+  const down = splitPage({ window: "week", totalMicros: 100 * SM, unreachable: "connect ECONNREFUSED 127.0.0.1:6379" });
+  assert.ok(down.includes('<div class="banner">budget split unreachable: connect ECONNREFUSED 127.0.0.1:6379</div>'));
+  assert.ok(down.includes('<section><h2>budget split</h2><div id="split" class="dim">the split could not be read from the queue, so no number is shown (see the banner)</div></section>'));
+  assert.ok(!/\$100/.test(down), "the envelope total is not drawn either");
+  assert.ok(!splitPage(undefined).includes("budget split"), "a payload without the slice draws no section at all");
+});
+
+test("junk in a split row degrades to ? or absence, and hostile text is escaped (#507)", () => {
+  const p = SPLIT();
+  p.log = [{ at: "<script>", writer: "<script>alert(1)</script>", outcome: "applied\u001b[31m", reason: "has space", planId: "not-a-hash" }];
+  p.state.writer = "Bad Writer";
+  p.floors = { ...p.floors, "<b>": 5, constructor: 1 };
+  const out = splitPage(p);
+  assert.ok(out.includes('<tr><td>?</td><td>?</td><td>?</td><td></td><td class="pid"></td></tr>'));
+  assert.ok(out.includes("written by ? ·"));
+  assert.ok(!out.includes("&lt;b&gt;</text>"), "an id that no envelope can name is no row");
+  assert.ok(out.includes(">constructor</text>"), "an id-shaped key is a row like any other");
+  const long = splitPage({ ...SPLIT(), floors: { "customer-data-platform-migration": 0 } });
+  assert.ok(long.includes(">customer-data-pl…</text>"), "a long id is cut to the label column");
+  assert.ok(JSON.parse(/var INSIGHTS = (.*);/.exec(long)[1]).tips.includes("customer-data-platform-migration · allocated - · spent - · floor $0.00"), "and its tip carries it whole");
+  assert.equal(out.split("<script").length - 1, 1, "still exactly the page's own script");
+  const down = splitPage({ unreachable: "</script><script>x" });
+  assert.equal(down.split("<script").length - 1, 1);
+  assert.ok(down.includes("budget split unreachable: &lt;/script&gt;&lt;script&gt;x"));
+});
+
+test("the page's micro-dollar text is the worker's formatMicros, to the micro (#507)", () => {
+  for (const m of [0, 1, 10, 999_999, 1_000_000, 1_250_000, 70_000_000, 82_500_000, 123_456_789, Number.MAX_SAFE_INTEGER]) {
+    assert.equal(microsUsd(m), `$${formatMicros(m)}`, `${m}`);
+  }
+  for (const junk of [-1, 1.5, null, undefined, "70", NaN]) assert.equal(microsUsd(junk), "-", "never a $0 for a number nobody has");
+});
+
+test("layoutSplitBars: one scale for every row, the envelope total or a larger amount, and overspend flagged (#507)", () => {
+  const laid = layoutSplitBars([
+    { id: "a", floor: 10 * SM, allocation: 70 * SM, spent: 77 * SM },
+    { id: "b", floor: 0, allocation: 30 * SM, spent: null },
+  ], 100 * SM);
+  assert.deepEqual(laid, [
+    { y: 0, allocW: 266, spentW: 293, floorX: 38, over: true },
+    { y: 22, allocW: 114, spentW: 0, floorX: null, over: false },
+  ]);
+  // A spend above the total stretches the scale, so it still ends inside its track.
+  const big = layoutSplitBars([{ id: "a", floor: 0, allocation: 50 * SM, spent: 200 * SM }], 100 * SM);
+  assert.deepEqual(big, [{ y: 0, allocW: 95, spentW: 380, floorX: null, over: true }]);
+  assert.deepEqual(layoutSplitBars([{ id: "a", floor: 0, allocation: 0, spent: 0 }], 0), [{ y: 0, allocW: 0, spentW: 0, floorX: null, over: false }], "an all-zero envelope is safe");
+});
+
+test("the page script runs under a DOM stub, and a split bar's tooltip is the composed text (#507)", () => {
+  const out = splitPage(SPLIT());
+  const script = /<script>([\s\S]*?)<\/script>/.exec(out)[1];
+  const handlers = {};
+  const el = () => ({ textContent: "", className: "", style: {}, getBoundingClientRect: () => ({ left: 0, top: 0 }), addEventListener() {} });
+  const nodes = { tip: el(), wrap: el(), stamp: el() };
+  // No graph svg: PAGE_JS stamps the age and returns before pan/zoom, and FIT_JS has no getElementsByTagName to walk.
+  const document = { getElementById: (id) => nodes[id] ?? null, addEventListener: (type, fn) => (handlers[type] = fn) };
+  new Function("document", "setInterval", "location", "history", "MouseEvent", script)(document, () => 0, {}, {}, function () {});
+  const tips = JSON.parse(/var INSIGHTS = (.*);/.exec(out)[1]).tips;
+  const idx = tips.indexOf("shop · allocated $70.00 · spent $77.00 · floor $10.00 · over its allocation");
+  assert.ok(idx >= 0 && out.includes(`<g data-tip="${idx}">`), "the shop bar carries that tip's ordinal");
+  const bar = { getAttribute: (n) => (n === "data-tip" ? String(idx) : null) };
+  handlers.pointermove({ target: { closest: (sel) => (sel === "[data-tip]" ? bar : null) }, clientX: 5, clientY: 5 });
+  assert.equal(nodes.tip.textContent, "shop · allocated $70.00 · spent $77.00 · floor $10.00 · over its allocation");
+  assert.equal(nodes.tip.style.display, "block");
+  assert.match(nodes.stamp.textContent, /^generated /);
 });

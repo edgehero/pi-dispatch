@@ -449,6 +449,9 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       // fact on this literal.
       once: t.once === true && !t.disarmed,
       disarmed: t.disarmed !== null && typeof t.disarmed === "object" ? t.disarmed : null,
+      // The portfolio flag (issue #507), the same kind of node FACT: this cron's jobs write the budget split. The tip
+      // says so in words; no chip, glyph, flag or node kind is added for it (the #188 rule above).
+      portfolio: t.portfolio === true,
       folderKey: group?.key ?? null,
       runs: Number.isInteger(stats?.runs) ? stats.runs : 0,
       lastOutcome: stats?.lastOutcome ?? null,

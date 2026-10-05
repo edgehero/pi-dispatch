@@ -260,3 +260,50 @@ test("the default graph dir's account root is made this account's first, and ano
   const said = theirs.events.find((e) => e[0] === "notify" && e[1] === "error");
   assert.match(said[2], new RegExp(`^insights: could not write /t/pi-dispatch-x/graph/insights\\.html \\(/t/pi-dispatch-x is owned by uid ${uid + 1}, not by this account \\(uid ${uid}\\): another account created /t/pi-dispatch-x before this one`));
 });
+
+test("with an envelope set, the split is read through readAllocations, without hosts or reasons, and counted from the records (#507)", async () => {
+  // The slice's assembler on its own: the rest of insightsCommand dials the real queue (the budget read), which a unit
+  // test cannot fake, so the page half is the builder over exactly what this returns.
+  const { fakeAllocRedis } = await import("./helpers/fake-alloc-redis.mjs");
+  const { readEnvelope } = await import("../src/read-model.mjs");
+  const { buildInsightsHtml } = await import("../src/insights-html.mjs");
+  const dir = tempDir("admin-insights-split-");
+  const files = { envelope: join(dir, "envelope.json"), projects: join(dir, "projects.json"), settings: join(dir, "settings.json") };
+  writeFileSync(files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+  writeFileSync(files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: true, writers: ["portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+  writeFileSync(files.settings, JSON.stringify({ maxCostUsd: "2" }));
+  const digest = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 }).digest;
+  const redis = fakeAllocRedis();
+  const M = 1_000_000;
+  redis.store.set("t507:plan", JSON.stringify({ version: 1, envelopeDigest: digest, planId: "3f9a0c1d2e4b5a67", writer: "portfolio-job", appliedAt: "2026-10-05T06:00:00.000Z", weights: { shop: 1, _other: 0 }, allocations: { shop: 100 * M, _other: 0 }, unallocated: 0, repos: {}, clamped: false, reasons: { shop: "CANARY-REASON" } }));
+  redis.lists.set("t507:log", [JSON.stringify({ at: "2026-10-05T06:00:00.000Z", host: "CANARY-HOST", writer: "portfolio-job", outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67", weights: { shop: 1 } })]);
+  const records = [
+    { jobId: "a", outcome: "policy", reason: "allocation-cap" },
+    { jobId: "b", outcome: "completed", reason: null, plan: { outcome: "refused", reason: "plan-stale", planId: null, clamped: false } },
+    { jobId: "c", outcome: "completed", reason: null, plan: { outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67", clamped: false } },
+    { jobId: "d", outcome: "policy", reason: "over-budget" },
+  ];
+  const paths = { envelopeFile: files.envelope, projectsFile: files.projects, settingsFile: files.settings, valkeyUrl: "redis://127.0.0.1:6390" };
+  mod._setAllocationSeamsForTests({ redisFn: () => redis, prefix: "t507", now: () => new Date(Date.parse("2026-10-05T12:00:00Z")) });
+  let slice;
+  try {
+    slice = await mod.assembleAllocationView(paths, mod.splitCounts(records));
+  } finally {
+    mod._setAllocationSeamsForTests({});
+  }
+  assert.deepEqual(slice.counts, { refusals: { "allocation-cap": 1, "envelope-mismatch": 0, "portfolio-no-envelope": 0, "portfolio-snapshot-oversize": 0 }, plans: { "plan-stale": 1, applied: 1 } });
+  assert.deepEqual(slice.log, [{ at: "2026-10-05T06:00:00.000Z", writer: "portfolio-job", outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67" }], "a row cut to its enum fields: no host");
+  assert.equal(JSON.stringify(slice).includes("CANARY"), false, "no host and no reason text leave the assembler");
+  assert.equal(slice.mismatch, false);
+  const page = buildInsightsHtml({ allocation: slice, window: "30d" }, { now: 0 });
+  assert.ok(page.includes('<span class="wl">envelope</span><span>$100.00 per week · delegation on</span>'), "the envelope the worker's parser read");
+  assert.ok(page.includes("plan 3f9a0c1d2e4b5a67 · written by portfolio-job · applied 2026-10-05 06:00 UTC"));
+  assert.ok(page.includes("plans collected in the spend window: applied 1 · plan-stale 1</div>"));
+  assert.equal(mod.splitCounts({ unreachable: "EACCES" }), null, "an unread scan counts nothing");
+  assert.deepEqual(await mod.assembleAllocationView({ envelopeFile: null }, null), { unset: true }, "no envelope, no queue read");
+
+  // A broken envelope names its file by basename only: the page is a file meant to be shared.
+  writeFileSync(files.envelope, "{ not json");
+  const broken = await mod.assembleAllocationView(paths, null);
+  assert.deepEqual(broken, { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json" });
+});
