@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { builtinModules, createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
@@ -521,7 +521,12 @@ test("the copy of pi this bolt resolves and the copy the runner dispatches throu
 	// declares, which is what makes one scan cover both.
 	const { hoisted, runner } = await derive();
 	const runnerRoot = runner.packages[0].root;
-	assert.equal(runnerRoot, packageRoot("@earendil-works/pi-ai", codingAgentRoot), "the runner closure is not reading the pi-ai pi-coding-agent's own lookup finds");
+	// Held to the RUNNER's own resolver (piOwnPackageDir, what the meter binds), not to this file's packageRoot walk,
+	// which is what built runnerRoot in the first place and so could only agree with itself.
+	const { piOwnPackageDir } = await import("../../image/runner/src/usage-meter.mjs");
+	const runnersOwn = piOwnPackageDir("pi-ai");
+	assert.ok(runnersOwn, "the runner's resolver finds no pi-ai at all");
+	assert.equal(realpathSync(runnerRoot), realpathSync(runnersOwn), "the runner closure is not reading the pi-ai the runner's meter binds (piOwnPackageDir)");
 	const nestedNames = runner.packages[0].reads.names;
 	assert.ok(nestedNames.size > 20, `the runner's copy yielded ${nestedNames.size} names, so this is measuring an empty directory rather than pi`);
 	if (runnerRoot === hoisted.packages[0].root) {

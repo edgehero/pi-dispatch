@@ -2554,7 +2554,17 @@ export async function collectChecks(shellVars, seams) {
 			if (typeof error?.code === "string") keylessUnreadable = error.code;
 		}
 	}
-	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir: keyAgentDir, oracle, nodeOk: checks[0]?.ok, keyless: { endpoints: keylessEndpoints, models: keylessModels, unreadable: keylessUnreadable } });
+	// Issue #587's gate: the rename hint is judged on the overlay itself, read whenever there is one, endpoint or not.
+	let hintModels = keylessModels;
+	let hintUnread = false;
+	if (unknownToPi && hintModels === null && Object.hasOwn(RENAMED_PROVIDERS, provider) && typeof env.PI_GLOBAL_PI_DIR === "string" && isAbsolute(env.PI_GLOBAL_PI_DIR)) {
+		try {
+			hintModels = readOverlayModels(env.PI_GLOBAL_PI_DIR, keylessIo);
+		} catch {
+			hintUnread = true;
+		}
+	}
+	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir: keyAgentDir, oracle, nodeOk: checks[0]?.ok, keyless: { endpoints: keylessEndpoints, models: keylessModels, unreadable: keylessUnreadable, hintModels, hintUnread } });
 	const keyNamed = Object.keys(keyFromFile).filter((name) => keyCheck.label?.includes(`: ${name})`));
 	// Issue #481 (PR #485 review round 2): a key found nowhere doctor can look is one an env-setup script may export, which
 	// is the documented home for a provider key fetched from a secrets manager (docs/secrets.md).
@@ -2701,7 +2711,7 @@ export async function collectChecks(shellVars, seams) {
 						checks.push({
 							ok: false,
 							warn: true,
-							label: `Overlay models.json entry ${JSON.stringify(name)} no longer overrides anything: pi 1.0.3 renamed that provider to ${JSON.stringify(renamedTo)}, so this entry is now a provider of its own with no models, and the ${renamedTo} models do not get its settings`,
+							label: `Overlay models.json entry ${JSON.stringify(name)} no longer overrides anything: pi 1.0.3 renamed that provider to ${JSON.stringify(renamedTo)}, so this entry is now a provider of its own, holding only what it declares itself, and the ${renamedTo} models do not get its settings`,
 							fix: `rename the entry to ${JSON.stringify(renamedTo)} in ${modelsPath} (and every ${name}/ model reference in the triggers to ${renamedTo}/), then re-run doctor`,
 						});
 					}
@@ -4255,7 +4265,7 @@ function noKeyVariableCheck(provider, oracle, keyless = null) {
 	// Why a custom provider the overlay defines is not keyless, when it is one: the one fact the operator has to change.
 	const why = verdict.why ? `; it is not keyless because ${verdict.why}` : "";
 	// Issue #587: an id pi renamed (azure-openai-responses is `azure` since pi 1.0.3), named, unless the overlay declares it.
-	const renamed = providerRenameHint(provider, { models: keyless?.models ?? null, piProviders: oracle.piProviders() });
+	const renamed = providerRenameHint(provider, { models: keyless?.hintModels ?? keyless?.models ?? null, overlayUnread: keyless?.hintUnread === true, piProviders: oracle.piProviders() });
 	return {
 		ok: false,
 		label: `PI_PROVIDER is ${JSON.stringify(provider)}, which is not a provider pi has${why}${renamed ? `;${renamed}` : ""}`,
