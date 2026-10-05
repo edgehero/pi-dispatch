@@ -23,7 +23,7 @@
  *
  * `authPath` stays `${agentDir}/auth.json`, the same file the 0.80.7 wiring passed to AuthStorage.create: the
  * credential still comes from the environment or auth.json, and the overlay models.json is definitions only
- * (import-pi refuses a literal key there). Since issue #587's gate run-job reads that file once, at start
+ * (import-pi refuses a literal key there). Since issue #587's review run-job reads that file once, at start
  * (createJobModelRuntime below).
  */
 import { readFileSync } from "node:fs";
@@ -74,7 +74,7 @@ export async function loadPiAuthStorage({ resolve = (spec) => import.meta.resolv
 
 /**
  * The job's ModelRuntime. With pi's `AuthStorage` handed in (run-job.mjs always does), the credentials are the
- * auth.json contents read ONCE here, held in pi's in-memory store (issue #587's gate): pi's file store re-reads the
+ * auth.json contents read ONCE here, held in pi's in-memory store (issue #587's review): pi's file store re-reads the
  * file whenever it changes, and a credential's `env` is merged into every request's options.env after the guards ran
  * (ModelRuntime.prepareRequest), so a job that wrote auth.json mid-run could pick its Azure deployment past the model
  * list, or set PI_CACHE_RETENTION past the cost bound. A refresh or login pi makes writes to memory only. Without

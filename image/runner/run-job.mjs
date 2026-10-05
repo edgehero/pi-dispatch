@@ -186,7 +186,7 @@ async function main() {
 	// overlay is mounted -- this is how a CUSTOM provider/model becomes resolvable.
 	const GLOBAL_MODELS = "/opt/pi-global/models.json";
 	const modelsPath = existsSync(GLOBAL_MODELS) ? GLOBAL_MODELS : `${agentDir}/models.json`;
-	// The credentials are auth.json as it is NOW, held in memory (issue #587's gate, src/model-runtime.mjs has the why).
+	// The credentials are auth.json as it is NOW, held in memory (issue #587's review, src/model-runtime.mjs has the why).
 	const modelRuntime = await createJobModelRuntime({ ModelRuntime, AuthStorage: await loadPiAuthStorage(), agentDir, modelsPath });
 
 	// Pin the model explicitly. With `model` omitted, pi picks from settings and provider defaults
