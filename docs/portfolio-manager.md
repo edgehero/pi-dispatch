@@ -86,8 +86,9 @@ moves 25/31.25 of the way, to shop $25.00, platform $60.00 and ops $15.00.
   only the one command fixture flow. A 7B model (qwen2.5:7b) ran this flow: its plan followed
   `priorities.md`, applied, and raised a project's weight from 1 to 3 once that project was marked "on fire".
   It did not on every run: some runs wrote no plan, and one wrote `"basis": "null"`, which was refused. A run
-  that writes no plan is recorded as `plan-absent`, and the next report opens with
-  `Last plan: refused (plan-absent)`.
+  that completes without a plan is recorded as `plan-absent`, and the next report opens with
+  `Last plan: refused (plan-absent)`. A run that stops before it completes (a timeout, a cancel, a failure)
+  records nothing, and the next report still shows the earlier attempt.
   Give a local model a context of 16k tokens or more: Ollama often defaults to 4096, too small for this flow.
 - It does **not** set `"github": true`. That flag hands the job the deployment's GitHub credential: under the
   default `GITHUB_AUTH_SOURCE=gh` that is your whole gh login, and a job that reads issue text must not hold a

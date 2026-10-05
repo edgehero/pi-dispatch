@@ -168,8 +168,9 @@ function readPlan(fs, path) {
 /**
  * The pre-check, called by run-job.mjs right before the exit line and its result DISCARDED. Returns undefined, always,
  * and never throws. Logs nothing when there is neither a plan file nor a snapshot (no portfolio job); otherwise one
- * `plan_precheck` line. A portfolio job (it has the snapshot) that wrote no plan file logs `plan-absent`, the host's
- * answer to it (issue #507), so the job's own log says it wrote nothing.
+ * `plan_precheck` line. A portfolio job (it has the snapshot) that wrote no plan file logs `plan-absent` (issue #507),
+ * so the job's own log says it wrote nothing. The pre-check runs on any exit, but the host records `plan-absent` only
+ * for a job that completed: on any other exit it collects nothing, so the line is a hint, like every other here.
  */
 export function precheckAtExit({ outboxDir = OUTBOX_DIR, snapshotPath = SNAPSHOT_PATH, fs = nodeFs, log = () => {}, now = () => Date.now() } = {}) {
 	try {
