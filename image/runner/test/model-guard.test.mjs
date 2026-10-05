@@ -8,6 +8,7 @@ import {
 	createUsageMeter,
 	installProcessUsageMeter,
 	makeHardStopStream,
+	pinPriceTable,
 	policyEnforcement,
 	VIRTUAL_MODEL_API,
 	wrapModelRuntime,
@@ -640,29 +641,32 @@ test("the compat half hands its provider the same copies, and refuses an inherit
 	assert.deepEqual([refused.errorMessage, sent.length, meter.state.stopReason], ["pi-dispatch: model not allowed", 1, MODEL_NOT_ALLOWED]);
 });
 
-test("under a cap a call is priced from the runtime's own registry: a forged cost or compat, or an unregistered model, is refused (issue #587)", async () => {
-	// The bound and pi's settlement both read the model object the CALLER passes, so an extension calling with
-	// { ...expensiveModel, cost: zeros } ran under a cap at $0. Each call is held to the registry entry for its
-	// (provider, id, api) in the runtime it was made on.
-	const registry = [LISTED, { ...LISTED, id: "free-1", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }];
+test("under a cap a call is priced from the table pinned at install: a forged cost or compat, or an unpinned model, is refused (issue #587)", async () => {
+	// The bound and pi's own settlement both read the model object the CALLER passes, and a live registry can be
+	// poisoned mid-run (registerProvider over a builtin id, a rewritten models.json and a refresh, an extension's own
+	// runtime). So the table is taken ONCE, when the meter installs, and every capped call on every runtime instance is
+	// held to it: no entry for (provider, id, api), or an entry whose api, cost or compat differs, is unboundable.
+	const source = [{ ...LISTED }, { ...LISTED, id: "free-1", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }];
+	const prices = pinPriceTable({ getAllModels: () => source });
+	// Poisoning the source after the pin changes nothing the table holds.
+	source[0].cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 	const cases = [
-		["the registry's own model", { ...LISTED }, true],
+		["the pinned model", { ...LISTED }, true],
 		["a deep-equal copy", JSON.parse(JSON.stringify(LISTED)), true],
-		["a registered zero-rated model", { ...registry[1] }, true],
-		["a forged zero cost", { ...LISTED, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, false],
+		["a pinned zero-rated model", { ...LISTED, id: "free-1", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, true],
+		["a forged zero cost, also what the poisoned registry now says", { ...LISTED, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, false],
 		["a forged tier", { ...LISTED, cost: { ...LISTED.cost, tiers: [{ inputTokensAbove: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }] } }, false],
 		["a forged compat", { ...LISTED, compat: { maxTokensField: "max_completion_tokens" } }, false],
 		["a forged fallback list", { ...LISTED, compat: { ...LISTED.compat, allowedFallbackModels: [] } }, false],
 		["another api", { ...LISTED, api: "openai-responses" }, false],
-		["an unregistered id", { ...LISTED, id: "nowhere-1", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, false],
+		["an unpinned id", { ...LISTED, id: "nowhere-1", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, false],
 	];
 	for (const [label, model, admitted] of cases) {
 		const { FakeRuntime, dispatched } = recordingRuntimeClass();
-		FakeRuntime.prototype.getAllModels = (provider) => registry.filter((m) => m.provider === provider);
 		const meter = createUsageMeter({ maxCostMicros: 1_000_000_000, onStop: () => {} });
 		const logged = [];
 		const guard = createPolicyGuard({ maxCostMicros: 1_000_000_000, log: (event, fields) => logged.push({ event, fields }), env: {} });
-		const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard });
+		const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard, prices });
 		try {
 			await new FakeRuntime().streamSimple(model, {}, {}).result();
 			assert.deepEqual([dispatched.length, meter.state.stopReason], admitted ? [1, null] : [0, COST_CAP], label);
@@ -671,11 +675,19 @@ test("under a cap a call is priced from the runtime's own registry: a forged cos
 			layer.restore();
 		}
 	}
-	// Without a cap nothing is priced, so nothing is compared; and a runtime with no registry to ask is judged as before.
+	// An empty table (a pi child given none) refuses every capped call; a list alone compares nothing.
+	const { FakeRuntime: Empty, dispatched: none } = recordingRuntimeClass();
+	const emptyMeter = createUsageMeter({ maxCostMicros: 1_000_000_000 });
+	const emptyLayer = wrapModelRuntime({ ModelRuntime: Empty, meter: emptyMeter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ maxCostMicros: 1_000_000_000, env: {} }), prices: new Map() });
+	try {
+		await new Empty().streamSimple({ ...LISTED }, {}, {}).result();
+		assert.deepEqual([none.length, emptyMeter.state.stopReason], [0, COST_CAP]);
+	} finally {
+		emptyLayer.restore();
+	}
 	const { FakeRuntime: Plain, dispatched } = recordingRuntimeClass();
-	Plain.prototype.getAllModels = () => [];
 	const meter = createUsageMeter({ allowedModels: [{ provider: "local", model: "nowhere-1" }] });
-	const layer = wrapModelRuntime({ ModelRuntime: Plain, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ allowedModels: [{ provider: "local", model: "nowhere-1" }] }) });
+	const layer = wrapModelRuntime({ ModelRuntime: Plain, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ allowedModels: [{ provider: "local", model: "nowhere-1" }] }), prices });
 	try {
 		await new Plain().streamSimple({ ...LISTED, id: "nowhere-1" }, {}, {}).result();
 		assert.deepEqual([dispatched.length, meter.state.stopReason], [1, null], "a list alone compares no price");
@@ -684,13 +696,13 @@ test("under a cap a call is priced from the runtime's own registry: a forged cos
 	}
 });
 
-test("the compat half prices a legacy call from the job runtime's registry too (issue #587)", async () => {
-	const registry = { getAllModels: (provider) => [LISTED].filter((m) => m.provider === provider) };
+test("the compat half prices a legacy call from the pinned table too (issue #587)", async () => {
+	const prices = pinPriceTable({ getAllModels: () => [LISTED] });
 	const sent = [];
 	const make = () => {
 		const meter = createUsageMeter({ maxCostMicros: 1_000_000_000 });
 		const inner = { streamSimple: (model) => (sent.push(model), new FakeStream()) };
-		return { meter, compat: wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ maxCostMicros: 1_000_000_000 }), registry }) };
+		return { meter, compat: wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ maxCostMicros: 1_000_000_000 }), prices }) };
 	};
 	const forged = make();
 	forged.compat.streamSimple({ ...LISTED, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, {}, {});

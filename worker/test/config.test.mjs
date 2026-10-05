@@ -445,7 +445,7 @@ test("PI_FORWARD_ENV refuses every name the worker writes into a job's container
 });
 
 test("PI_FORWARD_ENV refuses the two names the runner sets for its child processes (issue #500)", () => {
-	assert.deepEqual([...RUNNER_ENV_NAMES].sort(), ["PI_DISPATCH_CHILD_LEDGER", "PI_DISPATCH_RUNNER_PID"]);
+	assert.deepEqual([...RUNNER_ENV_NAMES].sort(), ["PI_DISPATCH_CHILD_LEDGER", "PI_DISPATCH_PRICE_TABLE", "PI_DISPATCH_RUNNER_PID"]);
 	for (const env of [{}, { PI_EGRESS: "0" }]) {
 		for (const name of RUNNER_ENV_NAMES) {
 			assert.throws(() => loadConfig({ ...env, PI_FORWARD_ENV: `FOO,${name}` }), (e) => e.piDispatchConfig === true && new RegExp(`PI_FORWARD_ENV must not forward ${name} -- the job's runner sets it inside the container`).test(e.message), name);

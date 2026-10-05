@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { types as utilTypes } from "node:util";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
@@ -812,21 +813,45 @@ function isOwnData(value) {
 }
 
 /**
- * The registry entry of the runtime a call is made on for the call's (provider, id, api), or null when it has none, or
- * undefined when there is no registry to ask (issue #587's gate). The cost guard prices a call from it: the bound and
- * pi's own settlement both read the model object the CALLER passes, so a caller's `{ ...model, cost: zeros }` would
- * otherwise run under a cap at $0. `registry` is a ModelRuntime (`getAllModels(provider)`, every model type).
+ * THE PRICE TABLE (issue #587's review). The cost guard's bound and pi's own settlement both read the model object the
+ * CALLER passes, so a caller's `{ ...model, cost: zeros }` would run under a cap at $0, and a live registry can be
+ * poisoned mid-run (registerProvider over a builtin id, a rewritten models.json and any refresh, a modelOverrides
+ * entry, an extension's own ModelRuntime). So one table is pinned ONCE, from the job's runtime, when the meter installs,
+ * which is before any extension loads: the builtin catalog plus the operator's overlay as it was loaded at start.
+ * `(provider, id, api)` to `{ api, cost, compat }`, each copied as plain data. Every capped call on every runtime
+ * instance, and every legacy call, is held to it (pricedAsPinned). null means no table: the call is judged on its own
+ * object (only a caller that wires the meter without one, such as a unit test).
  */
-function registryEntry(registry, model) {
-	if (typeof registry?.getAllModels !== "function") return undefined;
+export function pinPriceTable(runtime) {
+	if (typeof runtime?.getAllModels !== "function") return null;
+	const table = new Map();
 	let models;
 	try {
-		models = registry.getAllModels(model?.provider);
+		models = runtime.getAllModels();
 	} catch {
-		return null;
+		return table;
 	}
-	if (!Array.isArray(models)) return null;
-	return models.find((entry) => entry?.id === model?.id && entry?.api === model?.api) ?? null;
+	for (const model of Array.isArray(models) ? models : []) {
+		try {
+			if (typeof model?.provider !== "string" || typeof model?.id !== "string" || typeof model?.api !== "string") continue;
+			table.set(priceKey(model), { api: model.api, cost: dataCopy(model.cost), compat: dataCopy(model.compat) });
+		} catch (error) {
+			if (error !== NOT_DATA) throw error;
+			// A model whose price is not plain data is left out: a capped call on it is refused.
+		}
+	}
+	return table;
+}
+
+/** One spelling of a table key: NUL cannot appear in a provider id, a model id or an api id. */
+function priceKey(model) {
+	return `${model?.provider}\u0000${model?.id}\u0000${model?.api}`;
+}
+
+/** The pinned entry for a call's model, null when the table has none, undefined when there is no table. */
+function priceEntry(prices, model) {
+	if (!(prices instanceof Map)) return undefined;
+	return prices.get(priceKey(model)) ?? null;
 }
 
 /** The verdict for a call the guard judged and let through: dispatch it, and bind it to its settle. */
@@ -862,7 +887,7 @@ function externalStop(isStopped) {
  * not judge (a virtual model, whose physical re-entry is judged instead, or a compat call already judged by
  * the runtime half).
  */
-function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = null, registered }) {
+function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = null, priced }) {
 	if (!hardStop) return null;
 	if (meter.state.stopReason !== null) return meter.state.stopReason;
 	// A stop from OUTSIDE this process (issue #500: a child reads the parent's STOP file), asked before every
@@ -875,7 +900,7 @@ function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = 
 		}
 	}
 	if (guard === null || skip) return null;
-	const refused = guard.admit(registered === undefined ? { method, model, args } : { method, model, args, registered });
+	const refused = guard.admit(priced === undefined ? { method, model, args } : { method, model, args, priced });
 	if (refused === null || refused === undefined) return ADMITTED;
 	meter.stop(refused);
 	return meter.state.stopReason;
@@ -919,7 +944,7 @@ function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = 
  * later install layered on top is never torn out from under it; in that case this layer is switched to
  * pass-through instead, so it stops counting without breaking the chain.
  */
-export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardStopResult = defaultHardStopResult, guard = null, dispatch = new AsyncLocalStorage(), isStopped = null }) {
+export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardStopResult = defaultHardStopResult, guard = null, dispatch = new AsyncLocalStorage(), isStopped = null, prices = null }) {
 	const proto = ModelRuntime?.prototype;
 	const originals = new Map();
 	const wrappers = new Map();
@@ -931,8 +956,8 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	// Only streamSimple re-enters with the physical model (trap #4); a virtual model on any other method is judged as
 	// itself: under a cost cap that is an unboundable call, refused, and under a list it is refused unless the list
 	// names the virtual entry itself (pi then fails such an unrouted call without reaching a provider).
-	// `runtime` is the instance the call was made on: its registry prices the call (registryEntry), only while a guard judges.
-	const verdictFor = (method, model, args, runtime) => judge({ meter, hardStop, guard, method, model, args, isStopped, skip: method === "streamSimple" && model?.api === VIRTUAL_MODEL_API, registered: guard !== null && hardStop ? registryEntry(runtime, model) : undefined });
+	// The pinned table prices the call (pinPriceTable), whatever instance it was made on, only while a guard judges.
+	const verdictFor = (method, model, args) => judge({ meter, hardStop, guard, method, model, args, isStopped, skip: method === "streamSimple" && model?.api === VIRTUAL_MODEL_API, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined });
 	// The call's arguments as the guard prepared them for an admitted call (the model guard wraps options.onPayload).
 	const prepareFor = (verdict, method, model, args) => (verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method, model, args, stop: (reason) => meter.stop(reason) }) : args);
 	// Judged and dispatched on ONE copy (issue #502, PR #538's review): a model whose fields are getters could
@@ -950,7 +975,7 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			if (!active) return original.call(this, requested, ...passed);
 			const model = judgedModel(requested);
 			const given = judgedArgs(passed);
-			const verdict = verdictFor(name, model, given, this);
+			const verdict = verdictFor(name, model, given);
 			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
 			// Trap #5: everything this call dispatches, across its awaits, runs under this call's own token, and its
 			// options carry the token, so the compat half can tell this call's re-entry from any other call there.
@@ -975,7 +1000,7 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			if (!active) return original.call(this, requested, context, passed);
 			const model = judgedModel(requested);
 			const [, given] = judgedArgs([context, passed]);
-			const verdict = verdictFor(name, model, [context, given], this);
+			const verdict = verdictFor(name, model, [context, given]);
 			if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
 			const [, options] = prepareFor(verdict, name, model, [context, given]);
 			// A token too, though no result method re-enters the compat half: a legacy call made inside it is never its own.
@@ -1041,7 +1066,7 @@ export function defaultHardStopResult(method, model, message = STOP_MESSAGES[TOK
  *
  * There is deliberately NO swallowing try/catch, for the reason wrapModelRuntime gives (dispatchBinding rethrows).
  */
-export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null, isStopped = null, registry = null }) {
+export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null, isStopped = null, prices = null }) {
 	const dispatchOrUnanswered = (verdict, run) => dispatchBinding(guard, verdict, run);
 	function route(kind, requested, context, passed) {
 		// One copy, judged and dispatched (wrapModelRuntime's judgedModel has the why), its options likewise.
@@ -1050,9 +1075,8 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 		// Checked before dispatch, so a stop ends the NEXT call rather than merely recording it.
 		// The runtime call's own re-entry is skipped; any other call, a forward to another pair included, is judged.
 		const reentry = claimReentry(dispatch?.getStore(), model, given);
-		// A legacy call is priced from the job runtime's registry (`registry`, installProcessUsageMeter's `runtime`), as the
-		// runtime half prices from the instance it is called on.
-		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, registered: guard !== null && hardStop ? registryEntry(registry, model) : undefined });
+		// A legacy call is priced from the same pinned table as the runtime half (pinPriceTable).
+		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined });
 		if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
 		const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason) })[1] : given;
 		const provider = fallbackModels?.getProvider?.(model.provider);
@@ -1301,7 +1325,11 @@ export async function installProcessUsageMeter({
 	brake = false,
 	children: childrenHook = null,
 	isStopped = null,
+	prices,
 }) {
+	// The price table (pinPriceTable, issue #587's review), pinned HERE, before any extension loads: `prices` when the
+	// caller hands one over (a pi child, the parent's table), else the job runtime's, else none.
+	const pinnedPrices = prices !== undefined ? prices : pinPriceTable(runtime);
 	// --- the compat half's copy, decided first: it supplies the brake's stream factory to BOTH halves ---
 	// An INJECTED copy (issue #500, `compat: { module }`) skips resolution and the identity check: a pi child loads
 	// child-meter.mjs through pi's virtual modules, so the module it hands over IS the copy pi gives extensions, and in
@@ -1389,7 +1417,7 @@ export async function installProcessUsageMeter({
 	}
 	// One per install, shared by both halves (trap #5).
 	const dispatch = new AsyncLocalStorage();
-	const runtimeLayer = wrapModelRuntime({ ModelRuntime, meter, hardStop, guard, dispatch, isStopped });
+	const runtimeLayer = wrapModelRuntime({ ModelRuntime, meter, hardStop, guard, dispatch, isStopped, prices: pinnedPrices });
 	if (runtime !== null && !runtimeLayer.covers(runtime)) {
 		runtimeLayer.restore();
 		log("usage_meter_unavailable", { reason: "runtime-not-covered" });
@@ -1461,6 +1489,8 @@ export async function installProcessUsageMeter({
 		covers: (instance) => runtimeLayer.covers(instance),
 		module,
 		tag: accepted?.candidate.tag ?? null,
+		// The table every capped call is priced from (pinPriceTable): run-job hands it to pi children.
+		prices: pinnedPrices,
 		apis: [],
 		arm,
 		rearms: 0,
@@ -1481,7 +1511,7 @@ export async function installProcessUsageMeter({
 			const api = entry?.api;
 			if (typeof api !== "string") continue;
 			if (wrapped.has(entry)) continue;
-			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, guard, dispatch, isStopped, registry: runtime });
+			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, guard, dispatch, isStopped, prices: pinnedPrices });
 			// One sourceId per api id, and registerApiProvider keys the registry by api id, so re-arming
 			// replaces our entry instead of piling up registrations.
 			module.registerApiProvider({ api, ...streams }, `${METER_PROVIDER_PREFIX}:${api}`);
@@ -2148,10 +2178,10 @@ export function unreportedUsage(message, api) {
  * whose answer carries broken usage (unreportedUsage, the meter's own predicate) is charged at least its bound; the
  * guard keeps no counter for it: the meter counts it as `costUnreported` on every run, capped or not.
  */
-/** Whether the call's model carries the registry entry's api, cost (tiers included) and compat (fallbacks, maxTokensField). */
-function pricedAsRegistered(model, registered) {
-	if (registered === null || typeof registered !== "object") return false;
-	return model?.api === registered.api && samePayloadValue(model?.cost, registered.cost) && samePayloadValue(model?.compat, registered.compat);
+/** Whether the call's model carries the pinned entry's api, cost (tiers included) and compat (fallbacks, maxTokensField). */
+function pricedAsPinned(model, pinned) {
+	if (pinned === null || typeof pinned !== "object") return false;
+	return model?.api === pinned.api && samePayloadValue(model?.cost, pinned.cost) && samePayloadValue(model?.compat, pinned.compat);
 }
 
 export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null }) {
@@ -2241,12 +2271,12 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		settle(ticket, null);
 	}
 
-	function admit({ method, model, args, registered }) {
+	function admit({ method, model, args, priced }) {
 		flushPending();
-		// Issue #587's gate: priced from the runtime's own registry entry, never the caller's say-so. A call whose api, cost
-		// or compat differs from it, or one no registry knows, cannot be bounded honestly: `registered` is undefined only
-		// when there is no registry to ask (a pi child's compat half), and then the call is judged on its own object.
-		if (registered !== undefined && !pricedAsRegistered(model, registered)) return refuse({ why: "unboundable" });
+		// Issue #587's review: priced from the table pinned at install (pinPriceTable), never the caller's say-so. A call
+		// whose api, cost or compat differs from its entry, or one with no entry, cannot be bounded honestly. `priced` is
+		// undefined only when the meter was wired with no table at all, and then the call is judged on its own object.
+		if (priced !== undefined && !pricedAsPinned(model, priced)) return refuse({ why: "unboundable" });
 		const [context, options] = args ?? [];
 		// A copy that held something other than plain data (snapshotModel): what pi would read is not what was judged.
 		if (isUnreadable(model) || isUnreadable(options)) return refuse({ why: "unboundable" });
@@ -2920,7 +2950,7 @@ function signature(stat) {
  * loop, and with it every brake), held to a regular file of at most CHILD_LEDGER_MAX_BYTES, and read through the
  * descriptor so a swap after the check reads nothing new. Strict UTF-8.
  */
-function readLedger(fs, path, known) {
+function readLedger(fs, path, known, maxBytes = CHILD_LEDGER_MAX_BYTES) {
 	try {
 		if (known !== null && signature(fs.lstatSync(path, { bigint: true })) === known) return UNCHANGED;
 	} catch (error) {
@@ -2934,15 +2964,15 @@ function readLedger(fs, path, known) {
 	}
 	try {
 		const stat = fs.fstatSync(fd, { bigint: true });
-		if (!stat.isFile() || stat.size > BigInt(CHILD_LEDGER_MAX_BYTES)) return BAD;
-		const buffer = Buffer.alloc(CHILD_LEDGER_MAX_BYTES + 1);
+		if (!stat.isFile() || stat.size > BigInt(maxBytes)) return BAD;
+		const buffer = Buffer.alloc(maxBytes + 1);
 		let length = 0;
 		while (length < buffer.length) {
 			const read = fs.readSync(fd, buffer, length, buffer.length - length, null);
 			if (read === 0) break;
 			length += read;
 		}
-		if (length > CHILD_LEDGER_MAX_BYTES) return BAD;
+		if (length > maxBytes) return BAD;
 		return { text: new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length)), sig: signature(stat) };
 	} catch {
 		return BAD;
@@ -3204,6 +3234,17 @@ export const RUNNER_PID_ENV = "PI_DISPATCH_RUNNER_PID";
 export const STOP_FILE = "STOP";
 export const SPENT_FILE = "SPENT";
 /**
+ * The parent's pinned price table (pinPriceTable, issue #587's review), for pi children: written ONCE by the runner into
+ * the ledger directory, read-only (0444), its sha256 in PRICE_TABLE_ENV, which the runner sets in its own environment
+ * for its descendants. A child prices every capped call from it; a file that is missing, unreadable, malformed or does
+ * not match the hash is an EMPTY table, which refuses every capped call (never "unchecked"). RESIDUAL, named: the job's
+ * own processes run as the runner's uid, so one that rewrites the file AND exports a matching hash to a child it starts
+ * itself defeats the check; it stops an extension or a model in a pi child from forging a price in passing.
+ */
+export const PRICE_TABLE_FILE = "PRICES";
+export const PRICE_TABLE_ENV = "PI_DISPATCH_PRICE_TABLE";
+const PRICE_TABLE_MAX_BYTES = 8 * 1024 * 1024;
+/**
  * The globalThis key the preload hands its state over on: `{ dir, name, meter, library, child }`. A Symbol.for key,
  * because the preload, the child-meter extension (loaded by pi's own loader) and code appended to pi's
  * model-runtime.js (library mode) each reach it from a different module graph, and only the global is shared by all.
@@ -3342,6 +3383,49 @@ export function readExternal({ dir, name, fs = DEFAULT_LEDGER_FS }) {
 		return Infinity;
 	}
 	return externalFor(parsed, name);
+}
+
+/** The table's file text: `{ v: 1, entries: [[key, { api, cost, compat }], ...] }`, in key order. */
+function priceTableText(table) {
+	return JSON.stringify({ v: 1, entries: [...table].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)) });
+}
+
+/**
+ * Write the parent's table for its children (PRICE_TABLE_FILE) and set its hash in `env` (the runner's own environment,
+ * which every descendant inherits). Throws what the fs throws; the caller logs it, and a child then finds no table.
+ */
+export function publishPriceTable({ dir, table, env, fs = DEFAULT_WRITE_FS, chmod = chmodSync }) {
+	const text = priceTableText(table instanceof Map ? table : new Map());
+	writeFileAtomic({ dir, name: PRICE_TABLE_FILE, text, fs });
+	try {
+		chmod(join(dir, PRICE_TABLE_FILE), 0o444);
+	} catch {
+		// Read-only is a convenience, not the check: the hash is.
+	}
+	// env-internal PI_DISPATCH_PRICE_TABLE: set by the runner in its own environment for its descendants, never by the worker.
+	env[PRICE_TABLE_ENV] = createHash("sha256").update(text).digest("hex");
+}
+
+/** A child's copy of the parent's table, or an EMPTY Map when it cannot be had intact (PRICE_TABLE_FILE has the rule). */
+export function readPriceTable({ dir, env, fs = DEFAULT_LEDGER_FS }) {
+	// env-internal PI_DISPATCH_PRICE_TABLE: set by the runner in its own environment and inherited, never by the worker.
+	const want = env?.[PRICE_TABLE_ENV];
+	if (typeof want !== "string" || !/^[0-9a-f]{64}$/.test(want) || typeof dir !== "string") return new Map();
+	const read = readLedger(fs, join(dir, PRICE_TABLE_FILE), null, PRICE_TABLE_MAX_BYTES);
+	if (read === GONE || read === BAD || read === UNCHANGED) return new Map();
+	if (createHash("sha256").update(read.text).digest("hex") !== want) return new Map();
+	try {
+		const parsed = JSON.parse(read.text);
+		if (!isPlain(parsed) || parsed.v !== 1 || !Array.isArray(parsed.entries)) return new Map();
+		const table = new Map();
+		for (const entry of parsed.entries) {
+			if (!Array.isArray(entry) || typeof entry[0] !== "string" || !isPlain(entry[1])) return new Map();
+			table.set(entry[0], entry[1]);
+		}
+		return table;
+	} catch {
+		return new Map();
+	}
 }
 
 /** A fresh ledger name for `pid`: `<pid>.<16 lowercase hex>.json`. */
@@ -3490,6 +3574,8 @@ export async function startChildMeter({
 		};
 		// After a failed write, nothing more goes out: the ledger can no longer record it.
 		const isStopped = () => (child.failed ? TOKEN_BUDGET : readStop({ dir, fs }));
+		// The parent's pinned price table (issue #587's review): a child prices from it, never from its own runtime.
+		const prices = readPriceTable({ dir, env, fs });
 		child.installOn = async (Class, copy) => {
 			const handle = await install({
 				ModelRuntime: Class,
@@ -3498,6 +3584,7 @@ export async function startChildMeter({
 				compat: copy,
 				brake: true,
 				isStopped,
+				prices,
 				// The parent's detector is the parent's; a child samples nothing.
 				children: { sample() {} },
 			});

@@ -1532,7 +1532,9 @@ async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels 
 	const log = (event, fields) => logged.push({ event, fields });
 	const meter = createUsageMeter({ maxTokens, maxCostMicros, allowedModels, rootSessionId: "root", onStop: (reason) => stops.push(reason) });
 	const guard = createPolicyGuard({ maxCostMicros, allowedModels, log });
-	const installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, log, guard });
+	// The providers are registered BEFORE the meter installs (issue #587's review): the meter pins its price table then,
+	// as the runner's does before any extension loads, and a capped call on a model registered later has no price.
+	let installed = null;
 	try {
 		fx.modelRuntime.registerProvider("pi-dispatch-proxy", {
 			baseUrl: "http://127.0.0.1:1",
@@ -1581,6 +1583,7 @@ async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels 
 		}
 		await fx.modelRuntime.refresh({ allowNetwork: false });
 		if (registerTarget) target = fx.modelRuntime.getModel("pi-dispatch-upstream", "upstream-1");
+		installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, log, guard });
 		const proxy = fx.modelRuntime.getModel("pi-dispatch-proxy", "proxy-1");
 		const result = await fx.modelRuntime.streamSimple(proxy, { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, {}).result();
 		await flush();
@@ -1589,7 +1592,7 @@ async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels 
 		await flush();
 		return { result, next, served, stops, meter, guard, logged };
 	} finally {
-		installed.uninstall();
+		installed?.uninstall();
 		fx.cleanup();
 	}
 }

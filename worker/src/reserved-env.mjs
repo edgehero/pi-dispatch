@@ -64,11 +64,12 @@ export const CONTAINER_ENV_NAMES = new Set([
 
 /**
  * Issue #500: the names the RUNNER sets in its own environment inside the container, for its descendants: the child
- * ledger directory and the runner's pid (image/runner/src/usage-meter.mjs, openChildLedger). The worker never writes
+ * ledger directory and the runner's pid (image/runner/src/usage-meter.mjs, openChildLedger), and the hash of the price
+ * table the runner hands its children (publishPriceTable, issue #587's review). The worker never writes
  * them, so they are not in the set above (which a test pins to what buildContainerEnv emits). They are reserved all the
  * same: a trigger binding one through `run.secrets`, or a host value forwarded through `PI_FORWARD_ENV`, would arrive in
  * the runner's environment before the runner sets its own, and a value the runner then failed to replace would point
  * every pi child's ledger at a directory the agent chose. Refused at load in both lists, and deleted by
  * buildContainerEnv after both loops as the backstop.
  */
-export const RUNNER_ENV_NAMES = new Set(["PI_DISPATCH_CHILD_LEDGER", "PI_DISPATCH_RUNNER_PID"]);
+export const RUNNER_ENV_NAMES = new Set(["PI_DISPATCH_CHILD_LEDGER", "PI_DISPATCH_PRICE_TABLE", "PI_DISPATCH_RUNNER_PID"]);
