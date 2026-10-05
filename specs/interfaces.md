@@ -4719,7 +4719,7 @@ validator rather than a second copy of it.
   `overlay-unparseable`, `overlay-is-a-directory`, `overlay-unreadable`, `overlay-link`, `overlay-not-a-file` or
   `overlay-provider-invalid`, and under `model-not-allowed` the worker's `fallback-unlisted`. Under `cost-cap` (issue #507)
   it is the rule of the runner's cost guard that refused, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`):
-  `unboundable`, `external` or `over-cap`, and `null` for a `cost-cap` stop the guard did not refuse. It is `null` for every
+  `unboundable`, `external` or `over-cap`, and `null` for a `cost-cap` stop the guard did not refuse, from an older image, or on an exit line the worker could not verify. It is `null` for every
   record whose reason carries no detail, which is every record written before it. ADMISSIBLE because it is never a
   free string: the record keeps a value only when it matches `^[a-z][a-z0-9-]{0,63}$`, else `null`, and every
   producer is a literal in `processor.mjs` or, under `cost-cap`, a member of a closed set the worker checks, so the
