@@ -464,6 +464,33 @@ test("operator-revert skips the interval and the step, and is still a CAS on the
 	assert.equal((await alloc.revert({ envelope: off, digest: envelopeDigest(off), target, now: at })).reason, "delegation-off");
 });
 
+test("a revert to an expired row restores the neutral split with no plan id and no expiry; one to an applied row keeps its id (#507)", async () => {
+	const { redis, audit, alloc, envelope, digest } = setup();
+	await alloc.reconcile({ envelope, digest, now: NOW });
+	const until = new Date(NOW + 2 * 24 * HOUR).toISOString();
+	const p = await alloc.applyPlan({ envelope, digest, projects: PROJECTS, text: plan({ shop: 3, platform: 1, _other: 0 }, null, { top: { validUntil: until } }), writer: SESSION, now: NOW });
+	assert.equal(p.outcome, "applied");
+	const later = NOW + 3 * 24 * HOUR;
+	await alloc.reconcile({ envelope, digest, now: later });
+	const expired = logRows(redis).find((x) => x.outcome === "expired");
+	assert.equal(expired.planId, p.planId, "the row still names the plan that ran out: the audit's answer, kept");
+	// Another plan, then the operator goes back to the expired row: the neutral split, as that row records it.
+	const q = await alloc.applyPlan({ envelope, digest, projects: PROJECTS, text: plan({ shop: 1, platform: 3, _other: 0 }), writer: SESSION, now: later + HOUR });
+	assert.equal(q.outcome, "applied");
+	const r = await alloc.revert({ envelope, digest, target: expired, now: later + 2 * HOUR });
+	assert.deepEqual(r, { outcome: "reverted", reason: null, planId: null });
+	const s = stored(redis);
+	assert.deepEqual([s.writer, s.planId, s.validUntil], ["operator-revert", null, null], "no plan nobody wrote, and nothing to expire");
+	assert.deepEqual(s.allocations, { _other: 0, platform: 50 * USD, shop: 50 * USD }, "the neutral split the row recorded");
+	assert.equal(audit.rows.at(-1).row.planId, null, "the reverted row names no plan either");
+	// A revert to an applied row is unchanged: its plan id, and a fresh expiry.
+	const applied = logRows(redis).find((x) => x.outcome === "applied" && x.planId === p.planId);
+	const back = await alloc.revert({ envelope, digest, target: applied, now: later + 3 * HOUR });
+	assert.equal(back.planId, p.planId);
+	assert.equal(stored(redis).planId, p.planId);
+	assert.ok(stored(redis).validUntil, "an applied plan's revert carries an expiry");
+});
+
 test("governedDollars: min(row, allocation) with its source, synthetic ledgers for a project with no row and for _other, the total on the deployment (#504)", () => {
 	const envelope = envelopeOf();
 	const state = { allocations: { shop: 70 * USD, platform: 20 * USD, _other: 10 * USD }, unallocated: 0, repos: { shop: { [scopeRef("github:acme/web")]: 50 * USD, [scopeRef("github:acme/api")]: 20 * USD } } };

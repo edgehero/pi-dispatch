@@ -2370,9 +2370,13 @@ function revertible(row: any): boolean {
   return w !== null && typeof w === "object" && !Array.isArray(w) && Object.keys(w).length > 0;
 }
 
-/** How the revert question names its target: the plan id, or the outcome and time of a split that had none. */
+/**
+ * How the revert question names its target: the plan id, or the outcome and time of a split that had none. An `expired`
+ * row names the plan that ran out beside the NEUTRAL weights that replaced it, and a revert to it restores that neutral
+ * split with no plan (issue #507), so the question names the split, never the expired plan.
+ */
 function revertTargetName(row: any): string {
-  return row?.planId ? `plan ${cellOf(row.planId)}` : `the ${cellOf(row?.outcome)} split of ${cellOf(row?.at)}`;
+  return row?.planId && row?.outcome !== "expired" ? `plan ${cellOf(row.planId)}` : `the ${cellOf(row?.outcome)} split of ${cellOf(row?.at)}`;
 }
 
 /** One sentence for the footer from a revert's result: every branch names what happened, never a reason text. */
