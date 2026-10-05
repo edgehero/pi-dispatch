@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { callCostBound, COMPLETIONS_CATALOG_HOSTS as RUNNER_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS as RUNNER_EXTRA_HOSTS, completionsOwnServer as runnerOwnServer } from "../../image/runner/src/usage-meter.mjs";
@@ -89,7 +89,7 @@ try {
 	if (process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") throw new Error(`output-cap's parity with pi's composer REQUIRES pi-coding-agent here: ${error}`);
 }
 
-test("outputCapView agrees with pi's own ModelRuntime on api, baseUrl and the field, over overlays that lean on each composer rule (#507)", { skip: piCore ? false : "pi-coding-agent not importable" }, async (t) => {
+test("outputCapView agrees with pi's own ModelRuntime on api, baseUrl and the field, over overlays that lean on each composer rule (#507)", { skip: piCore ? false : "pi-coding-agent not importable" }, async () => {
 	const overlay = {
 		providers: {
 			litellm: { api: "openai-completions", baseUrl: "http://litellm.lan:4000/v1", apiKey: "x", models: [{ id: "gw", cost: PRICED }] },
@@ -98,10 +98,7 @@ test("outputCapView agrees with pi's own ModelRuntime on api, baseUrl and the fi
 			openrouter: { baseUrl: "http://or-proxy.lan/v1" },
 		},
 	};
-	// Removed here as well as by the helper: with this file's top-level await for pi's modules, the helper's root
-	// `after()` hook alone left the directory behind (measured: one per run under a TMPDIR of its own).
 	const dir = tempDir("output-cap-pi-");
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
 	const path = join(dir, "models.json");
 	writeFileSync(path, JSON.stringify(overlay));
 	const saved = process.env.PI_OFFLINE;
