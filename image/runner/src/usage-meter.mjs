@@ -2592,7 +2592,7 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 	// The operator's own deployment map, read ONCE, now (issue #587's review): the environment the worker gave the job
 	// (PI_FORWARD_ENV, which env-allowlist.mjs tells an Azure operator to use for it). A map that arrives later (a stored
 	// credential's env, an edit of process.env) is not this one, and the payload check refuses what it picks.
-	// env-internal AZURE_OPENAI_DEPLOYMENT_NAME_MAP: pi-ai's own variable, reserved from run.secrets (provider-steering.mjs).
+	// The map is pi-ai's own variable, reserved from run.secrets (provider-steering.mjs).
 	const startDeployments = parseDeploymentNameMap(env?.[AZURE_DEPLOYMENT_MAP]);
 	const allowed = new Set(allowedModels.map((entry) => pairKey(entry.provider, entry.model)));
 	const state = { refused: 0 };
@@ -3402,13 +3402,13 @@ export function publishPriceTable({ dir, table, env, fs = DEFAULT_WRITE_FS, chmo
 	} catch {
 		// Read-only is a convenience, not the check: the hash is.
 	}
-	// env-internal PI_DISPATCH_PRICE_TABLE: set by the runner in its own environment for its descendants, never by the worker.
+	// The hash variable (PRICE_TABLE_ENV) is set by the runner in its own environment for its descendants, never by the worker.
 	env[PRICE_TABLE_ENV] = createHash("sha256").update(text).digest("hex");
 }
 
 /** A child's copy of the parent's table, or an EMPTY Map when it cannot be had intact (PRICE_TABLE_FILE has the rule). */
 export function readPriceTable({ dir, env, fs = DEFAULT_LEDGER_FS }) {
-	// env-internal PI_DISPATCH_PRICE_TABLE: set by the runner in its own environment and inherited, never by the worker.
+	// The hash variable (PRICE_TABLE_ENV) is set by the runner in its own environment and inherited, never by the worker.
 	const want = env?.[PRICE_TABLE_ENV];
 	if (typeof want !== "string" || !/^[0-9a-f]{64}$/.test(want) || typeof dir !== "string") return new Map();
 	const read = readLedger(fs, join(dir, PRICE_TABLE_FILE), null, PRICE_TABLE_MAX_BYTES);
