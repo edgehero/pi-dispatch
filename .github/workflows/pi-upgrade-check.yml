@@ -708,12 +708,12 @@ jobs:
           const candidates = resolvePiAiCompat();
           if (candidates.length === 0) { console.error("resolvePiAiCompat() offered NO pi-ai compat candidate at all"); process.exit(1); }
           if (candidates[0].tag !== "pi") { console.error("first candidate is tagged " + candidates[0].tag + ", want pi"); process.exit(1); }
-          if (!existsSync(fileURLToPath(candidates[0].url))) { console.error("pi's own candidate is not on disk"); process.exit(1); }
+          if (!existsSync(fileURLToPath(candidates[0].url))) { console.error("the candidate pi itself uses is not on disk"); process.exit(1); }
           const mod = await import(candidates[0].url);
           for (const fn of ["getApiProvider", "getApiProviders", "registerApiProvider", "resetApiProviders"]) {
-            if (typeof mod[fn] !== "function") { console.error("pi's own compat copy no longer exports " + fn + "()"); process.exit(1); }
+            if (typeof mod[fn] !== "function") { console.error("the compat copy pi itself uses no longer exports " + fn + "()"); process.exit(1); }
           }
-          console.log("OK: " + candidates.length + " candidate(s), pi's own first, compat surface intact");'
+          console.log("OK: " + candidates.length + " candidate(s), the copy pi itself uses first, compat surface intact");'
           docker run --rm --network none -e PROBE="$PROBE" \
             --entrypoint sh "$IMAGE_REF" -c 'node --input-type=module -e "$PROBE"' \
             || { echo "::error::The usage meter no longer offers pi-coding-agent's OWN pi-ai first in this image. That copy is the pi-ai pi hands its extensions, whose registry the meter's compat half arms for legacy extension calls; the process-wide choke point is ModelRuntime.prototype, and installProcessUsageMeter accepts the compat copy by identity with pi's VIRTUAL_MODULES, so this step is about the ORDER and the surface, not the decision. If the layout moved, re-verify in this order: piOwnPackageDir and resolvePiAiCompat in image/runner/src/usage-meter.mjs, the compat exports the probe and the wrapper call (getApiProvider/getApiProviders/registerApiProvider/resetApiProviders, createAssistantMessageEventStream), trap (g) in specs/interfaces.md, and image/runner/test/pinned-api.test.mjs."; exit 1; }
