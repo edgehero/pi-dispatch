@@ -693,6 +693,30 @@ test("doctor: PI_PROVIDER=gemini says pi has no such provider, and derives the o
 	assert.match(text(), /set PI_PROVIDER=google/, "the suggestion comes from pi's own table");
 });
 
+test("doctor: PI_PROVIDER=azure-openai-responses names pi 1.0.3's rename to azure (issue #587)", { skip: skipNoPi }, async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(provEnv({ PI_PROVIDER: "azure-openai-responses", AZURE_OPENAI_API_KEY: "k" }), provDeps(out));
+	assert.equal(code, 1, "the worker refuses every job on the old id, so doctor must not be green");
+	assert.match(text(), /PI_PROVIDER is "azure-openai-responses", which is not a provider pi has; pi renamed the provider "azure-openai-responses" to "azure" in pi 1\.0\.3: did you mean "azure"\?/);
+	assert.match(text(), /set PI_PROVIDER=azure, and rename the provider in every trigger's model and allowed-models entries and in models\.json the same way/);
+	const other = capture();
+	await runDoctor(provEnv({ PI_PROVIDER: "gemini", GEMINI_API_KEY: "g" }), provDeps(other.out));
+	assert.doesNotMatch(other.text(), /renamed/, "only an id pi renamed gets the hint");
+});
+
+test("doctor: an overlay entry under the old azure id that only moves the baseUrl is flagged, a full custom provider is not (issue #587)", async () => {
+	for (const entry of [{ baseUrl: "https://x.openai.azure.com/openai/v1" }, { baseUrl: "https://x.openai.azure.com/openai/v1", api: "azure-openai-responses" }, { api: "azure-openai-responses", models: [{ id: "gpt-5.4", baseUrl: "https://x.openai.azure.com/openai/v1" }] }, { modelOverrides: { "gpt-5.4": { maxTokens: 1000 } } }]) {
+		const a = capture();
+		await runDoctor(overlayEnv(overlay({ models: JSON.stringify({ providers: { "azure-openai-responses": entry } }) })), overlayDeps(a.out));
+		assert.match(a.text(), /⚠ Overlay models\.json entry "azure-openai-responses" no longer overrides anything: pi 1\.0\.3 renamed that provider to "azure", so this entry is now a provider of its own with no models, and the azure models do not get its settings\n {4}→ rename the entry to "azure" in /, JSON.stringify(entry));
+	}
+	for (const providers of [{ "azure-openai-responses": { baseUrl: "https://x.openai.azure.com/openai/v1", api: "azure-openai-responses", models: [{ id: "my-deployment" }] } }, { azure: { baseUrl: "https://x.openai.azure.com/openai/v1" } }]) {
+		const b = capture();
+		await runDoctor(overlayEnv(overlay({ models: JSON.stringify({ providers }) })), overlayDeps(b.out));
+		assert.doesNotMatch(b.text(), /no longer overrides anything/, JSON.stringify(providers));
+	}
+});
+
 test("doctor: a keyless custom provider is ✓ exactly when the worker's gate passes it, on the same declaration (#503)", { skip: skipNoPi }, async () => {
 	// The agreement bolt: doctor's line and the worker's buildContainerEnv are driven on the SAME endpoints and the SAME
 	// overlay models.json, case by case. A disagreement is a green setup line over a refused job, or the reverse.

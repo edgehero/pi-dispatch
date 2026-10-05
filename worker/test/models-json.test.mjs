@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -71,11 +72,12 @@ const MAXIMAL = {
 					contextWindow: 32768,
 					maxTokens: 4096,
 					samplingParams: { temperature: 0.2, anything: [1, { x: 2 }] },
+					samplingParamsByThinkingLevel: { off: { temperature: 0 }, high: { max_tokens: 100, anything: [1] }, max: {} },
 					headers: { "x-m": "n" },
 					compat: { supportsEagerToolInputStreaming: true, allowedFallbackModels: [{ provider: "anthropic", model: "claude-x", cost: COST }] },
 				},
 			],
-			modelOverrides: { "qwen2.5:0.5b": { name: "Q", cost: { input: 1 }, contextWindow: 1, compat: { supportsMaxOutputTokens: true } } },
+			modelOverrides: { "qwen2.5:0.5b": { name: "Q", cost: { input: 1 }, contextWindow: 1, samplingParamsByThinkingLevel: { low: { top_p: 0.5 } }, compat: { supportsMaxOutputTokens: true } } },
 		},
 		radius: { oauth: "radius" },
 	},
@@ -101,6 +103,10 @@ const COMPOSITION = {
 	"radius builtin, custom model": { providers: { radius: { oauth: "radius", baseUrl: "http://gpu:11434/v1", models: [{ id: "qwen" }] } } },
 	"authHeader only": { providers: { openai: { authHeader: false } } },
 	"overrides only, on a custom provider": { providers: { ollama: { modelOverrides: { qwen: { contextWindow: 0 } } } } },
+	// pi 1.0.3 renamed the Azure provider to `azure` (issue #587): a block under the old id that only moves the baseUrl
+	// is now a custom provider of its own, with no models, and the builtin azure models keep an empty baseUrl.
+	"old azure id, baseUrl only": { providers: { "azure-openai-responses": { baseUrl: "https://example.openai.azure.com/openai/v1" } } },
+	"new azure id, baseUrl only": { providers: { azure: { baseUrl: "https://example.openai.azure.com/openai/v1" } } },
 };
 
 // Every path to a value in a document, objects and arrays included.
@@ -149,12 +155,25 @@ function corpus() {
 	return texts;
 }
 
-test("the mirror is transcribed from pi 0.99.1: a pi bump must re-transcribe it, then move this pin", { skip }, () => {
+/**
+ * The exact pi files the two mirrors were transcribed from, by content (issue #587): models-json.mjs from
+ * model-config.js's schema, model-catalog.mjs's overlayProviderProblem from provider-composer.js's applyModelsJson and
+ * modelFromJson. Hashes, not the version: a version pin went red on every pi bump whether these files moved or not, and
+ * a review forced for nothing teaches people to bump the pin unread. Re-transcribed at 1.0.3: model-config.js gained
+ * samplingParamsByThinkingLevel under models[] and modelOverrides; provider-composer.js merges it per level.
+ */
+const MIRRORED_PI_FILES = Object.freeze({
+	"dist/core/model-config.js": "24a0e0f98672766e16e00d9f61587f50f9481915581156ae71a14e48ee912e4c",
+	"dist/core/provider-composer.js": "b088d1babb75360da6bf1bcbe8e140ce600e1db15f51345f1965d3d1e9f267ef",
+});
+
+test("the mirror is transcribed from the pinned pi's own files: a file that changed must be re-transcribed, then its hash moved", { skip }, () => {
 	// The corpus below mutates the fields the mirror KNOWS. A pi release that adds a typed field, or a composition rule,
-	// would pass it green. So the version is pinned here, the host-pi.pinned.test.mjs rule: a bump fails this line
-	// until someone re-reads pi's model-config.js and provider-composer.js and updates models-json.mjs and
-	// model-catalog.mjs (overlayProviderProblem) to match.
-	assert.equal(piVersion, "0.99.1", "pi-coding-agent moved: re-transcribe ModelsConfigSchema (models-json.mjs) and applyModelsJson/modelFromJson (model-catalog.mjs overlayProviderProblem) from the new release, then update this pin");
+	// would pass it green. So the source files are pinned here by content: a bump that changes either fails this line,
+	// by name, until someone re-reads it and updates models-json.mjs and model-catalog.mjs (overlayProviderProblem).
+	for (const [file, sha256] of Object.entries(MIRRORED_PI_FILES)) {
+		assert.equal(createHash("sha256").update(readFileSync(new URL(file, PI))).digest("hex"), sha256, `pi-coding-agent ${piVersion}'s ${file} changed: re-transcribe ModelsConfigSchema (models-json.mjs) or applyModelsJson/modelFromJson (model-catalog.mjs overlayProviderProblem) from it, then update this hash`);
+	}
 });
 
 // The `provider/id` pairs a file declares under `providers.<p>.models[].id`, read leniently (a file pi refuses still has

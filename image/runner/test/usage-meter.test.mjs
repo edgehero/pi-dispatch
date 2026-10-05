@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import {
 	assertPoliciesEnforceable,
 	CHILD_LEDGER_ROWS,
@@ -10,6 +11,7 @@ import {
 	installProcessUsageMeter,
 	makeHardStopStream,
 	METER_PROVIDER_PREFIX,
+	piOwnPackageDir,
 	resolvePiAiCompat,
 	RUNTIME_RESULT_METHODS,
 	RUNTIME_STREAM_METHODS,
@@ -851,21 +853,57 @@ function fakeResolve(map) {
 	};
 }
 
-test("prefers the nested pi-ai copy -- the one pi-coding-agent actually imports", () => {
+/** An `exists` that answers true only for these file paths (as the URLs the resolver asks with). */
+function onDisk(...paths) {
+	const urls = new Set(paths.map((path) => pathToFileURL(path).href));
+	return (url) => urls.has(url);
+}
+const NESTED_AI = "/app/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai";
+const HOISTED_AI = "/app/node_modules/@earendil-works/pi-ai";
+
+test("prefers pi's OWN pi-ai copy, the one pi-coding-agent's own imports resolve to, in a nested layout", () => {
+	// The shrinkwrapped layout up to pi 0.99.1: pi's copy nested under it, the worker's hoisted. Both offered, pi's first.
 	const candidates = resolvePiAiCompat({
 		resolve: fakeResolve({
 			"@earendil-works/pi-coding-agent": AGENT_ENTRY,
 			"@earendil-works/pi-ai/compat": HOISTED_COMPAT,
 		}),
-		exists: () => true,
+		exists: onDisk(`${NESTED_AI}/package.json`, `${NESTED_AI}/dist/compat.js`, `${HOISTED_AI}/package.json`, `${HOISTED_AI}/dist/compat.js`),
 	});
 	assert.deepEqual(candidates, [
-		{ tag: "nested", url: NESTED_COMPAT },
+		{ tag: "pi", url: NESTED_COMPAT },
 		{ tag: "hoisted", url: HOISTED_COMPAT },
 	]);
 });
 
-test("falls back to the hoisted copy when no nested copy exists on disk", () => {
+test("in a flat layout pi's own copy IS the hoisted one, offered once (issue #587)", () => {
+	// pi 1.0.3: no shrinkwrap, one copy at the top. pi's own lookup walks past its package to /app/node_modules.
+	const candidates = resolvePiAiCompat({
+		resolve: fakeResolve({
+			"@earendil-works/pi-coding-agent": AGENT_ENTRY,
+			"@earendil-works/pi-ai/compat": HOISTED_COMPAT,
+		}),
+		exists: onDisk(`${HOISTED_AI}/package.json`, `${HOISTED_AI}/dist/compat.js`),
+	});
+	assert.deepEqual(candidates, [{ tag: "pi", url: HOISTED_COMPAT }]);
+	assert.equal(piOwnPackageDir("pi-agent-core", { resolve: fakeResolve({ "@earendil-works/pi-coding-agent": AGENT_ENTRY }), exists: onDisk(`${HOISTED_AI}/package.json`) }), null, "a package nobody installed is null, not a guess");
+});
+
+test("pi's lookup walks the directories Node's own does, in Node's order, and never into a node_modules/node_modules", () => {
+	// Node's list for a package at /app/node_modules/@earendil-works/pi-coding-agent (Module._nodeModulePaths, measured):
+	// its own node_modules, /app/node_modules/@earendil-works/node_modules, /app/node_modules, /node_modules. Never
+	// /app/node_modules/node_modules: a directory that is itself a node_modules is skipped.
+	const scope = "/app/node_modules/@earendil-works/node_modules/@earendil-works/pi-ai";
+	const decoy = "/app/node_modules/node_modules/@earendil-works/pi-ai";
+	const resolve = fakeResolve({ "@earendil-works/pi-coding-agent": AGENT_ENTRY });
+	assert.equal(piOwnPackageDir("pi-ai", { resolve, exists: onDisk(`${decoy}/package.json`) }), null);
+	assert.equal(piOwnPackageDir("pi-ai", { resolve, exists: onDisk(`${decoy}/package.json`, `${HOISTED_AI}/package.json`) }), HOISTED_AI);
+	assert.equal(piOwnPackageDir("pi-ai", { resolve, exists: onDisk(`${scope}/package.json`, `${HOISTED_AI}/package.json`) }), scope, "nearer wins");
+	assert.equal(piOwnPackageDir("pi-ai", { resolve, exists: onDisk(`${NESTED_AI}/package.json`, `${scope}/package.json`) }), NESTED_AI, "nearest wins");
+	assert.equal(piOwnPackageDir("pi-ai", { resolve, exists: onDisk("/node_modules/@earendil-works/pi-ai/package.json") }), "/node_modules/@earendil-works/pi-ai", "the walk reaches the root");
+});
+
+test("falls back to a bare specifier's copy when pi's own lookup finds nothing", () => {
 	const candidates = resolvePiAiCompat({
 		resolve: fakeResolve({
 			"@earendil-works/pi-coding-agent": AGENT_ENTRY,
@@ -878,11 +916,12 @@ test("falls back to the hoisted copy when no nested copy exists on disk", () => 
 
 test("an unresolvable package yields no candidate rather than throwing", () => {
 	assert.deepEqual(resolvePiAiCompat({ resolve: fakeResolve({}), exists: () => true }), []);
-	const onlyNested = resolvePiAiCompat({
+	assert.equal(piOwnPackageDir("pi-ai", { resolve: fakeResolve({}), exists: () => true }), null);
+	const onlyAgent = resolvePiAiCompat({
 		resolve: fakeResolve({ "@earendil-works/pi-coding-agent": AGENT_ENTRY }),
 		exists: () => true,
 	});
-	assert.deepEqual(onlyNested, [{ tag: "nested", url: NESTED_COMPAT }]);
+	assert.deepEqual(onlyAgent, [{ tag: "pi", url: NESTED_COMPAT }]);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -956,7 +995,7 @@ test("installs the runtime half and the compat half, and says so on one line", a
 
 	assert.equal(handle.ok, true);
 	assert.deepEqual(handle.methods, [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS]);
-	assert.equal(handle.tag, "nested");
+	assert.equal(handle.tag, "pi");
 	assert.equal(handle.module, copy.module);
 	assert.deepEqual(handle.apis, ["anthropic-messages", "openai-completions"]);
 	assert.equal(handle.rearms, 0);
@@ -969,7 +1008,7 @@ test("installs the runtime half and the compat half, and says so on one line", a
 			fields: {
 				ok: true,
 				methods: [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS],
-				compat: "nested",
+				compat: "pi",
 				apis: ["anthropic-messages", "openai-completions"],
 				// This fixture ships no providers/all.js and the meter is uncapped, so BOTH degradations
 				// are present -- and both are stated. Reporting a bare ok:true here is the exact failure
@@ -1007,7 +1046,7 @@ test("a healthy meter reports its catalog and its brake as present", async () =>
 	assert.deepEqual(logged[0].fields, {
 		ok: true,
 		methods: [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS],
-		compat: "nested",
+		compat: "pi",
 		apis: ["anthropic-messages"],
 		fallback: true,
 		capped: true,
@@ -1103,7 +1142,7 @@ test("no provable compat copy degrades the meter LOUDLY and leaves the runtime h
 			methods: [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS],
 			compat: false,
 			compatError: "no-candidate-matched",
-			tried: ["nested", "hoisted"],
+			tried: ["pi", "hoisted"],
 			apis: [],
 			capped: true,
 			costCapped: false,

@@ -168,7 +168,7 @@ test("installing the meter changes no request on any wrapped path, and counts ea
 		const meter = createUsageMeter({});
 		installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: modelRuntime, meter, log: () => {} });
 		assert.equal(installed.ok, true, "the runtime half must install at the pin");
-		assert.equal(installed.tag, "nested", "the compat half must accept pi's own copy at the pin");
+		assert.equal(installed.tag, "pi", "the compat half must accept pi's own copy at the pin");
 		const compat = installed.module;
 
 		// METERED -- the same two requests through the wrapped runtime (the compat half armed as well).

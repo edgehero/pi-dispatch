@@ -3064,8 +3064,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Must handle** (each verified by runtime probe, none by reading source — this is the part that bites; written at
   the 0.80.7 pin, and from 0.99.1 true of the registry half only, whose copy is now accepted by identity
   rather than by the mutation probe below, issue #509):
-  - **Two module instances.** pi-ai is installed twice (hoisted, and nested under pi-coding-agent) with
-    **separate** module-level registries, and pi-coding-agent uses the nested one. A bare-specifier import
+  - **Two module instances.** Up to pi 0.99.1, pi-ai was installed twice (hoisted, and nested under
+    pi-coding-agent by its shrinkwrap) with **separate** module-level registries, and pi-coding-agent used the
+    nested one. From pi 1.0.1 there is no shrinkwrap, and at the 1.0.3 pin the root `overrides` keep one copy; the
+    runner finds pi's copy by pi-coding-agent's own node_modules lookup (`piOwnPackageDir`, issue #587) and still
+    accepts it only by identity. A bare-specifier import
     from runner code binds the hoisted copy and is a **silent no-op** — it registers, reports success, and
     counts nothing — and `import.meta.resolve` reports the wrong path convincingly. Acceptance is decided
     **only** by a mutation probe: register an inert provider through the `ModelRegistry`, then ask the
@@ -3647,20 +3650,29 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     an `sk-` key the caller passed (Sign in with ChatGPT drops the field; the key is resolved after the guard)
     all use `model.maxTokens`. A present `maxTokens` that is not a finite number is `Infinity` (PR #534's review):
     pi's context clamp turns NaN into a null on the wire (the provider's default) and Infinity into the
-    remaining window. On openai-completions, openai-responses and azure, `samplingParams` (the model's and the
-    call's) are merged into the request AFTER the cap (pinned), so an output-cap key there
+    remaining window. On openai-completions, openai-responses and azure, the sampling parameters are merged into
+    the request AFTER the cap (pinned). Since pi 1.0.2 that object is `resolveSamplingParams`': the model's
+    `samplingParams`, then its `samplingParamsByThinkingLevel` entry for the call's thinking level (clamped per
+    model), then the call's, and streamSimple resolves twice, so keys of two levels can meet in one request (issue
+    #587). The bound tracks no level: it reads the model's params, EVERY level's and the call's as layers, takes the
+    largest output-cap key and the largest `n` in any layer, and applies the key rules below to every layer, so it is
+    never lower than what any level sends. An output-cap key in a layer
     (`max_tokens`, `max_completion_tokens`, `max_output_tokens`) widens the bound when larger, `n` multiplies it,
     and a present value that is not a positive finite number (an integer for `n`) is `Infinity` (PR #534's review).
     Because that merge comes last, ANY key overrides the request (`model`, `service_tier`, `tools`), so a
-    samplingParams holding a key outside a fixed safe list (`temperature`, `top_p`, `top_k`, `seed`, `stop`,
-    `presence_penalty`, `frequency_penalty`, the three output-cap keys, `n`) makes the call `Infinity` too;
+    layer holding a key outside a fixed safe list (`temperature`, `top_p`, `top_k`, `seed`, `stop`,
+    `presence_penalty`, `frequency_penalty`, the three output-cap keys, `n`), or a level map or level that is not a
+    plain object, makes the call `Infinity` too;
   - **an output cap the server may ignore** (issue #507): openai-completions sends the cap as
     `max_completion_tokens` unless the model's composed `compat.maxTokensField` is `"max_tokens"` (pinned), and
     Ollama 0.35.0 ignores `max_completion_tokens` (measured: 20 asked, 440 answered), so a capped job on a priced
     declared-endpoint model settled $3.41 under a $2 cap. pi chose that field per host only for the hosts its own
-    catalog serves openai-completions on (`COMPLETIONS_CATALOG_HOSTS`, derived from the pinned catalog by test). On
+    catalog serves openai-completions on (`COMPLETIONS_CATALOG_HOSTS`, derived from the pinned catalog by test; a
+    catalog row with an empty `baseUrl` names no host and is skipped, issue #587). On
     ANY other host (`completionsOwnServer`: the operator's server, a declared endpoint or not, or a baseUrl that
-    does not parse) the output term is only the cap that travels as `max_tokens`: the asked cap or
+    does not parse, which includes the empty one every `azure` catalog row carries at pi 1.0.3, among them
+    `azure/deepseek-v4-pro` on openai-completions, whose real server the operator configures) the output term is
+    only the cap that travels as `max_tokens`: the asked cap or
     `model.maxTokens` on `streamSimple` (pi always sends one there), the asked cap alone on a raw `stream`; a
     model whose field is not `max_tokens`, or a raw `stream` with no cap, is `Infinity`, so it is refused under a
     cap. ONE rule, in the runner, because the runner is the one place that sees the model as pi composed it; the
@@ -3669,7 +3681,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `model.contextWindow` (the operator's number, not the server's, and Ollama shifts its context to keep
     answering); rewriting the field for the operator (the overlay is the operator's file and a job mounts it
     read-only); and trusting an explicit `"max_completion_tokens"` (Ollama ignores it however it was chosen). A
-    zero-rated model is `0` before this term, so a free local model is untouched;
+    zero-rated model is `0` before this term, so a free local model is untouched. For a builtin model with an
+    empty baseUrl the way out is the operator's: `providers.azure.modelOverrides["<id>"].compat.maxTokensField:
+    "max_tokens"` in the overlay `models.json`, when that server reads `max_tokens`;
   - the input rate is the dearest of input, cache read and cache write, and twice input when a 1h cache write
     can happen (anthropic-messages or bedrock-converse-stream with retention `long`, resolved in pi's order:
     the option, the call's env, the process env);
@@ -4395,16 +4409,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
      and case-sensitively on both halves of the pair. The same id under another provider is another route, key
      and bill, so it is refused. The id on the call is not the only thing that picks the model that answers (PR
      #538's review), so a listed call is also refused when its request would name another model:
-     - samplingParams (the model's or the call's) naming a routing key (`model`, `modelId`, `models`, `fallbacks`
-       or `providerOptions`, where the Vercel AI Gateway reads its model fallbacks), on the three apis that merge
-       them into the request after it is built (`samplingRoutes`): a `model` key there replaces the requested one.
+     - sampling parameters (the model's `samplingParams`, ANY of its `samplingParamsByThinkingLevel` levels, or the
+       call's; pi picks the level per call, issue #587) naming a routing key (`model`, `modelId`, `models`,
+       `fallbacks` or `providerOptions`, where the Vercel AI Gateway reads its model fallbacks), on the three apis
+       that merge them into the request after it is built (`samplingRoutes`): a `model` key there replaces the
+       requested one. A level map or level that is not a plain object refuses too.
        Only those keys, by decision (PR #538's review, rounds 2 and 3): any other key (`min_p`, `reasoning_effort`,
        `chat_template_kwargs`, `service_tier`) changes how the model answers, never which one, and passes under a
        list alone; the cost guard keeps its own wider price rule under a cap;
      - a caller's own `fetch` option, which sends the request after every hook and could rewrite it unseen (pi
        never passes one itself, pinned);
-     - on azure-openai-responses, a per-call `azureDeploymentName` or `options.env` deployment map, either of
-       which picks the deployment before `model.id`;
+     - on api azure-openai-responses, and on provider `azure` whatever the api (issue #587: pi 1.0.3's azure
+       provider rewrites `payload.model` to `resolveDeploymentName`'s answer in an `onPayload` wrapper of its own,
+       outside the guard's, for its openai-completions models too), a per-call `azureDeploymentName` or
+       `options.env` deployment map, either of which picks the deployment before `model.id`;
      - on anthropic-messages, a `compat.allowedFallbackModels` entry whose pair (the model's provider and the
        fallback's id, the only part pi sends, as `fallbacks`) is not on the list: the provider may answer with
        any fallback it was sent;
@@ -8372,3 +8390,4 @@ a tunnel.
 | 2026-10-05 | Issue #507, the review of the allocation totals. **`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED**, the other surfaces: during a mismatch the rows list the split-only entries too, marked, so the split's total and its rows agree on all three surfaces. The outside-edit rule UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, step 4: the first refusal's rule (`unboundable`, `external`, `over-cap`) rides the exit line as `why` and reaches the run record and the run drill-in. Rejected: putting it in `tokens` (numbers only, rebuilt by the worker) and naming the model (the record holds no container-chosen string). A `cost-cap` stop from a child, a displaced compat entry or an unmetered child names no rule, since no refusal of this runner's guard made it. The bound and the settle UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, a test-harness change with no product behaviour change. In a test file with a top-level await, `node:test` runs the root `after()` hooks once the tests declared before the await have finished, while the module is still suspended on it (measured on Node 22.19 and 23.5); a test declared after the await runs after those hooks, so the #351 helper's hook never removed its directory, and `output-cap.test.mjs` carried its own `t.after()` for it. Each workspace's `test/helpers/temp-dir.mjs` now also removes, on the process `exit` event (after every test and hook in both runners), the directories its hook never saw, and the per-test workaround is gone. Each pass takes what it removes off the list, so a directory late work recreates after the hook stays the image runner's `settleBeforeCleanup` case, whose control test still shows it. `worker/test/temp-dir-helper.test.mjs` proves it for all four copies in a child run that also shows the hook ran first. **No `REQ-`, `DES-`, `INT-` or `CONST-` entry changes, checked.** **Code evidence**: worker, receiver, admin and image/runner test/helpers/temp-dir.mjs; worker/test/temp-dir-helper.test.mjs; worker/test/output-cap.test.mjs. |
+| 2026-10-05 | Issue #587 (pi 1.0.3). **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, the bound: the sampling parameters are `resolveSamplingParams`' merge of the model's `samplingParams`, its `samplingParamsByThinkingLevel` level and the call's; the bound reads every layer (the largest output-cap key, the largest `n`, the safe-key rule on each, a malformed level `Infinity`), so no level pi picks sends more than it counted. A catalog row with an empty `baseUrl` (every `azure` row at 1.0.3) is skipped by the catalog-host derivation and stays the operator's own server, fail closed; the way out is `compat.maxTokensField: "max_tokens"` in a `modelOverrides` entry. **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` AMENDED**: a routing key under any thinking level refuses, and the deployment check keys on provider `azure` for every api as well as on api azure-openai-responses. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, Two module instances: pi 1.0.1 dropped the shrinkwrap; the compat copy is found by pi-coding-agent's own lookup (`piOwnPackageDir`, tag `pi`) and accepted by identity as before. |

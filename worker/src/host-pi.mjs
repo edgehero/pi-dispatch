@@ -15,7 +15,7 @@
  * What it must never become. Nothing on the worker's BOOT path may import this file. It reads host paths and
  * may spawn a package manager, and neither belongs anywhere near `start.mjs`.
  *
- * Everything here MIRRORS a private detail of the pinned pi (0.99.1) rather than calling it: pi exports no
+ * Everything here MIRRORS a private detail of the pinned pi (1.0.3) rather than calling it: pi exports no
  * public answer to "where is this package installed" or "is this resource enabled", and importing the whole
  * coding-agent SDK to read two well-known paths is not worth the weight. That mirroring is a real risk --
  * pi could change the grammar and we would silently start staging something the operator turned off -- so it

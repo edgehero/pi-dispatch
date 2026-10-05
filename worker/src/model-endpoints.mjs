@@ -521,6 +521,27 @@ export const KEYLESS_API_KEY = `$${KEYLESS_ENV_NAME}`;
 /**
  * The second way into the credential gate, said once for every refusal and doctor line that names it (issue #503).
  */
+/**
+ * Provider ids pi renamed, old to new (issue #587: pi 1.0.3 renamed `azure-openai-responses` to `azure`, and its catalog
+ * file with it; the api id `azure-openai-responses` is unchanged). Pinned against the catalog by
+ * worker/test/env-allowlist.test.mjs: every old id is gone from pi, every new id is there. A rename is not a refusal of
+ * its own: the old id is already refused before spend as a provider pi does not have, and this only lets that refusal
+ * and doctor say which id was meant.
+ */
+export const RENAMED_PROVIDERS = Object.freeze({ "azure-openai-responses": "azure" });
+
+/**
+ * The "did you mean" for a provider pi renamed, or "" (issue #587). Only for an old id pi no longer has, whose new id pi
+ * does have, and that the overlay's models.json (`models`, parsed, or null when it was not read) does not declare: a
+ * provider the file declares under the old id is the operator's own custom provider, and the hint would be wrong there.
+ */
+export function providerRenameHint(provider, { models = null, piProviders = [] } = {}) {
+	if (typeof provider !== "string" || !Object.hasOwn(RENAMED_PROVIDERS, provider)) return "";
+	const renamed = RENAMED_PROVIDERS[provider];
+	if (piProviders.includes(provider) || !piProviders.includes(renamed) || providerOf(models, provider) !== null) return "";
+	return ` pi renamed the provider "${provider}" to "${renamed}" in pi 1.0.3: did you mean "${renamed}"?`;
+}
+
 export const KEYLESS_HOW = `for a custom provider served by a local model server, declare that server in model-endpoints.json with "keyless": true and set "apiKey": "${KEYLESS_API_KEY}" on the provider in models.json (docs/egress.md, "Local model servers")`;
 
 /**

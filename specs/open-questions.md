@@ -209,6 +209,21 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   `excludeTools` survives as `string[]`, `allToolNames` is now EIGHT (`powershell` joined, and
   `EXCLUDABLE_TOOL_NAMES` restates the eight), and pi still ignores an unknown exclusion name silently. The
   rest of this row is kept as the record of the question while it was open.
+- **Re-checked at the pi 1.0.3 bump (2026-10-05, issue #587)**: the Action on bump below was carried out against the
+  1.0.3 tarball. The option set is unchanged, `excludeTools` is still `string[]`, `allToolNames` is still the eight,
+  and an unknown exclusion name is still ignored silently. A resumed transcript now restores its tool loadout as
+  PENDING tools, filtered by the same allow and exclude check, so an excluded tool stays excluded on a resume
+  (`loader.test.mjs` pins it on a real session). The checklist grew with this bump, because pi 1.0.1 dropped the
+  shrinkwrap that used to lock its own sibling packages:
+  - every pi package is held to the runner's pin in the root `overrides` and in `package-lock.json`
+    (`.github/scripts/pi-pin-check.mjs`);
+  - no path names pi's copy of a package by its place in the tree: `piOwnPackageDir` follows pi-coding-agent's
+    own lookup;
+  - the copies that only a version literal used to force a review of are pinned by the content hash of the pi file
+    each came from (models.json's schema and composer, pi-ai's `models.js`, pi-tui's `utils.js`), so an unchanged
+    file stays green and a changed one goes red with its name;
+  - a new model field that feeds the request's sampling parameters, or a new caller of the Azure deployment
+    resolver, fails `pinned-api.test.mjs` by name.
 - **Not a question — a scheduled landmine.** pi's changelog carries the breaking change under
   `[Unreleased]`: `authStorage` and `modelRegistry` *replaced* by an async `modelRuntime`.
   `createAgentSession`'s option set changes with it. **It has not shipped.** At `0.80.7` the wiring is
@@ -1059,9 +1074,10 @@ adversarial passes did.
 - **What bounds it meanwhile, and what detection ships today**: two pins, deliberately at different
   distances. `worker/test/host-pi.pinned.test.mjs` asserts the **resolved artifact** and rides the existing
   `contract-tests` job, so a pi bump that moves any mirrored internal fails the build rather than the
-  operator's overlay. `.github/scripts/host-pi-canary.mjs` runs the same needles against `pi@latest` inside
-  the `admin-extension-canary` job, so a release that will break the next bump is visible before anyone
-  makes it. Both import `PINNED_PI_NEEDLES` from `host-pi.mjs` itself, so the gate and the canary cannot
+  operator's overlay. `.github/scripts/host-pi-canary.mjs` runs the same needles against `pi@latest` in its
+  own job, `host-pi mirrors survive latest pi (canary)` (deliberately not a required check: it is green on drift
+  by design, so its red means pi failed to install), so a release that will break the next bump is visible
+  before anyone makes it. Both import `PINNED_PI_NEEDLES` from `host-pi.mjs` itself, so the gate and the canary cannot
   drift apart: a needle added to one is checked by both. Beyond the pins, the mirror is built to admit
   ignorance — a glob in an enablement pattern returns a **third** state rather than a guess, the extension
   is copied, and the command prints which ones it could not decide about.
@@ -1084,6 +1100,8 @@ adversarial passes did.
   carries `builtin:<name>` entries, resolved in a separate loop; the mirror drops them before any verdict
   and two needles (`BUILTIN_PATH_PREFIX` in source-info.js, the builtin loop in package-manager.js) pin
   that. The file grammar itself did not move.
+- **Re-checked at the pi 1.0.3 bump (2026-10-05, issue #587)**: every needle holds against the 1.0.3 tarball;
+  `package-manager.js` and `source-info.js` did not change, and the file grammar did not move.
 - **Related risks**: `OQ-005` (the upstream-drift row this is the same species as, and the one whose
   correction records that a sha is not a version), `OQ-011`.
 
@@ -1907,3 +1925,4 @@ adversarial passes did.
 | 2026-10-03 | Issue #500, part E. **`OQ-011` CORRECTED**, its What detection ships today bullet: the diagnostic sampler it described is replaced by the runner's children hook, which folds child ledgers and, on Linux, counts a pi child with no ledger as unmetered and stops a job under any policy, so "can never fail a job" no longer holds. Status UNCHANGED; the row is re-decided in part F. |
 | 2026-10-03 | Issue #500, part F (closes #500). **`OQ-011` RE-DECIDED: RESOLVED** for the cooperative path, with the residual kept as an accepted risk that wants ratification. New Status and Decision bullets (the preload, the child meter, the ledgers, the parent's fold and stops, the `/proc` detector, the nested runner, and the worker and panel of part F); a What stays an accepted risk bullet (a child that hides from both, a renamed copy of pi, a non-pi client, a direct API call, a forged small ledger, overshoot by a tick of headroom, no detector off Linux, the overlay `models.json` for children, #503); the risk-not-constraint bullet narrowed to the runner's own process; What would close it becomes What would close the rest; the graduation bullet's sampler sentence marked superseded; What bounds it, Related risk and Needs rewritten for the residual. The heading keeps its wording so links to it still work. The measurements M1 to M10 and the earlier corrections are UNCHANGED, checked, apart from their header sentence, which now points at the decision. |
 | 2026-10-03 | Issue #500, part F, PR #570's review. **`OQ-011` AMENDED**, its What stays an accepted risk bullet, worded as the DES residuals are: a pi CLI child whose spawner scrubs the environment and leaves no marker in its command line, a library-mode child whose spawner clears `NODE_OPTIONS` (clearing that alone hides it), and a meterless child that ends before either `starting` grace and before teardown. **`OQ-012` AMENDED, wording only**: its comparison to `OQ-011`'s child-process sampler (gone with issue #500) is marked as such, and its related-risk note says a `pi` subprocess is metered since issue #500 with a residual. |
+| 2026-10-05 | Issue #587 (pi 1.0.3). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.0.3 tarball (option set, `excludeTools`, the eight tools, the silent ignore, and a resumed transcript's pending tools filtered by the exclusion); the checklist gains the sibling-package overrides and lockfile check, the lookup by identity instead of a nested path, the content hashes that replace version literals, and the two new needles (sampling fields, Azure deployment callers). **`OQ-018` AMENDED**: the host-pi canary is its own job, `host-pi mirrors survive latest pi (canary)`, not part of the admin canary's, and it is not required; re-checked at 1.0.3, every needle holds. Still ACCEPTED RISK. |

@@ -247,7 +247,12 @@ Any trigger type can name the model its jobs run on, and how many turns a job ma
   "run": { "kind": "github", "flow": "triage", "provider": "openai", "model": "gpt-5.4-mini", "maxTurns": 10 } }
 ```
 
-- `"provider"` is a pi provider id, such as `anthropic` or `openai`.
+- `"provider"` is a pi provider id, such as `anthropic` or `openai`. Since pi 1.0.3 the Azure OpenAI
+  provider is `azure`, no longer `azure-openai-responses`. Rename it everywhere it appears: here, in
+  `"models"` lists and `PI_ALLOWED_MODELS` (`azure/gpt-5.4`), in `PI_PROVIDER`, and in the overlay
+  `models.json`. A job on the old id is refused before it spends, and the refusal names `azure`. An
+  allowed-models entry on the old id matches nothing. A thread job that resumes an older session is safe:
+  a session written by another pi version is never resumed, the job starts fresh.
 - `"model"` is that provider's model id. Case is kept as you wrote it.
 - `"maxTurns"` is a whole number of 1 or more.
 
@@ -383,8 +388,9 @@ Inside the container the runner checks every call before it is sent:
   not translated. A field set to nothing (`undefined`) counts as absent, so a hook that copies the
   request through JSON passes.
 - A call that would name another model some other way is refused too: `model`, `modelId`, `models`,
-  `fallbacks` or `providerOptions` in `samplingParams`, an Azure deployment chosen per call, or a
-  caller's own `fetch`. Other `samplingParams` keys, such as `min_p`, `reasoning_effort`,
+  `fallbacks` or `providerOptions` in `samplingParams` or in any level of `samplingParamsByThinkingLevel`
+  (pi picks the level per call, so every level counts), an Azure deployment chosen per call (on any
+  model of the `azure` provider), or a caller's own `fetch`. Other `samplingParams` keys, such as `min_p`, `reasoning_effort`,
   `chat_template_kwargs` or `service_tier`, change how a model answers, not which one, and pass. A hook
   that edits those same settings is refused, because hooks are denied by default: `samplingParams` is
   checked against a short list of keys that route, a hook against a short list of keys it may change.

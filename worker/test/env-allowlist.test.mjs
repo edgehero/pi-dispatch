@@ -610,6 +610,30 @@ test("a provider pi reads no key variable for still refuses, rather than guessin
 	);
 });
 
+test("a provider id pi renamed refuses as before, naming the new id, unless models.json declares the old one (issue #587)", { skip }, async () => {
+	const { RENAMED_PROVIDERS, providerRenameHint } = await import("../src/model-endpoints.mjs");
+	// The table is pinned to the catalog: every old id is gone from pi and every new id is there.
+	assert.deepEqual({ ...RENAMED_PROVIDERS }, { "azure-openai-responses": "azure" });
+	for (const [old, renamed] of Object.entries(RENAMED_PROVIDERS)) {
+		assert.ok(!piProviders().includes(old), `${old} is a pi provider again: drop it from RENAMED_PROVIDERS`);
+		assert.ok(piProviders().includes(renamed), `${renamed} is not a pi provider: RENAMED_PROVIDERS is stale`);
+	}
+	const refuse = (modelEndpoints) => () => mod.resolveProviderCredential({ provider: "azure-openai-responses", hostEnv: { AZURE_OPENAI_API_KEY: "k" }, modelEndpoints });
+	const hinted = (e) => e.piDispatchConfig === true && /^pi has no provider "azure-openai-responses", so there is no key variable to give it a key\. pi renamed the provider "azure-openai-responses" to "azure" in pi 1\.0\.3: did you mean "azure"\? Use one of pi's provider ids/.test(e.message);
+	// No new refusal: the same refusal as for any id pi does not have, before any spend, now with the hint.
+	assert.throws(refuse(null), hinted);
+	assert.throws(refuse({ endpoints: [{ id: "e" }], models: { providers: { azure: { baseUrl: "https://x.openai.azure.com" } } } }), hinted, "a models.json that does not declare the old id");
+	// A models.json that declares the old id makes it the operator's own provider: refused (it is not keyless), unhinted.
+	const declared = { providers: { "azure-openai-responses": { baseUrl: "https://x.openai.azure.com", api: "azure-openai-responses", apiKey: "k", models: [{ id: "gpt-5.4" }] } } };
+	assert.throws(refuse({ endpoints: [{ id: "e" }], models: declared }), (e) => e.piDispatchConfig === true && !/did you mean/.test(e.message));
+	// The new id resolves its key as any provider does.
+	assert.deepEqual(mod.resolveProviderCredential({ provider: "azure", hostEnv: { AZURE_OPENAI_API_KEY: "k" } }), { AZURE_OPENAI_API_KEY: "k" });
+	// Nothing for an id pi never had.
+	assert.equal(providerRenameHint("gemini", { piProviders: piProviders() }), "");
+	assert.equal(providerRenameHint("__proto__", { piProviders: piProviders() }), "");
+	assert.equal(providerRenameHint("azure-openai-responses", { piProviders: [...piProviders(), "azure-openai-responses"] }), "", "not while pi still has the old id");
+});
+
 test("a prototype-key provider id refuses instead of coercing a name out of pi's lookup", { skip }, () => {
 	// pi looks its provider up in a plain object literal, so `__proto__` resolves up the prototype chain
 	// and hands back a non-string. providerKeyCandidates filters those out, which leaves an empty list,

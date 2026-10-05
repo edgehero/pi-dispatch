@@ -1225,7 +1225,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   rate), so a dollar cap checked after a call is a soft limit that one call can overshoot by more than the cap.
   So (d) is checked before the call, against a bound that is an upper bound by construction: the request's
   UTF-8 bytes plus 8,192 as input tokens (one token is at least one byte, checked by use through the
-  `boundExceeded` counter), the call's output cap, the dearest table that could price it (tiers, fallback
+  `boundExceeded` counter), the call's output cap (the largest any of its sampling parameters could send,
+  every thinking level's included, issue #587), the dearest table that could price it (tiers, fallback
   models, a 1h cache write, a generic Anthropic long-context tier) and the worst service tier. Calls the bound
   cannot cover (`pi-messages` and other self-priced apis, image generation, deferred fetches, a classifier
   with an output rate) are refused under a cap rather than guessed. With no cap set no guard is installed and
@@ -1827,8 +1828,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   direct model call (its `ctx.modelRegistry`, or pi-ai's legacy global functions), classifiers and image
   models. A virtual model is judged by the physical model each request is routed to. Matching is exact and
   case-sensitive on both the provider and the model id. A listed call is still refused when its request would
-  name another model: a routing key (`model`, `modelId`, `models`, `fallbacks`, `providerOptions`) in samplingParams
-  (any other samplingParams key passes under a list), a per-call Azure deployment, a caller's own `fetch`, or an
+  name another model: a routing key (`model`, `modelId`, `models`, `fallbacks`, `providerOptions`) in its sampling
+  parameters, whichever thinking level a call is made at (`samplingParams`, any `samplingParamsByThinkingLevel`
+  level, or the call's; any other key passes under a list), a per-call Azure deployment (on the azure-openai-responses
+  api, and on provider `azure` whatever its api, issue #587), a caller's own `fetch`, or an
   Anthropic fallback (`compat.allowedFallbackModels`, sent with every anthropic-messages call) that is not itself on
   the list under the model's provider. A payload hook (an extension's `before_provider_request`, or a call's
   `onPayload`) is DENY BY DEFAULT: it may change only the top-level messages, system prompt and sampling settings,
@@ -1903,7 +1906,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   naming model A and not model B, each of `setModel(B)`, a second in-process session on B, an extension's
   `ctx.modelRegistry.streamSimple(B)` and a virtual router routing to B ends the job `2` / `model-not-allowed`
   with no call reaching B and no ledger row for it, while calls on A are admitted. Given a listed call whose
-  samplingParams name another model (while `min_p` passes), or whose call option `onPayload` or session
+  samplingParams name another model (while `min_p` passes), or one whose model names another model under any thinking
+  level, or whose call option `onPayload` or session
   `before_provider_request` hook
   rewrites the model, nothing reaches the provider and the job ends `2` / `model-not-allowed`. Given a list and a
   cost cap, a call to an unlisted model is `model-not-allowed`, never `cost-cap`. Given a list on a runner that
@@ -3216,6 +3220,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-05 | Issue #587 (pi 1.0.3). **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED** (mechanism, not contract): the bound's output cap is the largest any of the call's sampling parameters could send, every `samplingParamsByThinkingLevel` level included (pi 1.0.2 merges the level pi picks per call). **`REQ-MODEL-POLICY` AMENDED**: a routing key in the sampling parameters refuses whichever thinking level the call is made at, and a per-call Azure deployment refuses on provider `azure` whatever its api as well as on the azure-openai-responses api; the Acceptance gains the thinking-level case. **`REQ-TRIGGER-SECRETS` UNCHANGED, checked**: pi-ai 1.0.3's five Anthropic workload identity federation variables were already reserved (the Anthropic SDK reads them by name) and are now pinned as found in pi-ai's own sources too. **`REQ-UPSTREAM-CONTRACT-TESTS` UNCHANGED, checked**: version literals that only forced a review are now content hashes of the pi files each copy came from, and a new test holds every pi package in the lockfile and the overrides to the pin. |
 | 2026-10-05 | Issue #507, found by its end-to-end test: a run the cost guard refused as unboundable recorded only `cost-cap` with $0. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a run's drill-in header names the record's `why` after the reason, and points an unboundable `cost-cap` at `compat.maxTokensField`. `REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked: no cap, bound or refusal rule moved; the record only names which rule refused. |
 | 2026-10-05 | Issue #507, the review of the allocation totals. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: during an envelope mismatch the ALLOCATION rows, on the panel, `/dispatch priorities` and the insights page, also list each entry the applied split allocates that this host's file does not name, marked "not in this host's file" (render.mjs `allocationRowIds`); before, such an allocation counted in the shown total and was listed nowhere. With the digests equal the rows are the file's entries alone, UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the panel's job-count meter with no overlay cap read `N / ? (cap unknown)` while the worker ran under `PI_DAILY_CAP` from its `.env`. By design the panel reads job-count caps from the overlay only (the lab drove the panel with no overlay); the meter now reads `N / ? (worker env cap)`, as `/dispatch budget` and the insights page already said where the cap lives. Reading the env was rejected: without a pointer it is pi's own. The caps the panel reads UNCHANGED, checked. |

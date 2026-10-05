@@ -103,7 +103,7 @@ on the deployment default; before pinning the trigger's `model` to something che
 What-if build-report @ anthropic/claude-haiku-4-5:
   estimate ~$4.87 est. total · ~$0.16 est. per run
   coverage 87% of observed runs ledgered · excluded 4 (no ledger)
-  rates pi-ai 0.99.1
+  rates pi-ai 1.0.3
 ```
 
 How to read it, class markers on ([`costs.md`](costs.md)): the flow's **median ledgered run** is

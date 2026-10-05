@@ -36,9 +36,10 @@ try {
 } catch (error) {
 	importError = error;
 }
-// The copy the runner dispatches through: pi-coding-agent, and the pi-ai IT resolves (nested under it
-// today). Both copies are scanned, because the hoisted one is what this file resolves and the nested one
-// is what runs.
+// The copy the runner dispatches through: pi-coding-agent, and the pi-ai IT resolves. Both copies are
+// scanned, because the hoisted one is what this file resolves and pi's own is what runs. Up to pi 0.99.1
+// pi-coding-agent's shrinkwrap nested its own; since 1.0.1 there is none, and at the 1.0.3 pin the root
+// overrides keep one copy, so the two are the same directory (issue #587).
 const codingAgentRoot = packageRoot("@earendil-works/pi-coding-agent", RUNNER_DIR);
 const runnerPiAiRoot = codingAgentRoot && packageRoot("@earendil-works/pi-ai", codingAgentRoot);
 if ((!piEntry || !runnerPiAiRoot) && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
@@ -56,7 +57,7 @@ const RESIDUAL = new Set(["AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "ALL_PROXY", "http
 // helper as HOME and USERPROFILE, for the same reason.
 const RUNTIME_NOT_PROVIDER = ["HOME", "PATH", "APPDATA", "USERPROFILE", "XDG_CONFIG_HOME", "HOMEDRIVE", "HOMEPATH"];
 
-// The pins below are the classifier's own output at the 0.99.1 pin, reviewed; each test says what they mean.
+// The pins below are the classifier's own output at the pin, reviewed; each test says what they mean.
 // Every counted occurrence in every scanned file that names nothing, WITH ITS COUNT, per package version and
 // file (see the test that reads it). A JSON file rather than a literal here because it is long and is only
 // ever replaced wholesale from the failure message, after reading what changed.
@@ -69,7 +70,7 @@ const OUTSIDE_PI_NAMESPACE = [
 	"SSH_CONNECTION", "SSH_TTY", "STY", "SystemRoot", "TERM", "TERMINAL_EMULATOR", "TERMUX_VERSION",
 	"TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "VISUAL", "WARP_SESSION_ID", "WARP_TERMINAL_SESSION_UUID",
 	"WAYLAND_DISPLAY", "WEZTERM_PANE", "WINDIR", "WSLENV", "WSL_DISTRO_NAME", "WSL_INTEROP", "WT_SESSION",
-	"XDG_CACHE_HOME", "XDG_SESSION_TYPE", "ZELLIJ", "cwd", "error", "hasError", "is", "off", "stack",
+	"XDG_CACHE_HOME", "XDG_SESSION_TYPE", "ZELLIJ", "error", "hasError", "off", "stack",
 ];
 
 /** Every .js/.mjs/.cjs file under `dir`, ignoring nested dependencies and any path `skipDir` names. */
@@ -434,8 +435,9 @@ test("the tokenizer that strips comments is checked against an independent parse
 test("the names pi reads outside its own namespace are pinned, so dropping them is a decision on record", { skip }, async () => {
 	// The namespace rule keeps pi's own `PI_*` configuration and leaves the rest: the terminal, the OS, the
 	// editor, the proxy variables (egress-reserved), and the llama.cpp extension's LLAMA_BASE_URL (whose
-	// provider the worker cannot select, asserted below). Some are not environment reads at all: pi-agent-core
-	// calls its execution context `env` (`env.cwd`). Pinned, so a new name pi starts reading outside its
+	// provider the worker cannot select, asserted below). Some are not environment reads at all (`error`,
+	// `stack`: a value named `env` that is not the environment); pi-agent-core's `env.cwd` and `env.is` left with
+	// its dist/harness at pi 1.0.3 (issue #587). Pinned, so a new name pi starts reading outside its
 	// namespace is looked at rather than silently skipped. Names the SDK derivation reserves anyway are left
 	// out of this list.
 	const { pi, sdk } = await derive();
@@ -511,18 +513,41 @@ test("the residuals are the ONLY hand-written members, and they are still unfind
 });
 
 test("the copy of pi this bolt resolves and the copy the runner dispatches through agree", { skip }, async () => {
-	// `image/runner/src/usage-meter.mjs` carries this repo's own warning that `import.meta.resolve` lies
-	// here: the runner runs pi through pi-coding-agent, which nests its OWN pi-ai. Both closures feed the
-	// set, but pi-ai itself is also compared directly, so a divergence is named rather than absorbed.
+	// `image/runner/src/usage-meter.mjs` carries this repo's own warning that a resolved path is not proof of
+	// the copy pi uses. Both closures feed the set, and pi-ai itself is also compared directly, so a divergence
+	// is named rather than absorbed. Up to pi 0.99.1 the runner's was a SECOND copy, nested by pi-coding-agent's
+	// shrinkwrap; pi 1.0.1 dropped the shrinkwrap and at the 1.0.3 pin the root overrides keep ONE copy of every
+	// pi package (issue #587), so the two roots may be one directory. Then it must be the release pi-coding-agent
+	// declares, which is what makes one scan cover both.
 	const { hoisted, runner } = await derive();
-	assert.notEqual(runner.packages[0].root, hoisted.packages[0].root, "the runner closure is reading the hoisted pi-ai, so this is a set against itself");
+	const runnerRoot = runner.packages[0].root;
+	assert.equal(runnerRoot, packageRoot("@earendil-works/pi-ai", codingAgentRoot), "the runner closure is not reading the pi-ai pi-coding-agent's own lookup finds");
 	const nestedNames = runner.packages[0].reads.names;
-	assert.ok(nestedNames.size > 20, `the nested copy yielded ${nestedNames.size} names, so this is measuring an empty directory rather than a second pi`);
+	assert.ok(nestedNames.size > 20, `the runner's copy yielded ${nestedNames.size} names, so this is measuring an empty directory rather than pi`);
+	if (runnerRoot === hoisted.packages[0].root) {
+		const declared = JSON.parse(readFileSync(`${codingAgentRoot}/package.json`, "utf8")).dependencies["@earendil-works/pi-ai"];
+		const { version } = JSON.parse(readFileSync(`${runnerRoot}/package.json`, "utf8"));
+		assert.equal(declared, `^${version}`, "one pi-ai copy, but not the release pi-coding-agent declares: the overrides drifted");
+		return;
+	}
 	assert.deepEqual(
 		[...nestedNames.keys()].sort(),
 		[...hoisted.packages[0].reads.names.keys()].sort(),
-		"the nested pi-ai the runner dispatches through reads a DIFFERENT set of provider variables than the hoisted one",
+		"the pi-ai the runner dispatches through reads a DIFFERENT set of provider variables than the hoisted one",
 	);
+});
+
+test("pi-ai's workload identity federation variables are found by the scan in pi-ai itself, and reserved (issue #587)", { skip }, async () => {
+	// pi-ai 1.0.3 reads these when no key is set (providers/anthropic.js, api/anthropic-messages.js), through
+	// constants imported from env-api-keys.js. The organization and workspace ids decide who pays, so a trigger's
+	// run.secrets must not be able to set them. Found in pi-ai's OWN sources, not only through the Anthropic SDK,
+	// so the reservation does not rest on the SDK still reading them.
+	const { runner } = await derive();
+	const piAi = runner.packages[0].reads.names;
+	for (const name of ["ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_WORKSPACE_ID"]) {
+		assert.ok(piAi.has(name), `pi-ai no longer yields ${name}: the scan stopped resolving its constants, or pi stopped reading it`);
+		assert.ok(PROVIDER_STEERING_VARS.has(name), `${name} must be reserved`);
+	}
 });
 
 test("the names that motivated the issues are all in, and an ordinary secret is not", { skip }, () => {
@@ -553,6 +578,13 @@ test("the names that motivated the issues are all in, and an ordinary secret is 
 		"google_cloud_project",
 		"GOOGLE_CLOUD_QUOTA_PROJECT",
 		"PI_CODING_AGENT_DIR",
+		// Issue #587: pi-ai 1.0.3's Anthropic workload identity federation; the organization and workspace ids decide
+		// who pays.
+		"ANTHROPIC_FEDERATION_RULE_ID",
+		"ANTHROPIC_ORGANIZATION_ID",
+		"ANTHROPIC_IDENTITY_TOKEN_FILE",
+		"ANTHROPIC_SERVICE_ACCOUNT_ID",
+		"ANTHROPIC_WORKSPACE_ID",
 	]) {
 		assert.ok(PROVIDER_STEERING_VARS.has(name), `${name} must be reserved`);
 	}
@@ -578,7 +610,7 @@ test("bedrock is why the key variables stay in this set rather than being left t
 test("this set and the pre-spend provider gate are COMPLEMENTARY, not one subsuming the other", { skip }, async () => {
 	// Worth pinning because it is easy to conclude the wrong thing in either direction. This set is derived
 	// from what pi and its SDKs READ, minus the key variables, so provider key variables are not in here:
-	// 37 of 38 at the 0.99.1 pin are outside the set (the one inside is the retained ANTHROPIC_AUTH_TOKEN),
+	// 37 of 38 at the 0.99.1 pin were outside the set (the one inside is the retained ANTHROPIC_AUTH_TOKEN),
 	// and 32 of them are not even read by name in a scanned SDK source. So the pre-spend gate and doctor's
 	// per-provider check both still have work to do, and a fixture using one of the names both cover
 	// would silently stop exercising them -- which is exactly what happened to two doctor tests when this

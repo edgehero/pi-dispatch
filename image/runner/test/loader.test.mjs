@@ -112,12 +112,12 @@ function fixture({ adminExtensions = false } = {}) {
 		// independent signals and a test that exercised one would leave the other free to rot.
 		writeFileSync(
 			join(workspace, ".pi", "extensions", "helper.js"),
-			`export default function (api) {\n\tapi.registerCommand("${SIBLING_EXT_SENTINEL}", { description: "an ordinary repo extension" });\n}\n`,
+			`export default function (api) {\n\tapi.registerCommand("${SIBLING_EXT_SENTINEL}", { description: "an ordinary repo extension", handler: async () => {} });\n}\n`,
 		);
 		// Signal one: the entry carries the admin name (what import-pi refuses to copy into an overlay).
 		writeFileSync(
 			join(workspace, ".pi", "extensions", "pi-dispatch-admin.js"),
-			`export default function (api) {\n\tapi.registerCommand("${ADMIN_NAME_SENTINEL}", { description: "admin by name" });\n}\n`,
+			`export default function (api) {\n\tapi.registerCommand("${ADMIN_NAME_SENTINEL}", { description: "admin by name", handler: async () => {} });\n}\n`,
 		);
 		// Signal two: this repo's actual shim -- a name no pattern could flag, the paid-enqueue tool
 		// behind it. If only the name were tested, THIS is the file that would reach the model.
@@ -127,12 +127,12 @@ function fixture({ adminExtensions = false } = {}) {
 		// 0.99.1 pin, issue #509). Without the schema this fixture tested pi's validation, not the guard.
 		writeFileSync(
 			join(workspace, ".pi", "extensions", "relay.js"),
-			`export default function (api) {\n\tapi.registerCommand("${ADMIN_TOOL_SENTINEL}", { description: "admin by surface" });\n\tapi.registerTool({\n\t\tname: "dispatch_run",\n\t\tlabel: "Run",\n\t\tdescription: "enqueue a paid job",\n\t\tparameters: { type: "object", properties: {} },\n\t\texecute: async () => ({ output: "" }),\n\t});\n}\n`,
+			`export default function (api) {\n\tapi.registerCommand("${ADMIN_TOOL_SENTINEL}", { description: "admin by surface", handler: async () => {} });\n\tapi.registerTool({\n\t\tname: "dispatch_run",\n\t\tlabel: "Run",\n\t\tdescription: "enqueue a paid job",\n\t\tparameters: { type: "object", properties: {} },\n\t\texecute: async () => ({ output: "" }),\n\t});\n}\n`,
 		);
 	} else {
 		writeFileSync(
 			join(workspace, ".pi", "extensions", "index.js"),
-			`export default function (api) {\n\tapi.registerCommand("${WORKSPACE_EXT_SENTINEL}", { description: "a repo extension" });\n}\n`,
+			`export default function (api) {\n\tapi.registerCommand("${WORKSPACE_EXT_SENTINEL}", { description: "a repo extension", handler: async () => {} });\n}\n`,
 		);
 	}
 
@@ -559,8 +559,8 @@ function fixturePackage({ skillName = "pkg-skill", nestedDep = false } = {}) {
 	// The extension proves it RAN, not merely that its path was listed: registerCommand writes into
 	// the Extension object the loader hands back, so the sentinel is observable without a session.
 	const body = nestedDep
-		? `import { marker } from "nested-fixture-dep";\n\nexport default function (api) {\n\tapi.registerCommand(marker, { description: "loaded a nested dep" });\n}\n`
-		: `export default function (api) {\n\tapi.registerCommand("${PKG_EXT_SENTINEL}", { description: "staged package extension" });\n}\n`;
+		? `import { marker } from "nested-fixture-dep";\n\nexport default function (api) {\n\tapi.registerCommand(marker, { description: "loaded a nested dep", handler: async () => {} });\n}\n`
+		: `export default function (api) {\n\tapi.registerCommand("${PKG_EXT_SENTINEL}", { description: "staged package extension", handler: async () => {} });\n}\n`;
 	writeFileSync(join(dir, "ext", "sentinel.js"), body);
 
 	writeFileSync(
@@ -593,7 +593,7 @@ function fixtureExtensionDir(prefix, commandName) {
 	// extensions/ is listed entry by entry since issue #544, so there index.js loads as itself.
 	writeFileSync(
 		join(dir, "extensions", "index.js"),
-		`export default function (api) {\n\tapi.registerCommand("${commandName}", { description: "ordering fixture" });\n}\n`,
+		`export default function (api) {\n\tapi.registerCommand("${commandName}", { description: "ordering fixture", handler: async () => {} });\n}\n`,
 	);
 	return dir;
 }
@@ -726,7 +726,7 @@ const LOOSE_EXT_SENTINEL = "LOOSE-OVERLAY-EXT-SENTINEL-1a2b";
 const BROKEN_EXT_SENTINEL = "BROKEN-OVERLAY-EXT-SENTINEL-3c4d";
 
 /** An extension that proves it ran: it registers a command named after it. */
-const commandExtension = (name) => `export default function (api) {\n\tapi.registerCommand("${name}", { description: "fixture" });\n}\n`;
+const commandExtension = (name) => `export default function (api) {\n\tapi.registerCommand("${name}", { description: "fixture", handler: async () => {} });\n}\n`;
 
 /**
  * An extensions/ folder in every shape pi's rule has a case for: loose .js and .ts files, a subdir with an
@@ -1281,6 +1281,52 @@ test("run.excludeTools' enforcement contract at the pin: structural removal, rea
 	} finally {
 		narrowed.dispose();
 		control.dispose();
+	}
+});
+
+test("an excluded tool stays excluded on a resumed session whose transcript restores it as pending (issue #587)", { skip }, async () => {
+	// pi 1.0.3 restores a transcript's tool loadout (the replayed system messages' toolsAdded) as PENDING tools,
+	// activated when they register (agent-session's _restoreToolsFromTranscript and _refreshToolRegistry). A thread job
+	// resumes a transcript written before its trigger excluded a tool, so the transcript can name one. It must not
+	// come back: not at construction, not after the tree is navigated (which restores the loadout), not after the
+	// registry refreshes (which activates pending tools), and not through a by-name re-enable.
+	const pi = await import("@earendil-works/pi-coding-agent");
+	const { openSessionManager } = await import("../src/session.mjs");
+	const f = fixture();
+	const loader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, outboxProtocolPath: f.outboxProtocolPath });
+	const agentDir = tempDir("pi-agent-");
+	const sessionDir = tempDir("pi-resume-");
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
+	const settingsManager = pi.SettingsManager.inMemory({});
+	// The earlier job's transcript, with both tools in its declared loadout.
+	const declared = (name) => ({ name, description: `${name} tool`, parameters: { type: "object", properties: {} } });
+	const writer = pi.SessionManager.create(f.workspace, sessionDir);
+	const systemId = writer.appendMessage({ role: "system", content: "", toolsAdded: ["read", "grep", "bash", "edit"].map(declared), timestamp: 1 });
+	writer.appendMessage({ role: "user", content: "earlier", timestamp: 2 });
+	writer.appendMessage({ role: "assistant", content: [{ type: "text", text: "ok" }], api: "openai-completions", provider: "p", model: "m", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 3 });
+	const sessionFile = writer.getSessionFile();
+	assert.ok(sessionFile, "the transcript must be on disk, as a resumed job's is");
+	const { sessionManager, resumed } = openSessionManager({ sessionFile, cwd: f.workspace });
+	assert.equal(resumed, true, "the premise: this is a resume");
+	assert.deepEqual(pi.SessionManager.open(sessionFile, sessionDir, f.workspace).buildSessionContext().messages.filter((m) => m.role === "system").flatMap((m) => m.toolsAdded.map((t) => t.name)), ["read", "grep", "bash", "edit"], "the premise: the transcript declares the excluded tools");
+	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager, resourceLoader: loader, sessionManager, excludeTools: ["bash", "edit"] });
+	const excludedIn = (names) => names.filter((name) => name === "bash" || name === "edit");
+	try {
+		assert.deepEqual(excludedIn(session.getActiveToolNames()), [], "at construction");
+		assert.ok(!session.getActiveToolNames().includes("grep"), "the premise: grep is not a default tool");
+		// Navigating the tree restores the transcript's loadout (pending tools included).
+		await session.navigateTree(systemId, { summarize: false });
+		assert.deepEqual(excludedIn(session.getActiveToolNames()), [], "after a tree navigation restored the transcript's loadout");
+		assert.ok(session.getActiveToolNames().includes("grep"), "the restore ran: a declared tool that is allowed came back");
+		assert.deepEqual(excludedIn([...(session._pendingToolNames ?? [])]), [], "an excluded tool is never pending");
+		// A registry refresh activates pending tools; a by-name re-enable asks for them outright.
+		await session.reload();
+		assert.deepEqual(excludedIn(session.getActiveToolNames()), [], "after a reload refreshed the registry");
+		session.setActiveToolsByName(["read", "bash", "edit"]);
+		assert.deepEqual(excludedIn(session.getActiveToolNames()), [], "after a by-name re-enable");
+		assert.deepEqual(excludedIn(session.getAllTools().map((t) => t.name)), [], "the registry itself lacks them");
+	} finally {
+		session.dispose();
 	}
 });
 

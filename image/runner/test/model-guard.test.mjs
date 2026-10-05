@@ -422,6 +422,12 @@ test("samplingParams naming a routing field refuse a listed call, from the model
 			["a `models` fallback list", base, { samplingParams: { models: ["big-unlisted"] } }],
 			["a modelId", base, { samplingParams: { modelId: "big-unlisted" } }],
 			["a gateway's providerOptions", base, { samplingParams: { providerOptions: { gateway: { models: ["anthropic/claude-opus-5"] } } } }],
+			// pi 1.0.2's per-level params (issue #587): resolveSamplingParams merges the level pi picks per call, so a
+			// routing key under ANY level refuses, whatever level this call would ask for.
+			["a thinking level's model", { ...base, samplingParamsByThinkingLevel: { high: { model: "big-unlisted" } } }, {}],
+			["a level the call does not ask for", { ...base, samplingParamsByThinkingLevel: { off: { temperature: 0 }, xhigh: { models: ["big-unlisted"] } } }, { reasoning: "low" }],
+			["an unreadable level", { ...base, samplingParamsByThinkingLevel: { high: "model=big-unlisted" } }, {}],
+			["an unreadable level map", { ...base, samplingParamsByThinkingLevel: [{ model: "big-unlisted" }] }, {}],
 		]) {
 			const { runtime, calls, meter, logged, layer } = wired();
 			try {
@@ -446,6 +452,8 @@ test("samplingParams naming a routing field refuse a listed call, from the model
 		assert.equal(guard.admit({ method: "streamSimple", model: { ...LISTED, samplingParams }, args: [{}, {}] }), null, `catalog ${JSON.stringify(samplingParams)}`);
 	}
 	assert.equal(guard.admit({ method: "streamSimple", model: { ...LISTED, api: "anthropic-messages" }, args: [{}, { samplingParams: { model: "x" } }] }), null);
+	// The same under a thinking level: price and sampling knobs pass, the level map itself is no routing key.
+	assert.equal(guard.admit({ method: "streamSimple", model: { ...LISTED, samplingParamsByThinkingLevel: { off: { temperature: 0.2 }, high: { max_tokens: 10, min_p: 0.05 } } }, args: [{}, {}] }), null);
 });
 
 test("on azure, a per-call deployment name or deployment map refuses a listed call; so does a caller's own fetch anywhere", () => {
@@ -459,6 +467,23 @@ test("on azure, a per-call deployment name or deployment map refuses a listed ca
 	// A caller's own fetch sends after every hook, on any api: refused under a list.
 	assert.equal(guard.admit({ method: "streamSimple", model: LISTED, args: [{}, { fetch: globalThis.fetch }] }), MODEL_NOT_ALLOWED);
 	assert.equal(guard.snapshot().modelRefused, 3);
+});
+
+test("on provider azure, a deployment name or map refuses on EVERY api it serves, openai-completions included (issue #587)", () => {
+	// pi 1.0.3's azure provider rewrites payload.model to resolveDeploymentName(...) inside an onPayload wrapper of its
+	// own (providers/azure.js), outside the guard's, for its openai-completions models too (azure/deepseek-v4-pro).
+	const list = [{ provider: "azure", model: "deepseek-v4-pro" }, { provider: "azure", model: "gpt-5.4" }];
+	const guard = createModelGuard({ allowedModels: list });
+	for (const api of ["openai-completions", "azure-openai-responses", "some-future-api"]) {
+		const model = { ...LISTED, provider: "azure", id: api === "openai-completions" ? "deepseek-v4-pro" : "gpt-5.4", api, baseUrl: "" };
+		assert.equal(guard.admit({ method: "streamSimple", model, args: [{}, {}] }), null, `${api}: a plain listed call passes`);
+		assert.equal(guard.admit({ method: "streamSimple", model, args: [{}, { azureDeploymentName: "gpt-big-unlisted" }] }), MODEL_NOT_ALLOWED, `${api}: a deployment name`);
+		assert.equal(guard.admit({ method: "stream", model, args: [{}, { env: { AZURE_OPENAI_DEPLOYMENT_NAME_MAP: `${model.id}=gpt-big-unlisted` } }] }), MODEL_NOT_ALLOWED, `${api}: a deployment map`);
+	}
+	assert.equal(guard.snapshot().modelRefused, 6);
+	// Another provider on openai-completions never reads either option.
+	const other = createModelGuard({ allowedModels: LIST });
+	assert.equal(other.admit({ method: "streamSimple", model: LISTED, args: [{}, { azureDeploymentName: "x", env: { AZURE_OPENAI_DEPLOYMENT_NAME_MAP: "listed-1=x" } }] }), null);
 });
 
 /** A runtime whose provider runs options.onPayload on `{ model }` before it sends, as every pinned api does, and records what it sent. */

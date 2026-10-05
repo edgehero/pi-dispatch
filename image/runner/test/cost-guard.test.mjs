@@ -732,6 +732,33 @@ test("samplingParams that override the output cap widen the bound, n multiplies 
 	assert.equal(callCostBound("streamSimple", { ...SONNET_4_5, samplingParams: { max_tokens: 999_999 } }, inputOf(100_000), {}, NO_ENV), 100_000 * 3.75 + 64_000 * 15);
 });
 
+test("samplingParamsByThinkingLevel: every level counts, whatever level the call asks for (issue #587)", () => {
+	// pi 1.0.2 merges { ...samplingParams, ...byLevel[level], ...options.samplingParams } per call (resolveSamplingParams),
+	// with the level clamped per model, and streamSimple resolves twice, so keys of two levels can meet. The bound
+	// reads every level as a layer: the largest output key in any of them, times the largest n in any of them.
+	const ctx = inputOf(10_000);
+	const base = 10_000 + 1000 * 2;
+	const leveled = (byLevel, extra = {}) => ({ ...FLAT, ...extra, samplingParamsByThinkingLevel: byLevel });
+	assert.equal(callCostBound("streamSimple", leveled({ high: { max_tokens: 50_000 } }), ctx, {}, NO_ENV), 10_000 + 50_000 * 2, "a level's max_tokens, with no reasoning asked");
+	assert.equal(callCostBound("streamSimple", leveled({ high: { max_tokens: 50_000 } }), ctx, { reasoning: "low" }, NO_ENV), 10_000 + 50_000 * 2, "a level the call does not ask for");
+	assert.equal(callCostBound("streamSimple", leveled({ off: { max_completion_tokens: 4000 }, xhigh: { max_output_tokens: 9000 } }), ctx, {}, NO_ENV), 10_000 + 9000 * 2, "the largest across levels");
+	assert.equal(callCostBound("streamSimple", leveled({ low: { n: 3 }, high: { max_tokens: 5000 } }), ctx, {}, NO_ENV), 10_000 + 3 * 5000 * 2, "n of one level times the cap of another: two resolutions can meet");
+	assert.equal(callCostBound("streamSimple", leveled({ high: { max_tokens: 5000 } }, { samplingParams: { n: 2 } }), ctx, { samplingParams: { max_tokens: 7000 } }, NO_ENV), 10_000 + 2 * 7000 * 2, "the model's, the levels' and the call's together");
+	assert.equal(callCostBound("streamSimple", leveled({ high: { n: 2 } }, { samplingParams: { n: 3 } }), ctx, {}, NO_ENV), 10_000 + 3 * 1000 * 2, "the largest n of any layer, wherever it sits");
+	assert.equal(callCostBound("streamSimple", leveled({ high: { max_tokens: 10, temperature: 0 } }), ctx, {}, NO_ENV), base, "a smaller level value never lowers the bound");
+	assert.equal(callCostBound("streamSimple", leveled({}), ctx, {}, NO_ENV), base, "an empty map is nothing");
+	for (const bad of [{ high: { max_tokens: null } }, { high: { max_tokens: "1" } }, { low: { n: 0 } }, { high: { model: "o1-pro" } }, { minimal: { service_tier: "priority" } }, { high: "max_tokens=1" }, [{ max_tokens: 1 }], "high"]) {
+		assert.equal(callCostBound("streamSimple", leveled(bad), ctx, {}, NO_ENV), Infinity, JSON.stringify(bad));
+	}
+	// The guard itself refuses such a call under a cap: Infinity is unboundable, and a large level value is bounded and judged.
+	const guard = createCostGuard({ capMicros: 100_000 });
+	assert.equal(guard.admit({ method: "streamSimple", model: leveled({ high: { max_tokens: 1_000_000 } }), args: [ctx, {}] }), COST_CAP, "a level's max_tokens past the cap");
+	assert.equal(guard.admit({ method: "streamSimple", model: leveled({ high: { model: "o1-pro" } }), args: [ctx, {}] }), COST_CAP, "a level's model key");
+	assert.equal(guard.admit({ method: "streamSimple", model: leveled({ high: { max_tokens: 2000 } }), args: [ctx, {}] }), null, "a bounded level under the cap");
+	// Not on an api that does not merge them after the cap.
+	assert.equal(callCostBound("streamSimple", { ...SONNET_4_5, samplingParamsByThinkingLevel: { high: { max_tokens: 999_999, model: "x" } } }, inputOf(100_000), {}, NO_ENV), 100_000 * 3.75 + 64_000 * 15);
+});
+
 test("a present maxTokens that is not a finite number is unboundable; null is absent", () => {
 	const ctx = inputOf(10_000);
 	for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, "100", true]) {

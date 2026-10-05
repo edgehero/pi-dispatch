@@ -265,7 +265,13 @@ Evidence convention as in `constitution.md`.
   live trap rather than a historical one, and why the guardrails are read explicitly instead.
 
   **(g) Never reach `@earendil-works/pi-ai` by bare specifier — and *what* a bare specifier does instead
-  depends on which environment you are in.** Wherever the **worker's** dependencies are installed as well
+  depends on which environment you are in.** What follows held up to the 0.99.1 pin, while pi-coding-agent
+  shipped an npm-shrinkwrap.json. pi 1.0.1 dropped it, and at the 1.0.3 pin the root `overrides` keep ONE copy
+  of every pi package, at the top of `node_modules` in a dev checkout and in the image alike, so a bare
+  specifier now happens to name pi's copy (issue #587). That is a fact about one layout, not a guarantee, so the
+  invariant below stands, and the runner finds pi's copy by pi-coding-agent's OWN node_modules lookup
+  (`piOwnPackageDir` in `image/runner/src/usage-meter.mjs`, Node's order) and still accepts it only by identity.
+  Up to 0.99.1: wherever the **worker's** dependencies are installed as well
   (a dev checkout, the contract-tests job), pi-ai is on disk **TWICE** with **SEPARATE module-level
   registries**: the hoisted `node_modules/@earendil-works/pi-ai`, which is the worker's declared dependency,
   and the nested `node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai`.
@@ -6418,7 +6424,12 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   runner would exit 2 in a started container. The overlay is parsed the way pi's `ModelConfig.load` parses it (issue
   #502, `worker/src/models-json.mjs`, held to pi by a differential test at the pin): a BOM, `//` comments and trailing
   commas are accepted, and a schema error anywhere refuses the whole document, because pi then loads none of it, so
-  nothing in such a file is keyless (fail closed). The reader (`readOverlayModels`, the one rule
+  nothing in such a file is keyless (fail closed). Since pi 1.0.2 a model entry and a `modelOverrides` entry may carry
+  `samplingParamsByThinkingLevel` (an object with optional `off`, `minimal`, `low`, `medium`, `high`, `xhigh` and
+  `max` keys, each an object of sampling parameters merged over `samplingParams` for that thinking level); the
+  mirror validates it in both places (issue #587), and the runner's guards read every level
+  (`DES-DOLLAR-RESERVE-AND-SETTLE`, `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`). The mirror is pinned to the exact
+  pi files it was transcribed from by their content hash (model-config.js, provider-composer.js), not by version. The reader (`readOverlayModels`, the one rule
   for the pickup and `doctor`, its keyless line and its credential-free overlay check alike) reads with no existence check first and keeps the read out of the parse's try. It
   `lstat`s `models.json` first (PR #553's review): a link of any kind, dangling included, is a `configError`
   marked `overlayLink`, since the job's mount does not resolve links the way the host does; a named pipe, a socket
@@ -6471,7 +6482,13 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   provider or its `modelOverrides` entry). Without it pi sends the output cap as `max_completion_tokens`, which Ollama
   ignores, so the runner's cost guard counts each such call unboundable and refuses it under a dollar cap: the cap
   holds by construction, and the job ends `cost-cap` at its first call. The rule is the runner's
-  (`completionsOwnServer`) and covers every host outside the pinned catalog's and `api.openai.com`, declared or not. `doctor` warns twice over,
+  (`completionsOwnServer`) and covers every host outside the pinned catalog's and `api.openai.com`, declared or not,
+  and a builtin model whose catalog `baseUrl` is empty: at pi 1.0.3 every `azure` row, among them
+  `azure/deepseek-v4-pro` on openai-completions, whose server is whatever the operator configures (issue #587). For
+  such a model the field goes in a `modelOverrides` entry: `providers.azure.modelOverrides["deepseek-v4-pro"].compat`.
+  pi 1.0.3 also renamed the Azure provider from `azure-openai-responses` to `azure` (the api id is unchanged): an
+  overlay entry under the old id that only moves the `baseUrl` is now a custom provider of its own with no models,
+  so `doctor` flags an old-id entry that lacks an `api`, a `baseUrl` or `models`. `doctor` warns twice over,
   one line per model: its cost-cap line names every such model a job under a per-job cap may use, on any host, as
   refused at every call (`costCapFitChecks` with `outputUnboundable`), and a declared-endpoint line names the other
   priced models a declared endpoint serves (`ignoredOutputCapModels`). Both compose the model as pi does (api,
@@ -7434,3 +7451,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-05 | Issue #507, the review of the doctor half. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the Output cap bullet: doctor's cost-cap line now names every model a capped job may use whose output the runner cannot bound, on any host (a gateway, a remote server, a builtin provider pointed at a proxy), and the declared-endpoint line names only the rest. The rule is `worker/src/output-cap.mjs`, a copy of the runner's held equal by test. The file's shape UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, the final review of the doctor half. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the Output cap bullet: a model the overlay defines with no api or baseUrl of its own or its provider's takes them from pi's `findModelDefaults` model (same id, else one of its api, else the first openai-completions chat model, else the first), as pi composes it; the view took only a same-id builtin, so doctor missed such a model. A parity test holds the view to pi's ModelRuntime. The rest of the bullet UNCHANGED, checked. |
 | 2026-10-05 | Issue #507, found by its end-to-end test: a run the cost guard refused as unboundable recorded only `cost-cap` with $0 and `why: null`, and which rule refused reached the job log alone. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a `cost-cap` exit line names the first refusal's rule as `why` (`unboundable`, `external`, `over-cap`; the runner's `COST_REFUSALS`), on both decided exit-line paths, and writes none for a stop the runner's own guard did not refuse; `parseExitWhy` keeps it only from the worker's closed `COST_CAP_WHYS` off a last line that says `code: 2` and `cost-cap`, pinned equal to the runner's list. The `cost_refused` log line is unchanged. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `why` carries that rule under `cost-cap`. Exit codes, classes, `tokens` and every other field UNCHANGED, checked. **Code evidence**: image/runner/src/outcome.mjs -> COST_REFUSALS, costRefusalField; image/runner/src/usage-meter.mjs -> createCostGuard (refusedWhy), createPolicyGuard; image/runner/run-job.mjs; worker/src/run-history.mjs -> COST_CAP_WHYS, parseExitWhy, makeLogSink; worker/src/run-container.mjs; worker/src/processor.mjs. |
+| 2026-10-05 | Issue #587 (pi 1.0.3). **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: a model entry and a `modelOverrides` entry may carry `samplingParamsByThinkingLevel` (pi 1.0.2), validated by the mirror in both places and read in full by the runner's guards; the mirror is pinned to pi's model-config.js and provider-composer.js by content hash; Output cap names the empty catalog `baseUrl` of every `azure` row as the operator's own server and the `modelOverrides` way out, and the Azure provider rename with doctor's flag for an old-id entry that lacks an api, a baseUrl or models. **`INT-SDK-SESSION-OPTIONS` AMENDED**, trap (g): from pi 1.0.1 there is no shrinkwrap and at the 1.0.3 pin one copy of each pi package; the runner finds pi's pi-ai by pi-coding-agent's own lookup and accepts it by identity; the up-to-0.99.1 text is kept as history. The option table is UNCHANGED, checked (pinned-api.test.mjs holds it). **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: the new refusals end as `model-not-allowed` and `cost-cap`, existing rows. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: `run.provider` and model entries keep their shape; an `azure-openai-responses` provider is refused before spend as any provider pi does not have, now naming `azure`; the five Anthropic federation variables were already reserved from `run.secrets` (derived from the Anthropic SDK) and are now also found in pi-ai's own sources. |

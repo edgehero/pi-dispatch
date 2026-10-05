@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // The oracle every width test in this workspace is held to, shared by `width.test.mjs` and its two
@@ -26,15 +29,27 @@ export async function loadVisibleWidth() {
 
 /** The pinned renderer's module, or null: `visibleWidth` above, and `sliceByColumn` for the compositor's cut. */
 export async function loadRenderer() {
+  let pi;
+  let entry;
   try {
-    const pi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
-    const entry = pi.resolve("@earendil-works/pi-tui");
-    // WHICH COPY, asserted rather than assumed. pi depends on pi-tui by a RANGE, so a resolve that is not
-    // the lockfile's would answer any version in that range, and a hoisted layout could put a different
-    // copy above this one. `CONST-PI-VERSION-PINNED` says to verify against the pinned artifact rather than a range, and
-    // an oracle measured against the wrong artifact is a table pinned to the wrong renderer.
-    const version = pi("@earendil-works/pi-tui/package.json").version;
-    if (version !== PI_TUI_VERSION) return null;
+    pi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+    entry = pi.resolve("@earendil-works/pi-tui");
+  } catch {
+    return null;
+  }
+  // WHICH COPY, asserted rather than assumed, and asserted by CONTENT (issue #587). pi depends on pi-tui by a
+  // RANGE, so a resolve that is not the lockfile's would answer any version in that range, and a hoisted layout
+  // could put a different copy above this one. `CONST-PI-VERSION-PINNED` says to verify against the pinned
+  // artifact, and an oracle measured against the wrong artifact is a table pinned to the wrong renderer. The file
+  // the oracle and the panel's width table both come from is pinned by its hash rather than the package by its
+  // version: a version literal went red on every pi bump whether the renderer moved or not. A mismatch THROWS,
+  // naming the file, rather than returning null.
+  const utils = join(dirname(entry), "utils.js");
+  const actual = createHash("sha256").update(readFileSync(utils)).digest("hex");
+  if (actual !== PI_TUI_UTILS_SHA256) {
+    throw new Error(`pi-tui ${pi("@earendil-works/pi-tui/package.json").version}'s dist/utils.js changed (sha256 ${actual}): re-derive the panel's width table from its graphemeWidth and re-check the cutters against its sliceByColumn (admin/src/panel.mjs), then update PI_TUI_UTILS_SHA256`);
+  }
+  try {
     const tui = await import(pathToFileURL(entry).href);
     return typeof tui.visibleWidth === "function" && typeof tui.sliceByColumn === "function" ? tui : null;
   } catch {
@@ -42,5 +57,9 @@ export async function loadRenderer() {
   }
 }
 
-/** The pin, from `package-lock.json`. A mismatch fails the tests below rather than measuring silently. */
-export const PI_TUI_VERSION = "0.99.1";
+/**
+ * The sha256 of pinned pi-tui's `dist/utils.js`, where `visibleWidth`, `graphemeWidth` and `sliceByColumn` live.
+ * Re-verified at 1.0.3: the width logic is byte-identical to 0.99.1's; the file gained `flattenLines` and
+ * `sliceByColumn` now keeps an escape code that precedes the cut range ahead of one at its boundary.
+ */
+export const PI_TUI_UTILS_SHA256 = "6c187576b9a2f29b156a0f6cf140fdf6617a5606203db2769760a32a01f3d595";
