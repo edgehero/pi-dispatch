@@ -110,12 +110,17 @@ function lastPlanLine(snapshot, snapshotProblem) {
 	return `Last plan: ${outcome}`;
 }
 
-/** The split in force now, from `snapshot.plan`. */
+/**
+ * The split in force now, from `snapshot.plan`. `plan.writer` is the split's LAST writer. A re-base keeps the plan's id
+ * and weights and only moves the amounts onto a changed envelope, so `envelope-change` with a plan is said as a
+ * re-base: "from envelope-change" read as if the envelope change had written the plan (issue #507).
+ */
 function inForceLine(snapshot) {
 	if (!snapshot) return "In force: unknown without a snapshot.";
 	const plan = snapshot.plan;
 	if (!plan) return "In force: the neutral split (the envelope's default weights).";
-	const parts = [`In force: plan ${id(plan.id)} from ${token(plan.writer)}`];
+	const by = plan.writer === "envelope-change" ? "re-based onto a changed envelope" : `from ${token(plan.writer)}`;
+	const parts = [`In force: plan ${id(plan.id)} ${by}`];
 	if (plan.appliedAt) parts.push(`since ${instant(plan.appliedAt)}`);
 	if (plan.validUntil) parts.push(`until ${instant(plan.validUntil)}`);
 	return `${parts.join(", ")}${plan.clamped ? ", clamped by the step limit" : ""}.`;
