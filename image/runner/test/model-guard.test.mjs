@@ -486,6 +486,112 @@ test("on provider azure, a deployment name or map refuses on EVERY api it serves
 	assert.equal(other.admit({ method: "streamSimple", model: LISTED, args: [{}, { azureDeploymentName: "x", env: { AZURE_OPENAI_DEPLOYMENT_NAME_MAP: "listed-1=x" } }] }), null);
 });
 
+// ── Issue #587's gate: the sampling layers pi reads are the ones the guards judged ───────────────────────
+
+/** A runtime that records the model and options each call was dispatched with, by reference, as pi receives them. */
+function recordingRuntimeClass() {
+	const dispatched = [];
+	class FakeRuntime {
+		streamSimple(model, _context, options) {
+			dispatched.push({ model, options });
+			const stream = new FakeStream();
+			stream.end(answer());
+			return stream;
+		}
+	}
+	return { FakeRuntime, dispatched };
+}
+
+function recorded({ allowedModels = LIST, maxCostMicros = null } = {}) {
+	const { FakeRuntime, dispatched } = recordingRuntimeClass();
+	const meter = createUsageMeter({ maxCostMicros, allowedModels, onStop: () => {} });
+	const logged = [];
+	const guard = createPolicyGuard({ maxCostMicros, allowedModels, log: (event, fields) => logged.push({ event, fields }), env: {} });
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard });
+	return { runtime: new FakeRuntime(), dispatched, meter, logged, layer };
+}
+
+test("a level map or a layer that is not plain own data refuses: inherited, non-enumerable, accessor, a class (issue #587)", async () => {
+	// pi reads `byLevel?.[level]` by property access, so an inherited or non-enumerable level reaches the request while
+	// Object.values() never sees it. Each shape refuses under a list and under a cap; nothing is dispatched.
+	const hidden = () => {
+		const levels = {};
+		Object.defineProperty(levels, "off", { value: { model: "unlisted-1", max_tokens: 5_000_000 }, enumerable: false });
+		return levels;
+	};
+	const accessor = () => ({ get off() { return { model: "unlisted-1" }; } });
+	const layerAccessor = () => ({ off: { get model() { return "unlisted-1"; } } });
+	class Levels { constructor() { this.off = { temperature: 0 }; } }
+	const shapes = [
+		["an inherited level", () => ({ samplingParamsByThinkingLevel: Object.create({ off: { model: "unlisted-1", max_tokens: 5_000_000 } }) })],
+		["a non-enumerable level", () => ({ samplingParamsByThinkingLevel: hidden() })],
+		["an accessor level", () => ({ samplingParamsByThinkingLevel: accessor() })],
+		["an accessor inside a level", () => ({ samplingParamsByThinkingLevel: layerAccessor() })],
+		["a class instance as the map", () => ({ samplingParamsByThinkingLevel: new Levels() })],
+		["inherited samplingParams", () => ({ samplingParams: Object.create({ model: "unlisted-1" }) })],
+	];
+	for (const [label, extra] of shapes) {
+		for (const policy of [{ allowedModels: LIST }, { allowedModels: null, maxCostMicros: 1_000_000_000 }]) {
+			const { runtime, dispatched, meter, layer } = recorded(policy);
+			try {
+				const result = await runtime.streamSimple({ ...LISTED, ...extra() }, {}, {}).result();
+				assert.equal(result.stopReason, "aborted", `${label}, ${policy.allowedModels ? "list" : "cap"}`);
+				assert.deepEqual([dispatched.length, meter.state.stopReason], [0, policy.allowedModels ? MODEL_NOT_ALLOWED : COST_CAP], `${label}, ${policy.allowedModels ? "list" : "cap"}`);
+			} finally {
+				layer.restore();
+			}
+		}
+	}
+});
+
+test("the sampling layers and options pi receives are copies: a mutation after the call returns changes nothing sent (issue #587)", async () => {
+	// pi reads the model's and the call's sampling parameters after an await (prepareRequest), so the caller's own objects
+	// could be changed between the guard's verdict and the request. The guard judges one deep copy and pi gets it.
+	for (const where of ["samplingParams", "level", "options", "env"]) {
+		const { runtime, dispatched, meter, layer } = recorded({ maxCostMicros: 1_000_000_000 });
+		try {
+			const model = { ...LISTED, samplingParams: {}, samplingParamsByThinkingLevel: { off: {} }, cost: { ...LISTED.cost }, compat: { ...LISTED.compat } };
+			const options = { samplingParams: {}, env: {} };
+			const stream = runtime.streamSimple(model, {}, options);
+			const target = { samplingParams: model.samplingParams, level: model.samplingParamsByThinkingLevel.off, options: options.samplingParams, env: options.env }[where];
+			target.model = "unlisted-1";
+			target.max_tokens = 5_000_000;
+			target.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "listed-1=big";
+			model.cost.output = 0;
+			model.compat.maxTokensField = "max_completion_tokens";
+			await stream.result();
+			assert.equal(meter.state.stopReason, null, where);
+			assert.equal(dispatched.length, 1, where);
+			const sent = dispatched[0];
+			assert.notEqual(sent.model, model, `${where}: the model pi gets is the guard's copy`);
+			assert.deepEqual({ ...sent.model.samplingParams }, {}, `${where}: model samplingParams`);
+			assert.deepEqual({ ...sent.model.samplingParamsByThinkingLevel.off }, {}, `${where}: the off level`);
+			assert.deepEqual({ ...sent.options.samplingParams }, {}, `${where}: the call's samplingParams`);
+			assert.deepEqual({ ...sent.options.env }, {}, `${where}: the call's env`);
+			assert.equal(sent.model.cost.output, 2, `${where}: the cost the bound was judged on`);
+			assert.equal(sent.model.compat.maxTokensField, "max_tokens", `${where}: the compat the bound was judged on`);
+		} finally {
+			layer.restore();
+		}
+	}
+});
+
+test("the compat half hands its provider the same copies, and refuses an inherited level too (issue #587)", async () => {
+	const sent = [];
+	const meter = createUsageMeter({ allowedModels: LIST });
+	const inner = { streamSimple: (model, _context, options) => (sent.push({ model, options }), new FakeStream()) };
+	const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ allowedModels: LIST }) });
+	const model = { ...LISTED, samplingParamsByThinkingLevel: { off: {} } };
+	const options = { samplingParams: {} };
+	compat.streamSimple(model, {}, options);
+	model.samplingParamsByThinkingLevel.off.model = "unlisted-1";
+	options.samplingParams.model = "unlisted-1";
+	assert.equal(sent.length, 1);
+	assert.deepEqual([{ ...sent[0].model.samplingParamsByThinkingLevel.off }, { ...sent[0].options.samplingParams }], [{}, {}]);
+	const refused = await compat.streamSimple({ ...LISTED, samplingParamsByThinkingLevel: Object.create({ off: { model: "unlisted-1" } }) }, {}, {}).result();
+	assert.deepEqual([refused.errorMessage, sent.length, meter.state.stopReason], ["pi-dispatch: model not allowed", 1, MODEL_NOT_ALLOWED]);
+});
+
 /** A runtime whose provider runs options.onPayload on `{ model }` before it sends, as every pinned api does, and records what it sent. */
 function payloadRuntimeClass() {
 	const sent = [];

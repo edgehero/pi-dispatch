@@ -689,12 +689,85 @@ function zeroUsage() {
 }
 
 /**
- * A shallow copy of the model a call was made on, read once (issue #502, PR #538's review). Spreading reads each
- * own enumerable field exactly once, so a getter cannot answer the guard and the provider differently; a model
- * whose id lives on a prototype getter loses it in the copy and is refused, the safe side.
+ * The copy of the model a call was made on that the guard judges AND pi is handed, read once (issue #502, PR #538's
+ * review; deepened by issue #587's gate). Spreading reads each own enumerable field exactly once, so a getter cannot
+ * answer the guard and the provider differently; a model whose id lives on a prototype getter loses it in the copy and
+ * is refused, the safe side. Every field is then copied DEEP (snapshotPayload), because pi reads the nested objects
+ * (samplingParams, every samplingParamsByThinkingLevel level, compat with its fallbacks and maxTokensField, cost with
+ * its tiers) after an await: a caller that kept a reference could change them between the verdict and the request.
+ * The two sampling fields are copied stricter still (samplingCopy, levelsCopy): own data only, into null-prototype
+ * objects, or a marker the guards refuse.
  */
 function snapshotModel(model) {
-	return model !== null && typeof model === "object" ? { ...model } : model;
+	if (model === null || typeof model !== "object") return model;
+	const copy = { ...model };
+	for (const key of Object.keys(copy)) {
+		if (key === "samplingParams") copy[key] = samplingCopy(copy[key]);
+		else if (key === "samplingParamsByThinkingLevel") copy[key] = levelsCopy(copy[key]);
+		else copy[key] = snapshotPayload(copy[key]);
+	}
+	return copy;
+}
+
+/**
+ * The call's options, copied the same way for the same reason (issue #587's gate): one read of each own field, and a
+ * deep copy of the two pi reads after an await and the guards judge, `samplingParams` and `env` (the per-call
+ * deployment map, PI_CACHE_RETENTION). Anything else is handed over as given (a signal, the caller's onPayload).
+ */
+function snapshotOptions(options) {
+	if (options === null || typeof options !== "object") return options;
+	const copy = { ...options };
+	if (Object.hasOwn(copy, "samplingParams")) copy.samplingParams = samplingCopy(copy.samplingParams);
+	if (Object.hasOwn(copy, "env")) copy.env = snapshotPayload(copy.env);
+	return copy;
+}
+
+/** A call's arguments with its options (the LAST argument on every wrapped method) copied by snapshotOptions. */
+function snapshotArgs(args) {
+	if (!Array.isArray(args) || args.length === 0) return args;
+	return [...args.slice(0, -1), snapshotOptions(args.at(-1))];
+}
+
+/**
+ * Stands in for a sampling field that is not plain own data. Its prototype is neither Object.prototype nor null, so
+ * isOwnData refuses it: the model guard as a routing key, the cost guard as unboundable.
+ */
+const UNREADABLE_SAMPLING = Object.freeze(Object.create(Object.freeze({ unreadable: true })));
+
+/**
+ * Whether `value` is a plain object of own data: its prototype is Object.prototype or null, and every own key is a
+ * string naming an enumerable data property (no getter, nothing hidden from Object.keys). pi reads a level by property
+ * access (`byLevel?.[level]`), so an inherited, non-enumerable or accessor level reaches the request while Object.values
+ * never sees it (issue #587's gate measured `Object.create({ off: { model } })` on the wire, unrefused).
+ */
+function isOwnData(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const proto = Object.getPrototypeOf(value);
+	if (proto !== Object.prototype && proto !== null) return false;
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (typeof key !== "string" || !descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) return false;
+	}
+	return true;
+}
+
+/** A null-prototype copy of an own-data object, each value copied by `copyValue`; UNREADABLE_SAMPLING otherwise. */
+function ownDataCopy(value, copyValue) {
+	if (value === undefined || value === null) return value;
+	if (!isOwnData(value)) return UNREADABLE_SAMPLING;
+	const out = Object.create(null);
+	for (const key of Object.keys(value)) out[key] = copyValue(Object.getOwnPropertyDescriptor(value, key).value);
+	return out;
+}
+
+/** A sampling-parameter object (the model's, a level's or the call's), copied as own data, its values deep. */
+function samplingCopy(value) {
+	return ownDataCopy(value, (inner) => snapshotPayload(inner));
+}
+
+/** samplingParamsByThinkingLevel: the map and each level copied as own data. */
+function levelsCopy(value) {
+	return ownDataCopy(value, (level) => samplingCopy(level));
 }
 
 /** The verdict for a call the guard judged and let through: dispatch it, and bind it to its settle. */
@@ -806,14 +879,17 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	// answer the guard with one id and the provider with another. Only while a guard can judge, so a job with no
 	// policy dispatches the caller's own object exactly as before.
 	const judgedModel = (model) => (guard !== null && hardStop ? snapshotModel(model) : model);
+	// The options too, on the same condition (issue #587's gate): their sampling parameters and env are read after an await.
+	const judgedArgs = (args) => (guard !== null && hardStop ? snapshotArgs(args) : args);
 	const dispatchOrUnanswered = (verdict, run) => dispatchBinding(guard, verdict, run);
 
 	for (const name of RUNTIME_STREAM_METHODS) {
 		const original = proto?.[name];
 		if (typeof original !== "function") continue;
-		const wrapper = function (requested, ...given) {
-			if (!active) return original.call(this, requested, ...given);
+		const wrapper = function (requested, ...passed) {
+			if (!active) return original.call(this, requested, ...passed);
 			const model = judgedModel(requested);
+			const given = judgedArgs(passed);
 			const verdict = verdictFor(name, model, given);
 			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
 			// Trap #5: everything this call dispatches, across its awaits, runs under this call's own token, and its
@@ -835,9 +911,10 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	for (const name of RUNTIME_RESULT_METHODS) {
 		const original = proto?.[name];
 		if (typeof original !== "function") continue;
-		const wrapper = function (requested, context, given) {
-			if (!active) return original.call(this, requested, context, given);
+		const wrapper = function (requested, context, passed) {
+			if (!active) return original.call(this, requested, context, passed);
 			const model = judgedModel(requested);
+			const [, given] = judgedArgs([context, passed]);
 			const verdict = verdictFor(name, model, [context, given]);
 			if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
 			const [, options] = prepareFor(verdict, name, model, [context, given]);
@@ -906,9 +983,10 @@ export function defaultHardStopResult(method, model, message = STOP_MESSAGES[TOK
  */
 export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null, isStopped = null }) {
 	const dispatchOrUnanswered = (verdict, run) => dispatchBinding(guard, verdict, run);
-	function route(kind, requested, context, given) {
-		// One copy, judged and dispatched (wrapModelRuntime's judgedModel has the why).
+	function route(kind, requested, context, passed) {
+		// One copy, judged and dispatched (wrapModelRuntime's judgedModel has the why), its options likewise.
 		const model = guard !== null && hardStop ? snapshotModel(requested) : requested;
+		const given = guard !== null && hardStop ? snapshotOptions(passed) : passed;
 		// Checked before dispatch, so a stop ends the NEXT call rather than merely recording it.
 		// The runtime call's own re-entry is skipped; any other call, a forward to another pair included, is judged.
 		const reentry = claimReentry(dispatch?.getStore(), model, given);
@@ -1773,19 +1851,19 @@ export const SAMPLING_SAFE_KEYS = Object.freeze(["temperature", "top_p", "top_k"
  * A key in any layer counts, and an output bound takes the largest value any layer holds.
  */
 function samplingLayers(model, options) {
-	const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 	const layers = [];
 	for (const layer of [model?.samplingParams, options?.samplingParams]) {
 		if (layer === undefined || layer === null) continue;
-		if (!isObject(layer)) return null;
+		if (!isOwnData(layer)) return null;
 		layers.push(layer);
 	}
 	const byLevel = model?.samplingParamsByThinkingLevel;
 	if (byLevel !== undefined && byLevel !== null) {
-		if (!isObject(byLevel)) return null;
+		// Own data only (isOwnData): an inherited, hidden or accessor level is one pi reads and Object.values does not.
+		if (!isOwnData(byLevel)) return null;
 		for (const layer of Object.values(byLevel)) {
 			if (layer === undefined || layer === null) continue;
-			if (!isObject(layer)) return null;
+			if (!isOwnData(layer)) return null;
 			layers.push(layer);
 		}
 	}
