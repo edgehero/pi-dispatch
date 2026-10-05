@@ -363,15 +363,19 @@ is an open issue.
   no `baseUrl` in pi's catalog: since pi 1.0.3 every `azure` model has none, and `azure/deepseek-v4-pro` runs on
   openai-completions, so its server is whatever you configure. The way out is yours, when that server reads
   `max_tokens`: `"providers": {"azure": {"modelOverrides": {"deepseek-v4-pro": {"compat": {"maxTokensField":
-  "max_tokens"}}}}}` in the overlay `models.json`. The run record says which rule
+  "max_tokens"}}}}}` in the overlay `models.json`. Also refused: a call on a model the job's own model registry
+  does not know, or one whose cost, compat or api differs from the registry's entry for it. A price is never taken
+  from the caller (an extension could pass a model with its prices set to zero). A model an extension registers with
+  `registerProvider` is in the registry. The run record says which rule
   refused in its `why`: `unboundable` for these, `over-cap` when the call's bound would pass the cap, and `external`
   when the subprocesses' spend could not be read. The run detail shows it after the reason, as
   `cost-cap (unboundable: see compat.maxTokensField)`. A `cost-cap` stop with no `why` came from a subprocess, an
   unmetered child or a displaced compat entry, not from a refused call of the runner's own, or it ran on an older
   image or its exit line could not be verified.
 - **Sampling parameters count at every thinking level.** A model in `models.json` may carry `samplingParams` and,
-  since pi 1.0.2, `samplingParamsByThinkingLevel`, which pi merges per call for the thinking level it picks. On
-  openai-completions, openai-responses and azure both reach the request after the output cap. The bound reads every
+  since pi 1.0.2, `samplingParamsByThinkingLevel`, which pi merges per call for the thinking level it picks. Both
+  reach the request after the output cap on all three apis that merge them: openai-completions, openai-responses and
+  azure. The bound reads every
   level: the largest `max_tokens`, `max_completion_tokens` or `max_output_tokens` in any of them, times the largest
   `n`. Any other key there that is not a plain sampling knob (`model`, `service_tier`, `tools`) makes the call
   unboundable under a cap, at any level.
