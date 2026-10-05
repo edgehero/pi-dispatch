@@ -14,8 +14,10 @@
 # what broke. So the pull request is ALWAYS a draft, and a person makes it ready.
 #
 # Before it commits, pi-bump.mjs refuses anything a bump cannot explain: a lockfile entry not from the npm registry
-# with an integrity hash, a package that gains an install script, a package.json that changed beyond its pin, and any
-# file in the working tree beyond the pin files and the lockfile. The workflow then stages exactly those paths.
+# with an integrity hash, a package whose registry metadata gains an install script, a package.json that changed
+# beyond its pin, and any file in the working tree beyond the pin files and the lockfile. The workflow then stages
+# exactly those paths. The install-script check reads metadata only and cannot see a tarball's binding.gyp (npm builds
+# one with node-gyp at install), so the pull request's review and its CI are the real check on what a package runs.
 #
 # Untrusted text (the version input, a branch name) reaches a shell only through `env:`, never through an expression
 # inside `run:`.

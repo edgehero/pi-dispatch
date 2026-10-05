@@ -158,13 +158,18 @@ and merges it.
   latest). One job, which runs no pi code: `.github/scripts/pi-bump.mjs <version>` moves every pin from one table and
   re-resolves pi's tree in the lockfile with `npm install --package-lock-only --ignore-scripts` (registry metadata
   only, nothing extracted or run). It refuses a lockfile entry not from the npm registry with an integrity hash, a
-  package that gains an install script, a `package.json` that changed beyond its pin, and any file other than the
-  pin files and the lockfile. Then it commits exactly those files as Rob Boerman with `-s`, force-pushes
+  package whose registry metadata gains an install script, a `package.json` that changed beyond its pin, and any
+  file other than the pin files and the lockfile. The install-script check cannot see a tarball's `binding.gyp`
+  (npm builds one with node-gyp at install whatever the metadata says), so the review and the pull request's CI are
+  the real check on what a new package runs. Then it commits exactly those files as Rob Boerman with `-s`, force-pushes
   `chore/pi-bump`, and opens or updates the one pull request titled `chore(pi): run on pi X`. It skips a target that
   is the pin, older than it, not an exact release, already carried by the open pull request, or closed unmerged.
 - **The pull request is ALWAYS a draft.** The workflow cannot know whether the bump holds; the pull request's own
   required checks say so (the suite, the pinned-assumption tests and the image job's zero-spend smoke, on the new pi).
   Each red check names what broke. When everything is fixed and green, a person marks it ready.
+- **Those checks run the new pi's code with no review yet.** That is why `pi-upgrade-check.yml` is read-only and no
+  `pull_request` job references a secret. Keep it so: a future `pull_request` job that references a secret would
+  hand it to a bump pull request's pi code.
 - **Reviewing a bump.** Work through the body's checklist (it is OQ-005's).
   - If `worker/test/pi-derived.test.mjs` is red, run `node .github/scripts/pi-derived.mjs --write` on the branch and
     commit the result. It prints the catalog hosts added and removed: **a new host widens the cost guard**, so check

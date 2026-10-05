@@ -68,6 +68,11 @@ on:
 # commit nobody is merging any more, while a superseded run of `release` is a publish halfway through.
 # Ten pushes to a branch used to leave ten sets of runs queued against each other, and the newest commit --
 # the only one that matters -- waited behind its own predecessors.
+# Read-only for every job: none of them writes, and a pi bump's pull request runs this workflow on pi code nobody has
+# reviewed yet (issue #587). A job that needs more names it on itself.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -547,7 +552,7 @@ jobs:
       # A STEP IN A REQUIRED JOB, SO IT DECIDES FOR ITSELF WHETHER TO RUN. The job must always report, so it cannot be
       # path-filtered; the smoke depends on a real provider, so a pull request that cannot move its result does not pay
       # for it. It runs on a push to main, the schedule and a manual run, on the pi bump's own branch, and on a pull
-      # request that changes a pi pin site, the lockfile, image/ or the smoke itself, computed here against the base
+      # request that changes a pi pin site, the lockfile, image/, the smoke itself or this workflow, computed here against the base
       # (fake-key-smoke.mjs's smokeWanted). On pull_request the checkout is the merge commit, so a diff against the
       # base sha is exactly the pull request's change.
       - name: "RUNNER: a fake-key job reaches the provider, is refused with a 401, is metered and costs nothing (issue #587)"
@@ -557,7 +562,7 @@ jobs:
           : > "$RUNNER_TEMP/changed.txt"
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             git fetch --no-tags --depth=1 origin "$BASE_SHA"
-            git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
+            git diff --name-only --no-renames "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
           fi
           node .github/scripts/fake-key-smoke.mjs "$IMAGE_REF" --changed "$RUNNER_TEMP/changed.txt"
 
