@@ -623,6 +623,9 @@ test("the runner never imports pi-ai directly -- a static import makes the meter
 	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("await buildLoadedResourceLoader({"), "the meter installs before any extension loads (issue #543)");
 	assert.match(runJob, /\n\t\tmodelRuntime,\n\t\tmodel,\n/, "the session must be created on the SAME runtime the meter proved");
 	assert.match(runJob, /usageMeter\.arm\(\)/, "run-job.mjs must re-arm the meter AFTER createAgentSession");
+	// Issue #587's review: the table the meter pinned is handed to pi children, after the install and before any extension loads.
+	assert.match(runJob, /publishPriceTable\(\{ dir: childLedger\.dir, table: usageMeter\.prices, env: process\.env \}\)/, "run-job.mjs must hand the pinned price table to its children");
+	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("publishPriceTable({") && runJob.indexOf("publishPriceTable({") < runJob.indexOf("await buildLoadedResourceLoader({"), "published after the pin, before any extension loads");
 });
 
 test("the runner's first pi-ai candidate IS the copy pi hands its extensions, wherever npm put it (issue #587)", { skip }, async () => {
