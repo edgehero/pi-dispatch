@@ -57,7 +57,7 @@ async function job({ api, priced = false, maxTokens = null, capMicros = null, ke
 	const root = tempDir("pi-dispatch-535-");
 	const modelsPath = join(root, "models.json");
 	const cost = priced ? { input: 1, output: 100, cacheRead: 0, cacheWrite: 0 } : { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 };
-	writeFileSync(modelsPath, `${JSON.stringify({ providers: { [PROVIDER]: { apiKey: "pi-dispatch-fake-key-sentinel", baseUrl: "http://127.0.0.1:1", api, models: [{ id: MODEL_ID, name: "pi-dispatch fake", api, reasoning: false, input: ["text"], cost, contextWindow: 100000, maxTokens: priced ? 10000 : 4096 }] } } })}\n`);
+	writeFileSync(modelsPath, `${JSON.stringify({ providers: { [PROVIDER]: { apiKey: "pi-dispatch-fake-key-sentinel", baseUrl: "http://127.0.0.1:1", api, models: [{ id: MODEL_ID, name: "pi-dispatch fake", api, reasoning: false, input: ["text"], cost, contextWindow: 100000, maxTokens: priced ? 10000 : 4096, compat: { maxTokensField: "max_tokens" } }] } } })}\n`);
 	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir: root, modelsPath });
 	const model = modelRuntime.getModel(PROVIDER, MODEL_ID);
 

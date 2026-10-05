@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
 	BOUND_OVERHEAD_TOKENS,
 	callCostBound,
+	completionsOwnServer,
 	IMAGE_RESIZE_MAX,
 	IMAGE_TOKEN_CEILINGS,
 	SAMPLING_SAFE_KEYS,
@@ -42,7 +43,7 @@ function contextOfBytes(bytes) {
 const inputOf = (tokens) => contextOfBytes(tokens - BOUND_OVERHEAD_TOKENS);
 const NO_ENV = Object.freeze({});
 
-const FLAT = Object.freeze({ id: "flat", api: "openai-completions", provider: "local", baseUrl: "http://127.0.0.1:1", cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 1000 });
+const FLAT = Object.freeze({ id: "flat", api: "openai-completions", provider: "local", baseUrl: "http://127.0.0.1:1", cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 1000, compat: { maxTokensField: "max_tokens" } });
 
 test("callCostBound: a flat model is input bytes + overhead at the dearest input rate, plus its output cap", () => {
 	assert.equal(BOUND_OVERHEAD_TOKENS, 8192);
@@ -708,6 +709,34 @@ test("a present maxTokens that is not a finite number is unboundable; null is ab
 		assert.equal(callCostBound("streamSimple", FLAT, ctx, { maxTokens: bad }, NO_ENV), Infinity, String(bad));
 	}
 	assert.equal(callCostBound("streamSimple", FLAT, ctx, { maxTokens: null }, NO_ENV), 12_000);
+});
+
+test("issue #507: on a server outside pi's catalog, openai-completions is bounded only by a cap sent as max_tokens", () => {
+	const ctx = inputOf(10_000);
+	// The e2e model: priced qwen2.5:3b on Ollama, maxTokens 256, no compat. pi sends max_completion_tokens, which Ollama
+	// 0.35.0 ignores (20 asked, 440 answered), so neither the asked cap nor the model's bounds anything.
+	const ollama = { ...FLAT, baseUrl: "http://host.docker.internal:11434/v1", compat: undefined, maxTokens: 256 };
+	assert.equal(callCostBound("streamSimple", ollama, ctx, {}, NO_ENV), Infinity, "pi's default field on the operator's server");
+	assert.equal(callCostBound("streamSimple", ollama, ctx, { maxTokens: 20 }, NO_ENV), Infinity, "an asked cap that travels as max_completion_tokens");
+	assert.equal(callCostBound("streamSimple", { ...ollama, compat: { maxTokensField: "max_completion_tokens" } }, ctx, {}, NO_ENV), Infinity, "said explicitly, it is still a field the server may ignore");
+	assert.equal(callCostBound("streamSimple", { ...ollama, compat: { supportsStore: false } }, ctx, {}, NO_ENV), Infinity, "a compat without the field");
+	assert.equal(callCostBound("streamSimple", { ...ollama, baseUrl: "not a url" }, ctx, {}, NO_ENV), Infinity, "a baseUrl that does not parse");
+	// With max_tokens the cap on the wire bounds it: streamSimple always sends one, a raw stream only the caller's.
+	const fixed = { ...ollama, compat: { maxTokensField: "max_tokens" } };
+	assert.equal(callCostBound("streamSimple", fixed, ctx, {}, NO_ENV), 10_000 + 256 * 2, "streamSimple sends model.maxTokens");
+	assert.equal(callCostBound("streamSimple", fixed, ctx, { maxTokens: 20 }, NO_ENV), 10_000 + 20 * 2);
+	assert.equal(callCostBound("stream", fixed, ctx, { maxTokens: 20 }, NO_ENV), 10_000 + 20 * 2);
+	assert.equal(callCostBound("stream", fixed, ctx, {}, NO_ENV), Infinity, "a raw stream with no cap sends none");
+	// A host pi's catalog serves keeps pi's own choice of field: openrouter sends max_completion_tokens and reads it.
+	const openrouter = { ...ollama, provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" };
+	assert.equal(callCostBound("streamSimple", openrouter, ctx, {}, NO_ENV), 10_000 + 256 * 2);
+	assert.equal(callCostBound("stream", openrouter, ctx, {}, NO_ENV), 10_000 + 256 * 2, "the hosted server stops at the model's own limit");
+	// Zero-rated stays 0 wherever it runs, and other apis are untouched.
+	assert.equal(callCostBound("streamSimple", { ...ollama, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, ctx, {}, NO_ENV), 0);
+	assert.equal(callCostBound("streamSimple", { ...ollama, api: "anthropic-messages" }, ctx, {}, NO_ENV), 10_000 + 256 * 2);
+	assert.equal(completionsOwnServer(ollama), true);
+	assert.equal(completionsOwnServer(openrouter), false);
+	assert.equal(completionsOwnServer({ ...ollama, api: "openai-responses" }), false);
 });
 
 test("a displacement under the cap is counted on the exit line as costUnjudged", async () => {

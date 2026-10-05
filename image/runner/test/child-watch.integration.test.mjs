@@ -48,7 +48,7 @@ export default function fakeProvider(pi) {
 		baseUrl: "http://127.0.0.1:1",
 		apiKey: "pi-dispatch-child-fake-key",
 		api,
-		models: [{ id: "m1", name: "m1", api, reasoning: false, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 }],
+		models: [{ id: "m1", name: "m1", api, reasoning: false, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096, compat: { maxTokensField: "max_tokens" } }],
 		streamSimple(model) {
 			appendFileSync(process.env.FAKE_CALLS, "call\\n");
 			const stream = createAssistantMessageEventStream();

@@ -256,7 +256,7 @@ test("the worker keeps the child keys: a runner's exit line round-trips byte-ide
 
 test("a child's floor counters reach the exit line: a child call that never started floors the job exactly as a parent call would (issue #500)", async () => {
 	const cap = 1_000_000;
-	const M1 = { provider: "fake", id: "m1", api: "openai-completions", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } };
+	const M1 = { provider: "fake", id: "m1", api: "openai-completions", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" } };
 	const failed = { role: "assistant", stopReason: "error", content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } };
 	const noUsage = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }] };
 	// Issue #571: what pi settles when the answer carried no usage block, all zeros. The meter would price it at $0 as

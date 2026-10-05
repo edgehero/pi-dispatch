@@ -191,7 +191,13 @@ interval, and you can revert it ([SECURITY.md](../SECURITY.md), `CONST-ISSUE-TEX
 ## Test it with zero spend
 
 Use a local model with a nonzero price in your overlay `models.json`, so the meter and the caps run as they
-would for a paid model ([local model servers](egress.md#local-model-servers)).
+would for a paid model ([local model servers](egress.md#local-model-servers)). Give it
+`"compat": {"maxTokensField": "max_tokens"}`, or the dollar cap refuses every call to it: Ollama ignores the field
+pi sends otherwise, so nothing would stop the answer at the output cap.
+
+```json
+{"providers":{"local-ollama":{"api":"openai-completions","baseUrl":"http://host.docker.internal:11434/v1","apiKey":"$PI_DISPATCH_KEYLESS","compat":{"maxTokensField":"max_tokens"},"models":[{"id":"qwen2.5:3b","contextWindow":32768,"maxTokens":256,"cost":{"input":10,"output":6000,"cacheRead":0,"cacheWrite":0}}]}}}
+```
 
 1. Copy the example to `~/pm`, then `git init`, `git add -A`, `git commit -m init`.
 2. Set up the envelope above, with `~/pm` a member of `ops`, and `minIntervalHours` 0 while you test, so
