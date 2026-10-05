@@ -1508,7 +1508,7 @@ test("issue #543: a legacy extension that only re-registers an api id at load is
 /** What a fallback provider spends answering itself: $2, priced by the provider, as a fetch-based custom api reports it. */
 const OWN_TWO_DOLLARS = { input: 100000, output: 10000, cacheRead: 0, cacheWrite: 0, totalTokens: 110000, cost: { input: 1.5, output: 0.5, cacheRead: 0, cacheWrite: 0, total: 2 } };
 
-async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels = null, target: targetOverrides = {}, answer: proxyAnswer = "pass", entry = "ok", second = false }) {
+async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels = null, target: targetOverrides = {}, answer: proxyAnswer = "pass", entry = "ok", second = false, registerTarget = false }) {
 	const fx = await fixture(`pi-dispatch-fake-api-543-proxy-${(loadTimeRuns += 1)}`);
 	const compat = await import(resolvePiAiCompat()[0].url);
 	const servedApi = `pi-dispatch-served-api-${loadTimeRuns}`;
@@ -1526,7 +1526,7 @@ async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels 
 		return stream;
 	};
 	compat.registerApiProvider({ api: servedApi, stream: answer, streamSimple: answer });
-	const target = { ...fx.model, provider: "pi-dispatch-upstream", id: "upstream-1", api: servedApi, ...targetOverrides };
+	let target = { ...fx.model, provider: "pi-dispatch-upstream", id: "upstream-1", api: servedApi, ...targetOverrides };
 	const stops = [];
 	const logged = [];
 	const log = (event, fields) => logged.push({ event, fields });
@@ -1573,7 +1573,14 @@ async function proxyRun({ maxTokens = null, maxCostMicros = null, allowedModels 
 				return own;
 			},
 		});
+		// `registerTarget` (issue #587's gate): the target is a model of the job runtime's own registry, so under a cap it is
+		// priced from there; an unregistered target is refused as unboundable before its bound is even taken.
+		if (registerTarget) {
+			const { provider: _provider, ...definition } = target;
+			fx.modelRuntime.registerProvider("pi-dispatch-upstream", { baseUrl: target.baseUrl, apiKey: "pi-dispatch-upstream-literal-key", api: target.api, models: [{ ...definition, name: target.id, reasoning: false, input: ["text"], contextWindow: 100000 }] });
+		}
 		await fx.modelRuntime.refresh({ allowNetwork: false });
+		if (registerTarget) target = fx.modelRuntime.getModel("pi-dispatch-upstream", "upstream-1");
 		const proxy = fx.modelRuntime.getModel("pi-dispatch-proxy", "proxy-1");
 		const result = await fx.modelRuntime.streamSimple(proxy, { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, {}).result();
 		await flush();
@@ -1598,11 +1605,15 @@ test("PR #547's reviews: a proxy provider's forward to another model is a full c
 	assert.deepEqual([listed.served, listed.stops, listed.guard.snapshot().modelRefused], [[], [MODEL_NOT_ALLOWED], 1]);
 	// A cheap proxy forwarding to a dear target under a $1 cap: the target's own bound (about $2) is judged, and refused
 	// before anything is sent, as the same target called directly would be.
-	const dear = await proxyRun({ maxCostMicros: 1_000_000, target: { api: PRICED_API, cost: { input: 1, output: 200, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000, compat: { maxTokensField: "max_tokens" } } });
+	const dear = await proxyRun({ maxCostMicros: 1_000_000, registerTarget: true, target: { api: PRICED_API, cost: { input: 1, output: 200, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000, compat: { maxTokensField: "max_tokens" } } });
 	assert.equal(dear.result.errorMessage, "pi-dispatch: cost cap reached", JSON.stringify(dear.result));
 	const refusal = dear.logged.find((line) => line.event === "cost_refused");
 	assert.ok(refusal?.fields.bound > 1_000_000, `the target's own bound was judged: ${JSON.stringify(refusal)}`);
 	assert.deepEqual([dear.served, dear.stops, dear.guard.cost.state.inflight], [[], ["cost-cap"], 0], "nothing sent, nothing left in flight");
+	// The same forward to a target no registry knows (issue #587's gate): refused before its bound, as unboundable.
+	const unregistered = await proxyRun({ maxCostMicros: 1_000_000, target: { api: PRICED_API, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000, compat: { maxTokensField: "max_tokens" } } });
+	assert.equal(unregistered.logged.find((line) => line.event === "cost_refused")?.fields.why, "unboundable", JSON.stringify(unregistered.logged));
+	assert.deepEqual([unregistered.served, unregistered.stops], [[], ["cost-cap"]], "a zero-rated target nobody registered is not run for free");
 	// A proxy that answers with zero usage of its own: the target's usage is counted.
 	const zero = await proxyRun({ answer: "zero" });
 	assert.deepEqual([zero.served, zero.meter.state.calls, zero.meter.state.total], [["upstream-1"], 2, SENTINEL_TOTAL]);

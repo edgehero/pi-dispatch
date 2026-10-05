@@ -770,6 +770,24 @@ function levelsCopy(value) {
 	return ownDataCopy(value, (level) => samplingCopy(level));
 }
 
+/**
+ * The registry entry of the runtime a call is made on for the call's (provider, id, api), or null when it has none, or
+ * undefined when there is no registry to ask (issue #587's gate). The cost guard prices a call from it: the bound and
+ * pi's own settlement both read the model object the CALLER passes, so a caller's `{ ...model, cost: zeros }` would
+ * otherwise run under a cap at $0. `registry` is a ModelRuntime (`getAllModels(provider)`, every model type).
+ */
+function registryEntry(registry, model) {
+	if (typeof registry?.getAllModels !== "function") return undefined;
+	let models;
+	try {
+		models = registry.getAllModels(model?.provider);
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(models)) return null;
+	return models.find((entry) => entry?.id === model?.id && entry?.api === model?.api) ?? null;
+}
+
 /** The verdict for a call the guard judged and let through: dispatch it, and bind it to its settle. */
 const ADMITTED = Symbol("admitted");
 
@@ -803,7 +821,7 @@ function externalStop(isStopped) {
  * not judge (a virtual model, whose physical re-entry is judged instead, or a compat call already judged by
  * the runtime half).
  */
-function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = null }) {
+function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = null, registered }) {
 	if (!hardStop) return null;
 	if (meter.state.stopReason !== null) return meter.state.stopReason;
 	// A stop from OUTSIDE this process (issue #500: a child reads the parent's STOP file), asked before every
@@ -816,7 +834,7 @@ function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = 
 		}
 	}
 	if (guard === null || skip) return null;
-	const refused = guard.admit({ method, model, args });
+	const refused = guard.admit(registered === undefined ? { method, model, args } : { method, model, args, registered });
 	if (refused === null || refused === undefined) return ADMITTED;
 	meter.stop(refused);
 	return meter.state.stopReason;
@@ -872,7 +890,8 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	// Only streamSimple re-enters with the physical model (trap #4); a virtual model on any other method is judged as
 	// itself: under a cost cap that is an unboundable call, refused, and under a list it is refused unless the list
 	// names the virtual entry itself (pi then fails such an unrouted call without reaching a provider).
-	const verdictFor = (method, model, args) => judge({ meter, hardStop, guard, method, model, args, isStopped, skip: method === "streamSimple" && model?.api === VIRTUAL_MODEL_API });
+	// `runtime` is the instance the call was made on: its registry prices the call (registryEntry), only while a guard judges.
+	const verdictFor = (method, model, args, runtime) => judge({ meter, hardStop, guard, method, model, args, isStopped, skip: method === "streamSimple" && model?.api === VIRTUAL_MODEL_API, registered: guard !== null && hardStop ? registryEntry(runtime, model) : undefined });
 	// The call's arguments as the guard prepared them for an admitted call (the model guard wraps options.onPayload).
 	const prepareFor = (verdict, method, model, args) => (verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method, model, args, stop: (reason) => meter.stop(reason) }) : args);
 	// Judged and dispatched on ONE copy (issue #502, PR #538's review): a model whose fields are getters could
@@ -890,7 +909,7 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			if (!active) return original.call(this, requested, ...passed);
 			const model = judgedModel(requested);
 			const given = judgedArgs(passed);
-			const verdict = verdictFor(name, model, given);
+			const verdict = verdictFor(name, model, given, this);
 			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
 			// Trap #5: everything this call dispatches, across its awaits, runs under this call's own token, and its
 			// options carry the token, so the compat half can tell this call's re-entry from any other call there.
@@ -915,7 +934,7 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			if (!active) return original.call(this, requested, context, passed);
 			const model = judgedModel(requested);
 			const [, given] = judgedArgs([context, passed]);
-			const verdict = verdictFor(name, model, [context, given]);
+			const verdict = verdictFor(name, model, [context, given], this);
 			if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
 			const [, options] = prepareFor(verdict, name, model, [context, given]);
 			// A token too, though no result method re-enters the compat half: a legacy call made inside it is never its own.
@@ -981,7 +1000,7 @@ export function defaultHardStopResult(method, model, message = STOP_MESSAGES[TOK
  *
  * There is deliberately NO swallowing try/catch, for the reason wrapModelRuntime gives (dispatchBinding rethrows).
  */
-export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null, isStopped = null }) {
+export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null, isStopped = null, registry = null }) {
 	const dispatchOrUnanswered = (verdict, run) => dispatchBinding(guard, verdict, run);
 	function route(kind, requested, context, passed) {
 		// One copy, judged and dispatched (wrapModelRuntime's judgedModel has the why), its options likewise.
@@ -990,7 +1009,9 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 		// Checked before dispatch, so a stop ends the NEXT call rather than merely recording it.
 		// The runtime call's own re-entry is skipped; any other call, a forward to another pair included, is judged.
 		const reentry = claimReentry(dispatch?.getStore(), model, given);
-		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped });
+		// A legacy call is priced from the job runtime's registry (`registry`, installProcessUsageMeter's `runtime`), as the
+		// runtime half prices from the instance it is called on.
+		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, registered: guard !== null && hardStop ? registryEntry(registry, model) : undefined });
 		if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
 		const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason) })[1] : given;
 		const provider = fallbackModels?.getProvider?.(model.provider);
@@ -1419,7 +1440,7 @@ export async function installProcessUsageMeter({
 			const api = entry?.api;
 			if (typeof api !== "string") continue;
 			if (wrapped.has(entry)) continue;
-			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, guard, dispatch, isStopped });
+			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, guard, dispatch, isStopped, registry: runtime });
 			// One sourceId per api id, and registerApiProvider keys the registry by api id, so re-arming
 			// replaces our entry instead of piling up registrations.
 			module.registerApiProvider({ api, ...streams }, `${METER_PROVIDER_PREFIX}:${api}`);
@@ -2086,6 +2107,12 @@ export function unreportedUsage(message, api) {
  * whose answer carries broken usage (unreportedUsage, the meter's own predicate) is charged at least its bound; the
  * guard keeps no counter for it: the meter counts it as `costUnreported` on every run, capped or not.
  */
+/** Whether the call's model carries the registry entry's api, cost (tiers included) and compat (fallbacks, maxTokensField). */
+function pricedAsRegistered(model, registered) {
+	if (registered === null || typeof registered !== "object") return false;
+	return model?.api === registered.api && samePayloadValue(model?.cost, registered.cost) && samePayloadValue(model?.compat, registered.compat);
+}
+
 export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null }) {
 	if (!Number.isSafeInteger(capMicros) || capMicros < 0) throw new Error(`invalid PI_MAX_COST_MICROS: ${capMicros}`);
 	if (external !== null && typeof external !== "function") throw new Error("createCostGuard: external must be a function");
@@ -2173,8 +2200,12 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		settle(ticket, null);
 	}
 
-	function admit({ method, model, args }) {
+	function admit({ method, model, args, registered }) {
 		flushPending();
+		// Issue #587's gate: priced from the runtime's own registry entry, never the caller's say-so. A call whose api, cost
+		// or compat differs from it, or one no registry knows, cannot be bounded honestly: `registered` is undefined only
+		// when there is no registry to ask (a pi child's compat half), and then the call is judged on its own object.
+		if (registered !== undefined && !pricedAsRegistered(model, registered)) return refuse({ why: "unboundable" });
 		const [context, options] = args ?? [];
 		const b = method === "generateImages" || method === "streamDeferred" ? Infinity : bound(method, model, context, options, env);
 		if (!Number.isFinite(b)) return refuse({ why: "unboundable" });
