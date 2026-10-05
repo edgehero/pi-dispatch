@@ -9,7 +9,7 @@ import { test } from "node:test";
 // Pure -- no static pi import in its module graph -- so it needs none of the gating below. Importing
 // the runner's OWN candidate resolver is deliberate: the layout fact it encodes is the thing that
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
-import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, IMAGE_RESIZE_MAX, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
+import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, IMAGE_RESIZE_MAX, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
 import * as catalogModels from "./helpers/catalog-models.mjs";
 import { classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
 import { jobSettings } from "../src/config.mjs";
@@ -1640,6 +1640,11 @@ test("COMPLETIONS_CATALOG_HOSTS is exactly the hosts the pinned catalog serves o
 	}
 	assert.deepEqual([...COMPLETIONS_CATALOG_HOSTS], [...hosts].sort(), "a catalog host came or went: re-check which field pi sends there before trusting it");
 	const src = nestedPiAi("api", "openai-completions.js");
+	// The one host trusted beside the catalog's, for its own reason: not a catalog openai-completions host, and pi's
+	// detection sends it max_completion_tokens (no rule names it), which OpenAI reads.
+	assert.deepEqual([...COMPLETIONS_EXTRA_HOSTS], ["api.openai.com"]);
+	assert.ok(!hosts.has("api.openai.com"), "api.openai.com became a catalog openai-completions host: drop it from the extra list");
+	assert.doesNotMatch(src.slice(src.indexOf("const useMaxTokens"), src.indexOf("const isGrok")), /openai\.com/, "pi now picks the field for api.openai.com itself");
 	assert.match(src, /if \(compat\.maxTokensField === "max_tokens"\) \{[^}]*params\.max_tokens = options\.maxTokens;\s*\}\s*else \{\s*params\.max_completion_tokens = options\.maxTokens;/, "max_tokens only when compat says so");
 	assert.match(src, /maxTokensField: model\.compat\.maxTokensField \?\? detected\.maxTokensField,/, "the model's compat wins over detection");
 	assert.match(src, /maxTokensField: useMaxTokens \? "max_tokens" : "max_completion_tokens",/, "detection's default is max_completion_tokens");

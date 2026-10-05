@@ -357,7 +357,11 @@ is an open issue.
 - **The compat re-arm window**: a legacy call made while the meter's compat half was displaced is not judged. Under
   a cap the job stops, and the run counts it in `costUnjudged`, which settles at the floor.
 - **Calls that cannot be bounded are refused under a cap**: an api outside the priced set, `generateImages`,
-  `streamDeferred`, a priced classifier, a virtual model outside `streamSimple`.
+  `streamDeferred`, a priced classifier, a virtual model outside `streamSimple`, and a priced openai-completions
+  model on a server that is not one of pi's own hosted providers (or `api.openai.com`) whose `compat.maxTokensField`
+  is not `"max_tokens"` ([local model servers](egress.md#local-model-servers)).
+- **Your own server on another api is trusted** to honour that api's own output-cap field (`max_output_tokens`,
+  `max_tokens`). One that ignores it can answer past the bound; `boundExceeded` is the evidence.
 - **Old images are refused.** A job with a dollar cap on an image that does not declare `costCap` is refused before
   it spends (`job-image-cost-cap-unsupported`, [job image](job-image.md)).
 - **A version 1 worker refuses a version 2 limits file**, so rolling a worker back past version 2 with dollar rows

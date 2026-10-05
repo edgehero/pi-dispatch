@@ -49,7 +49,8 @@ test("callCostBound: a flat model is input bytes + overhead at the dearest input
 	assert.equal(BOUND_OVERHEAD_TOKENS, 8192);
 	assert.equal(callCostBound("streamSimple", FLAT, inputOf(10_000), {}, NO_ENV), 10_000 * 1 + 1000 * 2, "no maxTokens asked: the model's 1000");
 	assert.equal(callCostBound("streamSimple", FLAT, inputOf(10_000), { maxTokens: 100 }, NO_ENV), 10_000 + 100 * 2, "openai-completions sends a positive maxTokens");
-	assert.equal(callCostBound("streamSimple", FLAT, inputOf(10_000), { maxTokens: 0 }, NO_ENV), 12_000, "0 is not sent (`if (options?.maxTokens)`), so the model's cap applies");
+	assert.equal(callCostBound("streamSimple", FLAT, inputOf(10_000), { maxTokens: 0 }, NO_ENV), Infinity, "0 is not sent (`if (options?.maxTokens)`), so the operator's server has no cap (#507)");
+	assert.equal(callCostBound("streamSimple", { ...FLAT, provider: "groq", baseUrl: "https://api.groq.com/openai/v1" }, inputOf(10_000), { maxTokens: 0 }, NO_ENV), 12_000, "on a catalog host no cap is the hosted server's own limit: the model's");
 	// The byte bound is NOT the window: a context past contextWindow still costs its bytes.
 	assert.equal(callCostBound("streamSimple", FLAT, inputOf(100_000), {}, NO_ENV), 100_000 + 2000, "contextWindow 32768 does not cap the input bound");
 	// Bytes, not characters: a 3-byte character counts 3.
@@ -731,6 +732,20 @@ test("issue #507: on a server outside pi's catalog, openai-completions is bounde
 	const openrouter = { ...ollama, provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" };
 	assert.equal(callCostBound("streamSimple", openrouter, ctx, {}, NO_ENV), 10_000 + 256 * 2);
 	assert.equal(callCostBound("stream", openrouter, ctx, {}, NO_ENV), 10_000 + 256 * 2, "the hosted server stops at the model's own limit");
+	// A caller's cap of 0 or less (review of #507): pi's clamp keeps it, 0 then sends no cap and -1 goes on the wire as
+	// max_tokens -1, which Ollama reads as no limit. Neither falls back to model.maxTokens.
+	for (const method of ["streamSimple", "stream"]) {
+		assert.equal(callCostBound(method, fixed, ctx, { maxTokens: 0 }, NO_ENV), Infinity, `${method} 0`);
+		assert.equal(callCostBound(method, fixed, ctx, { maxTokens: -1 }, NO_ENV), Infinity, `${method} -1`);
+		assert.equal(callCostBound(method, openrouter, ctx, { maxTokens: -1 }, NO_ENV), Infinity, `${method} -1 on a catalog host goes on the wire too`);
+	}
+	assert.equal(callCostBound("streamSimple", openrouter, ctx, { maxTokens: 0 }, NO_ENV), 10_000 + 256 * 2, "0 on a catalog host: no cap, the hosted limit");
+	assert.equal(callCostBound("streamSimple", { ...fixed, api: "anthropic-messages" }, ctx, { maxTokens: -1 }, NO_ENV), 10_000 + 256 * 2, "the other apis are unchanged");
+	// api.openai.com on openai-completions (review of #507): pi sends max_completion_tokens, which OpenAI reads, and its
+	// reasoning models reject max_tokens, so the host is trusted as it is.
+	const openaiCompletions = { ...ollama, provider: "my-openai", baseUrl: "https://api.openai.com/v1" };
+	assert.equal(completionsOwnServer(openaiCompletions), false);
+	assert.equal(callCostBound("streamSimple", openaiCompletions, ctx, {}, NO_ENV), 10_000 + 256 * 2);
 	// Zero-rated stays 0 wherever it runs, and other apis are untouched.
 	assert.equal(callCostBound("streamSimple", { ...ollama, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, ctx, {}, NO_ENV), 0);
 	assert.equal(callCostBound("streamSimple", { ...ollama, api: "anthropic-messages" }, ctx, {}, NO_ENV), 10_000 + 256 * 2);
