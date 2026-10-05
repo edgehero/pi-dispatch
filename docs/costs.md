@@ -53,6 +53,10 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 A run whose container died before reporting tokens contributes no row of its own: it makes its bucket a
 floor and demotes it to `est.` with coverage, so nothing renders as an unclassified dollar.
 
+A run refused before it could spend is an exact `$0`, metered and never a floor. The record says so: no
+tokens, no container exit, and `budgetReserved: false`. It still counts as a run, but not as an unmetered one.
+A record that lacks any of the three keeps the floor, because a run that did start can lack the other two.
+
 A bucket (a trigger, flow, repo or day) whose every run one declared plan covers reads `plan:<id>`, and
 `dispatch_costs` returns its typed value as class `"plan"` with that `planId`. A bucket that mixes plan
 and billed runs, that two plans cover (an id may hold any character, so no separator could name both),
@@ -208,8 +212,10 @@ Some cases worth knowing:
 
 - **A run that called no model** (for example one whose first call the cap refused) settles metered at $0. A
   command job is not one by itself: the extension command it runs may call models like any other job.
-- **A 401 before any answer settles at the floor.** The failed call counts as `costUnanswered`, because a request
-  that got no answer may still have been billed. A bad key therefore costs one per-job cap in each window.
+- **A 401 or 403 before any answer settles at the floor.** This is by design. The failed call counts as
+  `costUnanswered`, because a request that got no answer may still have been billed. The worker cannot tell that
+  apart from a label written inside the container, and such a label must never release money. A bad key therefore
+  costs one per-job cap in each window.
 - **A run the worker stopped** (timeout, cancel, shutdown) settles at the floor: its exit line is not believed.
 - **A call whose answer reported no usage settles at the floor.** See [A call that reports no usage](#a-call-that-reports-no-usage).
 - **A retried job** keeps only its last attempt's record. The window counters are the truth for every attempt.
@@ -286,7 +292,8 @@ change what the windows are charged.
   caps from the settings overlay and the deployment's `.env`, so a cap set only in the worker's service unit
   shows no deployment row.
 - **`dispatch_costs`** returns the same windows under `dollars.windows`, and each run's `dollars` under
-  `dollars.runs`. Amounts are integer micro-dollars (1 USD is 1000000).
+  `dollars.runs`. Amounts are integer micro-dollars (1 USD is 1000000). `dollars.windows` lists the operator's
+  caps only. With no dollar cap set it is empty, even while a budget split governs the jobs.
 - **`dispatch_limits`** gives each scoped-limits row its caps in words and, for a dollar row, each window's cap
   and counter.
 

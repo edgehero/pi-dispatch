@@ -108,12 +108,48 @@ function collector({ fs = fakeFs(), allocation = fakeAllocation(), live = true, 
 
 const refusedAs = (reason) => ({ outcome: "refused", reason, planId: null, clamped: false });
 
-test("no priorities.json (or no outbox, or a forge job) collects nothing: plan null, no row, no apply (#505)", async () => {
-	for (const [job, prepared] of [[JOB, PREPARED], [{ id: "g", data: { kind: "github" } }, PREPARED], [JOB, null]]) {
-		const { collect, allocation, logs } = collector({ fs: fakeFs({ absent: true }) });
-		assert.equal(await collect({ job, prepared, portfolio: true }), null);
-		assert.equal(allocation.applied.length + allocation.refusals.length, 0);
-		assert.equal(logs.length, 0);
+test("no priorities.json (or no outbox, or a forge job) collects nothing for a job that is no confirmed portfolio job: plan null, no row, no apply (#505, #507)", async () => {
+	const cases = [
+		["a forge job", { id: "g", data: { kind: "github" } }, PREPARED, true],
+		["no job dir", JOB, null, true],
+		["the pickup said no", JOB, PREPARED, false],
+		["a manual run", { id: "m", data: { kind: "local", folder: "/srv/pm" } }, PREPARED, false],
+		["a chained child", { id: "c", data: { ...DATA, parentJobId: "p", chainDepth: 1 } }, PREPARED, true],
+		["an unflagged cron job", { id: "u", data: { ...DATA, portfolio: undefined } }, PREPARED, true],
+		["prepare wrote no snapshot (the flag went away before prepare)", JOB, { ...PREPARED, portfolio: undefined }, true],
+	];
+	for (const [what, job, prepared, portfolio] of cases) {
+		for (const fs of [fakeFs({ absent: true }), Object.assign(fakeFs({ absent: true }), { lstatSync: () => { throw Object.assign(new Error("not a dir"), { code: "ENOTDIR" }); } })]) {
+			const { collect, allocation, logs } = collector({ fs });
+			assert.equal(await collect({ job, prepared, portfolio }), null, what);
+			assert.equal(allocation.applied.length + allocation.refusals.length, 0, what);
+			assert.equal(logs.length, 0, what);
+		}
+	}
+	// The flag removed from the live file while the job ran: it is no longer asked for a plan.
+	for (const live of [false, new Error("unreadable")]) {
+		const { collect, allocation, logs } = collector({ fs: fakeFs({ absent: true }), live });
+		assert.equal(await collect({ job: JOB, prepared: PREPARED, portfolio: true }), null);
+		assert.equal(allocation.refusals.length + logs.length, 0);
+	}
+});
+
+test("plan-absent: a confirmed portfolio job that wrote no plan is refused and recorded, a log line and an audit row (#507)", async () => {
+	for (const code of ["ENOENT", "ENOTDIR"]) {
+		const fs = fakeFs({ absent: true });
+		fs.lstatSync = (p) => {
+			fs.calls.push(["lstat", p]);
+			throw Object.assign(new Error("nope"), { code });
+		};
+		const { collect, allocation, logs, flagCalls } = collector({ fs });
+		assert.deepEqual(await collect({ job: JOB, prepared: PREPARED, portfolio: true }), refusedAs("plan-absent"), code);
+		assert.equal(allocation.applied.length, 0);
+		assert.equal(allocation.refusals.length, 1, `${code}: one audit and alloc:log row`);
+		assert.equal(allocation.refusals[0].reason, "plan-absent");
+		assert.deepEqual(allocation.refusals[0].writer, { kind: "portfolio-job", jobId: JOB.id, triggerId: "pm-weekly" });
+		assert.deepEqual(logs, [{ event: "plan_collected", jobId: JOB.id, outcome: "refused", reason: "plan-absent" }]);
+		assert.deepEqual(flagCalls, [DATA], "only after the live file agreed");
+		assert.ok(!fs.calls.some((c) => c[0] === "open"));
 	}
 });
 
@@ -435,6 +471,24 @@ test("a collector refusal is a file row and an alloc:log row with the enum reaso
 	const logged = (redis.lists.get(ALLOC_LOG_KEY) ?? []).map((t) => JSON.parse(t));
 	assert.deepEqual(logged, [row]);
 	assert.ok(!JSON.stringify(rows).includes("Fix the"));
+});
+
+test("plan-absent reaches alloc:log as the trigger's last attempt; 500 non-portfolio jobs writing nothing leave it alone (#507)", async () => {
+	const clock = { now: NOW };
+	const { redis, rows, allocation, collect } = realState(clock);
+	assert.deepEqual(await collect({ job: JOB, prepared: PREPARED, portfolio: true }), refusedAs("plan-absent"));
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0].reason, "plan-absent");
+	assert.equal(rows[0].writer, "portfolio-job");
+	const last = await allocation.lastAttempt({ kind: "portfolio-job", triggerId: "pm-weekly" });
+	assert.equal(last.outcome, "refused");
+	assert.equal(last.reason, "plan-absent");
+	const before = [...redis.lists.get(ALLOC_LOG_KEY)];
+	for (let i = 0; i < 500; i++) {
+		assert.equal(await collect({ job: { id: `manual:x:${i}`, data: { kind: "local", folder: "/srv/other" } }, prepared: PREPARED, portfolio: false }), null);
+	}
+	assert.deepEqual(redis.lists.get(ALLOC_LOG_KEY), before);
+	assert.equal(rows.length, 1);
 });
 
 test("500 non-portfolio jobs leaving priorities.json leave alloc:log and the audit file untouched (#505 review)", async () => {

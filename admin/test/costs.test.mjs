@@ -285,6 +285,31 @@ test("floor propagation: unpriced calls, the fallback meter, and a pre-#25 recor
   assert.deepEqual(pre.provenance.total, { usd: 0, class: "estimated", floor: true, coverage: 0 }, "tokens:null spent something and measured nothing");
 });
 
+test("a refusal before any spend is an exact $0: metered, never a floor, never unmetered (#507)", () => {
+  const refused = (over = {}) => rec({ jobId: "r-1", outcome: "policy", reason: "portfolio-snapshot-oversize", exitCode: null, turns: null, tokens: null, budgetReserved: false, ...over });
+  const alone = fold([refused()]);
+  assert.deepEqual(alone.provenance.total, { usd: 0, class: "metered", floor: false });
+  assert.equal(alone.provenance.runsTotal, 1);
+  assert.equal(alone.provenance.runsUnmetered, 0);
+  assert.equal(alone.provenance.runsUnledgered, 0);
+  assert.deepEqual(alone.daily.find((d) => d.day === "2026-07-14").cost, { usd: 0, class: "metered", floor: false });
+  const beside = fold([ledgeredMetered, refused(), refused({ jobId: "r-2", outcome: "failed", reason: "container-never-started" })]);
+  assert.deepEqual(beside.provenance.total, { usd: 0.5, class: "metered", floor: false }, "it leaves a metered bucket metered and exact");
+  // Each of the three is needed: without any one of them the record may be a run that spent.
+  const floors = [
+    ["a pre-meter record of a run that started (no budgetReserved field)", (() => { const r = refused(); delete r.budgetReserved; return r; })()],
+    ["budgetReserved null", refused({ budgetReserved: null })],
+    ["budgetReserved true: the slot is held, so a container may have run", refused({ budgetReserved: true })],
+    ["a container exit with no exit line", refused({ exitCode: 1 })],
+    ["the pre-#25 shape: a completed run that recorded nothing", preTokens],
+  ];
+  for (const [what, r] of floors) {
+    const f = fold([r]);
+    assert.equal(f.provenance.total.floor, true, what);
+    assert.equal(f.provenance.runsUnmetered, 1, what);
+  }
+});
+
 test("floor: an unmetered pi child, and the cost guard's short-count counters, floor the run; boundExceeded and absent keys do not (issue #500 part F)", () => {
   const run = (extra) => rec({ jobId: "c-1", tokens: { ...tok(0.5), ...extra }, usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]) });
   const floorOf = (extra) => fold([run(extra)]).provenance.total.floor;

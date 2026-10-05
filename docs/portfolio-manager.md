@@ -85,7 +85,9 @@ moves 25/31.25 of the way, to shop $25.00, platform $60.00 and ops $15.00.
   refused (`plan-parse-error`, `plan-invalid`) and the job still completes. In a test, a 3B local model ran
   only the one command fixture flow. A 7B model (qwen2.5:7b) ran this flow: its plan followed
   `priorities.md`, applied, and raised a project's weight from 1 to 3 once that project was marked "on fire".
-  It did not on every run: some runs wrote no plan, and one wrote `"basis": "null"`, which was refused.
+  It did not on every run: some runs wrote no plan, and one wrote `"basis": "null"`, which was refused. A run
+  that writes no plan is recorded as `plan-absent`, and the next report opens with
+  `Last plan: refused (plan-absent)`.
   Give a local model a context of 16k tokens or more: Ollama often defaults to 4096, too small for this flow.
 - It does **not** set `"github": true`. That flag hands the job the deployment's GitHub credential: under the
   default `GITHUB_AUTH_SOURCE=gh` that is your whole gh login, and a job that reads issue text must not hold a
@@ -154,6 +156,9 @@ that someone else wrote must never reach it. A reason your last plan gave is age
 
 - **That its plan applied.** The host judges it after the job ends. The report says "requested", and the next
   run learns the outcome from `lastAttempt`.
+- **That `lastAttempt` shows a revert.** It holds only this trigger's own plans. A revert in the panel shows in the
+  snapshot's `plan`: its `writer` is then `operator-revert`, and the report's "In force" line names it. A revert to
+  the neutral split leaves `plan` null, and the line says so.
 - **That the numbers are exact to the cent mid run.** Spend counters include what running jobs still hold, and
   other jobs settle while the manager runs.
 - **That run counts cover the whole fleet.** They do only with a run mirror (`PI_WORKER_NAME` set on every

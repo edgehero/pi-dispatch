@@ -1221,7 +1221,10 @@ refactor apart.
     not a plain token counts under `other`.
   - `plan` is null while the neutral split applies; then a plan's `basis` is null, else it is `plan.id`.
     `planAllowedAfter` is the last writer's plan plus `minIntervalHours`, null when none applied. `lastAttempt` is the
-    newest `alloc:log` row a `portfolio-job` writer wrote for this trigger, null when there is none.
+    newest `alloc:log` row a `portfolio-job` writer wrote for this trigger, null when there is none. A run that wrote
+    no plan shows as `outcome: "refused"`, `reason: "plan-absent"` (issue #507). An operator revert is not a
+    `portfolio-job` row, so it never shows here: it reaches the next run through `plan.writer`, `operator-revert`
+    (or `plan: null` after a revert to the neutral split).
   - **Money comes from the fleet-wide counters**, the `budget:usd:s:<hash16>` keys of the envelope's window that every
     host reserves and settles in, so it is complete on every host. A member's key is `memberDollarKeyPrefix`, the one
     enforcement uses: the scoped-limits row its jobs match (a bare `acme/web` row for the member `github:acme/web`),
@@ -4597,7 +4600,7 @@ validator rather than a second copy of it.
     "why":     "<fixed token: the refusal's detail, e.g. overlay-link under model-unknown>" | null,
     "project": "<project id from projects.json, ^[a-z0-9][a-z0-9-]{0,31}$>" | null,   // issue #499; never the name
     "plan":    { "outcome": "applied" | "duplicate" | "refused",                         // issue #505: a collected plan
-                 "reason": "<fixed enum: plan-not-portfolio|plan-oversize|plan-not-regular-file|plan-unreadable|plan-parse-error|plan-collect-error|plan-invalid|delegation-off|writer-not-allowed|envelope-mismatch|plan-duplicate|plan-stale|plan-too-soon|plan-incomplete|plan-busy>" | null,
+                 "reason": "<fixed enum: plan-absent|plan-not-portfolio|plan-oversize|plan-not-regular-file|plan-unreadable|plan-parse-error|plan-collect-error|plan-invalid|delegation-off|writer-not-allowed|envelope-mismatch|plan-duplicate|plan-stale|plan-too-soon|plan-incomplete|plan-busy>" | null,
                  "planId": "<16 lowercase hex>" | null, "clamped": <bool> } | null }
   ```
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
@@ -4738,7 +4741,9 @@ validator rather than a second copy of it.
   **`portfolio-snapshot-oversize`** (issue #505) is a prepare-stage policy refusal of a portfolio job: the snapshot
   `/job/portfolio.json` (`INT-CONTAINER-JOB-INPUTS`) would be larger than 64 KiB, so the job is refused before the
   reserve rather than run on a cut snapshot. The worker log line `refused_portfolio_snapshot_oversize` names the
-  project count and the bytes. `budgetReserved` is not set (returned from prepare, before the reserve), no `dollars`.
+  project count and the bytes. `budgetReserved: false` (returned from prepare, before the reserve), no `dollars`. Every
+  prepare-stage refusal records `budgetReserved: false` since issue #507 (`sha-gone`, the materialiser caps, the local
+  folder refusals and this one); before it the field was not set, so the cost fold read such a run as unmetered.
   Never retried; it pages nobody (`HOOK_POLICY_REASONS` UNCHANGED, checked: like every pre-reserve refusal it has
   nothing spent to page about). Fewer projects, or fewer members per project, fix it.
 
@@ -5143,9 +5148,13 @@ validator rather than a second copy of it.
   (`DES-JOB-OUTBOX-CHAINING`). Collected by `makeCollectPlan` (`worker/src/outbox-plan.mjs`) on the completed branch
   only, after the chain requests; a policy, abort or infra exit collects nothing. Validation order, host-side,
   fail-closed at the first miss, each refusal a fixed token:
-  1. No file (or no outbox, as for a forge job): nothing happens, and the record's `plan` is `null`. Only ENOENT and
-     ENOTDIR mean "no file"; any other error is judged after rung 2: a job the pickup never confirmed then has no
-     plan (`null`), and a confirmed one meets rung 4.
+  1. No file (or no outbox, as for a forge job). Only ENOENT and ENOTDIR mean "no file", and what it means waits for
+     rung 2's three checks (issue #507). A job all three confirm as a portfolio job is refused as `plan-absent` and
+     recorded like rungs 2 to 5: it exists to write a plan, so writing none is the trigger's own attempt, and the
+     operator and the next manager run (its `lastAttempt`) see "wrote nothing". Every other job that writes no plan
+     has `plan: null` and writes no row, including a confirmed job whose flag went away at prepare or at collection
+     (nobody asks it for a plan any more). Any other lstat error is judged after rung 2: a job the pickup never
+     confirmed then has no plan (`null`), and a confirmed one meets rung 4.
   2. `plan-not-portfolio`: the pickup did not confirm the job as a portfolio job (the flag on its data, a cron
      `trigger`, no `parentJobId` or `chainDepth`, and the live triggers file flagging the same entry), or its data no
      longer has that shape, or prepare wrote no snapshot (`prepared.portfolio`), or the LIVE triggers file no longer
@@ -5161,7 +5170,7 @@ validator rather than a second copy of it.
   5. `plan-parse-error`: not JSON, or a root that is not an object.
   6. `applyPlan` (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`) with the writer `{ kind: "portfolio-job", jobId,
      triggerId }`: `plan-invalid` naming one field, then `delegation-off` through `plan-busy`.
-  Rungs 2 to 5 are recorded like the apply ladder's own refusals, one audit-file row and one `alloc:log` row with the
+  Rungs 1 (`plan-absent`) to 5 are recorded like the apply ladder's own refusals, one audit-file row and one `alloc:log` row with the
   token and nothing of the body, so none is silent and the next snapshot's `lastAttempt` can name it, with one
   exception: a job the pickup never confirmed (a manual run, a chained child, an unflagged cron job) is refused in its
   run record and its log line only, never in the audit file or `alloc:log`, which holds 500 rows and is the panel's
@@ -5171,8 +5180,9 @@ validator rather than a second copy of it.
   compare-and-set was sent), so the record carries its `planId` when it could be computed; see `alloc:plan` and the
   audit file. Its log line is
   `plan_collected { jobId, outcome, reason }`. The runner also pre-checks the file at exit with a vendored copy of
-  `parsePlan`'s structural half and logs `plan_precheck` with enum tokens; that check decides nothing and can change
-  neither the exit code nor the exit line.
+  `parsePlan`'s structural half and logs `plan_precheck` with enum tokens (`plan-absent` when the job has the
+  snapshot and wrote no file, nothing when it has neither); that check decides nothing and can change neither the
+  exit code nor the exit line.
 - **Why**: The `/outbox` file is the container's only signal channel back to the host and is **untrusted**;
   every field is allowlist-validated host-side before an enqueue, the child folder is forced, and depth is
   host-computed, so a queue-blind container can neither forge a shallow chain to evade the cap nor escape
@@ -5197,7 +5207,11 @@ validator rather than a second copy of it.
   carries `plan`; given the same file from a manual, chained or no-longer-flagged job, then it is refused as
   `plan-not-portfolio` and recorded; given a symlink, a FIFO or an oversize file, then it is refused without being
   read; given a policy or infra exit, then nothing is collected; given any fault, then the job's outcome stays
-  `completed`.
+  `completed`. Given a completed job that the pickup, prepare and the live triggers file all confirm as a portfolio
+  job and that wrote no `priorities.json` (issue #507), then its record's `plan` is `{ outcome: "refused", reason:
+  "plan-absent" }`, a `plan_collected` line is logged and one audit-file row and one `alloc:log` row (writer
+  `portfolio-job`) are written; given any other job that wrote no file, then `plan` is `null` and nothing is written
+  to the audit file or `alloc:log`.
 
 ## INT-SESSION-STORE-CONTRACT
 
@@ -6271,6 +6285,9 @@ project left out stays `plan-incomplete`.
   depth, `projects` sorted by id, `repos` by ref, a written `validUntil` in its `toISOString` spelling, an optional
   field left out kept out). Two plans that differ only in order or in how they spell one instant have one id, and a
   re-read plan with no `validUntil` keeps its id, so collecting one file twice is a `plan-duplicate`.
+- **No plan at all** (issue #507): this contract judges text, so a missing file is never a `parsePlan` refusal. A
+  confirmed portfolio job that writes no `/outbox/priorities.json` is refused by the collector as `plan-absent`
+  (`INT-OUTBOX-CONTRACT`, rung 1), with no `planId`, `field` or `rule`, and the applied plan stays as it was.
 
 ## INT-MODEL-ENDPOINTS-FILE-CONTRACT
 
@@ -7378,3 +7395,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-04 | Issue #505, part B. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/portfolio.json`, a confirmed portfolio job's snapshot, `0444` beside `event.json` on the existing `/job` mount, built at prepare only when the pickup decided portfolio AND the live triggers file still flags the entry; its shape, its content rule (ids, digests, integers, ISO instants, enum tokens, project ids and member labels, a label with a control, format or bidi character replaced by its ref, never issue text, a title, a plan reason or a path), money from the fleet-wide counters of the envelope's window (a member's key the one enforcement uses, `memberDollarKeyPrefix`, so a bare row's key; `spentMicros` is spent plus held, the counter the next job is admitted against; the issue's sketch also named a `reservedMicros`, which the counters cannot give), `runs7d` from the local history merged with the run mirror and `runsComplete` false without one, InfraRetry on a Valkey fault, and the portfolio persona it composes. **`INT-OUTBOX-CONTRACT` AMENDED**: a second file, `/outbox/priorities.json`, with its own ladder (no file, `plan-not-portfolio` from the pickup decision, prepare and the live file together, recorded only in the run record and the log line for a job the pickup never confirmed, `plan-oversize` and `plan-not-regular-file` by `lstat` and again on the `O_NOFOLLOW` and `O_NONBLOCK` descriptor's `fstat`, `plan-unreadable`, `plan-parse-error`, then `applyPlan` with the `portfolio-job` writer); every refusal recorded, completed-only, never throws (`plan-collect-error`, outcome unknown, the plan id carried), and the runner's log-only pre-check. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the tail field `plan` (`outcome`, `reason`, `planId`, `clamped`) after `project`, rebuilt and enum-checked, and the reason `portfolio-snapshot-oversize` (prepare-stage policy, before the reserve, `HOOK_POLICY_REASONS` UNCHANGED, checked: nothing is spent to page about). **`INT-PRIORITIES-PLAN-CONTRACT` AMENDED**, one sentence: the runner's pre-check passes the snapshot's `maxPlanDays` as the caller's. `INT-TRIGGERS-FILE-CONTRACT`, `INT-ENVELOPE-FILE-CONTRACT` and `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked (the pre-check changes neither the exit code nor the exit line). |
 | 2026-10-04 | Found this round (no issue), the lost-lock fix. No contract changed. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the worker now reads a job's own record back (`makeReadRecord`, by the writer's `<sanitizedJobId>.json` name; a record whose id differs from the job's is refused as `id-mismatch`) and, on a declared fleet, the mirror's copy by the same sanitized id; the shape, the name, the last-write-wins rule and the PII-free property are untouched, and a read never throws. **`INT-ON-FAILURE-HOOK-CONTRACT` UNCHANGED, checked**: a lost-lock job pages with the argv the completed listener would have used for its record (`policy` and the reason), or not at all. |
 | 2026-10-04 | Issue #504, part C. **`INT-ENVELOPE-FILE-CONTRACT` AMENDED**: the producer names the admin's envelope write (`dispatch_envelope_set`: `parseEnvelope`, the expected digest stored before the file, put back on a failed write), the admin's reads, the writers' cross-check (`envelopeRefusal`) and the guard on pi's file tools; the rollback of the expected digest is a compare-and-set; the deployment pointer may carry the key and the wizard never writes it. **`INT-PRIORITIES-PLAN-CONTRACT` AMENDED**: the session's writers fill `basis` and add `_other` at its current weight when it is not named. **`INT-DEPLOYMENT-POINTER-CONTRACT` AMENDED**: the allowlist has nine keys with `PI_ENVELOPE_FILE`, allowlisted and never emitted by the wizard. **`INT-HOST-REGISTRY-CONTRACT`** and **`INT-RUN-HISTORY-FILE-CONTRACT`** UNCHANGED, checked: no field or reason is added. **Code evidence**: admin/src/read-model.mjs -> readEnvelope, planEnvelopeWrite, writeEnvelope, envelopeRefusal, readAllocations, applyPriorities, revertAllocation; admin/src/write-guard.mjs; admin/src/deployment-pointer.mjs -> POINTER_ENV_ALLOWLIST. |
+| 2026-10-05 | Issue #507, found by its end-to-end test. **`INT-OUTBOX-CONTRACT` AMENDED**, rung 1 of the plan collector: "no file" waits for rung 2. A job the pickup, prepare and the live triggers file all confirm as a portfolio job and that wrote no `/outbox/priorities.json` is refused as `plan-absent`, recorded like rungs 2 to 5 (the run record, the `plan_collected` line, one audit-file row and one `alloc:log` row, writer `portfolio-job`); every other job that writes no file keeps `plan: null` and writes no row, including a confirmed job whose flag went away at prepare or at collection. The rung-1 recording sentence, the runner pre-check sentence (`plan-absent` when the job has the snapshot and no file) and the acceptance follow. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `plan.reason` enum gains `plan-absent`, and `portfolio-snapshot-oversize` (with every prepare-stage refusal) now records `budgetReserved: false` instead of leaving it unset. **`INT-PRIORITIES-PLAN-CONTRACT` AMENDED**: a "No plan at all" bullet, since this contract judges text and a missing file is never a `parsePlan` refusal. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `lastAttempt` may say `plan-absent`, and an operator revert never shows there (it reaches the next run as `plan.writer` `operator-revert`, or `plan: null` after a revert to the neutral split). UNCHANGED, checked: `INT-ENVELOPE-FILE-CONTRACT` (no key), `INT-RUNNER-EXIT-CODE-PROTOCOL` (the pre-check still decides nothing). Code evidence: worker/src/outbox-plan.mjs (`PLAN_ABSENT`), worker/src/run-history.mjs (`PLAN_RECORD_REASONS`), worker/src/processor.mjs (the prepare refusal return), image/runner/src/plan-check.mjs; tests worker/test/outbox-plan.test.mjs, worker/test/portfolio-report.test.mjs, worker/test/processor.test.mjs, image/runner/test/plan-check.test.mjs. |

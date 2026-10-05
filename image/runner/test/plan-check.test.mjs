@@ -27,11 +27,19 @@ function run(paths, extra = {}) {
 	return { ret, logs };
 }
 
-test("no plan file: nothing logged, nothing returned (every job that is not a portfolio job) (#505)", () => {
-	const { ret, logs } = run(job({ plan: null }));
+test("no plan file and no snapshot: nothing logged, nothing returned (every job that is not a portfolio job) (#505)", () => {
+	const { ret, logs } = run(job({ plan: null, snapshot: false }));
 	assert.equal(ret, undefined);
 	assert.deepEqual(logs, []);
-	assert.equal(precheckAtExit({ outboxDir: "/nonexistent/outbox", log: () => assert.fail("logged") }), undefined, "no /outbox at all (a forge job)");
+	assert.equal(precheckAtExit({ outboxDir: "/nonexistent/outbox", snapshotPath: "/nonexistent/portfolio.json", log: () => assert.fail("logged") }), undefined, "no /outbox at all (a forge job)");
+});
+
+test("no plan file in a portfolio job (it has the snapshot) logs plan-absent, the host's answer (#507)", () => {
+	const { ret, logs } = run(job({ plan: null }));
+	assert.equal(ret, undefined);
+	assert.deepEqual(logs, [{ event: "plan_precheck", outcome: "refused", reason: "plan-absent" }]);
+	const noOutbox = job({ plan: null });
+	assert.deepEqual(run({ ...noOutbox, outboxDir: join(noOutbox.root, "gone") }).logs, [{ event: "plan_precheck", outcome: "refused", reason: "plan-absent" }], "no outbox at all");
 });
 
 test("a well-formed plan logs ok; a malformed one logs plan-invalid with the field and rule, never a byte of the plan (#505)", () => {

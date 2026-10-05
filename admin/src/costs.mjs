@@ -206,11 +206,26 @@ function floorCounted(tokens) {
 }
 
 /**
+ * Whether a record is a refusal before any spend (issue #507): no tokens, no container exit, and the worker's own word
+ * that no budget slot is held (`budgetReserved: false`). Every pre-spend refusal writes exactly that, and a run that
+ * started a container has an exit code or holds its slot. All three, because each alone is also true of a run that
+ * spent: a pre-meter record (before issue #25) has no tokens, and a container killed before its exit line may have
+ * no exit code. A record that does not SAY `false` (null, or absent on an old record) keeps the floor below.
+ */
+function refusedBeforeSpend(record) {
+  return (record.tokens === null || record.tokens === undefined) && (record.exitCode === null || record.exitCode === undefined) && record.budgetReserved === false;
+}
+
+/**
  * One run's contribution to every aggregate: its classified rows, its metered dollars, the set of
  * classes it carries, and whether its number is a floor.
  */
 function runContribution(record, subscriptions, pricing) {
   const tokens = record.tokens ?? null;
+  // A refusal before any spend (issue #507): an exact, measured $0, class "metered" and never a floor. Before this it
+  // fell to the branch below and put a floor on every bucket it joined, so a lab of refusals read "≥$0.00" and counted
+  // as unmetered runs (REQ-COST-ANALYTICS (d)).
+  if (refusedBeforeSpend(record)) return { rows: [], usd: 0, classes: ["metered"], floor: false };
   // Pre-#25: the run spent real money and recorded nothing. $0 of class "unknown", and a FLOOR -- any
   // total containing it understates by construction.
   if (!tokens) return { rows: [], usd: 0, classes: ["unknown"], floor: true };
@@ -842,6 +857,9 @@ function buildProvenance(runs, piAiPin) {
   let runsLedgerTruncated = 0;
   let ratesDrifted = 0;
   for (const { record } of runs) {
+    // A refusal before any spend (issue #507) is neither unmetered nor unledgered: it has nothing to meter, and its $0
+    // is exact. It still counts in `runsTotal`, so the insights page's "fully ledgered" reads it as fully accounted.
+    if (refusedBeforeSpend(record)) continue;
     if (!record.tokens) runsUnmetered += 1;
     // An empty ledger degrades exactly like an absent one -- the flat totals are all the reader has.
     else if (!(record.usage && Array.isArray(record.usage.models) && record.usage.models.length > 0)) runsUnledgered += 1;

@@ -610,7 +610,8 @@ export function makeAllocationState({ redis, host = "", audit, log = () => {}, l
 
 	/**
 	 * A plan refused BEFORE `applyPlan` could judge it (issue #505): the job-side collector's own rungs
-	 * (`plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`, `plan-parse-error`). One row in
+	 * (`plan-absent`, `plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`,
+	 * `plan-parse-error`). `plan-absent` (issue #507) is a confirmed portfolio job that wrote no plan at all. One row in
 	 * the file and one in `alloc:log`, like every refusal `applyPlan` writes, so none of them is silent. The reason is a
 	 * fixed token and the plan body is never read into it: a refused file may not even be a plan. Throws like `record`
 	 * on an infrastructure fault; the collector catches it.

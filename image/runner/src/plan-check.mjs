@@ -167,23 +167,29 @@ function readPlan(fs, path) {
 
 /**
  * The pre-check, called by run-job.mjs right before the exit line and its result DISCARDED. Returns undefined, always,
- * and never throws. Logs nothing when there is no plan file; otherwise one `plan_precheck` line.
+ * and never throws. Logs nothing when there is neither a plan file nor a snapshot (no portfolio job); otherwise one
+ * `plan_precheck` line. A portfolio job (it has the snapshot) that wrote no plan file logs `plan-absent`, the host's
+ * answer to it (issue #507), so the job's own log says it wrote nothing.
  */
 export function precheckAtExit({ outboxDir = OUTBOX_DIR, snapshotPath = SNAPSHOT_PATH, fs = nodeFs, log = () => {}, now = () => Date.now() } = {}) {
 	try {
 		const path = join(outboxDir, PLAN_FILE);
-		try {
-			fs.lstatSync(path);
-		} catch (error) {
-			if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return undefined;
-			log("plan_precheck", { outcome: "refused", reason: "plan-unreadable" });
-			return undefined;
-		}
-		// No snapshot: this is no portfolio job, and the host will refuse the file as such.
+		// The snapshot is read first: whether "no file" is worth a line depends on it.
 		let snapshot = false;
 		try {
 			snapshot = fs.lstatSync(snapshotPath).isFile();
 		} catch {}
+		try {
+			fs.lstatSync(path);
+		} catch (error) {
+			if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+				if (snapshot) log("plan_precheck", { outcome: "refused", reason: "plan-absent" });
+				return undefined;
+			}
+			log("plan_precheck", { outcome: "refused", reason: "plan-unreadable" });
+			return undefined;
+		}
+		// No snapshot: this is no portfolio job, and the host will refuse the file as such.
 		if (!snapshot) {
 			log("plan_precheck", { outcome: "refused", reason: "plan-not-portfolio" });
 			return undefined;
