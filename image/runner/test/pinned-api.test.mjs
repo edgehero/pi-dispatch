@@ -1638,6 +1638,8 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	// ...which the azure-openai-responses api calls for any provider, and the `azure` provider calls for EVERY api it
 	// serves, rewriting payload.model in its own onPayload wrapper (so the guard's payload check never sees it). That
 	// is why the model guard keys the deployment check on the api OR the provider. Exactly these two callers.
+	// The map's grammar, which the model guard's parseDeploymentNameMap copies to accept the operator's start-time map.
+	assert.match(nestedPiAi("api", "azure-openai-config.js"), /function parseDeploymentNameMap\(value\) \{\s*const map = new Map\(\);\s*if \(!value\)\s*return map;\s*for \(const entry of value\.split\(","\)\) \{\s*const trimmed = entry\.trim\(\);\s*if \(!trimmed\)\s*continue;\s*const \[modelId, deploymentName\] = trimmed\.split\("=", 2\);\s*if \(!modelId \|\| !deploymentName\)\s*continue;\s*map\.set\(modelId\.trim\(\), deploymentName\.trim\(\)\);\s*\}\s*return map;\s*\}/, "pi's deployment-map grammar moved: the model guard's parseDeploymentNameMap must follow it");
 	const callers = [...modules.map((name) => `api/${name}`), ...readdirSync(join(apiDir, "..", "providers")).filter((name) => name.endsWith(".js")).map((name) => `providers/${name}`)].filter((file) => file !== "api/azure-openai-config.js" && /\bresolveDeploymentName\(/.test(nestedPiAi(...file.split("/")))).sort();
 	assert.deepEqual(callers, ["api/azure-openai-responses.js", "providers/azure.js"]);
 	const azureProvider = nestedPiAi("providers", "azure.js");

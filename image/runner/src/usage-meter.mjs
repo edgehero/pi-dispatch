@@ -2540,8 +2540,30 @@ function fallbackOf(model, message) {
  * line says which one answered. Single-slot, like the cost guard's: admit, prepare and the dispatch after them are
  * synchronous and adjacent in both wrappers.
  */
-export function createModelGuard({ allowedModels, log = () => {} }) {
+/**
+ * pi's parseDeploymentNameMap (api/azure-openai-config.js, pinned by needle): `id=deployment` pairs, comma separated,
+ * each side trimmed, an entry missing either side skipped.
+ */
+export function parseDeploymentNameMap(value) {
+	const map = new Map();
+	if (!value) return map;
+	for (const entry of String(value).split(",")) {
+		const trimmed = entry.trim();
+		if (!trimmed) continue;
+		const [modelId, deploymentName] = trimmed.split("=", 2);
+		if (!modelId || !deploymentName) continue;
+		map.set(modelId.trim(), deploymentName.trim());
+	}
+	return map;
+}
+
+export function createModelGuard({ allowedModels, log = () => {}, env = process.env }) {
 	if (!Array.isArray(allowedModels) || allowedModels.length === 0) throw new Error("invalid PI_ALLOWED_MODELS: want a non-empty list");
+	// The operator's own deployment map, read ONCE, now (issue #587's review): the environment the worker gave the job
+	// (PI_FORWARD_ENV, which env-allowlist.mjs tells an Azure operator to use for it). A map that arrives later (a stored
+	// credential's env, an edit of process.env) is not this one, and the payload check refuses what it picks.
+	// env-internal AZURE_OPENAI_DEPLOYMENT_NAME_MAP: pi-ai's own variable, reserved from run.secrets (provider-steering.mjs).
+	const startDeployments = parseDeploymentNameMap(env?.[AZURE_DEPLOYMENT_MAP]);
 	const allowed = new Set(allowedModels.map((entry) => pairKey(entry.provider, entry.model)));
 	const state = { refused: 0 };
 	let pending = null;
@@ -2595,7 +2617,7 @@ export function createModelGuard({ allowedModels, log = () => {} }) {
 			} catch {
 				before = null;
 			}
-			if (deploymentChecked && (before === null || before.model !== model.id)) {
+			if (deploymentChecked && (before === null || before.model !== (startDeployments.get(model.id) ?? model.id))) {
 				refuse(method, "deployment");
 				stop(MODEL_NOT_ALLOWED);
 				throw new Error(STOP_MESSAGES[MODEL_NOT_ALLOWED]);
@@ -2661,7 +2683,7 @@ export function createModelGuard({ allowedModels, log = () => {} }) {
  * the cap's counter of displaced compat entries.
  */
 export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null }) {
-	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log });
+	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env });
 	// `external` (issue #500) reaches the cost guard only: it is spend, which only a cap judges.
 	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external });
 	const guards = [model, cost].filter((guard) => guard !== null);

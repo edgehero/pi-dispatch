@@ -758,6 +758,33 @@ test("on azure, a payload whose model is not the requested id before any hook ra
 	}
 });
 
+test("on azure, the operator's own deployment map, as the process held it at start, is accepted; any other wire model is not (issue #587)", async () => {
+	// An operator who forwards AZURE_OPENAI_DEPLOYMENT_NAME_MAP (PI_FORWARD_ENV) names the deployment of a listed model.
+	// The guard reads that map ONCE, when it is created, and accepts exactly its answer for the requested id. A map
+	// arriving later (a stored credential's env, a process.env edit) is refused as before.
+	const list = [{ provider: "azure", model: "gpt-4o" }];
+	const model = { ...LISTED, provider: "azure", id: "gpt-4o", api: "openai-completions", baseUrl: "" };
+	const run = async ({ env, wire, after = () => {} }) => {
+		const { FakeRuntime, sent } = payloadRuntimeClass({ wireModel: () => wire });
+		const meter = createUsageMeter({ allowedModels: list });
+		const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ allowedModels: list, env }) });
+		after(env);
+		try {
+			await new FakeRuntime().streamSimple(model, {}, {}).result();
+			return [sent.length, meter.state.stopReason];
+		} finally {
+			layer.restore();
+		}
+	};
+	const map = (value) => ({ AZURE_OPENAI_DEPLOYMENT_NAME_MAP: value });
+	assert.deepEqual(await run({ env: map("gpt-4o=prod-gpt4o"), wire: "prod-gpt4o" }), [1, null], "the operator's deployment of a listed model");
+	assert.deepEqual(await run({ env: map(" other=x , gpt-4o = prod-gpt4o "), wire: "prod-gpt4o" }), [1, null], "parsed as pi parses it");
+	assert.deepEqual(await run({ env: {}, wire: "gpt-4o" }), [1, null], "no map: the id itself");
+	assert.deepEqual(await run({ env: map("gpt-4o=prod-gpt4o"), wire: "gpt-4o" }), [0, MODEL_NOT_ALLOWED], "with a map at start, the id itself is not what pi sends");
+	assert.deepEqual(await run({ env: {}, wire: "prod-gpt4o" }), [0, MODEL_NOT_ALLOWED], "a deployment from anywhere else");
+	assert.deepEqual(await run({ env: map("gpt-4o=prod-gpt4o"), wire: "gpt-5-pro", after: (env) => (env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "gpt-4o=gpt-5-pro") }), [0, MODEL_NOT_ALLOWED], "an edit after start is not read");
+});
+
 test("a payload whose fallbacks name a model off the list is refused before any hook ran, the backstop (issue #587)", async () => {
 	for (const [fallbacks, refused] of [[[{ model: "unlisted-1" }], true], [[{ model: "listed-1" }], false], ["not-a-list", true]]) {
 		const { FakeRuntime, sent } = payloadRuntimeClass({ wireModel: (model) => model.id, extra: { fallbacks } });
