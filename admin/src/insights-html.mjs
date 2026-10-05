@@ -447,8 +447,10 @@ const SPLIT_PLAN_ID = /^[0-9a-f]{16}$/;
 const SPLIT_AT = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/;
 const SPLIT_WINDOWS = Object.freeze(["day", "week", "month"]);
 const SPLIT_PROBLEMS = Object.freeze(["newer", "unreadable"]);
-// The four refusals of the split a run record can carry, in the assembler's order (index.ts `SPLIT_REFUSALS`).
-const SPLIT_REFUSALS = Object.freeze(["allocation-cap", "envelope-mismatch", "portfolio-no-envelope", "portfolio-snapshot-oversize"]);
+// The four refusals of the split a run record can carry. The assembler counts by this list (index.ts imports it), and
+// `insights-html.test.mjs` holds it to the worker's constants: this module may not load the worker.
+export const INSIGHTS_SPLIT_REFUSALS = Object.freeze(["allocation-cap", "envelope-mismatch", "portfolio-no-envelope", "portfolio-snapshot-oversize"]);
+const SPLIT_REFUSALS = INSIGHTS_SPLIT_REFUSALS;
 const SPLIT_LOG_ROWS = 20;
 // The entry no project lists (worker/src/priorities.mjs `OTHER`): an envelope id, though not a project id.
 const SPLIT_OTHER = "_other";
@@ -475,10 +477,23 @@ export function microsUsd(m) {
   return `$${whole}.${fraction}`;
 }
 
-/** An instant as `YYYY-MM-DD HH:MM UTC`, or "?" for anything that is not an ISO instant. */
+/**
+ * An instant as `YYYY-MM-DD HH:MM UTC`, or "?" for anything that is not one. The shape alone admitted 2026-99-99T99:99,
+ * so the fields are range-checked too (a month 1 to 12, a day 1 to 31, an hour below 24, a minute below 60).
+ */
 function splitAt(v) {
   const m = typeof v === "string" ? SPLIT_AT.exec(v) : null;
-  return m ? `${m[1]} ${m[2]} UTC` : "?";
+  if (!m) return "?";
+  const [mo, d] = [Number(m[1].slice(5, 7)), Number(m[1].slice(8, 10))];
+  const [h, mi] = [Number(m[2].slice(0, 2)), Number(m[2].slice(3, 5))];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59) return "?";
+  return `${m[1]} ${m[2]} UTC`;
+}
+
+/** A plan id: null when there is none, the 16-hex hash, or "?" for a value that is neither (never read as "no plan"). */
+function splitPlanId(v) {
+  if (v === null || v === undefined) return null;
+  return typeof v === "string" && SPLIT_PLAN_ID.test(v) ? v : "?";
 }
 
 /** A `{ id: micros }` map with ids the envelope can name (a project id or `_other`), sorted; junk entries drop. */
@@ -499,7 +514,8 @@ function splitCountMap(v, keys) {
   for (const k of keys ?? Object.keys(v).sort()) {
     if (splitWord(k) === null) continue;
     const n = v[k];
-    out.set(k, Number.isSafeInteger(n) && n >= 0 ? n : 0);
+    // A count that is not one is "?", never 0: a 0 claims a count nobody made. An absent reason was counted as none.
+    out.set(k, n === undefined ? 0 : Number.isSafeInteger(n) && n >= 0 ? n : null);
   }
   return out;
 }
@@ -527,7 +543,7 @@ function normAllocation(v) {
   const log = [];
   for (const h of Array.isArray(v.log) ? v.log.slice(0, SPLIT_LOG_ROWS) : []) {
     if (h === null || typeof h !== "object") continue;
-    log.push({ at: splitAt(h.at), writer: splitWord(h.writer) ?? "?", outcome: splitWord(h.outcome) ?? "?", reason: splitWord(h.reason), planId: typeof h.planId === "string" && SPLIT_PLAN_ID.test(h.planId) ? h.planId : null });
+    log.push({ at: splitAt(h.at), writer: splitWord(h.writer) ?? "?", outcome: splitWord(h.outcome) ?? "?", reason: splitWord(h.reason), planId: splitPlanId(h.planId) });
   }
   const c = v.counts !== null && v.counts !== undefined && typeof v.counts === "object" ? v.counts : null;
   return {
@@ -537,7 +553,7 @@ function normAllocation(v) {
     delegation: v.delegation === true,
     stateProblem: SPLIT_PROBLEMS.includes(v.stateProblem) ? v.stateProblem : null,
     state: st && {
-      planId: typeof st.planId === "string" && SPLIT_PLAN_ID.test(st.planId) ? st.planId : null,
+      planId: splitPlanId(st.planId),
       writer: splitWord(st.writer) ?? "?",
       appliedAt: splitAt(st.appliedAt),
       validUntil: typeof st.validUntil === "string" ? splitAt(st.validUntil) : null,
@@ -545,6 +561,7 @@ function normAllocation(v) {
       unallocated: microsOr(st.unallocated),
     },
     mismatch: v.mismatch === true,
+    changedOutside: v.changedOutside === true,
     deploymentSpent: microsOr(spend.deployment),
     rows,
     log,
@@ -1099,7 +1116,7 @@ function splitBarsSvg(na, tips, names) {
 function splitCountsLine(label, counts, empty) {
   if (counts === null) return `${label}: not counted (the spend scan could not be read)`;
   if (counts.size === 0) return `${label}: ${empty}`;
-  return `${label}: ${[...counts].map(([k, n]) => `${k} ${fmt(n)}`).join(" · ")}`;
+  return `${label}: ${[...counts].map(([k, n]) => `${k} ${n === null ? "?" : fmt(n)}`).join(" · ")}`;
 }
 
 /**
@@ -1116,6 +1133,8 @@ function splitSectionHtml(na, tips, names, windowLabel) {
   const per = na.window !== null ? ` per ${na.window}` : "";
   rows.push(`<div class="row"><span class="wl">envelope</span><span>${escapeHtml(`${microsUsd(na.totalMicros)}${per} · delegation ${na.delegation ? "on" : "off"}`)}</span></div>`);
   const st = na.state;
+  // The panel's banner, by its rule (render.mjs `changedOutside`, computed by the assembler over the same rows).
+  if (na.changedOutside) rows.push('<div class="row"><span class="state">changed outside the panel: the envelope was edited by hand on a host, which then refuses governed jobs as envelope-mismatch until alloc:envelope:expected names its digest</span></div>');
   if (na.stateProblem === "newer") rows.push('<div class="row"><span class="state">the applied split was written by a newer pi-dispatch: upgrade this console</span></div>');
   else if (na.stateProblem === "unreadable") rows.push('<div class="row"><span class="state">the applied split does not decode; the next pickup replaces it with the neutral split</span></div>');
   if (st) {
@@ -1124,7 +1143,9 @@ function splitSectionHtml(na, tips, names, windowLabel) {
     if (st.validUntil !== null) bits.push(`until ${st.validUntil}`);
     if (st.clamped) bits.push("clamped by the step");
     rows.push(`<div class="row"><span class="wl">plan</span><span>${escapeHtml(bits.join(" · "))}</span></div>`);
-    if (na.mismatch) rows.push('<div class="row"><span class="state">the split was made for another envelope: governed jobs refuse as envelope-mismatch until it is re-based</span></div>');
+    // This console host's envelope, compared with the applied split's: the panel's and `/dispatch priorities`' sentence.
+    // Another host with the matching envelope runs its jobs, so the page claims this host only.
+    if (na.mismatch) rows.push('<div class="row"><span class="state">the split was made for another envelope, not this host\'s: governed jobs on this host refuse as envelope-mismatch</span></div>');
   } else if (na.stateProblem === null) {
     rows.push('<div class="row dim">no split applied yet: the first host to look writes the neutral one</div>');
   }
@@ -1134,11 +1155,12 @@ function splitSectionHtml(na, tips, names, windowLabel) {
   }
   if (st) rows.push(`<div class="row"><span class="wl">headroom</span><span>${escapeHtml(`unallocated ${microsUsd(st.unallocated)} · deployment spent ${microsUsd(na.deploymentSpent)} of ${microsUsd(na.totalMicros)}`)}</span></div>`);
   rows.push(`<div class="dim small">amounts are this ${escapeHtml(na.window ?? "envelope")} window's; the bar is the allocation, the solid bar the spend (held included), the amber tick the floor</div>`);
-  rows.push(`<div class="small">${escapeHtml(splitCountsLine(`refusals in the spend window (${windowLabel})`, na.refusals, "none"))}</div>`);
-  rows.push(`<div class="small">${escapeHtml(splitCountsLine("plans collected in the spend window", na.plans, "none"))}</div>`);
+  // From THIS host's run records, over the spend window; the history below is the fleet's (`alloc:log` is shared).
+  rows.push(`<div class="small">${escapeHtml(splitCountsLine(`refusals in runs on this host, ${windowLabel}`, na.refusals, "none"))}</div>`);
+  rows.push(`<div class="small">${escapeHtml(splitCountsLine(`plans collected in runs on this host, ${windowLabel}`, na.plans, "none"))}</div>`);
   if (na.log.length > 0) {
     const tr = na.log.map((h) => `<tr><td>${escapeHtml(h.at)}</td><td>${escapeHtml(h.writer)}</td><td>${escapeHtml(h.outcome)}</td><td>${escapeHtml(h.reason ?? "")}</td><td class="pid">${escapeHtml(h.planId ?? "")}</td></tr>`);
-    rows.push(`<h3>history, newest first (alloc:log)</h3><table class="alog"><tr><th>at</th><th>writer</th><th>outcome</th><th>reason</th><th>plan</th></tr>${tr.join("")}</table>`);
+    rows.push(`<h3>history, newest first (alloc:log, every host)</h3><table class="alog"><tr><th>at</th><th>writer</th><th>outcome</th><th>reason</th><th>plan</th></tr>${tr.join("")}</table>`);
   } else {
     rows.push('<div class="dim small">no outcomes yet</div>');
   }
@@ -1375,11 +1397,11 @@ h3{font-size:12px;color:${PAGE_THEME.dim};margin:0 0 4px}
 #budget .state{color:${PAGE_THEME.amber};font-weight:600}
 #budget .state.over{color:${PAGE_THEME.danger}}
 #budget .lever{margin-top:8px;color:${PAGE_THEME.dim};font-size:11px}
-#split{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:10px 12px;font-size:12px}
+#split{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:10px 12px;font-size:12px;overflow-x:auto}
 #split .row{display:flex;align-items:center;gap:8px;margin:3px 0}
-#split .wl{color:${PAGE_THEME.dim};min-width:86px}
+#split .wl{color:${PAGE_THEME.dim};min-width:86px;flex-shrink:0}
 #split .state{color:${PAGE_THEME.amber};font-weight:600}
-#split .state.over{color:${PAGE_THEME.danger}}
+#split .state.over{color:${PAGE_THEME.danger};flex-shrink:0}
 #split .small{margin:3px 0}
 #split h3{margin-top:10px}
 #split .lever{margin-top:8px;color:${PAGE_THEME.dim};font-size:11px}

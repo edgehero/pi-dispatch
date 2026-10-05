@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, microsUsd, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
+import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, microsUsd, INSIGHTS_SPLIT_REFUSALS, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { buildGraphModel } from "../src/graph-model.mjs";
@@ -930,8 +930,8 @@ test("the budget split's live shape: the envelope, the plan, the headroom, the c
   assert.ok(out.includes('<div class="row"><span class="wl">envelope</span><span>$100.00 per week · delegation on</span></div>'));
   assert.ok(out.includes('<div class="row"><span class="wl">plan</span><span>plan 3f9a0c1d2e4b5a67 · written by portfolio-job · applied 2026-10-05 06:01 UTC · until 2026-10-19 06:01 UTC · clamped by the step</span></div>'));
   assert.ok(out.includes('<div class="row"><span class="wl">headroom</span><span>unallocated $0.00 · deployment spent $82.50 of $100.00</span></div>'));
-  assert.ok(out.includes('<div class="small">refusals in the spend window (last 30d): allocation-cap 3 · envelope-mismatch 0 · portfolio-no-envelope 0 · portfolio-snapshot-oversize 1</div>'));
-  assert.ok(out.includes('<div class="small">plans collected in the spend window: applied 2 · plan-stale 1</div>'));
+  assert.ok(out.includes('<div class="small">refusals in runs on this host, last 30d: allocation-cap 3 · envelope-mismatch 0 · portfolio-no-envelope 0 · portfolio-snapshot-oversize 1</div>'));
+  assert.ok(out.includes('<div class="small">plans collected in runs on this host, last 30d: applied 2 · plan-stale 1</div>'));
   assert.ok(out.includes('<tr><td>2026-10-05 12:30 UTC</td><td>operator-session</td><td>refused</td><td>plan-too-soon</td><td class="pid">aaaaaaaaaaaaaaaa</td></tr>'));
   assert.ok(out.includes('<tr><td>2026-10-05 06:01 UTC</td><td>portfolio-job</td><td>applied</td><td></td><td class="pid">3f9a0c1d2e4b5a67</td></tr>'));
   assert.ok(out.includes('$77.00 spent of $70.00 · floor $10.00 <tspan fill="'), "the overspent row says over in words");
@@ -950,12 +950,12 @@ test("the budget split's live shape: the envelope, the plan, the headroom, the c
 
 test("the split's counts say not counted when the spend scan was unread, never 0 (#507)", () => {
   const out = splitPage({ ...SPLIT(), counts: null });
-  assert.ok(out.includes('<div class="small">refusals in the spend window (last 30d): not counted (the spend scan could not be read)</div>'));
-  assert.ok(out.includes('<div class="small">plans collected in the spend window: not counted (the spend scan could not be read)</div>'));
+  assert.ok(out.includes('<div class="small">refusals in runs on this host, last 30d: not counted (the spend scan could not be read)</div>'));
+  assert.ok(out.includes('<div class="small">plans collected in runs on this host, last 30d: not counted (the spend scan could not be read)</div>'));
   assert.ok(!out.includes("allocation-cap 0"), "no invented zero");
   const none = splitPage({ ...SPLIT(), counts: { refusals: { "allocation-cap": 0 }, plans: {} } });
-  assert.ok(none.includes("refusals in the spend window (last 30d): allocation-cap 0 · envelope-mismatch 0 · portfolio-no-envelope 0 · portfolio-snapshot-oversize 0</div>"), "a count that was made says 0 for every reason");
-  assert.ok(none.includes("plans collected in the spend window: none</div>"));
+  assert.ok(none.includes("refusals in runs on this host, last 30d: allocation-cap 0 · envelope-mismatch 0 · portfolio-no-envelope 0 · portfolio-snapshot-oversize 0</div>"), "a count that was made says 0 for every reason");
+  assert.ok(none.includes("plans collected in runs on this host, last 30d: none</div>"));
 });
 
 test("the split's other three shapes: unset is one line, a problem its text, unreachable a banner and no number (#507)", () => {
@@ -976,7 +976,7 @@ test("junk in a split row degrades to ? or absence, and hostile text is escaped 
   p.state.writer = "Bad Writer";
   p.floors = { ...p.floors, "<b>": 5, constructor: 1 };
   const out = splitPage(p);
-  assert.ok(out.includes('<tr><td>?</td><td>?</td><td>?</td><td></td><td class="pid"></td></tr>'));
+  assert.ok(out.includes('<tr><td>?</td><td>?</td><td>?</td><td></td><td class="pid">?</td></tr>'));
   assert.ok(out.includes("written by ? ·"));
   assert.ok(!out.includes("&lt;b&gt;</text>"), "an id that no envelope can name is no row");
   assert.ok(out.includes(">constructor</text>"), "an id-shaped key is a row like any other");
@@ -1028,4 +1028,45 @@ test("the page script runs under a DOM stub, and a split bar's tooltip is the co
   assert.equal(nodes.tip.textContent, "shop · allocated $70.00 · spent $77.00 · floor $10.00 · over its allocation");
   assert.equal(nodes.tip.style.display, "block");
   assert.match(nodes.stamp.textContent, /^generated /);
+});
+
+test("the split's refusal list is the worker's four reasons, the one list the assembler counts by (#507)", async () => {
+  // This module may not load the worker, so the words are restated here and held to the worker's own constants.
+  const { PORTFOLIO_NO_ENVELOPE } = await import(new URL("../../worker/src/processor.mjs", import.meta.url).href);
+  const { PORTFOLIO_SNAPSHOT_OVERSIZE } = await import(new URL("../../worker/src/portfolio-snapshot.mjs", import.meta.url).href);
+  const { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } = await import("@edgehero/pi-dispatch/allocation");
+  assert.deepEqual([...INSIGHTS_SPLIT_REFUSALS], [ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON, PORTFOLIO_NO_ENVELOPE, PORTFOLIO_SNAPSHOT_OVERSIZE]);
+  assert.ok(Object.isFrozen(INSIGHTS_SPLIT_REFUSALS));
+  const src = readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
+  assert.match(src, /const SPLIT_REFUSALS: readonly string\[\] = INSIGHTS_SPLIT_REFUSALS;/, "the assembler counts by the page's list, not a copy");
+});
+
+test("the split says what this host sees: its mismatch, an outside edit, a plan id it cannot read, and a count it cannot read (#507)", () => {
+  const mismatch = splitPage({ ...SPLIT(), mismatch: true });
+  assert.ok(mismatch.includes(`<div class="row"><span class="state">the split was made for another envelope, not this host's: governed jobs on this host refuse as envelope-mismatch</span></div>`));
+  const edited = splitPage({ ...SPLIT(), changedOutside: true });
+  assert.ok(edited.includes('<div class="row"><span class="state">changed outside the panel: the envelope was edited by hand on a host, which then refuses governed jobs as envelope-mismatch until alloc:envelope:expected names its digest</span></div>'));
+  assert.ok(!splitPage(SPLIT()).includes("changed outside the panel"), "no notice without the flag");
+  assert.ok(!splitPage({ ...SPLIT(), changedOutside: "yes" }).includes("changed outside the panel"), "a strict boolean");
+  const p = SPLIT();
+  p.state.planId = "not-a-hash";
+  const odd = splitPage(p);
+  assert.ok(odd.includes("<span>plan ? · written by portfolio-job ·"), "an unreadable id is not the neutral split");
+  p.state.planId = null;
+  assert.ok(splitPage(p).includes("<span>neutral split, no plan · written by portfolio-job ·"));
+  const bad = SPLIT();
+  bad.log = [{ at: "2026-99-99T99:99:00.000Z", writer: "default", outcome: "neutral", reason: null, planId: null }, { at: "2026-02-31T23:59:00Z", writer: "default", outcome: "neutral", reason: null, planId: null }];
+  bad.counts = { refusals: { "allocation-cap": -1, "envelope-mismatch": "3" }, plans: { applied: 1.5 } };
+  const junk = splitPage(bad);
+  assert.ok(junk.includes("<tr><td>?</td><td>default</td>"), "an instant out of range is ?");
+  assert.ok(junk.includes("<tr><td>2026-02-31 23:59 UTC</td>"), "the check is a range, not a calendar: the worker writes ISO from a Date");
+  assert.ok(junk.includes("refusals in runs on this host, last 30d: allocation-cap ? · envelope-mismatch ? · portfolio-no-envelope 0 · portfolio-snapshot-oversize 0</div>"));
+  assert.ok(junk.includes("plans collected in runs on this host, last 30d: applied ?</div>"));
+});
+
+test("the split box scrolls sideways on a narrow window, and its labels never wrap (#507)", () => {
+  const out = splitPage(SPLIT());
+  assert.match(out, /#split\{[^}]*overflow-x:auto\}/);
+  assert.match(out, /#split \.wl\{[^}]*flex-shrink:0\}/);
+  assert.match(out, /#split \.state\.over\{[^}]*flex-shrink:0\}/);
 });

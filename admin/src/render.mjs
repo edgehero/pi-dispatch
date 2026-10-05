@@ -491,7 +491,9 @@ export function renderSettingsView(settings) {
  * envelope. Every amount is integer micro-dollars, shown in dollars.
  */
 export function renderAllocations({ envelope = null, digest = null, problem = null, alloc = null, historyRows = 10 } = {}) {
-  const usd = (m) => (Number.isSafeInteger(m) ? `$${formatMicros(m)}` : "-");
+  // `>= 0` as the panel's `usd` has it: `formatMicros` throws on a negative, and a counter another writer set below 0
+  // made this whole view throw instead of showing "-" for the one cell.
+  const usd = (m) => (Number.isSafeInteger(m) && m >= 0 ? `$${formatMicros(m)}` : "-");
   if (!envelope) return `ALLOCATION\n${cell(problem ?? "no envelope")}`;
   const d = envelope.delegation ?? {};
   const rules = d.enabled ? `delegation on (${(d.writers ?? []).join(", ")}; step ${d.maxStepPct}%, interval ${d.minIntervalHours}h, plans up to ${d.maxPlanDays}d)` : "delegation off";
@@ -504,7 +506,10 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
   else if (!s) lines.push("no split applied yet: the first host to look writes the neutral split");
   if (s) {
     const plan = s.planId ? `plan ${cell(s.planId)}` : "neutral (no plan)";
-    lines.push(`${plan} · writer ${cell(s.writer)} · applied ${cell(s.appliedAt)}${s.validUntil ? ` · until ${cell(s.validUntil)}` : ""}${s.clamped ? " · clamped by the step" : ""}`);
+    // The panel's plan line word for word (issue #507), the instant through `allocAt` and the expiry as its date, so it
+    // fits 80 columns with the longest writer; `clamped` gets its own line, where no width can cut it.
+    lines.push(`${plan} · ${cell(s.writer)} · ${allocAt(s.appliedAt)}${s.validUntil ? ` · until ${sliceColumns(cell(s.validUntil), 10)}` : ""}`);
+    if (s.clamped) lines.push("  clamped by the step");
     if (s.envelopeDigest !== digest) lines.push(`made for envelope ${cell(s.envelopeDigest)}, not this host's: governed jobs here refuse as envelope-mismatch`);
   }
   const rows = Object.keys(envelope.floors).map((id) => [
@@ -524,7 +529,7 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
     const hosts = allocHostsShown(history);
     for (const h of history) {
       const why = h.reason ? ` ${cell(h.reason)}${h.field ? ` (${cell(h.field)}: ${cell(h.rule)})` : ""}` : "";
-      lines.push(`  ${allocAt(h.at)}  ${hosts ? `${allocHost(h.host)}  ` : ""}${cell(h.writer)}  ${cell(h.outcome)}${why}${h.planId ? `  ${allocPlanId(h.planId)}` : ""}${h.clamped ? "  clamped" : ""}`);
+      lines.push(`  ${allocAt(h.at)}  ${hosts ? `${allocHost(h.host)}  ` : ""}${cell(h.writer)}  ${h.planId ? `${allocPlanId(h.planId)}  ` : ""}${cell(h.outcome)}${why}${h.clamped ? "  clamped" : ""}`);
     }
   }
   return lines.join("\n");
@@ -532,9 +537,11 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
 
 /**
  * The cells of an `alloc:log` history row, shared by this text and the panel's `b` view (issue #507), so the two cannot
- * disagree about what a row says. A row is the instant, the host when it tells rows apart, the writer, the outcome with
- * its enum reason, and the plan id, and it fits 80 columns: with the full ISO instant and id a refusal ran to 85 here,
- * and the panel clipped the plan id off the end of every refusal row.
+ * disagree about what a row says. A row is the instant, the host when it tells rows apart, the writer, the plan id, and
+ * the outcome with its enum reason, in that order: the reason is the longest cell and the one a reader needs least, so
+ * where a row is wider than its line (the panel clips; an `envelope-changed-externally envelope-mismatch` row is 87
+ * columns on one host) the cut takes the reason's tail, never the plan id. With the full ISO instant and id first, a
+ * refusal ran to 85 columns and the panel clipped the plan id off the end of every refusal row.
  *
  * The instant as `MM-DD HH:MM`, in UTC as written: a split is planned in days and the year is the one on the screen.
  * A value that is not an ISO instant (a row another writer set) is shown as its first 11 columns, never parsed.
@@ -542,6 +549,18 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
 export function allocAt(at) {
   const m = /^\d{4}-(\d{2}-\d{2})T(\d{2}:\d{2})/.exec(String(at ?? ""));
   return m ? `${m[1]} ${m[2]}` : sliceColumns(cell(at), 11);
+}
+
+/**
+ * Whether the envelope was edited outside the admin since the fleet last agreed on one (issue #504 part C's banner rule,
+ * shared since issue #507 so the panel's `b` view and the insights page cannot disagree): an
+ * `envelope-changed-externally` row newer than the newest `rebased` or `applied` row, not only the newest row, so a
+ * refused plan logged after the edit does not hide it. `log` is newest first, as `alloc:log` is read.
+ */
+export function changedOutside(log) {
+  const rows = Array.isArray(log) ? log : [];
+  const agreedAt = rows.findIndex((r) => r?.outcome === "rebased" || r?.outcome === "applied");
+  return (agreedAt === -1 ? rows : rows.slice(0, agreedAt)).some((r) => r?.outcome === "envelope-changed-externally");
 }
 
 /**

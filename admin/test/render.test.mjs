@@ -477,13 +477,30 @@ test("/dispatch priorities: the history row fits 80 columns, names a host only o
   const text = (log) => renderAllocations({ envelope, digest: "d", alloc: { state, log, spend: { deployment: { micros: 76 * M }, projects: {} } } }).split("\n");
   const one = text([refused, applied]);
   assert.ok(one.includes("  unallocated $0.00 · deployment spent $76.00 of $100.00"), one.join("\n"));
-  assert.ok(one.includes("  10-05 12:30  operator-session  refused plan-too-soon  aaaaaaaa"));
-  assert.ok(one.includes("  10-05 12:00  operator-session  applied  3f9a0c1d  clamped"));
+  assert.ok(one.includes("  10-05 12:30  operator-session  aaaaaaaa  refused plan-too-soon"));
+  assert.ok(one.includes("  10-05 12:00  operator-session  3f9a0c1d  applied  clamped"));
   const fleet = text([{ ...refused, host: "build-host-number-7" }, applied]);
-  const row = "  10-05 12:30  build-hos…  operator-session  refused plan-too-soon  aaaaaaaa";
+  const row = "  10-05 12:30  build-hos…  operator-session  aaaaaaaa  refused plan-too-soon";
   assert.ok(fleet.includes(row), fleet.join("\n"));
-  assert.ok(fleet.includes("  10-05 12:00  mini1  operator-session  applied  3f9a0c1d  clamped"));
+  assert.ok(fleet.includes("  10-05 12:00  mini1  operator-session  3f9a0c1d  applied  clamped"));
   assert.ok(row.length <= 80, "the widest common row, on a fleet, fits 80 columns");
   const odd = text([{ ...refused, at: "yesterday, roughly at noon" }]);
-  assert.ok(odd.includes("  yesterday,   operator-session  refused plan-too-soon  aaaaaaaa"), "an instant that is not ISO is cut, never parsed");
+  assert.ok(odd.includes("  yesterday,   operator-session  aaaaaaaa  refused plan-too-soon"), "an instant that is not ISO is cut, never parsed");
+  // The plan line is the panel's, and fits 80 with the longest writer; clamped is a line of its own.
+  const clamped = renderAllocations({ envelope, digest: "d", alloc: { state: { ...state, writer: "operator-revert", validUntil: "2026-10-19T12:00:00.000Z", clamped: true }, log: [], spend: {} } }).split("\n");
+  const plan = "plan 3f9a0c1d2e4b5a67 · operator-revert · 10-05 12:00 · until 2026-10-19";
+  assert.ok(clamped.includes(plan) && clamped[clamped.indexOf(plan) + 1] === "  clamped by the step", clamped.join("\n"));
+  assert.ok(plan.length <= 80);
+  // Where the reason is too long for a line, the plan id still stands before it.
+  const outside = text([{ at: "2026-10-05T13:00:00.000Z", host: "mini1", writer: "envelope-change", outcome: "envelope-changed-externally", reason: "envelope-mismatch", planId: "3f9a0c1d2e4b5a67" }]);
+  assert.ok(outside.includes("  10-05 13:00  envelope-change  3f9a0c1d  envelope-changed-externally envelope-mismatch"));
+});
+
+test("/dispatch priorities shows - for a negative counter instead of throwing (#507)", () => {
+  const M = 1_000_000;
+  const envelope = { window: "week", totalMicros: 100 * M, floors: { shop: 10 * M }, defaultWeights: { shop: 1 }, delegation: { enabled: false } };
+  const state = { planId: null, writer: "default", appliedAt: "2026-10-05T12:00:00.000Z", envelopeDigest: "d", weights: { shop: 1 }, allocations: { shop: 100 * M }, unallocated: 0 };
+  const lines = renderAllocations({ envelope, digest: "d", alloc: { state, log: [], spend: { deployment: { micros: -5 }, projects: { shop: { micros: -1 } } } } }).split("\n");
+  assert.ok(lines.includes("  unallocated $0.00 · deployment spent - of $100.00"), lines.join("\n"));
+  assert.ok(lines.some((l) => /^ {2}shop +floor \$10\.00 +weight 1 +allocation \$100\.00 +spent -$/.test(l)), lines.join("\n"));
 });
