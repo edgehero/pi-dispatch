@@ -653,14 +653,14 @@ test("the compat half prices a legacy call from the job runtime's registry too (
 });
 
 /** A runtime whose provider runs options.onPayload on `{ model }` before it sends, as every pinned api does, and records what it sent. */
-function payloadRuntimeClass() {
+function payloadRuntimeClass({ wireModel = (model) => model.id } = {}) {
 	const sent = [];
 	class FakeRuntime {
 		streamSimple(model, _context, options) {
 			const stream = new FakeStream();
 			(async () => {
 				try {
-					const payload = { model: model.id, messages: [] };
+					const payload = { model: wireModel(model), messages: [] };
 					const next = await options?.onPayload?.(payload, model);
 					sent.push((next ?? payload).model);
 					stream.end(answer());
@@ -676,6 +676,39 @@ function payloadRuntimeClass() {
 	}
 	return { FakeRuntime, sent };
 }
+
+test("on azure, a payload whose model is not the requested id before any hook ran is refused: a deployment chosen outside the call (issue #587)", async () => {
+	// pi resolves the deployment from options.env MERGED with the credential's own env (ModelRuntime.prepareRequest),
+	// after admit, so a deployment map can arrive where admit cannot see it. The provider rewrites payload.model to the
+	// deployment name before the guard's onPayload runs; the guard compares it with model.id there.
+	const list = [{ provider: "azure", model: "gpt-4o" }];
+	for (const api of ["azure-openai-responses", "openai-completions"]) {
+		const { FakeRuntime, sent } = payloadRuntimeClass({ wireModel: () => "gpt-5-pro-deployment" });
+		const meter = createUsageMeter({ allowedModels: list });
+		const logged = [];
+		const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ allowedModels: list, log: (event, fields) => logged.push(fields) }) });
+		try {
+			const result = await new FakeRuntime().streamSimple({ ...LISTED, provider: "azure", id: "gpt-4o", api, baseUrl: "" }, {}, {}).result();
+			assert.equal(result.errorMessage, "pi-dispatch: model not allowed", api);
+			assert.deepEqual([sent, meter.state.stopReason, logged.map((fields) => fields.why)], [[], MODEL_NOT_ALLOWED, ["deployment"]], api);
+		} finally {
+			layer.restore();
+		}
+	}
+	// The api alone (a custom provider on azure-openai-responses) too; and another provider whose wire model differs is not
+	// judged by this rule (bedrock sends modelId, an alias is a provider's business).
+	for (const [model, refused] of [[{ ...LISTED, api: "azure-openai-responses" }, true], [{ ...LISTED }, false]]) {
+		const { FakeRuntime, sent } = payloadRuntimeClass({ wireModel: () => "something-else" });
+		const meter = createUsageMeter({ allowedModels: LIST });
+		const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: makeHardStopStream({ createStream: () => new FakeStream() }), guard: createPolicyGuard({ allowedModels: LIST }) });
+		try {
+			await new FakeRuntime().streamSimple(model, {}, {}).result();
+			assert.deepEqual([sent.length, meter.state.stopReason], refused ? [0, MODEL_NOT_ALLOWED] : [1, null], model.api);
+		} finally {
+			layer.restore();
+		}
+	}
+});
 
 test("a payload hook that changes the model fails the call before it is sent and stops the job; one that does not passes", async () => {
 	const { FakeRuntime, sent } = payloadRuntimeClass();
