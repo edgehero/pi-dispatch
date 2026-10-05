@@ -574,6 +574,8 @@ function normAllocation(v) {
     kind: "live",
     window,
     totalMicros,
+    // This host's envelope file's total, only to say it differs from the split's (issue #507); null when it agrees.
+    fileTotal: Number.isSafeInteger(v.fileTotalMicros) && v.fileTotalMicros !== totalMicros ? microsOr(v.fileTotalMicros) : null,
     delegation: v.delegation === true,
     stateProblem: SPLIT_PROBLEMS.includes(v.stateProblem) ? v.stateProblem : null,
     state: st && {
@@ -1182,7 +1184,9 @@ function splitSectionHtml(na, tips, names, windowLabel) {
     rows.push(`<div class="row"><span class="wl">plan</span><span>${escapeHtml(bits.join(" · "))}</span></div>`);
     // This console host's envelope, compared with the applied split's: the panel's and `/dispatch priorities`' sentence.
     // Another host with the matching envelope runs its jobs, so the page claims this host only.
-    if (na.mismatch) rows.push('<div class="row"><span class="state">the split was made for another envelope, not this host\'s: governed jobs on this host refuse as envelope-mismatch</span></div>');
+    // With another total in this host's file, the line says so: render.mjs `fileTotalText`'s words, held equal by a test.
+    // Fixed words and `microsUsd` digits only, so nothing here needs escaping.
+    if (na.mismatch) rows.push(`<div class="row"><span class="state">the split was made for another envelope, not this host's: governed jobs on this host refuse as envelope-mismatch${na.fileTotal !== null ? `. This host's file says total ${microsUsd(na.fileTotal)}; the totals shown are the split's.` : ""}</span></div>`);
   } else if (na.stateProblem === null) {
     rows.push('<div class="row dim">no split applied yet: the first host to look writes the neutral one</div>');
   }

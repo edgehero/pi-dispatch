@@ -502,10 +502,12 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
   if (!envelope) return `ALLOCATION\n${cell(problem ?? "no envelope")}`;
   const d = envelope.delegation ?? {};
   const rules = d.enabled ? `delegation on (${(d.writers ?? []).join(", ")}; step ${d.maxStepPct}%, interval ${d.minIntervalHours}h, plans up to ${d.maxPlanDays}d)` : "delegation off";
-  const lines = [`ALLOCATION · ${envelope.window} · total ${usd(envelope.totalMicros)} · ${rules}`, `envelope ${cell(digest)}`];
+  // The split's own total beside the split (issue #507, `splitTotalMicros`), the envelope's when none is shown.
+  const s = alloc && !alloc.unreachable ? alloc.state : null;
+  const total = splitTotalMicros(s, envelope.totalMicros);
+  const lines = [`ALLOCATION · ${envelope.window} · total ${usd(total)} · ${rules}`, `envelope ${cell(digest)}`];
   if (!alloc) return lines.join("\n");
   if (alloc.unreachable) return [...lines, `split unreadable (${cell(alloc.unreachable)})`].join("\n");
-  const s = alloc.state;
   if (alloc.stateProblem === "newer") lines.push("the applied split was written by a newer pi-dispatch: upgrade this console");
   else if (alloc.stateProblem === "unreadable") lines.push("the applied split does not decode; the next pickup replaces it with the neutral split");
   else if (!s) lines.push("no split applied yet: the first host to look writes the neutral split");
@@ -515,7 +517,7 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
     // fits 80 columns with the longest writer; `clamped` gets its own line, where no width can cut it.
     lines.push(`${plan} · ${cell(s.writer)} · ${allocAt(s.appliedAt)}${s.validUntil ? ` · until ${sliceColumns(cell(s.validUntil), 10)}` : ""}`);
     if (s.clamped) lines.push("  clamped by the step");
-    if (s.envelopeDigest !== digest) lines.push(`made for envelope ${cell(s.envelopeDigest)}, not this host's: governed jobs here refuse as envelope-mismatch`);
+    if (s.envelopeDigest !== digest) lines.push(`made for envelope ${cell(s.envelopeDigest)}, not this host's: governed jobs here refuse as envelope-mismatch${total !== envelope.totalMicros ? `.${fileTotalText(usd(envelope.totalMicros))}` : ""}`);
     // The panel's outside-edit notice, by the same rule and in the same words (issue #507).
     const edit = outsideEdit(alloc.log, s.envelopeDigest);
     if (edit) lines.push(cell(outsideEditText(edit)));
@@ -529,8 +531,8 @@ export function renderAllocations({ envelope = null, digest = null, problem = nu
   ]);
   const widths = rows.reduce((w, r) => r.map((c, i) => Math.max(w[i] ?? 0, c.length)), []);
   for (const r of rows) lines.push(`  ${r.map((c, i) => pad(c, widths[i])).join("  ").trimEnd()}`);
-  // The headroom beside the envelope it is headroom of (issue #507): the deployment's spend against the total.
-  if (s) lines.push(`  unallocated ${usd(s.unallocated)} · deployment spent ${usd(alloc.spend?.deployment?.micros)} of ${usd(envelope.totalMicros)}`);
+  // The headroom beside the split it is headroom of (issue #507): the deployment's spend against the split's total.
+  if (s) lines.push(`  unallocated ${usd(s.unallocated)} · deployment spent ${usd(alloc.spend?.deployment?.micros)} of ${usd(total)}`);
   const history = Array.isArray(alloc.log) ? alloc.log.slice(0, historyRows) : [];
   if (history.length > 0) {
     lines.push("history (newest first):");
@@ -577,6 +579,32 @@ export function outsideEdit(log, splitDigest) {
   if (!row || typeof row.envelopeDigest !== "string" || row.envelopeDigest === splitDigest) return null;
   const hex8 = (d) => (/^[0-9a-f]{8}/.test(d) ? d.slice(0, 8) : "?");
   return { digest: hex8(row.envelopeDigest), at: allocAt(row.at), split: hex8(splitDigest) };
+}
+
+/**
+ * The total the ALLOCATION views show beside the split (issue #507): the applied split's OWN total, its allocations
+ * plus its unallocated money, which the worker holds equal to the total of the envelope the split was made for. Not
+ * this host's envelope file's: during an envelope mismatch that file may say $30.00 while every number beside it is
+ * the applied $28.00 split, and the header, the headroom and the bars must agree with the numbers they sit beside.
+ * The envelope's total when no split is applied, or when an amount of it is not a whole non-negative micro-dollar
+ * count (that split does not decode as the worker's, and the view says so elsewhere). One rule for the panel,
+ * `/dispatch priorities` and the insights page.
+ */
+export function splitTotalMicros(state, envelopeTotalMicros) {
+  if (!state || typeof state !== "object") return envelopeTotalMicros;
+  const parts = [...Object.values(state.allocations ?? {}), state.unallocated ?? 0];
+  if (!parts.every((n) => Number.isSafeInteger(n) && n >= 0)) return envelopeTotalMicros;
+  const sum = parts.reduce((a, b) => a + b, 0);
+  return Number.isSafeInteger(sum) ? sum : envelopeTotalMicros;
+}
+
+/**
+ * What the mismatch line adds when this host's file holds another total than the split shown (issue #507): the file's
+ * total, said once, so the shown totals cannot be read as the file's. Empty when the two agree. `usdText` is the
+ * file's total already in dollars, so each surface keeps its own formatting.
+ */
+export function fileTotalText(usdText) {
+  return ` This host's file says total ${usdText}; the totals shown are the split's.`;
 }
 
 /** The outside-edit notice in words, the same on every surface. */
