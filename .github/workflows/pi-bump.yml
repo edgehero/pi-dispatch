@@ -19,6 +19,13 @@
 # exactly those paths. The install-script check reads metadata only and cannot see a tarball's binding.gyp (npm builds
 # one with node-gyp at install), so the pull request's review and its CI are the real check on what a package runs.
 #
+# A PERSON'S FIXES ARE KEPT. The branch is rebuilt on the base only while it holds nothing but the workflow's own bump
+# commit (one commit on its merge base, subject `chore(pi): run on pi X`, by Rob Boerman, changing only the pin files
+# and the lockfile), or when a closed pull request keeps its tip. Once a person pushed anything else, a newer pi waits:
+# the open pull request gets one comment per version, and the job stays green. There is no input to override that; a
+# person merges or closes the pull request, or deletes the branch. Without fixes, a branch whose base changed a pin
+# file or the lockfile is rebuilt on it even for the same version, so the pull request does not sit on a conflict.
+#
 # Untrusted text (the version input, a branch name) reaches a shell only through `env:`, never through an expression
 # inside `run:`.
 
@@ -93,12 +100,40 @@ jobs:
           # Every pull request whose head is this repository's chore/pi-bump, open or closed. pi-bump.mjs keeps only
           # those whose head repository IS this one: a fork can carry a branch of the same name.
           gh api "repos/$GITHUB_REPOSITORY/pulls?state=all&head=${GITHUB_REPOSITORY_OWNER}:chore/pi-bump&per_page=100" > "$RUNNER_TEMP/pulls.json"
+          # The branch as it is now, and what it carries over this run's base (GITHUB_SHA, the commit checked out and
+          # rebuilt on) and the base over it. pi-bump.mjs rebuilds it only when it holds nothing but its own bump
+          # commit; a person's fixes stop the run instead.
+          gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/chore/pi-bump" > "$RUNNER_TEMP/refs.json"
+          export REFS="$RUNNER_TEMP/refs.json" AHEAD="$RUNNER_TEMP/ahead.json" BEHIND="$RUNNER_TEMP/behind.json"
+          tip=$(node .github/scripts/pi-bump.mjs tip)
+          if [ -n "$tip" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$tip" > "$AHEAD"
+            gh api "repos/$GITHUB_REPOSITORY/compare/$tip...$GITHUB_SHA" > "$BEHIND"
+          fi
           export TARGET
-          PULLS="$RUNNER_TEMP/pulls.json" node .github/scripts/pi-bump.mjs decide > "$RUNNER_TEMP/decision"
+          PULLS="$RUNNER_TEMP/pulls.json" NOTICE="$RUNNER_TEMP/notice.md" node .github/scripts/pi-bump.mjs decide > "$RUNNER_TEMP/decision"
           cat "$RUNNER_TEMP/decision" >> "$GITHUB_OUTPUT"
           # Written only once pi-bump.mjs has accepted it as an exact version, so an input cannot add an output line.
           if grep -qx 'skip=false' "$RUNNER_TEMP/decision"; then echo "target=$TARGET" >> "$GITHUB_OUTPUT"; fi
-          echo "::notice::$(grep '^reason=' "$RUNNER_TEMP/decision" | cut -d= -f2-)"
+          level=notice
+          if grep -qx 'level=warning' "$RUNNER_TEMP/decision"; then level=warning; fi
+          echo "::$level::$(grep '^reason=' "$RUNNER_TEMP/decision" | cut -d= -f2-)"
+
+      # A pull request that carries a person's fixes is not rebuilt for a newer pi. It gets one comment per new version
+      # instead, from a fixed text holding only the validated version, and the job stays green.
+      - name: Tell a pull request with fixes that a newer pi waits for it
+        if: steps.decide.outputs.held != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PI_BUMP_TOKEN: ${{ secrets.PI_BUMP_TOKEN }}
+          HELD: ${{ steps.decide.outputs.held }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues/$HELD/comments?per_page=100" > "$RUNNER_TEMP/comments.json"
+          if node .github/scripts/pi-bump.mjs noticed "$RUNNER_TEMP/comments.json" "$RUNNER_TEMP/notice.md" | grep -qx 'noticed=true'; then
+            echo "#$HELD already says so"
+            exit 0
+          fi
+          GH_TOKEN="$PI_BUMP_TOKEN" gh pr comment "$HELD" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/notice.md"
 
       - name: Bump every pin and resolve the lockfile (no package code runs)
         if: steps.decide.outputs.skip == 'false'
@@ -112,12 +147,14 @@ jobs:
           npm view @earendil-works/pi-coding-agent versions --json > "$RUNNER_TEMP/versions.json"
           node .github/scripts/pi-bump.mjs render "$RUNNER_TEMP/summary.json" "$RUNNER_TEMP/versions.json" "$RUNNER_TEMP/pr"
 
-      # Force-pushed: the workflow owns chore/pi-bump. A run for a newer pi rebuilds it from the base branch, because a
-      # fix made for the older release has to be re-verified against the newer one anyway.
+      # Force-pushed, because the branch is rebuilt on the base, but only over what the decide step saw: the lease is
+      # the tip it judged to hold nothing but its own bump commit (empty: the branch must not exist). A fix pushed in
+      # between makes the push fail rather than vanish.
       - name: Commit as Rob Boerman, signed off, and push the rolling branch
         if: steps.decide.outputs.skip == 'false'
         env:
           PI_BUMP_TOKEN: ${{ secrets.PI_BUMP_TOKEN }}
+          LEASE: ${{ steps.decide.outputs.lease }}
         run: |
           mapfile -t paths < <(node .github/scripts/pi-bump.mjs paths)
           git config user.name "Rob Boerman"
@@ -128,7 +165,7 @@ jobs:
           basic=$(printf 'x-access-token:%s' "$PI_BUMP_TOKEN" | base64 -w0)
           echo "::add-mask::$basic"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" \
-            push --force "https://github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/chore/pi-bump
+            push "--force-with-lease=refs/heads/chore/pi-bump:$LEASE" "https://github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/chore/pi-bump
 
       - name: Open or update the one pull request, as a draft
         if: steps.decide.outputs.skip == 'false'

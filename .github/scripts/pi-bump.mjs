@@ -33,8 +33,16 @@
  *
  * Idempotent: at the current pin it changes nothing (the pruned tree resolves back to the same lockfile).
  *
+ * A PERSON'S FIXES ARE NEVER OVERWRITTEN. `decide` rebuilds the branch only while it carries nothing but the
+ * workflow's own commit (fixupsOn), or a closed pull request keeps its tip; otherwise the open pull request gets one
+ * comment per new version and waits for a person to merge or close it. The push is leased to the tip `decide` saw.
+ *
  * Usage: node .github/scripts/pi-bump.mjs <version> [--summary <file>] [--npm <npm command>]
- *        node .github/scripts/pi-bump.mjs decide                   reads TARGET, PULLS (a file); prints skip= and reason=
+ *        node .github/scripts/pi-bump.mjs tip                      reads REFS (a file); prints the branch's tip, or nothing
+ *        node .github/scripts/pi-bump.mjs decide                   reads TARGET and the files PULLS, REFS, AHEAD, BEHIND;
+ *                                                                  prints skip=, reason=, level=, and lease= or held=
+ *                                                                  (writing the held pull request's comment to NOTICE)
+ *        node .github/scripts/pi-bump.mjs noticed <comments> <notice>   prints noticed=true when a comment holds it
  *        node .github/scripts/pi-bump.mjs render <summary> <versions.json> <out dir>   writes title.txt, body.md, commit.txt
  *        node .github/scripts/pi-bump.mjs paths                    prints the paths a bump commit may hold, one per line
  */
@@ -69,6 +77,12 @@ export const PI_PIN_SITES = Object.freeze([
 export const BUMP_PATHS = Object.freeze([...PI_PIN_SITES.map((site) => site.path), ROOT_PACKAGE, LOCKFILE]);
 
 export const titleFor = (version) => `chore(pi): run on pi ${version}`;
+
+/** Who the workflow commits as. The workflow's `git config` lines are held to this by worker/test/pi-bump.test.mjs. */
+export const BUMP_AUTHOR = Object.freeze({ name: "Rob Boerman", email: "robboerman@live.nl" });
+/** The subject of the workflow's own bump commit: titleFor of an exact version, and nothing else. */
+const BUMP_SUBJECT_RE = /^chore\(pi\): run on pi (0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const SHA_RE = /^[0-9a-f]{40}$/;
 
 const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const parts = (version) => version.split(".").map(Number);
@@ -238,6 +252,9 @@ export function treeProblems(porcelain) {
 	return problems;
 }
 
+/** The pull requests whose head is BRANCH in THIS repository, into any base. */
+const ownPulls = (pulls, repo) => (Array.isArray(pulls) ? pulls : []).filter((pull) => pull?.head?.ref === BRANCH && pull?.head?.repo?.full_name === repo);
+
 /**
  * The rolling pull request among a `GET /repos/{repo}/pulls?head=...` answer: the one whose head is BRANCH in THIS
  * repository and whose base is the branch this run bumps. A fork's pull request can carry a branch of the same name,
@@ -245,9 +262,7 @@ export function treeProblems(porcelain) {
  * branch for its own and rewrote it, and a pull request closed there would have stopped main's bump for good.
  */
 export function rollingPulls(pulls, repo, base) {
-	return (Array.isArray(pulls) ? pulls : []).filter(
-		(pull) => pull?.head?.ref === BRANCH && pull?.head?.repo?.full_name === repo && pull?.base?.repo?.full_name === repo && pull?.base?.ref === base,
-	);
+	return ownPulls(pulls, repo).filter((pull) => pull?.base?.repo?.full_name === repo && pull?.base?.ref === base);
 }
 
 /**
@@ -261,6 +276,98 @@ export function skipReason({ pinned, target, openTitles = [], closedTitles = [] 
 	if (openTitles.includes(titleFor(target))) return `the open ${BRANCH} pull request already carries pi ${target}`;
 	if (closedTitles.includes(titleFor(target))) return `a ${BRANCH} pull request for pi ${target} was closed unmerged; bump it by hand to try again`;
 	return null;
+}
+
+/**
+ * The tip of BRANCH from a `GET /repos/{repo}/git/matching-refs/heads/chore/pi-bump` answer, or null when there is no
+ * such branch. matching-refs matches a PREFIX, so `chore/pi-bump-x` is in the answer too and must not count.
+ */
+export function branchTip(refs) {
+	const ref = (Array.isArray(refs) ? refs : []).find((r) => r?.ref === `refs/heads/${BRANCH}`);
+	if (!ref) return null;
+	if (!SHA_RE.test(ref.object?.sha ?? "")) throw new Error(`${BRANCH} points at ${JSON.stringify(ref.object?.sha)}, not a commit`);
+	return ref.object.sha;
+}
+
+/**
+ * What BRANCH carries beyond the workflow's own bump commit, or [] when it carries only that commit. `ahead` is a
+ * `GET /repos/{repo}/compare/{base}...{tip}` answer: the commits on the branch since its merge base with the base, and
+ * the files they change. The workflow's commit is exactly one commit on that merge base, with the subject titleFor
+ * makes, by BUMP_AUTHOR, changing only BUMP_PATHS. Anything else is a person's work (a fix, a merge of the base, a
+ * regenerated table), and the workflow does not overwrite it.
+ */
+export function fixupsOn(ahead) {
+	const commits = Array.isArray(ahead?.commits) ? ahead.commits : [];
+	const files = Array.isArray(ahead?.files) ? ahead.files : [];
+	const found = [];
+	if (ahead?.ahead_by !== 1 || ahead?.total_commits !== 1 || commits.length !== 1) found.push(`${BRANCH} is ${ahead?.ahead_by} commits on its base, not the one bump commit`);
+	for (const commit of commits) {
+		const subject = String(commit?.commit?.message ?? "").split("\n")[0];
+		const author = commit?.commit?.author ?? {};
+		if (!BUMP_SUBJECT_RE.test(subject)) found.push(`a commit on ${BRANCH} is not a bump commit by its subject`);
+		if (author.name !== BUMP_AUTHOR.name || author.email !== BUMP_AUTHOR.email) found.push(`a commit on ${BRANCH} is not by the bump's author`);
+	}
+	if (files.length === 0) found.push(`${BRANCH} lists no changed file`);
+	for (const file of files) if (file?.status !== "modified" || !BUMP_PATHS.includes(file?.filename)) found.push(`${BRANCH} changes a file a bump does not write`);
+	return [...new Set(found)];
+}
+
+/**
+ * Whether the base changed a file the bump commit writes since the branch was made. `behind` is a
+ * `GET /repos/{repo}/compare/{tip}...{base}` answer. Then the bump commit is stale (the lockfile it re-resolved is not
+ * the base's any more, and the pull request shows a conflict), so a branch without fixes is rebuilt on the base even
+ * when it already carries the target. The compare API lists at most 300 files, so a list that long counts as stale.
+ */
+export function baseMovedUnder(behind) {
+	const files = Array.isArray(behind?.files) ? behind.files : [];
+	return files.length >= 300 || files.some((file) => BUMP_PATHS.includes(file?.filename) || BUMP_PATHS.includes(file?.previous_filename));
+}
+
+/** The comment a held pull request gets, from a validated version only. */
+export function heldNotice(version) {
+	if (!EXACT_VERSION_RE.test(version ?? "")) throw new Error(`${JSON.stringify(version)} is not an exact version`);
+	return `pi ${version} is out. This pull request carries fixes, so the workflow did not rebuild it. Merge or close it, and the next run bumps to ${version}.\n`;
+}
+
+/** Whether a pull request's comments (one `GET .../issues/{n}/comments` page, or a slurped list of pages) hold `notice`. */
+export function alreadyNoticed(comments, notice) {
+	return (Array.isArray(comments) ? comments.flat() : []).some((comment) => typeof comment?.body === "string" && comment.body.trim() === notice.trim());
+}
+
+/**
+ * The whole decision of one run. Returns `skip` and `reason`; `level` (notice or warning) for the annotation; `lease`,
+ * the tip the push may replace ("" when the branch must not exist yet); and `held` and `notice` when a pull request
+ * waits on a person and gets that comment.
+ *
+ * The rule that keeps a person's work: the branch is rebuilt only when it carries nothing but the workflow's own
+ * commit (fixupsOn), or when a closed pull request still holds its tip (GitHub keeps a closed pull request's commits
+ * under refs/pull/N/head, so nothing is lost). Otherwise nothing is pushed: an open pull request into this base gets
+ * the comment, and a branch no pull request holds is left for a person, with a warning. No input overrides this. A
+ * person closes the pull request or deletes the branch.
+ */
+export function decide({ pinned, target, repo, base, pulls, tip, ahead, behind }) {
+	if (tip !== null && !SHA_RE.test(tip ?? "")) throw new Error(`${JSON.stringify(tip)} is not a commit`);
+	const own = ownPulls(pulls, repo);
+	const rolling = rollingPulls(pulls, repo, base);
+	const open = rolling.filter((p) => p.state === "open");
+	const fixups = tip ? fixupsOn(ahead) : [];
+	const stale = tip !== null && fixups.length === 0 && baseMovedUnder(behind);
+	const reason = skipReason({
+		pinned,
+		target,
+		// A carried target is not a reason to stop when the base moved a bump file under the branch: it is rebuilt.
+		openTitles: stale ? [] : open.map((p) => p.title),
+		closedTitles: rolling.filter((p) => p.state === "closed" && !p.merged_at).map((p) => p.title),
+	});
+	if (reason) return { skip: true, reason, level: "notice", lease: null, held: null, notice: null };
+	const keptByClosed = !own.some((p) => p.state === "open") && own.some((p) => p.state === "closed" && p.head?.sha === tip);
+	if (fixups.length > 0 && !keptByClosed) {
+		const pull = open.find((p) => Number.isInteger(p.number) && p.number > 0);
+		if (pull) return { skip: true, reason: `pull request #${pull.number} carries fixes, so it is not rebuilt for pi ${target} until it is merged or closed (${fixups.join("; ")})`, level: "notice", lease: null, held: pull.number, notice: heldNotice(target) };
+		return { skip: true, reason: `${BRANCH} carries commits no pull request into ${base} keeps, so it is not rebuilt for pi ${target}. Open a pull request for it, or delete the branch (${fixups.join("; ")})`, level: "warning", lease: null, held: null, notice: null };
+	}
+	const why = stale ? `the base changed a file the bump writes, so ${BRANCH} is rebuilt on it` : `pi ${target} is newer than the pin ${pinned}`;
+	return { skip: false, reason: why, level: "notice", lease: tip ?? "", held: null, notice: null };
 }
 
 /** The pull request's title and body, and the commit message, from validated versions only: no text from outside. */
@@ -283,7 +390,7 @@ export function renderPullRequest({ from, to, versions }) {
 		"",
 		"- If `worker/test/pi-derived.test.mjs` is red, run `node .github/scripts/pi-derived.mjs --write` on this branch and commit the result. Read the hosts it reports added: **a new catalog host widens the cost guard** (a capped call there is bounded by the output field pi picks for it).",
 		"- Every other red test is a pinned assumption about pi that no longer holds. Fix the code or the copy against the new release, never the assertion. A red content-hash test names the pi file that changed: re-verify the copy against it, then move the hash (`CLAUDE.md`, \"pi bumps\").",
-		"- Fixes go on this branch as signed-off commits. A later run for a newer pi rebuilds the branch and drops them.",
+		"- Fixes go on this branch as signed-off commits. Once it carries one, the workflow never rebuilds it: a newer pi waits, with a comment here, until this pull request is merged or closed. Without fixes, a run for a newer pi, or after the base changed a pin file or the lockfile, rebuilds the branch on the base.",
 		"",
 		"## Review checklist (OQ-005)",
 		"",
@@ -373,15 +480,29 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		for (const p of BUMP_PATHS) console.log(p);
 	} else if (args[0] === "decide") {
 		const pinned = siteVersion(PI_PIN_SITES[0], readFileSync(new URL(PI_PIN_SITES[0].path, repo), "utf8"));
-		const pulls = rollingPulls(json(process.env.PULLS), process.env.GITHUB_REPOSITORY, process.env.BASE_BRANCH);
-		const reason = skipReason({
+		const tip = branchTip(json(process.env.REFS));
+		const verdict = decide({
 			pinned,
 			target: process.env.TARGET,
-			openTitles: pulls.filter((p) => p.state === "open").map((p) => p.title),
-			closedTitles: pulls.filter((p) => p.state === "closed" && !p.merged_at).map((p) => p.title),
+			repo: process.env.GITHUB_REPOSITORY,
+			base: process.env.BASE_BRANCH,
+			pulls: json(process.env.PULLS),
+			tip,
+			ahead: tip ? json(process.env.AHEAD) : null,
+			behind: tip ? json(process.env.BEHIND) : null,
 		});
-		console.log(`skip=${reason ? "true" : "false"}`);
-		console.log(`reason=${reason ?? `pi ${process.env.TARGET} is newer than the pin ${pinned}`}`);
+		console.log(`skip=${verdict.skip}`);
+		console.log(`reason=${verdict.reason}`);
+		console.log(`level=${verdict.level}`);
+		if (verdict.lease !== null) console.log(`lease=${verdict.lease}`);
+		if (verdict.held !== null) {
+			console.log(`held=${verdict.held}`);
+			writeFileSync(process.env.NOTICE, verdict.notice);
+		}
+	} else if (args[0] === "tip") {
+		console.log(branchTip(json(process.env.REFS)) ?? "");
+	} else if (args[0] === "noticed") {
+		console.log(`noticed=${alreadyNoticed(json(args[1]), readFileSync(args[2], "utf8"))}`);
 	} else if (args[0] === "render") {
 		const [, summaryFile, versionsFile, dir] = args;
 		const { from, to } = json(summaryFile);
@@ -394,7 +515,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		const npm = option("--npm") ?? "npm";
 		const [version] = args;
 		if (!version) {
-			console.error("usage: node .github/scripts/pi-bump.mjs <version> [--summary <file>] [--npm <npm command>] | decide | render <summary> <versions> <dir> | paths");
+			console.error("usage: node .github/scripts/pi-bump.mjs <version> [--summary <file>] [--npm <npm command>] | decide | tip | noticed <comments> <notice> | render <summary> <versions> <dir> | paths");
 			process.exit(2);
 		}
 		const summary = bump({ repo, version, npm });

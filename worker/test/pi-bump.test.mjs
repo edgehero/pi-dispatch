@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
-import { bump, BUMP_PATHS, compareVersions, LOCKFILE, lockedPiNames, lockfileProblems, packageProblems, PI_PIN_SITES, prunePiTree, renderPullRequest, rewriteOverrides, rewriteSite, rollingPulls, ROOT_PACKAGE, siteVersion, skipReason, titleFor, treeProblems, versionsBetween } from "../../.github/scripts/pi-bump.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { alreadyNoticed, baseMovedUnder, branchTip, bump, BUMP_AUTHOR, BUMP_PATHS, compareVersions, decide, fixupsOn, heldNotice, LOCKFILE, lockedPiNames, lockfileProblems, packageProblems, PI_PIN_SITES, prunePiTree, renderPullRequest, rewriteOverrides, rewriteSite, rollingPulls, ROOT_PACKAGE, siteVersion, skipReason, titleFor, treeProblems, versionsBetween } from "../../.github/scripts/pi-bump.mjs";
 import { piPinProblems, repositoryPins } from "../../.github/scripts/pi-pin-check.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -183,6 +184,7 @@ test("the pull request is always a draft built only from validated versions, lin
 	assert.doesNotMatch(pr.body, /1\.0\.6|evil/);
 	assert.match(pr.body, /node \.github\/scripts\/pi-derived\.mjs --write/);
 	assert.match(pr.body, /## Review checklist \(OQ-005\)/);
+	assert.match(pr.body, /Once it carries one, the workflow never rebuilds it: a newer pi waits, with a comment here, until this pull request is merged or closed\./, "fixes on the branch are kept");
 	assert.doesNotMatch(pr.body, LONG_DASHES);
 	assert.match(pr.commit, /^chore\(pi\): run on pi 1\.0\.5\n\nMoves every pi pin from 1\.0\.3 to 1\.0\.5 /);
 	assert.match(renderPullRequest({ from: "1.0.3", to: "1.0.4", versions: [] }).body, /^- \[v1\.0\.4\]/m, "the target is linked even when the release list is empty");
@@ -249,4 +251,193 @@ test("a bump at the pin changes nothing", () => {
 	const summary = bump({ repo: at, version: PIN, run: (cmd, args, { cwd }) => (cmd === "git" ? "" : writeFileSync(join(cwd, LOCKFILE), lock)), log: () => {} });
 	assert.deepEqual(summary.changed, []);
 	assert.deepEqual(summary.problems, []);
+});
+
+// Issue #587, the fixes a person pushes onto the bump's pull request. The workflow rebuilds the branch only while it
+// holds nothing but its own commit; anything else holds the branch, and the open pull request gets one comment.
+
+const REPO = "edgehero/pi-dispatch";
+const TIP = "a".repeat(40);
+const NEXT = PIN.replace(/\d+$/, (n) => String(Number(n) + 1));
+const LATER = PIN.replace(/\d+$/, (n) => String(Number(n) + 2));
+const commitOf = (subject = titleFor(NEXT), author = BUMP_AUTHOR) => ({ sha: "b".repeat(40), commit: { message: `${subject}\n\nMoves every pi pin.\n\nSigned-off-by: ${author.name} <${author.email}>`, author: { ...author, date: "2026-10-06T07:23:40Z" } } });
+const botAhead = (edit = (a) => a) => edit({ status: "ahead", ahead_by: 1, total_commits: 1, commits: [commitOf()], files: BUMP_PATHS.map((filename) => ({ filename, status: "modified" })) });
+const pullOf = (number, extra = {}) => ({ number, title: titleFor(NEXT), state: "open", merged_at: null, head: { ref: "chore/pi-bump", sha: TIP, repo: { full_name: REPO } }, base: { ref: "main", repo: { full_name: REPO } }, ...extra });
+const decideFor = (over = {}) => decide({ pinned: PIN, target: LATER, repo: REPO, base: "main", pulls: [pullOf(594)], tip: TIP, ahead: botAhead(), behind: { files: [] }, ...over });
+
+test("a branch holding only the workflow's own commit may be rebuilt; any other commit, path or author is a fix", () => {
+	assert.deepEqual(fixupsOn(botAhead()), [], "one bump commit by the bump's author over the pin files and the lockfile");
+	assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, files: a.files.slice(0, 2) }))), [], "a bump that moved fewer files is still the workflow's");
+	const fix = { ...commitOf("fix(pi): the derived tables for pi 1.0.4"), sha: "c".repeat(40) };
+	assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, ahead_by: 2, total_commits: 2, commits: [...a.commits, fix] }))), ["chore/pi-bump is 2 commits on its base, not the one bump commit", "a commit on chore/pi-bump is not a bump commit by its subject"], "an extra commit");
+	assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, ahead_by: 2, total_commits: 2 }))), ["chore/pi-bump is 2 commits on its base, not the one bump commit"], "a count beyond the listed commits");
+	assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, files: [...a.files, { filename: "worker/src/pricing.mjs", status: "modified" }] }))), ["chore/pi-bump changes a file a bump does not write"], "the bump's commit amended with another path");
+	assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, files: [{ filename: "image/Dockerfile", status: "added" }] }))), ["chore/pi-bump changes a file a bump does not write"], "a pin file the bump would only modify");
+	assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, files: [] }))), ["chore/pi-bump lists no changed file"]);
+	for (const author of [{ name: "Someone Else", email: BUMP_AUTHOR.email }, { name: BUMP_AUTHOR.name, email: "someone@example.com" }]) {
+		assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, commits: [commitOf(titleFor(NEXT), author)] }))), ["a commit on chore/pi-bump is not by the bump's author"], JSON.stringify(author));
+	}
+	for (const subject of [`${titleFor(NEXT)} and a fix`, "fix: x", titleFor("1.0.4-rc.1")]) assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, commits: [commitOf(subject)] }))), ["a commit on chore/pi-bump is not a bump commit by its subject"], subject);
+	assert.notDeepEqual(fixupsOn(null), [], "an answer that is not a comparison is never read as the workflow's own commit");
+});
+
+test("the branch tip is read from the exact ref, and the base moving a bump file under it is seen", () => {
+	const ref = (name, sha = TIP) => ({ ref: `refs/heads/${name}`, object: { sha } });
+	assert.equal(branchTip([ref("chore/pi-bump-x", "c".repeat(40)), ref("chore/pi-bump")]), TIP);
+	assert.equal(branchTip([ref("chore/pi-bump-x")]), null, "matching-refs matches a prefix");
+	assert.equal(branchTip([]), null);
+	assert.throws(() => branchTip([ref("chore/pi-bump", "x; rm -rf /")]), /not a commit/);
+	assert.equal(baseMovedUnder({ files: [{ filename: "worker/src/x.mjs" }] }), false);
+	assert.equal(baseMovedUnder({ files: [{ filename: "package-lock.json" }] }), true);
+	assert.equal(baseMovedUnder({ files: [{ filename: "x.json", previous_filename: "worker/package.json" }] }), true);
+	assert.equal(baseMovedUnder({ files: Array.from({ length: 300 }, (_, i) => ({ filename: `f${i}` })) }), true, "a list the API cut short");
+});
+
+test("a newer pi rebuilds a branch without fixes, and holds one with fixes, commenting on its open pull request", () => {
+	assert.deepEqual(decideFor({ tip: null, ahead: null, behind: null, pulls: [] }), { skip: false, reason: `pi ${LATER} is newer than the pin ${PIN}`, level: "notice", lease: "", held: null, notice: null }, "no branch: the push must find none");
+	assert.deepEqual(decideFor(), { skip: false, reason: `pi ${LATER} is newer than the pin ${PIN}`, level: "notice", lease: TIP, held: null, notice: null }, "only the bump commit: rebuilt, leased to its tip");
+	const fixed = botAhead((a) => ({ ...a, ahead_by: 2, total_commits: 2, commits: [...a.commits, commitOf("fix(pi): x")] }));
+	const held = decideFor({ ahead: fixed });
+	assert.equal(held.skip, true);
+	assert.equal(held.held, 594);
+	assert.equal(held.level, "notice", "held is the rule working, not a failure");
+	assert.equal(held.lease, null);
+	assert.equal(held.notice, heldNotice(LATER));
+	assert.match(held.reason, /^pull request #594 carries fixes/);
+	const carried = decideFor({ ahead: fixed, target: NEXT });
+	assert.deepEqual([carried.skip, carried.held], [true, null], "the version it already carries: the plain skip, no comment");
+	assert.match(carried.reason, /already carries/);
+	assert.match(decideFor({ target: NEXT }).reason, /already carries/, "carried and the base moved nothing a bump writes");
+	assert.match(decideFor({ ahead: fixed, target: "latest" }).reason, /not an exact release version/, "an input is refused before anything else");
+});
+
+test("a branch with fixes no open pull request holds is rebuilt only when a closed pull request keeps its tip", () => {
+	const fixed = botAhead((a) => ({ ...a, commits: [commitOf("fix(pi): x")] }));
+	const closed = (extra) => pullOf(594, { state: "closed", ...extra });
+	const orphan = decideFor({ ahead: fixed, pulls: [] });
+	assert.deepEqual([orphan.skip, orphan.level, orphan.held], [true, "warning", null], "a deleted pull request: its branch is a person's to resolve");
+	assert.match(orphan.reason, /carries commits no pull request into main keeps/);
+	assert.deepEqual([decideFor({ ahead: fixed, pulls: [closed()] }).skip, decideFor({ ahead: fixed, pulls: [closed()] }).lease], [false, TIP], "closed unmerged: GitHub keeps its commits");
+	assert.equal(decideFor({ ahead: fixed, pulls: [closed({ merged_at: "2026-10-06T08:00:00Z" })] }).skip, false, "merged, the branch left");
+	assert.equal(decideFor({ ahead: fixed, pulls: [closed({ head: { ...pullOf(1).head, sha: "c".repeat(40) } })] }).level, "warning", "pushed to after the close: nothing keeps that");
+	assert.equal(decideFor({ ahead: fixed, pulls: [closed(), pullOf(600, { title: titleFor(NEXT) })] }).held, 600, "an open pull request on the same tip is still held");
+	assert.equal(decideFor({ ahead: fixed, pulls: [closed(), pullOf(600, { base: { ref: "scratch", repo: { full_name: REPO } } })] }).level, "warning", "open into another base: not rebuilt from here");
+	assert.match(decideFor({ ahead: fixed, target: NEXT, pulls: [closed({ title: titleFor(NEXT) })] }).reason, /closed unmerged/, "the closed version itself still is not retried");
+});
+
+test("a branch without fixes is rebuilt for the version it carries once the base changed a file the bump writes", () => {
+	const moved = decideFor({ target: NEXT, behind: { files: [{ filename: "package-lock.json" }] } });
+	assert.deepEqual([moved.skip, moved.lease], [false, TIP]);
+	assert.match(moved.reason, /base changed a file the bump writes/);
+	const fixed = botAhead((a) => ({ ...a, commits: [commitOf(titleFor(NEXT), { name: "Someone Else", email: "x@example.com" })] }));
+	assert.match(decideFor({ ahead: fixed, target: NEXT, behind: { files: [{ filename: "package-lock.json" }] } }).reason, /already carries/, "with fixes, the conflict is a person's");
+});
+
+test("the comment on a held pull request is a fixed text from a validated version, posted once per version", () => {
+	assert.equal(heldNotice("1.0.5"), "pi 1.0.5 is out. This pull request carries fixes, so the workflow did not rebuild it. Merge or close it, and the next run bumps to 1.0.5.\n");
+	for (const bad of ["1.0.5\n@everyone", "latest", "1.0.5-rc.1", undefined]) assert.throws(() => heldNotice(bad), /not an exact version/, String(bad));
+	assert.doesNotMatch(heldNotice("1.0.5"), LONG_DASHES);
+	const pages = [[{ body: "looks fine" }], [{ body: heldNotice("1.0.5").trim() }]];
+	assert.equal(alreadyNoticed(pages, heldNotice("1.0.5")), true, "a slurped listing, in any page");
+	assert.equal(alreadyNoticed(pages, heldNotice("1.0.6")), false, "one comment per version");
+	assert.equal(alreadyNoticed([{ body: `> ${heldNotice("1.0.5")}` }], heldNotice("1.0.5")), false, "a quote of it is not it");
+	assert.equal(alreadyNoticed({ message: "Not Found" }, heldNotice("1.0.5")), false);
+});
+
+const WORKFLOW = read(".github/workflows/pi-bump.yml");
+
+/** The `run:` block of the workflow step named `name`, dedented. */
+function stepRun(name) {
+	const lines = WORKFLOW.split("\n");
+	const at = lines.findIndex((line) => line.trim() === `- name: ${name}`);
+	assert.ok(at >= 0, `no step named ${name}`);
+	const runAt = lines.findIndex((line, i) => i > at && /^\s+run: \|$/.test(line));
+	const indent = lines[runAt + 1].match(/^ */)[0];
+	const body = [];
+	for (const line of lines.slice(runAt + 1)) {
+		if (line.trim() !== "" && !line.startsWith(indent)) break;
+		body.push(line.slice(indent.length));
+	}
+	return body.join("\n");
+}
+
+/** Runs a step with `gh` played by a script that answers from `answers` and logs every call. */
+function runStep(name, { answers = {}, env = {}, temp = {} }) {
+	const dir = tempDir("pi-bump-step-");
+	mkdirSync(join(dir, "bin"));
+	mkdirSync(join(dir, "temp"));
+	for (const [file, value] of Object.entries(answers)) writeFileSync(join(dir, file), JSON.stringify(value));
+	for (const [file, text] of Object.entries(temp)) writeFileSync(join(dir, "temp", file), text);
+	const gh = [
+		"#!/bin/bash",
+		`printf '%s\\n' "$*" >> "${dir}/gh.log"`,
+		`d="${dir}"`,
+		'case "$*" in',
+		'  *"pulls?state=all"*) cat "$d/pulls.json" ;;',
+		'  *matching-refs*) cat "$d/refs.json" ;;',
+		'  *"compare/$GITHUB_SHA..."*) cat "$d/ahead.json" ;;',
+		'  *compare/*) cat "$d/behind.json" ;;',
+		'  *"/comments"*) cat "$d/comments.json" ;;',
+		'  "pr comment"*) echo "token=$GH_TOKEN" >> "$d/gh.log" ;;',
+		'  *) exit 9 ;;',
+		"esac",
+		"",
+	].join("\n");
+	writeFileSync(join(dir, "bin", "gh"), gh);
+	chmodSync(join(dir, "bin", "gh"), 0o755);
+	writeFileSync(join(dir, "output"), "");
+	const result = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", stepRun(name)], {
+		cwd: fileURLToPath(repo),
+		encoding: "utf8",
+		env: { PATH: `${join(dir, "bin")}:${dirname(process.execPath)}:/usr/bin:/bin`, GITHUB_OUTPUT: join(dir, "output"), RUNNER_TEMP: join(dir, "temp"), GITHUB_REPOSITORY: REPO, GITHUB_REPOSITORY_OWNER: "edgehero", GITHUB_SHA: "d".repeat(40), GH_TOKEN: "read-token", ...env },
+	});
+	const log = existsSync(join(dir, "gh.log")) ? readFileSync(join(dir, "gh.log"), "utf8") : "";
+	return { ...result, dir, log, output: readFileSync(join(dir, "output"), "utf8") };
+}
+
+const DECIDE = "Resolve the target and decide whether there is a bump to make";
+const NOTICE = "Tell a pull request with fixes that a newer pi waits for it";
+
+test("the workflow's decide step reads the branch and its comparisons, and holds a branch with fixes", () => {
+	const env = { INPUT_VERSION: LATER, BASE_BRANCH: "main" };
+	const refs = [{ ref: "refs/heads/chore/pi-bump", object: { sha: TIP } }];
+	const fixed = botAhead((a) => ({ ...a, ahead_by: 2, total_commits: 2, commits: [...a.commits, commitOf("fix(pi): x")] }));
+	const held = runStep(DECIDE, { env, answers: { "pulls.json": [pullOf(594)], "refs.json": refs, "ahead.json": fixed, "behind.json": { files: [] } } });
+	assert.equal(held.status, 0, held.stderr);
+	assert.match(held.output, /^skip=true$/m);
+	assert.match(held.output, /^held=594$/m);
+	assert.doesNotMatch(held.output, /^(target|lease)=/m, "nothing is pushed");
+	assert.equal(readFileSync(join(held.dir, "temp", "notice.md"), "utf8"), heldNotice(LATER));
+	assert.match(held.log, new RegExp(`compare/${"d".repeat(40)}\\.\\.\\.${TIP}\n.*compare/${TIP}\\.\\.\\.${"d".repeat(40)}`), "ahead of and behind this run's own base");
+	const rebuilt = runStep(DECIDE, { env, answers: { "pulls.json": [pullOf(594)], "refs.json": refs, "ahead.json": botAhead(), "behind.json": { files: [] } } });
+	assert.equal(rebuilt.status, 0, rebuilt.stderr);
+	assert.match(rebuilt.output, /^skip=false$/m);
+	assert.match(rebuilt.output, new RegExp(`^lease=${TIP}$`, "m"));
+	assert.match(rebuilt.output, new RegExp(`^target=${LATER.replaceAll(".", "\\.")}$`, "m"));
+	const fresh = runStep(DECIDE, { env, answers: { "pulls.json": [], "refs.json": [] } });
+	assert.equal(fresh.status, 0, fresh.stderr);
+	assert.match(fresh.output, /^lease=$/m, "no branch: the lease says none may exist");
+	assert.doesNotMatch(fresh.log, /compare/, "nothing to compare");
+	const orphan = runStep(DECIDE, { env, answers: { "pulls.json": [], "refs.json": refs, "ahead.json": fixed, "behind.json": { files: [] } } });
+	assert.match(orphan.stdout, /^::warning::chore\/pi-bump carries commits/m);
+});
+
+test("the workflow comments once per version, with the bump token, and pushes only over the tip it judged", () => {
+	const notice = heldNotice(LATER);
+	const comment = (comments) => runStep(NOTICE, { env: { HELD: "594", PI_BUMP_TOKEN: "bump-token" }, answers: { "comments.json": comments }, temp: { "notice.md": notice } });
+	const first = comment([[{ body: "on it" }, { body: heldNotice(NEXT) }]]);
+	assert.equal(first.status, 0, first.stderr);
+	assert.match(first.log, /^api --paginate --slurp repos\/edgehero\/pi-dispatch\/issues\/594\/comments\?per_page=100$/m, "read with the job's token");
+	assert.match(first.log, new RegExp(`^pr comment 594 --repo edgehero/pi-dispatch --body-file ${first.dir}/temp/notice\\.md\ntoken=bump-token$`, "m"));
+	const again = comment([[{ body: "on it" }], [{ body: notice }]]);
+	assert.equal(again.status, 0, again.stderr);
+	assert.doesNotMatch(again.log, /pr comment/, "already said for this version");
+	assert.match(WORKFLOW, /^ {8}if: steps\.decide\.outputs\.held != ''$/m);
+	const push = stepRun("Commit as Rob Boerman, signed off, and push the rolling branch");
+	assert.match(push, /push "--force-with-lease=refs\/heads\/chore\/pi-bump:\$LEASE" /);
+	assert.doesNotMatch(push, /--force(?!-with-lease)/, "never a bare force");
+	assert.match(WORKFLOW, /LEASE: \$\{\{ steps\.decide\.outputs\.lease \}\}/);
+	assert.match(push, new RegExp(`git config user\\.name "${BUMP_AUTHOR.name}"\ngit config user\\.email "${BUMP_AUTHOR.email.replaceAll(".", "\\.")}"`), "the workflow commits as the author fixupsOn recognises");
+	const inputs = WORKFLOW.match(/^ {4}inputs:\n((?: {6}.*\n)+)/m)[1];
+	assert.deepEqual(inputs.split("\n").filter((line) => /^ {6}\S/.test(line)), ["      version:"], "a manual run has no input that overrides the hold");
 });
