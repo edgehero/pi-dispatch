@@ -212,8 +212,17 @@ export function jobUserRefusal(causeOrDecision) {
  * endpoint: Docker Desktop's VM resized to another CPU count changes every job's `--cpus` ceiling, and a daemon
  * reconfigured on one socket path (rootful to rootless) changes the job user. Ten minutes bounds how long either goes
  * unseen; a lowered CPU count is caught sooner, because Docker refuses the stale `--cpus` and the job path invalidates
- * (`cpu_ceiling_stale`, `run-container.mjs`). A read past the age is a fresh read: one that does not answer decides as
- * the first read on a new endpoint does.
+ * (`cpu_ceiling_stale`, `run-container.mjs`).
+ *
+ * STALE WHILE ERROR (issue #596, gate round 2). A read past the age is a fresh read, and one that does not answer (a
+ * timeout, a daemon restarting, an unreadable reply) or throws keeps serving the last answered value for the same key
+ * until a read answers, logging `job_user_facts_stale` with the failed read's reason once per run of failures. Deciding
+ * such a read as a first read would make that pickup unavailable (an infrastructure retry) where, before the age
+ * existed, the cached answer was simply reused; the age is there to SEE a change, never to manufacture an outage.
+ * `invalidate()` is different on purpose: it is called because the job path just proved the cached CPU count wrong
+ * (Docker refused its `--cpus`, exit 125 "Range of CPUs"), so it drops the value entirely. Serving that count again
+ * would refuse every job the same way, so after an invalidate the next pickup reads fresh and, if that read fails, is
+ * unavailable exactly as a first read on a new endpoint is.
  */
 export const JOB_USER_FACTS_MAX_AGE_MS = 10 * 60_000;
 
@@ -226,11 +235,15 @@ export function makeJobUserResolver({
 	stat = statSync,
 	now = Date.now,
 	maxAgeMs = JOB_USER_FACTS_MAX_AGE_MS,
+	log = () => {},
 } = {}) {
 	let cached = null;
+	// True while a run of failed re-reads is being answered from `cached`, so the line is written once per run.
+	let staleSaid = false;
 	const inFlight = new Map();
 	resolveJobUser.invalidate = () => {
 		cached = null;
+		staleSaid = false;
 	};
 	return resolveJobUser;
 	async function resolveJobUser({ endpoint, key }) {
@@ -240,7 +253,25 @@ export function makeJobUserResolver({
 			// Asked on EVERY platform and endpoint, although a VM-backed platform or an endpoint on another machine decides
 			// `image` before any daemon fact is read: the same read is where the runtime observations come from (issue
 			// #345), and a Docker Desktop host skipped here would never be credited with the bounds its daemon applies.
-			const daemon = await readFacts();
+			let daemon;
+			let threw = null;
+			try {
+				daemon = await readFacts();
+			} catch (error) {
+				threw = error;
+				daemon = { answered: false, reason: "read-threw", transient: true };
+			}
+			// The value an expired entry may still serve when this read failed (see STALE WHILE ERROR above). Taken AFTER
+			// the read, so an `invalidate()` that landed while it was out is honoured by this very pickup.
+			const stale = cached && cached.key === key ? cached : null;
+			if (threw && !stale) throw threw;
+			if (stale && daemon?.answered !== true) {
+				if (!staleSaid) {
+					staleSaid = true;
+					log("job_user_facts_stale", { reason: daemon?.reason ?? "no-daemon-facts", ageMs: now() - stale.at });
+				}
+				return stale.value;
+			}
 			// A local docker endpoint's display form IS its unix path (credentials never ride a unix URL); with no endpoint,
 			// Podman's own shape names the service socket.
 			const socketPath = endpoint?.local === true && typeof endpoint.endpoint === "string" && endpoint.endpoint.startsWith("unix://")
@@ -251,7 +282,10 @@ export function makeJobUserResolver({
 			const value = { decision, facts: daemon?.answered ? daemon.facts : null, daemon, socket };
 			// Cached only for an ANSWERED read: an `image` decided on a VM-backed platform while its daemon was still starting
 			// must not pin "not read" for the runtime observations until the endpoint changes.
-			if (decision.mode !== "unknown" && decision.cause !== "runtime-unreadable" && daemon?.answered === true) cached = { key, value, at: now() };
+			if (decision.mode !== "unknown" && decision.cause !== "runtime-unreadable" && daemon?.answered === true) {
+				cached = { key, value, at: now() };
+				staleSaid = false;
+			}
 			return value;
 		})();
 		inFlight.set(key, work);

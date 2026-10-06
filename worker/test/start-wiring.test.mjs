@@ -356,7 +356,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 	const logs = parseLines(bootLines.slice(from));
 	// Expose the registration map under both names: `handlers` for the completed/failed handler tests,
 	// `registered` for the scheduler stall-guard test. Same object, one capture path.
-	return { captured, stopCalls, deps: captured?.deps, logs, handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls, podmanBackendCalls };
+	// `logs` is the boot's lines; `logsNow()` re-reads, for a line a job-path call writes after the boot returned.
+	return { captured, stopCalls, deps: captured?.deps, logs, logsNow: () => parseLines(bootLines.slice(from)), handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls, podmanBackendCalls };
 }
 
 // Capture the JSON log lines a synchronous fn emits through the injected writer.
@@ -4579,4 +4580,51 @@ test("issue #596 (gate round 1): a size flag the daemon drops rides beside the u
 	assert.deepEqual(await deps.jobUserPreflight(job, { capabilities: [] }), { user: null, home: null, hostCpus: 4 }, "the next pickup reads the resized daemon, and an enforcing one adds nothing");
 	assert.equal(reads, readsBefore + 1);
 	assert.equal(published?.limitsVersion, 3, "the highest scoped-limits version this build reads, for doctor's fleet line");
+});
+
+test("issue #596 (gate round 2): the boot's clock and log reach the podman info cache the bundle is handed, so a re-read past the age that fails serves the last answer and says so", { skip }, async () => {
+	let t = 2_000_000;
+	let fail = false;
+	const answer = PODMAN_INFO({ hostCpus: 6 });
+	const { podmanBackendCalls, logsNow } = await runStart({
+		env: { PI_BACKENDS: "podman", PI_JOB_IMAGE: "pi-job:ci" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		now: () => t,
+		jobUserIdentity: PODMAN_ID,
+		observationFs: PODMAN_FILES,
+		readPodmanInfo: async () => (fail ? { answered: false, reason: "timeout", transient: true } : answer()),
+		makePodmanReaper: () => async () => ({ reaped: true }),
+		bootImage: { ok: true, image: "pi-job:ci", imageDigest: "sha256:pod", piVersion: "0.80.7", capabilities: ["anyUid"] },
+	});
+	const readInfo = podmanBackendCalls[0].readInfo;
+	fail = true;
+	t += 10 * 60_000;
+	const read = await readInfo();
+	assert.equal(read.answered, true, "the last answer, not a failed read");
+	assert.equal(read.info.hostCpus, 6);
+	assert.deepEqual(logsNow().filter((l) => l.event === "podman_info_stale").map((l) => [l.reason, l.ageMs]), [["timeout", 10 * 60_000]], "the boot's log, the boot's clock");
+});
+
+test("issue #596 (gate round 2): the boot's clock and log reach the job-user resolver, so a re-read past the age that fails serves the last answer and says so", { skip }, async () => {
+	const endpoint = { local: true, context: "default", endpoint: "unix:///run/pd-test/docker.sock", reason: null, transient: false };
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	let t = 1_000_000;
+	let fail = false;
+	const facts = DOCKER_FACTS();
+	const { deps, logsNow } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		now: () => t,
+		readDaemonFacts: async () => (fail ? { answered: false, reason: "timeout", transient: true } : { ...(await facts()), facts: { ...(await facts()).facts, hostCpus: 14 } }),
+		jobUserIdentity: { ...LINUX_ID(1001), stat: () => ({ uid: 0, gid: 2375 }) },
+		resolveDockerEndpoint: async () => endpoint,
+	});
+	assert.equal((await deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } })).hostCpus, 14);
+	fail = true;
+	t += 10 * 60_000;
+	const stale = await deps.jobUserPreflight(job, { capabilities: [] });
+	assert.equal(stale.hostCpus, 14, "the last answer, not an unavailable pickup");
+	assert.equal(stale.unavailable, undefined);
+	assert.deepEqual(logsNow().filter((l) => l.event === "job_user_facts_stale").map((l) => [l.reason, l.ageMs]), [["timeout", 10 * 60_000]], "the boot's log, the boot's clock");
 });

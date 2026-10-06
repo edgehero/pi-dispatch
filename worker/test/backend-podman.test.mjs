@@ -134,6 +134,52 @@ test("cachedPodmanInfo keeps the first ANSWERED read, shares one in flight, and 
 	assert.equal(mod.cachedPodmanInfo(cached), cached, "wrapping twice is the same reader");
 });
 
+test("issue #596 gate round 2: cachedPodmanInfo reads again past its age, so a raised or lowered CPU count is seen, and serves the kept answer while a re-read fails", { skip }, async () => {
+	let t = 5_000_000;
+	let reads = 0;
+	let next = answered({ hostCpus: 4 });
+	const said = [];
+	const cached = mod.cachedPodmanInfo(async () => (reads++, next), { now: () => t, maxAgeMs: 600_000, log: (event, fields) => said.push([event, fields]) });
+	assert.equal((await cached()).info.hostCpus, 4);
+	next = answered({ hostCpus: 12 });
+	t += 599_999;
+	assert.equal((await cached()).info.hostCpus, 4, "inside the age, the kept read");
+	assert.equal(reads, 1);
+	t += 1;
+	assert.equal((await cached()).info.hostCpus, 12, "at the age, read again: a raised count is seen");
+	assert.equal(reads, 2);
+	// Past the age again, and Podman does not answer: the kept answer is served, and said once per run of failures.
+	next = { answered: false, reason: "timeout", transient: true };
+	t += 600_000;
+	const stale = await cached();
+	assert.equal(stale.answered, true, "a failed re-read is not a failed pickup");
+	assert.equal(stale.info.hostCpus, 12);
+	assert.equal((await cached()).info.hostCpus, 12);
+	assert.equal(reads, 4, "every pickup past the age asks again");
+	assert.deepEqual(said, [["podman_info_stale", { reason: "timeout", ageMs: 600_000 }]], "logged once per run, with the read's reason");
+	assert.equal(cached.peek().info.hostCpus, 12, "peek is the kept answer");
+	// A read that throws is a failure too.
+	next = null;
+	const throwing = mod.cachedPodmanInfo(async () => {
+		reads++;
+		if (!next) throw new Error("boom");
+		return next;
+	}, { now: () => t, maxAgeMs: 10, log: (event, fields) => said.push([event, fields]) });
+	next = answered({ hostCpus: 6 });
+	await throwing();
+	next = null;
+	t += 10;
+	assert.equal((await throwing()).info.hostCpus, 6, "a throwing re-read serves the kept answer");
+	assert.deepEqual(said.at(-1), ["podman_info_stale", { reason: "spawn-failed", ageMs: 10 }]);
+	// Answering again ends the run: a lowered count is seen, and the next failure is said again.
+	next = answered({ hostCpus: 2 });
+	assert.equal((await throwing()).info.hostCpus, 2, "a lowered count is seen");
+	next = null;
+	t += 10;
+	await throwing();
+	assert.equal(said.length, 3, "a new run of failures is said again");
+});
+
 test("decidePodmanJobUser applies its rows IN ORDER (#354)", { skip }, () => {
 	const decide = (over) => mod.decidePodmanJobUser({ platform: "linux", euid: 1234, egid: 1234, read: answered(), ...over });
 	assert.deepEqual(decide({}), { mode: "worker", user: "1234:1234", relabel: true, cause: null, reason: null });

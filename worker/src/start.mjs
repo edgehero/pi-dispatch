@@ -830,7 +830,7 @@ export async function startWorker(
 	// default venue: rootless, userns-remap, a root worker and Docker Desktop on Linux cannot run any local job here.
 	// An unknown answer (a daemon still starting) boots, so a unit with RestartPreventExitStatus=2 is never stranded
 	// by one; so does `runtime-unreadable`, which a later job re-reads.
-	const resolveJobUser = makeJobUserResolver({ readFacts: readDaemonFactsFn, ...jobUserIdentity });
+	const resolveJobUser = makeJobUserResolver({ readFacts: readDaemonFactsFn, ...jobUserIdentity, now, log });
 	// Issue #345: a floor that needs a DAEMON observation waits the facts read's own bound (plus a margin), not the image
 	// read's 5 s: a busy host's `docker info` is the slow read, and a floor this boot met from the table before would
 	// otherwise exit 1 on every restart of a healthy daemon.
@@ -898,7 +898,7 @@ export async function startWorker(
 	// Wrapped once in `cachedPodmanInfo` and the SAME wrapper is handed to the bundle below, so an answer read here is the
 	// one the first job is decided from rather than a second spawn. Bounded twice: the reader's own timeout (docker info's
 	// 15 s, reused) and this fuse two seconds past it, because a spawn that never settles has no timeout to fire.
-	const podmanInfo = podmanBlessed ? cachedPodmanInfo(readPodmanInfoFn) : null;
+	const podmanInfo = podmanBlessed ? cachedPodmanInfo(readPodmanInfoFn, { now, log }) : null;
 	const bootPodmanRead = podmanInfo
 		? await settleWithin(
 				Promise.resolve()
@@ -1619,7 +1619,7 @@ export async function startWorker(
 		// name a host whose envelope differs; such a host refuses governed jobs as `envelope-mismatch`. `none` without one.
 		fpEnvelope: () => envelope.digest ?? NO_ENVELOPE_FINGERPRINT,
 		// Issue #596: the highest scoped-limits version this build reads, so doctor can name a worker that would keep its
-		// last good file (and run a project's jobs at the default size) once the file carries a size. An integer.
+		// last good file (so no size and no later edit to the file applies on it) once the file is version 3. An integer.
 		limitsVersion: SCOPED_LIMITS_VERSION,
 	});
 

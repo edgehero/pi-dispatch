@@ -2498,9 +2498,10 @@ export async function collectChecks(shellVars, seams) {
 		// "no projects" against healthy peers would send the operator to the wrong host.
 		const projectFactsHere = readProjectFacts(env, fileExists);
 		if (projectFactsHere.parseError === null) checks.push(...fleetProjectsChecks(projectsFingerprint(projectFactsHere.projects), peers));
-		// Issue #596: a peer that predates version 3 keeps its last good scoped-limits file once this one carries a size,
-		// and runs the sized project's jobs at the default size. SKIPPED when this host's file does not load.
-		if (scopedLimitFacts.parseError === null) checks.push(...fleetSizeChecks(scopedLimitsVersionFor(scopedLimitFacts.limits), peers));
+		// Issue #596: a peer that predates version 3 keeps its last good scoped-limits file once this one is version 3, so
+		// no edit to the file applies on it. Judged on the DECLARED version, or the derived one if that is higher (gate
+		// round 2). SKIPPED when this host's file does not load.
+		if (scopedLimitFacts.parseError === null) checks.push(...fleetSizeChecks(Math.max(Number(scopedLimitFacts.declaredVersion) || 0, scopedLimitsVersionFor(scopedLimitFacts.limits)), peers));
 		// Issue #504 part B: one applied split, judged on every host against its own envelope. A host whose envelope digest
 		// differs refuses every governed job as `envelope-mismatch`. SKIPPED when this host's file does not load, for the
 		// projects check's reason above.
@@ -4477,7 +4478,12 @@ function readScopedLimitFacts(env, fileExists) {
 		// guarded read was ever reached. `readFileSync` is synchronous, so no test timeout can interrupt it
 		// -- the failure mode is a job that never ends rather than one that goes red.
 		if (!statSync(path).isFile()) return { limits: [], parseError: `scoped-limits file is not a regular file: ${path}`, path };
-		return { limits: parseScopedLimits(readFileSync(path, "utf8"), path), parseError: null, path };
+		const text = readFileSync(path, "utf8");
+		const limits = parseScopedLimits(text, path);
+		// Issue #596, gate round 2: the version the file DECLARES, beside the rows. An older worker refuses by the declared
+		// number, so a hand-written `"version": 3` with no size field is as unreadable to it as one with a size. The parse
+		// above already accepted this text, so this one cannot throw.
+		return { limits, declaredVersion: JSON.parse(text).version, parseError: null, path };
 	} catch (e) {
 		return { limits: [], parseError: e?.message ?? String(e), path };
 	}
@@ -4855,10 +4861,11 @@ export async function fleetDollarChecks(mine, peers, { dollarKeysExist = async (
  * can know.
  */
 /**
- * The fleet's job sizes (issue #596): WARNS when this host's scoped-limits file needs version 3 (a row carries a size)
- * and a peer publishes no `limitsVersion` of 3 or more. Such a worker refuses the file only when it LOADS it, at boot; a
- * running one keeps its last good file on reload (`scoped_limits_reload_invalid`) and runs the project's jobs at the
- * default size, with nothing on the job saying so. Nothing is said while no row carries a size.
+ * The fleet's job sizes (issue #596): WARNS when this host's scoped-limits file is version 3 (it declares 3, or a row
+ * carries a size) and a peer publishes no `limitsVersion` of 3 or more. Such a worker refuses the file only when it
+ * LOADS it, at boot; a running one keeps its LAST GOOD file on reload (`scoped_limits_reload_invalid`), so the size and
+ * every later edit to the file (job counts, `concurrent`, dollar caps) do not apply on it until it is upgraded and
+ * restarted, with nothing on its jobs saying so. Nothing is said while the file is version 1 or 2.
  */
 export function fleetSizeChecks(fileVersion, peers) {
 	if (fileVersion < 3) return [];
@@ -4867,8 +4874,8 @@ export function fleetSizeChecks(fileVersion, peers) {
 	return [{
 		ok: false,
 		warn: true,
-		label: `${old.map((h) => h.name).join(", ")} ${old.length === 1 ? "predates" : "predate"} job sizes (scoped-limits version 3), while this host's file carries one: a running worker from before keeps its last good file and runs the project's jobs at the default size, and refuses the file at its next start`,
-		fix: "upgrade and restart every worker on this Valkey before a size is written into scoped-limits.json",
+		label: `${old.map((h) => h.name).join(", ")} ${old.length === 1 ? "predates" : "predate"} job sizes (scoped-limits version 3), while this host's file is version 3: a running worker from before keeps its last good file, so neither the size nor any later edit to the file (job counts, concurrent, dollar caps) applies on it until it is upgraded and restarted, and it refuses the file at its next start`,
+		fix: "upgrade and restart every worker on this Valkey before scoped-limits.json is written as version 3",
 	}];
 }
 

@@ -149,7 +149,8 @@ ones adapters get wrong:
   project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` ([job sizes](scoped-limits.md#job-sizes-version-3)). Where
   Docker reports `SwapLimit` or `CPUShares` false, it drops that flag: doctor warns, and the worker logs
   `size_bound_unenforced` for each job. Where the runtime gives no CPU count, jobs run with no `--cpus` and doctor
-  warns.
+  warns. On Docker Desktop, after you give the VM fewer CPUs the first job loses one attempt (refunded and retried)
+  and the worker logs `cpu_ceiling_stale`; the next pickup reads the new count.
 - **`local`'s `nonRoot` and `localFolders` depend on which uid the job runs as** (issue #341). On macOS, Windows
   and Docker Desktop the image's own `USER` runs. On a daemon that enforces bind-mount ownership (native Linux
   Docker, rootful Podman) the worker runs the job as its own uid with `--user` and `HOME=/home/pi`, because
