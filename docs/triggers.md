@@ -249,12 +249,16 @@ Any trigger type can name the model its jobs run on, and how many turns a job ma
 
 - `"provider"` is a pi provider id, such as `anthropic` or `openai`. Since pi 1.0.3 the Azure OpenAI
   provider is `azure`, no longer `azure-openai-responses`. Rename it everywhere it appears: here, in
-  `"models"` lists and `PI_ALLOWED_MODELS` (`azure/gpt-5.4`), in `PI_PROVIDER`, and in the overlay
-  `models.json`. A job on the old id is refused before it spends, and the refusal names `azure`. An
-  allowed-models entry on the old id matches nothing. A thread job that resumes an older session is safe:
+  `"models"` lists and `PI_ALLOWED_MODELS` (`azure/gpt-5.4`), in `PI_PROVIDER`, in `model:` rows of your
+  scoped limits, in `provider` in `subscriptions.json`, and in the overlay `models.json`. A job on the old id
+  is refused before it spends, and the refusal names `azure`. An allowed-models entry on the old id matches
+  nothing, and a `model:` row on the old id caps nothing. If the worker takes the Azure key from the host's pi
+  login, rename the `azure-openai-responses` key in that `auth.json` to `azure`, or log in again; otherwise the
+  job is refused as `provider-unconfigured`. A thread job that resumes an older session is safe:
   a session written by another pi version is never resumed, the job starts fresh.
 - A pi bump can also remove models from pi's catalog. A trigger, an allowed-models entry or `PI_MODEL` that
   names a model the new pi does not have is refused before it spends (`model-unknown`), and `doctor` names it.
+  A `model:` row in your scoped limits that names such a model caps nothing.
   pi 1.0.3 removed these ids (besides the Azure rename):
   - `cloudflare-ai-gateway`: `claude-fable-5.1`, `claude-haiku-4.5`, `claude-opus-4.5`, `claude-opus-4.6`,
     `claude-opus-4.7`, `claude-opus-4.8`, `claude-opus-5.5`, `claude-sonnet-4.5` and `claude-sonnet-4.6`. Each
