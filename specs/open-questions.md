@@ -635,7 +635,10 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
     project's `.pi/extensions` (only when the project is trusted, for example `-a`), then the agent dir's, and
     pi's built-ins (tools `codemode` and `tool_search`, commands `llama` and `mcp`), none of which the runner
     loads. `-ne` drops discovery and the built-ins and keeps every `-e`. **Decided: no `-ne`.** The meter loads
-    first without it, and `-ne` would take away the discovery a subagent package may rely on.
+    first without it, and `-ne` would take away the discovery a subagent package may rely on. pi 1.0.4 adds
+    `--no-mcp`: the loader's final set then drops `builtin:mcp`, and only paths with the `builtin:` prefix, so
+    every `-e` file path stays (re-checked in the 1.0.4 tarball, `core/resource-loader.js`, and run against the
+    bundle with `-ne --no-mcp`).
   - **M7, subcommands.** pi dispatches eight subcommands on `args[0]` (`auth`, `config`, `install`, `list`,
     `mcp`, `remove`, `uninstall`, `update`). Three were run (`auth check`, `list`, `mcp list`): each ran as itself
     with no injection, and with `-e` forced in front each became a chat turn on the default model ("No API key
@@ -1929,3 +1932,4 @@ adversarial passes did.
 | 2026-10-03 | Issue #500, part F, PR #570's review. **`OQ-011` AMENDED**, its What stays an accepted risk bullet, worded as the DES residuals are: a pi CLI child whose spawner scrubs the environment and leaves no marker in its command line, a library-mode child whose spawner clears `NODE_OPTIONS` (clearing that alone hides it), and a meterless child that ends before either `starting` grace and before teardown. **`OQ-012` AMENDED, wording only**: its comparison to `OQ-011`'s child-process sampler (gone with issue #500) is marked as such, and its related-risk note says a `pi` subprocess is metered since issue #500 with a residual. |
 | 2026-10-05 | Issue #587 (pi 1.0.3). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.0.3 tarball (option set, `excludeTools`, the eight tools, the silent ignore, and a resumed transcript's pending tools filtered by the exclusion); the checklist gains the sibling-package overrides and lockfile check, the lookup by identity instead of a nested path, the content hashes that replace version literals, and the two new needles (sampling fields, Azure deployment callers). **`OQ-018` AMENDED**: the host-pi canary is its own job, `host-pi mirrors survive latest pi (canary)`, not part of the admin canary's, and it is not required; re-checked at 1.0.3, every needle holds. Still ACCEPTED RISK. |
 | 2026-10-05 | Issue #587 (every new pi release as a draft pull request). **`OQ-005`**: the Action on bump is now the review checklist in the body of every pull request the pi bump workflow opens. Status UNCHANGED (closed). |
+| 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`OQ-011` AMENDED** in M6: pi 1.0.4's `--no-mcp` drops only `builtin:mcp` from what a child loads, so every `-e` path, the meter's included, stays. Re-checked in the 1.0.4 tarball and run against the bundle. The row's decision (no `-ne`) is UNCHANGED, checked. |

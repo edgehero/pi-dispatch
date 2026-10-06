@@ -175,6 +175,13 @@ test("-ne keeps the injected meter: the child is metered (issue #500)", { skip }
 	assertMetered(w.ledger);
 });
 
+test("-ne --no-mcp keeps the injected meter: pi 1.0.4's built-in filter drops only builtin paths (issue #500)", { skip }, async () => {
+	const w = world();
+	const result = await run([entry("dist/bundle/cli.js"), ...printArgs(w, "-ne", "--no-mcp"), "hello"], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assertMetered(w.ledger);
+});
+
 test("a message after `--` stays a message and the child is metered: the meter goes in front, never at the end (issue #500)", { skip }, async () => {
 	const w = world();
 	const result = await run([entry("dist/bundle/cli.js"), ...printArgs(w), "--", "hello"], { env: w.env, cwd: w.root });

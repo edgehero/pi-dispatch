@@ -1862,8 +1862,13 @@ test("-ne keeps explicit -e paths, \"--\" ends option parsing, and the subcomman
 	assert.deepEqual(parsed.extensions, ["first.mjs"]);
 	assert.deepEqual(parsed.messages, ["-e", "second.mjs"]);
 	// -ne drops discovery and the built-ins but keeps the explicit -e paths, in both places the loader builds the set.
+	// Since 1.0.4 the final set also drops each `builtin:<name>` path that --no-mcp disables, and only those: a path
+	// that does not start with the builtin prefix passes the filter, so the injected meter (a file path) survives
+	// -ne and --no-mcp alike. child-meter.integration.test.mjs runs both flags against the real CLI.
 	const loader = agentDistFile("core", "resource-loader.js");
-	assert.match(loader, /const extensionPaths = this\.noExtensions\n\s*\? cliEnabledExtensions\n\s*: this\.mergePaths\(cliEnabledExtensions, enabledExtensions\);/, "-ne no longer keeps the explicit -e paths (final set)");
+	assert.match(loader, /const extensionPaths = \(this\.noExtensions \? cliEnabledExtensions : this\.mergePaths\(cliEnabledExtensions, enabledExtensions\)\)\.filter\(\(path\) => !path\.startsWith\(BUILTIN_PATH_PREFIX\) \|\|\n\s*!this\.disabledBuiltinExtensions\.has\(path\.slice\(BUILTIN_PATH_PREFIX\.length\)\)\);/, "-ne no longer keeps the explicit -e paths (final set)");
+	assert.match(agentDistFile("core", "source-info.js"), /\nexport const BUILTIN_PATH_PREFIX = "builtin:";\n/, "the builtin path prefix moved: re-check that no -e file path can carry it");
+	assert.match(agentDistFile("main.js"), /\n {16}disabledBuiltinExtensions: parsed\.noMcp \? \["mcp"\] : undefined,\n/, "the CLI now disables other built-ins: re-check which paths the final set drops");
 	assert.match(loader, /const extensionPaths = \(this\.noExtensions \? cliEnabledExtensions : this\.mergePaths\(cliEnabledExtensions, enabledExtensions\)\)\.filter\(/, "-ne no longer keeps the explicit -e paths (current set)");
 	assert.match(agentDistFile("cli", "args.js"), /--no-extensions, -ne {11}Disable extension discovery and built-in extensions \(explicit -e paths still work\)/);
 	// The subcommands main() dispatches on args[0] before it parses any option. An injected -e in front of one turns it
