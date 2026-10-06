@@ -134,7 +134,7 @@ export function writeAllSync(fd, text, { write = writeSync, sleep = (ms) => Atom
  * exit code and the last line still agree. Before this the runner had no handler, so a `docker stop` killed it
  * mid-run and no genuine line followed whatever a tool had written.
  */
-export function createExitWriter({ key = null, jobId, write, exit }) {
+export function createExitWriter({ key = null, jobId, write, exit, resources = () => null }) {
 	let written = false;
 	// The code the process exits with once the line is out: the line's own, or 1 (the runner's catch-path default,
 	// `outcome.code ?? EXIT_INFRA`) for a line that named none.
@@ -143,7 +143,17 @@ export function createExitWriter({ key = null, jobId, write, exit }) {
 		if (written) return false;
 		written = true;
 		if (Number.isSafeInteger(fields?.code)) writtenCode = fields.code;
-		const body = JSON.stringify({ event: "exit", jobId, ...fields });
+		// Issue #596: what the container used, read HERE, by the one writer every path goes through (the decided line, the
+		// catch path and SIGTERM), and at the last moment before the line exists, so the peak and the CPU time cover
+		// everything the job did before it. Last of the fields (before the signature), and omitted when nothing could be
+		// read, so a line with nothing to say stays byte-identical to what every older worker already parses.
+		let used = null;
+		try {
+			used = resources();
+		} catch {
+			used = null;
+		}
+		const body = JSON.stringify({ event: "exit", jobId, ...fields, ...(used !== null && typeof used === "object" ? { resources: used } : {}) });
 		write(`\n${key ? signExitLine(body, key) : body}\n`);
 		return true;
 	}

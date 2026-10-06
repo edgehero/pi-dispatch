@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { test } from "node:test";
+import { RESOURCE_KEYS } from "../src/cgroup-usage.mjs";
 import { pathToFileURL } from "node:url";
 import {
 	assertPoliciesEnforceable,
@@ -416,7 +417,10 @@ test("the worst-case exit line fits the worker's 8 KiB recovery tail with headro
 		tokens: meter.snapshot(),
 		usage: ledger,
 		session: { resumed: false, reason: "absent" },
+		// Issue #596: the cgroup block, every key at the largest safe integer, the most it can serialise to.
+		resources: Object.fromEntries(RESOURCE_KEYS.map((key) => [key, Number.MAX_SAFE_INTEGER])),
 	});
+	assert.ok(line.includes('"resources":{"memPeak":9007199254740991,'), "the worst case must carry the block");
 	assert.ok(line.length < 5000, `the worst-case exit line must leave tail headroom; got ${line.length} chars`);
 });
 

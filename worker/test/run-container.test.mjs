@@ -926,3 +926,34 @@ test("exitAuth on a podman venue: the same key, -i on the podman argv", { skip }
 	assert.ok(rec.args.includes("--userns=keep-id"));
 	assert.equal(rec.stdin, `${MINTED}\n`);
 });
+
+// ---- issue #596: what the container used, and the supervisor's out-of-memory report ----
+
+const USED = { memPeak: 123, oomKills: 1, memSomeUsec: 0, memFullUsec: 0, cpuUsec: 9, throttledUsec: 0, throttled: 0, pidsPeak: 5 };
+
+test("resources and the OOM report reach the result from a verified sink, and nothing reaches it from an unverified one", { skip }, async () => {
+	const verified = { turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: 137, resources: USED, exitOomKilled: true, exitAuth: "verified" };
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin({}, 137), mintExitKey: () => MINTED, openJobLog: () => ({ write() {}, close: async () => verified }) });
+	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+	assert.deepEqual(result.resources, USED);
+	assert.equal(result.exitOomKilled, true);
+	assert.equal(result.code, 137);
+	for (const closed of [{ ...verified, exitAuth: "unverified" }, { ...verified, exitAuth: undefined }]) {
+		const rc = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin({}, 137), mintExitKey: () => MINTED, openJobLog: () => ({ write() {}, close: async () => closed }) });
+		const r = await rc({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+		assert.equal(Object.hasOwn(r, "resources"), false, "an unverified line's block is a tool's");
+		assert.equal(Object.hasOwn(r, "exitOomKilled"), false, "and so is its OOM report");
+	}
+});
+
+test("resources reach the result off a real disabled sink, and an exit line without them leaves the result unchanged", { skip }, async () => {
+	const { makeLogSink } = await import("../src/run-history.mjs");
+	const fs = { mkdirSync() {}, createWriteStream: () => null };
+	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId: "j1", code: 0, ...fields })}\n`;
+	for (const [chunk, want] of [[line({ resources: USED }), USED], [line({}), undefined]]) {
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, onOutput: () => {}, openJobLog: makeLogSink({ logsDir: "/logs", enabled: false, fs }), spawnFn: fakeSpawnWithData({}, { chunks: [Buffer.from(chunk)], exitCode: 0 }) });
+		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+		assert.deepEqual(result.resources, want, chunk);
+		assert.equal(Object.hasOwn(result, "resources"), want !== undefined);
+	}
+});

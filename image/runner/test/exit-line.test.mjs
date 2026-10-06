@@ -104,6 +104,48 @@ test("terminate writes a terminated line with the caller's counts and exits 143;
 	assert.deepEqual(exits2, [0], "the process exits with the code its line said, so the container's code and the line agree");
 });
 
+test("the writer reads `resources` at write time, last of the fields and signed, and omits it when nothing was read (issue #596)", () => {
+	const order = [];
+	const used = { memPeak: 5, oomKills: 0, memSomeUsec: null, memFullUsec: null, cpuUsec: 9, throttledUsec: 0, throttled: 0, pidsPeak: 3 };
+	const out = [];
+	const writer = createExitWriter({
+		key: KEY,
+		jobId: "j",
+		write: (s) => {
+			order.push("write");
+			out.push(s);
+		},
+		exit: () => {},
+		resources: () => {
+			order.push("read");
+			return used;
+		},
+	});
+	assert.deepEqual(order, [], "not read when the writer is made: a peak read early would miss what the job did after");
+	writer.writeExit({ code: 0, reason: "completed", turns: 1 });
+	assert.deepEqual(order, ["read", "write"], "read once, just before the line is written");
+	const body = authenticExitLines(out[0], KEY);
+	assert.notEqual(body, "", "the block is inside the signed bytes");
+	assert.deepEqual(Object.keys(JSON.parse(body)), ["event", "jobId", "code", "reason", "turns", "resources"], "last of the fields");
+	assert.deepEqual(JSON.parse(body).resources, used);
+	// The SIGTERM path goes through the same writer, so it carries the block too.
+	const term = [];
+	createExitWriter({ key: KEY, jobId: "j", write: (s) => term.push(s), exit: () => {}, resources: () => used }).terminate({ turns: 2 });
+	assert.deepEqual(JSON.parse(authenticExitLines(term.join(""), KEY)).resources, used);
+	// Nothing read, or a reader that throws: no key at all, so the line is byte-identical to one from before the field.
+	for (const resources of [() => null, () => undefined, () => 7, () => { throw new Error("boom"); }]) {
+		const plain = [];
+		createExitWriter({ key: null, jobId: "j", write: (s) => plain.push(s), exit: () => {}, resources }).writeExit({ code: 0 });
+		assert.equal(plain[0], `\n${JSON.stringify({ event: "exit", jobId: "j", code: 0 })}\n`);
+	}
+});
+
+test("run-job.mjs hands the writer the cgroup reader, so every exit-line path carries `resources` (issue #596)", () => {
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /\n\t\tresources: \(\) => readCgroupUsage\(\),\n\t\}\);/);
+	assert.match(src, /import \{ readCgroupUsage \} from "\.\/src\/cgroup-usage\.mjs";/);
+});
+
 test("run-job.mjs reads the key and installs the SIGTERM handler before main, and writes every exit line through the writer", () => {
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	const handler = src.indexOf('process.on("SIGTERM", () => {');
@@ -121,7 +163,9 @@ test("run-job.mjs reads the key and installs the SIGTERM handler before main, an
 test("image entrypoint runs the runner under the exec-only node the Dockerfile installs (issue #545)", () => {
 	const entrypoint = readFileSync(new URL("../../entrypoint.sh", import.meta.url), "utf8");
 	const dockerfile = readFileSync(new URL("../../Dockerfile", import.meta.url), "utf8");
-	assert.match(entrypoint, /\nexec \/opt\/pi-dispatch\/runner-node \/app\/image\/runner\/run-job\.mjs\n/);
+	// Issue #596: the entrypoint starts the supervisor, which holds the key too, under the same exec-only node, and it
+	// starts the runner under that node in turn (supervise.mjs RUNNER_NODE and RUNNER_SCRIPT, pinned in supervise.test.mjs).
+	assert.match(entrypoint, /\nexec \/opt\/pi-dispatch\/runner-node \/app\/image\/runner\/supervise\.mjs\n/);
 	assert.match(dockerfile, /\nRUN install -o root -g root -m 0711 \/usr\/local\/bin\/node \/opt\/pi-dispatch\/runner-node\n/);
 	assert.ok(dockerfile.indexOf("runner-node") < dockerfile.indexOf("chmod -R a-w /opt/pi-dispatch"), "installed before /opt/pi-dispatch is made read-only");
 });

@@ -259,7 +259,9 @@ Each transfer carries:
 
 The runner's integer must reach the processor unmodified: `0` completed, `1` infra (retried), `2` policy
 (never retried). The **abort flag is separate and load-bearing**: a worker SIGKILL and a kernel OOM both
-surface as `137`, so the code alone cannot say which happened. Report `aborted` independently.
+surface as `137`, so the code alone cannot say which happened. Report `aborted` independently. A kernel OOM is
+told apart from other kills by the job image's own signed exit line (issue #596), not by the runtime, so a
+backend needs nothing more for it: pass the container's stdout through as it is.
 
 `neverStartedExits` is your runtime's set for "the runner never ran" (Docker's is 125/126/127). Those refund
 the budget slot. If your runtime has no such codes, declare `[]` and normalise to that outcome yourself. If your

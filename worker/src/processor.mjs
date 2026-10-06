@@ -93,6 +93,11 @@ export const OBSERVATION_COMMENT_UNNAMED = "the venue this job runs on did not c
 // status comment lives (the prompt contract instructs it, including for "I cannot fix this"), and exit 2
 // by construction means the agent was cut off before that step.
 // EXPORTED only so a test can hold every RUNNER_POLICY_REASONS member to a row here (issue #437 review).
+/** Issue #596: the reason a job killed for memory records, when the runtime confirmed it (oom-watch.mjs). */
+export const OOM_KILLED = "oom-killed";
+/** The exit code of a container whose main process was SIGKILLed: a worker's stop or the kernel's OOM killer. */
+const EXIT_SIGKILL = 137;
+
 export const TERMINAL_COMMENTS = {
 	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
@@ -106,6 +111,9 @@ export const TERMINAL_COMMENTS = {
 	"model-not-allowed": "Stopped: the run tried to call an AI model this trigger does not allow, or to change an AI request in a way it does not allow, so the call was not made. Partial work may exist. Not retried.",
 	"cost-cap-unenforceable": "Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 	"model-policy-unenforceable": "Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
+	// Issue #596. Never the size or the project: both are operator configuration, and the reader may be an issue author
+	// who can act on neither. The worker log and the run record carry them.
+	[OOM_KILLED]: "Stopped: the job's container ran out of memory and was stopped. Partial work may exist. Not retried, because the same size would stop the same way. The operator can raise this job's memory size.",
 };
 
 // Issue #502: the `model-unknown` refusal's comment. Names no model: the reader may be an issue author.
@@ -302,6 +310,7 @@ export async function runJob(job, deps) {
 		prepareWorkspace, // (job, token) => { workspaceDir, jobDir }  (clone+materialise+prompt)
 		// runContainer({ job, token, prepared, secrets, name, signal, user, home, modelEndpoints? }) => { code, aborted, abortReason, turns, tokens, session, usage, context, exitReason }.
 		// `exitReason` (issue #437) is parseExitReason's closed-set label, read only inside the exit-2 branch.
+		// `resources` and `exitOomKilled` (issue #596) are the exit line's cgroup block and the supervisor's OOM report.
 		// `user`/`home` are the job-user gate's answer (issue #341), null for the image's own USER.
 		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
 		// `signal`: stop the container on abort, and reject/exit promptly if `signal.aborted` is already
@@ -412,6 +421,8 @@ export async function runJob(job, deps) {
 	// the record says about it (INT-RUN-HISTORY-FILE-CONTRACT), null until the reservation step ran.
 	let dollarHold = null;
 	let dollars = null;
+	// Issue #596: what the container used (`resources` off its exit line), null until a container ran and reported it.
+	let resources = null;
 
 	try {
 		// The one-shot pre-spend check (issue #231), FIRST on the ladder: one file read, cheaper than
@@ -1270,12 +1281,22 @@ export async function runJob(job, deps) {
 		// then only a signed line is read (run-container.mjs, run-history.mjs `authenticExitLines`). An image that does not
 		// declare it is read as before, under the #542 trust rule below alone.
 		const exitAuth = (img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY);
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, resources: ranResources = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}) });
 		containerRan = true;
+		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
+		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
+		resources = ranResources ?? null;
+		// Issue #596: CONFIRMED killed for memory. The image's supervisor (image/runner/supervise.mjs) outlives the runner,
+		// whose process tree it gives the highest OOM score, and when the runner dies of SIGKILL with the cgroup's
+		// `oom_kill` above 0 it writes the signed line `code: 137, reason: "oom-killed"` (parseExitOomKilled). All three
+		// facts must agree: that line, verified under this run's key (an unsigned line is a tool's), and the container's
+		// own exit 137. Docker's `oom` event is not used: it fires also when only a child was killed and the job went on
+		// to exit 0, and Podman has no such event at all (both measured in the issue #596 lab).
+		const oomKilled = exitOomKilled === true && exitAuthResult === "verified" && code === EXIT_SIGKILL;
 		// `exitAuth: "unverified"` is a run whose image signs its exit line and no signed line was found: the runner died
 		// before writing one, or a line was forged or taken off the pipe. Its tokens read as unknown and its dollars settle
 		// at the floor, the same as a container that wrote no exit line at all.
-		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}), ...(exitAuthResult !== null ? { exitAuth: exitAuthResult } : {}) });
+		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}), ...(exitAuthResult !== null ? { exitAuth: exitAuthResult } : {}), ...(oomKilled ? { oomKilled: true } : {}) });
 
 		// Record token spend post-run (the check-AFTER half of the lagging token cap). The container ran,
 		// so it spent real tokens on EVERY path that reaches here -- abort, completed, policy, AND the infra
@@ -1334,14 +1355,15 @@ export async function runJob(job, deps) {
 		// mid-job). It DID start, so this is never refunded as never-started: it keeps its slot and retries as infrastructure,
 		// BEFORE the exit-code switch, where the same code would read as a free never-started exit.
 		if (detached === true) {
-			throw new InfraRetry(`the container outlived its docker run, exit ${code}`, { reason: "container-detached", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars });
+			throw new InfraRetry(`the container outlived its docker run, exit ${code}`, { reason: "container-detached", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources });
 		}
 
 		// A WORKER-initiated stop (30-min timeout via cancelJob, graceful-shutdown docker stop, or an
 		// operator's cancel, issue #287) kills the container -> exit 143/137. That is our decision, not an
 		// infra fault: it is POLICY and must NOT retry, or a wedged job re-runs into a second PR / double
 		// spend. Keyed on the abort FLAG, not the code -- an unbidden 137 (kernel OOM) carries
-		// `aborted: false`, falls to the switch, and stays infra-retryable.
+		// `aborted: false`, and falls to the OOM branch below when the runtime confirmed it, else to the switch, where it
+		// stays infra-retryable (issue #596).
 		// WHO aborted is an exact-match on `abortReason` (the wiring maps it off `signal.reason`), and the
 		// match is deliberately closed: "job-timeout-30m", "shutdown", undefined and any future garbage all
 		// classify as worker-abort, so a pin bump that changes what rides the signal can widen nothing.
@@ -1352,7 +1374,22 @@ export async function runJob(job, deps) {
 			// Awaited bare like every determinate refusal above: the adapter never throws by contract, and
 			// the one swallowed comment in this file (the catch's) justifies itself by its position.
 			await comment(job, TERMINAL_COMMENTS[reason]);
-			return { outcome: "policy", reason, exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}) };
+			return { outcome: "policy", reason, exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}) };
+		}
+
+		// Issue #596: a runner the kernel killed for memory, CONFIRMED (`oomKilled` above). After the abort branch, so a
+		// worker's own stop is never relabelled, and before the switch, where the same 137 is an unknown exit and retries.
+		// The same size would be killed the same way on every retry, so it is POLICY: returned, never retried, its slot
+		// kept and its dollars settled above like any other paid stop. An UNCONFIRMED 137 (an image without the supervisor,
+		// an unsigned line, a SIGKILL with no OOM kill in the cgroup) falls through and retries, exactly as before.
+		//
+		// When only a CHILD was killed, the runner survives and ends on its own code, so this branch is not taken: the
+		// outcome is the runner's, and `resources.oomKills` in the record says a process was killed for memory.
+		if (oomKilled) {
+			// The project and the size go to the log and the record, never to the comment (the TERMINAL_COMMENTS rule).
+			log("oom_killed", { jobId: job.id ?? null });
+			await comment(job, TERMINAL_COMMENTS[OOM_KILLED]);
+			return { outcome: "policy", reason: OOM_KILLED, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}) };
 		}
 
 		switch (code) {
@@ -1394,6 +1431,7 @@ export async function runJob(job, deps) {
 					// Only when the collector returned a plan (a file, or a confirmed portfolio job with none, `plan-absent`): the
 					// record's `plan` is null otherwise, and every other result is unchanged.
 					...(plan ? { plan } : {}),
+					...(resources ? { resources } : {}),
 				};
 			}
 			case EXIT_POLICY: {
@@ -1420,7 +1458,7 @@ export async function runJob(job, deps) {
 				// `why`. parseExitWhy keeps only a member of the closed COST_CAP_WHYS off a `cost-cap` line that said code 2,
 				// and it rides only beside a `cost-cap` reason, so a forged line can at worst name the wrong rule of three.
 				const why = reason === "cost-cap" && COST_CAP_WHYS.includes(exitWhy) ? { why: exitWhy } : {};
-				return { outcome: "policy", reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...why };
+				return { outcome: "policy", reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...why, ...(resources ? { resources } : {}) };
 			}
 			case EXIT_INFRA:
 				// NO comment on any infra throw, here or in the catch: an InfraRetry may be retried and
@@ -1428,7 +1466,7 @@ export async function runJob(job, deps) {
 				// the whole infra class lives at the terminal seam -- start.mjs's failed listener, guarded on
 				// BullMQ's own finishedOn -- which also catches the stall-kill and wait-gate paths this
 				// function never sees (issue #288).
-				throw new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars });
+				throw new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources });
 			default:
 				// THE RUNTIME NEVER HANDED CONTROL TO THE RUNNER, in whatever integers this venue spells that
 				// (issue #227). For docker it is 125 (`docker run` itself failed), 126 (the entrypoint exists
@@ -1444,9 +1482,9 @@ export async function runJob(job, deps) {
 				// and normalises to this outcome itself.
 				if (neverStarted) {
 					// No `dollars` here: the hold is still standing, and the catch refunds it whole with the job-count slots.
-					throw new InfraRetry(`the runtime could not start the container, exit ${code}`, { reason: "container-never-started", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
+					throw new InfraRetry(`the runtime could not start the container, exit ${code}`, { reason: "container-never-started", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), resources });
 				}
-				throw new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars });
+				throw new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources });
 		}
 	} catch (e) {
 		// A CONFIG-tagged throw is a determinate policy refusal wearing an exception, and issue #310 is the
@@ -1625,7 +1663,7 @@ function isNeverStartedRetry(e) {
 }
 
 export class InfraRetry extends Error {
-	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved, dollars } = {}) {
+	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved, dollars, resources } = {}) {
 		super(message, cause ? { cause } : undefined);
 		this.name = "InfraRetry";
 		this.piDispatchRetry = true;
@@ -1647,6 +1685,8 @@ export class InfraRetry extends Error {
 		// Issue #501: the dollar reservation's outcome (`dollarsRecord`), or null when no dollar window applied. Set by
 		// the processor on a throw after the reservation, so a retried attempt's record says what its window was charged.
 		this.dollars = dollars ?? null;
+		// Issue #596: what the container used, off its exit line, or null; set on a throw after a container ran.
+		this.resources = resources ?? null;
 	}
 }
 

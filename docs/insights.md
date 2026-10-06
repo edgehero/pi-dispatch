@@ -115,6 +115,27 @@ seeded band, marked as such, never a confident number; an unknown model answers 
 ids instead of an estimate. The output is an argument for an edit, not an edit: the lever stays the
 trigger's own `model`/`provider` fields or the `/dispatch set` knobs.
 
+## What each run records about resources
+
+Every run record carries `resources`: what the job's container used, read from its own cgroup just before the
+runner's last line (issue #596). It is not drawn on this page yet; it is in each `<logsDir>/<jobId>.json`.
+
+| Field | What it is |
+|---|---|
+| `memPeak` | the most memory the container held at once, in bytes (page cache included) |
+| `oomKills` | processes the kernel killed for memory |
+| `memSomeUsec`, `memFullUsec` | microseconds some or all of its tasks waited on memory |
+| `cpuUsec` | CPU time used, in microseconds |
+| `throttledUsec`, `throttled` | time and periods the CPU limit held it back |
+| `pidsPeak` | the most processes at once |
+
+- Each field is a whole number, or null when the venue did not expose it. The whole block is null for a run on an
+  older job image, or one that died before its last line.
+- A job whose container ran out of memory ends `oom-killed`, outcome `policy`, and is not retried. A job where only a
+  child process was killed keeps its own outcome, and `oomKills` above 0 shows it.
+- Every job still runs at 4 GB and 2 CPUs. These numbers are for choosing sizes later, not limits.
+- Disk I/O, disk space and network are not measured or isolated.
+
 ## Honest limits
 
 - The page is a snapshot: it re-renders when you re-run the command, not by itself. The auto-reload

@@ -8,7 +8,7 @@ import { valkeyClientContext } from "./valkey-endpoint.mjs";
 import { authRefusalFor, makeRedisClient, onValkeyError, parseConnection, valkeyAuthState, valkeyPasswordFor } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
-import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
+import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OOM_KILLED } from "./processor.mjs";
 import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { githubFailureFields } from "./octokit-log.mjs";
@@ -1897,7 +1897,8 @@ export async function startWorker(
 	// each already comments -- a delivery storm against a spent cap must not page anyone), and
 	// `operator-cancel`, because the operator initiated it and a push telling them what they just did is
 	// noise with a pager attached.
-	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy", ...RUNNER_POLICY_REASONS]);
+	// `oom-killed` (issue #596) is a paid terminal the operator alone can fix (a job's memory size), so it pages too.
+	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy", OOM_KILLED, ...RUNNER_POLICY_REASONS]);
 	// One predicate for the completed listener and the lost-lock path below, so a record replays exactly the page its
 	// result would have sent.
 	const pagesAsPolicy = (result) => Boolean(onFailure) && result?.outcome === "policy" && HOOK_POLICY_REASONS.has(result.reason) && result.budgetReserved !== false;

@@ -30,6 +30,7 @@ import {
 	loadRetryPredicate,
 } from "./src/outcome.mjs";
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
+import { readCgroupUsage } from "./src/cgroup-usage.mjs";
 import { createExitWriter, readExitKey, writeAllSync } from "./src/exit-line.mjs";
 import { createJobModelRuntime, loadPiAuthStorage } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
@@ -608,6 +609,8 @@ if (!nestedRunner) {
 		// Synchronously, every byte, to fd 1 (writeAllSync): the SIGTERM path exits the moment the line is written.
 		write: (line) => writeAllSync(1, line),
 		exit: (code) => process.exit(code),
+		// Issue #596: this container's cgroup counters, read by the writer just before each line (cgroup-usage.mjs).
+		resources: () => readCgroupUsage(),
 	});
 	// SIGTERM is the worker's stop (the job timeout, an operator's cancel, a shutdown): `docker stop` delivers it to the
 	// init process, which forwards it here. Without a handler node died at once and no genuine exit line followed, so a

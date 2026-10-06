@@ -23,6 +23,7 @@ failure comment exists on the issue", REQ-JOB-STATUS-COMMENTS):
 | a per-job cost limit or an allowed-model list stopped the next AI call (exit 2, reasons `cost-cap` and `model-not-allowed`; `cost-cap` is live on a job image that declares `costCap`, `model-not-allowed` on one that declares `modelPolicy`. The worker also uses `model-not-allowed` for a job it refuses before starting, when the model it would run on is not on the job's list; that refusal posts its own comment, spends nothing and pages nobody. A runner stop whose record has `modelRefused: 0` means the runner could no longer judge calls (its provider registry was replaced mid-run), not that a listed call was refused) | `Stopped: the next AI call could have taken this run past its cost limit ...` or `Stopped: the run tried to call an AI model this trigger does not allow, or to change an AI request in a way it does not allow ...`, each ending `Not retried.` |
 | the job image could not enforce a cost limit or an allowed-model list before each AI call, so it refused before calling the provider (exit 2, reasons `cost-cap-unenforceable` and `model-policy-unenforceable`) | `Stopped: this run has a cost limit, and the job image could not enforce it ...` or `Stopped: this run is limited to certain AI models, and the job image could not enforce that ...`, each ending `The operator needs to update the job image. Not retried.` |
 | the worker refused a job before starting because the deployment's overlay `models.json` cannot be used (reason `model-unknown`, with a `why` starting `overlay-` in the worker log and the run record: a file pi would drop, a folder, a file the worker cannot read, a link, a named pipe or device, or a provider entry pi will not put together). Spends nothing and pages nobody | `Refused before starting: the deployment's model settings file (models.json in the overlay) cannot be used for this job, so no container was started and nothing was spent. The operator needs to fix that file. Not run.` |
+| the job's container ran out of memory and the kernel killed the runner (exit 137, reason `oom-killed`). Only on a job image whose supervisor reports it: the worker reads it from the signed exit line, never from Docker's events (which also fire when only a child was killed) | `Stopped: the job's container ran out of memory and was stopped. Partial work may exist. Not retried, because the same size would stop the same way. The operator can raise this job's memory size.` The comment names no size and no project; the run record and the worker log carry them |
 | the FINAL infrastructure failure (retries exhausted, a stalled worker's job, an internal error) | `Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log.` |
 
 What deliberately does NOT comment here:
@@ -61,13 +62,13 @@ arguments:
   not allowed this model or route, and every job fails the same way until the operator fixes it),
   `cost-cap`, `model-not-allowed`, `cost-cap-unenforceable`, `model-policy-unenforceable` (the cost limit and
   allowed-model rows above; the hook fires only for a run that took its budget slot, so the worker's free
-  `model-not-allowed` refusal never reaches it), `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
+  `model-not-allowed` refusal never reaches it), `oom-killed` (the job ran out of memory, above), `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
   carries, or `infra` when it carried none. Anything message-shaped is flattened to `infra` before it can
   reach your argv.
 - `host` is the worker's declared name, possibly empty.
 
 It fires for: the 30-minute kill, an in-container policy stop (exit 2, including a provider's refusal of
-the key), and the final infrastructure
+the key), a job killed for memory (`oom-killed`), and the final infrastructure
 failure, including a job killed by a worker crash (the stall path fails it at the next pickup, and the
 observing worker fires the hook). It does NOT fire for completions, for free pre-spend refusals (they
 are free, they already comment, and a delivery storm against a spent cap must not page anyone), for

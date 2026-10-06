@@ -11,7 +11,7 @@ import { InfraRetry } from "./processor.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
- * `{ code, aborted, turns, tokens, session, usage, context, exitReason }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
+ * `{ code, aborted, turns, tokens, session, usage, context, exitReason, resources?, exitOomKilled? }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
  * the 30-min timeout or graceful shutdown), which the processor classifies as POLICY (no retry) per
  * INT-RUNNER-EXIT-CODE-PROTOCOL. The numeric `code` alone cannot say this: a worker SIGKILL and a
  * kernel OOM both surface as 137, so the abort FLAG -- not the code -- is the discriminator.
@@ -250,12 +250,16 @@ export function makeRunContainer({
 				let exitWhy = null;
 				// Issue #545: null (no key issued), "verified" or "unverified" (a key, and no exit line carried it).
 				let exitAuthResult = null;
+				// Issue #596: what the container used, off its exit line (parseExitResources), or null.
+				let resources = null;
+				// Issue #596: the image's supervisor reported the runner killed for memory (parseExitOomKilled).
+				let exitOomKilled = false;
 				try {
 					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -265,6 +269,8 @@ export function makeRunContainer({
 					exitReason = null;
 					exitLineCode = null;
 					exitWhy = null;
+					resources = null;
+					exitOomKilled = false;
 					// The sink could not say, and a key was issued: nothing it returned was verified.
 					exitAuthResult = exitKey !== null ? "unverified" : null;
 				}
@@ -279,12 +285,16 @@ export function makeRunContainer({
 					exitReason = null;
 					exitLineCode = null;
 					exitWhy = null;
+					resources = null;
+					exitOomKilled = false;
 				}
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
 				// `exitWhy` only when the line named one, so every other run resolves the object it always did.
 				const why = exitWhy !== null ? { exitWhy } : {};
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...auth } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...auth });
+				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.
+				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true } : {}) };
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth });
 			});
 		});
 

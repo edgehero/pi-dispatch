@@ -514,6 +514,51 @@ jobs:
             || { echo "::error::the built image's capabilities label does not declare exitAuth -- the worker would read an exit line the job's tools can forge."; exit 1; }
           echo "OK: the label declares exitAuth, and the CORE checklist ran its proof"
 
+      # --- INT-RUNNER-EXIT-CODE-PROTOCOL (resources and the supervisor, issue #596) ---
+      # Two runs of the same offline job a key is handed to (a cap of 0 stops it before any call, nothing is dialled).
+      # The first runs at the job's real 4g: its signed exit line must carry `resources` with a peak above 0, read from
+      # the job's own cgroup. The second runs at 64m, where loading pi alone does not fit: the kernel kills the runner,
+      # and the supervisor between the init and the runner must survive it (the runner's tree has the top OOM score)
+      # and write the signed line itself, `code: 137, reason: "oom-killed"`, with `oomKills` above 0. That line is the
+      # only thing that tells the worker a 137 was memory and not something a retry could pass, on Docker and Podman
+      # alike. Measured on Docker Desktop: 64m and 80m killed the runner every time, 96m ran it to its normal exit.
+      - name: "RUNNER: the exit line reports resources, and a runner killed for memory is reported (issue #596)"
+        run: |
+          JOB=$(mktemp -d)
+          echo "Reply with the single word ok." > "$JOB/prompt.md"
+          chmod -R a+rX "$JOB"
+          key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+          run_keyed() {
+            printf '%s\n' "$key" | timeout 300 docker run -i --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+              --pids-limit=512 "$@" -v "$JOB:/job:ro" \
+              -e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+              -e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 -e PI_EXIT_AUTH=stdin -e PI_JOB_ID=r596 \
+              "$IMAGE_REF" 2>&1
+          }
+          signed_last() {
+            line=$(echo "$1" | grep '"event":"exit"' | tail -1)
+            mac=$(echo "$line" | sed -nE 's/.*,"auth":"([0-9a-f]{64})"\}$/\1/p')
+            body=$(echo "$line" | sed -E 's/,"auth":"[0-9a-f]{64}"\}$/}/')
+            want=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$key" | awk '{print $NF}')
+            [ -n "$mac" ] && [ "$mac" = "$want" ] && echo "$body"
+          }
+          set +e
+          out=$(run_keyed --memory=4g --memory-swap=4g --cpus=2); code=$?
+          set -e
+          body=$(signed_last "$out") || { echo "$out" | tail -5; echo "::error::the job's last exit line is not signed with its key (exit $code)"; exit 1; }
+          echo "$body" | grep -Eq '"resources":\{"memPeak":[1-9][0-9]*,' \
+            || { echo "$body"; echo "::error::the signed exit line carries no resources block with a peak: the record would say nothing about memory"; exit 1; }
+          set +e
+          out=$(run_keyed --memory=64m --memory-swap=64m); code=$?
+          set -e
+          rm -rf "$JOB"
+          [ "$code" = 137 ] || { echo "$out" | tail -5; echo "::error::at 64m the job exited $code, want 137: the runner was not killed for memory, so this proves nothing"; exit 1; }
+          body=$(signed_last "$out") || { echo "$out" | tail -5; echo "::error::a runner killed for memory left no signed exit line: the supervisor did not survive it, or did not write one"; exit 1; }
+          if ! echo "$body" | grep -q '"code":137,"reason":"oom-killed"' || ! echo "$body" | grep -Eq '"oomKills":[1-9]'; then
+            echo "$body"; echo "::error::the supervisor's line does not say oom-killed with oomKills above 0"; exit 1
+          fi
+          echo "OK: resources on the signed line, and a runner killed for memory ends on a signed oom-killed line"
+
       # --- DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST (issue #341) ---
       # The runner's own user is uid 1001, the image's, which is exactly the one host shape that can never show
       # the bug: every job mount works for it with no --user at all. So the check runs as a DIFFERENT uid, 1234

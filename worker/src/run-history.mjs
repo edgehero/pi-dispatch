@@ -13,7 +13,7 @@ import { isProjectId } from "./project-id.mjs";
  * The PURE HELPERS are total functions over their arguments -- no filesystem, no clock, no
  * `process.env`, no randomness -- so the record shape and the filename/telemetry parsing are testable
  * without a container, a queue, or a disk: `sanitizeJobId`, `parseExitTurns`, `parseExitTokens`,
- * `parseExitSession`, `parseExitUsage`, `buildRecord`.
+ * `parseExitSession`, `parseExitUsage`, `parseExitResources`, `buildRecord`.
  *
  * The I/O factories -- `makeLogSink`, `makeRecordWriter`, `makeFindPreviousRun`, `makeLogReaper` --
  * each inject their own `fs` (and, for the reaper, their own clock via `now`), so they too are testable
@@ -330,6 +330,81 @@ export function parseExitContext(text) {
 		return null;
 	}
 	return null;
+}
+
+/**
+ * The keys of the runner's `resources` block (issue #596), in its emission order. A copy of the runner's
+ * `RESOURCE_KEYS` (image/runner/src/cgroup-usage.mjs), which the worker cannot import at run time; a test holds the
+ * two lists equal.
+ */
+export const RESOURCE_KEYS = Object.freeze(["memPeak", "oomKills", "memSomeUsec", "memFullUsec", "cpuUsec", "throttledUsec", "throttled", "pidsPeak"]);
+
+/**
+ * What the job's container used, off the LAST exit line (issue #596): `{ memPeak, oomKills, memSomeUsec, memFullUsec,
+ * cpuUsec, throttledUsec, throttled, pidsPeak }`, each a safe non-negative integer or null, or null.
+ *
+ * REBUILT as an explicit literal over RESOURCE_KEYS, never passed through: extra keys are dropped, and a key the
+ * runner could not read arrives as null (or absent) and stays null. A present value that is not a safe non-negative
+ * integer (a string, a float, a negative, anything past 2^53) nulls the WHOLE block, the malformed->null rule
+ * `parseExitUsage` follows: such a line was not written by a conformant runner, and half of a forged block is not a
+ * measurement. Null when the line has no `resources` (an image from before this field, a runner that could read no
+ * cgroup file) or when every key is null. Scanned from the end exactly as `parseExitContext` is, repairing a glued
+ * line on the way, and NEVER throws. Read-only telemetry: it feeds no exit-code or retry classification.
+ */
+export function parseExitResources(text) {
+	if (typeof text !== "string") return null;
+	const lines = text.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (line === "") continue;
+		const parsed = parseTailLine(line);
+		if (parsed?.event !== "exit") continue;
+		return rebuildResources(parsed?.resources);
+	}
+	return null;
+}
+
+/** The reason the image's supervisor writes when the runner was killed for memory (image/runner/supervise.mjs). */
+export const EXIT_OOM_KILLED = "oom-killed";
+
+/**
+ * Whether the LAST exit line is the supervisor's report that the runner was killed for memory (issue #596): `code: 137`,
+ * `reason: "oom-killed"`, and a `resources` block whose `oomKills` is above 0, all on that one line. False for anything
+ * else, including a line with no resources. Scanned from the end exactly as `parseExitResources` is, and NEVER throws.
+ *
+ * The processor reads it only beside a container exit of 137 that the worker did not cause, and only from a line the
+ * per-job key verified: the supervisor runs in images that declare `exitAuth`, so an unsigned line saying this was
+ * written by a job's own tool. A child killed for memory while the runner lives writes no such line (the runner ends on
+ * its own code), so it never reads as one.
+ */
+export function parseExitOomKilled(text) {
+	if (typeof text !== "string") return false;
+	const lines = text.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (line === "") continue;
+		const parsed = parseTailLine(line);
+		if (parsed?.event !== "exit") continue;
+		const used = rebuildResources(parsed?.resources);
+		return parsed?.code === 137 && parsed?.reason === EXIT_OOM_KILLED && used !== null && used.oomKills !== null && used.oomKills > 0;
+	}
+	return false;
+}
+
+/** The validating rebuild behind `parseExitResources` and the record's `resources`: null on any violation. */
+function rebuildResources(r) {
+	if (r === null || typeof r !== "object" || Array.isArray(r)) return null;
+	const out = {};
+	for (const key of RESOURCE_KEYS) {
+		const v = Object.hasOwn(r, key) ? r[key] : null;
+		if (v === null || v === undefined) {
+			out[key] = null;
+			continue;
+		}
+		if (!Number.isSafeInteger(v) || v < 0) return null;
+		out[key] = v;
+	}
+	return RESOURCE_KEYS.some((key) => out[key] !== null) ? out : null;
 }
 
 /**
@@ -658,6 +733,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// with no portfolio trigger; a confirmed one that wrote none says `plan-absent` (issue #507). Never
 		// the plan's weights or its reasons: those are in the allocation audit file, and a reason is agent text.
 		plan: planOf(source.plan),
+		// What the container used (issue #596, INT-RUN-HISTORY-FILE-CONTRACT): peak memory, OOM kills, memory pressure, CPU
+		// time and throttling, peak processes, read by the runner from its own cgroup just before its exit line. Additive,
+		// nullable, an explicit literal REBUILT here, TAIL position after `plan` on the same contract. Integers only, so
+		// PII-free by construction. Null when no exit line carried it: an older image, a runner killed before its line (a
+		// job killed for memory has none, and its `reason` says `oom-killed` instead), or a venue that hides the cgroup.
+		resources: rebuildResources(source.resources),
 	};
 }
 
@@ -853,6 +934,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const session = parseExitSession(exitText);
 			const usage = parseExitUsage(exitText);
 			const context = parseExitContext(exitText);
+			const resources = parseExitResources(exitText);
+			const oomKilled = parseExitOomKilled(exitText);
 			try {
 				if (stream !== null) {
 					const s = stream;
@@ -878,7 +961,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			}
 			// `exitAuth` only when a key was issued, so a keyless close returns exactly the object it always did. `exitWhy`
 			// (issue #507) only when the line named one, for the same reason.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(keyed ? { exitAuth } : {}) };
+			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };
