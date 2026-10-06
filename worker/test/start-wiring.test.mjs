@@ -4544,3 +4544,39 @@ test("job sizes: the worker hands createWorker the size settings at the TOP leve
 	recordRun({ job: { id: "j2", name: "github", data: { kind: "github", repo: "acme/web", size: { memMiB: 9999, cpuCenti: 50, source: "project" } } }, result: { outcome: "policy" } });
 	assert.equal(records.at(-1).size, null, "a record from before the pickup gate carries none, and never the job data's");
 });
+
+test("issue #596 (gate round 1): a size flag the daemon drops rides beside the user, a stale --cpus refusal re-reads the daemon, and the registry says which limits version this build reads", { skip }, async () => {
+	const endpoint = { local: true, context: "default", endpoint: "unix:///run/pd-test/docker.sock", reason: null, transient: false };
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	let reads = 0;
+	let over = { hostCpus: 14, swapLimit: false, cpuShares: false };
+	const facts = DOCKER_FACTS();
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	let published = null;
+	const { deps, runContainerCalls } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: async () => {
+			reads++;
+			const answer = await facts();
+			return { ...answer, facts: { ...answer.facts, ...over } };
+		},
+		jobUserIdentity: { ...LINUX_ID(1001), stat: () => ({ uid: 0, gid: 2375 }) },
+		resolveDockerEndpoint: async () => endpoint,
+		makeHostRegistry: (args) => {
+			const real = makeHostRegistry(args);
+			return { ...real, start: (fields, opts) => ((published = fields), real.start(fields, opts)) };
+		},
+	});
+	const first = await deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } });
+	assert.deepEqual(first, { user: null, home: null, hostCpus: 14, unenforced: ["--memory-swap", "--cpu-shares"] });
+	const readsBefore = reads;
+	over = { hostCpus: 4, swapLimit: true, cpuShares: true };
+	assert.equal((await deps.jobUserPreflight(job, { capabilities: [] })).hostCpus, 14, "cached until told");
+	const hook = runContainerCalls.at(-1).onCpuCeilingStale;
+	assert.equal(typeof hook, "function", "the local launcher is handed the invalidation");
+	hook();
+	assert.deepEqual(await deps.jobUserPreflight(job, { capabilities: [] }), { user: null, home: null, hostCpus: 4 }, "the next pickup reads the resized daemon, and an enforcing one adds nothing");
+	assert.equal(reads, readsBefore + 1);
+	assert.equal(published?.limitsVersion, 3, "the highest scoped-limits version this build reads, for doctor's fleet line");
+});

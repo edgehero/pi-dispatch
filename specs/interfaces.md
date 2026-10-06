@@ -1472,20 +1472,33 @@ refactor apart.
       classification's 90%-of-the-limit rule holds at every size;
     - `--memory-swap=<m>`, EQUAL to `--memory`: no swap beyond the job's memory. Docker and Podman give a container
       swap equal to its memory by default; with the two equal `memory.swap.max` reads 0 on every venue measured,
-      rootless Podman included. The builder refuses a hand-built spec whose two differ;
-    - `--cpu-shares=round(cpus x 1024)`, held inside 2 to 262144: a WEIGHT, so under contention each job gets CPU in
-      proportion to its size and an idle host lets any job use idle cores. The `cpu.weight` it becomes depends on
+      rootless Podman included. The builder refuses a hand-built spec whose two differ. Docker with `SwapLimit` false
+      (no swap accounting) drops the flag with a client warning only, as it drops `--cpu-shares` with `CPUShares`
+      false: the job path carries both facts from the job user's `docker info` read (`unenforcedSizeFlags`) and logs
+      `size_bound_unenforced { container, flags }` per job, and doctor warns. The flags stay on the argv;
+    - `--cpu-shares=round(cpus x 1024)`, held inside 2 to 262144: a WEIGHT, so under contention a larger size gets
+      more CPU than a smaller one, in order, and an idle host lets any job use idle cores. Exactly proportional only
+      on the linear mapping below (measured: sizes 3:1 split about 3:1 there, about 2.4:1 on the curved one). The `cpu.weight` it becomes depends on
       the OCI runtime's version (measured: runc 1.1.13 and crun 1.14 map 1024 to 39 and 2048 to 79; runc 1.5.1 and
       crun 1.27 map 1024 to 100 and 2048 to 174; a container started without the flag gets 100 on all four). Both
       mappings keep the order, and every job container carries a share, so the order between jobs holds; on an old
       runtime a default job weighs less than a container started without one (the egress proxy, a Valkey), which is
-      the right direction and is left as is;
+      the right direction and is left as is. The other direction is open: a large size outweighs every container
+      without a share (cpus 256 is a share of 262144, `cpu.weight` 10000 on a current runtime, against the proxy's,
+      Valkey's and the host services' 100), so such jobs can starve them under contention; a weight scale is phase 2;
     - `--cpus=<n>`, the HOST CEILING, the same for every job: the runtime's own CPU count (`docker info` `NCPU`,
       `podman info` `host.cpus`, read with the job user's facts) minus a reserve of one CPU when it has four or more.
-      It keeps every job off the reserved core; it is not the job's size, which would be the hard cap the issue
-      decided against. When the runtime gave no count the flag is ABSENT (fail open, logged `cpu_ceiling_unknown`):
-      Docker refuses a `--cpus` above its own count, and the worker's count is not the daemon's on Docker Desktop.
-      The phase 2 host budget refines the reserve;
+      It bounds any SINGLE job; it does not keep a core free across jobs, because each container's quota is its own
+      and they do not sum (measured: two busy jobs on a 4-core cpuset with `--cpus=3` used 4.06 cores). A reserve
+      across all jobs is the phase 2 host budget's (a parent cgroup's quota). It is not the job's size either, which
+      would be the hard cap the issue decided against. When the runtime gave no count the flag is ABSENT (fail open,
+      logged `cpu_ceiling_unknown`, and doctor warns per venue): Docker refuses a `--cpus` above its own count, and
+      the worker's count is not the daemon's on Docker Desktop. The count is the job-user resolver's cached read,
+      which is re-read after ten minutes and dropped at once when Docker refuses a job's `--cpus` as out of its
+      range (`Range of CPUs is from 0.01 to <n>`, exit 125, after Docker Desktop's VM was given fewer CPUs): that
+      attempt stays never-started (refunded and retried), the worker logs `cpu_ceiling_stale { container, cpus,
+      hostCpus, runtimeCpus }`, and the next pickup reads the daemon again. Podman 4.9.3 and 5.8.1 accept a `--cpus`
+      above the host's count (measured), so there a stale count only bounds less, until the cache's age;
     - `--shm-size=min(1g, memory/2)`, because `/dev/shm` is charged to the container's memory.
     `--pids-limit=512` stays fixed. `dockerExtra` refuses every flag that sets a CPU or memory bound, a weight or an
     OOM preference (`-m`, `-c`, `--cpu-shares`, `--cpu-quota`, `--cpu-period`, `--cpu-rt-*`, `--cpuset-*`,
@@ -2524,8 +2537,10 @@ sibling rather than an extension of the GitHub one for the same reason.
     --memory-swap=<m> [--cpus=<host ceiling>] --cpu-shares=<s> --shm-size=<shm>`. **The size is the RUN's**
     (issue #596): the manifest records the size the job was given (`size`, `{ memMiB, cpuCenti, source }`), and
     the sandbox reopens the run at it, so the shell has the memory, the swap bound and the CPU weight the job had;
-    a manifest from before sizes, or one whose size does not rebuild, reopens at the built-in `4g` and `2`, the size
-    every such run had. The `--cpus` ceiling is this CLI's own runtime's (its CPU count from the job-user facts read,
+    a manifest from before sizes (no `size` key) reopens at the built-in `4g` and `2`, the size every such run had,
+    and one whose `size` is present and does not rebuild REFUSES (`size-invalid`) before anything is asked or created:
+    the retention writes the key only with a size, so a malformed one is damage, and repairing it to `4g` would open a
+    shell at a size the run never had. The `--cpus` ceiling is this CLI's own runtime's (its CPU count from the job-user facts read,
     minus one when it has four or more), absent when that read gave none. On `podman` the same builder adds what it adds to a job: `--user=<uid>:<gid>`,
     `--userns=keep-id` and `PODMAN_PINNED_FLAGS`, and a network flag ALWAYS, the session's own network with
     egress on and `--network=private` with it off, because a containers.conf `netns = "host"` puts a container
@@ -3107,7 +3122,11 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
       otherwise), and `cpu.weight`, which must be one of the two values the measured runtime mappings give the
       argv's `--cpu-shares` (`cpuWeightsFor`: runc 1.1.13 and crun 1.14, linear; runc 1.5.1 and crun 1.27, curved);
       a weight neither gives is NOT READ BACK, never a failure, because the order between jobs, which is what the
-      weight carries, may hold under a mapping nobody measured. cgroup v2 only, as every measured venue is.
+      weight carries, may hold under a mapping nobody measured. cgroup v2 only, as every measured venue is. This
+      read CANNOT prove the flag was passed: a missing `--cpu-shares` gives the default 100, which is only NOT READ
+      BACK (a warning) for most sizes, and for a 1-CPU size on a curved runtime 1024 shares and no flag both read
+      100, so the probe cannot tell them apart. The guard for the flag's presence is the argv: tests pin that every
+      job, sandbox and probe argv carries `--cpu-shares` at its size (`job-size.test.mjs`, `docker-run.test.mjs`).
     - `nonRoot`: all four `Uid` fields of PID 1 nonzero.
     - `mountSet`: `docker inspect .Mounts` keyed by destination and read-write flag against the spec's own
       mounts. A mount missing, one extra, one with its RW flipped, the docker socket, the home directory or an
@@ -4799,7 +4818,8 @@ validator rather than a second copy of it.
   beside `project`, never read off the job's data, so a size a payload carries is never recorded. Present on every
   record written after the pickup gate, a refusal there included (it is then the size the job WOULD have had);
   null on a record written before it (the wait gate's refusals) and on every record before the field. Integers and
-  a fixed word, so PII-free by construction.
+  a fixed word, so PII-free by construction. A retry or a deferred attempt is a NEW pickup: it resolves the size in
+  force then, so two attempts of one job can record two sizes when the file was edited between them.
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
   only the attempts that FINISHED before this one (it increments in `moveToFinished`/`moveToFailed`, bullmq 5.80.4),
@@ -6060,7 +6080,8 @@ validator rather than a second copy of it.
     size is its project's (`INT-CONTAINER-RUNTIME-CONTRACT`, the job's size).
     - `memory`: a whole number of megabytes or gigabytes, lower case (`"512m"`, `"1536m"`, `"4g"`; `^[1-9]\d*[mg]$`),
       at least `512m` and at most `1024g`, stored in its one spelling (`"1024m"` reads back as `"1g"`). Each job of
-      the project gets that memory and no swap beyond it.
+      the project gets that memory and no swap beyond it where the runtime enforces swap limits
+      (`INT-CONTAINER-RUNTIME-CONTRACT`, `size_bound_unenforced`).
     - `cpus`: a number or decimal string above 0 with at most two decimals, at least `0.25` and at most `256`,
       stored as a number. It is the job's CPU WEIGHT under contention (`--cpu-shares`), not a cap.
     - `hostShare`: a whole PERCENTAGE from 1 to 100: the most of one host's job budget the project's running jobs
@@ -6074,7 +6095,12 @@ validator rather than a second copy of it.
       a host's budget, so it is judged where that budget is known (phase 2), not at load.
     Unset, a job takes the deployment's `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`), field by field.
     The size is resolved once at pickup from this snapshot and recorded on the run (`INT-RUN-HISTORY-FILE-CONTRACT`
-    `size`); an edit applies to the project's NEXT jobs.
+    `size`); an edit applies to the project's NEXT pickups, a retry or a deferred attempt included.
+    A version 3 row refuses a KEY it does not define (anything but `scope`, the four job counts, the three dollar
+    windows and the four size fields; keys are case-sensitive), naming the key: a misspelled `Memory`, `cpu` or `mem`
+    beside a valid field was dropped by the operator-file policy, and the project's jobs ran at the default size while
+    the file read as sized. Version 1 and 2 files keep dropping unknown keys, so every file an older build reads still
+    loads unchanged.
   - **Version rule**: a version 1 file that uses a dollar field or a `model:` row is REFUSED with a message
     naming version 2, so a file cannot carry a dollar cap that one build reads and another drops. A version 1
     file with neither stays valid and reads exactly as before (the five-key row). The `model:` prefix is
@@ -6089,7 +6115,11 @@ validator rather than a second copy of it.
     the same reason: a version 1 or 2 file carrying one is refused with a message naming version 3, and every
     released build (3.1.0 reads up to version 2) refuses a version 3 file as newer, so a size never reads as applied
     on one build and silently dropped on another. The writer stamps the LOWEST version that expresses the file, so
-    a file with no size field stays what it was. Upgrade every worker before writing a size.
+    a file with no size field stays what it was. That refusal happens when a build LOADS the file, at boot: a worker
+    already running when the file becomes version 3 keeps its last good file on reload (`scoped_limits_reload_invalid`)
+    and runs the project's jobs at the default size. So every worker is upgraded AND RESTARTED before a size is
+    written; each publishes the highest version it reads (`limitsVersion`, `INT-HOST-REGISTRY-CONTRACT`) and doctor
+    warns about a peer that predates version 3 while this host's file carries a size.
 - **Canonicalization**: a local job's scope is `path.resolve(folder.trim())` and an absolute-path-shaped
   row is stored resolved, so every spelling of one directory (`/srv/site/`, `/srv//site`, `/srv/x/../site`)
   converges on one counter and one mutex slot, and Unicode is NFC-normalized on both sides (macOS's
@@ -6243,7 +6273,9 @@ validator rather than a second copy of it.
   outside 1 to 100, then the file is refused. Given `dispatch_limit_add` or `dispatch_limit_edit` with a size field,
   then it is judged by the worker's parsers and shown in its stored spelling before the confirm, a malformed one is
   refused before it, an edit carries every size field it is not sent, and the file is stamped version 3 only while a
-  row carries one.
+  row carries one. Given `{ "scope": "project:shop", "memory": "1g", "Memory": "8g" }`, or `cpu` or `mem` beside a
+  valid field, in a version 3 file, then the file is refused naming the key; given an unknown key on a row of a
+  version 1 or 2 file, then it is dropped as before.
   Given a project `shop` over two folders and a row `project:shop` with `day: 2` (issue #499 part B), then the third
   member job that day is refused `project-cap`, its folder slot is given back and the global ledger is untouched;
   given a full global window, then a member job gives back its project and repo slots; given a never-started
@@ -7146,6 +7178,7 @@ abstains.
     fpUsd           a fingerprint of the dollar caps this host judges the shared dollar counters against
     fpProjects      a fingerprint of this host's live projects: ids and member hashes, never a name
     fpEnvelope      the digest of this host's live allocation envelope, or "none" without one
+    limitsVersion   the highest scoped-limits file version this build reads (an integer; 3 since job sizes)
 ```
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
@@ -7213,6 +7246,14 @@ none, it WARNS about the peers whose digest differs from this host's
 (`fleetEnvelopeChecks`) and about a peer that publishes no `fpEnvelope` field (a worker from before it) while an
 envelope is in use somewhere (this host's or a peer's value is not `none`). When this host's own envelope does not
 load, doctor fails on that and makes no comparison.
+
+**`limitsVersion` is an integer** (issue #596). It is the build's `SCOPED_LIMITS_VERSION`, so a row without it is a
+worker from before job sizes. A build refuses a newer scoped-limits file only when it loads one at boot; while it runs
+it keeps its last good file on reload, so after a size is written such a worker runs the project's jobs at the default
+size and says nothing on the job. Only `doctor` reads the field, to WARN (`doctor.mjs -> fleetSizeChecks`): when this
+host's own file carries a size (needs version 3), each peer whose `limitsVersion` is absent or below 3 is named, with
+"upgrade and restart every worker" as the fix. When this host's file does not load, nothing is compared. Nothing
+refuses on it.
 
 **The TTL is refreshed on EVERY beat**, which reverses this project's stated set-once rule (`budget.mjs`:
 *"set the TTL only when the key is first created, so a long window cannot push its expiry forward"*). The
@@ -7676,3 +7717,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-06 | Issue #596, phase 0, the executing review. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: (1) `resources` gains `swapPeak` (bytes, `memory.swap.peak`, after `memPeak`; null on cgroup v1 or where the file is absent), because `memPeak` cannot see swap and a job at its limit swaps before it dies while its swap allowance equals its memory. The block is now nine keys, held to the runner's list by the existing tests. (2) The exit line's `message` cap falls from 2000 to 1900 characters as serialized: with `swapPeak` the worst-case line (every key at its largest) measured 6155 characters, past the 6 KiB budget that keeps a 2 KiB margin inside the worker's 8 KiB tail, and the diagnostic message gives way rather than the label's margin; the literal stays pinned by both tests. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's `resources` carries `swapPeak` after `memPeak` (additive, nullable, in the rebuilt literal; the shape is pinned to `RESOURCE_KEYS` by `resource-keys.test.mjs`). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no flag moves; `--memory-swap` is still refused as an extra flag, and the default swap allowance is what `swapPeak` measures. Code evidence: image/runner/src/cgroup-usage.mjs, image/runner/src/outcome.mjs, worker/src/run-history.mjs, docs/insights.md; tests image/runner/test/cgroup-usage.test.mjs, image/runner/test/outcome.test.mjs, worker/test/run-history.test.mjs, worker/test/resource-keys.test.mjs. |
 | 2026-10-06 | Issue #596, phase 0, the final review. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTS the executing review's row above**: the worst-case line test measured the UNSIGNED line at `provider-auth-refused`, so it left out the 75-character `,"auth":"<64 hex>"` every keyed line ends in and the longest runner policy reason (`model-policy-unenforceable`). Signed and at that reason, a 1900 cap left 9 characters inside 6 KiB, and "6155" understated the overshoot at 2000. The test now builds the line with a 64-character `auth` field and the longest member of `RUNNER_POLICY_REASONS`, and the cap falls to 1800 so the next key has room. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**. Code evidence: image/runner/src/outcome.mjs; tests worker/test/run-history.test.mjs, image/runner/test/outcome.test.mjs. |
 | 2026-10-06 | Issue #596, phase 1 (sizes and hard limits). **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: every container is built from a job size `{ memMiB, cpuCenti }` (`worker/src/job-size.mjs`) resolved once at pickup from the limits snapshot (the project row's `memory` and `cpus`, else `PI_JOB_MEMORY` and `PI_JOB_CPUS`, else `4g` and `2`) and passed to `runContainer` as an argument, never through `job.data`. It becomes `--memory=<m> --memory-swap=<m>` (equal, so no swap beyond memory: `memory.swap.max` 0 measured on all five venues), `--cpu-shares=round(cpus x 1024)` (a weight; the runtime-version mapping to `cpu.weight` is recorded, order preserved), `--cpus=<host CPU count minus one when four or more>` (a ceiling for every job, absent and logged `cpu_ceiling_unknown` when the runtime gave no count) and `--shm-size=min(1g, memory/2)`. `--shm-size` LEAVES `ISOLATION_FLAGS` (it is a value now) and is still on every argv; `--pids-limit=512` stays fixed. Memory is emitted in the one spelling `memoryBytes` reads, pinned over the whole accepted range, so the OOM rule's 90% comparison holds at every size. `dockerExtra` refuses every CPU, memory, weight and OOM flag. The Why's "flags are UNCHANGED" sentence is replaced by what phase 1 changed. **`INT-SANDBOX-CONTRACT` AMENDED**: the manifest records the run's size and the sandbox reopens at it (the built-in size for a run from before), with this CLI's own `--cpus` ceiling. **`INT-LIVE-PROBE-CONTRACT` AMENDED**: the probes and the podman canary are built at the deployment's default size with the venue's ceiling, and `isolation` also reads `memory.swap.max` (must be 0), `cpu.max` (must be the ceiling) and `cpu.weight` (one of the two measured mappings, else not read back); docker's canary is unchanged. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: version 3 adds `memory`, `cpus`, `hostShare` (a whole percentage) and `minJobs` on a project row only; a size-only row is valid; version 1 and 2 files carrying one are refused naming version 3; `minJobs` needs a size and at most the row's `concurrent`; `hostShare` and `minJobs` are parsed, validated and stored and said to be NOT ENFORCED until the host budget (phase 2), which also judges a share against `minJobs` times the size. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record gains `size` `{ memMiB, cpuCenti, source }` at its tail after `resources`. `INT-RUNNER-EXIT-CODE-PROTOCOL` gets one wording fix (the `--memory=` the OOM rule compares with is the job's size, no longer `4g` today) and is otherwise UNCHANGED, checked. Checked and UNCHANGED: `INT-CONTAINER-JOB-INPUTS`, `INT-EGRESS-POLICY-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT`, `INT-CONFIG-OVERLAY-CONTRACT` (sizes are env and file only, never the overlay). |
+| 2026-10-06 | Issue #596, phase 1, review gate round 1. **`INT-CONTAINER-RUNTIME-CONTRACT` CORRECTED and AMENDED**: the `--cpus` bullet said the ceiling keeps every job off the reserved core; refuted by measurement (per-container quotas do not sum: two busy jobs on a 4-core cpuset with `--cpus=3` used 4.06 cores), it now bounds any SINGLE job and names the aggregate reserve as phase 2's. The count is the job-user resolver's cached read, re-read after ten minutes and dropped at once when Docker refuses a job's `--cpus` as out of range (exit 125, `cpu_ceiling_stale { container, cpus, hostCpus, runtimeCpus }`, the attempt stays never-started); Podman accepts such a `--cpus` (measured). The swap bullet names Docker's `SwapLimit` false and `CPUShares` false, carried from the same facts read and logged per job as `size_bound_unenforced`; the share bullet says a larger size gets more CPU, in order, exactly proportional only on the linear mapping (measured: sizes 3:1 split about 3:1 on runc 1.1.13 and crun 1.14, about 2.4:1 on runc 1.5.1 and crun 1.27), and names the open weight-starvation direction as phase 2. **`INT-SANDBOX-CONTRACT` AMENDED**: a manifest whose `size` is present and does not rebuild refuses `size-invalid` (it reopened at `4g`); an absent key still reopens at the built-in size. **`INT-SCOPED-LIMITS-FILE-CONTRACT` CORRECTED and AMENDED**: an older build refuses a version 3 file only at boot, a running one keeps its last good file and runs the project at the default size, so upgrade AND restart; a version 3 row refuses an unknown key (versions 1 and 2 unchanged), with acceptance clauses; an edit applies to the next pickups, a retry or deferred attempt included. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the `size` paragraph: a retry or a deferred attempt is a new pickup and records the size in force then. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: the row gains `limitsVersion` (an integer), read only by doctor to warn about a peer that predates version 3 while this host's file carries a size. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, the `isolation` bullet: the `cpu.weight` read cannot prove `--cpu-shares` was passed (a missing flag reads the default 100, only not read back, and for a 1-CPU size on a curved runtime 1024 shares and no flag both read 100); the argv pin tests are the guard for the flag. Checked and UNCHANGED: `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT`. |

@@ -8,7 +8,8 @@ import { describe, test } from "node:test";
 import { ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { SANDBOX_LAUNCHERS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, SANDBOX_OPEN_GRACE_MS, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, sandboxKeeperCheck, boundedRuntime, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, stopSandbox, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
+import { SANDBOX_LAUNCHERS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, SANDBOX_OPEN_GRACE_MS, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, sandboxKeeperCheck, boundedRuntime, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, stopSandbox, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues, sandboxSizeOf } from "../src/sandbox.mjs";
+import { DEFAULT_JOB_SIZE } from "../src/job-size.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 import { makeSandboxReaper, pinSandbox } from "../src/sandbox-store.mjs";
 
@@ -398,8 +399,17 @@ test("openSandbox reopens a run at its RECORDED size, a run from before sizes at
 	assert.deepEqual(sized(launchedWith), ["--memory=1g", "--memory-swap=1g", "--cpu-shares=512", "--shm-size=512m"], "the run's own size, and no ceiling where the job-user read gave no CPU count");
 	await openSandbox({ ...session, ...openable(), egress: { armed: false }, launch });
 	assert.deepEqual(sized(launchedWith), ["--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g"], "a manifest from before sizes: the size every such run had");
-	await openSandbox({ ...session, ...openable({ size: { memMiB: 100, cpuCenti: 50, source: "project" } }), egress: { armed: false }, launch });
-	assert.ok(launchedWith.includes("--memory=4g"), "a recorded size that does not rebuild opens at the built-in size");
+	// A size key that is PRESENT and does not rebuild is damage: refused before anything is asked, never repaired to 4g.
+	for (const bad of [{ memMiB: 100, cpuCenti: 50, source: "project" }, null, "4g", { memMiB: 1024, cpuCenti: 50, source: "elsewhere" }]) {
+		launchedWith = null;
+		let asked = false;
+		const refused = await openSandbox({ ...session, ...openable({ size: bad }), resolveJobUser: async () => ((asked = true), { user: null, home: null }), egress: { armed: false }, launch });
+		assert.equal(refused.refused, "size-invalid", JSON.stringify(bad));
+		assert.match(refused.message, /recorded size is malformed/);
+		assert.deepEqual([launchedWith, asked], [null, false], "nothing launched, nothing asked");
+	}
+	assert.equal(sandboxSizeOf({}), DEFAULT_JOB_SIZE, "no size key: the size every run before sizes had");
+	assert.equal(sandboxSizeOf({ size: { memMiB: 100, cpuCenti: 50, source: "project" } }), null);
 	// The CPU count rides beside the job-user answer, non-enumerable, as `runtime` does (`withRuntime`).
 	const withCpus = Object.defineProperty({ user: null, home: null }, "hostCpus", { value: 14, enumerable: false });
 	await openSandbox({ ...session, ...openable({ size: { memMiB: 2048, cpuCenti: 100, source: "env" } }), resolveJobUser: async () => withCpus, egress: { armed: false }, launch });

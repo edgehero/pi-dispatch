@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { containerSpec, memoryBytes, memoryBytesOfArgs } from "../src/container-spec.mjs";
 import { buildDockerRunArgs, buildPodmanRunArgs, dockerArgsFromSpec } from "../src/docker-run.mjs";
 import {
+	cpuRangeRefusal,
+	unenforcedSizeFlags,
 	CPU_SHARES_MAX,
 	CPU_SHARES_MIN,
 	DEFAULT_JOB_CPUS,
@@ -183,4 +185,22 @@ test("a recorded size is rebuilt from its three fields, and anything else is nul
 	for (const bad of [null, undefined, [], "4g", { memMiB: 2048, cpuCenti: 50 }, { memMiB: 2048, cpuCenti: 50, source: "trigger" }, { memMiB: 100, cpuCenti: 50, source: "env" }, { memMiB: 2048, cpuCenti: 50.5, source: "env" }]) {
 		assert.equal(recordedJobSize(bad), null, JSON.stringify(bad) ?? "undefined");
 	}
+});
+
+test("cpuRangeRefusal reads the count off Docker's refusal of a --cpus above its CPUs, and nothing else (issue #596)", () => {
+	// Measured verbatim, Docker 27.4.0 with `--cpus=99` on a 14-CPU daemon, exit 125.
+	assert.equal(cpuRangeRefusal("docker: Error response from daemon: Range of CPUs is from 0.01 to 14.00, as there are only 14 CPUs available.\nSee 'docker run --help'.\n"), 14);
+	assert.equal(cpuRangeRefusal("Error response from daemon: range of CPUs is from 0.01 to 4.00, as there are only 4 CPUs available"), 4, "any case");
+	for (const other of ["", null, undefined, "docker: Error response from daemon: Conflict. The container name \"/x\" is already in use", "Error: docker.io/library/busybox:1.36: image not known", "Range of CPUs"]) {
+		assert.equal(cpuRangeRefusal(other), null, String(other));
+	}
+});
+
+test("unenforcedSizeFlags names the size flags a Docker daemon says it drops, and reads a null fact as no evidence (issue #596)", () => {
+	assert.deepEqual(unenforcedSizeFlags({ swapLimit: true, cpuShares: true }), []);
+	assert.deepEqual(unenforcedSizeFlags({ swapLimit: false, cpuShares: true }), ["--memory-swap"]);
+	assert.deepEqual(unenforcedSizeFlags({ swapLimit: true, cpuShares: false }), ["--cpu-shares"]);
+	assert.deepEqual(unenforcedSizeFlags({ swapLimit: false, cpuShares: false }), ["--memory-swap", "--cpu-shares"]);
+	assert.deepEqual(unenforcedSizeFlags({ swapLimit: null, cpuShares: null }), [], "Podman: not read, so not claimed");
+	assert.deepEqual(unenforcedSizeFlags(null), []);
 });

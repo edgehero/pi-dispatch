@@ -1035,6 +1035,9 @@ export async function openSandbox({
 	if (resolved.refused) return resolved;
 	// Admitted by `resolveSandbox`, so never null here.
 	const { bin } = sandboxLauncher(resolved.venue);
+	// Issue #596: the run's size, decided before anything is asked or created. A recorded size that is malformed refuses.
+	const size = sandboxSizeOf(resolved.manifest);
+	if (size === null) return { refused: "size-invalid", message: `the run's recorded size is malformed, so the size ${jobId} ran at is unknown; re-run the job instead` };
 
 	// `--publish` AND AN ARMED POLICY ARE OPPOSITE DIRECTIONS, and docker resolves the contradiction SILENTLY
 	// (issue #362). An armed policy puts this shell on its own `--internal` network, and a container attached
@@ -1140,7 +1143,7 @@ export async function openSandbox({
 		user: jobUser?.user ?? null,
 		home: jobUser?.home ?? null,
 		relabel: jobUser?.relabel === true,
-		size: sandboxSizeOf(resolved.manifest),
+		size,
 		hostCpus: jobUser?.hostCpus ?? null,
 		// By containment, the rule `rebaseWorkspace` already moves the retained clone by: a workspace inside the retained
 		// job dir is the worker's own clone, one outside it is the operator's folder. Not by the manifest's `kind`, so a run
@@ -1605,12 +1608,14 @@ async function decidePodmanSandboxJobUser({
 
 /**
  * The size a sandbox reopens a run at (issue #596): the size its manifest recorded, or the built-in 4g and 2 for a run
- * retained before sizes existed, which is the size every such run had. A recorded size that does not rebuild
- * (`recordedJobSize`) also opens at the built-in size: the manifest is host-written, and the size bounds a shell an
- * operator sits in, so a wrong one is a slower session, never a wider reach.
+ * retained before sizes existed (no `size` key), which is the size every such run had. A `size` key that is PRESENT
+ * and does not rebuild (`recordedJobSize`) is null, and the open refuses (`size-invalid`): the retention writes the key
+ * only with a size, so a malformed one is damage, and repairing it to 4g would open a shell at a size the run never
+ * had, larger than a small project's, without a word.
  */
 export function sandboxSizeOf(manifest) {
-	return recordedJobSize(manifest?.size) ?? DEFAULT_JOB_SIZE;
+	if (!manifest || typeof manifest !== "object" || !Object.hasOwn(manifest, "size")) return DEFAULT_JOB_SIZE;
+	return recordedJobSize(manifest.size);
 }
 
 /**

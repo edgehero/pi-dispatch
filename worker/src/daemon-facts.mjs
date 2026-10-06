@@ -108,6 +108,9 @@ export function parseDaemonFacts(output) {
 				// enforced and a job may swap past its memory; doctor warns. null on Podman (its compat value is not read,
 				// for `bounds`' reason) and when the key is absent.
 				swapLimit: podman || typeof body.SwapLimit !== "boolean" ? null : body.SwapLimit,
+				// Issue #596: whether the daemon can set a CPU weight (`CPUShares`). Where it is false, Docker drops
+				// `--cpu-shares` with a client warning and the job has no weight. null on Podman and when absent, as above.
+				cpuShares: podman || typeof body.CPUShares !== "boolean" ? null : body.CPUShares,
 			} };
 		}
 	}

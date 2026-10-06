@@ -24,7 +24,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { usdFingerprint } from "../src/dollar-fingerprint.mjs";
 import { projectsFingerprint } from "../src/projects.mjs";
 import { appliedSplitChecks, envelopeChecks, fleetEnvelopeChecks, loadEnvelopeAsTheWorker } from "../src/doctor.mjs";
-import { doctorJobSize, jobSizeChecks } from "../src/doctor.mjs";
+import { doctorJobSize, fleetSizeChecks, jobSizeChecks } from "../src/doctor.mjs";
 import { envelopeDigest, parseEnvelope } from "../src/envelope.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { quotedShown } from "../src/backend-local.mjs";
@@ -5385,6 +5385,25 @@ test("issue #499 part C: doctor names a peer whose projects differ, from the ser
 	assert.ok(!none.some((x) => /projects/.test(x.label) && /fingerprint|disagree/.test(x.label)), "no projects anywhere: nothing new on upgrade");
 });
 
+test("issue #596 (gate round 1): doctor names a peer that predates job sizes, from the service's own scoped-limits file", async () => {
+	const dir = tempDir("pi-fleet-size-");
+	const projects = join(dir, "projects.json");
+	writeFileSync(projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+	const sized = join(dir, "sized.json");
+	writeFileSync(sized, JSON.stringify({ version: 3, limits: [{ scope: "project:shop", memory: "1g" }] }));
+	const plain = join(dir, "plain.json");
+	writeFileSync(plain, JSON.stringify({ version: 2, limits: [{ scope: "project:shop", day: 5 }] }));
+	const env = (file) => ({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_PROJECTS_FILE: projects, PI_SCOPED_LIMITS_FILE: file, PI_SETTINGS_FILE: noOverlay() });
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const old = await collectChecks(env(sized), fleetSeams([{ name: "mini2", tz }, { name: "mini3", tz, limitsVersion: "3" }]));
+	const line = old.find((c) => /predates job sizes/.test(c.label));
+	assert.ok(line && line.warn === true && /^mini2 predates/.test(line.label), "the peer from before sizes is named, the current one is not");
+	const current = await collectChecks(env(sized), fleetSeams([{ name: "mini2", tz, limitsVersion: "3" }]));
+	assert.ok(!current.some((c) => /predate/.test(c.label)));
+	const unsized = await collectChecks(env(plain), fleetSeams([{ name: "mini2", tz }]));
+	assert.ok(!unsized.some((c) => /predate/.test(c.label)), "no size written: nothing at risk yet");
+});
+
 test("PR #569's review: with THIS host's projects.json not loading, doctor fails on it and does not blame a healthy peer", async () => {
 	const file = join(tempDir("pi-fp-projects-bad-"), "projects.json");
 	writeFileSync(file, "{ not json");
@@ -5839,7 +5858,7 @@ test("doctor --live builds its probes at the deployment's job size with the daem
 	assert.deepEqual(probe.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a)), ["--memory=2g", "--memory-swap=2g", "--cpus=13", "--cpu-shares=512", "--shm-size=1g"]);
 	assert.match(text(), /✓ read back on local: isolation holds \(CapBnd 0, NoNewPrivs 1, pids\.max 512, memory\.max 2147483648, memory\.swap\.max 0, cpu\.max 1300000 100000, cpu\.weight 59 \(--cpu-shares=512\)\)/);
 	assert.match(text(), /✓ Job size: 2g of memory .* weight of 0\.5 CPUs, per job \(PI_JOB_MEMORY and PI_JOB_CPUS;/);
-	assert.match(text(), /✓ local: every job may use at most 13 of this runtime's 14 CPUs/);
+	assert.match(text(), /✓ local: any one job may use at most 13 of this runtime's 14 CPUs/);
 });
 
 test("doctor --live renders a failed read-back as a hard failure with the declared word beside the observed", async () => {
@@ -8048,6 +8067,11 @@ const MIXED_PIN = {
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"⚠ podman: `podman info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `podman info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8113,6 +8137,11 @@ const MIXED_PIN = {
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no answer that says its CPU count (docker-not-found), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"⚠ podman: `podman info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `podman info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
 			"✓ podman: cgroup v2 controllers are delegated to this account (cpuset, cpu, io, memory, pids), so a job's pid, memory and cpu bounds are applied",
 			"✓ podman: SELinux does not confine containers here, so nothing a job mounts is relabelled",
@@ -8169,6 +8198,11 @@ const MIXED_PIN = {
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"⚠ podman: `podman info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `podman info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8222,6 +8256,11 @@ const MIXED_PIN = {
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"⚠ podman: `podman info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `podman info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -10125,6 +10164,9 @@ const DOCKER_CANARY_PIN = {
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10197,6 +10239,9 @@ const DOCKER_CANARY_PIN = {
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10275,6 +10320,9 @@ const DOCKER_CANARY_PIN = {
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10357,6 +10405,9 @@ const DOCKER_CANARY_PIN = {
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10439,6 +10490,9 @@ const DOCKER_CANARY_PIN = {
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
+			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
+			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -11992,14 +12046,34 @@ test("doctor names the default job size, the --cpus ceiling this runtime gives e
 	const plain = jobSizeChecks({}, { daemon: facts() });
 	assert.deepEqual(plain.map((c) => [c.ok, c.warn === true]), [[true, false], [true, false]]);
 	assert.match(plain[0].label, /^Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job \(the built-in default;/);
-	assert.match(plain[1].label, /^local: every job may use at most 13 of this runtime's 14 CPUs \(--cpus\), one kept for the host;/);
+	assert.match(plain[1].label, /^local: any one job may use at most 13 of this runtime's 14 CPUs \(--cpus\);/);
+	assert.doesNotMatch(plain[1].label, /kept for the host/, "the ceiling is per job and keeps no core free across jobs (measured)");
 	assert.match(jobSizeChecks({ PI_JOB_MEMORY: "1536m", PI_JOB_CPUS: "0.5" })[0].label, /^Job size: 1536m of memory .* weight of 0\.5 CPUs, per job \(PI_JOB_MEMORY and PI_JOB_CPUS;/);
-	assert.doesNotMatch(jobSizeChecks({}, { daemon: facts({ hostCpus: 2 }) })[1].label, /kept for the host/, "a host under four CPUs keeps none back");
-	assert.equal(jobSizeChecks({}, { daemon: null }).length, 1, "no daemon answer, no ceiling line");
+	assert.match(jobSizeChecks({}, { daemon: facts({ hostCpus: 2 }) })[1].label, /at most 2 of this runtime's 2 CPUs/, "a host under four CPUs keeps none back");
+	assert.equal(jobSizeChecks({}, {}).length, 1, "no venue named, no ceiling line");
+	// The ceiling UNKNOWN is a warning, per venue (P1G1-C1): a job then runs with no --cpus at all.
+	for (const [label, opts, want] of [
+		["docker not read", { daemon: null }, /^local: `docker info` gave no answer that says its CPU count \(not read\), so the CPU ceiling is unknown and a job that runs gets no --cpus/],
+		["docker unreadable", { daemon: { answered: false, reason: "unparseable", transient: false } }, /^local: `docker info` gave no answer that says its CPU count \(unparseable\)/],
+		["docker gave no count", { daemon: facts({ hostCpus: null }) }, /^local: `docker info` gave no CPU count, so the CPU ceiling is unknown/],
+		["podman gave no count", { podman: { answered: true, info: { hostCpus: null } } }, /^podman: `podman info` gave no CPU count, so the CPU ceiling is unknown .*cpu_ceiling_unknown/],
+		["podman did not answer", { podman: { answered: false, reason: "timeout" } }, /^podman: `podman info` gave no answer that says its CPU count \(timeout\)/],
+	]) {
+		const lines = jobSizeChecks({}, opts);
+		assert.deepEqual([lines.length, lines[1].ok, lines[1].warn], [2, false, true], label);
+		assert.match(lines[1].label, want, label);
+	}
+	// A podman-only deployment's ceiling comes from `podman info`; both venues say their own.
+	const both = jobSizeChecks({}, { daemon: facts({ hostCpus: 14 }), podman: { answered: true, info: { hostCpus: 4 } } });
+	assert.deepEqual(both.slice(1).map((c) => c.label.match(/^(\w+): any one job may use at most (\d+) of this runtime's (\d+)/).slice(1)), [["local", "13", "14"], ["podman", "3", "4"]]);
+	const shares = jobSizeChecks({}, { daemon: facts({ cpuShares: false }) }).at(-1);
+	assert.deepEqual([shares.ok, shares.warn], [false, true]);
+	assert.match(shares.label, /CPUShares false, so it drops --cpu-shares .*size_bound_unenforced/);
+	assert.equal(jobSizeChecks({}, { daemon: facts({ cpuShares: null }) }).some((c) => /CPUShares/.test(c.label)), false);
 	const swap = jobSizeChecks({}, { daemon: facts({ swapLimit: false }) }).at(-1);
 	assert.equal(swap.ok, false);
 	assert.equal(swap.warn, true);
-	assert.match(swap.label, /SwapLimit false, so --memory-swap cannot be enforced here and a job may swap beyond its memory/);
+	assert.match(swap.label, /SwapLimit false, so it drops --memory-swap and a job may swap beyond its memory \(size_bound_unenforced\)/);
 	assert.equal(jobSizeChecks({}, { daemon: facts({ swapLimit: null }) }).some((c) => /SwapLimit/.test(c.label)), false, "Podman's compat answer is not read, so nothing is said");
 	// A setting the worker refuses at boot is a FAILURE, never a warning.
 	const bad = jobSizeChecks({ PI_JOB_MEMORY: "4GB" });
@@ -12015,4 +12089,15 @@ test("doctor's read-backs and the podman canary are built at the deployment's de
 	assert.deepEqual(args.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a)), ["--memory=1g", "--memory-swap=1g", "--cpus=3", "--cpu-shares=512", "--shm-size=512m"]);
 	// docker's canary is a plain `docker run` with no bounds at all, pinned byte for byte, and stays so.
 	assert.equal(egressCanaryProbeArgs({ slug: "provider", pid: 1, network: "n", proxy: "p", image: "pi-job:latest", url: "https://x", size: { memMiB: 1024, cpuCenti: 50 } }).some((a) => a.startsWith("--memory")), false);
+});
+
+test("doctor names each peer that predates job sizes once this host's file carries one, and nothing otherwise (#596)", () => {
+	const peers = [{ name: "a", limitsVersion: "3" }, { name: "b" }, { name: "c", limitsVersion: "2" }, { name: "d", limitsVersion: "4" }];
+	const [line, ...rest] = fleetSizeChecks(3, peers);
+	assert.deepEqual([rest.length, line.ok, line.warn], [0, false, true]);
+	assert.match(line.label, /^b, c predate job sizes \(scoped-limits version 3\), while this host's file carries one: a running worker from before keeps its last good file and runs the project's jobs at the default size/);
+	assert.match(line.fix, /upgrade and restart every worker/);
+	assert.match(fleetSizeChecks(3, [{ name: "b" }])[0].label, /^b predates job sizes/);
+	assert.deepEqual(fleetSizeChecks(2, peers), [], "no size in the file: nothing at risk yet");
+	assert.deepEqual(fleetSizeChecks(3, [{ name: "a", limitsVersion: "3" }]), [], "every peer reads version 3");
 });

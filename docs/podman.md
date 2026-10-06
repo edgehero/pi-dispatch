@@ -1263,8 +1263,9 @@ own folder is never relabelled and needs the `semanage fcontext` label from the 
 - **`podman machine`** (macOS, Windows) is refused as `podman-platform`, since nothing about it was measured.
 - **The CPU ceiling ignores the account's own limit.** Every job gets the size its project sets (see
   [job sizes](scoped-limits.md#job-sizes-version-3)) and a `--cpus` ceiling of the host's CPU count from `podman info`,
-  minus one core when it has four or more. A `cpu.max` or `memory.max` set on the account's systemd user service
-  (`max` on every host measured) is not read yet; the host budget of a later release takes the smaller of the two.
+  minus one core when it has four or more. The ceiling bounds a single job, not all of them together. A `cpu.max` or
+  `memory.max` set on the account's systemd user service (`max` on every host measured) is not read yet; the host
+  budget of a later release takes the smaller of the two.
 
 ## Property table
 

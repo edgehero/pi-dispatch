@@ -978,3 +978,68 @@ test("issue #596: the size handed to runContainer is the size on the argv, never
 	assert.deepEqual(rec.args.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a)), ["--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g"]);
 	assert.deepEqual(logs, [["cpu_ceiling_unknown", { container: "j2" }]]);
 });
+
+/** A `docker run` that writes `stderr` and exits `code`; every other command answers 0 with nothing. */
+function stderrDocker(recorder, { code, stderr = "" }) {
+	return (cmd, args) => {
+		if (args[0] === "run") recorder.args = args;
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		queueMicrotask(() => {
+			if (args[0] === "run") for (const chunk of [stderr].flat()) if (chunk !== "") child.stderr.emit("data", Buffer.from(chunk));
+			child.emit("close", args[0] === "run" ? code : 0);
+		});
+		return child;
+	};
+}
+
+test("issue #596: docker refusing a stale --cpus drops the cached facts and names both counts; nothing else does", { skip }, async () => {
+	const REFUSAL = "docker: Error response from daemon: Range of CPUs is from 0.01 to 4.00, as there are only 4 CPUs available.\nSee 'docker run --help'.\n";
+	const attempt = async ({ code, stderr, hostCpus }) => {
+		const rec = {};
+		const logs = [];
+		let stale = 0;
+		const controller = new AbortController();
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, onOutput: () => {}, spawnFn: stderrDocker(rec, { code, stderr }), fs: cidFs(), detachedCheck: instantCheck(), log: (e, f) => logs.push([e, f]), onCpuCeilingStale: () => stale++ });
+		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: controller.signal, ...(hostCpus !== undefined ? { hostCpus } : {}) });
+		return { result, logs: logs.filter(([e]) => e === "cpu_ceiling_stale"), stale, rec };
+	};
+	// Docker Desktop's VM went from 14 CPUs to 4: the ceiling 13 is out of the daemon's range.
+	const refused = await attempt({ code: 125, stderr: REFUSAL, hostCpus: 14 });
+	assert.ok(refused.rec.args.includes("--cpus=13"));
+	assert.equal(refused.result.code, 125, "the attempt stays a never-started one, refunded and retried by the processor");
+	assert.deepEqual(refused.logs, [["cpu_ceiling_stale", { container: "pi-job-j1", cpus: 13, hostCpus: 14, runtimeCpus: 4 }]]);
+	assert.equal(refused.stale, 1, "the wiring is told, so the next pickup reads the daemon again");
+	// The refusal split across two chunks is still read: the head is kept across chunks.
+	const split = await attempt({ code: 125, stderr: [REFUSAL.slice(0, 40), REFUSAL.slice(40)], hostCpus: 14 });
+	assert.deepEqual([split.logs.length, split.stale], [1, 1]);
+	for (const [label, args] of [
+		["another 125 (a name conflict)", { code: 125, stderr: "docker: Error response from daemon: Conflict. The container name is already in use.\n", hostCpus: 14 }],
+		["the text on a run that started (exit 0)", { code: 0, stderr: REFUSAL, hostCpus: 14 }],
+		["the text on a real job failure (exit 1)", { code: 1, stderr: REFUSAL, hostCpus: 14 }],
+		["no CPU count, so no --cpus was ours", { code: 125, stderr: REFUSAL }],
+	]) {
+		const other = await attempt(args);
+		assert.deepEqual([other.logs, other.stale], [[], 0], label);
+	}
+	// A throwing hook does not rewrite the attempt's answer.
+	const rec = {};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, onOutput: () => {}, spawnFn: stderrDocker(rec, { code: 125, stderr: REFUSAL }), fs: cidFs(), detachedCheck: instantCheck(), onCpuCeilingStale: () => {
+		throw new Error("boom");
+	} });
+	assert.equal((await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, hostCpus: 14 })).code, 125);
+});
+
+test("issue #596: a size flag the runtime said it drops is logged per job, and stays on the argv", { skip }, async () => {
+	const rec = {};
+	const logs = [];
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, onOutput: () => {}, spawnFn: fakeSpawnWithData(rec, { exitCode: 0 }), log: (e, f) => logs.push([e, f]) });
+	await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, hostCpus: 4, unenforced: ["--memory-swap", "--cpu-shares"] });
+	assert.deepEqual(logs, [["size_bound_unenforced", { container: "pi-job-j1", flags: ["--memory-swap", "--cpu-shares"] }]]);
+	assert.ok(rec.args.includes("--memory-swap=4g") && rec.args.includes("--cpu-shares=2048"), "the flags are still passed: the runtime decides, the log names it");
+	logs.length = 0;
+	await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j2", signal: new AbortController().signal, hostCpus: 4 });
+	assert.deepEqual(logs, [], "a runtime that enforces both says nothing");
+});

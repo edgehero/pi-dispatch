@@ -59,7 +59,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
-import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
+import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, loadProjects, projectsFingerprint } from "./projects.mjs";
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
@@ -1829,7 +1829,8 @@ export async function collectChecks(shellVars, seams) {
 					: null);
 	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs, unit: jobUser.unit, ...(podman ? { podman: podman.observed } : {}) }));
 	// Issue #596: the default job size, and what this host's runtime says about the bounds a size becomes.
-	checks.push(...jobSizeChecks(env, { daemon: localUsed ? daemon : null }));
+	// Each venue this deployment runs, from that venue's own read: `undefined` leaves a venue out, null is "not read".
+	checks.push(...jobSizeChecks(env, { daemon: localUsed ? (daemon ?? null) : undefined, podman: podman?.observed?.read !== undefined && podman?.observed?.read !== null ? podman.observed.read : undefined }));
 	checks.push(...jobUser.checks);
 	if (podman) checks.push(...podman.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
@@ -2497,6 +2498,9 @@ export async function collectChecks(shellVars, seams) {
 		// "no projects" against healthy peers would send the operator to the wrong host.
 		const projectFactsHere = readProjectFacts(env, fileExists);
 		if (projectFactsHere.parseError === null) checks.push(...fleetProjectsChecks(projectsFingerprint(projectFactsHere.projects), peers));
+		// Issue #596: a peer that predates version 3 keeps its last good scoped-limits file once this one carries a size,
+		// and runs the sized project's jobs at the default size. SKIPPED when this host's file does not load.
+		if (scopedLimitFacts.parseError === null) checks.push(...fleetSizeChecks(scopedLimitsVersionFor(scopedLimitFacts.limits), peers));
 		// Issue #504 part B: one applied split, judged on every host against its own envelope. A host whose envelope digest
 		// differs refuses every governed job as `envelope-mismatch`. SKIPPED when this host's file does not load, for the
 		// projects check's reason above.
@@ -4850,6 +4854,24 @@ export async function fleetDollarChecks(mine, peers, { dollarKeysExist = async (
  * Hosts are named, never a project's members or name: the registry carries a digest, so "different" is all a reader
  * can know.
  */
+/**
+ * The fleet's job sizes (issue #596): WARNS when this host's scoped-limits file needs version 3 (a row carries a size)
+ * and a peer publishes no `limitsVersion` of 3 or more. Such a worker refuses the file only when it LOADS it, at boot; a
+ * running one keeps its last good file on reload (`scoped_limits_reload_invalid`) and runs the project's jobs at the
+ * default size, with nothing on the job saying so. Nothing is said while no row carries a size.
+ */
+export function fleetSizeChecks(fileVersion, peers) {
+	if (fileVersion < 3) return [];
+	const old = peers.filter((h) => !(Number(h.limitsVersion) >= 3));
+	if (old.length === 0) return [];
+	return [{
+		ok: false,
+		warn: true,
+		label: `${old.map((h) => h.name).join(", ")} ${old.length === 1 ? "predates" : "predate"} job sizes (scoped-limits version 3), while this host's file carries one: a running worker from before keeps its last good file and runs the project's jobs at the default size, and refuses the file at its next start`,
+		fix: "upgrade and restart every worker on this Valkey before a size is written into scoped-limits.json",
+	}];
+}
+
 export function fleetProjectsChecks(mine, peers) {
 	const checks = [];
 	const opinions = peers.filter((h) => typeof h.fpProjects === "string" && h.fpProjects !== "");
@@ -7379,13 +7401,16 @@ export function doctorJobSize(env) {
 }
 
 /**
- * The job size lines (issue #596): the default size every job without a project size gets, the `--cpus` ceiling this
- * host's runtime gives every job, and a WARNING where the Docker daemon reports `SwapLimit` false, because there
- * `--memory-swap` cannot be enforced and a job may swap past its memory, which the size promised it would not.
- * A setting that does not parse is a FAILURE: the worker refuses to start on it (`loadConfig`).
- * `daemon` is the local venue's one `docker info` answer, or null where it was not read.
+ * The job size lines (issue #596): the default size every job without a project size gets, the `--cpus` ceiling each
+ * venue's runtime gives every job, and WARNINGS where a bound will not hold: the ceiling is unknown (the runtime did
+ * not answer, or gave no CPU count, so jobs run with no `--cpus`, the worker's `cpu_ceiling_unknown`), or the Docker
+ * daemon reports `SwapLimit` or `CPUShares` false (it drops `--memory-swap` or `--cpu-shares` with a client warning
+ * only, the worker's `size_bound_unenforced`). A setting that does not parse is a FAILURE: the worker refuses to start
+ * on it (`loadConfig`).
+ * `daemon` is the local venue's one `docker info` answer (null where it was not read), `undefined` where this
+ * deployment does not run `local`; `podman` is the podman venue's one `podman info` read the same way.
  */
-export function jobSizeChecks(env, { daemon = null } = {}) {
+export function jobSizeChecks(env, { daemon = undefined, podman = undefined } = {}) {
 	let d;
 	try {
 		d = jobSizeDefaults(env);
@@ -7394,11 +7419,27 @@ export function jobSizeChecks(env, { daemon = null } = {}) {
 	}
 	const where = d.memSet || d.cpuSet ? "PI_JOB_MEMORY and PI_JOB_CPUS" : "the built-in default";
 	const checks = [{ ok: true, label: `Job size: ${formatMemory(d.memMiB)} of memory with no swap beyond it, and the CPU weight of ${formatCpus(d.cpuCenti)} CPUs, per job (${where}; a project row's memory and cpus override it, docs/scoped-limits.md)` }];
+	const venues = [];
+	// `reason` is the reader's own token (`timeout`, `unparseable`, ...), never the runtime's text.
+	const reasonOf = (read) => (typeof read?.reason === "string" && /^[a-z0-9-]{1,40}$/.test(read.reason) ? read.reason : "not read");
+	if (daemon !== undefined) venues.push({ venue: "local", answered: daemon?.answered === true, reason: reasonOf(daemon), hostCpus: daemon?.answered === true ? daemon.facts?.hostCpus : null, cmd: "docker info" });
+	if (podman !== undefined) venues.push({ venue: "podman", answered: podman?.answered === true, reason: reasonOf(podman), hostCpus: podman?.answered === true ? podman.info?.hostCpus : null, cmd: "podman info" });
+	for (const v of venues) {
+		const ceiling = hostCpuCeiling(v.hostCpus);
+		if (ceiling !== null) {
+			// "any ONE job": each container's quota is its own and they do not sum, so busy jobs together can still use
+			// every core (measured, issue #596); a reserve across jobs is the phase 2 host budget's.
+			checks.push({ ok: true, label: `${v.venue}: any one job may use at most ${ceiling} of this runtime's ${v.hostCpus} CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)` });
+		} else {
+			checks.push({ ok: false, warn: true, label: `${v.venue}: ${v.answered ? `\`${v.cmd}\` gave no CPU count` : `\`${v.cmd}\` gave no answer that says its CPU count (${v.reason})`}, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)`, fix: `make \`${v.cmd}\` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user` });
+		}
+	}
 	const facts = daemon?.answered === true ? daemon.facts : null;
-	const ceiling = hostCpuCeiling(facts?.hostCpus);
-	if (ceiling !== null) checks.push({ ok: true, label: `local: every job may use at most ${ceiling} of this runtime's ${facts.hostCpus} CPUs (--cpus)${ceiling < facts.hostCpus ? ", one kept for the host" : ""}; under contention each gets CPU in proportion to its size (--cpu-shares)` });
 	if (facts?.swapLimit === false) {
-		checks.push({ ok: false, warn: true, label: "local: the Docker daemon reports SwapLimit false, so --memory-swap cannot be enforced here and a job may swap beyond its memory", fix: "enable swap accounting in the kernel (cgroup v2, or swapaccount=1 on cgroup v1), restart Docker, then re-run doctor" });
+		checks.push({ ok: false, warn: true, label: "local: the Docker daemon reports SwapLimit false, so it drops --memory-swap and a job may swap beyond its memory (size_bound_unenforced)", fix: "enable swap accounting in the kernel (cgroup v2, or swapaccount=1 on cgroup v1), restart Docker, then re-run doctor" });
+	}
+	if (facts?.cpuShares === false) {
+		checks.push({ ok: false, warn: true, label: "local: the Docker daemon reports CPUShares false, so it drops --cpu-shares and jobs get no CPU weight by size (size_bound_unenforced)", fix: "enable the cpu cgroup controller for Docker (cgroup v2 with cpu delegated), restart Docker, then re-run doctor" });
 	}
 	return checks;
 }

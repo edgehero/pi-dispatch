@@ -641,3 +641,16 @@ test("a project row whose id is not a project is named by index and id (dangling
 	assert.doesNotThrow(() => checkProjectRows(limits, [...projects, { id: "gone", members: ["/srv/x"] }], "sl.json"));
 	assert.doesNotThrow(() => checkProjectRows([], [], "sl.json"));
 });
+
+test("v3: a row refuses a key it does not define, so a misspelled size cannot drop out beside a valid field; v1 and v2 still drop one (issue #596)", () => {
+	for (const typo of ["Memory", "cpu", "mem", "CPUs", "host_share", "minjobs", "comment"]) {
+		assert.throws(() => v3([{ scope: "project:shop", memory: "1g", [typo]: "8g" }]), (e) => e.message.includes(`unknown key ${JSON.stringify(typo)}`) && /keys are case-sensitive/.test(e.message), typo);
+	}
+	assert.throws(() => v3([{ scope: "acme/web", day: 1, Memory: "8g", cpu: 2 }]), /unknown keys "Memory", "cpu"/, "on any row, both named");
+	assert.throws(() => v3([{ scope: "model:openai/gpt-x", dayUsd: "1", dayusd: "2" }]), /unknown key "dayusd"/, "a model row too");
+	// Every key the file defines is accepted.
+	assert.equal(v3([{ scope: "project:shop", day: 1, week: 2, month: 3, concurrent: 2, dayUsd: "1", weekUsd: "2", monthUsd: "3", memory: "1g", cpus: 1, hostShare: 50, minJobs: 1 }]).length, 1);
+	// Versions 1 and 2 keep the operator-file policy: an unknown key is dropped, so a file an older build reads still loads.
+	assert.deepEqual(parse([{ scope: "acme/web", day: 1, Memory: "8g", comment: "x" }]), [{ scope: "acme/web", day: 1, week: null, month: null, concurrent: null }]);
+	assert.equal(parseScopedLimits(wrap([{ scope: "project:shop", day: 1, cpu: 2 }], 2), "sl.json")[0].day, 1);
+});
