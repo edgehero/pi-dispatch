@@ -2121,8 +2121,9 @@ test("readScopedLimits: valid file, missing file, invalid file (incl. a NEWER ve
   const ok = readScopedLimits({ scopedLimitsPath: "sl.json", fs });
   assert.equal(ok.limits[0].day, 3);
   assert.deepEqual(readScopedLimits({ scopedLimitsPath: "absent.json", fs }), { missing: true });
-  const newer = readScopedLimits({ scopedLimitsPath: "v3.json", fs: memFs({ "v3.json": JSON.stringify({ version: 3, limits: [] }) }) });
-  assert.match(newer.invalid, /newer pi-dispatch \(version 3; this build understands 2\)/);
+  // One past the newest this build reads (3 since issue #596).
+  const newer = readScopedLimits({ scopedLimitsPath: "v4.json", fs: memFs({ "v4.json": JSON.stringify({ version: 4, limits: [] }) }) });
+  assert.match(newer.invalid, /newer pi-dispatch \(version 4; this build understands 3\)/);
 });
 
 test("writeScopedLimits: a MISSING file starts from the empty v1 shape and the write creates it", () => {
@@ -2143,11 +2144,28 @@ test("writeScopedLimits REFUSES a version-less or newer existing file -- read an
   const r1 = writeScopedLimits({ scopedLimitsPath: "sl.json", fs: versionless, mutate: (l) => l });
   assert.match(r1.invalid, /must have "version": 1/);
   assert.equal(JSON.parse(versionless.files.get("sl.json")).version, undefined, "the file bytes were not touched");
-  const v3text = JSON.stringify({ version: 3, limits: [{ scope: "a/b", day: 1, hour: 2 }] });
-  const v3 = memFs({ "sl.json": v3text });
-  const r2 = writeScopedLimits({ scopedLimitsPath: "sl.json", fs: v3, mutate: (l) => l });
+  const v4text = JSON.stringify({ version: 4, limits: [{ scope: "a/b", day: 1, hour: 2 }] });
+  const v4 = memFs({ "sl.json": v4text });
+  const r2 = writeScopedLimits({ scopedLimitsPath: "sl.json", fs: v4, mutate: (l) => l });
   assert.match(r2.invalid, /newer pi-dispatch/);
-  assert.equal(v3.files.get("sl.json"), v3text, "never re-stamped down");
+  assert.equal(v4.files.get("sl.json"), v4text, "never re-stamped down");
+});
+
+test("writeScopedLimits stamps version 3 only when a row carries a size, and a size off a project row is refused unwritten (issue #596)", () => {
+  const projects = JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] });
+  const fs = memFs({ "sl.json": JSON.stringify({ version: 2, limits: [{ scope: "project:shop", concurrent: 2 }] }), "projects.json": projects });
+  const sized = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map((r) => ({ ...r, memory: "1536m", cpus: 0.5 })) });
+  assert.equal(sized.ok, true, sized.invalid);
+  const written = JSON.parse(fs.files.get("sl.json"));
+  assert.equal(written.version, 3);
+  assert.deepEqual(written.limits, [{ scope: "project:shop", concurrent: 2, memory: "1536m", cpus: 0.5 }], "null size fields are omitted, set ones written in the parser's spelling");
+  // Dropping the size again writes the lowest version that expresses the file.
+  writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map(({ memory, cpus, ...r }) => r) });
+  assert.equal(JSON.parse(fs.files.get("sl.json")).version, 2);
+  const before = fs.files.get("sl.json");
+  const repo = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => [...l, { scope: "acme/web", memory: "2g" }] });
+  assert.match(repo.invalid, /memory belong on a project row/);
+  assert.equal(fs.files.get("sl.json"), before, "nothing written");
 });
 
 test("writeScopedLimits refuses to add or change a project:<id> row whose id is not in projects.json (issue #499 part B)", () => {

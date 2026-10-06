@@ -43,6 +43,8 @@ import {
 	pinningProbeRunArgs,
 	runLiveProbes,
 	STATUS_SCRIPT,
+	cpuWeightsFor,
+	expectedBounds,
 	sweepStaleContainers,
 	sweepStaleFixtures,
 	sweepStaleNetworks,
@@ -55,7 +57,9 @@ const nodeFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 
 // What the shipped image reads under the builder's flags (measured on docker 27.4 / Docker Desktop), and what the
 // same image reads WITHOUT them. The second is the non-vacuity fixture: CapEff is 0 in both.
-const HELD_STATUS = "Name:\tdocker-init\nUid:\t1001\t1001\t1001\t1001\nCapEff:\t0000000000000000\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\ncgroup:v2\npids.max:512\nmemory.max:4294967296\n";
+// Issue #596: the default size (4g, 2 CPUs) with no runtime CPU count, as the green run's fixture builds it: swap 0, no
+// ceiling, and the weight runc 1.5.1 and crun 1.27 give --cpu-shares=2048 (measured).
+const HELD_STATUS = "Name:\tdocker-init\nUid:\t1001\t1001\t1001\t1001\nCapEff:\t0000000000000000\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\ncgroup:v2\npids.max:512\nmemory.max:4294967296\nmemory.swap.max:0\ncpu.weight:174\ncpu.max:max 100000\n";
 const RAW_STATUS = "Uid:\t1001\t1001\t1001\t1001\nCapEff:\t0000000000000000\nCapBnd:\t00000000a80425fb\nNoNewPrivs:\t0\ncgroup:v2\npids.max:max\nmemory.max:max\n";
 
 // --- the argv ---------------------------------------------------------------------------------------------------
@@ -149,6 +153,45 @@ test("isolation: NoNewPrivs 0 alone fails; an unreadable bound is NOT read back,
 	assert.equal(v1.warn, true);
 	assert.match(v1.detail, /not read back/);
 	assert.equal(isolationVerdict(parseStatus("Uid:\t1\t1\t1\t1\n")).warn, true, "no CapBnd line at all");
+});
+
+test("isolation reads back the size: swap 0, the --cpus ceiling as cpu.max, and a cpu.weight one of the measured mappings gives (#596)", () => {
+	const bounds = expectedBounds({ memMiB: 1024, cpuCenti: 50 }, 14);
+	assert.deepEqual(bounds, { pidsLimit: 512, memoryBytes: 1024 ** 3, cpuShares: 512, cpuMax: "1300000 100000" });
+	assert.equal(expectedBounds().cpuMax, "max 100000", "no runtime CPU count, no ceiling");
+	assert.equal(expectedBounds().memoryBytes, 4 * 1024 ** 3);
+	const sized = (over = {}) => ["Uid:\t1001\t1001\t1001\t1001", "CapBnd:\t0000000000000000", "NoNewPrivs:\t1", "cgroup:v2", "pids.max:512", "memory.max:1073741824", "memory.swap.max:0", "cpu.weight:20", "cpu.max:1300000 100000"].map((l) => over[l.split(":")[0]] ?? l).join("\n");
+	const held = isolationVerdict(parseStatus(sized()), bounds);
+	assert.equal(held.ok, true, held.detail);
+	assert.match(held.detail, /memory\.swap\.max 0, cpu\.max 1300000 100000, cpu\.weight 20 \(--cpu-shares=512\)/);
+	assert.equal(isolationVerdict(parseStatus(sized({ "cpu.weight": "cpu.weight:59" })), bounds).ok, true, "the newer runtimes' mapping of 512");
+	const swap = isolationVerdict(parseStatus(sized({ "memory.swap.max": "memory.swap.max:1073741824" })), bounds);
+	assert.equal(swap.ok, false);
+	assert.notEqual(swap.warn, true, "a job that may swap past its size is a failure, not an unread");
+	assert.match(swap.detail, /memory\.swap\.max 1073741824, expected 0/);
+	assert.equal(isolationVerdict(parseStatus(sized({ "memory.swap.max": "memory.swap.max:max" })), bounds).ok, false);
+	const ceiling = isolationVerdict(parseStatus(sized({ "cpu.max": "cpu.max:max 100000" })), bounds);
+	assert.equal(ceiling.ok, false);
+	assert.match(ceiling.detail, /cpu\.max max 100000, expected 1300000 100000/);
+	const odd = isolationVerdict(parseStatus(sized({ "cpu.weight": "cpu.weight:100" })), bounds);
+	assert.equal(odd.ok, false);
+	assert.equal(odd.warn, true, "a weight no measured mapping gives is said, not failed");
+	assert.match(odd.detail, /cpu\.weight 100 is neither mapping measured for --cpu-shares=512 \(20 or 59\)/);
+	for (const line of ["memory.swap.max", "cpu.weight", "cpu.max"]) {
+		const unread = isolationVerdict(parseStatus(sized({ [line]: `${line}:` })), bounds);
+		assert.equal(unread.warn, true, line);
+		assert.match(unread.detail, new RegExp(`${line.replace(/\./g, "\\.")} not readable`), line);
+	}
+	// A caller that passes no size bounds (the pre-#596 shape) checks what it always checked.
+	assert.equal(isolationVerdict(parseStatus(sized({ "memory.max": "memory.max:4294967296", "memory.swap.max": "memory.swap.max:max" }))).ok, true);
+});
+
+test("cpuWeightsFor reproduces the lab's whole --cpu-shares sweep under both runtime mappings (#596)", () => {
+	// Measured (round-size lab, section E): shares -> cpu.weight on runc 1.1.13 / crun 1.14 and on runc 1.5.1 / crun 1.27.
+	const sweep = [[2, 1, 1], [512, 20, 59], [1024, 39, 100], [2048, 79, 174], [4096, 157, 303], [262144, 10000, 10000]];
+	for (const [shares, old, recent] of sweep) assert.deepEqual(cpuWeightsFor(shares), [...new Set([old, recent])], String(shares));
+	assert.deepEqual(cpuWeightsFor(1), []);
+	assert.deepEqual(cpuWeightsFor(null), []);
 });
 
 test("nonRoot needs all four Uid fields nonzero", () => {
@@ -492,6 +535,23 @@ test("a green run reads back all eight, in the conformance list's order, and lea
 	assert.deepEqual(result.notes, []);
 	const run = docker.calls.find((a) => a[0] === "run" && a.includes("sleep"));
 	assert.equal(run.at(-1), String(liveSleepSeconds(1000)), "the argv the sequence builds ends in the sleep DERIVED from its own step bound");
+});
+
+test("a sized run builds EVERY probe container at the size and ceiling it was handed, and reads them back against them (#596)", async () => {
+	const status = "Name:\tdocker-init\nUid:\t1001\t1001\t1001\t1001\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\ncgroup:v2\npids.max:512\nmemory.max:1073741824\nmemory.swap.max:0\ncpu.weight:20\ncpu.max:300000 100000\n";
+	const docker = fakeDocker({ status: async () => ({ code: 0, stdout: status, stderr: "" }) });
+	const result = await runLiveProbes(probeArgs(docker, { size: { memMiB: 1024, cpuCenti: 50 }, hostCpus: 4 }));
+	const runs = docker.calls.filter((a) => a[0] === "run");
+	assert.ok(runs.length >= 3, "the reading, pinning and ephemeral containers");
+	for (const run of runs) {
+		assert.deepEqual(run.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a)), ["--memory=1g", "--memory-swap=1g", "--cpus=3", "--cpu-shares=512", "--shm-size=512m"], run[1]);
+	}
+	const isolation = result.verdicts.find((v) => v.property === "isolation");
+	assert.equal(isolation.ok, true, isolation.detail);
+	assert.match(isolation.detail, /memory\.max 1073741824, memory\.swap\.max 0, cpu\.max 300000 100000, cpu\.weight 20/);
+	// The same container read against the DEFAULT size fails: the verdict compares with what it was handed.
+	const unsized = await runLiveProbes(probeArgs(fakeDocker({ status: async () => ({ code: 0, stdout: status, stderr: "" }) })));
+	assert.equal(unsized.verdicts.find((v) => v.property === "isolation").ok, false);
 });
 
 test("the mutation is ANNOUNCED before the first docker call, and not at all when nothing will run", async () => {

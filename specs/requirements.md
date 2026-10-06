@@ -965,6 +965,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `dollar-cap`). A job reserves narrowest first: its repo or folder row, then its project's row, then the global
   windows; a refusal by any ledger gives back the ones before it, and every path that refunds gives back every ledger
   still held. A row naming a project that does not exist refuses the worker's start, never caps nothing in silence.
+- **Job sizes** (issue #596, file version 3): a `project:<id>` row may set the size of every member's job container,
+  `memory` (no swap beyond it) and `cpus` (a CPU weight under contention, under one host ceiling), and a row may set a
+  size and nothing else. A job without one takes the deployment's `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and
+  `2`), refused at boot when malformed. The size is resolved once at pickup from the same snapshot every other limit
+  is read from and recorded on the run. The row may also carry `hostShare` (a whole percentage of a host's job budget)
+  and `minJobs` (a soft minimum of the project's jobs per host); both are validated and stored now and are enforced
+  by NOTHING until the host budget ships (phase 2 of the issue), which every surface that shows them says. A version
+  1 or 2 file that carries a size field is refused naming version 3; a size field off a project row is refused.
 - **Why**: Every prior limit was deployment-global: one noisy repo emptied the daily cap for every other
   scope with nothing naming the culprit, and nothing serialized a working tree — two same-folder jobs ran
   containers concurrently in one read-write bind mount, reachable by a single cron trigger with no
@@ -1006,6 +1014,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   job defers while the first runs. Given a project `dayUsd` window with no room, then the job is refused `dollar-cap`.
   Given a row naming a project the projects file does not define, then the worker refuses to start, a live edit that
   would create one is kept out, the admin refuses to write it and `doctor` fails naming it.
+  Given a `project:` row with `memory: "1g"` and `cpus: 0.5` (issue #596), then each member job's container gets
+  `--memory=1g --memory-swap=1g --cpu-shares=512 --shm-size=512m` and the record's `size` says `project`; given no
+  row and `PI_JOB_MEMORY=2g`, then `2g` and `env`; given neither, `4g`, 2 CPUs and `default`; given a size in a job's
+  payload, then it changes nothing. Given a size field in a version 2 file, or on a repo row, then the file is
+  refused; given `minJobs` with no size, or above the row's `concurrent`, then the file is refused; given `hostShare`
+  or `minJobs` accepted, then nothing enforces either yet and the panel and the tools say "not enforced yet".
 
 ## REQ-DELEGATED-ALLOCATION
 
@@ -3230,6 +3244,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-06 | Issue #596, phase 1. **`REQ-SCOPED-LIMITS` AMENDED**: a `project:<id>` row (file version 3) may set its members' job size, `memory` with no swap beyond it and `cpus` as a weight under a host ceiling, alone or beside its other limits; a job without one takes `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`, refused at boot when malformed); the size is resolved at pickup from the limits snapshot and recorded on the run. `hostShare` (a whole percentage) and `minJobs` (a soft minimum needing a size, at most the row's `concurrent`) are validated and stored, and ENFORCED BY NOTHING until the phase 2 host budget, which every surface says. Acceptance clauses for each. Checked and UNCHANGED: `REQ-SPEND-CAPS-MULTI-WINDOW`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-EGRESS-ALLOWLIST` (no new refusal, no budget change, no network change). |
 | 2026-10-06 | Issue #587 (a pi bump never rebuilds over fixes made on its pull request). **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: the paragraph on how a bump arrives adds that the workflow rebuilds the rolling branch only while it holds nothing but its own bump commit, so a newer pi waits, with a comment, until a pull request carrying fixes is merged or closed. Every assertion this requirement lists is UNCHANGED, checked. |
 | 2026-10-05 | Issue #587 (every new pi release as a draft pull request). **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: a new paragraph names `.github/workflows/pi-bump.yml` as how the upgrade commit is prepared (pins and lockfile only, no pi code run, one rolling pull request that is always a draft) and says the verdict is this suite's, run by that pull request's own required checks, with the derived-table test and the `image` job's zero-spend provider smoke; the Acceptance adds the draft's red check. Every assertion this requirement lists is UNCHANGED, checked. |
 | 2026-10-05 | Issue #587 (pi 1.0.3). **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED** (mechanism, not contract): the bound's output cap is the largest any of the call's sampling parameters could send, every `samplingParamsByThinkingLevel` level included (pi 1.0.2 merges the level pi picks per call). **`REQ-MODEL-POLICY` AMENDED**: a routing key in the sampling parameters refuses whichever thinking level the call is made at, and a per-call Azure deployment refuses on provider `azure` whatever its api as well as on the azure-openai-responses api; the Acceptance gains the thinking-level case. **`REQ-TRIGGER-SECRETS` UNCHANGED, checked**: pi-ai 1.0.3's five Anthropic workload identity federation variables were already reserved (the Anthropic SDK reads them by name) and are now pinned as found in pi-ai's own sources too. **`REQ-UPSTREAM-CONTRACT-TESTS` UNCHANGED, checked**: version literals that only forced a review are now content hashes of the pi files each copy came from, and a new test holds every pi package in the lockfile and the overrides to the pin. |

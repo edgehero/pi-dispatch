@@ -73,7 +73,7 @@ scaffolds the empty form.
 }
 ```
 
-- `version`: required, `1` (or `2` for the dollar fields below). A file stamped by a newer pi-dispatch refuses loudly on both sides rather
+- `version`: required, `1` (or `2` for the dollar fields below, or `3` for a project's job size). A file stamped by a newer pi-dispatch refuses loudly on both sides rather
   than being read with its new fields silently dropped (a dropped cap field would be a silently widened
   spend limit). The tools refuse to write over a newer or version-less file for the same reason.
 - `scope` — a forge `"owner/name"` or a local folder path, matched **exactly** against the job's scope.
@@ -207,6 +207,46 @@ Things to know before you add a model row:
   its own ledger row, which matches no model row. A model row bounds the ids it names; a `models` list is what
   stops a job from reaching others.
 
+### Job sizes (version 3)
+
+A `project:<id>` row can also say how big each of the project's job containers is. Heavy projects get more
+memory, light ones less.
+
+```json
+{
+  "version": 3,
+  "limits": [
+    { "scope": "project:shop", "memory": "8g", "cpus": 4 },
+    { "scope": "project:docs", "memory": "1g", "cpus": 0.5, "concurrent": 2 }
+  ]
+}
+```
+
+- `memory`: the memory each job gets, a whole number of megabytes or gigabytes in lower case: `"512m"`,
+  `"1536m"`, `"8g"`. At least `512m`, at most `1024g`. The file keeps one spelling: `"1024m"` is written back as
+  `"1g"`. A job gets **no swap beyond its memory**: a job that needs more needs a bigger size. When a job runs out,
+  it ends `oom-killed` and is not retried ([insights](insights.md)).
+- `cpus`: a number with at most two decimals, at least `0.25`: `0.5`, `2`, `1.25`. It is a **weight, not a cap**.
+  When jobs compete for CPU, each gets CPU in proportion to its `cpus`. When the host is idle, any job may use the
+  idle cores. One core is always kept for the host when it has four or more, so no job can take it.
+- A row may set only a size, only one of the two, or a size beside its caps. A field the row does not set comes
+  from `PI_JOB_MEMORY` and `PI_JOB_CPUS` in `.env`, which default to `4g` and `2`. A bad value there stops the
+  worker at boot with the reason.
+- A size is only allowed on a `project:<id>` row. On a repo, folder or model row it refuses the file.
+- `hostShare` (a whole percentage from 1 to 100) and `minJobs` (an integer, at least 1) are **checked and stored
+  now, but nothing enforces them yet.** They are for the host budget of a later release: `hostShare` will be the
+  most of one host the project's running jobs may hold, and `minJobs` how many of its jobs a host makes room for
+  first. `minJobs` needs `memory` or `cpus` on the same row and may not be above its `concurrent`. The panel and
+  the tools show both with "not enforced yet".
+- A size needs `"version": 3`. The panel and the tools write it for you, and only when a row has a size. **Upgrade
+  every worker before you write one**: an older worker refuses a version 3 file (it would otherwise run the
+  project's jobs at the default size without saying so).
+- The worker reads the size when it picks a job up, so an edit applies to the project's next jobs. A running job
+  keeps its size. Each run record says the size the job got and where it came from (`size` in the record).
+- A reopened [sandbox](sandbox.md) gets the size its run had.
+
+What a size does not cover: disk I/O, disk space and the network are not limited per job.
+
 ## How it works
 
 A job's scoped windows reserve **first**: its repo or folder row, then its project row, then the global
@@ -232,7 +272,10 @@ Three doors, same as quiet hours:
   `dispatch_limit_add` / `dispatch_limit_edit` / `dispatch_limit_delete` change them behind the same
   operator confirm dialog as every config write. The add and edit tools take `dayUsd`, `weekUsd` and
   `monthUsd` as decimal strings (`"2.50"`) and check them before they ask, with the worker's own rules. They
-  write version 1 until a row needs version 2, and drop back to version 1 when the last dollar row goes.
+  write version 1 until a row needs version 2, and drop back to version 1 when the last dollar row goes. On a
+  project row they also take `memory`, `cpus`, `hostShare` and `minJobs`, checked the same way and shown in the
+  spelling the file will hold, and write version 3 only while a row has one. An edit keeps every field it is not
+  sent. The panel's SCOPED LIMITS section shows a row's size beside its caps.
 - **The dollar windows** of every row, with the deployment's, are in the panel's DOLLAR WINDOWS section and in
   `dispatch_costs` ([costs](costs.md#where-to-look)). A row's own dollar windows also show on its line in the
   panel's SCOPED LIMITS section and in the budget panel of the insights page, as spent and held over the cap.
@@ -259,7 +302,8 @@ Three doors, same as quiet hours:
 | Piece | Value |
 |---|---|
 | Env var | `PI_SCOPED_LIMITS_FILE` (absolute path; unset = no scoped limits. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
-| File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?`, `model:` rows and `project:<id>` rows |
+| File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?`, `model:` rows and `project:<id>` rows; version 3 adds `memory?`, `cpus?`, `hostShare?` and `minJobs?` on a project row |
+| Job size | `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`), unless the job's project row sets its own |
 | Refusal reason | `scope-cap` (pre-spend, never retried); `project-cap` for a project row; `dollar-cap` for a dollar window; `allocation-cap` when an allocation envelope's split bound the window |
 | Deferral | delayed set, fixed re-check, never dropped |
 | Panel key | `m` |

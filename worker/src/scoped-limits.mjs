@@ -39,6 +39,10 @@
  * its repo or folder row, then its project's row, then the global windows (`scopedLedgers`), and its keys are built from
  * the project ROW's scope like every other row's, so a project needs no keyspace of its own.
  *
+ * Issue #596 (phase 1) adds version 3: a project row may carry its jobs' size (`memory`, `cpus`) and the host budget's
+ * two knobs (`hostShare`, `minJobs`), see `SIZE_LIMIT_FIELDS`. This module only parses them; `job-size.mjs` resolves the
+ * size at pickup, and nothing reads `hostShare` or `minJobs` for a decision until the phase 2 host budget.
+ *
  * Custom: scoped limits validated inline per triggers.mjs/pause-windows.mjs precedent; zod not in deps
  */
 
@@ -51,6 +55,7 @@ import { splitModelEntry } from "./model-ref.mjs";
 import { formatMicros, parseUsdMicros } from "./money.mjs";
 import { parseScopeString, qualifiedScopeOf, scopeOf } from "./pause-windows.mjs";
 import { PROJECT_ID_RE, isProjectId } from "./project-id.mjs";
+import { formatCpus, formatMemory, parseCpus, parseMemory } from "./job-size.mjs";
 
 /**
  * The highest schema version this build reads. A file declaring a higher one is refused loudly. The admin writes the
@@ -66,7 +71,23 @@ import { PROJECT_ID_RE, isProjectId } from "./project-id.mjs";
  * cap, a concurrency limit and a lease that one build enforces and another silently ignores. Version 2 makes every
  * older build refuse the file loudly instead.
  */
-export const SCOPED_LIMITS_VERSION = 2;
+export const SCOPED_LIMITS_VERSION = 3;
+
+/**
+ * The four size fields of version 3 (issue #596), on a PROJECT row only, in display order:
+ *   - `memory`: the project's jobs' memory (`"512m"`, `"4g"`; `job-size.mjs` `parseMemory`), stored in its one spelling;
+ *   - `cpus`: their CPU weight (`0.5`, `2`; `parseCpus`), stored as a number;
+ *   - `hostShare`: the most of a host's job budget the project's running jobs may hold together, as a whole PERCENTAGE
+ *     from 1 to 100 (`50` is half). Parsed, validated and recorded now; ENFORCED only by the host budget (phase 2 of the
+ *     issue), and until then it bounds nothing;
+ *   - `minJobs`: how many of the project's jobs a host should make room for before it admits other projects' jobs, a
+ *     soft minimum. Parsed, validated and recorded now; ENFORCED only by the host budget's holds (phase 2), and until
+ *     then it bounds nothing.
+ * A version 1 or 2 file that carries one is refused naming version 3, for the version 2 reason: a 3.1.0 worker drops
+ * unknown fields, so the file would size its jobs on one build and not on another. Every released build refuses a
+ * version 3 file as newer.
+ */
+export const SIZE_LIMIT_FIELDS = Object.freeze(["memory", "cpus", "hostShare", "minJobs"]);
 
 /** The four job-count limit fields a row may carry, in display order. */
 const LIMIT_FIELDS = ["day", "week", "month", "concurrent"];
@@ -156,9 +177,10 @@ export function canonicalScope(job) {
 
 /**
  * Parse, validate, and normalize the scoped-limits file TEXT. Returns the normalized `limits` array
- * (every row rebuilt as an explicit `{ scope, day, week, month, concurrent }` literal in a version 1 file, and
- * `{ scope, day, week, month, concurrent, dayUsd, weekUsd, monthUsd }` in a version 2 one, `null` for absent
- * fields, unknown fields dropped -- the operator-file policy). Throws `configError` (fail-loud) on any
+ * (every row rebuilt as an explicit `{ scope, day, week, month, concurrent }` literal in a version 1 file,
+ * `{ scope, day, week, month, concurrent, dayUsd, weekUsd, monthUsd }` in a version 2 one, and that plus `memory,
+ * cpus, hostShare, minJobs` in a version 3 one, `null` for absent fields, unknown fields dropped -- the operator-file
+ * policy). Throws `configError` (fail-loud) on any
  * malformed entry. `path` is for error messages only -- this function touches no filesystem.
  */
 export function parseScopedLimits(text, path) {
@@ -173,7 +195,7 @@ export function parseScopedLimits(text, path) {
 	}
 	const version = parsed.version;
 	if (!Number.isInteger(version) || version < 1) {
-		throw configError(`scoped-limits file must have "version": 1 or ${SCOPED_LIMITS_VERSION} (an integer >= 1): ${path}`);
+		throw configError(`scoped-limits file must have "version": 1 to ${SCOPED_LIMITS_VERSION} (an integer >= 1): ${path}`);
 	}
 	if (version > SCOPED_LIMITS_VERSION) {
 		throw configError(`scoped-limits file written by a newer pi-dispatch (version ${version}; this build understands ${SCOPED_LIMITS_VERSION}): ${path}`);
@@ -240,10 +262,10 @@ function normalizeModelLimit(row, trimmed, at, path, version) {
 	// The runner folds model-less and overflow calls into an `other/other` usage row, so a row naming that pair
 	// could never be told apart from the fold.
 	if (`${ref.provider}/${ref.model}`.toLowerCase() === "other/other") throw configError(`${at}: model:other/other names the usage ledger's fold row, not a model: ${path}`);
-	for (const field of LIMIT_FIELDS) {
+	for (const field of [...LIMIT_FIELDS, ...SIZE_LIMIT_FIELDS]) {
 		if (row[field] !== undefined && row[field] !== null) throw configError(`${at}: a model row carries dayUsd, weekUsd and monthUsd only (${field} is refused): ${path}`);
 	}
-	const norm = { scope: `${MODEL_SCOPE_PREFIX}${ref.provider}/${ref.model}`, day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: null, monthUsd: null };
+	const norm = { scope: `${MODEL_SCOPE_PREFIX}${ref.provider}/${ref.model}`, day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: null, monthUsd: null, ...(version >= 3 ? sizeNulls() : {}) };
 	let any = false;
 	for (const field of USD_LIMIT_FIELDS) {
 		if (row[field] === undefined || row[field] === null) continue;
@@ -312,6 +334,9 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 		// read-modify-write writes back exactly what the parser accepts. `dollarCapsFor` turns them into integers.
 		// Only in a version 2 file's rows: a version 1 file reads into exactly the five-key literal it always did.
 		...(version >= 2 ? { dayUsd: null, weekUsd: null, monthUsd: null } : {}),
+		// Version 3's size fields (issue #596), the same way: only in a version 3 file's rows, null unless a project row
+		// sets them, so a version 1 or 2 file reads into exactly the literal it always did.
+		...(version >= 3 ? sizeNulls() : {}),
 	};
 	let any = false;
 	for (const field of USD_LIMIT_FIELDS) {
@@ -337,10 +362,53 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 		norm[field] = value;
 		any = true;
 	}
+	// Issue #596: a project row may carry a size and nothing else, so the size fields count as limiting something.
+	if (sizeFields(row, norm, { at, path, version, project: isProjectScope(trimmed) })) any = true;
 	if (!any) {
-		throw configError(`${at}: at least one of day, week, month, concurrent${version >= 2 ? ", dayUsd, weekUsd, monthUsd" : ""} is required (a row that limits nothing is a row an operator sets and then trusts): ${path}`);
+		throw configError(`${at}: at least one of day, week, month, concurrent${version >= 2 ? ", dayUsd, weekUsd, monthUsd" : ""}${version >= 3 && isProjectScope(trimmed) ? ", memory, cpus, hostShare, minJobs" : ""} is required (a row that limits nothing is a row an operator sets and then trusts): ${path}`);
 	}
 	return norm;
+}
+
+/** The four version 3 size fields, all null: what a version 3 row carries when it sets none. */
+function sizeNulls() {
+	return { memory: null, cpus: null, hostShare: null, minJobs: null };
+}
+
+/**
+ * Read a row's size fields into `norm` (issue #596), refusing loudly, and say whether it set any. Only a project row
+ * may carry them: a size is what one project's jobs need, and a repo or folder row is not where a job's project is
+ * decided. `minJobs` needs a size on the same row (a minimum of jobs of an unstated size reserves nothing anyone can
+ * judge) and may not exceed the row's own `concurrent` (a minimum the project can never reach). `hostShare` against
+ * `minJobs` times the size is judged where a host's budget is known (the phase 2 host budget), because a percentage of
+ * a host is an amount only on a host.
+ */
+function sizeFields(row, norm, { at, path, version, project }) {
+	const present = SIZE_LIMIT_FIELDS.filter((f) => row[f] !== undefined && row[f] !== null);
+	if (present.length === 0) return false;
+	if (!project) throw configError(`${at}: ${present.join(", ")} belong on a project row (project:<id>), because a job's size is its project's: ${path}`);
+	if (version < 3) throw configError(`${at}: ${present.join(", ")} needs "version": 3 (this file says ${version}), so a build that predates job sizes refuses the file rather than running the project's jobs at the default size: ${path}`);
+	const sized = (field, parse, store) => {
+		if (row[field] === undefined || row[field] === null) return;
+		try {
+			norm[field] = store(parse(row[field]));
+		} catch (error) {
+			throw configError(`${at}: ${field}: ${error.message}: ${path}`);
+		}
+	};
+	sized("memory", parseMemory, formatMemory);
+	sized("cpus", parseCpus, (centi) => Number(formatCpus(centi)));
+	if (row.hostShare !== undefined && row.hostShare !== null) {
+		if (!Number.isSafeInteger(row.hostShare) || row.hostShare < 1 || row.hostShare > 100) throw configError(`${at}: hostShare is a whole percentage of the host's job budget, from 1 to 100 (got ${JSON.stringify(row.hostShare)}): ${path}`);
+		norm.hostShare = row.hostShare;
+	}
+	if (row.minJobs !== undefined && row.minJobs !== null) {
+		if (!Number.isSafeInteger(row.minJobs) || row.minJobs < 1) throw configError(`${at}: minJobs must be an integer >= 1: ${path}`);
+		if (norm.memory === null && norm.cpus === null) throw configError(`${at}: minJobs needs memory or cpus on the same row, so the room it asks a host to keep has a size: ${path}`);
+		if (norm.concurrent !== null && row.minJobs > norm.concurrent) throw configError(`${at}: minJobs ${row.minJobs} is above this row's concurrent ${norm.concurrent}, a minimum the project can never reach: ${path}`);
+		norm.minJobs = row.minJobs;
+	}
+	return true;
 }
 
 /**
@@ -567,12 +635,15 @@ export function dollarRowsBelowJobCap(limits, deploymentMaxCostUsd) {
 }
 
 /**
- * The lowest file version that expresses `rows` (normalized or as the admin builds them): 2 when any row carries a
- * dollar field, is a model row, is a project row (issue #499 part B) or has a forge-qualified scope (issue #498), else 1.
+ * The lowest file version that expresses `rows` (normalized or as the admin builds them): 3 when any row carries a size
+ * field (issue #596), else 2 when any row carries a dollar field, is a model row, is a project row (issue #499 part B)
+ * or has a forge-qualified scope (issue #498), else 1.
  * The admin writes this, so a file
  * with bare and folder job-count rows only stays a version 1 file that an older worker still reads.
  */
 export function scopedLimitsVersionFor(rows) {
+	// Issue #596: a size field on any row needs version 3 (the parser refuses it off a project row, and says so).
+	if ((rows ?? []).some((l) => SIZE_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined))) return 3;
 	const v2 = (rows ?? []).some((l) => {
 		const scope = typeof l?.scope === "string" ? l.scope.trim() : l?.scope;
 		return isModelScope(scope) || isProjectScope(scope) || isQualifiedScope(scope) || USD_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined);

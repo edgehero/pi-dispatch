@@ -29,6 +29,7 @@
 
 import { READ_BACK_BY_A_LIVE_PROBE } from "./backend-conformance.mjs";
 import { containerSpec, memoryBytes } from "./container-spec.mjs";
+import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkEndpoints, networkNameFor, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate } from "./netns-keeper.mjs";
@@ -112,8 +113,11 @@ export function liveFixture(root) {
 // `relabel` (issue #355) is a job's too: where a job's own mounts carry `:Z`, so do the probe's, because a probe mounted
 // the way no job is would read back a container no job gets. The fixture is doctor's own directory, so its workspace
 // is relabelled like a forge job's clone (`workspaceOwned`); its global overlay directory never is, exactly as a job's.
-function probeOptions({ image, name, fixture, user = null, relabel = false }) {
-	return { image, name, env: {}, network: "none", user, relabel: relabel === true, workspaceOwned: true, ...fixture };
+//
+// `size` and `hostCpus` (issue #596) are a job's too: the deployment's default size and the `--cpus` ceiling of this
+// runtime's own CPU count, so the probe is bounded exactly as a job without a project size is, and reads that back.
+function probeOptions({ image, name, fixture, user = null, relabel = false, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+	return { image, name, env: {}, network: "none", user, relabel: relabel === true, workspaceOwned: true, size, hostCpus, ...fixture };
 }
 
 // `buildArgs` (issue #354) is the RUNTIME's job builder, never a second one: each probe below is built by whichever
@@ -121,32 +125,32 @@ function probeOptions({ image, name, fixture, user = null, relabel = false }) {
 // The default is docker's, so every argv here is byte-for-byte what it was.
 
 /** The probe container's argv: the job builder's, detached, with `sleep <derived seconds>` as its whole program. */
-export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs }) {
-	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
+export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
 }
 
 /**
  * The pinning probe's argv: the job builder's, detached, against an image this host does not have. Detached so a
  * container that WAS created prints the ID it is removed by; with `--pull=never` in the builder none should be.
  */
-export function pinningProbeRunArgs({ name, nonce, fixture, user = null, relabel = false, buildArgs = buildDockerRunArgs }) {
-	return buildArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user, relabel }), extraFlags: ["-d"] });
+export function pinningProbeRunArgs({ name, nonce, fixture, user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+	return buildArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user, relabel, size, hostCpus }), extraFlags: ["-d"] });
 }
 
 /**
  * One ephemeral run's argv (issue #344): the job builder's, detached, running EPHEMERAL_SCRIPT with the nonce and the
  * run's number. The same NAME both times, because "a job id run twice" is the question.
  */
-export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null, relabel = false, buildArgs = buildDockerRunArgs }) {
-	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
+export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
 }
 
 /**
  * One peer's argv (issue #344): the job builder's, detached, on its OWN job network, running PEER_SCRIPT, which answers
  * every connection with the nonce for `seconds`. Built with `network` set exactly as a job with egress armed is.
  */
-export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs }) {
-	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
+export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
 }
 
 /**
@@ -156,6 +160,9 @@ export function peerRunArgs({ image, name, fixture, network, nonce, seconds = li
 export const STATUS_SCRIPT = [
 	"cat /proc/1/status",
 	'if [ -f /sys/fs/cgroup/cgroup.controllers ]; then echo "cgroup:v2"; echo "pids.max:$(cat /sys/fs/cgroup/pids.max 2>/dev/null)"; echo "memory.max:$(cat /sys/fs/cgroup/memory.max 2>/dev/null)";',
+	// Issue #596: the swap bound (0 when --memory-swap equals --memory), the CPU weight --cpu-shares became, and the
+	// --cpus ceiling. cgroup v2 only: v1 spells all three differently, and every venue measured is v2.
+	'echo "memory.swap.max:$(cat /sys/fs/cgroup/memory.swap.max 2>/dev/null)"; echo "cpu.weight:$(cat /sys/fs/cgroup/cpu.weight 2>/dev/null)"; echo "cpu.max:$(cat /sys/fs/cgroup/cpu.max 2>/dev/null)";',
 	'else echo "cgroup:v1"; echo "pids.max:$(cat /sys/fs/cgroup/pids/pids.max 2>/dev/null)"; echo "memory.max:$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)"; fi',
 ].join("\n");
 
@@ -246,6 +253,9 @@ export function parseStatus(output) {
 		cgroup: field("cgroup"),
 		pidsMax: field("pids.max"),
 		memoryMax: field("memory.max"),
+		swapMax: field("memory.swap.max"),
+		cpuWeight: field("cpu.weight"),
+		cpuMax: field("cpu.max"),
 	};
 }
 
@@ -260,6 +270,31 @@ export function expectedMemoryBytes(memory = containerSpec({ image: "i", name: "
 	return memoryBytes(memory);
 }
 
+/**
+ * What a container of this size reads back (issue #596), from the SAME spec builder the probe's argv came from:
+ * `{ pidsLimit, memoryBytes, cpuShares, cpuMax }`, `cpuMax` being the `cpu.max` line `--cpus` writes (`<quota> 100000`,
+ * or `max 100000` with no ceiling).
+ */
+export function expectedBounds(size = DEFAULT_JOB_SIZE, hostCpus = null) {
+	const spec = containerSpec({ image: "i", name: "n", workspace: "/w", size, hostCpus });
+	return { pidsLimit: expectedPidsLimit(), memoryBytes: memoryBytes(spec.memory), cpuShares: spec.cpuShares, cpuMax: spec.cpus === null ? "max 100000" : `${Number(spec.cpus) * 100000} 100000` };
+}
+
+/**
+ * The `cpu.weight` a `--cpu-shares` value becomes, under the two mappings measured (issue #596): runc 1.1.13 and crun
+ * 1.14 map linearly (`1 + ((shares - 2) * 9999) / 262142`, integer division: 1024 to 39, 2048 to 79), runc 1.5.1 and
+ * crun 1.27 map so 1024 is 100 (`10^((l^2 + 125l) / 612 - 7/34)` rounded up, l = log2(shares): 2048 to 174). Both
+ * reproduce every value of the lab's sweep. A weight that is neither is a runtime nobody measured, said as such.
+ */
+export function cpuWeightsFor(shares) {
+	if (!Number.isSafeInteger(shares) || shares < 2) return [];
+	if (shares >= 262144) return [10000];
+	const linear = 1 + Math.floor(((shares - 2) * 9999) / 262142);
+	const l = Math.log2(shares);
+	const curved = Math.ceil(10 ** ((l * l + 125 * l) / 612 - 7 / 34));
+	return [...new Set([linear, curved])];
+}
+
 const verdict = (property, ok, detail, extra = {}) => ({ property, ok, detail, ...extra });
 const notReadBack = (property, why) => verdict(property, false, `not read back: ${why}`, { warn: true });
 
@@ -271,7 +306,7 @@ const notReadBack = (property, why) => verdict(property, false, `not read back: 
  * FAILURE (the bound was not applied, as on rootless docker without delegation); a bound that could not be read at
  * all is "not read back", never a pass.
  */
-export function isolationVerdict(status, { pidsLimit = expectedPidsLimit(), memoryBytes = expectedMemoryBytes() } = {}) {
+export function isolationVerdict(status, { pidsLimit = expectedPidsLimit(), memoryBytes = expectedMemoryBytes(), cpuShares = null, cpuMax = null } = {}) {
 	if (!status || status.capBnd === null || status.noNewPrivs === null) return notReadBack("isolation", "PID 1's status did not show CapBnd and NoNewPrivs");
 	const failures = [];
 	if (!/^0+$/.test(status.capBnd)) failures.push(`CapBnd ${status.capBnd} (the capability bounding set is not empty)`);
@@ -285,10 +320,30 @@ export function isolationVerdict(status, { pidsLimit = expectedPidsLimit(), memo
 		if (Number(got) !== want) failures.push(`${name} ${got}, expected ${want}`);
 		return null;
 	};
-	const unread = [bound("pids.max", status.pidsMax, pidsLimit), bound("memory.max", status.memoryMax, memoryBytes)].filter(Boolean);
+	const unread = [bound("pids.max", status.pidsMax, pidsLimit), bound("memory.max", status.memoryMax, memoryBytes)];
+	// Issue #596, read only by a caller that passes the size's bounds (`expectedBounds`). The swap bound is part of the
+	// memory bound: `--memory-swap` equal to `--memory` makes it 0, and anything else lets a job swap past its size.
+	// `cpu.max` is the host ceiling (`--cpus`), which keeps the host's reserve, so a different one is a failure too.
+	// `cpu.weight` is the job's share, whose number depends on the runtime's version: one neither measured mapping
+	// gives is said, not failed, because the ORDER between jobs is what it carries and an unknown mapping may keep it.
+	let cpuNote = "";
+	if (cpuMax !== null) {
+		const swap = status.swapMax;
+		if (swap === null || swap === undefined || swap === "") unread.push("memory.swap.max not readable");
+		else if (swap !== "0") failures.push(`memory.swap.max ${swap}, expected 0 (a job may swap beyond its memory)`);
+		const max = status.cpuMax;
+		if (max === null || max === undefined || max === "") unread.push("cpu.max not readable");
+		else if (max !== cpuMax) failures.push(`cpu.max ${max}, expected ${cpuMax}`);
+		const weight = status.cpuWeight;
+		const known = cpuWeightsFor(cpuShares);
+		if (weight === null || weight === undefined || weight === "") unread.push("cpu.weight not readable");
+		else if (!known.includes(Number(weight))) unread.push(`cpu.weight ${weight} is neither mapping measured for --cpu-shares=${cpuShares} (${known.join(" or ")})`);
+		else cpuNote = `, memory.swap.max 0, cpu.max ${cpuMax}, cpu.weight ${weight} (--cpu-shares=${cpuShares})`;
+	}
+	const missing = unread.filter(Boolean);
 	if (failures.length > 0) return verdict("isolation", false, failures.join("; "));
-	if (unread.length > 0) return notReadBack("isolation", `${unread.join(" and ")} (cgroup ${status.cgroup ?? "unknown"}); CapBnd 0 and NoNewPrivs 1 did hold`);
-	return verdict("isolation", true, `CapBnd 0, NoNewPrivs 1, pids.max ${pidsLimit}, memory.max ${memoryBytes}`);
+	if (missing.length > 0) return notReadBack("isolation", `${missing.join(" and ")} (cgroup ${status.cgroup ?? "unknown"}); CapBnd 0 and NoNewPrivs 1 did hold`);
+	return verdict("isolation", true, `CapBnd 0, NoNewPrivs 1, pids.max ${pidsLimit}, memory.max ${memoryBytes}${cpuNote}`);
 }
 
 /** NON-ROOT: all four Uid fields (real, effective, saved, filesystem) nonzero, on the process the job would be. */
@@ -658,6 +713,10 @@ export async function runLiveProbes({
 	// Issue #452, gate round 3: the runtime as this pass already read it (`{ podman, rootless, version } | null`), for the
 	// detach gate, so doctor asks the daemon once per run. Absent, the gate reads it itself.
 	readRuntime = null,
+	// Issue #596: the size every probe container is built at (a job's default) and the runtime's CPU count for the
+	// `--cpus` ceiling; the isolation verdict reads both back.
+	size = DEFAULT_JOB_SIZE,
+	hostCpus = null,
 }) {
 	const notRun = (reason) => ({ ran: false, reason, verdicts: [], notes: [], swept: [] });
 	const notLocal = notRun(`this shell's ${bin} CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run`);
@@ -762,7 +821,7 @@ export async function runLiveProbes({
 		}
 
 		// --- the reading container: mounts, status, writes ---
-		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs }));
+		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs, size, hostCpus }));
 		const probeId = reading.entry.id;
 		if (reading.result?.code !== 0 || probeId === null) {
 			// The runtime's own words, when it printed any (issue #453, gate round 1): "did not start" alone left the operator
@@ -771,7 +830,7 @@ export async function runLiveProbes({
 			return { ran: false, reason: `the probe container did not start${said ? ` (${bin} said: ${said})` : ""}, so nothing was read back`, verdicts: [], notes, swept };
 		}
 
-		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user, relabel })).mounts;
+		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user, relabel, size, hostCpus })).mounts;
 		const inspected = await step(["inspect", "--format={{json .Mounts}}", probeId]);
 		// Issue #345: the mount table as the container itself sees it, by a constant `cat`, for what `.Mounts` does not list.
 		const mountinfo = await step(["exec", probeId, "cat", "/proc/self/mountinfo"]);
@@ -779,7 +838,7 @@ export async function runLiveProbes({
 
 		const statusRun = await step(["exec", probeId, "sh", "-c", STATUS_SCRIPT]);
 		const status = statusRun?.code === 0 ? parseStatus(statusRun.stdout) : null;
-		const isolation = status ? isolationVerdict(status) : notReadBack("isolation", "the status probe did not run in the container");
+		const isolation = status ? isolationVerdict(status, expectedBounds(size, hostCpus)) : notReadBack("isolation", "the status probe did not run in the container");
 		const nonRoot = status ? nonRootVerdict(status) : notReadBack("nonRoot", "the status probe did not run in the container");
 
 		const written = await step(["exec", probeId, "sh", "-c", WRITE_SCRIPT, "sh", nonce]);
@@ -805,7 +864,7 @@ export async function runLiveProbes({
 		await release(reading.entry);
 
 		// --- the pinning container: an image this host does not have ---
-		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user, relabel, buildArgs }));
+		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user, relabel, buildArgs, size, hostCpus }));
 		const after = await step(["image", "inspect", absentImageRef(nonce)]);
 		const stillAbsent = after?.code === 0 ? false : typeof after?.code === "number" ? true : null;
 		const imagePinning = imagePinningVerdict({ code: pinning.result?.code, output: `${pinning.result?.stdout ?? ""}${pinning.result?.stderr ?? ""}`, stillAbsent, bin });
@@ -813,7 +872,7 @@ export async function runLiveProbes({
 
 		// --- the ephemeral pair (issue #344): one name, two runs, each waited on until it is gone ---
 		const runEphemeral = async (n) => {
-			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user, relabel, buildArgs }));
+			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user, relabel, buildArgs, size, hostCpus }));
 			const started = result?.code === 0 && entry.id !== null;
 			// A HELD NAME is the daemon refusing the create for the name, in its own words (measured: Docker "Conflict. ...
 			// is already in use", Podman "that name is already in use"). Not a listed container: after the first run was
@@ -862,7 +921,7 @@ export async function runLiveProbes({
 						} catch {
 							break;
 						}
-						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs }));
+						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs, size, hostCpus }));
 						peers.push(entry);
 						if (result?.code !== 0 || entry.id === null) break;
 						ids[key] = entry.id;

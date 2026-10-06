@@ -227,8 +227,58 @@ test("ISOLATION_FLAGS is frozen intent -- the exact set the spec pins", () => {
 		"--security-opt",
 		"no-new-privileges",
 		"--pids-limit=512",
-		"--shm-size=1g",
 	]);
+	// Issue #596: `--shm-size` is a SIZE now (min(1g, memory/2)), emitted beside `--memory`, and so not in this literal set.
+	assert.equal(ISOLATION_FLAGS.some((f) => f.startsWith("--shm-size")), false);
+});
+
+test("the job's size reaches the argv beside --memory, on both runtimes, in one fixed order (issue #596)", () => {
+	const sized = { ...base, size: { memMiB: 1536, cpuCenti: 75 }, hostCpus: 8 };
+	const docker = buildDockerRunArgs(sized);
+	const at = docker.indexOf("--pids-limit=512") + 1;
+	assert.deepEqual(docker.slice(at, at + 5), ["--memory=1536m", "--memory-swap=1536m", "--cpus=7", "--cpu-shares=768", "--shm-size=768m"]);
+	const podman = buildPodmanRunArgs({ ...sized, user: "1234:1234" });
+	const pat = podman.indexOf("--pids-limit=512") + 1;
+	assert.deepEqual(podman.slice(pat, pat + 5), docker.slice(at, at + 5), "the podman argv sizes a job exactly as the docker one does");
+	// Each size flag exactly once, so no later token can be a second, wider one.
+	for (const flag of ["--memory=", "--memory-swap=", "--cpus=", "--cpu-shares=", "--shm-size="]) {
+		assert.equal(docker.filter((a) => a.startsWith(flag)).length, 1, flag);
+	}
+	// No CPU count from the runtime: no ceiling at all, everything else unchanged.
+	const open = buildDockerRunArgs({ ...sized, hostCpus: null });
+	assert.equal(open.some((a) => a.startsWith("--cpus")), false);
+	assert.deepEqual(open.filter((a) => !a.startsWith("--cpus")), docker.filter((a) => !a.startsWith("--cpus")));
+});
+
+test("the builder REFUSES a hand-built spec whose size allows swap, or that has no size fields at all (issue #596)", () => {
+	const good = containerSpec({ ...base, size: { memMiB: 2048, cpuCenti: 100 }, hostCpus: 4 });
+	assert.ok(dockerArgsFromSpec(good).includes("--memory-swap=2g"));
+	const bad = [
+		{ ...good, memorySwap: "4g" },
+		{ ...good, memorySwap: undefined },
+		{ ...good, memorySwap: "-1" },
+		{ ...good, memory: "2G", memorySwap: "2G" },
+		{ ...good, memory: undefined, memorySwap: undefined },
+		{ ...good, cpuShares: 1 },
+		{ ...good, cpuShares: 262145 },
+		{ ...good, cpuShares: "1024" },
+		{ ...good, cpus: "0" },
+		{ ...good, cpus: 3 },
+		{ ...good, cpus: "1.5" },
+		{ ...good, cpus: undefined },
+		{ ...good, shmSize: "1G" },
+		{ ...good, shmSize: undefined },
+	];
+	for (const spec of bad) assert.throws(() => dockerArgsFromSpec(spec), /size fields are not containerSpec's/, JSON.stringify({ memory: spec.memory, memorySwap: spec.memorySwap, cpus: spec.cpus, cpuShares: spec.cpuShares, shmSize: spec.shmSize }));
+	assert.throws(() => containerSpec({ ...base, size: { memMiB: 256, cpuCenti: 100 } }), /refusing a job size/);
+});
+
+test("every flag that sets a CPU or memory bound, a weight or an OOM preference is refused in dockerExtra (issue #596)", () => {
+	for (const flag of ["-m", "-c", "--cpu-shares", "--cpu-quota", "--cpu-period", "--cpuset-cpus", "--memory-reservation", "--memory-swap", "--blkio-weight", "--device-read-bps", "--device-write-bps", "--device-read-iops", "--device-write-iops", "--oom-score-adj", "--shm-size", "--cpus", "--memory"]) {
+		assert.ok(DOCKER_EXTRA_FORBIDDEN.includes(flag), `${flag} must be denied`);
+		assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: [flag, "1"] }), /supersede the isolation boundary/, flag);
+		assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: [`${flag}=1`] }), /supersede the isolation boundary/, `${flag}=1`);
+	}
 });
 
 test("the /session mount is per-job and writable, and the container learns nothing about the host layout", () => {
@@ -329,7 +379,7 @@ test("composing the two halves is exactly what the public builder does", () => {
 		base,
 		{ ...base, sessionDir: "/s", globalPiDir: "/g", network: "n", env: { A: "1", B: undefined } },
 		{ image: "i", name: "pi-sandbox-1", workspace: "/w", jobDir: "/j", extraFlags: ["-i", "-t", "--entrypoint", "bash"] },
-		{ image: "i", name: "n", workspace: "/w", memory: "8g", cpus: "4" },
+		{ image: "i", name: "n", workspace: "/w", size: { memMiB: 8192, cpuCenti: 400 }, hostCpus: 2 },
 		{ ...base, user: "1234:1234", network: "n" },
 	];
 	for (const s of shapes) assert.deepEqual(dockerArgsFromSpec(containerSpec({ ...s })), buildDockerRunArgs({ ...s }));
@@ -467,6 +517,8 @@ test("the podman argv, literally: --userns=keep-id immediately after --user=, th
 		cidFile: "/j.cid",
 		relabel: true,
 		workspaceOwned: true,
+		size: { memMiB: 1024, cpuCenti: 50 },
+		hostCpus: 4,
 	});
 	assert.deepEqual(args, [
 		"run",
@@ -478,9 +530,11 @@ test("the podman argv, literally: --userns=keep-id immediately after --user=, th
 		"--security-opt",
 		"no-new-privileges",
 		"--pids-limit=512",
-		"--shm-size=1g",
-		"--memory=4g",
-		"--cpus=2",
+		"--memory=1g",
+		"--memory-swap=1g",
+		"--cpus=3",
+		"--cpu-shares=512",
+		"--shm-size=512m",
 		"--network=pi-job-1-net",
 		"--user=1234:1234",
 		"--userns=keep-id",

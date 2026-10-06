@@ -31,7 +31,7 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
-import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
+import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -2305,6 +2305,8 @@ function limitRow(l: any, used: any, inner: number, styler: any, projects: any =
   const bits = [`${dot} ${styler.fg("accent", l.scope ?? "-")}`, ...windows];
   if (Number.isInteger(l.concurrent)) bits.push(styler.fg("muted", `≤${l.concurrent} at once`));
   bits.push(...usdWindows);
+  // Issue #596: the project's job size, after its windows, the plain-text path's order (`renderScopedLimits`, one helper).
+  bits.push(...sizeBits(l).map((b) => styler.fg("muted", b)));
   // A project row (issue #499 part C) says how many members it caps, or that its project is missing, which the worker
   // refuses (doctor names it). Read from the projects file the worker reads; nothing when that is unreadable.
   const note = projectRowNote(l, projects);

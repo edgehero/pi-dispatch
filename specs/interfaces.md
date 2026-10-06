@@ -903,7 +903,7 @@ refactor apart.
   supervisor's line as the decisive one (`parseExitOomKilled`: `by: "supervisor"`, `code: 137`, `reason:
   "oom-killed"`, `oomKills` above 0), that line verified under the run's key (`exitAuth: "verified"`; an unsigned line
   is a tool's), and its `memPeak` at 90% of the container's memory limit or more (`peakReachedLimit`; the limit is the
-  `--memory=` on the argv the worker built, `4g` today, never re-read from the environment). The fourth exists because
+  `--memory=` on the argv the worker built, the job's size since issue #596 phase 1, never re-read from the environment). The fourth exists because
   `oom_kill` also counts a kill by the HOST's OOM killer, whose first choice the runner is at score 1000: a machine
   short of memory says nothing about the job's size, so such a `137` stays infrastructure and retries. A cgroup OOM
   happens at the limit, and its peak read the bound exactly or just under it on every venue measured. What it cannot
@@ -1443,21 +1443,55 @@ refactor apart.
     another**, and that carve-out must be re-made in every image it names. `docs/job-image.md` is the
     operator-facing form of this list; the `image` CI job is its executable form; `OQ-012` is the honest
     statement that nothing in this repo enforces it.
-  - Flags: `--pull=never --rm --init --cap-drop=ALL --security-opt no-new-privileges --memory=4g --cpus=2
-    --pids-limit=512 --shm-size=1g`, and -- **unless `PI_EGRESS=0`** -- `--network=pi-job-<jobId>-net`.
+  - Flags: `--pull=never --rm --init --cap-drop=ALL --security-opt no-new-privileges --pids-limit=512`, then the
+    job's size (issue #596, below) `--memory=<m> --memory-swap=<m> [--cpus=<host ceiling>] --cpu-shares=<s>
+    --shm-size=<shm>`, and -- **unless `PI_EGRESS=0`** -- `--network=pi-job-<jobId>-net`.
     `<jobId>` here, and in `--name=pi-job-<jobId>`, is the queue's job id with every character outside
     `[A-Za-z0-9._-]` replaced by `_` (`jobContainerName`, issue #435): a cron job's id is the job scheduler's
     `repeat:<schedulerId>:<millis>`, and the runtime refuses `:` in a container or network name (exit 125), so
     before this no cron job ever started. Every other id the worker sees is already of that shape.
-  - **Three of those are NOT members of `ISOLATION_FLAGS`, and this is a list of FLAGS rather than a
-    rendering of that constant.** `ISOLATION_FLAGS` (`worker/src/docker-run.mjs`) is the **literal,
+  - **The size flags and `--network` are NOT members of `ISOLATION_FLAGS`, and this is a list of FLAGS rather
+    than a rendering of that constant.** `ISOLATION_FLAGS` (`worker/src/docker-run.mjs`) is the **literal,
     value-free, unconditional** set, and two places assert every member of it reaches the sandbox argv
     *against the imported array, not a copy* (`CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-SANDBOX-CONTRACT`).
-    `--memory`, `--cpus` and `--network` carry **configured values** and are appended beside it. The
+    `--memory`, `--memory-swap`, `--cpus`, `--cpu-shares`, `--shm-size` and `--network` carry **configured values**
+    and are appended beside it. `--shm-size` was a member, `--shm-size=1g`, until issue #596 made it a size: it left
+    the array then, and is still on every argv. The
     distinction is load-bearing rather than clerical: a conditional flag inside that array makes "every
     member" false on any deployment running without an egress policy, so the assertion would have to be
     weakened to "every member except this one" -- which does not weaken a constraint so much as **retire
     the assertion that was enforcing it**.
+  - **The job's size (issue #596, phase 1).** Every container is built from a size `{ memMiB, cpuCenti }`
+    (`worker/src/job-size.mjs`), resolved ONCE at pickup from the limits snapshot every gate reads: the job's
+    project row's `memory` and `cpus` (`INT-SCOPED-LIMITS-FILE-CONTRACT`, version 3), field by field, else the
+    deployment's `PI_JOB_MEMORY` and `PI_JOB_CPUS`, else `4g` and `2`. It reaches `runContainer` as an ARGUMENT,
+    never through `job.data`, so nothing a job's payload carries can size it. `containerSpec` turns it into the
+    flags through one function (`containerSizing`), so no caller can pair a memory with another swap bound:
+    - `--memory=<m>`, in the one spelling `formatMemory` writes (`<n>g` for whole gigabytes, else `<n>m`), which
+      `memoryBytes` reads back for every size the parser accepts (a test walks the whole range), so the OOM
+      classification's 90%-of-the-limit rule holds at every size;
+    - `--memory-swap=<m>`, EQUAL to `--memory`: no swap beyond the job's memory. Docker and Podman give a container
+      swap equal to its memory by default; with the two equal `memory.swap.max` reads 0 on every venue measured,
+      rootless Podman included. The builder refuses a hand-built spec whose two differ;
+    - `--cpu-shares=round(cpus x 1024)`, held inside 2 to 262144: a WEIGHT, so under contention each job gets CPU in
+      proportion to its size and an idle host lets any job use idle cores. The `cpu.weight` it becomes depends on
+      the OCI runtime's version (measured: runc 1.1.13 and crun 1.14 map 1024 to 39 and 2048 to 79; runc 1.5.1 and
+      crun 1.27 map 1024 to 100 and 2048 to 174; a container started without the flag gets 100 on all four). Both
+      mappings keep the order, and every job container carries a share, so the order between jobs holds; on an old
+      runtime a default job weighs less than a container started without one (the egress proxy, a Valkey), which is
+      the right direction and is left as is;
+    - `--cpus=<n>`, the HOST CEILING, the same for every job: the runtime's own CPU count (`docker info` `NCPU`,
+      `podman info` `host.cpus`, read with the job user's facts) minus a reserve of one CPU when it has four or more.
+      It keeps every job off the reserved core; it is not the job's size, which would be the hard cap the issue
+      decided against. When the runtime gave no count the flag is ABSENT (fail open, logged `cpu_ceiling_unknown`):
+      Docker refuses a `--cpus` above its own count, and the worker's count is not the daemon's on Docker Desktop.
+      The phase 2 host budget refines the reserve;
+    - `--shm-size=min(1g, memory/2)`, because `/dev/shm` is charged to the container's memory.
+    `--pids-limit=512` stays fixed. `dockerExtra` refuses every flag that sets a CPU or memory bound, a weight or an
+    OOM preference (`-m`, `-c`, `--cpu-shares`, `--cpu-quota`, `--cpu-period`, `--cpu-rt-*`, `--cpuset-*`,
+    `--memory-reservation`, `--memory-swap`, `--memory-swappiness`, `--kernel-memory`, `--blkio-weight*`,
+    `--device-{read,write}-{bps,iops}`, `--oom-score-adj`, `--shm-size`, `--cpus`). Disk I/O, disk space and the
+    network are NOT bounded per job.
   - **Mounts**: `/job:ro`, `/workspace:rw`, `/outbox:rw` (local jobs only), `/opt/pi-global:ro` (when
     configured), and `/session:rw` — the last only when a trigger armed `run.resume` and the worker
     resolved a key (`INT-SESSION-STORE-CONTRACT`). `/session` is a **per-job** directory under the job's
@@ -1677,7 +1711,7 @@ refactor apart.
     refusal (`REQ-EGRESS-ALLOWLIST`), which pairs with the flag exactly as the image inspect pairs with
     `--pull=never`: the check is readable but raceable, the flag is unraceable but silent, and neither is
     sufficient alone.
-  - **`--shm-size=1g`, and explicitly NOT `--ipc=host`.** Playwright's docs say verbatim: *"Using
+  - **`--shm-size` (`1g` at the default size, `min(1g, memory/2)` since issue #596), and explicitly NOT `--ipc=host`.** Playwright's docs say verbatim: *"Using
     `--ipc=host` is recommended when using Chromium. Without it, Chromium can run out of memory and
     crash."* **We deliberately diverge.** `--ipc=host` shares the **host's IPC namespace** with a
     container running adversarial-input agent code — it trades a documented crash for an undocumented
@@ -2038,8 +2072,9 @@ refactor apart.
   `--memory`, which is how a kill by the host's own OOM killer reads) stays infra-retryable, as before. The runtime's own record of the kill is not used: with `--rm` the container's `State.OOMKilled` is gone when
   `docker run` returns, Docker's `oom` event fires also when only a child was killed and the job exited 0, and Podman
   (4.9 and 5.8, rootful and rootless) emits no `oom` event and, on 4.9 rootless, never sets `OOMKilled` (measured).
-  The flags are UNCHANGED by this: every job still runs at `--memory=4g --cpus=2 --pids-limit=512`, with swap at the
-  runtime's default (equal to the memory, measured on all five venues).
+  Phase 0 changed no flag. Phase 1 sizes them (the job's size, above): a job gets no swap beyond its memory where it
+  had swap equal to it before (measured on all five venues), and its CPU is a weight under a host ceiling where it was
+  a hard `--cpus=2`. Where Docker reports `SwapLimit` false the swap bound cannot be enforced; doctor warns.
   `PLAYWRIGHT_BROWSERS_PATH` resolves the collision between non-root execution and root-installed
   Chromium — see `DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS`.
   **Env is an allowlist, never a pass-through**: `ANTHROPIC_OAUTH_TOKEN`, and from the 0.99.1 pin
@@ -2484,15 +2519,21 @@ sibling rather than an extension of the GitHub one for the same reason.
 - **Contract**:
   - **The argv is built by the SAME builder as the venue's jobs.** `buildSandboxRunArgs` calls the venue's
     job builder (`buildDockerRunArgs` on `local`, `buildPodmanRunArgs` on `podman`) through its `extraFlags`
-    seam, so `ISOLATION_FLAGS`, `--memory` and `--cpus` reach this container **by construction**:
-    `--pull=never --rm --init --cap-drop=ALL --security-opt no-new-privileges --pids-limit=512 --shm-size=1g
-    --memory=4g --cpus=2`. On `podman` the same builder adds what it adds to a job: `--user=<uid>:<gid>`,
+    seam, so `ISOLATION_FLAGS` and the size flags reach this container **by construction**:
+    `--pull=never --rm --init --cap-drop=ALL --security-opt no-new-privileges --pids-limit=512 --memory=<m>
+    --memory-swap=<m> [--cpus=<host ceiling>] --cpu-shares=<s> --shm-size=<shm>`. **The size is the RUN's**
+    (issue #596): the manifest records the size the job was given (`size`, `{ memMiB, cpuCenti, source }`), and
+    the sandbox reopens the run at it, so the shell has the memory, the swap bound and the CPU weight the job had;
+    a manifest from before sizes, or one whose size does not rebuild, reopens at the built-in `4g` and `2`, the size
+    every such run had. The `--cpus` ceiling is this CLI's own runtime's (its CPU count from the job-user facts read,
+    minus one when it has four or more), absent when that read gave none. On `podman` the same builder adds what it adds to a job: `--user=<uid>:<gid>`,
     `--userns=keep-id` and `PODMAN_PINNED_FLAGS`, and a network flag ALWAYS, the session's own network with
     egress on and `--network=private` with it off, because a containers.conf `netns = "host"` puts a container
     launched with no `--network` on the host's network namespace. This is the load-bearing sentence of the
     whole contract. A leaner hand-written argv here would be a second place for the boundary to live, and the
     copy that did not get the next flag would be the one nobody was looking at. The `local` argv is
-    byte-identical to the one before #429, pinned by literals.
+    byte-identical to the one before #429, pinned by literals, apart from the size flags issue #596 changed on
+    every container.
   - **On `podman`, who the shell runs as and what refuses it** (issue #429). Always the OPENING account's
     `<euid>:<egid>` with `HOME=/home/pi`, never the image's user: keep-id maps the account that runs `podman`,
     and the retained image is in that account's own store. A stamp naming another uid, or the image's own user,
@@ -2983,8 +3024,12 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
     `env: {}`, the job user doctor decided for this host (issue #341: the builder's `user` field, so `--user` where
     a job has it and nothing where it does not, still with no `-e`, not even HOME, since the probe runs no pi) and
     `extraFlags: ["-d", "--entrypoint", "sleep"]`, then the sleep seconds after the image. Through `extraFlags`
-    it adds exactly those three flags and that argument; every member of `ISOLATION_FLAGS`, `--memory` and
-    `--cpus` reach it by construction. Where `relabelsPrivateMounts` holds (issue #355), doctor passes the same
+    it adds exactly those three flags and that argument; every member of `ISOLATION_FLAGS` and the size flags reach
+    it by construction. **At a job's size** (issue #596): every probe container, and the podman venue's egress
+    canary, is built at the deployment's default size (`PI_JOB_MEMORY` and `PI_JOB_CPUS` read by the worker's own
+    rule, the built-in `4g` and `2` when unset or refused, which doctor reports as the boot refusal it is) with the
+    `--cpus` ceiling of the venue's own CPU count (`docker info`, `podman info`). docker's egress canary is a plain
+    `docker run` carrying no bound at all, pinned byte for byte, and is unchanged. Where `relabelsPrivateMounts` holds (issue #355), doctor passes the same
     `relabel` a job would get, with the fixture's workspace counted as the worker's own, so the fixture's `/job`,
     `/workspace`, `/outbox` and `/session` carry `:Z` exactly as a job's would and its `/opt/pi-global` never does. The sleep is DERIVED from the step bound (the four steps that need the
     container alive since issue #345 added the mountinfo read, at 20 seconds each, plus 30), never a literal.
@@ -3055,8 +3100,14 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
     a pass:
     - `isolation`: one `docker exec` of a constant script reading `/proc/1/status` and the cgroup files. `CapBnd`
       must be zero and `NoNewPrivs` 1 (`CapEff` alone is zero for any non-root image with no flags at all),
-      `pids.max` must equal the imported `--pids-limit` and `memory.max` the spec's default memory. A literal
-      `max` fails; a bound that could not be read is not read back.
+      `pids.max` must equal the imported `--pids-limit` and `memory.max` the size's memory. A literal
+      `max` fails; a bound that could not be read is not read back. Since issue #596 it also reads
+      `memory.swap.max`, which must be `0` (else a job may swap past its size: a failure), `cpu.max`, which must be
+      the `--cpus` ceiling the argv carried as `<ceiling x 100000> 100000`, or `max 100000` with none (a failure
+      otherwise), and `cpu.weight`, which must be one of the two values the measured runtime mappings give the
+      argv's `--cpu-shares` (`cpuWeightsFor`: runc 1.1.13 and crun 1.14, linear; runc 1.5.1 and crun 1.27, curved);
+      a weight neither gives is NOT READ BACK, never a failure, because the order between jobs, which is what the
+      weight carries, may hold under a mapping nobody measured. cgroup v2 only, as every measured venue is.
     - `nonRoot`: all four `Uid` fields of PID 1 nonzero.
     - `mountSet`: `docker inspect .Mounts` keyed by destination and read-write flag against the spec's own
       mounts. A mount missing, one extra, one with its RW flipped, the docker socket, the home directory or an
@@ -4725,7 +4776,9 @@ validator rather than a second copy of it.
                    "oomKills": <int> | null,
                    "memSomeUsec": <int> | null, "memFullUsec": <int> | null,              // runner (or its supervisor) just before the exit line;
                    "cpuUsec": <int> | null, "throttledUsec": <int> | null,                // bytes, microseconds and counts
-                   "throttled": <int> | null, "pidsPeak": <int> | null } | null }
+                   "throttled": <int> | null, "pidsPeak": <int> | null } | null,
+    "size":    { "memMiB": <int>, "cpuCenti": <int>,                                    // issue #596, phase 1: the size the job was GIVEN,
+                 "source": "project" | "env" | "default" } | null }                      // resolved at pickup
   ```
   **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
   after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
@@ -4737,6 +4790,16 @@ validator rather than a second copy of it.
   container that died before any line, or a forged block (any present value that is not a safe non-negative integer).
   A job killed for memory records `reason: "oom-killed"` (outcome `policy`, never retried) and the supervisor's
   `resources`; a job whose CHILD was killed for memory keeps its own outcome and shows `oomKills` above 0.
+  **`size` (issue #596, phase 1) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
+  after `resources`: the size the job was given, beside what it used. `memMiB` is its memory in MiB (also its swap
+  bound: none beyond it), `cpuCenti` its CPU weight in hundredths of a CPU, and `source` where the size came from:
+  `project` when the job's project row set its memory or CPUs (a row setting one takes the other from the
+  deployment), `env` when `PI_JOB_MEMORY` or `PI_JOB_CPUS` did and the row neither, `default` for the built-in `4g`
+  and `2`. Resolved ONCE at the pickup gate from the limits snapshot every gate reads, and passed to the record
+  beside `project`, never read off the job's data, so a size a payload carries is never recorded. Present on every
+  record written after the pickup gate, a refusal there included (it is then the size the job WOULD have had);
+  null on a record written before it (the wait gate's refusals) and on every record before the field. Integers and
+  a fixed word, so PII-free by construction.
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
   only the attempts that FINISHED before this one (it increments in `moveToFinished`/`moveToFailed`, bullmq 5.80.4),
@@ -5918,10 +5981,11 @@ validator rather than a second copy of it.
   empty file, or any file, and no row can raise it (`min(configured, 1)` for a local scope — scope strings
   are not reliably typeable folder-vs-repo, so the clamp is silent rather than a parse refusal that would
   misfire on `"a/b"`).
-- **Shape**: `{ "version": 1 | 2, "limits": [ { scope, day?, week?, month?, concurrent?, dayUsd?, weekUsd?, monthUsd? } ] }`.
-  The dollar fields, model rows and `project:<id>` rows (issue #499 part B, below) need version 2.
+- **Shape**: `{ "version": 1 | 2 | 3, "limits": [ { scope, day?, week?, month?, concurrent?, dayUsd?, weekUsd?, monthUsd?, memory?, cpus?, hostShare?, minJobs? } ] }`.
+  The dollar fields, model rows and `project:<id>` rows (issue #499 part B, below) need version 2; the four size
+  fields (issue #596, on a project row only) need version 3.
   - `version` (required): integer ≥ 1, fail-loud on newer (`scoped-limits file written by a newer
-    pi-dispatch (version N; this build understands 2)`). Adopted from `INT-SUBSCRIPTIONS-FILE-CONTRACT`
+    pi-dispatch (version N; this build understands 3)`). Adopted from `INT-SUBSCRIPTIONS-FILE-CONTRACT`
     because this is a MONEY file: unknown fields are silently dropped per the operator-file policy, so a
     v2 cap field an old worker dropped would be a silently WIDENED spend limit. The protection covers
     STAMPED files only — a hand-edit that plants a future field in a `version: 1` file drops in silence,
@@ -5990,6 +6054,27 @@ validator rather than a second copy of it.
     id, and keeps its last good limits otherwise (the admin cannot see the live projects, which usually still define it,
     because the projects edit that dropped it was kept out). A row already in the file is not re-judged, so a dangling
     row can still be deleted. Doctor fails on one.
+  - **A project's job size** (version 3; issue #596): a project row may carry `memory`, `cpus`, `hostShare` and
+    `minJobs`, and a row may carry those and nothing else (they count as limiting something). On any other row (a
+    repo, a forge-qualified repo, a folder, a model) each is refused, naming the project row as its place: a job's
+    size is its project's (`INT-CONTAINER-RUNTIME-CONTRACT`, the job's size).
+    - `memory`: a whole number of megabytes or gigabytes, lower case (`"512m"`, `"1536m"`, `"4g"`; `^[1-9]\d*[mg]$`),
+      at least `512m` and at most `1024g`, stored in its one spelling (`"1024m"` reads back as `"1g"`). Each job of
+      the project gets that memory and no swap beyond it.
+    - `cpus`: a number or decimal string above 0 with at most two decimals, at least `0.25` and at most `256`,
+      stored as a number. It is the job's CPU WEIGHT under contention (`--cpu-shares`), not a cap.
+    - `hostShare`: a whole PERCENTAGE from 1 to 100: the most of one host's job budget the project's running jobs
+      may hold together. **Parsed, validated and stored now, and ENFORCED BY NOTHING YET**: the host budget that
+      enforces it is the issue's phase 2, and until that ships a share bounds nothing. The views say "not enforced
+      yet" beside it.
+    - `minJobs`: an integer ≥ 1, how many of the project's jobs a host should make room for before admitting other
+      projects' jobs: a SOFT minimum. Needs `memory` or `cpus` on the same row, and may not exceed the row's own
+      `concurrent`. **Parsed, validated and stored now, and ENFORCED BY NOTHING YET** (phase 2's holds), said so
+      beside it as `hostShare` is. Whether `hostShare` leaves room for `minJobs` times the size is a question about
+      a host's budget, so it is judged where that budget is known (phase 2), not at load.
+    Unset, a job takes the deployment's `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`), field by field.
+    The size is resolved once at pickup from this snapshot and recorded on the run (`INT-RUN-HISTORY-FILE-CONTRACT`
+    `size`); an edit applies to the project's NEXT jobs.
   - **Version rule**: a version 1 file that uses a dollar field or a `model:` row is REFUSED with a message
     naming version 2, so a file cannot carry a dollar cap that one build reads and another drops. A version 1
     file with neither stays valid and reads exactly as before (the five-key row). The `model:` prefix is
@@ -6000,7 +6085,11 @@ validator rather than a second copy of it.
     is a project row (above), and a version 1 file holding one is refused naming version 2. A forge-qualified row (issue #498) needs version 2 as well: every build before it reads
     `github:acme/web` as a plain repo string no job has, so a version 1 file holding one would carry a cap, a
     concurrency limit and a lease that one build enforces and another silently drops. The writer stamps version 2
-    for a qualified row, and an older build refuses the file loudly.
+    for a qualified row, and an older build refuses the file loudly. A size field (issue #596) needs version 3 for
+    the same reason: a version 1 or 2 file carrying one is refused with a message naming version 3, and every
+    released build (3.1.0 reads up to version 2) refuses a version 3 file as newer, so a size never reads as applied
+    on one build and silently dropped on another. The writer stamps the LOWEST version that expresses the file, so
+    a file with no size field stays what it was. Upgrade every worker before writing a size.
 - **Canonicalization**: a local job's scope is `path.resolve(folder.trim())` and an absolute-path-shaped
   row is stored resolved, so every spelling of one directory (`/srv/site/`, `/srv//site`, `/srv/x/../site`)
   converges on one counter and one mutex slot, and Unicode is NFC-normalized on both sides (macOS's
@@ -6147,6 +6236,14 @@ validator rather than a second copy of it.
   writes such a row as version 2. Given `github:acme/web/` or `github:acme/web#12`, then it is refused as not a forge
   repo. Given an edit that changes a row's scope, then the confirm says the count starts over and that running jobs
   keep their old slot until they finish.
+  Given `{ "scope": "project:shop", "memory": "1024m", "cpus": "0.50" }` in a version 3 file (issue #596), then it
+  parses to `memory: "1g"`, `cpus: 0.5`, and each member job runs at that size; given it in a version 2 file, then the
+  file is refused naming version 3; given `memory` on a repo, folder or model row, then the file is refused naming
+  the project row; given `minJobs` with neither `memory` nor `cpus`, or above the row's `concurrent`, or a `hostShare`
+  outside 1 to 100, then the file is refused. Given `dispatch_limit_add` or `dispatch_limit_edit` with a size field,
+  then it is judged by the worker's parsers and shown in its stored spelling before the confirm, a malformed one is
+  refused before it, an edit carries every size field it is not sent, and the file is stamped version 3 only while a
+  row carries one.
   Given a project `shop` over two folders and a row `project:shop` with `day: 2` (issue #499 part B), then the third
   member job that day is refused `project-cap`, its folder slot is given back and the global ledger is untouched;
   given a full global window, then a member job gives back its project and repo slots; given a never-started
@@ -7578,3 +7675,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-06 | Issue #596, phase 0, review round 2. **CORRECTS the review round's row above**: it said a finished run killed afterwards "keeps its tokens and outcome". It keeps its tokens, usage and session (the runner's own line decides, `decisiveExitLine`), but not its outcome: the container still exited `137` without the worker causing it, so the run retries and its dollars settle at the floor, exactly as before the supervisor existed; the protocol's body already said so and is unchanged. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: (1) "the decisive exit line" is defined once, at `decisiveExitLine`, and the `reason` and `why` paragraphs use it instead of "the LAST exit line", which stopped being true when the supervisor's late line began to be ignored. (2) It states that `--disable-sigusr1` closes only the route from outside the process: code loaded into the runner itself (the serviced repo's `/workspace/.pi/extensions`, imported after the key was read, `image/runner/src/loader.mjs`) can open `node:inspector` in process, and an operator who sets `NODE_OPTIONS` (a trigger's secret named so, or `PI_FORWARD_ENV`) reaches both holders. Both predate #596 and stay outside the key's guarantee; the environment reservation is UNCHANGED. This corrects the review round's sentence that the job "cannot write" that environment, which held for the job's tools and not for the operator. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the `exitAuth` evidence's fourth run finds every key holder by its executable (`/opt/pi-dispatch/runner-node` as argv[0] in `/proc/<pid>/cmdline`, readable for a process that is not dumpable), wants at least two (the supervisor and the runner), each closed, and the control open; an image whose entrypoint runs the runner without the supervisor now fails it. The probe it replaces found the supervisor by parentage and a name, so a renamed supervisor without the flag, or a runner whose shell did not exec, read `absent` and passed (both measured). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED (wording)**: the dollar basis's trust rule names the decisive exit line. Code evidence: image/verify-image.sh, docs/job-image.md, worker/src/run-history.mjs (JSDoc), worker/src/run-container.mjs (comment), worker/src/processor.mjs (`oom_report_below_limit` is not logged on an aborted run); test worker/test/processor.test.mjs. |
 | 2026-10-06 | Issue #596, phase 0, the executing review. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: (1) `resources` gains `swapPeak` (bytes, `memory.swap.peak`, after `memPeak`; null on cgroup v1 or where the file is absent), because `memPeak` cannot see swap and a job at its limit swaps before it dies while its swap allowance equals its memory. The block is now nine keys, held to the runner's list by the existing tests. (2) The exit line's `message` cap falls from 2000 to 1900 characters as serialized: with `swapPeak` the worst-case line (every key at its largest) measured 6155 characters, past the 6 KiB budget that keeps a 2 KiB margin inside the worker's 8 KiB tail, and the diagnostic message gives way rather than the label's margin; the literal stays pinned by both tests. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's `resources` carries `swapPeak` after `memPeak` (additive, nullable, in the rebuilt literal; the shape is pinned to `RESOURCE_KEYS` by `resource-keys.test.mjs`). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no flag moves; `--memory-swap` is still refused as an extra flag, and the default swap allowance is what `swapPeak` measures. Code evidence: image/runner/src/cgroup-usage.mjs, image/runner/src/outcome.mjs, worker/src/run-history.mjs, docs/insights.md; tests image/runner/test/cgroup-usage.test.mjs, image/runner/test/outcome.test.mjs, worker/test/run-history.test.mjs, worker/test/resource-keys.test.mjs. |
 | 2026-10-06 | Issue #596, phase 0, the final review. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTS the executing review's row above**: the worst-case line test measured the UNSIGNED line at `provider-auth-refused`, so it left out the 75-character `,"auth":"<64 hex>"` every keyed line ends in and the longest runner policy reason (`model-policy-unenforceable`). Signed and at that reason, a 1900 cap left 9 characters inside 6 KiB, and "6155" understated the overshoot at 2000. The test now builds the line with a 64-character `auth` field and the longest member of `RUNNER_POLICY_REASONS`, and the cap falls to 1800 so the next key has room. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**. Code evidence: image/runner/src/outcome.mjs; tests worker/test/run-history.test.mjs, image/runner/test/outcome.test.mjs. |
+| 2026-10-06 | Issue #596, phase 1 (sizes and hard limits). **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: every container is built from a job size `{ memMiB, cpuCenti }` (`worker/src/job-size.mjs`) resolved once at pickup from the limits snapshot (the project row's `memory` and `cpus`, else `PI_JOB_MEMORY` and `PI_JOB_CPUS`, else `4g` and `2`) and passed to `runContainer` as an argument, never through `job.data`. It becomes `--memory=<m> --memory-swap=<m>` (equal, so no swap beyond memory: `memory.swap.max` 0 measured on all five venues), `--cpu-shares=round(cpus x 1024)` (a weight; the runtime-version mapping to `cpu.weight` is recorded, order preserved), `--cpus=<host CPU count minus one when four or more>` (a ceiling for every job, absent and logged `cpu_ceiling_unknown` when the runtime gave no count) and `--shm-size=min(1g, memory/2)`. `--shm-size` LEAVES `ISOLATION_FLAGS` (it is a value now) and is still on every argv; `--pids-limit=512` stays fixed. Memory is emitted in the one spelling `memoryBytes` reads, pinned over the whole accepted range, so the OOM rule's 90% comparison holds at every size. `dockerExtra` refuses every CPU, memory, weight and OOM flag. The Why's "flags are UNCHANGED" sentence is replaced by what phase 1 changed. **`INT-SANDBOX-CONTRACT` AMENDED**: the manifest records the run's size and the sandbox reopens at it (the built-in size for a run from before), with this CLI's own `--cpus` ceiling. **`INT-LIVE-PROBE-CONTRACT` AMENDED**: the probes and the podman canary are built at the deployment's default size with the venue's ceiling, and `isolation` also reads `memory.swap.max` (must be 0), `cpu.max` (must be the ceiling) and `cpu.weight` (one of the two measured mappings, else not read back); docker's canary is unchanged. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: version 3 adds `memory`, `cpus`, `hostShare` (a whole percentage) and `minJobs` on a project row only; a size-only row is valid; version 1 and 2 files carrying one are refused naming version 3; `minJobs` needs a size and at most the row's `concurrent`; `hostShare` and `minJobs` are parsed, validated and stored and said to be NOT ENFORCED until the host budget (phase 2), which also judges a share against `minJobs` times the size. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record gains `size` `{ memMiB, cpuCenti, source }` at its tail after `resources`. `INT-RUNNER-EXIT-CODE-PROTOCOL` gets one wording fix (the `--memory=` the OOM rule compares with is the job's size, no longer `4g` today) and is otherwise UNCHANGED, checked. Checked and UNCHANGED: `INT-CONTAINER-JOB-INPUTS`, `INT-EGRESS-POLICY-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT`, `INT-CONFIG-OVERLAY-CONTRACT` (sizes are env and file only, never the overlay). |

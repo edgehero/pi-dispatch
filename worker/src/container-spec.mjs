@@ -20,9 +20,12 @@
  * without reaching the argv builder. Nothing about the value changed in the move -- same fields, same
  * order, same guards -- because a byte-identical local deployment is #227's first constraint.
  *
- * It imports NOTHING, which is the property `packages.mjs` depends on when it derives the staged-packages
- * root from `CONTAINER_GLOBAL_PI_DIR` rather than re-typing the path.
+ * It imports nothing but `job-size.mjs` (issue #596), itself a leaf that imports nothing, which is the property
+ * `packages.mjs` depends on when it derives the staged-packages root from `CONTAINER_GLOBAL_PI_DIR` rather than
+ * re-typing the path.
  */
+
+import { DEFAULT_JOB_SIZE, containerSizing } from "./job-size.mjs";
 
 /**
  * Where the operator's global pi overlay lands INSIDE the container (REQ-GLOBAL-PI-OVERLAY). Exported
@@ -123,7 +126,11 @@ export function assertUserns(userns) {
  *                   mounted /session:rw. Per-job, like jobDir -- never the shared store.
  * @param globalPiDir host path to the operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY); mounted /opt/pi-global:ro
  * @param name       container name (for `docker stop` at the timeout)
- * @param memory     e.g. "4g"; cpus e.g. "2"
+ * @param size       the job's size, `{ memMiB, cpuCenti }` (issue #596, `job-size.mjs`); the built-in 4g and 2 when
+ *                   absent. It becomes `memory`, `memorySwap` (equal: no swap beyond memory), `cpuShares` and `shmSize`
+ *                   through ONE function, `containerSizing`, so no caller can pair a memory with another swap bound.
+ * @param hostCpus   the runtime's own CPU count (`docker info` `NCPU`, `podman info` `host.cpus`), or null. It sets
+ *                   `cpus`, the host ceiling every job shares (`hostCpuCeiling`), never the job's own size.
  * @param network    the per-job egress network this container joins (REQ-EGRESS-ALLOWLIST); null = the
  *                   docker default bridge, which is what every job did before that requirement existed
  * @param user       "<uid>:<gid>" the job runs as (issue #341), or null for the image's own USER. Portable: it says WHO
@@ -148,8 +155,8 @@ export function containerSpec({
 	sessionDir,
 	globalPiDir,
 	name,
-	memory = "4g",
-	cpus = "2",
+	size = DEFAULT_JOB_SIZE,
+	hostCpus = null,
 	network = null,
 	user = null,
 	userns = null,
@@ -164,6 +171,8 @@ export function containerSpec({
 	assertCidFile(cidFile);
 	if (!name) throw new Error("docker run: container name is required");
 	if (!workspace) throw new Error("docker run: workspace mount is required");
+	// Throws on a size outside the floors and ceilings, before any field is built (issue #596).
+	const sizing = containerSizing(size, hostCpus);
 	// Booleans, strictly: a truthy string from a caller that forwarded an option bag must not re-own host directories.
 	if (typeof relabel !== "boolean") throw new Error(`docker run: relabel must be a boolean; got ${typeof relabel}`);
 	if (typeof workspaceOwned !== "boolean") throw new Error(`docker run: workspaceOwned must be a boolean; got ${typeof workspaceOwned}`);
@@ -207,8 +216,13 @@ export function containerSpec({
 	return {
 		image,
 		name,
-		memory,
-		cpus,
+		// Issue #596: the job's size. `memorySwap` equals `memory` (no swap beyond it), `cpuShares` is the job's weight,
+		// `shmSize` is min(1g, memory/2), and `cpus` is the host ceiling or null (then `--cpus` is absent).
+		memory: sizing.memory,
+		memorySwap: sizing.memorySwap,
+		cpus: sizing.cpus,
+		cpuShares: sizing.cpuShares,
+		shmSize: sizing.shmSize,
 		network,
 		user,
 		// Issue #354. Always present and `null` by default (the parameter default turns an `undefined` into it, so a spec
@@ -325,6 +339,10 @@ export function copyDowngrades(spec) {
  * count) in bytes, or null for anything else. Binary units, as Docker and Podman read them. Null is the safe answer for
  * every caller: the live probe then reports the bound as not checked, and the OOM classification (issue #596) does not
  * confirm a kill it cannot compare with the limit.
+ *
+ * Stricter than Docker's own parser (no fractions, no `t`), and that is safe only because every bound the worker
+ * passes is written by `formatMemory` from a size `parseMemory` accepted: `job-size.test.mjs` walks every such size
+ * through the argv and back through this function.
  */
 export function memoryBytes(memory) {
 	const m = /^(\d{1,15})([bkmg]?)$/i.exec(String(memory ?? ""));

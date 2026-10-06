@@ -62,7 +62,7 @@ test("parseScopedLimits round-trips its own output (null is absent, the subscrip
 test("parseScopedLimits rejects malformed files fail-loud", () => {
 	assert.throws(() => parseScopedLimits("{ not json", "sl.json"), /not valid JSON/);
 	assert.throws(() => parseScopedLimits(JSON.stringify([]), "sl.json"), /must be an object with "version" and "limits"/);
-	assert.throws(() => parseScopedLimits(JSON.stringify({ limits: [] }), "sl.json"), /must have "version": 1 or 2 \(an integer >= 1\)/);
+	assert.throws(() => parseScopedLimits(JSON.stringify({ limits: [] }), "sl.json"), /must have "version": 1 to 3 \(an integer >= 1\)/);
 	assert.throws(() => parseScopedLimits(JSON.stringify({ version: 0, limits: [] }), "sl.json"), /must have "version": 1/);
 	assert.throws(() => parseScopedLimits(JSON.stringify({ version: "1", limits: [] }), "sl.json"), /must have "version": 1/);
 	assert.throws(() => parseScopedLimits(JSON.stringify({ version: 1 }), "sl.json"), /must have a "limits" array/);
@@ -82,10 +82,76 @@ test("parseScopedLimits rejects malformed files fail-loud", () => {
 
 test("parseScopedLimits refuses a newer version loudly, naming both", () => {
 	assert.throws(
-		() => parseScopedLimits(wrap([], 3), "sl.json"),
-		/written by a newer pi-dispatch \(version 3; this build understands 2\)/,
+		() => parseScopedLimits(wrap([], 4), "sl.json"),
+		/written by a newer pi-dispatch \(version 4; this build understands 3\)/,
 	);
-	assert.equal(SCOPED_LIMITS_VERSION, 2);
+	assert.equal(SCOPED_LIMITS_VERSION, 3);
+});
+
+// ── version 3: job sizes on project rows (issue #596) ──────────────────────────────────────────────────
+
+const v3 = (limits) => parseScopedLimits(wrap(limits, 3), "sl.json");
+
+test("v3: a project row may carry memory, cpus, hostShare and minJobs, normalized to one spelling each, and a size alone is a valid row", () => {
+	const [row] = v3([{ scope: "project:heavy", memory: "16384m", cpus: "1.50", hostShare: 50, minJobs: 2 }]);
+	assert.deepEqual(row, { scope: "project:heavy", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: null, monthUsd: null, memory: "16g", cpus: 1.5, hostShare: 50, minJobs: 2 });
+	// The widened "limits nothing" rule: a row with only a size limits something (its jobs' size).
+	assert.deepEqual(v3([{ scope: "project:light", memory: "1g" }])[0].memory, "1g");
+	assert.deepEqual(v3([{ scope: "project:light", cpus: 0.25 }])[0].cpus, 0.25);
+	assert.deepEqual(v3([{ scope: "project:light", hostShare: 10 }])[0].hostShare, 10);
+	// Round-trips through the parser: the admin's read-modify-write goes through it on both edges.
+	const again = parseScopedLimits(JSON.stringify({ version: 3, limits: v3([{ scope: "project:p", memory: "1536m", cpus: 0.29, concurrent: 3, minJobs: 3 }]) }), "sl.json");
+	assert.deepEqual(again, v3([{ scope: "project:p", memory: "1536m", cpus: 0.29, concurrent: 3, minJobs: 3 }]));
+	assert.deepEqual([again[0].memory, again[0].cpus], ["1536m", 0.29]);
+	// Every row of a version 3 file carries the four keys, null unless set, so the shape is one per version.
+	const rows = v3([{ scope: "acme/web", day: 1 }, { scope: "model:openai/gpt-x", dayUsd: "1" }]);
+	for (const r of rows) assert.deepEqual([r.memory, r.cpus, r.hostShare, r.minJobs], [null, null, null, null], r.scope);
+	// A version 1 or 2 row reads into exactly the literal it always did: no size keys at all.
+	assert.equal("memory" in parse([{ scope: "acme/web", day: 1 }])[0], false);
+	assert.equal("memory" in parseScopedLimits(wrap([{ scope: "acme/web", dayUsd: "1" }], 2), "sl.json")[0], false);
+});
+
+test("v3: a size field in a version 1 or 2 file is refused naming version 3, and off a project row in any version", () => {
+	for (const version of [1, 2]) {
+		for (const field of [{ memory: "1g" }, { cpus: 1 }, { hostShare: 50 }, { minJobs: 1, memory: "1g" }]) {
+			assert.throws(() => parseScopedLimits(wrap([{ scope: "project:p", day: 1, ...field }], version), "sl.json"), version === 1 ? /needs "version": (2|3)/ : /needs "version": 3 \(this file says 2\)/, `${version} ${JSON.stringify(field)}`);
+		}
+	}
+	assert.throws(() => parseScopedLimits(wrap([{ scope: "project:p", memory: "1g" }], 2), "sl.json"), /memory needs "version": 3 \(this file says 2\), so a build that predates job sizes refuses the file/);
+	for (const scope of ["acme/web", "github:acme/web", "/srv/site"]) {
+		assert.throws(() => v3([{ scope, day: 1, memory: "1g" }]), /memory belong on a project row \(project:<id>\)/, scope);
+		assert.throws(() => v3([{ scope, cpus: 2 }]), /cpus belong on a project row/, scope);
+	}
+	assert.throws(() => v3([{ scope: "model:openai/gpt-x", dayUsd: "1", memory: "1g" }]), /a model row carries dayUsd, weekUsd and monthUsd only \(memory is refused\)/);
+	assert.throws(() => v3([{ scope: "project:p" }]), /at least one of day, week, month, concurrent, dayUsd, weekUsd, monthUsd, memory, cpus, hostShare, minJobs is required/);
+	assert.throws(() => v3([{ scope: "project:p", memory: null, cpus: null }]), /is required/, "explicit nulls are absent");
+});
+
+test("v3: each size field refuses a value its rule refuses, naming the field and the rule", () => {
+	assert.throws(() => v3([{ scope: "project:p", memory: "256m" }]), /memory: a memory size must be at least 512m/);
+	assert.throws(() => v3([{ scope: "project:p", memory: "4GB" }]), /memory: a memory size is a whole number of megabytes or gigabytes/);
+	assert.throws(() => v3([{ scope: "project:p", memory: 4096 }]), /memory: a memory size is a whole number/);
+	assert.throws(() => v3([{ scope: "project:p", cpus: 0.1 }]), /cpus: a CPU size must be at least 0.25/);
+	assert.throws(() => v3([{ scope: "project:p", cpus: "1.234" }]), /cpus: a CPU size is a number above 0 with at most two decimals/);
+	for (const bad of [0, 101, 50.5, "50", -1, 0.5]) assert.throws(() => v3([{ scope: "project:p", hostShare: bad }]), /hostShare is a whole percentage of the host's job budget, from 1 to 100/, String(bad));
+	assert.equal(v3([{ scope: "project:p", hostShare: 100 }])[0].hostShare, 100);
+	assert.equal(v3([{ scope: "project:p", hostShare: 1 }])[0].hostShare, 1);
+	for (const bad of [0, -1, 1.5, "2", 2 ** 53]) assert.throws(() => v3([{ scope: "project:p", memory: "1g", minJobs: bad }]), /minJobs must be an integer >= 1/, String(bad));
+});
+
+test("v3: minJobs needs a size on its row, and may not exceed the row's own concurrent", () => {
+	assert.throws(() => v3([{ scope: "project:p", minJobs: 1 }]), /minJobs needs memory or cpus on the same row/);
+	assert.throws(() => v3([{ scope: "project:p", hostShare: 50, minJobs: 1 }]), /minJobs needs memory or cpus on the same row/, "a share is not a size");
+	assert.equal(v3([{ scope: "project:p", cpus: 1, minJobs: 2 }])[0].minJobs, 2);
+	assert.equal(v3([{ scope: "project:p", memory: "1g", concurrent: 2, minJobs: 2 }])[0].minJobs, 2);
+	assert.throws(() => v3([{ scope: "project:p", memory: "1g", concurrent: 2, minJobs: 3 }]), /minJobs 3 is above this row's concurrent 2, a minimum the project can never reach/);
+});
+
+test("v3: scopedLimitsVersionFor writes 3 only when a row uses a size field", () => {
+	assert.equal(scopedLimitsVersionFor([{ scope: "project:p", concurrent: 1 }]), 2);
+	assert.equal(scopedLimitsVersionFor([{ scope: "project:p", concurrent: 1, memory: null, cpus: null, hostShare: null, minJobs: null }]), 2, "null size fields are no size");
+	for (const field of [{ memory: "1g" }, { cpus: 2 }, { hostShare: 10 }, { minJobs: 1 }]) assert.equal(scopedLimitsVersionFor([{ scope: "a/b", day: 1 }, { scope: "project:p", ...field }]), 3, JSON.stringify(field));
+	assert.equal(scopedLimitsVersionFor([{ scope: "a/b", day: 1 }]), 1);
 });
 
 test('parseScopedLimits refuses "*" with the per-scope-default reversal note', () => {

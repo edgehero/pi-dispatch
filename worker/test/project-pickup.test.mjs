@@ -151,8 +151,9 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 	// The rule is one closure (`recordAfterGate`), not a field each call site has to remember. A bare `recordRun({`
 	// below its definition would record without the pickup project, and start.mjs would then resolve the LIVE ref.
 	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
-	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project });");
-	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project");
+	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project, size });");
+	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project and the size resolved beside it (#596)");
+	assert.ok(at > src.indexOf("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"), "the size is resolved from the same limits snapshot and pickup project, before the recorder");
 	// One read of the projects ref per pickup (issue #504 part B reuses the same snapshot for the resolved folder).
 	assert.ok(at > src.indexOf("const project = projectOf(job.data, pickupProjects);"), "and after the pickup resolution");
 	assert.ok(src.indexOf("const pickupProjects = projects();") < src.indexOf("const project = projectOf(job.data, pickupProjects);"));
@@ -164,4 +165,25 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 		.replace(/\/\/[^\n]*/g, "");
 	assert.deepEqual(code.match(/\brecordRun\b/g) ?? [], [], "no recordRun reference below the gate");
 	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 8, "exactly the 8 post-gate record paths use it; a new one must be counted here");
+});
+
+// Issue #596: the job's size is resolved at the same pickup, from the same limits snapshot and project, and reaches the
+// container and the record as an ARGUMENT: a size a queued job carries in its data is never read.
+test("the size is resolved at pickup from the project row, then the deployment's settings, and reaches runContainer and the record", { skip }, async () => {
+	const { parseScopedLimits } = await import("../src/scoped-limits.mjs");
+	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:shop", memory: "1536m", cpus: 0.5 }] }), "sl.json");
+	const ran = [];
+	let limitReads = 0;
+	const { processor, seen } = harness({
+		ref: { current: SHOP },
+		runContainer: async (ctx) => (ran.push(ctx.size), { code: 0, aborted: false, turns: 1 }),
+		extra: { scopedLimits: () => (limitReads++, limits), jobSizeEnv: { PI_JOB_MEMORY: "2g" } },
+	});
+	await processor(gh("j-1", "acme/web", { size: { memMiB: 65536, cpuCenti: 3200, source: "project" }, memory: "64g" }), "tok", new AbortController().signal);
+	assert.deepEqual(ran[0], { memMiB: 1536, cpuCenti: 50, source: "project" }, "the project row, never the job's data");
+	assert.deepEqual(seen.records[0].size, { memMiB: 1536, cpuCenti: 50, source: "project" });
+	assert.equal(limitReads, 1, "one limits read per pickup: the size comes from the gates' own snapshot");
+	await processor(gh("j-2", "acme/api"), "tok", new AbortController().signal);
+	assert.deepEqual(ran[1], { memMiB: 2048, cpuCenti: 200, source: "env" }, "no project: the deployment's settings");
+	assert.deepEqual(seen.records[1].size, { memMiB: 2048, cpuCenti: 200, source: "env" });
 });

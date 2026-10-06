@@ -216,6 +216,11 @@ test("the job user the run had is written to the manifest, null when nothing dec
 	const podman = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
 	assert.equal(retainJobDir(prepared({ sandbox: { jobId: "gh-4", kind: "github", image: "pi-job:latest", backend: "podman", podmanStore: "/home/op/.local/share/containers/storage" } }), { sandboxDir: "/sbx", fs: podman, now: () => Date.parse("2026-08-01T10:00:00Z") }).podmanStore, "/home/op/.local/share/containers/storage");
 	assert.equal(Object.hasOwn(stamped, "podmanStore"), false, "every other manifest keeps its shape");
+	// Issue #596: the run's size is recorded too, and only when known, so a sandbox reopens the run at it.
+	const sized = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	retainJobDir(prepared({ sandbox: { jobId: "gh-5", kind: "github", image: "pi-job:latest", backend: "local", size: { memMiB: 1536, cpuCenti: 50, source: "project" } } }), { sandboxDir: "/sbx", fs: sized, now: () => Date.parse("2026-08-01T10:00:00Z") });
+	assert.deepEqual(JSON.parse(sized.files["/sbx/gh-5/manifest.json"]).size, { memMiB: 1536, cpuCenti: 50, source: "project" });
+	assert.equal(Object.hasOwn(stamped, "size"), false, "a run with no size keeps the manifest's old shape");
 
 	const bare = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
 	assert.equal(retainJobDir(prepared(), { sandboxDir: "/sbx", fs: bare }).jobUser, null, "no decision is null, which the sandbox reads as 'decide from this shell'");

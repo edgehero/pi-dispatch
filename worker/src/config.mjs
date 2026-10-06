@@ -15,6 +15,7 @@ import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-swee
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
+import { jobSizeDefaults } from "./job-size.mjs";
 import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
 import { modelListProblem } from "./model-ref.mjs";
 import { DOLLAR_ENV_NAMES, DOLLAR_WINDOW_KEYS, checkDollarInvariant, optionalUsdMicros } from "./money.mjs";
@@ -292,6 +293,19 @@ function refuseBackendShortfall(config) {
 }
 
 /**
+ * The deployment's default job size (issue #596): `{ memMiB, cpuCenti, memSet, cpuSet }` from `PI_JOB_MEMORY` and
+ * `PI_JOB_CPUS`, unset or empty meaning the built-in 4g and 2. A value the size parsers refuse (`job-size.mjs`) is a
+ * config error naming the key and the rule, so a typo stops the worker at boot rather than every job at its start.
+ */
+export function jobSizeFrom(env) {
+	try {
+		return jobSizeDefaults(env);
+	} catch (error) {
+		throw configError(error.message);
+	}
+}
+
+/**
  * PI_JOB_IMAGE as the worker runs it (issue #471): unset or empty is pi-job:latest (`||`, so "" falls back), and any
  * other value is judged by the one image rule `run.image` is (`image-ref.mjs`). A refused value is a config error at
  * boot (exit 2), naming the key: before #471 a dash-leading value booted, and every job then handed the runtime a flag
@@ -396,6 +410,9 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		dailyCostUsd: usdSetting(env, "PI_DAILY_COST_USD"),
 		weeklyCostUsd: usdSetting(env, "PI_WEEKLY_COST_USD"),
 		monthlyCostUsd: usdSetting(env, "PI_MONTHLY_COST_USD"),
+		// Issue #596: the deployment's default job size (`PI_JOB_MEMORY`, `PI_JOB_CPUS`; 4g and 2 when unset), refused here at
+		// boot (exit 2) naming the key, never at a job. A project row's size overrides it (INT-SCOPED-LIMITS-FILE-CONTRACT).
+		jobSize: jobSizeFrom(env),
 		jobImage: jobImageFrom(env), // || (not ??) so an empty string falls back; "" is falsy and would throw inside buildDockerRunArgs AFTER a budget slot was reserved
 		globalPiDir: resolveGlobalPiDir(env, fileExists), // REQ-GLOBAL-PI-OVERLAY: operator's ~/.pi/agent subset, :ro-mounted; null = off
 		allowGlobalExtensions: globalExtensionsEnabled(env), // REQ-GLOBAL-PI-OVERLAY: ON unless PI_GLOBAL_ALLOW_EXTENSIONS=0

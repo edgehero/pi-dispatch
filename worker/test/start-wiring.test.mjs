@@ -4518,3 +4518,29 @@ test("the host row's fpUsd is the dollar fingerprint of the live settings and sc
 	writeFileSync(settingsFile, "{ not json");
 	assert.equal(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, rows, LIST), "an invalid overlay falls back to env, as the slot count does");
 });
+
+test("the per-job gate carries the daemon's CPU count beside the user, from the same facts read, for the --cpus ceiling (issue #596)", { skip }, async () => {
+	const endpoint = { local: true, context: "default", endpoint: "unix:///run/pd-test/docker.sock", reason: null, transient: false };
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	const stat = () => ({ uid: 0, gid: 2375 });
+	const start = (over, identity = LINUX_ID(1234)) =>
+		runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: DOCKER_FACTS(over), jobUserIdentity: { ...identity, stat }, resolveDockerEndpoint: async () => endpoint });
+	const counted = await start({ hostCpus: 4 });
+	assert.deepEqual(await counted.captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { user: "1234:1234", home: "/home/pi", hostCpus: 4 });
+	const shipped = await start({ hostCpus: 4 }, LINUX_ID(1001));
+	assert.deepEqual(await shipped.captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } }), { user: null, home: null, hostCpus: 4 });
+	// A refusal runs nothing, so it carries none; a daemon that gave no count gives none.
+	assert.deepEqual(await counted.captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } }), { refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" });
+	const silent = await start({});
+	assert.deepEqual(await silent.captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { user: "1234:1234", home: "/home/pi" });
+});
+
+test("job sizes: the worker hands createWorker the size settings at the TOP level, and recordRun stamps the pickup's size (issue #596)", { skip }, async () => {
+	const { captured, recordRun, records } = await runStartWithRecords({ env: { PI_JOB_MEMORY: "2g", PI_JOB_CPUS: "0.5" } });
+	assert.deepEqual(captured.jobSizeEnv, { PI_JOB_MEMORY: "2g", PI_JOB_CPUS: "0.5" }, "the settings loadConfig judged, beside scopedLimits, never in deps");
+	assert.equal(captured.deps.jobSizeEnv, undefined);
+	recordRun({ job: { id: "j1", name: "github", data: { kind: "github", repo: "acme/web" } }, result: { outcome: "completed" }, project: null, size: { memMiB: 2048, cpuCenti: 50, source: "env" } });
+	assert.deepEqual(records.at(-1).size, { memMiB: 2048, cpuCenti: 50, source: "env" });
+	recordRun({ job: { id: "j2", name: "github", data: { kind: "github", repo: "acme/web", size: { memMiB: 9999, cpuCenti: 50, source: "project" } } }, result: { outcome: "policy" } });
+	assert.equal(records.at(-1).size, null, "a record from before the pickup gate carries none, and never the job data's");
+});

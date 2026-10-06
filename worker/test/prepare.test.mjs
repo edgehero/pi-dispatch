@@ -302,6 +302,10 @@ test("a prepared job carries the stamp cleanup needs to retain it (REQ-RESURRECT
 		// Issue #429: a podman run's store rides the stamp; nothing else carries the key.
 		assert.equal((await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-12", podmanStore: "/home/op/.local/share/containers/storage" })).sandbox.podmanStore, "/home/op/.local/share/containers/storage");
 		assert.equal(Object.hasOwn(stamped.sandbox, "podmanStore"), false);
+		// Issue #596: the size the processor resolved rides the stamp, rebuilt; nothing else carries the key.
+		assert.deepEqual((await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-13", size: { memMiB: 1536, cpuCenti: 50, source: "project", x: 1 } })).sandbox.size, { memMiB: 1536, cpuCenti: 50, source: "project" });
+		assert.equal(Object.hasOwn((await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-14", size: { memMiB: 1, cpuCenti: 50, source: "env" } })).sandbox, "size"), false, "a size that does not rebuild is not stamped");
+		assert.equal(Object.hasOwn(stamped.sandbox, "size"), false);
 		// #277: the venue is resolved exactly as the registry dispatches it, so a trigger's own run.backend wins.
 		assert.equal((await prepareWorkspace({ kind: "github", repo: "a/b", backend: "far" }, "tok", { queueJobId: "gh-9" })).sandbox.backend, "far");
 		// No default wired (a DI seam) stamps a null venue, which the sandbox refuses -- never a guessed local.

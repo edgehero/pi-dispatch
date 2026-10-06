@@ -245,6 +245,9 @@ export function renderScopedLimits({ limits, scopedBudget, projects = null, doll
       const u = Number.isSafeInteger(micros) && micros >= 0 ? formatMicros(micros) : "-";
       bits.push(`${key} $${u}/$${cap}${d?.full === true ? " (full)" : ""}`);
     }
+    // Version 3's job size (issue #596): what each of the project's jobs gets. hostShare and minJobs are shown as not
+    // enforced yet, so the line never reads as a bound the worker does not keep.
+    bits.push(...sizeBits(l));
     // A project row (issue #499 part C): its member count, or that its project is missing (the panel's framed twin).
     if (typeof l.scope === "string" && l.scope.startsWith("project:")) {
       const id = l.scope.slice("project:".length);
@@ -255,6 +258,20 @@ export function renderScopedLimits({ limits, scopedBudget, projects = null, doll
     lines.push(`  ${l.scope}: ${bits.join(" · ")}`);
   });
   return lines.join("\n");
+}
+
+/**
+ * A scoped-limits row's size, as display bits (issue #596): `memory 4g`, `2 CPUs`, and `hostShare 50% (not enforced
+ * yet)` and `minJobs 2 (not enforced yet)`, set fields only. Shared by `renderScopedLimits` and the panel's SCOPED
+ * LIMITS view, so the two say a size the same way.
+ */
+export function sizeBits(l) {
+  const bits = [];
+  if (typeof l?.memory === "string") bits.push(`memory ${l.memory}`);
+  if (typeof l?.cpus === "number") bits.push(`${l.cpus} CPU${l.cpus === 1 ? "" : "s"}`);
+  if (Number.isInteger(l?.hostShare)) bits.push(`hostShare ${l.hostShare}% (not enforced yet)`);
+  if (Number.isInteger(l?.minJobs)) bits.push(`minJobs ${l.minJobs} (not enforced yet)`);
+  return bits;
 }
 
 /** One window's cap + state suffix: the overlay cap and its classified state, or the unknown-cap notice. */

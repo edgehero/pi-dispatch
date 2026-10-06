@@ -50,7 +50,7 @@ test("the facts read is one bounded `docker info --format={{json .}}`", () => {
 });
 
 test("parseDaemonFacts reads the Docker shape: OS, rootless and userns markers, pid and memory bounds, never CPU", () => {
-	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1" });
+	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1", hostCpus: null, swapLimit: null });
 	assert.equal(facts("dockerRootless").rootless, true);
 	assert.deepEqual(facts("dockerRootless").bounds, { pids: false, memory: false });
 	assert.equal(facts("dockerRemap").userns, true);
@@ -63,7 +63,7 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	assert.equal(facts("podmanCompatRootful").podman, true);
 	assert.equal(facts("podmanCompatRootful").bounds, null, "Podman hard-codes PidsLimit and derives MemoryLimit from the root controllers");
 	assert.equal(facts("podmanCompatRootless").rootless, true);
-	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, selinux: null, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null }, "the trimmed shim fixture carries no version");
+	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, selinux: null, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null, hostCpus: null }, "the trimmed shim fixture carries no version");
 	assert.equal(facts("shimRootless").remoteSocketPath, "/run/user/1234/podman/podman.sock");
 	// Only a unix path is kept, because only a unix path is ever statted.
 	for (const remote of ["ssh://core:hunter2@10.0.0.5:22/run/podman/podman.sock", "tcp://127.0.0.1:8080", "unix://relative", "run/podman.sock", ""]) {
@@ -72,6 +72,23 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	}
 	assert.equal(facts("desktop").podman, false);
 	assert.equal(facts("dockerRootful").podman, false);
+});
+
+test("parseDaemonFacts reads the runtime's CPU count and Docker's SwapLimit, and nothing malformed (issue #596)", () => {
+	// Measured: `docker info` says `NCPU` 14 and `SwapLimit` true on Docker Desktop, 4 and true on Ubuntu's docker 29.1.3.
+	const docker = (over) => parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, ...over })).facts;
+	assert.equal(docker({ NCPU: 14 }).hostCpus, 14);
+	assert.equal(docker({ NCPU: 4, SwapLimit: true }).swapLimit, true);
+	assert.equal(docker({ SwapLimit: false }).swapLimit, false, "where --memory-swap cannot be enforced, doctor warns");
+	for (const bad of [0, -1, 2.5, "4", 5000, null]) assert.equal(docker({ NCPU: bad }).hostCpus, null, String(bad));
+	assert.equal(docker({ SwapLimit: "true" }).swapLimit, null);
+	// Podman's compat value is not read, for `bounds`' reason; its CPU count is.
+	const compat = parseDaemonFacts(JSON.stringify({ ...BODY.podmanCompatRootful, NCPU: 4, SwapLimit: false })).facts;
+	assert.equal(compat.swapLimit, null);
+	assert.equal(compat.hostCpus, 4);
+	// Podman's own shape (podman-docker): `host.cpus`.
+	assert.equal(parseDaemonFacts(JSON.stringify({ host: { ...BODY.shimRootless.host, cpus: 4 } })).facts.hostCpus, 4);
+	assert.equal("swapLimit" in parseDaemonFacts(JSON.stringify({ host: { ...BODY.shimRootless.host, cpus: 4 } })).facts, false);
 });
 
 // Issue #355. Measured through rootful Podman 5.8.1's compat API on an enforcing Fedora 44 host (SecurityOptions verbatim).

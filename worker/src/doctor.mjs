@@ -96,6 +96,7 @@ import { urlShown, valkeyContextFromResolution, valkeyPasswordFor, valkeyUrlProb
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
+import { DEFAULT_JOB_SIZE, formatCpus, formatMemory, hostCpuCeiling, jobSizeDefaults } from "./job-size.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
@@ -587,7 +588,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -1827,6 +1828,8 @@ export async function collectChecks(shellVars, seams) {
 					? { answered: false, reason: "docker-not-found", transient: true }
 					: null);
 	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs, unit: jobUser.unit, ...(podman ? { podman: podman.observed } : {}) }));
+	// Issue #596: the default job size, and what this host's runtime says about the bounds a size becomes.
+	checks.push(...jobSizeChecks(env, { daemon: localUsed ? daemon : null }));
 	checks.push(...jobUser.checks);
 	if (podman) checks.push(...podman.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
@@ -6173,7 +6176,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
  * then replaced by none; `CANARY_NO_WORKSPACE` is a path nothing creates, so if a later edit ever kept the mount, the
  * run would fail on a missing source rather than bind a real directory.
  */
-export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, proxy, image, url, user = null, script = egressCanaryScript(url), name = egressCanaryProbe(slug, pid), httpProxy = false }) {
+export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, proxy, image, url, user = null, script = egressCanaryScript(url), name = egressCanaryProbe(slug, pid), httpProxy = false, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
 	if (bin !== "podman") {
 		return [
 			"run",
@@ -6203,7 +6206,9 @@ export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, prox
 	// HOME as a podman job gets it (`resolvePodmanImageUser` always answers CONTAINER_HOME): under keep-id the job user's
 	// passwd entry otherwise names this host's home path, which does not exist in the image, and the canary loads pi as
 	// that user. No credential rides along: the canary proves the route, and a 401 from the provider is its success.
-	const { mounts: _placeholder, ...spec } = containerSpec({ image, name, env: { HOME: CONTAINER_HOME, ...egressEnv({ proxy, armed: true }) }, workspace: CANARY_NO_WORKSPACE, network, user, userns: "keep-id", extraFlags: ["--entrypoint", "node"] });
+	// Issue #596: at a job's size (the deployment's default, which doctor reads from the same settings the worker does) and
+	// under the same `--cpus` ceiling, so the canary's container is a job's in its bounds as well as its flags.
+	const { mounts: _placeholder, ...spec } = containerSpec({ image, name, env: { HOME: CONTAINER_HOME, ...egressEnv({ proxy, armed: true }) }, workspace: CANARY_NO_WORKSPACE, network, user, userns: "keep-id", extraFlags: ["--entrypoint", "node"], size, hostCpus });
 	return [...podmanArgsFromSpec({ ...spec, mounts: [] }), "-e", script];
 }
 
@@ -6233,7 +6238,7 @@ const CANARY_NO_WORKSPACE = "/nonexistent/pi-dispatch-egress-canary-mounts-nothi
  * `endpoints` (issue #503) are the declared model endpoints to prove on the same network after the three
  * (`runEndpointProbes`), `[]` by default, so the conformance script and a deployment with none run exactly the three.
  */
-export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, endpoints = [], gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }) }) {
+export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, endpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }) }) {
 	const venue = canaryVenueFor(bin);
 	const probe = probeRun ?? ((args) => run(args, { timeoutMs: bin === "podman" ? PODMAN_FIRST_START_TIMEOUT_MS : RUN_TIMEOUTS.cmd }));
 	const checks = [];
@@ -6312,7 +6317,7 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 			[CANARY_PROBE_SLUGS[1], "an unlisted host", "https://example.com/", false],
 			[CANARY_PROBE_SLUGS[2], "plain HTTP to a listed host off port 80", "http://api.anthropic.com:443/", false, egressCanaryPlainScript("http://api.anthropic.com:443/", { proxyUrl: egressProxyUrl(proxy) })],
 		]) {
-			const answer = await probe(egressCanaryProbeArgs({ bin, slug, pid, network: net, proxy, image, url, user, ...(script ? { script } : {}) }));
+			const answer = await probe(egressCanaryProbeArgs({ bin, slug, pid, network: net, proxy, image, url, user, size, hostCpus, ...(script ? { script } : {}) }));
 			// The script exits 0 (reached) or 3 (blocked). Anything else is the container not running it -- a name clash,
 			// the image, the daemon -- which is no reading at all, and must not pass for a deny.
 			// `code === null` is the ONE case where a container may still be RUNNING under a name we chose: the
@@ -6388,7 +6393,7 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 			if (staleRunner) {
 				checks.push({ ok: false, warn: true, label: `${venue.prefix}Model endpoints: not probed, because the job image has no runner module (above), and their probes take the runner's route`, fix: "use a job image built after issue #427, then re-run doctor" });
 			} else {
-				checks.push(...(await runEndpointProbes({ probe, bin, pid, network: net, proxy, image, user, endpoints, venue, unfinished })));
+				checks.push(...(await runEndpointProbes({ probe, bin, pid, network: net, proxy, image, user, endpoints, venue, unfinished, size, hostCpus })));
 			}
 		}
 	} finally {
@@ -6604,7 +6609,7 @@ export function undeclaredPortNear(endpoint, endpoints) {
  * variable as well on docker: the runner's dispatcher sends an `http://` origin to HTTP_PROXY, which docker's canary
  * argv does not otherwise carry (podman's is a job's environment and has it).
  */
-async function runEndpointProbes({ probe, bin, pid, network, proxy, image, user, endpoints, venue, unfinished }) {
+async function runEndpointProbes({ probe, bin, pid, network, proxy, image, user, endpoints, venue, unfinished, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
 	const checks = [];
 	for (const endpoint of endpointsById(endpoints)) {
 		const next = undeclaredPortNear(endpoint, endpoints);
@@ -6617,7 +6622,7 @@ async function runEndpointProbes({ probe, bin, pid, network, proxy, image, user,
 		];
 		for (const [slug, url, script] of runs) {
 			const name = egressEndpointProbe(slug, endpoint.id, pid);
-			const answer = await probe(egressCanaryProbeArgs({ bin, slug, name, pid, network, proxy, image, url, user, script, httpProxy: true }));
+			const answer = await probe(egressCanaryProbeArgs({ bin, slug, name, pid, network, proxy, image, url, user, script, httpProxy: true, size, hostCpus }));
 			if (answer?.code === null && answer.ended !== "error") unfinished.push(name);
 			checks.push(endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next }));
 		}
@@ -7357,6 +7362,45 @@ async function defaultProbeValkey(url) {
 	} finally {
 		client.disconnect();
 	}
+}
+
+/**
+ * The deployment's default job size as doctor reads it (issue #596): `PI_JOB_MEMORY` and `PI_JOB_CPUS` through the
+ * worker's own rule (`jobSizeDefaults`), or the built-in 4g and 2 when they do not parse (`jobSizeChecks` reports that as
+ * the boot refusal it is, and the read-backs then probe the size a fixed configuration would get).
+ */
+export function doctorJobSize(env) {
+	try {
+		const d = jobSizeDefaults(env);
+		return { memMiB: d.memMiB, cpuCenti: d.cpuCenti, source: d.memSet || d.cpuSet ? "env" : "default" };
+	} catch {
+		return DEFAULT_JOB_SIZE;
+	}
+}
+
+/**
+ * The job size lines (issue #596): the default size every job without a project size gets, the `--cpus` ceiling this
+ * host's runtime gives every job, and a WARNING where the Docker daemon reports `SwapLimit` false, because there
+ * `--memory-swap` cannot be enforced and a job may swap past its memory, which the size promised it would not.
+ * A setting that does not parse is a FAILURE: the worker refuses to start on it (`loadConfig`).
+ * `daemon` is the local venue's one `docker info` answer, or null where it was not read.
+ */
+export function jobSizeChecks(env, { daemon = null } = {}) {
+	let d;
+	try {
+		d = jobSizeDefaults(env);
+	} catch (error) {
+		return [{ ok: false, label: `job size does not parse: ${error.message}, so the worker REFUSES TO START`, fix: "set PI_JOB_MEMORY like 512m, 1536m or 4g and PI_JOB_CPUS like 0.5 or 2 (or unset them for 4g and 2), then re-run doctor" }];
+	}
+	const where = d.memSet || d.cpuSet ? "PI_JOB_MEMORY and PI_JOB_CPUS" : "the built-in default";
+	const checks = [{ ok: true, label: `Job size: ${formatMemory(d.memMiB)} of memory with no swap beyond it, and the CPU weight of ${formatCpus(d.cpuCenti)} CPUs, per job (${where}; a project row's memory and cpus override it, docs/scoped-limits.md)` }];
+	const facts = daemon?.answered === true ? daemon.facts : null;
+	const ceiling = hostCpuCeiling(facts?.hostCpus);
+	if (ceiling !== null) checks.push({ ok: true, label: `local: every job may use at most ${ceiling} of this runtime's ${facts.hostCpus} CPUs (--cpus)${ceiling < facts.hostCpus ? ", one kept for the host" : ""}; under contention each gets CPU in proportion to its size (--cpu-shares)` });
+	if (facts?.swapLimit === false) {
+		checks.push({ ok: false, warn: true, label: "local: the Docker daemon reports SwapLimit false, so --memory-swap cannot be enforced here and a job may swap beyond its memory", fix: "enable swap accounting in the kernel (cgroup v2, or swapaccount=1 on cgroup v1), restart Docker, then re-run doctor" });
+	}
+	return checks;
 }
 
 /**
@@ -8333,6 +8377,10 @@ export async function liveChecks(env, seams, facts) {
 	const relabel = relabelsPrivateMounts(facts.daemon?.answered ? facts.daemon.facts : null, facts.endpoint, ids.platform ?? seams.platform);
 	const result = await runLiveProbes({
 		image: facts.jobImage ?? jobImageOf(env).image,
+		// Issue #596: the deployment's default size, and the `--cpus` ceiling from the same `docker info` answer, so the
+		// probe is built at the size a job gets and reads back memory, swap, weight and ceiling against it.
+		size: doctorJobSize(env),
+		hostCpus: facts.daemon?.answered ? (facts.daemon.facts?.hostCpus ?? null) : null,
 		endpoint: facts.endpoint,
 		// Asked again right before the first probe command, through the same resolver as the collection's read.
 		resolveEndpoint: makeDockerEndpointResolver({ run: dockerRunVia(spawn) }),
@@ -8470,10 +8518,13 @@ export async function podmanLiveChecks(env, seams, facts) {
 	const readInfo = makePodmanInfoReader({ run: dockerRunVia(spawn, PODMAN_INFO_TIMEOUT_MS, { bin: "podman" }) });
 	const run = liveRunVia(spawn, { bin: "podman" });
 	const image = facts.jobImage ?? jobImageOf(env).image;
-	const canary = await podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, announce: (line) => out(`\nread back on podman: ${line}\n`) });
+	const canary = await podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, size: doctorJobSize(env), announce: (line) => out(`\nread back on podman: ${line}\n`) });
 	const egress = { armed: podman.egress.armed, results: canary.results, proxy: podman.egress.proxy, proxyRunning: podman.egress.proxyRunning, keeperBlocked: podman.egress.keeperBlocked ?? null };
 	const result = await runLiveProbes({
 		image,
+		// Issue #596: as the docker read-back, from this account's own `podman info`.
+		size: doctorJobSize(env),
+		hostCpus: podman.info?.hostCpus ?? null,
 		endpoint: podman.info,
 		resolveEndpoint: async () => {
 			const again = await readInfo();
@@ -8533,7 +8584,7 @@ export async function podmanLiveChecks(env, seams, facts) {
  * judges a pid against THIS process table and the canary's containers must start where the section looked, and both of
  * those are false the moment CONTAINER_HOST points elsewhere. The re-ask costs one spawn and only with egress armed.
  */
-async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, announce = () => {} }) {
+async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, size = DEFAULT_JOB_SIZE, announce = () => {} }) {
 	const none = { checks: [], results: [] };
 	if (podman.egress?.armed === false) return none;
 	// Issue #458: on Podman 4.x without the keeper, the canary's own teardown (and the stale sweep's detach) is the step
@@ -8559,7 +8610,7 @@ async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, 
 	const endpoints = podman.egress.endpoints ?? [];
 	const more = endpoints.length > 0 ? `; then three per declared model endpoint (${endpointsById(endpoints).map((e) => e.id).join(", ")}), named ${EGRESS_ENDPOINT_PROBE_PREFIX}<probe>-<id>-${pid}, removed the same way` : "";
 	announce(`starting ${probes.slice(0, -1).join(", ")} and ${probes.at(-1)} from ${image} (as the job user ${podman.user}) on the --internal network ${egressCanaryNetwork(pid)}, with ${podman.egress.proxy} attached, to read the egress allowlist back; all three are removed when the canary ends${more}`);
-	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate, endpoints });
+	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate, endpoints, size, hostCpus: again.info?.hostCpus ?? null });
 	return { checks: [...checks, ...canary.checks], results: canary.results };
 }
 

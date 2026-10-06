@@ -1319,7 +1319,7 @@ export async function startWorker(
 	// would be bytes nothing reads. That is also what keeps a single-host deployment byte-identical, since
 	// no job then issues a single extra Valkey command.
 	const runMirror = config.workerNameDeclared ? makeRunMirrorFn({ redis, retentionDays: config.logRetentionDays, log }) : null;
-	const recordRun = ({ job, result, error, startedAt, endedAt, project }) => {
+	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null }) => {
 		// The project (issue #499) was resolved at the pickup gate and rides here as `project` (an id or null), so a live
 		// edit of projects.json mid-run cannot make the record disagree with what the job was counted against. A record
 		// path that ends BEFORE the pickup gate (the wait gate's refusals) passes none, and resolves from the live ref
@@ -1329,7 +1329,7 @@ export async function startWorker(
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
 		// The default venue rides the same way and for the same reason (#277): it is the value the registry
 		// below is built with, so the record resolves a job's venue exactly as dispatch does.
-		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId });
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size });
 		writeRecord(record);
 		// STRICTLY AFTER the file, and deliberately not awaited. After, because a crash between the two must
 		// leave a record with no fleet row rather than a fleet row with no record -- the mirror is a VIEW,
@@ -1718,7 +1718,9 @@ export async function startWorker(
 		// undecidable daemon runs nothing), and only when true: every host this does not apply to keeps the answer
 		// shape, and so the argv, it had before.
 		if (chosen.refused || chosen.unavailable) return chosen;
-		return relabelsPrivateMounts(facts, endpoint, jobUserIdentity.platform) ? { ...chosen, relabel: true } : chosen;
+		// Issue #596: the daemon's CPU count from that same read, for the job's `--cpus` ceiling. Absent when it did not say.
+		const sized = Number.isSafeInteger(facts?.hostCpus) ? { ...chosen, hostCpus: facts.hostCpus } : chosen;
+		return relabelsPrivateMounts(facts, endpoint, jobUserIdentity.platform) ? { ...sized, relabel: true } : sized;
 	};
 
 	// #227: WHERE this job's container runs. The three functions that decide whether a container may start and
@@ -1948,6 +1950,9 @@ export async function startWorker(
 		scopedLimits: () => scopedLimits.current,
 		// Issue #499: the projects snapshot, read by the pickup gate once, beside the limits snapshot above.
 		projects: () => projects.current,
+		// Issue #596: the deployment's default job size, the two settings `loadConfig` already refused at boot if bad. ENV
+		// ONLY, never the settings overlay, so a size cannot change under a running worker.
+		jobSizeEnv: { PI_JOB_MEMORY: env.PI_JOB_MEMORY, PI_JOB_CPUS: env.PI_JOB_CPUS },
 		// Issue #504 part B: the live envelope and its digest, and the reconcile the pickup runs before it narrows a job's
 		// dollar ledgers by the applied split. Without an envelope `current()` is null, and `fleetGoverned` asks whether an
 		// applied split exists: if it does, this host's jobs refuse as envelope-mismatch rather than run ungoverned.

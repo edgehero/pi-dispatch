@@ -78,6 +78,8 @@ export function parseDaemonFacts(output) {
 				// listener (source): `unix://...` or `tcp://...` for a running service, the bare default path in-process.
 				remoteSocketPath: isUnixSocketPath(path) ? path : null,
 				serverVersion: displayVersion(body.version?.Version),
+				// Issue #596: the runtime's own CPU count, which sets every job's `--cpus` ceiling (`hostCpuCeiling`).
+				hostCpus: cpuCount(body.host.cpus),
 			} };
 		}
 		if (typeof body.ServerVersion === "string" && body.ServerVersion !== "" && (typeof body.OperatingSystem === "string" || Array.isArray(body.SecurityOptions))) {
@@ -98,6 +100,14 @@ export function parseDaemonFacts(output) {
 				serviceIsRemote: null,
 				remoteSocketPath: null,
 				serverVersion: displayVersion(body.ServerVersion),
+				// Issue #596: the daemon's CPU count (`NCPU`, the VM's on Docker Desktop, measured 14 there and 4 on Ubuntu),
+				// which sets every job's `--cpus` ceiling. Docker refuses a `--cpus` above it, so the worker's own count is
+				// never used in its place.
+				hostCpus: cpuCount(body.NCPU),
+				// Issue #596: whether the daemon can bound swap (`SwapLimit`). Where it is false, `--memory-swap` cannot be
+				// enforced and a job may swap past its memory; doctor warns. null on Podman (its compat value is not read,
+				// for `bounds`' reason) and when the key is absent.
+				swapLimit: podman || typeof body.SwapLimit !== "boolean" ? null : body.SwapLimit,
 			} };
 		}
 	}
@@ -111,6 +121,11 @@ export function parseDaemonFacts(output) {
  */
 export function displayVersion(value) {
 	return typeof value === "string" && /^[0-9A-Za-z.+~_-]{1,40}$/.test(value) ? value : null;
+}
+
+/** A runtime's CPU count: a whole number from 1 to 4096, else null (no fact rather than a guess). */
+function cpuCount(value) {
+	return Number.isSafeInteger(value) && value >= 1 && value <= 4096 ? value : null;
 }
 
 function isUnixSocketPath(path) {
@@ -166,5 +181,8 @@ export function parsePodmanInfo(stdout) {
 		// measured on 5.8.1 and 4.9.3), under which Podman 5 records this account's rootless network helper. Parsed as
 		// graphRoot is: an absolute path with no control character, else no fact (and the live network check refuses).
 		runRoot: typeof body.store?.runRoot === "string" && body.store.runRoot.length <= 4096 && /^\/[^\u0000-\u001f\u007f]*$/.test(body.store.runRoot) ? body.store.runRoot : null,
+		// Issue #596: the host's CPU count as Podman reports it (`host.cpus`, measured 4 on both lab VMs), which sets every
+		// podman job's `--cpus` ceiling. A rootless account's own `cpu.max` may be lower; phase 2's host budget reads it.
+		hostCpus: cpuCount(host.cpus),
 	};
 }

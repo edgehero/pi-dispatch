@@ -22,6 +22,7 @@
 export { containerSpec, CONTAINER_GLOBAL_PI_DIR, CONTAINER_SESSION_DIR, CONTAINER_SESSION_FILE } from "./container-spec.mjs";
 import { isAbsolute, relative } from "node:path";
 import { assertCidFile, assertJobUser, containerSpec } from "./container-spec.mjs";
+import { CPU_SHARES_MAX, CPU_SHARES_MIN } from "./job-size.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
 export const ISOLATION_FLAGS = [
@@ -39,8 +40,10 @@ export const ISOLATION_FLAGS = [
 	"--cap-drop=ALL", // pi would otherwise inherit the launching user's capabilities
 	"--security-opt",
 	"no-new-privileges",
-	"--pids-limit=512", // bound a fork bomb (UNVERIFIED figure; measured headroom ~4.5x, see spec)
-	"--shm-size=1g", // Chromium OOMs on the default 64MB /dev/shm; NOT --ipc=host (shares host ns)
+	"--pids-limit=512", // bound a fork bomb (UNVERIFIED figure; measured headroom ~4.5x, see spec). FIXED, never per size
+	// `--shm-size` LEFT this array in issue #596: it is now min(1g, memory/2) of the job's size, a value, and this array
+	// is the literal, value-free set (see `--network` in `argsFromSpec`). It is emitted beside `--memory` instead, still
+	// on every argv, and still NOT `--ipc=host` (Chromium OOMs on the default 64MB /dev/shm; host IPC shares the host ns).
 ];
 
 /**
@@ -85,8 +88,9 @@ export const ISOLATION_FLAGS = [
  * `DOCKER_EXTRA_ALLOWED`, or it is refused. The deny-list stays for its named reasons and its tests.
  */
 export const DOCKER_EXTRA_FORBIDDEN = [
-	// Each of the seven logical flags in ISOLATION_FLAGS, and the argv member beside them that the worker's
-	// own machinery reads back. A flag missing from here is a flag the array cannot defend.
+	// Each of the six logical flags in ISOLATION_FLAGS, `--shm-size` (in that array until issue #596 made it a size),
+	// and the argv member beside them that the worker's own machinery reads back. A flag missing from here is a flag the
+	// array cannot defend.
 	"--rm", // `--rm=false` leaves the container behind; verified against docker 27.4.0. `ephemeral` rests on it.
 	"--init",
 	"--shm-size",
@@ -105,6 +109,26 @@ export const DOCKER_EXTRA_FORBIDDEN = [
 	"--memory",
 	"-m",
 	"--cpus",
+	// The job's size (issue #596). Every flag that sets a CPU or memory bound, a weight or an OOM preference: a repeat
+	// would win last and give one job another job's promise. `-c` is `--cpu-shares`' short form.
+	"--cpu-shares",
+	"-c",
+	"--cpu-quota",
+	"--cpu-period",
+	"--cpu-rt-period",
+	"--cpu-rt-runtime",
+	"--cpuset-cpus",
+	"--cpuset-mems",
+	"--memory-reservation",
+	"--memory-swappiness",
+	"--kernel-memory",
+	"--blkio-weight",
+	"--blkio-weight-device",
+	"--device-read-bps",
+	"--device-write-bps",
+	"--device-read-iops",
+	"--device-write-iops",
+	"--oom-score-adj",
 	"--network",
 	"--net",
 	"--pull",
@@ -234,6 +258,7 @@ function argsFromSpec(spec, { userns }) {
 	// Re-checked here for a hand-built spec, the same reason `isolated` is.
 	assertJobUser(spec.user);
 	assertCidFile(spec.cidFile);
+	assertSizing(spec);
 
 	// `--network` sits HERE, beside --memory and --cpus, and deliberately NOT inside ISOLATION_FLAGS.
 	// That array is the LITERAL, value-free, unconditional set, and two separate places assert every member
@@ -245,7 +270,12 @@ function argsFromSpec(spec, { userns }) {
 	//
 	// null => the flag is ABSENT, so a job argv without an egress policy is byte-identical to one built
 	// before this feature existed. Same shape as the sessionDir/outboxDir/globalPiDir mounts below.
-	const args = ["run", `--name=${spec.name}`, ...ISOLATION_FLAGS, `--memory=${spec.memory}`, `--cpus=${spec.cpus}`];
+	// Issue #596: the job's size. `--memory-swap` equal to `--memory`, so no swap beyond it; `--cpus` the host ceiling,
+	// absent when the runtime's CPU count is unknown (`hostCpuCeiling` says why that fails open); `--cpu-shares` the job's
+	// weight; `--shm-size` min(1g, memory/2).
+	const args = ["run", `--name=${spec.name}`, ...ISOLATION_FLAGS, `--memory=${spec.memory}`, `--memory-swap=${spec.memorySwap}`];
+	if (spec.cpus !== null) args.push(`--cpus=${spec.cpus}`);
+	args.push(`--cpu-shares=${spec.cpuShares}`, `--shm-size=${spec.shmSize}`);
 	if (spec.network) args.push(`--network=${spec.network}`);
 	else if (userns) args.push("--network=private");
 	// null => ABSENT, so a job the image's own USER runs has an argv byte-identical to one built before issue #341.
@@ -281,6 +311,22 @@ function argsFromSpec(spec, { userns }) {
 
 	args.push(spec.image);
 	return args;
+}
+
+/**
+ * The size fields of a spec, re-checked for a hand-built one (issue #596): `memory` and `shmSize` in the spelling
+ * `formatMemory` writes, `memorySwap` EQUAL to `memory` (a spec that allows swap is refused, never repaired), `cpus` a
+ * positive whole number of CPUs or null, `cpuShares` an integer in the runtime's range. A spec from before these fields
+ * is refused rather than given `--memory-swap=undefined`.
+ */
+function assertSizing(spec) {
+	const memoryish = (v) => typeof v === "string" && /^[1-9]\d{0,6}[mg]$/.test(v);
+	const ok = memoryish(spec.memory)
+		&& spec.memorySwap === spec.memory
+		&& memoryish(spec.shmSize)
+		&& (spec.cpus === null || (typeof spec.cpus === "string" && /^[1-9]\d{0,5}$/.test(spec.cpus)))
+		&& Number.isSafeInteger(spec.cpuShares) && spec.cpuShares >= CPU_SHARES_MIN && spec.cpuShares <= CPU_SHARES_MAX;
+	if (!ok) throw new Error(`docker run: refusing a spec whose size fields are not containerSpec's (memory, memorySwap equal to it, cpus, cpuShares, shmSize): ${JSON.stringify({ memory: spec.memory ?? null, memorySwap: spec.memorySwap ?? null, cpus: spec.cpus ?? null, cpuShares: spec.cpuShares ?? null, shmSize: spec.shmSize ?? null })}`);
 }
 
 /**

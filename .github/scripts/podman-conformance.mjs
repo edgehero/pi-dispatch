@@ -239,7 +239,7 @@ async function egressCanary() {
 	const state = await podman(["inspect", "--format={{.State.Status}}", proxy]);
 	const proxyRunning = state.code === 0 && state.stdout.trim() === "running";
 	if (!proxyRunning) return { results: [], proxyRunning };
-	const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user });
+	const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user, hostCpus: read.info?.hostCpus ?? null });
 	for (const check of canary.checks) if (!check.ok) console.error(`podman-conformance: ${check.label}`);
 	return { results: canary.results, proxyRunning };
 }
@@ -266,7 +266,7 @@ async function egressAcrossTeardowns() {
 		if (result?.code !== 0) return { ran: true, ok: false, detail: `egress job ${i} exited ${result?.code} instead of 0, after: ${steps.join("; ") || "nothing"} (${keeper})` };
 		// The teardown ran: the worker's `finally` removed the network, so the reading below is one taken after it.
 		if ((await podman(["network", "exists", network])).code === 0) return { ran: true, ok: false, detail: `egress job ${i}'s network ${network} is still there, so its teardown did not run (${keeper})` };
-		const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user });
+		const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user, hostCpus: read.info?.hostCpus ?? null });
 		for (const check of canary.checks) if (!check.ok) console.error(`podman-conformance: after egress job ${i}'s teardown: ${check.label}`);
 		const reached = canary.results.find((r) => r.want === true)?.reached ?? null;
 		steps.push(`job ${i} exited 0 and its network was removed, then the provider was ${reached === true ? "reached" : reached === false ? "NOT reached" : "not read"} through ${proxy}`);
@@ -320,6 +320,9 @@ async function readBack() {
 		user: decision.user,
 		relabel: decision.relabel === true,
 		euid,
+		// Issue #596: the `--cpus` ceiling a job on this venue gets, from the same `podman info`, so the read-back proves
+		// `cpu.max` as well as the swap bound and the weight. The size is the built-in default, as doctor's with no setting.
+		hostCpus: read.info?.hostCpus ?? null,
 	});
 	for (const note of result.notes ?? []) console.error(`podman-conformance: ${note}`);
 	if (!result.ran) throw new Error(`the live probes did not run: ${result.reason}`);

@@ -27,7 +27,7 @@ test("an operator session carries every isolation flag -- the boundary is the sa
 	for (const flag of ISOLATION_FLAGS) {
 		assert.ok(args.includes(flag), `missing isolation flag: ${flag}`);
 	}
-	assert.ok(args.includes("--memory=4g") && args.includes("--cpus=2"), "resource limits apply to a sandbox too");
+	assert.ok(args.includes("--memory=4g") && args.includes("--memory-swap=4g") && args.includes("--cpu-shares=2048"), "resource limits apply to a sandbox too");
 	assert.ok(!s.includes("--ipc=host"), "--ipc=host shares the host IPC namespace");
 	assert.ok(!s.includes("--privileged"), "--privileged");
 	assert.ok(!s.includes("--pull=missing") && !s.includes("--pull=always"), "no argv may re-enable the fetch");
@@ -388,6 +388,31 @@ test("openSandbox with egress off builds exactly the argv it always did, and tou
 	await openSandbox({ ...session, ...openable(), egress: { armed: false, proxy: "p" }, spawnNetwork: recordingDocker(calls), launch: async ({ args }) => ((launchedWith = args), { code: 0 }) });
 	assert.deepEqual(launchedWith, buildSandboxRunArgs({ image: "pi-job:latest", name: "pi-sandbox-gh-1", workspace: "/w", jobDir: "/s/gh-1", publish: [], term: "xterm", idleSeconds: 1800 }));
 	assert.deepEqual(calls, []);
+});
+
+test("openSandbox reopens a run at its RECORDED size, a run from before sizes at 4g and 2, with the --cpus ceiling of this CLI's own runtime (#596)", async () => {
+	let launchedWith = null;
+	const launch = async ({ args }) => ((launchedWith = args), { code: 0 });
+	const sized = (args) => args.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a));
+	await openSandbox({ ...session, ...openable({ size: { memMiB: 1024, cpuCenti: 50, source: "project" } }), egress: { armed: false }, launch });
+	assert.deepEqual(sized(launchedWith), ["--memory=1g", "--memory-swap=1g", "--cpu-shares=512", "--shm-size=512m"], "the run's own size, and no ceiling where the job-user read gave no CPU count");
+	await openSandbox({ ...session, ...openable(), egress: { armed: false }, launch });
+	assert.deepEqual(sized(launchedWith), ["--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g"], "a manifest from before sizes: the size every such run had");
+	await openSandbox({ ...session, ...openable({ size: { memMiB: 100, cpuCenti: 50, source: "project" } }), egress: { armed: false }, launch });
+	assert.ok(launchedWith.includes("--memory=4g"), "a recorded size that does not rebuild opens at the built-in size");
+	// The CPU count rides beside the job-user answer, non-enumerable, as `runtime` does (`withRuntime`).
+	const withCpus = Object.defineProperty({ user: null, home: null }, "hostCpus", { value: 14, enumerable: false });
+	await openSandbox({ ...session, ...openable({ size: { memMiB: 2048, cpuCenti: 100, source: "env" } }), resolveJobUser: async () => withCpus, egress: { armed: false }, launch });
+	assert.deepEqual(sized(launchedWith), ["--memory=2g", "--memory-swap=2g", "--cpus=13", "--cpu-shares=1024", "--shm-size=1g"]);
+});
+
+test("the sandbox's job-user decision carries the runtime's CPU count beside its answer, without changing the answer's shape (#596)", async () => {
+	const facts = { answered: true, facts: { shape: "docker", podman: false, os: "Docker Desktop", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.4.0", hostCpus: 14, swapLimit: true } };
+	const mac = await decideSandboxJobUser({ manifest: { jobUser: null }, platform: "darwin", readFacts: async () => facts });
+	assert.deepEqual(mac, { user: null, home: null });
+	assert.equal(mac.hostCpus, 14);
+	const silent = await decideSandboxJobUser({ manifest: { jobUser: null }, platform: "darwin", readFacts: async () => ({ answered: false, reason: "timeout", transient: true }) });
+	assert.equal(silent.hostCpus, undefined, "no answer, no count: the session runs with no ceiling");
 });
 
 test("openSandbox refuses a session already running, before any network or shell", async () => {
@@ -1104,13 +1129,15 @@ test("a shell that is OPEN keeps its network even with no retained directory lef
 
 test("the LOCAL sandbox argv is byte-identical to the one before issue #429 (pinned as literals)", () => {
 	// Literals rather than a second call through the builder: a test comparing the builder to itself cannot see the
-	// venue table change what `local` builds. Captured from the tree before the change, both shapes.
+	// venue table change what `local` builds. Captured from the tree before the change, both shapes. Issue #596 changed
+	// the size flags of every container on purpose: a run with no recorded size reopens at the built-in 4g and 2, with
+	// swap equal to memory, the weight of 2 CPUs and no `--cpus` ceiling where no runtime CPU count is known.
 	const full = { image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/s/gh-1/workspace", jobDir: "/s/gh-1", term: "xterm-256color", idleSeconds: 1800, user: "1234:1234", home: "/home/pi", relabel: true, workspaceOwned: true, network: "pi-sandbox-gh-1-net", egressEnv: { HTTPS_PROXY: "http://p:3128" } };
-	const expected = ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--shm-size=1g", "--memory=4g", "--cpus=2", "--network=pi-sandbox-gh-1-net", "--user=1234:1234", "-i", "-t", "--entrypoint", "bash", "-e", "TERM=xterm-256color", "-e", "TMOUT=1800", "-e", "HOME=/home/pi", "-e", "HTTPS_PROXY=http://p:3128", "-v", "/s/gh-1:/job:ro,Z", "-v", "/s/gh-1/workspace:/workspace:Z", "pi-job:pinned"];
+	const expected = ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g", "--network=pi-sandbox-gh-1-net", "--user=1234:1234", "-i", "-t", "--entrypoint", "bash", "-e", "TERM=xterm-256color", "-e", "TMOUT=1800", "-e", "HOME=/home/pi", "-e", "HTTPS_PROXY=http://p:3128", "-v", "/s/gh-1:/job:ro,Z", "-v", "/s/gh-1/workspace:/workspace:Z", "pi-job:pinned"];
 	assert.deepEqual(buildSandboxRunArgs(full), expected);
 	assert.deepEqual(buildSandboxRunArgs({ ...full, venue: "local" }), expected, "naming the venue changes nothing");
 	const published = { image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/w", jobDir: "/j", publish: ["-p", "127.0.0.1:3000:3000"] };
-	assert.deepEqual(buildSandboxRunArgs(published), ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--shm-size=1g", "--memory=4g", "--cpus=2", "-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000", "-v", "/j:/job:ro", "-v", "/w:/workspace", "pi-job:pinned"]);
+	assert.deepEqual(buildSandboxRunArgs(published), ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g", "-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000", "-v", "/j:/job:ro", "-v", "/w:/workspace", "pi-job:pinned"]);
 });
 
 const podmanShape = { venue: "podman", image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/s/gh-1/workspace", jobDir: "/s/gh-1", term: "xterm", idleSeconds: 1800, user: "1234:1234", home: "/home/pi", workspaceOwned: true };
@@ -1131,7 +1158,7 @@ test("a podman sandbox carries the job's whole boundary: ISOLATION_FLAGS, PODMAN
 		assert.deepEqual(args.filter((a) => a.startsWith("--network")), [network], label);
 		assert.ok(args.includes("-i") && args.includes("-t"), `${label}: interactive`);
 		assert.equal(args[args.indexOf("--entrypoint") + 1], "bash", label);
-		assert.ok(args.includes("--memory=4g") && args.includes("--cpus=2"), label);
+		assert.ok(args.includes("--memory=4g") && args.includes("--memory-swap=4g") && args.includes("--cpu-shares=2048"), label);
 		assert.equal(args.at(-1), "pi-job:pinned", `${label}: the image is still last`);
 		// And it IS the podman job builder's argv for the same spec, so nothing here can drift from a job's.
 		assert.deepEqual(args, buildPodmanRunArgs({ image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/s/gh-1/workspace", jobDir: "/s/gh-1", user: "1234:1234", relabel: false, workspaceOwned: true, network: over.network ?? null, env: { TERM: "xterm", TMOUT: "1800", HOME: "/home/pi", ...(over.egressEnv ?? {}) }, extraFlags: ["-i", "-t", "--entrypoint", "bash"] }), label);

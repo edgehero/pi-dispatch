@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
+import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
 import { createJobNetwork, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
@@ -75,7 +76,11 @@ export function makeRunContainer({
 	// `exitAuth` (issue #545) is the processor's, off the image preflight: true when the job image declares `exitAuth`, so
 	// its runner reads a key from stdin and signs its exit line with it. Defaults off, so a caller that predates it, and
 	// every image that does not declare it, runs exactly as before and is read exactly as before.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false }) {
+	// `size` (issue #596) is the job's `{ memMiB, cpuCenti, source }`, resolved at pickup from the limits snapshot and
+	// handed here as an argument, never through `job.data`; absent, the built-in 4g and 2. `hostCpus` is the runtime's own
+	// CPU count from the job user's facts read, which sets the `--cpus` ceiling; null leaves `--cpus` off (fails open, and
+	// says so in `cpu_ceiling_unknown`).
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -175,6 +180,8 @@ export function makeRunContainer({
 			sessionDir: prepared.session?.hostDir,
 			globalPiDir, // undefined/null -> docker-run's guard skips the /opt/pi-global mount
 			name,
+			size, // issue #596: memory, swap equal to it, the CPU weight and /dev/shm, through containerSpec's one function
+			hostCpus, // issue #596: the `--cpus` ceiling every job shares; null leaves the flag off
 			network, // REQ-EGRESS-ALLOWLIST: null when no policy is armed, and the flag is then absent
 			user, // issue #341: the worker's own "<uid>:<gid>" on a daemon that enforces bind-mount ownership, else null
 			cidFile, // issue #345: where the CLI writes this attempt's container ID, read below when the run exits "never started"
@@ -191,9 +198,10 @@ export function makeRunContainer({
 		});
 
 		// Issue #596: the memory bound this container actually got, in bytes, read off the argv the runtime is handed (both
-		// builders spell it `--memory=`; the spec's default is `4g`), never re-derived from the environment. The processor
-		// confirms an OOM only when the run's peak reached 90% of it. null when the argv names none.
+		// builders spell it `--memory=`, from the job's size), never re-derived from the environment or the size. The
+		// processor confirms an OOM only when the run's peak reached 90% of it. null when the argv names none.
 		const memoryLimit = memoryBytesOfArgs(args);
+		if (!args.some((a) => typeof a === "string" && a.startsWith("--cpus="))) log("cpu_ceiling_unknown", { container: name });
 
 		// REQ-EGRESS-ALLOWLIST. This job's own --internal network, created here rather than at boot because
 		// it holds exactly two endpoints -- this container and the proxy -- and that is what makes job-to-job

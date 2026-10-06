@@ -98,7 +98,7 @@ observes its own, see its section):
 - **`isolation` is `asserted` on every Podman host reached through its Docker API.** The rule stops at "the daemon is
   Podman" and reads no further, because what it would read carries no information: Podman's Docker API reports
   `PidsLimit` and `MemoryLimit` whether or not a container's bounds apply. The bounds themselves DO apply on rootful
-  Podman (measured: `pids.max` 512 and `memory.max` 4 GiB in a job container, a fork run stopped at 504 children, a 64
+  Podman (measured at the default size: `pids.max` 512 and `memory.max` 4 GiB in a job container, a fork run stopped at 504 children, a 64
   MiB job killed with 137), and `pi-dispatch doctor --live` reads them back off a real container, which is the way to
   earn the word here.
 - **`mountSet` is `asserted` without an empty `/etc/containers/mounts.conf`.** Stock Fedora and RHEL Podman mounts
@@ -629,7 +629,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    must list `cpu`, `memory` and `pids`. Fedora delegates all of them to user managers (measured: `cpuset cpu io
    memory pids`); where a distribution does not, a drop-in for `user@.service` with `Delegate=cpu cpuset io memory
    pids` does. With a controller missing a job cannot have that bound: measured for cpu, Podman 5.8.1 refused to
-   start a container carrying `--cpus` (exit 126, "controller `cpu` is not available"). The file is absent while the
+   start a container carrying `--cpus` (exit 126, "controller `cpu` is not available"). Every job carries
+   `--cpu-shares` too (its size's CPU weight), which needs the same controller. The file is absent while the
    account's `user@<uid>.service` is inactive (measured, issue #453; systemd removes a stopped unit's cgroup). What
    decided the bounds in every case measured (Fedora 44, Podman 5.8.1, the venue's own argv; issue #453):
    - **no user manager** (linger off, the account reached through `sudo -iu`, which starts none): Podman put the job in
@@ -653,8 +654,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    applied, and the bounds read back as `max`.
 
    `pi-dispatch doctor`'s isolation line names which of these it saw, with its fix (⚠; the `PI_BACKEND_FLOOR` line is
-   the ✗ when the floor asks for `isolation`), and `pi-dispatch doctor --live` reads `pids.max` and `memory.max` back
-   off a real container. With linger off, doctor's ✓ holds only while a login session of the account is open, from
+   the ✗ when the floor asks for `isolation`), and `pi-dispatch doctor --live` reads `pids.max`, `memory.max`,
+   `memory.swap.max`, `cpu.max` and `cpu.weight` back off a real container. With linger off, doctor's ✓ holds only while a login session of the account is open, from
    whatever shell it runs in: measured, a `sudo -iu` doctor saw the manager another login session had started and
    gave ✓. The manager stops with the last session, so doctor says linger is off in a ⚠ of its own. Without a floor
    on `isolation` a missed observation changes only the word: podman jobs still run, unbounded. With one (say
@@ -1260,6 +1261,10 @@ own folder is never relabelled and needs the `semanage fcontext` label from the 
   A name conflict and an absent image are 125 and refunded as never started (measured: `already in use`, and
   `<ref>: image not known`).
 - **`podman machine`** (macOS, Windows) is refused as `podman-platform`, since nothing about it was measured.
+- **The CPU ceiling ignores the account's own limit.** Every job gets the size its project sets (see
+  [job sizes](scoped-limits.md#job-sizes-version-3)) and a `--cpus` ceiling of the host's CPU count from `podman info`,
+  minus one core when it has four or more. A `cpu.max` or `memory.max` set on the account's systemd user service
+  (`max` on every host measured) is not read yet; the host budget of a later release takes the smaller of the two.
 
 ## Property table
 

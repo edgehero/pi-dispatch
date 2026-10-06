@@ -24,6 +24,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { usdFingerprint } from "../src/dollar-fingerprint.mjs";
 import { projectsFingerprint } from "../src/projects.mjs";
 import { appliedSplitChecks, envelopeChecks, fleetEnvelopeChecks, loadEnvelopeAsTheWorker } from "../src/doctor.mjs";
+import { doctorJobSize, jobSizeChecks } from "../src/doctor.mjs";
 import { envelopeDigest, parseEnvelope } from "../src/envelope.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { quotedShown } from "../src/backend-local.mjs";
@@ -4805,7 +4806,8 @@ test("doctor: with PI_SCOPED_LIMITS_FILE set to the file, no trap line; an EMPTY
 test("doctor: a configured scoped-limits file that will not load is a FAILURE naming the boot refusal, never-tier", async () => {
 	const dir = tempDir("pi-sl-bad-");
 	const path = join(dir, "scoped-limits.json");
-	writeFileSync(path, JSON.stringify({ version: 3, limits: [] }));
+	// One past the newest version this build reads (3 since issue #596), so the loader's own words name it.
+	writeFileSync(path, JSON.stringify({ version: 4, limits: [] }));
 	const checks = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: path }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
 	const c = checks.find((x) => /PI_SCOPED_LIMITS_FILE is set in this shell to a file the worker cannot load/.test(x.label));
 	assert.ok(c, "the check is present");
@@ -5728,7 +5730,8 @@ test("doctor: under GITHUB_AUTH_SOURCE=app a redirected CLI does not claim a pro
 // -- doctor --live (issue #278, INT-LIVE-PROBE-CONTRACT) ----------------------------------------------------------
 
 const LIVE_ID = "d".repeat(64);
-const LIVE_STATUS = (uid = "1001") => `Name:\tdocker-init\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\ncgroup:v2\npids.max:512\nmemory.max:4294967296\n`;
+// Issue #596: a default-size job's swap, weight and ceiling too (no runtime CPU count in these fakes, so no ceiling).
+const LIVE_STATUS = (uid = "1001") => `Name:\tdocker-init\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\ncgroup:v2\npids.max:512\nmemory.max:4294967296\nmemory.swap.max:0\ncpu.weight:79\ncpu.max:max 100000\n`;
 
 // Issue #341: a rootful daemon's `docker info` body and the identities the job-user tests use.
 const ROOTFUL_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true });
@@ -5821,6 +5824,22 @@ test("doctor --live reads the eight back, reports the limits, leaves no fixture,
 	assert.deepEqual(calls.filter((c) => c.args[0] === "rm").map((c) => c.args), [["rm", "-f", LIVE_ID], ["rm", "-f", "pi-dispatch-live-pin-7-n"]]);
 	assert.deepEqual(readdirSync(env.PI_JOBS_DIR), [], "the fixture is removed");
 	assert.ok(calls.findIndex((c) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-live-probe")) > calls.findIndex((c) => c.args[0] === "info"), "the probes run after the ordinary checks");
+});
+
+test("doctor --live builds its probes at the deployment's job size with the daemon's --cpus ceiling, and reads both back (#596)", async () => {
+	const env = { ...liveEnv(), PI_JOB_MEMORY: "2g", PI_JOB_CPUS: "0.5" };
+	const { out, text } = capture();
+	const calls = [];
+	const sized = "Name:\tdocker-init\nUid:\t1001\t1001\t1001\t1001\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\ncgroup:v2\npids.max:512\nmemory.max:2147483648\nmemory.swap.max:0\ncpu.weight:59\ncpu.max:1300000 100000\n";
+	const facts = JSON.stringify({ ...JSON.parse(ROOTFUL_INFO), NCPU: 14, SwapLimit: true });
+	const plan = { ...liveOk(), ...infoPlan(facts), [`docker exec ${LIVE_ID} sh -c cat /proc/1/status`]: { code: 0, output: sized }, ...green };
+	const code = await runDoctor(env, { ...ghDeps(out, plan, calls), live: true, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
+	assert.equal(code, 0, text());
+	const probe = calls.find((c) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-live-probe")).args;
+	assert.deepEqual(probe.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a)), ["--memory=2g", "--memory-swap=2g", "--cpus=13", "--cpu-shares=512", "--shm-size=1g"]);
+	assert.match(text(), /✓ read back on local: isolation holds \(CapBnd 0, NoNewPrivs 1, pids\.max 512, memory\.max 2147483648, memory\.swap\.max 0, cpu\.max 1300000 100000, cpu\.weight 59 \(--cpu-shares=512\)\)/);
+	assert.match(text(), /✓ Job size: 2g of memory .* weight of 0\.5 CPUs, per job \(PI_JOB_MEMORY and PI_JOB_CPUS;/);
+	assert.match(text(), /✓ local: every job may use at most 13 of this runtime's 14 CPUs/);
 });
 
 test("doctor --live renders a failed read-back as a hard failure with the declared word beside the observed", async () => {
@@ -8028,6 +8047,7 @@ const MIXED_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8092,6 +8112,7 @@ const MIXED_PIN = {
 			"⚠ podman: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
 			"✓ podman: cgroup v2 controllers are delegated to this account (cpuset, cpu, io, memory, pids), so a job's pid, memory and cpu bounds are applied",
 			"✓ podman: SELinux does not confine containers here, so nothing a job mounts is relabelled",
@@ -8147,6 +8168,7 @@ const MIXED_PIN = {
 			"⚠ podman: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8199,6 +8221,7 @@ const MIXED_PIN = {
 			"⚠ podman: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -9047,6 +9070,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		observeHost: (e) => runtimeObs.observeHost({ endpoint: rootfulEndpoint, daemon: rootfulDaemon, fs: noFs, unit: null, env: e }),
 		observeRootfulConf: (e) => runtimeObs.observeRootfulConf({ endpoint: rootfulEndpoint, daemon: rootfulDaemon, fs: noFs, readService: async () => ({ code: 1, stdout: "" }), env: e, unit: { read: false, reason: "probe" } }),
 		pauseWindowsFilePath: (e) => cfg.pauseWindowsFilePath(e),
+		// Issue #596: the default job size, as the worker's config reads it.
+		jobSizeDefaults: async (e) => (await import("../src/job-size.mjs")).jobSizeDefaults(e),
 		scopedLimitsFilePath: (e) => cfg.scopedLimitsFilePath(e),
 		modelEndpointsFilePath: (e) => cfg.modelEndpointsFilePath(e),
 		// Issue #503: whether endpoints are declared, read as the service reads PI_MODEL_ENDPOINTS_FILE.
@@ -9434,9 +9459,10 @@ const podmanProbeArgv = (slug, url, script = egressCanaryScript(url)) => [
 	"--security-opt",
 	"no-new-privileges",
 	"--pids-limit=512",
-	"--shm-size=1g",
 	"--memory=4g",
-	"--cpus=2",
+	"--memory-swap=4g",
+	"--cpu-shares=2048",
+	"--shm-size=1g",
 	"--network=pi-dispatch-egress-doctor-1",
 	"--user=1234:1234",
 	"--userns=keep-id",
@@ -10098,6 +10124,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10118,7 +10145,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"✓ read back on local: egress holds (the provider was reached, an unlisted host was not, and plain HTTP off port 80 was refused)",
@@ -10169,6 +10196,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10189,7 +10217,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: the egress canary did not run all three probes (see the egress lines above)",
@@ -10246,6 +10274,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10266,7 +10295,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
@@ -10327,6 +10356,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10347,7 +10377,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
@@ -10408,6 +10438,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10428,7 +10459,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
@@ -11951,4 +11982,37 @@ test("no doctor test reaches a real Valkey for the applied split: every runDocto
 			return [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\.\/src\/doctor\.mjs"/g)].some((m) => /\b(runDoctor|collectChecks)\b/.test(m[1]));
 		});
 	assert.deepEqual(offenders, []);
+});
+
+// --- issue #596: job sizes ---------------------------------------------------------------------------------------------
+
+
+test("doctor names the default job size, the --cpus ceiling this runtime gives every job, and warns where SwapLimit is false (#596)", () => {
+	const facts = (over) => ({ answered: true, facts: { shape: "docker", podman: false, hostCpus: 14, swapLimit: true, ...over } });
+	const plain = jobSizeChecks({}, { daemon: facts() });
+	assert.deepEqual(plain.map((c) => [c.ok, c.warn === true]), [[true, false], [true, false]]);
+	assert.match(plain[0].label, /^Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job \(the built-in default;/);
+	assert.match(plain[1].label, /^local: every job may use at most 13 of this runtime's 14 CPUs \(--cpus\), one kept for the host;/);
+	assert.match(jobSizeChecks({ PI_JOB_MEMORY: "1536m", PI_JOB_CPUS: "0.5" })[0].label, /^Job size: 1536m of memory .* weight of 0\.5 CPUs, per job \(PI_JOB_MEMORY and PI_JOB_CPUS;/);
+	assert.doesNotMatch(jobSizeChecks({}, { daemon: facts({ hostCpus: 2 }) })[1].label, /kept for the host/, "a host under four CPUs keeps none back");
+	assert.equal(jobSizeChecks({}, { daemon: null }).length, 1, "no daemon answer, no ceiling line");
+	const swap = jobSizeChecks({}, { daemon: facts({ swapLimit: false }) }).at(-1);
+	assert.equal(swap.ok, false);
+	assert.equal(swap.warn, true);
+	assert.match(swap.label, /SwapLimit false, so --memory-swap cannot be enforced here and a job may swap beyond its memory/);
+	assert.equal(jobSizeChecks({}, { daemon: facts({ swapLimit: null }) }).some((c) => /SwapLimit/.test(c.label)), false, "Podman's compat answer is not read, so nothing is said");
+	// A setting the worker refuses at boot is a FAILURE, never a warning.
+	const bad = jobSizeChecks({ PI_JOB_MEMORY: "4GB" });
+	assert.deepEqual([bad.length, bad[0].ok, bad[0].warn === true], [1, false, false]);
+	assert.match(bad[0].label, /^job size does not parse: PI_JOB_MEMORY: a memory size is a whole number .* REFUSES TO START$/);
+});
+
+test("doctor's read-backs and the podman canary are built at the deployment's default size (#596)", () => {
+	assert.deepEqual(doctorJobSize({}), { memMiB: 4096, cpuCenti: 200, source: "default" });
+	assert.deepEqual(doctorJobSize({ PI_JOB_MEMORY: "2g" }), { memMiB: 2048, cpuCenti: 200, source: "env" });
+	assert.deepEqual(doctorJobSize({ PI_JOB_MEMORY: "nope" }), { memMiB: 4096, cpuCenti: 200, source: "default" }, "a refused value is reported by jobSizeChecks; the probes take the default");
+	const args = egressCanaryProbeArgs({ bin: "podman", slug: "provider", pid: 1, network: "n", proxy: "p", image: "pi-job:latest", url: "https://x", user: "1234:1234", size: { memMiB: 1024, cpuCenti: 50 }, hostCpus: 4 });
+	assert.deepEqual(args.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a)), ["--memory=1g", "--memory-swap=1g", "--cpus=3", "--cpu-shares=512", "--shm-size=512m"]);
+	// docker's canary is a plain `docker run` with no bounds at all, pinned byte for byte, and stays so.
+	assert.equal(egressCanaryProbeArgs({ slug: "provider", pid: 1, network: "n", proxy: "p", image: "pi-job:latest", url: "https://x", size: { memMiB: 1024, cpuCenti: 50 } }).some((a) => a.startsWith("--memory")), false);
 });
