@@ -631,7 +631,9 @@ refactor apart.
   `job-timeout-30m`, shutdown's `shutdown`, an absent reason and any future value all stay
   `worker-abort`, so a pin bump changing what rides the signal can widen nothing. This is distinct
   from the runner's clean in-process abort (turn budget / timeout observed inside the container, exit
-  `2`) and from an **unbidden** OOM-`137` with no worker abort, which stays infra-retryable (`1` class).
+  `2`) and from an **unbidden** OOM-`137` with no worker abort, which stays infra-retryable (`1` class)
+  unless the image's supervisor CONFIRMED it on the signed exit line: then it is `policy` / `oom-killed`, not
+  retried (issue #596, the supervisor paragraph below).
 
   **The runner needs BOTH a `try`/`catch` AND `stopReason` handling — they cover disjoint failure sets.**
   `session.prompt()` is `Promise<void>`, so there is no return value to inspect; the terminal message is
@@ -848,6 +850,38 @@ refactor apart.
   The forge is closed only when BOTH the worker and the image are from #545 or later: an older worker sends no
   key to any image, and a newer worker sends none to an image without `exitAuth`, so every other pairing runs
   unsigned, exactly as before.
+  **Every exit line carries `resources`, and a supervisor reports a runner killed for memory (issue #596).** The
+  runner reads its own cgroup (v2; `/proc/self/cgroup` names it, `0::/` on all five venues measured: Docker Desktop,
+  rootful Docker 29, rootless Podman 4.9, rootful and rootless Podman 5.8) just before the exit line is written, in
+  the one writer every path uses (the decided line, the catch path, the SIGTERM line), and adds it as the LAST field
+  before the signature: `resources: { memPeak, oomKills, memSomeUsec, memFullUsec, cpuUsec, throttledUsec, throttled,
+  pidsPeak }`, from `memory.peak`, `memory.events` `oom_kill`, `memory.pressure` `some`/`full` `total`, `cpu.stat`
+  `usage_usec`/`throttled_usec`/`nr_throttled` and `pids.peak`. Each is a safe non-negative integer or null (a file
+  missing or malformed); the block is omitted when nothing could be read, so such a line is byte-identical to before.
+  From `memory.events` only `oom_kill` is read: under crun the limit sits on the parent scope and the job's leaf shows
+  `oom 0` beside a real kill (measured). cgroup v1 is read for the cheap half (peak, OOM kills, CPU time and
+  throttling). Read-only telemetry like `tokens`: it feeds no classification. The worker rebuilds it
+  (`parseExitResources`: an explicit literal over the eight keys, a present value that is not a safe non-negative
+  integer nulls the whole block). The worst-case line, every key at 2^53 - 1, stays inside the 6 KiB budget below.
+  Since the same release the image's entrypoint starts a **supervisor** (`image/runner/supervise.mjs`, under the same
+  exec-only node) between the container's init and the runner. It drains stdin first and hands the same bytes to the
+  runner on the runner's own stdin, so the key handling above is unchanged; it keeps the key. It starts the runner
+  through `/bin/sh`, which writes `1000` to its own `/proc/self/oom_score_adj` and execs the runner (raising needs no
+  capability; a non-dumpable process cannot write its own, so the shell does it before the exec), so the runner and
+  everything it starts are the kernel's first OOM choice. It forwards SIGTERM, SIGINT and SIGHUP. When the runner
+  EXITS, the supervisor exits with that code and writes nothing. When the runner is KILLED by a signal, it reads the
+  cgroup and writes the signed exit line itself, with no tokens: `code` 128 plus the signal, `reason` `oom-killed` for
+  a SIGKILL while `oom_kill` is above 0, `terminated` for SIGTERM, `killed` otherwise, a `signal` name and
+  `resources`; then it exits with that code. Measured: the supervisor survived 15 of 15 OOM kills on three venues with
+  the score raised, while without it a second OOM in one cgroup killed even a 1 MB main shell on Fedora's 6.19 kernel;
+  the shipped image at `--memory=64m` ended 3 of 3 runs on a signed `oom-killed` line and exit `137`. **The worker
+  reads an OOM only as all three**: a container exit `137` it did not cause (the abort flag still wins), the
+  supervisor's line (`parseExitOomKilled`: `code: 137`, `reason: "oom-killed"`, `oomKills` above 0), and that line
+  verified under the run's key (`exitAuth: "verified"`; an unsigned line is a tool's). Then the job is `policy` /
+  `oom-killed`, returned and never retried, its slot kept and its dollars settled at the floor (a killed runner reports
+  no tokens). A child killed for memory while the runner lives writes no such line: the runner ends on its own code,
+  and `resources.oomKills` in the record is the trace. An image without the supervisor is read as before: its
+  unbidden `137` retries.
   **`tokens` gained eight keys with the process-wide meter** (`REQ-TOKEN-ACCOUNTING-AND-CAPS`), and **not
   one of them feeds classification either**: `metered` (`true` from the process-wide meter, `false` from
   the `subscribe()` fallback — the flag that tells a reader whether the total covers every in-process
@@ -1952,6 +1986,15 @@ refactor apart.
   load-bearing and none is decoration. `--cap-drop=ALL` removes the capabilities pi would otherwise
   inherit from the launching user (pi has no permission system of its own to do this).
   `--pids-limit` bounds a fork bomb. `--memory` bounds an OOM to one job rather than the host.
+  **An OOM is no longer always infra-retryable (issue #596).** A job whose runner the kernel kills for memory is
+  `policy` / `oom-killed`, not retried, when the image's supervisor confirms it on the signed exit line
+  (`INT-RUNNER-EXIT-CODE-PROTOCOL`); the same size would be killed the same way on every retry. An unconfirmed `137`
+  (an image without the supervisor, an unsigned line, a SIGKILL with no OOM kill counted) stays infra-retryable, as
+  before. The runtime's own record of the kill is not used: with `--rm` the container's `State.OOMKilled` is gone when
+  `docker run` returns, Docker's `oom` event fires also when only a child was killed and the job exited 0, and Podman
+  (4.9 and 5.8, rootful and rootless) emits no `oom` event and, on 4.9 rootless, never sets `OOMKilled` (measured).
+  The flags are UNCHANGED by this: every job still runs at `--memory=4g --cpus=2 --pids-limit=512`, with swap at the
+  runtime's default (equal to the memory, measured on all five venues).
   `PLAYWRIGHT_BROWSERS_PATH` resolves the collision between non-root execution and root-installed
   Chromium — see `DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS`.
   **Env is an allowlist, never a pass-through**: `ANTHROPIC_OAUTH_TOKEN`, and from the 0.99.1 pin
@@ -4589,7 +4632,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -4632,8 +4675,21 @@ validator rather than a second copy of it.
     "project": "<project id from projects.json, ^[a-z0-9][a-z0-9-]{0,31}$>" | null,   // issue #499; never the name
     "plan":    { "outcome": "applied" | "duplicate" | "refused",                         // issue #505: a collected plan
                  "reason": "<fixed enum: plan-absent|plan-not-portfolio|plan-oversize|plan-not-regular-file|plan-unreadable|plan-parse-error|plan-collect-error|plan-invalid|delegation-off|writer-not-allowed|envelope-mismatch|plan-duplicate|plan-stale|plan-too-soon|plan-incomplete|plan-busy>" | null,
-                 "planId": "<16 lowercase hex>" | null, "clamped": <bool> } | null }
+                 "planId": "<16 lowercase hex>" | null, "clamped": <bool> } | null,
+    "resources": { "memPeak": <int> | null, "oomKills": <int> | null,                     // issue #596: the container's own cgroup, read by the
+                   "memSomeUsec": <int> | null, "memFullUsec": <int> | null,              // runner (or its supervisor) just before the exit line;
+                   "cpuUsec": <int> | null, "throttledUsec": <int> | null,                // bytes, microseconds and counts
+                   "throttled": <int> | null, "pidsPeak": <int> | null } | null }
   ```
+  **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
+  after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
+  `memory.peak`, the most it held at once, page cache included), `oomKills` (processes the kernel killed for memory),
+  `memSomeUsec` and `memFullUsec` (`memory.pressure` totals), `cpuUsec` (CPU time), `throttledUsec` and `throttled`
+  (time and periods the CPU limit held it back) and `pidsPeak`. Integers only, so PII-free by construction. A key the
+  venue does not expose is null; the block is null when the run reported none: an image from before the field, a
+  container that died before any line, or a forged block (any present value that is not a safe non-negative integer).
+  A job killed for memory records `reason: "oom-killed"` (outcome `policy`, never retried) and the supervisor's
+  `resources`; a job whose CHILD was killed for memory keeps its own outcome and shows `oomKills` above 0.
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
   only the attempts that FINISHED before this one (it increments in `moveToFinished`/`moveToFailed`, bullmq 5.80.4),
@@ -7220,7 +7276,8 @@ this project never grows one.
   set -- BullMQ writes it on the non-retry branch alone, and the emit follows the move, so the guard
   reads the queue's own decision), and outcome `policy` with reason `worker-abort`, `runner-policy` or
   any member of the worker's `RUNNER_POLICY_REASONS` (`provider-auth-refused`, and since issues #501/#502
-  `cost-cap`, `model-not-allowed`, `cost-cap-unenforceable` and `model-policy-unenforceable`) at the
+  `cost-cap`, `model-not-allowed`, `cost-cap-unenforceable` and `model-policy-unenforceable`), or, since issue
+  #596, `oom-killed` (a paid run killed for memory, which only the operator can fix by its size) at the
   completed event (policy RETURNS, so a failed-only mount would miss them).
   `provider-auth-refused` (issue #437) is a container exit `2` whose runner named a provider's refusal
   of the credential (a 401/403, or a Google or Bedrock refusal shape since issue #451): it would have
@@ -7468,3 +7525,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-05 | Issue #587 (pi 1.0.3). **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: a model entry and a `modelOverrides` entry may carry `samplingParamsByThinkingLevel` (pi 1.0.2), validated by the mirror in both places and read in full by the runner's guards; the mirror is pinned to pi's model-config.js and provider-composer.js by content hash; Output cap names the empty catalog `baseUrl` of every `azure` row as the operator's own server and the `modelOverrides` way out, and the Azure provider rename with doctor's flag for an old-id entry that lacks an api, a baseUrl or models. **`INT-SDK-SESSION-OPTIONS` AMENDED**, trap (g): from pi 1.0.1 there is no shrinkwrap and at the 1.0.3 pin one copy of each pi package; the runner finds pi's pi-ai by pi-coding-agent's own lookup and accepts it by identity; the up-to-0.99.1 text is kept as history. The option table is UNCHANGED, checked (pinned-api.test.mjs holds it). **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: the new refusals end as `model-not-allowed` and `cost-cap`, existing rows. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: `run.provider` and model entries keep their shape; an `azure-openai-responses` provider is refused before spend as any provider pi does not have, now naming `azure`; the five Anthropic federation variables were already reserved from `run.secrets` (derived from the Anthropic SDK) and are now also found in pi-ai's own sources. |
 | 2026-10-05 | Issue #587, the second review round. **`INT-SDK-SESSION-OPTIONS` AMENDED**, the block and its evidence: the job's runtime is created with `credentials: AuthStorage.inMemory(<auth.json read once at start>)`, the class loaded by file URL from pi-coding-agent's `dist/core/auth-storage.js` (not a root export) and refused as a config error when missing; the 1.0.3 evidence names `create`'s `credentials` option, `prepareRequest`'s env merge and the in-memory store. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_DISPATCH_PRICE_TABLE` is a third reserved runner name (the hash of the price table the runner hands its children). |
 | 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED (wording only)**: the `run.excludeTools` bullet said pi consults the list through a set filter. pi 1.0.4 matches each entry by exact name or `*` pattern, so the bullet now says that an unknown exact name matches nothing, silently. The contract is unchanged: membership in the pinned built-in set is still refused at load, which also refuses a pattern. |
+| 2026-10-06 | Issue #596, phase 0 (measure). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: every exit line carries `resources` (the container's own cgroup v2 counters, read just before the line by the one writer every path uses, last before the signature, omitted when nothing could be read; only `oom_kill` from `memory.events`), and the image's entrypoint starts a supervisor between the init and the runner that passes the key on unchanged, raises the runner tree's `oom_score_adj` to 1000, forwards a stop, and writes the signed line itself only when the runner was killed (`oom-killed` for a SIGKILL with `oom_kill` above 0, `terminated`, `killed`); an unbidden `137` is `policy` / `oom-killed` only with that line, verified, and stays infra-retryable otherwise. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `resources` at the record's tail (eight nullable integers, rebuilt, null when absent or forged) and `oom-killed` in the reason enum. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, its OOM note: an OOM is no longer always infra-retryable, and why the runtime's own records cannot say so (`--rm`, Docker's event on a child's kill, no Podman event); the flags are UNCHANGED (4g, 2 CPUs, 512 pids, default swap). **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: `oom-killed` is a paid terminal and pages. **`INT-CANCEL-CHANNEL-CONTRACT` UNCHANGED, checked**: a cancel converted from a spent attempt keeps that attempt's `resources` beside its tokens and dollars, and nothing else moves. Code evidence: image/runner/supervise.mjs, image/runner/src/cgroup-usage.mjs, image/runner/src/exit-line.mjs, image/entrypoint.sh, worker/src/run-history.mjs, worker/src/run-container.mjs, worker/src/processor.mjs, worker/src/start.mjs, worker/src/index.mjs; tests image/runner/test/supervise.test.mjs, image/runner/test/cgroup-usage.test.mjs, image/runner/test/exit-line.test.mjs, image/runner/test/usage-meter.test.mjs, worker/test/run-history.test.mjs, worker/test/processor.test.mjs, worker/test/run-container.test.mjs, worker/test/resources-record.test.mjs, worker/test/start-wiring.test.mjs; the image job step in pi-upgrade-check.yml. |

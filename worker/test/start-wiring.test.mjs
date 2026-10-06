@@ -2626,6 +2626,8 @@ test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and polic
 		assert.equal(refused[0].jobId, `j3-${reason}`);
 	}
 	assert.ok(RUNNER_POLICY_REASONS.has("provider-auth-refused"));
+	// Issue #596: a job killed for memory is a paid stop only the operator can fix (its memory size), so it pages.
+	assert.equal((await fired(() => handlers.completed({ id: "j3-oom" }, { outcome: "policy", reason: "oom-killed", budgetReserved: true }))).length, 1, "a job killed for memory pages");
 	assert.equal((await fired(() => handlers.completed({ id: "j4" }, { outcome: "completed" }))).length, 0, "a completion pages nobody");
 	assert.equal((await fired(() => handlers.completed({ id: "j5" }, { outcome: "policy", reason: "over-budget" }))).length, 0, "a free pre-spend refusal already comments; a delivery storm must not page");
 	assert.equal((await fired(() => handlers.completed({ id: "j6" }, { outcome: "policy", reason: "operator-cancel" }))).length, 0, "the operator initiated it; a push saying what they just did is noise");

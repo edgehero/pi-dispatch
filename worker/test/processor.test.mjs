@@ -3,7 +3,7 @@ import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS
 import { test } from "node:test";
 import { budgetCapsFor, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { readFileSync, readdirSync } from "node:fs";
-import { InfraRetry, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
+import { InfraRetry, OOM_KILLED, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { buildRecord, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -256,7 +256,7 @@ test("every RUNNER_POLICY_REASONS member has its own fixed comment and pages the
 	}
 	// The hook set is DERIVED from the same set, so a new member pages without a second edit.
 	const start = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
-	assert.match(start, /const HOOK_POLICY_REASONS = new Set\(\["worker-abort", "runner-policy", \.\.\.RUNNER_POLICY_REASONS\]\);/);
+	assert.match(start, /const HOOK_POLICY_REASONS = new Set\(\["worker-abort", "runner-policy", OOM_KILLED, \.\.\.RUNNER_POLICY_REASONS\]\);/);
 });
 
 test("the exit-line reason never moves a job between classes: exit 1 with a forged provider-auth-refused is still InfraRetry", async () => {
@@ -313,6 +313,77 @@ test("an InfraRetry throw comments NOTHING from runJob -- once-ness for the infr
 test("an unbidden 137 (aborted:false, kernel OOM) throws InfraRetry -- infra stays retryable", async () => {
 	const { deps: d } = deps({ runContainer: async () => ({ code: 137, aborted: false }) });
 	await assert.rejects(() => runJob(ghJob, d), InfraRetry);
+});
+
+// Issue #596: a runner killed for memory. CONFIRMED only by the image supervisor's signed line (`exitOomKilled`, read
+// off a line the per-job key verified) beside the container's own unbidden 137.
+const USED = { memPeak: 4294967296, oomKills: 1, memSomeUsec: 9, memFullUsec: 4, cpuUsec: 1000, throttledUsec: 0, throttled: 0, pidsPeak: 30 };
+const oomRun = (over = {}) => async () => ({ code: 137, aborted: false, exitOomKilled: true, exitAuth: "verified", resources: USED, ...over });
+
+test("a confirmed OOM (signed supervisor line + unbidden 137) RETURNS policy oom-killed: not retried, slot kept, one generic comment", async () => {
+	const posted = [];
+	const logged = [];
+	const { deps: d } = deps({ runContainer: oomRun(), comment: async (_j, t) => posted.push(t), log: (e, f) => logged.push([e, f]) });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy", "returned, so never retried: the same size would be killed the same way");
+	assert.equal(r.reason, OOM_KILLED);
+	assert.equal(OOM_KILLED, "oom-killed");
+	assert.equal(r.exitCode, 137);
+	assert.equal(r.budgetReserved, true, "the container ran: its slot is spent like any paid stop");
+	assert.deepEqual(r.resources, USED);
+	assert.deepEqual(posted, [TERMINAL_COMMENTS["oom-killed"]]);
+	assert.ok(logged.some(([e, f]) => e === "container_exit" && f.oomKilled === true));
+	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r });
+	assert.equal(record.reason, "oom-killed");
+	assert.deepEqual(record.resources, USED);
+});
+
+test("the oom-killed comment is generic: no size, no project, no number, no path (the TERMINAL_COMMENTS rule)", () => {
+	const text = TERMINAL_COMMENTS["oom-killed"];
+	assert.match(text, /^Stopped: .* Not retried, because the same size would stop the same way\. The operator can raise this job's memory size\.$/);
+	assert.ok(!/[0-9]/.test(text), "no size");
+	assert.ok(!/[/\\]/.test(text), "no path");
+	assert.notEqual(text, TERMINAL_COMMENTS["runner-policy"]);
+});
+
+test("an UNCONFIRMED 137 stays InfraRetry: no supervisor line, an unsigned one, an image without a key, or a line with no kill", async () => {
+	for (const over of [{ exitOomKilled: false }, { exitOomKilled: undefined }, { exitAuth: "unverified" }, { exitAuth: undefined }, { exitAuth: null }]) {
+		const { deps: d, calls } = deps({ runContainer: oomRun(over) });
+		await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.reason !== OOM_KILLED, JSON.stringify(over));
+		assert.ok(!calls.some((c) => c.startsWith("comment:")), "a retried attempt posts nothing");
+	}
+	// The resources still ride the throw, so the retried attempt's record says what it used.
+	const { deps: d } = deps({ runContainer: oomRun({ exitOomKilled: false }) });
+	const e = await runJob(ghJob, d).catch((err) => err);
+	assert.deepEqual(e.resources, USED);
+	assert.deepEqual(buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, error: e }).resources, USED);
+});
+
+test("the OOM report never overrides another class: an abort wins, and a code other than 137 keeps its own outcome", async () => {
+	const { deps: d } = deps({ runContainer: oomRun({ aborted: true }) });
+	assert.equal((await runJob(ghJob, d)).reason, "worker-abort", "the worker's own stop is classified by its flag first");
+	const { deps: d2 } = deps({ runContainer: oomRun({ aborted: true, abortReason: "operator-cancel" }) });
+	assert.equal((await runJob(ghJob, d2)).reason, "operator-cancel");
+	// A child killed while the runner lived: the runner ends on its own code, and resources.oomKills is the trace.
+	const { deps: d3 } = deps({ runContainer: oomRun({ code: 0 }) });
+	const done = await runJob(ghJob, d3);
+	assert.equal(done.outcome, "completed");
+	assert.equal(done.resources.oomKills, 1);
+	const { deps: d4 } = deps({ runContainer: oomRun({ code: 2 }) });
+	assert.equal((await runJob(ghJob, d4)).reason, "runner-policy");
+	const { deps: d5 } = deps({ runContainer: oomRun({ code: 1 }) });
+	await assert.rejects(() => runJob(ghJob, d5), InfraRetry);
+	const { deps: d6 } = deps({ runContainer: oomRun({ detached: true }) });
+	await assert.rejects(() => runJob(ghJob, d6), (e) => e instanceof InfraRetry && e.reason === "container-detached");
+});
+
+test("every post-container result carries the run's resources, and a run that reported none carries no key", async () => {
+	const { deps: d } = deps({ runContainer: async () => ({ code: 0, aborted: false, resources: USED }) });
+	assert.deepEqual((await runJob(ghJob, d)).resources, USED);
+	const { deps: d2 } = deps({ runContainer: async () => ({ code: 137, aborted: true, resources: USED }) });
+	assert.deepEqual((await runJob(ghJob, d2)).resources, USED);
+	const { deps: d3 } = deps();
+	assert.equal("resources" in (await runJob(ghJob, d3)), false, "an older image's result is the object it always was");
 });
 
 test("cleanup runs even when the container throws", async () => {

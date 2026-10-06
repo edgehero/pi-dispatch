@@ -41,6 +41,16 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   since the per-model ledger landed seeds from its own **measured median** instead, so the band's reach
   shrinks as history accrues. Once a full retention cycle of ledgered runs exists, replace the band with
   measured per-flow distributions and narrow this row to the RAM question alone.
+- **Update (2026-10-06, issue #596)**: the RAM half is now MEASURED on every run, not estimated. The runner
+  reads its container's own cgroup just before its exit line and the run record carries it as `resources`
+  (`INT-RUN-HISTORY-FILE-CONTRACT`): `memPeak` (`memory.peak`, the high-water mark in bytes, page cache
+  included), `oomKills`, the memory pressure totals, CPU time and throttling, and `pidsPeak`. Present and
+  readable by the job's non-root user on all five venues measured (Docker Desktop, rootful Docker 29, rootless
+  Podman 4.9, rootful and rootless Podman 5.8); a 300 MB allocation read back as a ~600 MB peak on each (the
+  shell copies its buffer), and an offline job of the shipped image peaked at about 118 MB. A job killed for
+  memory is recorded `oom-killed` and is no longer retried. What stays open: the answer itself. The row is
+  answered once a representative set of real frontend runs has recorded peaks; the per-job size of #596's
+  later phases is to be chosen from those numbers, not from the 1.5 to 2.5 GB estimate above.
 
 ## OQ-003 — Does the assembled system prompt survive compaction and session reload byte-identically?
 
@@ -1941,3 +1951,4 @@ adversarial passes did.
 | 2026-10-05 | Issue #587 (every new pi release as a draft pull request). **`OQ-005`**: the Action on bump is now the review checklist in the body of every pull request the pi bump workflow opens. Status UNCHANGED (closed). |
 | 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`OQ-011` AMENDED** in M6: pi 1.0.4's `--no-mcp` drops only `builtin:mcp` from what a child loads, so every `-e` path, the meter's included, stays. Re-checked in the 1.0.4 tarball and run against the bundle. The row's decision (no `-ne`) is UNCHANGED, checked. |
 | 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.0.4 tarball. The option set is unchanged and `excludeTools` is still `string[]`, but its entries are now exact names or `*` patterns. An unknown exact name still matches nothing, silently, so the membership validation stands, and it refuses a pattern as an unknown name. `tools` now keeps MCP tools unless an entry starts with `mcp__`; the runner passes no `tools` and a job loads no built-in extension, so nothing in a job moves. |
+| 2026-10-06 | Issue #596, phase 0 (measure). **`OQ-002` AMENDED, not closed**: the RAM footprint per job is now measured on every run (`resources.memPeak` in the run record, from the container's own `memory.peak`, readable on all five venues the lab measured), so the row's answer will come from recorded peaks rather than the 1.5 to 2.5 GB estimate; it stays open until a representative set of real runs has recorded them. A job killed for memory is now recorded `oom-killed` and not retried. **`OQ-012` UNCHANGED, checked**: image conformance gains no capability token (the supervisor is a property of this repo's runner, checked by the image job, not of the portable checklist). |

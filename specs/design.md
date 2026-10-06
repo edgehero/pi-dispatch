@@ -8185,6 +8185,47 @@ a tunnel.
 - **Traces to**: `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-FIRST-RUN-SETUP-WIZARD`,
   `DES-SERVICE-ENV-SETUP-SEAM`, `DES-CONCURRENCY-3`, `REQ-EGRESS-ALLOWLIST`, `REQ-QUEUE-BURST-NO-DROP`
 
+## DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR
+
+- **Decision** (issue #596, phase 0): each run records what its container used, and a job killed for memory is
+  `policy` / `oom-killed`, not retried, only when the kill is CONFIRMED inside the container. The runner reads its own
+  cgroup just before its exit line and puts `resources` on it, through the one writer every exit path uses. A small
+  **supervisor** (`image/runner/supervise.mjs`) runs between the container's init and the runner, under the same
+  exec-only node: it passes the exit key on, raises the runner tree's `oom_score_adj` to 1000 (through a shell that
+  then execs the runner), forwards a stop, exits with the runner's own code when the runner exits, and writes the
+  signed exit line itself only when the runner was killed by a signal, naming `oom-killed` for a SIGKILL with
+  `oom_kill` above 0. The worker classifies an OOM only from that line, verified under the run's key, beside a
+  container exit `137` it did not cause. No container limit changes in this phase (`INT-CONTAINER-RUNTIME-CONTRACT`).
+- **Why**: the same size is killed the same way on every retry, so retrying an OOM pays twice for nothing, and an
+  unclassified `137` recorded no reason at all. The worker cannot look after the fact: `--rm` is a fixed isolation
+  flag, so the container's state is gone when `docker run` returns. The process that can see the cgroup at the moment
+  the runner dies has to live in the container and outlive the runner, and its report has to be one a job's tool
+  cannot forge, which the exit-line key already provides (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
+- **Rejected**:
+  - **Docker's `oom` event stream** (`docker events --filter event=oom`, one per worker, matched by the cidfile's
+    ID). Built first and removed in the same pull request: the event fires also when only a CHILD was killed and the
+    job exited 0 (measured on Docker Desktop and Docker 29), so it needs the exit code beside it anyway, and Podman
+    (4.9 and 5.8, rootful and rootless) emits no `oom` event at all, so the podman venue would have had no answer. The
+    supervisor answers on every venue with one mechanism. What only the event covered, an image without the
+    supervisor on Docker, retries as it always did.
+  - **`docker inspect` `State.OOMKilled`**: impossible under `--rm`, and Podman 4.9 rootless never set it (measured).
+  - **The runner reading its own cgroup at exit to classify itself**: a runner killed for memory runs no more code.
+  - **No score bump**: on Fedora's 6.19 kernel a second OOM in one cgroup killed even a 1 MB main shell while the
+    first victim's memory was being freed (measured), so the supervisor would die with the runner. With the bump it
+    survived 15 of 15 kills on three venues.
+  - **Reading `oom` or `max` from `memory.events`**: under crun the limit sits on the parent scope and the job's leaf
+    shows `oom 0` beside `oom_kill 1` (measured); only `oom_kill` is charged to the job's own cgroup everywhere.
+- **Residuals**: a supervisor killed for memory itself (never seen with the bump) leaves no line, and the `137`
+  retries as before. A job's own tool can SIGKILL the runner (same uid) after a child of it was killed for memory, and
+  the job then ends `oom-killed`, not retried: the job can only stop itself, which it could already do. The line
+  carries no tokens, so such a run settles at its floor, as a run with no line did.
+- **Evidence**: the issue #596 lab (five venues, zero spend), and the shipped image on Docker Desktop: at
+  `--memory=64m` 3 of 3 runs ended on a signed `oom-killed` line with exit `137`, at 96m the runner reached its own
+  exit; a `docker stop` still ends on the runner's own `terminated` line (the supervisor forwards it). The image job in
+  `pi-upgrade-check.yml` repeats both runs on every pull request. Code: image/runner/supervise.mjs,
+  image/runner/src/cgroup-usage.mjs, image/runner/src/exit-line.mjs, worker/src/run-history.mjs
+  (`parseExitResources`, `parseExitOomKilled`), worker/src/processor.mjs.
+
 ## Revision History
 
 | Date | Change |
@@ -8439,3 +8480,4 @@ a tunnel.
 | 2026-10-05 | Issue #587, the first review round. **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` AMENDED**: on api azure-openai-responses or provider `azure` the payload check refuses a payload whose `model` is not `model.id` before any hook ran (a deployment map from a stored credential's env, merged after admit); the job's runtime reads auth.json once at start into pi's in-memory store, so a mid-run write is ignored. Residual named: a runtime an extension creates, or a pi child, reads the file, where a credential `PI_CACHE_RETENTION` can still under-state a cache write. |
 | 2026-10-05 | Issue #587, the second review round. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: under a cap every call is priced from ONE table pinned when the meter installs, from the job's runtime and before any extension loads (catalog plus the operator overlay as loaded at start), for every runtime instance and every legacy call, and handed to pi children through the ledger directory with its hash in `PI_DISPATCH_PRICE_TABLE`; a child with no intact table refuses its capped calls. It replaces the live-registry rule of the row above, which a poisoned registry defeated. Residuals named: overlay models priced as the operator wrote them, extension-registered models not runnable under a cap, a same-uid process able to rewrite the child's table and its hash. The credential `PI_CACHE_RETENTION` residual is qualified: closed for the job's own runtime, open for an extension-created runtime and a pi child. **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` AMENDED**: the copy the guards judge and pi is handed is plain data only at every depth, anything else refused (`why: unreadable`), a getter-valued model included; the payload check also refuses pi-built fallbacks not on the list; and on azure the payload model must be what the operator's start-time `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` says, else `model.id`, so a forwarded operator map works again while a later one is refused. |
 | 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED** in its rejected-alternatives bullet: pi 1.0.4 adds `--no-mcp`, and the loader's final extension set now drops each `builtin:` path the CLI disables (only `mcp`), and no other path, so a child run with `-ne --no-mcp` keeps the injected meter. The pin reads the new expression and the CLI's one disabled name, and the child-meter proof runs the bundle with both flags. The subcommand set and the `--` rule are unchanged at 1.0.4, checked against the tarball. **`DES-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED (wording only)**: pi 1.0.4 matches `excludeTools` entries by exact name or `*` pattern rather than through a set, so the entry now says that an unknown exact name matches nothing, silently. The decision and every layer are unchanged. |
+| 2026-10-06 | Issue #596, phase 0 (measure). **NEW `DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR`**: every run records its container's cgroup counters (`resources`, read by the runner just before the exit line), and a job killed for memory is `policy` / `oom-killed`, not retried, only when the image's supervisor confirms it on the signed exit line beside an unbidden `137`. Docker's `oom` event stream was built and removed in the same pull request (it fires on a child's kill too, and Podman has none), with `State.OOMKilled`, self-classification and the unraised score as the other rejected options. No container limit changes. **`DES-CONCURRENCY-3` UNCHANGED, checked**: its RAM input is now measured per run (`OQ-002`), and the default is not moved by this phase. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked**: `oom-killed` takes a fixed generic row in `TERMINAL_COMMENTS` and joins the hook's paid set, both under that entry's existing rules (a fixed sentence naming no size or project; paid terminals page). |
