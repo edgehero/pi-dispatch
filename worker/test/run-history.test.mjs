@@ -1886,10 +1886,12 @@ test("parseExitResources reads the LAST exit line, and repairs a glued one as it
 	assert.equal(parseExitResources(`${exitWith({ resources: FULL })}${exitWith({})}`), null, "the last line has none, so none: an earlier line is not borrowed");
 });
 
-test("parseExitOomKilled: only a 137 line saying oom-killed with oomKills above 0", () => {
-	const line = (fields) => exitWith({ code: 137, reason: EXIT_OOM_KILLED, signal: "SIGKILL", resources: FULL, ...fields });
+test("parseExitOomKilled: only the supervisor's 137 line saying oom-killed with oomKills above 0", () => {
+	const line = (fields) => exitWith({ code: 137, reason: EXIT_OOM_KILLED, signal: "SIGKILL", by: "supervisor", resources: FULL, ...fields });
 	assert.equal(EXIT_OOM_KILLED, "oom-killed");
 	assert.equal(parseExitOomKilled(line({})), true);
+	assert.equal(parseExitOomKilled(line({ by: undefined })), false, "the runner never writes oom-killed: a line without the marker is not the supervisor's");
+	assert.equal(parseExitOomKilled(line({ by: "runner" })), false);
 	assert.equal(parseExitOomKilled(line({ code: 0 })), false, "a runner that ended on its own code was not killed");
 	assert.equal(parseExitOomKilled(line({ code: 143 })), false);
 	assert.equal(parseExitOomKilled(line({ reason: "killed" })), false);
@@ -1903,7 +1905,7 @@ test("parseExitOomKilled: only a 137 line saying oom-killed with oomKills above 
 test("the sink returns resources and the OOM report only when a line carried them, and only from signed lines under a key", async () => {
 	const KEY = "ab".repeat(32);
 	const sign = (body) => `${body.slice(0, -1)},"auth":"${createHmac("sha256", KEY).update(body, "utf8").digest("hex")}"}`;
-	const oomBody = JSON.stringify({ event: "exit", jobId: "j", code: 137, reason: "oom-killed", signal: "SIGKILL", resources: FULL });
+	const oomBody = JSON.stringify({ event: "exit", jobId: "j", code: 137, reason: "oom-killed", signal: "SIGKILL", by: "supervisor", resources: FULL });
 	const close = async (text, opts) => {
 		const fs = makeFakeFs({ stream: makeFakeStream() });
 		const jobLog = makeLogSink({ logsDir: "/logs", enabled: false, fs })("j", opts);
@@ -1919,6 +1921,51 @@ test("the sink returns resources and the OOM report only when a line carried the
 	assert.equal(forged.resources, undefined);
 	const plain = await close(exitWith({}));
 	assert.deepEqual(Object.keys(plain).includes("resources") || Object.keys(plain).includes("exitOomKilled"), false, "nothing to say: the object is the one it always was");
+});
+
+test("a supervisor line AFTER a line the runner wrote is ignored by every scanner: the runner's line decides (#596 review)", async () => {
+	// The reviewer's exact scenario: the runner wrote its decided line (code 0, real tokens, usage, session, context,
+	// resources), then was SIGKILLed (by a tool, or the kernel), and the supervisor reported the death, signed, as an OOM.
+	// Before this rule the worker read the LAST line: the finished run became oom-killed and lost its tokens.
+	const KEY = "cd".repeat(32);
+	const sign = (o) => {
+		const body = JSON.stringify(o);
+		return `${body.slice(0, -1)},"auth":"${createHmac("sha256", KEY).update(body, "utf8").digest("hex")}"}`;
+	};
+	const usage = { v: 1, piAi: "0.80.7", truncated: 0, models: [GOOD_ROW] };
+	const runnerLine = { event: "exit", jobId: "j", code: 0, reason: "completed", turns: 4, tokens: { input: 900000, output: 50000, total: 950000, cost: 1.5 }, usage, context: { tokens: 1000, window: 200000 }, session: { resumed: false, reason: "absent" }, resources: { ...FULL, oomKills: 0, memPeak: 100 } };
+	const supervisorLine = { event: "exit", jobId: "j", code: 137, reason: "oom-killed", signal: "SIGKILL", by: "supervisor", resources: FULL };
+	const tail = `\n${sign(runnerLine)}\n\n${sign(supervisorLine)}\n`;
+	const text = authenticExitLines(tail, KEY);
+	assert.equal(text.split("\n").length, 2, "both lines are authentic");
+	assert.equal(parseExitOomKilled(text), false, "not an OOM: the runner finished");
+	assert.equal(parseExitCode(text), 0);
+	assert.equal(parseExitTurns(text), 4);
+	assert.equal(parseExitTokens(text).total, 950000, "the tokens the runner counted, not none");
+	assert.equal(parseExitSession(text).reason, "absent");
+	assert.deepEqual(parseExitContext(text), { tokens: 1000, window: 200000 });
+	assert.equal(parseExitResources(text).memPeak, 100, "the runner's block, not the supervisor's");
+	assert.equal(parseExitReason(`${exitWith({ code: 2, reason: "cost-cap", why: "over-cap" })}${exitWith(supervisorLine)}`), "cost-cap");
+	assert.equal(parseExitWhy(`${exitWith({ code: 2, reason: "cost-cap", why: "over-cap" })}${exitWith(supervisorLine)}`), "over-cap");
+	assert.deepEqual(parseExitUsage(text), usage, "the usage ledger the dollar settlement reads");
+	// Through the real sink, with the key: the result is the runner's line, and no OOM report.
+	const fs = makeFakeFs({ stream: makeFakeStream() });
+	const jobLog = makeLogSink({ logsDir: "/logs", enabled: false, fs })("j", { exitKey: KEY });
+	jobLog.write(Buffer.from(tail));
+	const closed = await jobLog.close();
+	assert.equal(closed.exitLineCode, 0);
+	assert.equal(closed.tokens.total, 950000);
+	assert.equal(closed.exitOomKilled, undefined);
+	assert.equal(closed.exitAuth, "verified");
+	// The supervisor's line alone (the runner was killed before it wrote one) still decides.
+	const alone = authenticExitLines(`noise\n${sign(supervisorLine)}\n`, KEY);
+	assert.equal(parseExitOomKilled(alone), true);
+	assert.equal(parseExitCode(alone), 137);
+	assert.deepEqual(parseExitResources(alone), FULL);
+	// Two supervisor lines and nothing from the runner: the last one, as before.
+	assert.equal(parseExitCode(`${exitWith({ ...supervisorLine, code: 143, reason: "terminated" })}${exitWith(supervisorLine)}`), 137);
+	// A runner line AFTER the supervisor's (not a shape the image writes) is simply the last line.
+	assert.equal(parseExitCode(`${exitWith(supervisorLine)}${exitWith({ code: 1 })}`), 1);
 });
 
 test("the record carries resources at its TAIL, rebuilt, null when the run reported none (#596)", () => {

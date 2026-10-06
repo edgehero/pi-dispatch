@@ -64,7 +64,7 @@ export function sanitizeJobId(id) {
  * END (a mid-write death) has no complete object and is skipped too. A fragment is never MISREAD as a
  * value: a broken one does not parse and an anchorless one is not repaired.
  *
- * NEVER throws, like the six scanners that call it.
+ * NEVER throws, like `decisiveExitLine`, the one caller every scanner goes through.
  */
 function parseTailLine(line) {
 	try {
@@ -81,6 +81,42 @@ function parseTailLine(line) {
 		}
 	}
 	return null;
+}
+
+/** The signed marker the image's supervisor puts on every exit line it writes (image/runner/src/supervise.mjs). */
+export const EXIT_BY_SUPERVISOR = "supervisor";
+
+/**
+ * THE exit line every `parseExit*` scanner reads (issue #596), parsed, or null when `text` holds none. One picker, so
+ * the scanners cannot disagree about which line decided the run.
+ *
+ * Normally the LAST `exit` event, found from the end with `parseTailLine`'s glue repair. One exception: a line the
+ * image's supervisor wrote (`by: "supervisor"`) when an EARLIER exit line exists that is not the supervisor's. That
+ * order means the runner wrote its own line and was killed afterwards (a tool can SIGKILL it after its decided line, and
+ * so can the kernel), and the supervisor then reported the death. The runner's line is the run's real outcome, with the
+ * tokens, usage and session the supervisor never has, so it decides, and the supervisor's line is ignored by every
+ * scanner: the run reads exactly as it did before the supervisor existed (its container exit `137` still retries).
+ * Read the other way round, the supervisor's `oom-killed` would turn a finished run into a stopped one, its tokens lost
+ * from the daily cap and its dollars settled at the floor.
+ *
+ * With a key the text is `authenticExitLines`' output, so both lines are signed and `by` is inside the MAC. Without
+ * one nothing here is trusted anyway: a tool that writes a `by: "supervisor"` line after the runner's only makes the
+ * runner's line decide, which it could have arranged by writing nothing. NEVER throws.
+ */
+function decisiveExitLine(text) {
+	if (typeof text !== "string") return null;
+	const lines = text.split("\n");
+	let last = null;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (line === "") continue;
+		const parsed = parseTailLine(line);
+		if (parsed?.event !== "exit") continue;
+		if (parsed?.by !== EXIT_BY_SUPERVISOR) return parsed;
+		// The supervisor's line: it decides only if nothing the runner wrote comes before it.
+		if (last === null) last = parsed;
+	}
+	return last;
 }
 
 /**
@@ -101,16 +137,9 @@ function parseTailLine(line) {
  * container exit code alone decides the class, and that parsed reason only picks a label INSIDE exit 2.
  */
 export function parseExitTurns(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		return Number.isInteger(parsed?.turns) ? parsed.turns : null;
-	}
-	return null;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	return Number.isInteger(parsed?.turns) ? parsed.turns : null;
 }
 
 /**
@@ -145,16 +174,9 @@ export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap
  * earlier one in the tail is not the one the runner exited on. A fixed enum, so the PII-free record stays so.
  */
 export function parseExitReason(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		return parsed?.code === 2 && RUNNER_POLICY_REASONS.has(parsed?.reason) ? parsed.reason : null;
-	}
-	return null;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	return parsed?.code === 2 && RUNNER_POLICY_REASONS.has(parsed?.reason) ? parsed.reason : null;
 }
 
 /**
@@ -174,16 +196,9 @@ export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap
  * wrong rule of the three.
  */
 export function parseExitWhy(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		return parsed?.code === 2 && parsed?.reason === "cost-cap" && COST_CAP_WHYS.includes(parsed?.why) ? parsed.why : null;
-	}
-	return null;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	return parsed?.code === 2 && parsed?.reason === "cost-cap" && COST_CAP_WHYS.includes(parsed?.why) ? parsed.why : null;
 }
 
 /**
@@ -198,16 +213,9 @@ export function parseExitWhy(text) {
  * retry class (INT-RUNNER-EXIT-CODE-PROTOCOL).
  */
 export function parseExitCode(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		return Number.isSafeInteger(parsed?.code) ? parsed.code : null;
-	}
-	return null;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	return Number.isSafeInteger(parsed?.code) ? parsed.code : null;
 }
 
 /**
@@ -277,25 +285,18 @@ export const SESSION_REASONS = new Set([
  * `SESSION_REASONS` check below, that sentence is enforced rather than merely intended.
  */
 export function parseExitSession(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		const sess = parsed?.session;
-		if (sess && typeof sess === "object" && !Array.isArray(sess) && typeof sess.resumed === "boolean") {
-			// The reason is checked against the CLOSED enum, not merely against `typeof === "string"`, which
-			// is what it used to be. The container owns this value, so an unchecked string put an
-			// attacker-shapeable one into a record whose PII-free property rests on holding none -- while
-			// the comment above claimed "a boolean and a fixed enum". An unrecognised token reads as `null`
-			// (the runner said nothing this contract can represent) rather than being carried through: the
-			// enum is documented CLOSED in INT-RUN-HISTORY-FILE-CONTRACT, so a value outside it was already
-			// contract-violating and every consumer already handles null.
-			return { resumed: sess.resumed, reason: SESSION_REASONS.has(sess.reason) ? sess.reason : null };
-		}
-		return null;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	const sess = parsed?.session;
+	if (sess && typeof sess === "object" && !Array.isArray(sess) && typeof sess.resumed === "boolean") {
+		// The reason is checked against the CLOSED enum, not merely against `typeof === "string"`, which
+		// is what it used to be. The container owns this value, so an unchecked string put an
+		// attacker-shapeable one into a record whose PII-free property rests on holding none -- while
+		// the comment above claimed "a boolean and a fixed enum". An unrecognised token reads as `null`
+		// (the runner said nothing this contract can represent) rather than being carried through: the
+		// enum is documented CLOSED in INT-RUN-HISTORY-FILE-CONTRACT, so a value outside it was already
+		// contract-violating and every consumer already handles null.
+		return { resumed: sess.resumed, reason: SESSION_REASONS.has(sess.reason) ? sess.reason : null };
 	}
 	return null;
 }
@@ -311,23 +312,16 @@ export function parseExitSession(text) {
  * reads that as "no measurement" and passes rather than inventing a denominator.
  */
 export function parseExitContext(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		const c = parsed?.context;
-		// A window of 0 is not a denominator, and a negative count is not a measurement. SAFE integers
-		// specifically: `Number.isInteger` accepts up to ~1.8e308, and anything from 1e21 up stringifies to
-		// exponential notation, which the session store's own decimal round-trip then rejects on read --
-		// so a value in that range would be written into the store and be unreadable forever after, with
-		// the gate failing open on a measurement that said the context was full.
-		if (c && typeof c === "object" && !Array.isArray(c) && Number.isSafeInteger(c.tokens) && Number.isSafeInteger(c.window) && c.tokens >= 0 && c.window > 0) {
-			return { tokens: c.tokens, window: c.window };
-		}
-		return null;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	const c = parsed?.context;
+	// A window of 0 is not a denominator, and a negative count is not a measurement. SAFE integers
+	// specifically: `Number.isInteger` accepts up to ~1.8e308, and anything from 1e21 up stringifies to
+	// exponential notation, which the session store's own decimal round-trip then rejects on read --
+	// so a value in that range would be written into the store and be unreadable forever after, with
+	// the gate failing open on a measurement that said the context was full.
+	if (c && typeof c === "object" && !Array.isArray(c) && Number.isSafeInteger(c.tokens) && Number.isSafeInteger(c.window) && c.tokens >= 0 && c.window > 0) {
+		return { tokens: c.tokens, window: c.window };
 	}
 	return null;
 }
@@ -340,7 +334,7 @@ export function parseExitContext(text) {
 export const RESOURCE_KEYS = Object.freeze(["memPeak", "oomKills", "memSomeUsec", "memFullUsec", "cpuUsec", "throttledUsec", "throttled", "pidsPeak"]);
 
 /**
- * What the job's container used, off the LAST exit line (issue #596): `{ memPeak, oomKills, memSomeUsec, memFullUsec,
+ * What the job's container used, off the decisive exit line (`decisiveExitLine`, issue #596): `{ memPeak, oomKills, memSomeUsec, memFullUsec,
  * cpuUsec, throttledUsec, throttled, pidsPeak }`, each a safe non-negative integer or null, or null.
  *
  * REBUILT as an explicit literal over RESOURCE_KEYS, never passed through: extra keys are dropped, and a key the
@@ -348,47 +342,37 @@ export const RESOURCE_KEYS = Object.freeze(["memPeak", "oomKills", "memSomeUsec"
  * integer (a string, a float, a negative, anything past 2^53) nulls the WHOLE block, the malformed->null rule
  * `parseExitUsage` follows: such a line was not written by a conformant runner, and half of a forged block is not a
  * measurement. Null when the line has no `resources` (an image from before this field, a runner that could read no
- * cgroup file) or when every key is null. Scanned from the end exactly as `parseExitContext` is, repairing a glued
- * line on the way, and NEVER throws. Read-only telemetry: it feeds no exit-code or retry classification.
+ * cgroup file) or when every key is null. Read off the line `decisiveExitLine` picks, like every sibling, and NEVER
+ * throws. Telemetry, with ONE exception: `oomKills` and `memPeak` gate the OOM classification (`parseExitOomKilled`
+ * needs `oomKills` above 0, and the processor needs `memPeak` at 90% of the container's memory limit or more). These
+ * numbers are produced inside the job's container, so a job can inflate them; nothing else reads them for a decision.
  */
 export function parseExitResources(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		return rebuildResources(parsed?.resources);
-	}
-	return null;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	return rebuildResources(parsed?.resources);
 }
 
 /** The reason the image's supervisor writes when the runner was killed for memory (image/runner/supervise.mjs). */
 export const EXIT_OOM_KILLED = "oom-killed";
 
 /**
- * Whether the LAST exit line is the supervisor's report that the runner was killed for memory (issue #596): `code: 137`,
- * `reason: "oom-killed"`, and a `resources` block whose `oomKills` is above 0, all on that one line. False for anything
- * else, including a line with no resources. Scanned from the end exactly as `parseExitResources` is, and NEVER throws.
+ * Whether the decisive exit line (`decisiveExitLine`) is the supervisor's report that the runner was killed for memory
+ * (issue #596): `by: "supervisor"`, `code: 137`, `reason: "oom-killed"`, and a `resources` block whose `oomKills` is
+ * above 0, all on that one line. False for anything else, including a line with no resources, and a supervisor's line
+ * that follows one the runner wrote (that runner finished and was killed afterwards). NEVER throws.
  *
- * The processor reads it only beside a container exit of 137 that the worker did not cause, and only from a line the
- * per-job key verified: the supervisor runs in images that declare `exitAuth`, so an unsigned line saying this was
- * written by a job's own tool. A child killed for memory while the runner lives writes no such line (the runner ends on
- * its own code), so it never reads as one.
+ * The processor reads it only beside a container exit of 137 that the worker did not cause, only from a line the
+ * per-job key verified (the supervisor runs in images that declare `exitAuth`, so an unsigned line saying this was
+ * written by a job's own tool), and only when the line's `memPeak` reached 90% of the container's memory limit
+ * (`oom_kill` also counts a kill by the HOST's OOM killer, which a job at 1000 meets first). A child killed for memory
+ * while the runner lives writes no such line (the runner ends on its own code), so it never reads as one.
  */
 export function parseExitOomKilled(text) {
-	if (typeof text !== "string") return false;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		const used = rebuildResources(parsed?.resources);
-		return parsed?.code === 137 && parsed?.reason === EXIT_OOM_KILLED && used !== null && used.oomKills !== null && used.oomKills > 0;
-	}
-	return false;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return false;
+	const used = rebuildResources(parsed?.resources);
+	return parsed?.by === EXIT_BY_SUPERVISOR && parsed?.code === 137 && parsed?.reason === EXIT_OOM_KILLED && used !== null && used.oomKills !== null && used.oomKills > 0;
 }
 
 /** The validating rebuild behind `parseExitResources` and the record's `resources`: null on any violation. */
@@ -468,17 +452,10 @@ function rebuildTokens(t) {
 }
 
 export function parseExitTokens(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		const t = parsed?.tokens;
-		if (t && typeof t === "object" && !Array.isArray(t) && typeof t.total === "number") return rebuildTokens(t);
-		return null;
-	}
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	const t = parsed?.tokens;
+	if (t && typeof t === "object" && !Array.isArray(t) && typeof t.total === "number") return rebuildTokens(t);
 	return null;
 }
 
@@ -510,16 +487,9 @@ const USAGE_ROW_NUMERIC_KEYS = ["calls", "input", "output", "cacheRead", "cacheW
  * classification (INT-RUNNER-EXIT-CODE-PROTOCOL).
  */
 export function parseExitUsage(text) {
-	if (typeof text !== "string") return null;
-	const lines = text.split("\n");
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i].trim();
-		if (line === "") continue;
-		const parsed = parseTailLine(line);
-		if (parsed?.event !== "exit") continue;
-		return rebuildUsage(parsed?.usage);
-	}
-	return null;
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	return rebuildUsage(parsed?.usage);
 }
 
 /** The validating rebuild behind `parseExitUsage`: explicit literals only, null on ANY violation. */
@@ -736,8 +706,10 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// What the container used (issue #596, INT-RUN-HISTORY-FILE-CONTRACT): peak memory, OOM kills, memory pressure, CPU
 		// time and throttling, peak processes, read by the runner from its own cgroup just before its exit line. Additive,
 		// nullable, an explicit literal REBUILT here, TAIL position after `plan` on the same contract. Integers only, so
-		// PII-free by construction. Null when no exit line carried it: an older image, a runner killed before its line (a
-		// job killed for memory has none, and its `reason` says `oom-killed` instead), or a venue that hides the cgroup.
+		// PII-free by construction. A runner killed before its line still has one: the image's supervisor reads the cgroup
+		// when it reports the death, so a job killed for memory carries the block that shows it. Null when no exit line
+		// carried it: an older image, one whose supervisor died too, or a venue that hides the cgroup. Produced inside the
+		// job's container, so a job can inflate every number: advisory (docs/insights.md).
 		resources: rebuildResources(source.resources),
 	};
 }
@@ -830,8 +802,9 @@ const SIGNED_TAIL = /,"auth":"([0-9a-f]{64})"\}$/;
  *
  * The worker hands each job a fresh random key on the container's stdin, and the runner signs its exit line with
  * HMAC-SHA256 over the line's unsigned bytes. A job's own tool can write any bytes it likes to the container's stdout,
- * but not that MAC: the key left the pipe before any tool existed and the runner's memory is closed to the job's uid
- * (the image's exec-only node). So when a key was issued, only these lines are the runner's, and every `parseExit*`
+ * but not that MAC: the key left the pipe before any tool existed, and the processes holding it (the supervisor and
+ * the runner) are closed to the job's uid on /proc (the image's exec-only node) and on the Node inspector (both start
+ * with `--disable-sigusr1`). So when a key was issued, only these lines are the runner's, and every `parseExit*`
  * scanner runs over this text instead of the raw tail: a forged line, before or after the genuine one, is not in it.
  *
  * Each candidate starts at a `{"event":"exit"` anchor, the `parseTailLine` repair's reasoning: those raw bytes cannot
