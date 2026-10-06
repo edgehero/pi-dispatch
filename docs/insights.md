@@ -123,6 +123,7 @@ runner's last line (issue #596). It is not drawn on this page yet; it is in each
 | Field | What it is |
 |---|---|
 | `memPeak` | the most memory the container held at once, in bytes (page cache included) |
+| `swapPeak` | the most it held in swap at once, in bytes. `memPeak` does not count swap. Today a job's container may swap as much as its memory (the runtime's default), so a job at its memory limit swaps before it is killed: a run that fit shows little or none here, one that needed more shows a lot |
 | `oomKills` | processes the kernel killed for memory |
 | `memSomeUsec`, `memFullUsec` | microseconds some or all of its tasks waited on memory |
 | `cpuUsec` | CPU time used, in microseconds |

@@ -331,11 +331,12 @@ export function parseExitContext(text) {
  * `RESOURCE_KEYS` (image/runner/src/cgroup-usage.mjs), which the worker cannot import at run time; a test holds the
  * two lists equal.
  */
-export const RESOURCE_KEYS = Object.freeze(["memPeak", "oomKills", "memSomeUsec", "memFullUsec", "cpuUsec", "throttledUsec", "throttled", "pidsPeak"]);
+export const RESOURCE_KEYS = Object.freeze(["memPeak", "swapPeak", "oomKills", "memSomeUsec", "memFullUsec", "cpuUsec", "throttledUsec", "throttled", "pidsPeak"]);
 
 /**
- * What the job's container used, off the decisive exit line (`decisiveExitLine`, issue #596): `{ memPeak, oomKills, memSomeUsec, memFullUsec,
- * cpuUsec, throttledUsec, throttled, pidsPeak }`, each a safe non-negative integer or null, or null.
+ * What the job's container used, off the decisive exit line (`decisiveExitLine`, issue #596): `{ memPeak, swapPeak,
+ * oomKills, memSomeUsec, memFullUsec, cpuUsec, throttledUsec, throttled, pidsPeak }`, each a safe non-negative integer
+ * or null, or null.
  *
  * REBUILT as an explicit literal over RESOURCE_KEYS, never passed through: extra keys are dropped, and a key the
  * runner could not read arrives as null (or absent) and stays null. A present value that is not a safe non-negative

@@ -477,13 +477,13 @@ test("capExitMessage bounds the exit line's message and marks the cut; shorter o
 	for (const outcome of [{ code: 0, reason: "stop" }, { code: 2, reason: "x", message: 5 }, null, undefined]) assert.equal(capExitMessage(outcome), outcome);
 });
 
-test("the exit-line message budget is 2000 characters AS SERIALIZED, whatever the body escapes to", () => {
+test("the exit-line message budget is 1900 characters AS SERIALIZED, whatever the body escapes to", () => {
 	// The literal, pinned: every other test here derives from the constant, so a raised cap would pass them
 	// all while the worker's tail lost the label. worker/test/run-history.test.mjs measures the real line.
-	assert.equal(EXIT_MESSAGE_MAX_CHARS, 2000);
+	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1900);
 	const escaped = (message) => JSON.stringify(message).length - 2;
 	// A quote or newline serializes to 2 characters and a control byte to 6: the budget is what the tail
-	// sees, so each of these must come out at or under 2000 escaped characters plus the marker.
+	// sees, so each of these must come out at or under the budget in escaped characters, plus the marker.
 	for (const body of ['"'.repeat(5000), "\n".repeat(5000), "\u0001".repeat(5000), `403 ${'<a href="x">'.repeat(900)}`]) {
 		const capped = capExitMessage({ code: 2, reason: "provider-auth-refused", message: body }).message;
 		const kept = capped.slice(0, capped.lastIndexOf("... [truncated "));
@@ -493,12 +493,13 @@ test("the exit-line message budget is 2000 characters AS SERIALIZED, whatever th
 		assert.ok(capped.endsWith(`... [truncated ${body.length - kept.length} chars]`));
 	}
 	// A body at the budget raw but over it escaped is cut; one at the budget escaped is not.
-	assert.notEqual(capExitMessage({ message: '"'.repeat(1001) }).message, '"'.repeat(1001));
-	assert.equal(capExitMessage({ message: '"'.repeat(1000) }).message, '"'.repeat(1000));
+	const half = EXIT_MESSAGE_MAX_CHARS / 2;
+	assert.notEqual(capExitMessage({ message: '"'.repeat(half + 1) }).message, '"'.repeat(half + 1));
+	assert.equal(capExitMessage({ message: '"'.repeat(half) }).message, '"'.repeat(half));
 	// Whole code points only: an astral character is never split into a lone surrogate.
 	const astral = capExitMessage({ message: "\u{1F600}".repeat(3000) }).message;
 	const keptAstral = astral.slice(0, astral.lastIndexOf("... [truncated "));
-	assert.equal(keptAstral, "\u{1F600}".repeat(1000));
+	assert.equal(keptAstral, "\u{1F600}".repeat(half), "two UTF-16 units each, kept raw by JSON.stringify");
 	assert.equal(keptAstral.isWellFormed(), true);
 	// A lone surrogate escapes to 6 characters and U+2028 is kept raw by JSON.stringify; both are budgeted as serialized.
 	for (const body of ["\uD800".repeat(1000), "\u2028".repeat(3000)]) {

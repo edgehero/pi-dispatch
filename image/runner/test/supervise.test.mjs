@@ -11,7 +11,7 @@ import { BY_SUPERVISOR, deathFields, FORWARDED_SIGNALS, KILLED, OOM_KILLED, RAIS
  */
 
 const KEY = "0123456789abcdef".repeat(4);
-const USED = (oomKills) => ({ memPeak: 67108864, oomKills, memSomeUsec: null, memFullUsec: null, cpuUsec: 10, throttledUsec: 0, throttled: 0, pidsPeak: 4 });
+const USED = (oomKills) => ({ memPeak: 67108864, swapPeak: 0, oomKills, memSomeUsec: null, memFullUsec: null, cpuUsec: 10, throttledUsec: 0, throttled: 0, pidsPeak: 4 });
 
 /** A fake runner process: records its stdin and the signals sent to it, and exits when the test says so. */
 function fakeChild() {

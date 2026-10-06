@@ -929,7 +929,7 @@ test("exitAuth on a podman venue: the same key, -i on the podman argv", { skip }
 
 // ---- issue #596: what the container used, and the supervisor's out-of-memory report ----
 
-const USED = { memPeak: 123, oomKills: 1, memSomeUsec: 0, memFullUsec: 0, cpuUsec: 9, throttledUsec: 0, throttled: 0, pidsPeak: 5 };
+const USED = { memPeak: 123, swapPeak: 0, oomKills: 1, memSomeUsec: 0, memFullUsec: 0, cpuUsec: 9, throttledUsec: 0, throttled: 0, pidsPeak: 5 };
 
 test("resources and the OOM report reach the result from a verified sink, and nothing reaches it from an unverified one", { skip }, async () => {
 	const verified = { turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: 137, resources: USED, exitOomKilled: true, exitAuth: "verified" };

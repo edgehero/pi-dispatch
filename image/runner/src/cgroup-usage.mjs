@@ -16,7 +16,7 @@ import * as nodeFs from "node:fs";
  * Every read is synchronous and best effort: a missing, unreadable or malformed file is a null for its keys, and this
  * module never throws. A job whose numbers cannot be read still ends exactly as it would have; the record then says
  * "not measured" (null), never zero. cgroup v1 is read for the cheap half only (peak memory, OOM kills, CPU time and
- * throttling); every other key is null there.
+ * throttling); every other key, the swap peak included, is null there.
  *
  * From `memory.events` only `oom_kill` is read, never `oom` or `max`: under crun (rootless and rootful Podman) the limit
  * sits on the parent `libpod-<id>.scope` and the namespace root is a `container` leaf below it, so the OOM is counted on
@@ -30,6 +30,10 @@ import * as nodeFs from "node:fs";
 /** The keys, in the order they are written. The worker's copy is held to this list by a test. */
 export const RESOURCE_KEYS = Object.freeze([
 	"memPeak", // bytes, memory.peak (v1: memory.max_usage_in_bytes): the most the job held at once
+	// bytes, memory.swap.peak (v2 only, null on v1 and when absent): the most the job held in swap at once. memPeak cannot
+	// see swap, and while a job's swap allowance equals its memory (the default), a job at its limit swaps instead of
+	// dying: without this the record cannot tell "fit" from "needed more" (issue #596's review).
+	"swapPeak",
 	"oomKills", // memory.events `oom_kill` (v1: memory.oom_control): processes the kernel killed for memory
 	"memSomeUsec", // memory.pressure `some total`: microseconds some task waited on memory
 	"memFullUsec", // memory.pressure `full total`: microseconds every task waited on memory
@@ -117,6 +121,7 @@ function readV2(dir, read) {
 	const cpu = flatKeyed(read(`${dir}/cpu.stat`));
 	return {
 		memPeak: count(read(`${dir}/memory.peak`)?.trim()),
+		swapPeak: count(read(`${dir}/memory.swap.peak`)?.trim()),
 		oomKills: count(events.get("oom_kill")),
 		memSomeUsec: pressureTotal(pressure, "some"),
 		memFullUsec: pressureTotal(pressure, "full"),
@@ -137,6 +142,7 @@ function readV1(read, exists) {
 	const cpu = flatKeyed(at("cpu", "cpu.stat"));
 	return {
 		memPeak: count(at("memory", "memory.max_usage_in_bytes")?.trim()),
+		swapPeak: null,
 		oomKills: count(flatKeyed(at("memory", "memory.oom_control")).get("oom_kill")),
 		memSomeUsec: null,
 		memFullUsec: null,
