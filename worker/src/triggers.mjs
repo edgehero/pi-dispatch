@@ -1309,7 +1309,8 @@ function validateMaxCostUsd(run, at, path) {
  * trigger, while naming what to take away cannot widen on a bump.
  *
  * MEMBERSHIP IS VALIDATED against `EXCLUDABLE_TOOL_NAMES` because pi ignores unknown names in
- * `excludeTools` silently (verified at the pin: the set is only ever consulted by a filter), which puts
+ * `excludeTools` silently (verified at the pin: pi matches entries by exact name or `*` pattern, so an
+ * unknown exact name matches nothing, silently), which puts
  * a misspelled exclusion in `run.backend`'s destructive-absence class -- the job runs WITH the tool
  * while the file reads as though it was off. The near-miss sweep covers the KEY for the same reason.
  * No charset check: membership subsumes it, and no known name carries the comma the container env
