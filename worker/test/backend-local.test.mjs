@@ -7,14 +7,19 @@ import { networkNameFor } from "../src/egress.mjs";
 
 const fns = () => ({ runContainer: async () => ({}), imagePreflight: async () => ({}), egressPreflight: async () => ({}), stopContainer: async () => {}, reap: async () => ({ reaped: true }) });
 
-test("container-spec.mjs is a LEAF -- it imports nothing", () => {
+test("container-spec.mjs is a LEAF -- it imports nothing but job-size.mjs, which imports nothing", () => {
 	// Not in backends.test.mjs because it is a different module's property, and it is load-bearing from the
 	// moment `packages.mjs` started importing CONTAINER_GLOBAL_PI_DIR from here: that comment's whole claim
 	// is "this costs no cycle and no weight in the admin's bundle". docker-run.mjs, where the constant used
 	// to live, has now GAINED an import, which is exactly the drift this pins against next time.
+	// Issue #596 added ONE edge, to the job's size, and only because that module is a leaf too: the transitive set stays
+	// these two files.
 	const src = readFileSync(new URL("../src/container-spec.mjs", import.meta.url), "utf8");
-	assert.equal(/^import\s/m.test(src), false, "container-spec.mjs must import nothing");
+	assert.deepEqual(src.match(/^import\s.*$/gm), ['import { DEFAULT_JOB_SIZE, containerSizing } from "./job-size.mjs";'], "container-spec.mjs must import only job-size.mjs");
 	assert.equal(/require\(/.test(src), false);
+	const size = readFileSync(new URL("../src/job-size.mjs", import.meta.url), "utf8");
+	assert.equal(/^import\s/m.test(size), false, "job-size.mjs must import nothing");
+	assert.equal(/require\(/.test(size), false);
 });
 
 test("the namespace is one fact, and the producer builds names from it", () => {

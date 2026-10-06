@@ -140,8 +140,14 @@ ones adapters get wrong:
   drop-ins, no OCI hook installed, those files readable, FIPS off, and the service's socket on this host
   (`runtimeAddsNoMounts`). Where either is not observed the word
   counts as `asserted`, doctor prints what it saw, and a floor asking for `enforced` refuses. `pi-dispatch doctor
-  --live` reads what these cannot: `pids.max` and `memory.max` inside a real container, and its
-  `/proc/self/mountinfo`.
+  --live` reads what these cannot: `pids.max`, `memory.max`, `memory.swap.max`, `cpu.max` and `cpu.weight` inside
+  a real container, and its `/proc/self/mountinfo`.
+- **Every venue on this host runs a job at its size** (issue #596): `--memory` with an equal `--memory-swap` (no
+  swap beyond it), `--cpu-shares` for its CPU weight, `--shm-size` at most half its memory, and one `--cpus` ceiling
+  for every job (the runtime's CPU count minus a core kept for the host when it has four or more). Both builders
+  emit the same flags. The size is the job's project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS`
+  ([job sizes](scoped-limits.md#job-sizes-version-3)). Where Docker reports `SwapLimit` false, the swap bound cannot
+  be enforced and doctor warns.
 - **`local`'s `nonRoot` and `localFolders` depend on which uid the job runs as** (issue #341). On macOS, Windows
   and Docker Desktop the image's own `USER` runs. On a daemon that enforces bind-mount ownership (native Linux
   Docker, rootful Podman) the worker runs the job as its own uid with `--user` and `HOME=/home/pi`, because

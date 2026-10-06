@@ -127,7 +127,8 @@ import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // below is the precedent, and its header is a post-mortem of the same mistake.
 import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
-import { USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
+import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
+import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
 import { runDollars } from "./dollar-windows.mjs";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
@@ -157,7 +158,7 @@ import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGl
 import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
-import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations, outsideEdit, splitTotalMicros } from "./render.mjs";
+import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations, outsideEdit, splitTotalMicros } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -1038,8 +1039,15 @@ function registerTools(pi: ExtensionAPI): void {
       "envelope total is allocation-cap, not dollar-cap. " +
       "A bare row and a qualified row for the same " +
       "repo are refused together: keep one form. A dollar window needs a per-job cap " +
-      "(maxCostUsd). The file stays version 1 unless a row needs version 2. The operator MUST approve a confirm " +
-      "dialog showing the entry; refused with no interactive operator.",
+      "(maxCostUsd). A project:<id> row may also set its jobs' SIZE: `memory` (a string such as \"512m\", \"1536m\" " +
+      "or \"4g\", at least 512m; no swap is given beyond it) and `cpus` (a number such as 0.5 or 2, at least 0.25, at " +
+      "most two decimals; a CPU WEIGHT under contention, not a cap). Unset, a job takes PI_JOB_MEMORY and PI_JOB_CPUS " +
+      "(4g and 2). `hostShare` (a whole percentage, 1 to 100, of a host's job budget) and `minJobs` (an integer >= 1, " +
+      "needs memory or cpus on the row, at most its concurrent) are checked and stored now but NOT ENFORCED yet: the " +
+      "host budget that enforces them is a later release. A row may carry a size and nothing else. The file stays " +
+      "version 1 unless a row needs version 2, or 3 for a size field (a worker older than this one then refuses the " +
+      "file, so upgrade every worker first). The operator MUST approve a confirm dialog showing the entry; refused " +
+      "with no interactive operator.",
     executionMode: "sequential",
     parameters: Type.Object({
       scope: Type.String(),
@@ -1053,11 +1061,17 @@ function registerTools(pi: ExtensionAPI): void {
       dayUsd: Type.Optional(Type.String()),
       weekUsd: Type.Optional(Type.String()),
       monthUsd: Type.Optional(Type.String()),
+      // Issue #596: a project row's job size (version 3). `memory` a string ("1536m"); `cpus` a number or a decimal
+      // string, read by the worker's own parser (`sizeFieldsOf`), so the confirm shows the one spelling the file holds.
+      memory: Type.Optional(Type.String()),
+      cpus: Type.Optional(Type.Union([Type.Number(), Type.String()])),
+      hostShare: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      minJobs: Type.Optional(Type.Integer({ minimum: 1 })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
       const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
-      const l = buildScopedLimit({ ...params, ...dollarFieldsOf(params) });
+      const l = buildScopedLimit({ ...params, ...dollarFieldsOf(params), ...sizeFieldsOf(params) });
       // Issue #504 part C: judged BEFORE the confirm (the parser, the project pair and the allocation envelope), so the
       // operator is never asked to approve a row the write would refuse, such as one below an envelope floor.
       const envelope = envelopeGuard(paths, deploymentEnv());
@@ -1112,15 +1126,16 @@ function registerTools(pi: ExtensionAPI): void {
     label: "pi-dispatch edit scoped limit",
     description:
       "Changes fields of an existing scoped limit (by array index from dispatch_limits) and applies it live. " +
-      "Provide only the fields to change (scope/day/week/month/concurrent/dayUsd/weekUsd/monthUsd); the rest keep " +
+      "Provide only the fields to change (scope/day/week/month/concurrent/dayUsd/weekUsd/monthUsd, and on a project:<id> " +
+      "row memory/cpus/hostShare/minJobs as dispatch_limit_add describes them); the rest keep " +
       "their current value. `scope` is a repo \"owner/name\" on every forge, a forge-qualified " +
       "\"<forge>:owner/name\" such as \"github:acme/web\" for that forge only, or an ABSOLUTE local folder path. `dayUsd`/`weekUsd`/`monthUsd` are dollar windows, written as a decimal string (\"2.50\"). " +
       "No field can be removed here: to drop a cap from an entry, edit scoped-limits.json by hand. Changing `scope` " +
       "(such as a bare \"acme/web\" rewritten to \"github:acme/web\") starts a NEW count under a new key: the old " +
       "row's used runs and dollars do not carry over, and jobs already running keep their slot under the old scope " +
       "until they finish while the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until " +
-      "then. The file stays " +
-      "version 1 unless a row needs version 2. The operator MUST approve a confirm dialog showing the before->after; " +
+      "then. A new size applies to the project's NEXT jobs; a running job keeps the size it started with. The file stays " +
+      "version 1 unless a row needs version 2, or 3 for a size field. The operator MUST approve a confirm dialog showing the before->after; " +
       "refused with no interactive operator.",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -1133,6 +1148,10 @@ function registerTools(pi: ExtensionAPI): void {
       dayUsd: Type.Optional(Type.String()),
       weekUsd: Type.Optional(Type.String()),
       monthUsd: Type.Optional(Type.String()),
+      memory: Type.Optional(Type.String()),
+      cpus: Type.Optional(Type.Union([Type.Number(), Type.String()])),
+      hostShare: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      minJobs: Type.Optional(Type.Integer({ minimum: 1 })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
@@ -1144,6 +1163,8 @@ function registerTools(pi: ExtensionAPI): void {
       // Issue #501, part 7: a dollar field is judged BEFORE the confirm, so the operator is never asked to approve a
       // value the write would refuse.
       const usd = dollarFieldsOf(params);
+      // Issue #596: the size fields, judged and spelled the same way before the confirm.
+      const size = sizeFieldsOf(params);
       // A provided field replaces; an omitted one keeps the current value (?? treats undefined as "keep").
       // Rebuild through the shared builder so the result is validated the same way as an add.
       const before = buildScopedLimit(cur);
@@ -1158,6 +1179,11 @@ function registerTools(pi: ExtensionAPI): void {
         dayUsd: usd.dayUsd ?? cur.dayUsd,
         weekUsd: usd.weekUsd ?? cur.weekUsd,
         monthUsd: usd.monthUsd ?? cur.monthUsd,
+        // The size fields (version 3) the same way: a sent one replaces, an omitted one is carried.
+        memory: size.memory ?? cur.memory,
+        cpus: size.cpus ?? cur.cpus,
+        hostShare: size.hostShare ?? cur.hostShare,
+        minJobs: size.minJobs ?? cur.minJobs,
       });
       const envelope = envelopeGuard(paths, deploymentEnv());
       const mutate = (l: any[]) => l.map((w, i) => (i === params.index ? merged : w));
@@ -1893,7 +1919,44 @@ function buildScopedLimit(f: any): any {
   for (const k of ["dayUsd", "weekUsd", "monthUsd"]) {
     if (typeof f[k] === "string" && f[k].trim() !== "") l[k] = f[k].trim();
   }
+  // Version 3's size fields (issue #596) ride through as given; the shared parser validates them, and refuses them on
+  // any row that is not a project row.
+  if (typeof f.memory === "string" && f.memory.trim() !== "") l.memory = f.memory.trim();
+  if (typeof f.cpus === "number" || (typeof f.cpus === "string" && f.cpus.trim() !== "")) l.cpus = typeof f.cpus === "string" ? f.cpus.trim() : f.cpus;
+  for (const k of ["hostShare", "minJobs"]) {
+    const v = optInt(f[k]);
+    if (v !== undefined) l[k] = v;
+  }
   return l;
+}
+
+/**
+ * The size fields a scoped-limit tool was SENT (issue #596), in the one spelling the parser stores: `memory` through
+ * the worker's own `parseMemory`/`formatMemory` ("1024m" becomes "1g"), `cpus` through `parseCpus`/`formatCpus` as a
+ * number, `hostShare` and `minJobs` as given (the schema holds them to integers; the parser judges the rest). A blank
+ * or absent field is not sent. A malformed size throws with the parser's own words before any confirm is shown.
+ */
+function sizeFieldsOf(f: any): Record<string, any> {
+  const out: Record<string, any> = {};
+  const sent = (v: any) => v !== undefined && v !== null && !(typeof v === "string" && v.trim() === "");
+  if (sent(f?.memory)) {
+    try {
+      out.memory = formatMemory(parseMemory(typeof f.memory === "string" ? f.memory.trim() : f.memory));
+    } catch (e: any) {
+      throw new Error(`memory: ${e?.message ?? e}`);
+    }
+  }
+  if (sent(f?.cpus)) {
+    try {
+      out.cpus = Number(formatCpus(parseCpus(typeof f.cpus === "string" ? f.cpus.trim() : f.cpus)));
+    } catch (e: any) {
+      throw new Error(`cpus: ${e?.message ?? e}`);
+    }
+  }
+  for (const k of SIZE_LIMIT_FIELDS) {
+    if (k !== "memory" && k !== "cpus" && sent(f?.[k])) out[k] = f[k];
+  }
+  return out;
 }
 
 /**
@@ -1971,6 +2034,9 @@ function limitSummary(l: any): string {
   if (typeof l?.dayUsd === "string") bits.push(`day $${l.dayUsd}`);
   if (typeof l?.weekUsd === "string") bits.push(`week $${l.weekUsd}`);
   if (typeof l?.monthUsd === "string") bits.push(`month $${l.monthUsd}`);
+  // Version 3's size (issue #596). hostShare and minJobs are said as not enforced yet, so the summary never reads as a
+  // promise the worker does not keep.
+  bits.push(...sizeBits(l));
   return bits.join(" · ");
 }
 
@@ -3040,8 +3106,11 @@ async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Pr
   notify?.(res.ok ? `scoped limit added (${liveOr(res)}): ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
-/** Edit a scoped limit: select which, re-prompt each field with its current value — blank keeps it. */
-async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+/**
+ * Edit a scoped limit: select which, re-prompt each field with its current value (blank keeps it). Exported for its
+ * test: the fields it does not prompt for (the dollar windows and, since issue #596, the size) must be carried.
+ */
+export async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
   const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
   const p: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
   const list: any[] = Array.isArray(p?.limits) ? p.limits : [];
@@ -3070,10 +3139,14 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
     week: keep(week, cur.week),
     month: keep(month, cur.month),
     concurrent: keep(concurrent, cur.concurrent),
-    // Carried unchanged (see dispatch_limit_edit): editing a count must never drop a dollar cap.
+    // Carried unchanged (see dispatch_limit_edit): editing a count must never drop a dollar cap, nor a size (#596).
     dayUsd: cur.dayUsd,
     weekUsd: cur.weekUsd,
     monthUsd: cur.monthUsd,
+    memory: cur.memory,
+    cpus: cur.cpus,
+    hostShare: cur.hostShare,
+    minJobs: cur.minJobs,
   });
   const note = scopeChangeNote(buildScopedLimit(cur), merged);
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;

@@ -787,7 +787,8 @@ test("a job's teardown uses the runtime it was ADMITTED on, so a failed, errorin
 			return child;
 		};
 		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn, fs: cidFs(), egress: true, detachedCheck: instantCheck(), log: (e, f) => logs.push([e, f]), ...(teardownRuntime ? { teardownRuntime } : {}) });
-		await runContainer({ job: { ...JOB, id: "j1" }, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, user: null, home: null });
+		// `hostCpus` as a job's own facts read gives it (issue #596), so the only log line left is the teardown's.
+		await runContainer({ job: { ...JOB, id: "j1" }, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, user: null, home: null, hostCpus: 4 });
 		return { calls, logs };
 	};
 	for (const [shape, info] of Object.entries(INFO)) {
@@ -958,4 +959,22 @@ test("resources reach the result off a real disabled sink, and an exit line with
 		assert.deepEqual(result.resources, want, chunk);
 		assert.equal(Object.hasOwn(result, "resources"), want !== undefined);
 	}
+});
+
+test("issue #596: the size handed to runContainer is the size on the argv, never one off job.data, and the OOM limit is read off it", { skip }, async () => {
+	const rec = {};
+	const logs = [];
+	// The supervisor's verified OOM report, the one result `memoryLimit` rides beside.
+	const verified = { turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: 137, resources: USED, exitOomKilled: true, exitAuth: "verified" };
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin(rec, 137), mintExitKey: () => MINTED, openJobLog: () => ({ write() {}, close: async () => verified }), log: (e, f) => logs.push([e, f]) });
+	const job = { ...JOB, size: { memMiB: 65536, cpuCenti: 3200, source: "project" }, memory: "64g", cpus: 32 };
+	const result = await runContainer({ job, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true, size: { memMiB: 1536, cpuCenti: 50, source: "project" }, hostCpus: 14 });
+	const sized = rec.args.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a));
+	assert.deepEqual(sized, ["--memory=1536m", "--memory-swap=1536m", "--cpus=13", "--cpu-shares=512", "--shm-size=768m"]);
+	assert.equal(result.memoryLimit, 1536 * 1024 ** 2, "the 90% OOM rule compares with the size this container really got");
+	assert.deepEqual(logs, [], "a CPU count was known, so nothing to say");
+	// No size: the built-in 4g and 2. No CPU count: no --cpus, said once per job.
+	await runContainer({ job: JOB, prepared: PREPARED, name: "j2", signal: new AbortController().signal });
+	assert.deepEqual(rec.args.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a)), ["--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g"]);
+	assert.deepEqual(logs, [["cpu_ceiling_unknown", { container: "j2" }]]);
 });

@@ -1104,3 +1104,12 @@ test("ensureSandboxDir refuses a sandbox dir another account owns, secures the a
 	assert.throws(() => ensureSandboxDir("/t/pi-dispatch-501/jobs/sandboxes", { env: { TMPDIR: "/t" }, uid: 501, fs: fake({ "/t/pi-dispatch-501": { uid: 1270 } }) }), /^Error: \/t\/pi-dispatch-501 is owned by uid 1270/, "the default's account root is judged first");
 	assert.doesNotThrow(() => ensureSandboxDir("/srv/sb", { env, uid: null, fs: fake({ "/srv/sb": { uid: 1270 } }) }), "no uid (Windows): nothing judged");
 });
+
+test("PI_JOB_MEMORY and PI_JOB_CPUS: 4g and 2 when unset or empty, parsed when set, and a bad value refuses the boot naming the key (#596)", () => {
+	assert.deepEqual(loadConfig({}).jobSize, { memMiB: 4096, cpuCenti: 200, memSet: false, cpuSet: false });
+	assert.deepEqual(loadConfig({ PI_JOB_MEMORY: "", PI_JOB_CPUS: "" }).jobSize, { memMiB: 4096, cpuCenti: 200, memSet: false, cpuSet: false });
+	assert.deepEqual(loadConfig({ PI_JOB_MEMORY: "1536m", PI_JOB_CPUS: "0.5" }).jobSize, { memMiB: 1536, cpuCenti: 50, memSet: true, cpuSet: true });
+	for (const [env, why] of [[{ PI_JOB_MEMORY: "4GB" }, /^PI_JOB_MEMORY: a memory size is a whole number/], [{ PI_JOB_MEMORY: "256m" }, /^PI_JOB_MEMORY: a memory size must be at least 512m/], [{ PI_JOB_CPUS: "0" }, /^PI_JOB_CPUS: a CPU size must be at least 0.25/], [{ PI_JOB_CPUS: "two" }, /^PI_JOB_CPUS: a CPU size is a number/]]) {
+		assert.throws(() => loadConfig(env), (error) => error.piDispatchConfig === true && why.test(error.message), JSON.stringify(env));
+	}
+});

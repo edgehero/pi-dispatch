@@ -264,7 +264,8 @@ export async function runJob(job, deps) {
 		// Issue #341: which uid this job's container runs as. `(job, { capabilities, observed }) =>` `{ user, home }`
 		// (`user` null = the image's own USER), `{ refused, cause }` or `{ unavailable, reason }`. The default runs
 		// every job as the image's user, exactly as before, so a wiring that omits it changes nothing. A non-refused answer
-		// may also carry `relabel: true` (issue #355), which reaches `runContainer` beside the user it was decided with.
+		// may also carry `relabel: true` (issue #355), which reaches `runContainer` beside the user it was decided with, and
+		// `hostCpus` (issue #596), the runtime's CPU count from the same facts read, which sets the `--cpus` ceiling.
 		jobUserPreflight = async () => ({ user: null, home: null }),
 		// (session, { piVersion, context }) => { promoted, reason, bytes }. Promotes this job's transcript back into
 		// the store, on a COMPLETED exit only. Never throws. The default is a no-op so a wiring that omits
@@ -326,7 +327,8 @@ export async function runJob(job, deps) {
 		mintToken,
 		isDefaultBranchProtected, // (job, token) => boolean; same reason -- the forge is the job's, not the process's
 		prepareWorkspace, // (job, token) => { workspaceDir, jobDir }  (clone+materialise+prompt)
-		// runContainer({ job, token, prepared, secrets, name, signal, user, home, modelEndpoints? }) => { code, aborted, abortReason, turns, tokens, session, usage, context, exitReason }.
+		// runContainer({ job, token, prepared, secrets, name, signal, user, home, modelEndpoints?, size?, hostCpus? }) => { code, aborted, abortReason, turns, tokens, session, usage, context, exitReason }.
+		// `size` (issue #596) is `jobSize` below; `hostCpus` the runtime's CPU count off the job-user gate's own facts read.
 		// `exitReason` (issue #437) is parseExitReason's closed-set label, read only inside the exit-2 branch.
 		// `resources` and `exitOomKilled` (issue #596) are the exit line's cgroup block and the supervisor's OOM report.
 		// `user`/`home` are the job-user gate's answer (issue #341), null for the image's own USER.
@@ -383,6 +385,11 @@ export async function runJob(job, deps) {
 		// after prepare, before any reserve. Absent on a bare wiring, which checks nothing.
 		pickupProject = null,
 		folderProject = null,
+		// Issue #596: the job's size `{ memMiB, cpuCenti, source }`, resolved at pickup from the same limits snapshot as
+		// every other gate (index.mjs). Handed to `prepareWorkspace` (a retained run's manifest records it, so a sandbox
+		// reopens the run at its size) and to `runContainer`, never through `job.data`. null on a bare wiring: neither call
+		// then carries it, and the container gets the built-in 4g and 2.
+		jobSize = null,
 		// Issue #503 part 7: the builtin catalog's model object for (provider, id), or null (model-catalog.mjs
 		// `builtinModel`). Read only by the zero-rated check; the default knows no builtin model, so an unwired
 		// processor judges overlay models alone and reserves for every other.
@@ -1096,7 +1103,7 @@ export async function runJob(job, deps) {
 		// `podmanStore` (issue #429) only where the venue's job user carried one: the podman store the container ran in.
 		// `portfolio` (issue #505) only for a job the gate above confirmed: prepare then writes /job/portfolio.json, after
 		// asking the live file once more. Absent otherwise, so every other job's prepare call is unchanged.
-		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
+		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
 
 		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
 		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)
@@ -1299,7 +1306,7 @@ export async function runJob(job, deps) {
 		// then only a signed line is read (run-container.mjs, run-history.mjs `authenticExitLines`). An image that does not
 		// declare it is read as before, under the #542 trust rule below alone.
 		const exitAuth = (img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY);
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}) });
 		containerRan = true;
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.

@@ -6,6 +6,7 @@ import { resolveBackendName } from "./backend-registry.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
 import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 import { isProjectId } from "./project-id.mjs";
+import { recordedJobSize } from "./job-size.mjs";
 
 /**
  * Durable per-run history.
@@ -568,7 +569,7 @@ function rebuildUsage(u) {
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null }) {
 	const data = job.data ?? {};
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
@@ -712,6 +713,14 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// carried it: an older image, one whose supervisor died too, or a venue that hides the cgroup. Produced inside the
 		// job's container, so a job can inflate every number: advisory (docs/insights.md).
 		resources: rebuildResources(source.resources),
+		// The size the job was given (issue #596, INT-RUN-HISTORY-FILE-CONTRACT): `{ memMiB, cpuCenti, source }`, resolved
+		// at the pickup gate from the limits snapshot and passed in beside `project` (start.mjs `recordRun`), so the record
+		// says what the job was promised next to what it used (`resources`). Additive, nullable, an explicit literal REBUILT
+		// here (`recordedJobSize`), TAIL position after `resources` on the same contract. Two integers and a fixed word
+		// (`project` | `env` | `default`), so PII-free by construction. Present on every record written after the pickup
+		// gate, including a refusal there that started no container (it is the size the job WOULD have had); null on a record
+		// written before it (the wait gate's refusals) and from a caller that passes none.
+		size: recordedJobSize(size),
 	};
 }
 

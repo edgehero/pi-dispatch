@@ -1145,7 +1145,10 @@ export function makePodmanBackend(opts = {}) {
 		// Issue #429: the store this job's container lives in rides beside its user, so a retained run records it and a
 		// sandbox or the retention sweep can tell another store's empty answer from "not open".
 		const store = read?.answered === true ? read.info?.graphRoot : null;
-		return chosen.user && typeof store === "string" ? { ...chosen, store } : chosen;
+		// Issue #596: the host's CPU count from the same read, for the job's `--cpus` ceiling. Absent when Podman did not say.
+		const hostCpus = read?.answered === true ? read.info?.hostCpus : null;
+		const stored = chosen.user && typeof store === "string" ? { ...chosen, store } : chosen;
+		return chosen.user && Number.isSafeInteger(hostCpus) ? { ...stored, hostCpus } : stored;
 	};
 
 	return {

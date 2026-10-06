@@ -2316,6 +2316,32 @@ test("the gate's relabel reaches runContainer as a boolean, and only a true one 
 	assert.equal(plain.relabel, false, "a wiring without the gate relabels nothing");
 });
 
+test("the pickup's size reaches prepare and runContainer, and the gate's CPU count reaches runContainer, as arguments only (issue #596)", async () => {
+	let ran = null;
+	let prepOpts = null;
+	const size = { memMiB: 1536, cpuCenti: 50, source: "project" };
+	const { deps: d } = deps({
+		jobSize: size,
+		jobUserPreflight: async () => ({ user: "1234:1234", home: "/home/pi", hostCpus: 14 }),
+		prepareWorkspace: async (_j, _t, opts) => ((prepOpts = opts), { workspaceDir: "/w", jobDir: "/j" }),
+		runContainer: async (ctx) => ((ran = ctx), { code: 0, aborted: false }),
+	});
+	await runJob(ghJob, d);
+	assert.deepEqual([ran.size, ran.hostCpus], [size, 14]);
+	assert.deepEqual(prepOpts.size, size, "the retained run's manifest records it, so a sandbox reopens at it");
+	assert.equal(Object.hasOwn(ran.job, "size"), false, "never through the job's data");
+	// A bare wiring passes neither, so runContainer's own defaults (4g and 2, no ceiling) apply.
+	let bare = null;
+	let bareOpts = null;
+	const { deps: b } = deps({
+		jobUserPreflight: async () => ({ user: null, home: null, hostCpus: "14" }),
+		prepareWorkspace: async (_j, _t, opts) => ((bareOpts = opts), { workspaceDir: "/w", jobDir: "/j" }),
+		runContainer: async (ctx) => ((bare = ctx), { code: 0, aborted: false }),
+	});
+	await runJob(ghJob, b);
+	assert.deepEqual([Object.hasOwn(bare, "size"), Object.hasOwn(bare, "hostCpus"), Object.hasOwn(bareOpts, "size")], [false, false, false], "and a CPU count that is not an integer is not passed");
+});
+
 test("a wiring without the gate runs every job as the image's own user, exactly as before", async () => {
 	let ran = null;
 	const { deps: d } = deps({ runContainer: async (ctx) => ((ran = ctx), { code: 0, aborted: false }) });

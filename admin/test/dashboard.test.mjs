@@ -2276,6 +2276,19 @@ test("scoped limit rows: used/cap per capped window, '-' on a failed cell, confi
   assert.match(out, /● \/srv\/site\s+day 3\/3/, "at cap: the row's dot goes amber (● not ○)");
 });
 
+test("a project row's job size shows beside its caps, hostShare and minJobs marked not enforced yet (#596)", async () => {
+  const snap = {
+    ...SNAPSHOT,
+    scopedLimits: { limits: [{ scope: "project:shop", day: null, week: null, month: null, concurrent: 2, memory: "8g", cpus: 4, hostShare: 50, minJobs: 1 }] },
+    scopedBudget: { rows: [{}] },
+  };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+  await flush();
+  const out = comp.render(200).join("\n");
+  await comp.dispose();
+  assert.match(out, /project:shop\s+≤2 at once\s+memory 8g\s+4 CPUs\s+hostShare 50% \(not enforced yet\)\s+minJobs 1 \(not enforced yet\)/);
+});
+
 test("scoped limit section degrades on missing/invalid and never shows an in-flight count", async () => {
   const missing = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, scopedLimits: { missing: true } }) }) });
   const invalid = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, scopedLimits: { invalid: "boom" } }) }) });

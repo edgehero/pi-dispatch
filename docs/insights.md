@@ -123,7 +123,7 @@ runner's last line (issue #596). It is not drawn on this page yet; it is in each
 | Field | What it is |
 |---|---|
 | `memPeak` | the most memory the container held at once, in bytes (page cache included) |
-| `swapPeak` | the most it held in swap at once, in bytes. `memPeak` does not count swap. Today a job's container may swap as much as its memory (the runtime's default), so a job at its memory limit swaps before it is killed: a run that fit shows little or none here, one that needed more shows a lot |
+| `swapPeak` | the most it held in swap at once, in bytes. `memPeak` does not count swap. Since job sizes a container gets no swap beyond its memory, so this is 0 on a current worker; a run from an older worker could swap as much as its memory |
 | `oomKills` | processes the kernel killed for memory |
 | `memSomeUsec`, `memFullUsec` | microseconds some or all of its tasks waited on memory |
 | `cpuUsec` | CPU time used, in microseconds |
@@ -142,7 +142,9 @@ runner's last line (issue #596). It is not drawn on this page yet; it is in each
   stopping it, and `memPeak` reached 90% of the container's memory limit: the kernel counts a kill by the HOST's
   out-of-memory killer the same way, and a machine short of memory says nothing about the job's size, so such a run
   retries. A job where only a child process was killed keeps its own outcome, and `oomKills` above 0 shows it.
-- Every job still runs at 4 GB and 2 CPUs. These numbers are for choosing sizes later, not limits.
+- Each job runs at its size: its project's `memory` and `cpus`, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default
+  4 GB and 2 CPUs). Every record says which in `size` (`memMiB`, `cpuCenti` in hundredths of a CPU, and `source`:
+  `project`, `env` or `default`). Compare `memPeak` with it to choose a size ([job sizes](scoped-limits.md#job-sizes-version-3)).
 - Disk I/O, disk space and network are not measured or isolated.
 
 ## Honest limits

@@ -193,6 +193,19 @@ passing, on the record — issue #80.)
   containerize or sandbox Pi."*
 - **Traces to**: `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SESSION-STORE-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`, `INT-LIVE-PROBE-CONTRACT`
+  **A JOB'S BOUNDS ARE NOW ITS PROJECT'S SIZE, AND ITS CPU BOUND IS A SHARE (issue #596).** Until this, every job
+  container ran at one fixed `--memory=4g --cpus=2`, with swap equal to its memory by the runtime's default. That is
+  replaced by a per-project size (`INT-CONTAINER-RUNTIME-CONTRACT`, the job's size), and the change has to be argued
+  against what this entry protects, which is ONE JOB'S REACH, not the numbers. Memory gets stronger: the bound is the
+  project's size and swap beyond it is gone (`--memory-swap` equal to `--memory`, `memory.swap.max` 0 measured on
+  every venue), so a job can no longer spill past its bound into the host's swap, and an OOM still ends that one
+  job. CPU changes kind: a job is no longer capped at 2 CPUs, it carries a weight (`--cpu-shares`) under ONE host
+  ceiling (`--cpus` at the runtime's CPU count minus a reserved core). So an idle host lets a job use cores nobody
+  else wants, and under contention every job gets its share, which is the property this entry needs: no job can take
+  CPU another running job was promised, and none can take the reserved core. What this does NOT add is reach: the
+  size is decided by the worker from the operator's reviewed limits file and environment, at pickup, and handed to
+  the builder as an argument, never read from a job's payload, and `dockerExtra` refuses every flag that could set
+  one. Disk I/O, disk space and the network stay unbounded per job, as they always were, and are now said so.
   **A NETWORK NOW EXISTS BETWEEN A JOB AND ONE OTHER CONTAINER, and the argument this entry has twice
   borrowed is refused here.** With `CONST-EGRESS-POLICY-IN-THE-ARGV`, a job container joins a Docker
   network. Two revision rows recorded that this entry survived a change **because the change added no
@@ -240,6 +253,13 @@ passing, on the record — issue #80.)
   a network a `pi-job-` container is still on, since that severs a live job's only route out; and
   given `PI_EGRESS=0` the argv carries no `--network` and is byte-identical to one built before that entry
   existed.
+  **Given any job's size** (issue #596): its argv carries `--memory` and an EQUAL `--memory-swap` at the size the
+  worker resolved at pickup (its project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS`, else `4g` and `2`),
+  `--cpu-shares` for its CPUs, `--shm-size` at most half its memory, `--pids-limit=512`, and `--cpus` at the host
+  ceiling, or no `--cpus` with `cpu_ceiling_unknown` logged where the runtime gave no CPU count; given a job whose
+  payload names a size, the argv is the same as for one that names none; given any of those flags in
+  `dockerExtra`, the builder refuses the argv; and given a live probe, it reads back `memory.swap.max` 0 and the
+  ceiling it was given.
 
 ## CONST-EGRESS-POLICY-IN-THE-ARGV
 
@@ -1028,6 +1048,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-06 | Issue #596, phase 1 (sizes and hard limits). **`CONST-ISOLATION-CONTAINER-PER-JOB` AMENDED**, in the Why and the Acceptance. The fixed `--memory=4g --cpus=2` every job ran at is replaced by its project's size, and the constraint is argued rather than the code: what the entry protects is one job's REACH, and memory gets stronger (the bound is the size and swap beyond it is gone, `--memory-swap` equal to `--memory`, measured 0 on every venue, so a job cannot spill into the host's swap), while CPU changes kind, from a hard 2-CPU cap to a weight (`--cpu-shares`) under one host ceiling (`--cpus` at the runtime's CPU count minus a reserved core). That keeps the property the entry needs (no job can take CPU another running job was promised, none the reserved core) and lets an idle host's cores be used; the rejected alternative, a hard cap at each job's size, wastes idle cores and was decided against in the issue. No reach is added: the size is resolved by the worker at pickup from the reviewed limits file and the environment, handed to the builder as an argument, never read from a payload, and every flag that could set one is refused in `dockerExtra`. Disk I/O, disk space and the network are now said to be unbounded per job, as they always were. **CONST-EGRESS-POLICY-IN-THE-ARGV, CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY UNCHANGED, checked**: no network change, no new gate before or after a reservation (the size is resolved beside the pickup gates and refuses nothing), and the OOM classification of phase 0 is untouched. |
 | 2026-10-05 | Issue #587 (every new pi release as a draft pull request). **`CONST-PI-VERSION-PINNED` AMENDED**: the Statement names `.github/workflows/pi-bump.yml` as how the upgrade commit is prepared (one rolling pull request, always a draft, whose own required checks decide whether the bump holds; a person makes it ready and merges it); the Acceptance adds that `pi-bump.mjs` rewrites every pin from one table held to pi-pin-check's sites in both directions, runs no pi code and never moves a content hash. The pin itself is unchanged. **`CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: the workflow opens or updates a draft pull request and merges nothing; the `no automatic merge` grep now covers the workflow and `.github/scripts`, any spelling of auto merge, and self-approval in its forms (and reading a pull request's reviews, in the bump's scope only). **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new zero-spend smoke spends nothing (a fake key, refused with a 401). |
 | 2026-10-05 | Issue #587 (pi 1.0.3). **`CONST-PI-VERSION-PINNED` AMENDED**: the Statement names the pin's file (`image/runner/package.json`) instead of a number, so a bump no longer edits this article; the Evidence records that pi 1.0.1 dropped the shrinkwrap that locked pi's own sibling packages and that pi-coding-agent depends on them by a range, so the root `package.json` pins every `@earendil-works` package in `overrides`; the Acceptance adds that every pi entry in the lockfile, every pi override and every hand-written copy of the pin equal the runner's pin (`.github/scripts/pi-pin-check.mjs`, in the `pins are exact` job). The pin itself moves from 0.99.1 to 1.0.3 in the same commit. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new refusals (a routing key under any thinking level, an Azure deployment option on provider `azure`) are the model guard's and the cost guard's, inside the container before a provider call, and no worker gate moved; the renamed Azure provider is refused before any spend as any id pi does not have, now with the new id named. **`CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: the new script and workflow step merge nothing and name no merge call. |
 | 2026-10-04 | Found this round (no issue): a scheduled job whose run finished while Valkey was unreachable longer than the lock renewal window was run again, paid. **`CONST-RETRY-INFRA-ONLY` AMENDED**, the Why only: a scheduled job that stalls after its completion was recorded is returned as its record says, without running (the processor's lost-lock gate: `stalledCounter > 0`, `attempt` equal to `attemptsMade + 1`, outcome not `failed`, started no earlier than the job less a 5 minute clock tolerance; a record found and refused is logged as `job_lost_lock_record_rejected`); a job with no such record runs as before, and the stall guard still counts the stall. The Statement and Acceptance are UNCHANGED, checked: a re-run of a completed job was a retry of a determinate outcome, which the Statement already forbids. **Code evidence**: worker/src/index.mjs -> makeProcessor (the first gate); worker/src/run-history.mjs -> makeSettledRecord. |

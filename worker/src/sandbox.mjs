@@ -9,6 +9,7 @@ import { DEFAULT_BACKEND, PODMAN_BACKEND, UNATTRIBUTED_BACKEND, parseBackendFloo
 import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildDockerRunArgs, buildPodmanRunArgs, insideDir } from "./docker-run.mjs";
+import { DEFAULT_JOB_SIZE, recordedJobSize } from "./job-size.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { DEFAULT_EGRESS_PROXY, NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
@@ -22,7 +23,8 @@ import { isSandboxTombstone, readManifest, readRetained, sandboxDeadline, sandbo
  *
  * A SECOND container shape, deliberately not a second copy of the first. The argv comes from the run's VENUE's own
  * job builder (`buildDockerRunArgs` on `local`, `buildPodmanRunArgs` on `podman`, `SANDBOX_LAUNCHERS` below) through
- * its `extraFlags` seam, so `ISOLATION_FLAGS`, `--memory` and `--cpus` (and on podman keep-id and
+ * its `extraFlags` seam, so `ISOLATION_FLAGS` and the size flags (`--memory`, `--memory-swap`, `--cpu-shares`, `--shm-size`
+ * and the `--cpus` ceiling, at the RUN's recorded size, issue #596) (and on podman keep-id and
  * `PODMAN_PINNED_FLAGS`) reach this container BY CONSTRUCTION: a future change to the boundary cannot land on job
  * containers and miss this one, which is the whole reason for reusing the builder rather than writing a leaner argv
  * here.
@@ -154,7 +156,7 @@ function inPortRange(n) {
  * @param relabel      true where the job's own mounts carried `:Z` (issue #355), so the retained ones do again
  * @param workspaceOwned true when `workspace` is the retained clone (the worker's own), false for an operator's folder
  */
-export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null, relabel = false, workspaceOwned = false }) {
+export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null, relabel = false, workspaceOwned = false, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
 	// Thrown, not defaulted to docker: a caller naming a venue this file has no launcher for is assembling a session
 	// in a runtime nobody chose, which is the one mistake the table exists to make impossible.
 	const launcher = sandboxLauncher(venue);
@@ -192,6 +194,10 @@ export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, work
 		// operator's folder, which a private label would take away from every other container.
 		relabel,
 		workspaceOwned,
+		// Issue #596: the RUN's size (its manifest's, `sandboxSizeOf`), so the shell has the memory, swap bound and CPU
+		// weight the job had, and the same `--cpus` ceiling from this CLI's own runtime read.
+		size,
+		hostCpus,
 		// The terminal's two variables, and neither is a credential. TERM so the shell renders; TMOUT so a
 		// forgotten session closes itself. HOME beside `--user` and the proxy variables below are the rest.
 		// `buildDockerRunArgs` skips undefined, so an unset TERM or a disabled idle timeout emits nothing rather than
@@ -1134,6 +1140,8 @@ export async function openSandbox({
 		user: jobUser?.user ?? null,
 		home: jobUser?.home ?? null,
 		relabel: jobUser?.relabel === true,
+		size: sandboxSizeOf(resolved.manifest),
+		hostCpus: jobUser?.hostCpus ?? null,
 		// By containment, the rule `rebaseWorkspace` already moves the retained clone by: a workspace inside the retained
 		// job dir is the worker's own clone, one outside it is the operator's folder. Not by the manifest's `kind`, so a run
 		// retained before a preparer moved its clone is still judged by where the files actually are.
@@ -1421,15 +1429,21 @@ async function decideLocalSandboxJobUser({
 	// Issue #452, gate round 5: the facts read ONCE here even where the uid needs none of them (a VM-backed platform, an
 	// endpoint on another machine), and carried beside the answer for the teardown's detach gate, which otherwise reads
 	// `docker info` again at teardown and, if that read fails, keeps the network (the Docker Desktop case).
+	// Issue #596: the CPU count rides beside it, for the session's `--cpus` ceiling.
+	let admittedCpus = null;
 	const admittedOn = async () => {
 		try {
 			const read = await readFacts();
+			admittedCpus = read?.answered ? (read.facts?.hostCpus ?? null) : null;
 			return read?.answered ? runtimeFromFacts(read) : undefined;
 		} catch {
 			return undefined;
 		}
 	};
-	if (platform === "darwin" || platform === "win32") return withRuntime({ user: null, home: null }, await admittedOn());
+	if (platform === "darwin" || platform === "win32") {
+		const runtime = await admittedOn();
+		return withRuntime({ user: null, home: null }, runtime, admittedCpus);
+	}
 	const stamp = manifest?.jobUser;
 	const read = readJobUserStamp(stamp);
 	if (read.malformed) return { ...MALFORMED_STAMP };
@@ -1467,7 +1481,8 @@ async function decideLocalSandboxJobUser({
 	if (rootful?.refusal) return { refused: PODMAN_CONF_WIDENS_JOB, message: rootfulConfRefusal(rootful.refusal) };
 	// `runtime` (issue #452, gate round 4): the facts this session was admitted on, for its teardown's detach gate.
 	const runtime = daemon?.answered ? runtimeFromFacts(daemon) : remoteRuntime;
-	if (decision.mode === "image") return withRuntime({ user: null, home: null, ...relabel }, runtime);
+	const hostCpus = daemon?.answered ? (daemon.facts?.hostCpus ?? null) : admittedCpus;
+	if (decision.mode === "image") return withRuntime({ user: null, home: null, ...relabel }, runtime, hostCpus);
 	const needsImage = identity.euid !== SHIPPED_IMAGE_UID;
 	const caps = needsImage ? await imageCapabilities(manifest?.image) : { ok: true, capabilities: [] };
 	if (needsImage && !caps?.ok) {
@@ -1478,7 +1493,7 @@ async function decideLocalSandboxJobUser({
 		return { refused: chosen.refused, message: `the retained image ${manifest?.image} does not declare anyUid, so it cannot run as the uid that owns this run's files (issue #341)` };
 	}
 	if (chosen.refused) return { refused: chosen.refused, message: `${JOB_USER_FIX[chosen.cause] ?? "the job user could not be decided"} (issue #341)` };
-	return withRuntime({ user: chosen.user, home: chosen.home, ...relabel }, runtime);
+	return withRuntime({ user: chosen.user, home: chosen.home, ...relabel }, runtime, hostCpus);
 }
 
 /**
@@ -1486,8 +1501,11 @@ async function decideLocalSandboxJobUser({
  * non-enumerable, so the answer's shape, which callers compare and print, is what it always was, while `openSandbox`'s
  * teardown hands it to the detach gate and reads the daemon nothing more.
  */
-function withRuntime(answer, runtime) {
+function withRuntime(answer, runtime, hostCpus = null) {
 	if (runtime !== undefined) Object.defineProperty(answer, "runtime", { value: runtime, enumerable: false });
+	// Issue #596: the runtime's CPU count from the same read, for the session's `--cpus` ceiling. Non-enumerable for
+	// `runtime`'s reason: the answer's shape stays what it always was.
+	if (Number.isSafeInteger(hostCpus)) Object.defineProperty(answer, "hostCpus", { value: hostCpus, enumerable: false });
 	return answer;
 }
 
@@ -1582,7 +1600,17 @@ async function decidePodmanSandboxJobUser({
 	if (chosen.unavailable) return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${chosen.reason}); is podman answering \`podman info\` as this account?` };
 	// `relabel` on podman is `podman info`'s SELinux fact, the rule a podman job's own mounts follow (issue #355).
 	// `runtime` (issue #452, gate round 4): the same read, for the session teardown's detach gate, so it reads nothing again.
-	return withRuntime({ user: chosen.user, home: chosen.home, ...(chosen.relabel === true ? { relabel: true } : {}) }, { podman: true, rootless: info.info?.rootless ?? null, version: info.info?.version ?? null });
+	return withRuntime({ user: chosen.user, home: chosen.home, ...(chosen.relabel === true ? { relabel: true } : {}) }, { podman: true, rootless: info.info?.rootless ?? null, version: info.info?.version ?? null }, info.info?.hostCpus ?? null);
+}
+
+/**
+ * The size a sandbox reopens a run at (issue #596): the size its manifest recorded, or the built-in 4g and 2 for a run
+ * retained before sizes existed, which is the size every such run had. A recorded size that does not rebuild
+ * (`recordedJobSize`) also opens at the built-in size: the manifest is host-written, and the size bounds a shell an
+ * operator sits in, so a wrong one is a slower session, never a wider reach.
+ */
+export function sandboxSizeOf(manifest) {
+	return recordedJobSize(manifest?.size) ?? DEFAULT_JOB_SIZE;
 }
 
 /**

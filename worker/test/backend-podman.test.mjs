@@ -33,6 +33,8 @@ function infoBody(over = {}) {
 				security: { rootless: true, selinuxEnabled: true, seccompEnabled: true },
 				// Issue #503: Podman 5's own name for the rootless network helper (measured `pasta` on 5.8.1).
 				rootlessNetworkCmd: "pasta",
+				// Issue #596: the host's CPU count (measured 4 on both lab VMs), which sets a podman job's `--cpus` ceiling.
+				cpus: 4,
 				...host,
 			},
 			store: { graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" },
@@ -44,7 +46,7 @@ function infoBody(over = {}) {
 }
 // An escape byte built at run time: a literal one in source survives a copy and paste and then does not.
 const ESC = String.fromCharCode(27);
-const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers", rootlessNetworkCmd: "pasta" });
+const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers", rootlessNetworkCmd: "pasta", hostCpus: 4 });
 const answered = (over = {}) => ({ answered: true, info: { ...INFO(), ...over } });
 
 /**
@@ -93,9 +95,9 @@ test("parsePodmanInfo reads the measured shape and nothing else", { skip }, () =
 	}
 	// Every field null when absent or the wrong type: a missing `rootless` is never read as rootless, nor a missing
 	// `serviceIsRemote` as local.
-	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null, runRoot: null });
-	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupManager: `systemd${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"], rootlessNetworkCmd: `pasta${ESC}[2J` }, version: { Version: `5.8.1${ESC}]0;x` } }));
-	assert.deepEqual(odd, { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" });
+	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null, runRoot: null, hostCpus: null });
+	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupManager: `systemd${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"], rootlessNetworkCmd: `pasta${ESC}[2J`, cpus: "4" }, version: { Version: `5.8.1${ESC}]0;x` } }));
+	assert.deepEqual(odd, { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers", hostCpus: null });
 	// The store is a path or nothing: a relative one, a non-string or one carrying a control byte is no fact.
 	for (const graphRoot of ["relative/path", 7, `/home/op${ESC}[2J`, ""]) assert.equal(mod.parsePodmanInfo(JSON.stringify({ host: {}, store: { graphRoot } })).graphRoot, null, JSON.stringify(graphRoot));
 	// And so is its runtime state (issue #450), under which Podman 5 records the rootless network helper.
@@ -1014,10 +1016,11 @@ test("the podman jobUserPreflight decides from the observed read, reads podman i
 	const observed = await b.observationPreflight(JOB);
 	// `store` (issue #429): the container store the run lives in rides beside the user, so the retained run records it.
 	const STORE = "/home/op/.local/share/containers/storage";
-	assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"], observed }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true, store: STORE });
-	assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"] }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true, store: STORE });
-	const unstored = bundle({ readInfo: async () => answered({ graphRoot: null }) });
-	assert.deepEqual(await unstored.jobUserPreflight(JOB, { capabilities: ["anyUid"] }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true }, "no store reported, none carried");
+	// `hostCpus` (issue #596): the same read's CPU count rides beside them too, for the job's `--cpus` ceiling.
+	assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"], observed }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true, store: STORE, hostCpus: 4 });
+	assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"] }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true, store: STORE, hostCpus: 4 });
+	const unstored = bundle({ readInfo: async () => answered({ graphRoot: null, hostCpus: null }) });
+	assert.deepEqual(await unstored.jobUserPreflight(JOB, { capabilities: ["anyUid"] }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true }, "no store and no CPU count reported, none carried");
 	await b.observationPreflight(JOB);
 	assert.equal(reads, 1, "one podman info for the worker's life once it answers");
 	assert.deepEqual(logs.map(([e]) => e), ["podman_observed", "job_user"], "each said once while it does not change");

@@ -14,6 +14,7 @@ import { buildForgejoPrompt } from "./forgejo-prompt.mjs";
 import { buildAzurePrompt } from "./azure-prompt.mjs";
 import { prepareLocalWorkspace } from "./prepare-local.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
+import { recordedJobSize } from "./job-size.mjs";
 
 /**
  * The subdirectory of the per-job dir a trigger's injected skills are copied into, so they reach the
@@ -82,7 +83,7 @@ export function makePrepareWorkspace({
 	removeDir = (dir) => rmSync(dir, { recursive: true, force: true }),
 }) {
 	ensureDir(jobsDir);
-	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false } = {}) {
+	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false, size = null } = {}) {
 		ensureDir(jobsDir);
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
 		// Issue #524: a THROW out of anything below leaves `jobDir` to nobody. The processor tears down only what
@@ -92,7 +93,7 @@ export function makePrepareWorkspace({
 		// covers the thrown ones, in one place for every kind, rather than in each preparer that can throw.
 		// A retry makes a fresh directory, so nothing is lost by removing this one.
 		try {
-			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio });
+			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size });
 		} catch (error) {
 			// GUARDED: a removal that fails (a busy mount, a permission flipped mid-job) must never replace the error
 			// that is the job's actual outcome. The directory is then left, which is what happened before this catch.
@@ -103,7 +104,7 @@ export function makePrepareWorkspace({
 		}
 	};
 
-	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio }) {
+	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size }) {
 		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
 		// mounted, and copied ONCE for every job kind because this is where local and forge converge.
 		//
@@ -137,6 +138,9 @@ export function makePrepareWorkspace({
 			...(jobUser ? { jobUser: { user: jobUser.user ?? null, home: jobUser.home ?? null } } : {}),
 			// Issue #429: the podman store the run's container lived in, for a podman run only.
 			...(typeof podmanStore === "string" && podmanStore !== "" ? { podmanStore } : {}),
+			// Issue #596: the size the run's container had, so a re-opened sandbox gets the same memory and CPU weight.
+			// Rebuilt (`recordedJobSize`), and only when the processor resolved one; a direct call stamps nothing.
+			...(recordedJobSize(size) ? { size: recordedJobSize(size) } : {}),
 		};
 		if (job.kind === "local") {
 			// Harness text above, operator DATA below: the fixed pointer line names /job/event.json so a

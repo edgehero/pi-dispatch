@@ -129,7 +129,7 @@ const defaultFs = { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, re
  * nothing was retained -- and on `null` the caller has nothing left to do, because every failure path
  * here removes `jobDir` itself. Retention must never leave debris behind.
  *
- * `prepared.sandbox` is `{ jobId, kind, image, backend, jobUser? }`, stamped by `makePrepareWorkspace` (`jobUser`
+ * `prepared.sandbox` is `{ jobId, kind, image, backend, jobUser?, podmanStore?, size? }`, stamped by `makePrepareWorkspace` (`jobUser`
  * only when the processor decided one, issue #341). Absent (a bare construction, a test, an unwired dispatcher)
  * means no retention, which keeps such a caller on exactly
  * the pre-feature path.
@@ -182,6 +182,10 @@ export function retainJobDir(prepared, { sandboxDir, retentionHours = null, fs =
 			// other manifest is the shape it always was. A sandbox refuses to open under another store, and the sweep
 			// holds the run while the podman it asks uses another, because that podman's `ps` answers empty (measured).
 			...(typeof meta.podmanStore === "string" ? { podmanStore: meta.podmanStore } : {}),
+			// Issue #596: the run's size (`{ memMiB, cpuCenti, source }`), so a sandbox reopens the run at it. Written only when
+			// known, so every other manifest is the shape it always was; a manifest without it reopens at the built-in 4g
+			// and 2, the size every run had before sizes existed.
+			...(meta.size && typeof meta.size === "object" ? { size: meta.size } : {}),
 			workspace: rebaseWorkspace(prepared.workspace, jobDir, dest),
 			createdAt: new Date(created).toISOString(),
 			// Issue #446: the deadline THIS worker's window gives the run, written down, so an opener whose own
