@@ -10,7 +10,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.0.3",
+    "@earendil-works/pi-coding-agent": "1.0.4",
     "@playwright/cli": "0.1.17"
   }
 }

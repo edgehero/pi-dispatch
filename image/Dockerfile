@@ -227,7 +227,7 @@ RUN chmod +x /entrypoint.sh \
 #
 # It must track the runner's pin in image/runner/package.json. The CI pin-check greps both, so they
 # cannot drift silently -- the same discipline the glab and gh pins get.
-ARG PI_VERSION=1.0.3
+ARG PI_VERSION=1.0.4
 LABEL dev.pi-dispatch.pi-version="${PI_VERSION}"
 
 # Which forges this image can actually SERVE -- read by the worker's pre-spend image preflight, on the same

@@ -169,7 +169,7 @@ import { matchesKey } from "./keys.mjs";
 // consumes. It grows only when a task actually uses a new member.
 export const USED_API = ["registerCommand", "registerTool", "sendMessage", "on"] as const;
 
-export const SUPPORTED_PI_VERSION = "1.0.3";
+export const SUPPORTED_PI_VERSION = "1.0.4";
 
 /**
  * The advisory for running on a pi that is not the tested pin (issue #96). Pure over its two inputs
