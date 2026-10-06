@@ -658,7 +658,7 @@ jobs:
 
       # --- INT-TRIGGERS-FILE-CONTRACT (run.excludeTools, issue #291) ---
       # A name the pinned pi would silently ignore must be refused BEFORE any spend, in-container too:
-      # pi consults excludeTools only through a Set filter, so an unknown name is a no-op with no
+      # pi matches excludeTools entries by exact name or `*` pattern, so an unknown name is a no-op with no
       # diagnostic -- the job would run WITH the tool the trigger says to remove and record a clean
       # exit. The worker's loader makes this branch unreachable for worker-built containers; this step
       # is the end-to-end proof that the ENTRYPOINT wires the env var to the refusal for the skew and

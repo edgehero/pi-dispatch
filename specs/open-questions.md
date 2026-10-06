@@ -224,6 +224,13 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
     file stays green and a changed one goes red with its name;
   - a new model field that feeds the request's sampling parameters, or a new caller of the Azure deployment
     resolver, fails `pinned-api.test.mjs` by name.
+- **Re-checked at the pi 1.0.4 bump (2026-10-06, issue #587, pull request #594)**: the Action on bump below was
+  carried out against the 1.0.4 tarball. The option set is unchanged, `excludeTools` is still `string[]` and
+  `allToolNames` is still the eight. What moved is how pi reads the list: each entry is now an exact name or a `*`
+  pattern (`createToolNameMatcher`). An exact name matches as before, and an unknown one still matches nothing,
+  silently, so the validation still stands. A pattern is not a built-in name, so the loader and the runner refuse
+  it like a misspelling. `tools` (which the runner never passes) now keeps MCP tools unless an entry starts with
+  `mcp__`; a job loads no built-in extension, so it has no MCP tools either way.
 - **From the automated bump on (issue #587)**: the Action on bump below is the review checklist in the body of every
   pull request `.github/workflows/pi-bump.yml` opens, so it is read at the moment it applies rather than remembered.
 - **Not a question — a scheduled landmine.** pi's changelog carries the breaking change under
@@ -1933,3 +1940,4 @@ adversarial passes did.
 | 2026-10-05 | Issue #587 (pi 1.0.3). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.0.3 tarball (option set, `excludeTools`, the eight tools, the silent ignore, and a resumed transcript's pending tools filtered by the exclusion); the checklist gains the sibling-package overrides and lockfile check, the lookup by identity instead of a nested path, the content hashes that replace version literals, and the two new needles (sampling fields, Azure deployment callers). **`OQ-018` AMENDED**: the host-pi canary is its own job, `host-pi mirrors survive latest pi (canary)`, not part of the admin canary's, and it is not required; re-checked at 1.0.3, every needle holds. Still ACCEPTED RISK. |
 | 2026-10-05 | Issue #587 (every new pi release as a draft pull request). **`OQ-005`**: the Action on bump is now the review checklist in the body of every pull request the pi bump workflow opens. Status UNCHANGED (closed). |
 | 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`OQ-011` AMENDED** in M6: pi 1.0.4's `--no-mcp` drops only `builtin:mcp` from what a child loads, so every `-e` path, the meter's included, stays. Re-checked in the 1.0.4 tarball and run against the bundle. The row's decision (no `-ne`) is UNCHANGED, checked. |
+| 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.0.4 tarball. The option set is unchanged and `excludeTools` is still `string[]`, but its entries are now exact names or `*` patterns. An unknown exact name still matches nothing, silently, so the membership validation stands, and it refuses a pattern as an unknown name. `tools` now keeps MCP tools unless an entry starts with `mcp__`; the runner passes no `tools` and a job loads no built-in extension, so nothing in a job moves. |
