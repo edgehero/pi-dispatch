@@ -47,7 +47,7 @@ export function excludableToolNames() {
  * Refuse any exclusion the pinned pi would silently ignore -- pre-spend, exit 2, never retried.
  *
  * pi matches `excludeTools` entries by exact name (a `*` entry is a pattern since pi 1.0.4, and is not a known
- * name, so it refuses here too), so an unknown name is a no-op with no error and
+ * name, so it is refused here too), so an unknown name is a no-op with no error and
  * no diagnostic: the job would run WITH the tool the trigger says to remove and record a clean exit,
  * which is the silent fail-open this field exists to close. The worker's loader makes this branch
  * unreachable for worker-built containers (it validates the same names at load); it exists for skew --
