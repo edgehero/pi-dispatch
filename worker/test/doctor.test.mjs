@@ -5402,6 +5402,11 @@ test("issue #596 (gate round 1): doctor names a peer that predates job sizes, fr
 	assert.ok(!current.some((c) => /predate/.test(c.label)));
 	const unsized = await collectChecks(env(plain), fleetSeams([{ name: "mini2", tz }]));
 	assert.ok(!unsized.some((c) => /predate/.test(c.label)), "no size written: nothing at risk yet");
+	// Gate round 2: an older worker refuses by the DECLARED version, so a hand-written version 3 with no size warns too.
+	const declared = join(dir, "declared.json");
+	writeFileSync(declared, JSON.stringify({ version: 3, limits: [{ scope: "project:shop", day: 5 }] }));
+	const bare = await collectChecks(env(declared), fleetSeams([{ name: "mini2", tz }]));
+	assert.ok(bare.some((c) => c.warn === true && /^mini2 predates job sizes/.test(c.label)), "a declared version 3 without a size is named");
 });
 
 test("PR #569's review: with THIS host's projects.json not loading, doctor fails on it and does not blame a healthy peer", async () => {
@@ -5766,15 +5771,20 @@ const infoPlan = (body) => ({ "docker info --format={{json .}}": { code: 0, outp
  */
 function liveOk({ uid = "1001" } = {}) {
 	let volumes = [];
+	// Issue #596, gate round 2: the probe's `--cpus`, applied as the runtime applies it (cpu.max is the quota over a
+	// 100000 period). Absent (no runtime CPU count in the fake), cpu.max stays `max`, as LIVE_STATUS has it.
+	let cpus = null;
 	return {
 		"docker run --name=pi-dispatch-live-probe-": (_cmd, args) => {
 			volumes = args.flatMap((a, i) => (args[i - 1] === "-v" ? [a] : []));
+			const flag = args.find((a) => a.startsWith("--cpus="));
+			cpus = flag ? Number(flag.slice("--cpus=".length)) : null;
 			return { code: 0, output: `${LIVE_ID}\n` };
 		},
 		"docker inspect --format={{json .Mounts}}": () => ({ code: 0, output: JSON.stringify(volumes.map((v) => ({ Type: "bind", Source: v.split(":")[0], Destination: v.split(":")[1], RW: v.split(":")[2] !== "ro" }))) }),
 		// A readable rootful daemon, so the job user is decided and the probe runs (issue #341).
 		...infoPlan(ROOTFUL_INFO),
-		[`docker exec ${LIVE_ID} sh -c cat /proc/1/status`]: { code: 0, output: LIVE_STATUS(uid) },
+		[`docker exec ${LIVE_ID} sh -c cat /proc/1/status`]: () => ({ code: 0, output: cpus === null ? LIVE_STATUS(uid) : LIVE_STATUS(uid).replace("cpu.max:max 100000", `cpu.max:${Math.round(cpus * 100000)} 100000`) }),
 		// Issue #345: the mount table inside the reading container, as rootful Docker shows it for the builder's argv.
 		[`docker exec ${LIVE_ID} cat /proc/self/mountinfo`]: () => ({ code: 0, output: `${["/", "/proc", "/dev", "/sys", "/usr/sbin/docker-init", "/etc/hosts", ...volumes.map((v) => v.split(":")[1])].map((p, i) => `${100 + i} 99 0:${i} / ${p} rw - overlay overlay rw`).join("\n")}\n` }),
 		[`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: (_cmd, args) => {
@@ -8016,16 +8026,22 @@ const mixedPinRun = async (scenario) => {
 	const cwd = tempDir("pi-mixed-pin-cwd-");
 	const jobs = tempDir("pi-mixed-pin-jobs-");
 	const env = podmanEnv({ PI_BACKENDS: "local,podman", PI_WORKER_NAME: "mini1", PI_TRIGGERS_FILE: triggers, PI_JOBS_DIR: jobs, ...(scenario === "green" ? { PI_EGRESS: "1", GITHUB_AUTH_SOURCE: "gh" } : {}) });
-	const { docker: _absent, ...podmanOnly } = podmanPlan({ image: scenario !== "podmanMissing" });
+	// Issue #596, gate round 2: the Podman 5.8.1 this pin models answers with its CPU count (`host.cpus`), as every one
+	// does, so the pin prints the ceiling a healthy host prints rather than a cpu_ceiling_unknown none does. The local
+	// count stays unknown on purpose: docker is absent ("absent") or answers with no body (below).
+	const info = PODMAN_INFO({ cpus: 4 });
+	const { docker: _absent, ...podmanOnly } = podmanPlan({ info, image: scenario !== "podmanMissing" });
 	const plan =
 		scenario === "absent"
-			? podmanPlan()
+			? podmanPlan({ info })
 			: {
 					...EGRESS_OK,
 					...podmanOnly,
 					"gh auth status": { code: 0, output: ghStatusOutput },
 					"gh auth token": { code: 0, output: "gho_x\n" },
-					// The facts read answers with no body, as it did when this pin was captured (issue #452 keeps it so).
+					// The facts read answers with no body, as it did when this pin was captured (issue #452 keeps it so). So its CPU
+					// count is genuinely unknown, as its job user and observations are (`unparseable` on each line), and the
+					// local cpu_ceiling_unknown warning below is the honest output for this daemon (issue #596, gate round 2).
 					"docker info --format={{json .}}": { code: 0, output: "" },
 					"docker info": 0,
 					"docker image inspect --format={{json": RUNNER_ENTRYPOINT,
@@ -8070,8 +8086,7 @@ const MIXED_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
-			"⚠ podman: `podman info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `podman info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8140,8 +8155,7 @@ const MIXED_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"⚠ local: `docker info` gave no answer that says its CPU count (docker-not-found), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
-			"⚠ podman: `podman info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `podman info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
 			"✓ podman: cgroup v2 controllers are delegated to this account (cpuset, cpu, io, memory, pids), so a job's pid, memory and cpu bounds are applied",
 			"✓ podman: SELinux does not confine containers here, so nothing a job mounts is relabelled",
@@ -8201,8 +8215,7 @@ const MIXED_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
-			"⚠ podman: `podman info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `podman info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8259,8 +8272,7 @@ const MIXED_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
-			"⚠ podman: `podman info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `podman info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -10084,6 +10096,9 @@ const dockerCanaryPinRun = async (scenario, t = null) => {
 		...green,
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
+	// Issue #596, gate round 2: the Docker 27.5.1 this pin models answers with its CPU count, as every Docker does, so the
+	// pin prints the ceiling a healthy host prints rather than a cpu_ceiling_unknown none does. Assigned, keeping its place.
+	plan["docker info --format={{json .}}"] = { code: 0, output: `${JSON.stringify({ ...JSON.parse(ROOTFUL_INFO), NCPU: 4 })}\n` };
 	// Assigned, not spread: `green` already carries this key, and a spread keeps the FIRST key's place with the last value.
 	if (scenario === "stale") plan["docker run --rm --name pi-dispatch-egress-probe-provider"] = EGRESS_CANARY_STALE_RUNNER;
 	if (scenario === "unfinished") plan["docker run --rm --name pi-dispatch-egress-probe-provider"] = { code: null, output: "" };
@@ -10165,8 +10180,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
-			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10187,7 +10201,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max 300000 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"✓ read back on local: egress holds (the provider was reached, an unlisted host was not, and plain HTTP off port 80 was refused)",
@@ -10240,8 +10254,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
-			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10262,7 +10275,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max 300000 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: the egress canary did not run all three probes (see the egress lines above)",
@@ -10321,8 +10334,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
-			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10343,7 +10355,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max 300000 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
@@ -10406,8 +10418,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
-			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10428,7 +10439,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max 300000 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
@@ -10491,8 +10502,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
-			"⚠ local: `docker info` gave no CPU count, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
-			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
+			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10513,7 +10523,7 @@ const DOCKER_CANARY_PIN = {
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
 			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
-			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max max 100000, cpu.weight 79 (--cpu-shares=2048))",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296, memory.swap.max 0, cpu.max 300000 100000, cpu.weight 79 (--cpu-shares=2048))",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
@@ -12091,11 +12101,11 @@ test("doctor's read-backs and the podman canary are built at the deployment's de
 	assert.equal(egressCanaryProbeArgs({ slug: "provider", pid: 1, network: "n", proxy: "p", image: "pi-job:latest", url: "https://x", size: { memMiB: 1024, cpuCenti: 50 } }).some((a) => a.startsWith("--memory")), false);
 });
 
-test("doctor names each peer that predates job sizes once this host's file carries one, and nothing otherwise (#596)", () => {
+test("doctor names each peer that predates job sizes once this host's file is version 3, and nothing otherwise (#596)", () => {
 	const peers = [{ name: "a", limitsVersion: "3" }, { name: "b" }, { name: "c", limitsVersion: "2" }, { name: "d", limitsVersion: "4" }];
 	const [line, ...rest] = fleetSizeChecks(3, peers);
 	assert.deepEqual([rest.length, line.ok, line.warn], [0, false, true]);
-	assert.match(line.label, /^b, c predate job sizes \(scoped-limits version 3\), while this host's file carries one: a running worker from before keeps its last good file and runs the project's jobs at the default size/);
+	assert.equal(line.label, "b, c predate job sizes (scoped-limits version 3), while this host's file is version 3: a running worker from before keeps its last good file, so neither the size nor any later edit to the file (job counts, concurrent, dollar caps) applies on it until it is upgraded and restarted, and it refuses the file at its next start");
 	assert.match(line.fix, /upgrade and restart every worker/);
 	assert.match(fleetSizeChecks(3, [{ name: "b" }])[0].label, /^b predates job sizes/);
 	assert.deepEqual(fleetSizeChecks(2, peers), [], "no size in the file: nothing at risk yet");

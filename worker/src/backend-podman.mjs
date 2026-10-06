@@ -37,7 +37,7 @@ import { buildPodmanRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, makeEgressPreflight } from "./egress.mjs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { DAEMON_FACTS_TIMEOUT_MS } from "./job-user.mjs";
+import { DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FACTS_MAX_AGE_MS } from "./job-user.mjs";
 import { PODMAN_INFO_ARGS, parsePodmanInfo } from "./daemon-facts.mjs";
 
 // Moved to the leaf `daemon-facts.mjs` (issue #452, gate round 3) and re-exported, so every importer keeps its path.
@@ -106,25 +106,49 @@ export function makePodmanInfoReader({ run = (args) => execDockerBounded(args, {
 const CACHED = Symbol("podman-info-cached");
 
 /**
- * `readInfo` with its first ANSWERED result kept, and concurrent callers sharing one read. An unanswered read is never
- * kept: a Podman that timed out once must be asked again, or every later job would retry on a stale failure. Idempotent,
- * so the boot wiring can wrap a reader once and hand the same one to the bundle and to its own boot read.
+ * `readInfo` with its last ANSWERED result kept for `maxAgeMs`, and concurrent callers sharing one read. An unanswered
+ * read is never kept: a Podman that timed out once must be asked again, or every later job would retry on a stale
+ * failure. Idempotent, so the boot wiring can wrap a reader once and hand the same one to the bundle and to its own boot
+ * read (a second wrap keeps the first wrap's clock and age).
+ *
+ * The age (issue #596, gate round 2) is the job-user resolver's (`JOB_USER_FACTS_MAX_AGE_MS`), for the same reason:
+ * this read carries the host's CPU count that every job's `--cpus` ceiling is built from, and a raised or lowered count
+ * must be seen without a restart. STALE WHILE ERROR, also as there: a read past the age that does not answer keeps
+ * serving the kept answer until a read does, logging `podman_info_stale` with the failed read's reason once per run of
+ * failures, because the age exists to see a change and must not turn one slow `podman info` into a failed pickup.
+ * Podman has no `invalidate`: it accepts a `--cpus` above the host's count (4.9.3 and 5.8.1, measured), so no job
+ * refusal proves the kept count wrong.
  */
-export function cachedPodmanInfo(readInfo) {
+export function cachedPodmanInfo(readInfo, { now = Date.now, maxAgeMs = JOB_USER_FACTS_MAX_AGE_MS, log = () => {} } = {}) {
 	if (readInfo?.[CACHED]) return readInfo;
 	let kept = null;
+	let keptAt = 0;
+	let staleSaid = false;
 	let inFlight = null;
 	const cached = async () => {
-		if (kept) return kept;
+		if (kept && now() - keptAt < maxAgeMs) return kept;
 		if (inFlight) return inFlight;
 		inFlight = (async () => {
+			let read;
 			try {
-				const read = await readInfo();
-				if (read?.answered === true && read.info) kept = read;
-				return read;
+				read = await readInfo();
 			} catch {
-				return { answered: false, reason: "spawn-failed", transient: true };
+				read = { answered: false, reason: "spawn-failed", transient: true };
 			}
+			if (read?.answered === true && read.info) {
+				kept = read;
+				keptAt = now();
+				staleSaid = false;
+				return read;
+			}
+			if (kept) {
+				if (!staleSaid) {
+					staleSaid = true;
+					log("podman_info_stale", { reason: read?.reason ?? "unanswered", ageMs: now() - keptAt });
+				}
+				return kept;
+			}
+			return read;
 		})();
 		try {
 			return await inFlight;
@@ -1081,7 +1105,7 @@ export function makePodmanBackend(opts = {}) {
 	if (reap !== undefined && typeof reap !== "function") throw new Error(`backend "${PODMAN_BACKEND}": reap must be a function (makePodmanReaper)`);
 	const spawnSeam = spawnFn ? { spawnFn } : {};
 	const execSeam = exec ? { exec } : spawnFn ? { exec: execViaSpawn(spawnFn) } : {};
-	const info = cachedPodmanInfo(readInfo);
+	const info = cachedPodmanInfo(readInfo, { log });
 
 	const runContainer = makeRunContainerFn({
 		image,

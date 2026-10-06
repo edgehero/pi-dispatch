@@ -249,8 +249,10 @@ memory, light ones less.
   size.
 - **Upgrade and restart every worker before you write a size.** An older worker refuses a version 3 file only when
   it starts. One that is already running keeps its last good file when the file changes (it logs
-  `scoped_limits_reload_invalid`) and keeps running the project's jobs at the default size, without saying so on
-  the job. On a fleet, doctor warns about each worker that predates sizes once this host's file carries one.
+  `scoped_limits_reload_invalid`), so neither the size nor any later edit to the file (job counts, `concurrent`,
+  dollar caps) applies on it until it is upgraded and restarted, and nothing on its jobs says so. On a fleet, doctor
+  warns about each worker that predates sizes once this host's file is version 3, including a file that only
+  declares `"version": 3` with no size in it.
 - The worker reads the size when it picks a job up, so an edit applies to the project's next jobs. A running job
   keeps its size. A retry or a deferred job is a new pickup: it takes the size in force then, not the size of its
   first attempt. Each run record says the size the job got and where it came from (`size` in the record).

@@ -396,3 +396,74 @@ test("issue #596: a cached decision is read again after its age or on invalidate
 	assert.equal(reads, 3, "and cached again");
 	assert.equal(JOB_USER_FACTS_MAX_AGE_MS, 10 * 60_000, "the default age is the ten minutes the design entry names");
 });
+
+test("issue #596 gate round 2: an expired entry whose re-read fails keeps serving the last answer, said once per run; an invalidated one does not", async () => {
+	let reads = 0;
+	let t = 1_000_000;
+	const answer = (ncpu) => ({ answered: true, facts: { ...parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, NCPU: ncpu })).facts } });
+	let next = answer(14);
+	const said = [];
+	const readFacts = async () => {
+		reads++;
+		if (next === "throw") throw new Error("spawn EAGAIN");
+		return next;
+	};
+	const resolve = makeJobUserResolver({ readFacts, platform: "linux", euid: 1234, egid: 1234, stat: () => ({ uid: 0, gid: 2375 }), now: () => t, maxAgeMs: 600_000, log: (event, fields) => said.push([event, fields]) });
+	const first = await resolve({ endpoint: LOCAL, key: "k1" });
+	assert.equal(first.facts.hostCpus, 14);
+	// Expiry, re-read succeeds: the new answer.
+	next = answer(10);
+	t += 600_000;
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).facts.hostCpus, 10, "expiry re-read answered: the new count");
+	assert.equal(reads, 2);
+	// Expiry, re-read times out: the previous good answer, not an unavailable pickup.
+	next = { answered: false, reason: "timeout", transient: true };
+	t += 600_000;
+	const stale = await resolve({ endpoint: LOCAL, key: "k1" });
+	assert.equal(stale.decision.mode, "worker", "the cached decision, not `unknown`");
+	assert.equal(stale.facts.hostCpus, 10);
+	// An unreadable reply (transient false, which alone would refuse `runtime-unreadable`) and a throw are failures too.
+	next = { answered: false, reason: "unparseable", transient: false };
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).decision.mode, "worker");
+	next = "throw";
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).facts.hostCpus, 10, "a throwing re-read serves the last answer");
+	assert.equal(reads, 5, "each pickup past the age asks again");
+	assert.deepEqual(said, [["job_user_facts_stale", { reason: "timeout", ageMs: 600_000 }]], "said once per run of failures, with the reason");
+	// The stale answer is never served for another key (another endpoint state).
+	next = { answered: false, reason: "timeout", transient: true };
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k2" })).decision.mode, "unknown", "another endpoint decides as a first read");
+	// A read that answers ends the run; the next failure is said again.
+	next = answer(10);
+	await resolve({ endpoint: LOCAL, key: "k1" });
+	next = { answered: false, reason: "daemon-unreachable", transient: true };
+	t += 600_000;
+	await resolve({ endpoint: LOCAL, key: "k1" });
+	assert.deepEqual(said.at(-1), ["job_user_facts_stale", { reason: "daemon-unreachable", ageMs: 600_000 }]);
+	assert.equal(said.length, 2);
+	// invalidate (the job path proved the count wrong) drops the value: a failed fresh read is unavailable, NOT the stale
+	// count that Docker just refused, and a throw propagates as it does on a first read.
+	resolve.invalidate();
+	const after = await resolve({ endpoint: LOCAL, key: "k1" });
+	assert.equal(after.decision.mode, "unknown", "invalidated, then a failed read: unavailable");
+	assert.equal(after.facts, null);
+	next = "throw";
+	await assert.rejects(resolve({ endpoint: LOCAL, key: "k1" }), /EAGAIN/);
+	assert.equal(said.length, 2, "an invalidated failure is not a stale serve");
+	next = answer(8);
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).facts.hostCpus, 8, "and the next answered read is the fresh count");
+});
+
+test("issue #596 gate round 2: invalidate() during an in-flight re-read is honoured by that pickup", async () => {
+	let t = 0;
+	let release;
+	let next = { answered: true, facts: { ...parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, NCPU: 4 })).facts } };
+	const resolve = makeJobUserResolver({ readFacts: async () => (next === "wait" ? new Promise((r) => (release = r)) : next), platform: "linux", euid: 1234, egid: 1234, stat: () => ({ uid: 0, gid: 2375 }), now: () => t, maxAgeMs: 100 });
+	await resolve({ endpoint: LOCAL, key: "k1" });
+	next = "wait";
+	t += 100;
+	const pending = resolve({ endpoint: LOCAL, key: "k1" });
+	await new Promise((r) => setImmediate(r));
+	resolve.invalidate();
+	release({ answered: false, reason: "timeout", transient: true });
+	assert.equal((await pending).decision.mode, "unknown", "the refused count is not served after an invalidate");
+});
