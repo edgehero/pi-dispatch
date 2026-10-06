@@ -317,7 +317,7 @@ test("an unbidden 137 (aborted:false, kernel OOM) throws InfraRetry -- infra sta
 
 // Issue #596: a runner killed for memory. CONFIRMED only by the image supervisor's signed line (`exitOomKilled`, read
 // off a line the per-job key verified) beside the container's own unbidden 137.
-const USED = { memPeak: 4294967296, oomKills: 1, memSomeUsec: 9, memFullUsec: 4, cpuUsec: 1000, throttledUsec: 0, throttled: 0, pidsPeak: 30 };
+const USED = { memPeak: 4294967296, swapPeak: 0, oomKills: 1, memSomeUsec: 9, memFullUsec: 4, cpuUsec: 1000, throttledUsec: 0, throttled: 0, pidsPeak: 30 };
 // The 4g bound every job runs at (containerSpec's default), in bytes: the peak above is AT it, as a cgroup OOM's is.
 const LIMIT_4G = 4 * 1024 ** 3;
 const oomRun = (over = {}) => async () => ({ code: 137, aborted: false, exitOomKilled: true, memoryLimit: LIMIT_4G, exitAuth: "verified", resources: USED, ...over });

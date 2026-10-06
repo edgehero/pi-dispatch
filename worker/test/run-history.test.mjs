@@ -1522,7 +1522,7 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	// runner's own capExitMessage is imported here (outcome.mjs has no imports of its own), so this test
 	// exercises the function run-job.mjs calls, through the real sink.
 	const { capExitMessage, EXIT_MESSAGE_MAX_CHARS } = await import("../../image/runner/src/outcome.mjs");
-	assert.equal(EXIT_MESSAGE_MAX_CHARS, 2000, "the literal is pinned here too: this test's margin is measured against it");
+	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1900, "the literal is pinned here too: this test's margin is measured against it");
 
 	// The rest of the line as run-job.mjs builds it, at its WORST CASE, so the budget is not flattered:
 	// the maximal ledger usage-meter.test.mjs builds (8 named rows of 64-character provider and model ids
@@ -1851,7 +1851,7 @@ test("makeSettledRecord reports every record it found and refused, with its sour
 // Issue #596: what the container used, and the supervisor's out-of-memory report
 // ---------------------------------------------------------------------------------------------
 
-const FULL = { memPeak: 602259456, oomKills: 1, memSomeUsec: 12, memFullUsec: 3, cpuUsec: 50062, throttledUsec: 0, throttled: 0, pidsPeak: 19 };
+const FULL = { memPeak: 602259456, swapPeak: 0, oomKills: 1, memSomeUsec: 12, memFullUsec: 3, cpuUsec: 50062, throttledUsec: 0, throttled: 0, pidsPeak: 19 };
 const exitWith = (fields) => `noise\n${JSON.stringify({ event: "exit", jobId: "j", code: 0, ...fields })}\n`;
 
 test("RESOURCE_KEYS is the runner's own list, in its order (the worker cannot import the runner at run time)", () => {

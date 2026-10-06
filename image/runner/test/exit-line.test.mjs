@@ -106,7 +106,7 @@ test("terminate writes a terminated line with the caller's counts and exits 143;
 
 test("the writer reads `resources` at write time, last of the fields and signed, and omits it when nothing was read (issue #596)", () => {
 	const order = [];
-	const used = { memPeak: 5, oomKills: 0, memSomeUsec: null, memFullUsec: null, cpuUsec: 9, throttledUsec: 0, throttled: 0, pidsPeak: 3 };
+	const used = { memPeak: 5, swapPeak: 0, oomKills: 0, memSomeUsec: null, memFullUsec: null, cpuUsec: 9, throttledUsec: 0, throttled: 0, pidsPeak: 3 };
 	const out = [];
 	const writer = createExitWriter({
 		key: KEY,

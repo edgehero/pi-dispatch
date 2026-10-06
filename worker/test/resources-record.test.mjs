@@ -16,7 +16,7 @@ if (!mod && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
 }
 const skip = mod ? false : `bullmq not installed (node ${process.version} < 22.19.0); CI runs these`;
 
-const USED = { memPeak: 2147483648, oomKills: 0, memSomeUsec: 1, memFullUsec: 0, cpuUsec: 600000000, throttledUsec: 5, throttled: 1, pidsPeak: 40 };
+const USED = { memPeak: 2147483648, swapPeak: 0, oomKills: 0, memSomeUsec: 1, memFullUsec: 0, cpuUsec: 600000000, throttledUsec: 5, throttled: 1, pidsPeak: 40 };
 
 function harness(runContainer, { cancelReq = undefined } = {}) {
 	const records = [];

@@ -19,6 +19,7 @@ const V2 = {
 	"/proc/self/cgroup": "0::/\n",
 	[`${CGROUP_ROOT}/cgroup.controllers`]: "cpuset cpu io memory hugetlb pids rdma\n",
 	[`${CGROUP_ROOT}/memory.peak`]: "602259456\n",
+	[`${CGROUP_ROOT}/memory.swap.peak`]: "1048576\n",
 	[`${CGROUP_ROOT}/memory.events`]: "low 0\nhigh 0\nmax 218\noom 10\noom_kill 1\noom_group_kill 0\n",
 	[`${CGROUP_ROOT}/memory.pressure`]: "some avg10=0.00 avg60=0.00 avg300=0.00 total=1234\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=567\n",
 	[`${CGROUP_ROOT}/cpu.stat`]: "usage_usec 50062\nuser_usec 7964\nsystem_usec 42098\nnr_periods 3\nnr_throttled 2\nthrottled_usec 900\nnr_bursts 0\nburst_usec 0\n",
@@ -28,7 +29,7 @@ const V2 = {
 test("reads every key off a cgroup v2 job, in RESOURCE_KEYS order", () => {
 	const r = readCgroupUsage({ fs: fakeFs(V2) });
 	assert.deepEqual(Object.keys(r), [...RESOURCE_KEYS]);
-	assert.deepEqual(r, { memPeak: 602259456, oomKills: 1, memSomeUsec: 1234, memFullUsec: 567, cpuUsec: 50062, throttledUsec: 900, throttled: 2, pidsPeak: 6 });
+	assert.deepEqual(r, { memPeak: 602259456, swapPeak: 1048576, oomKills: 1, memSomeUsec: 1234, memFullUsec: 567, cpuUsec: 50062, throttledUsec: 900, throttled: 2, pidsPeak: 6 });
 });
 
 test("only oom_kill is read from memory.events: under crun the job's leaf shows oom 0 and max 0 beside a real kill", () => {
@@ -43,7 +44,9 @@ test("a missing file is null for its keys and nothing else", () => {
 	const files = { ...V2 };
 	delete files[`${CGROUP_ROOT}/memory.pressure`];
 	delete files[`${CGROUP_ROOT}/pids.peak`];
+	delete files[`${CGROUP_ROOT}/memory.swap.peak`];
 	const r = readCgroupUsage({ fs: fakeFs(files) });
+	assert.equal(r.swapPeak, null, "a kernel or venue without memory.swap.peak: null, never zero");
 	assert.equal(r.memSomeUsec, null);
 	assert.equal(r.memFullUsec, null);
 	assert.equal(r.pidsPeak, null);
@@ -88,7 +91,7 @@ test("cgroup v1 reads the cheap half and leaves the rest null", () => {
 		[`${CGROUP_ROOT}/cpu/cpu.stat`]: "nr_periods 10\nnr_throttled 3\nthrottled_time 7000\n",
 	};
 	const r = readCgroupUsage({ fs: fakeFs(files) });
-	assert.deepEqual(r, { memPeak: 123456, oomKills: 2, memSomeUsec: null, memFullUsec: null, cpuUsec: 5000, throttledUsec: 7, throttled: 3, pidsPeak: null });
+	assert.deepEqual(r, { memPeak: 123456, swapPeak: null, oomKills: 2, memSomeUsec: null, memFullUsec: null, cpuUsec: 5000, throttledUsec: 7, throttled: 3, pidsPeak: null });
 });
 
 test("no cgroup filesystem at all is null, and nothing a filesystem does makes it throw", () => {
