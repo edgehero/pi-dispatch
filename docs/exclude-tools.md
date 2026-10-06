@@ -25,6 +25,9 @@ strictness is not pedantry: pi silently ignores unknown names in its exclusion l
 `"Bash"` would exclude nothing while your file reads as though it did. A field that can be quietly
 wrong about a permission is worse than no field, so the loader refuses what pi would ignore.
 
+Since pi 1.0.4, pi's own exclusion list also takes `*` patterns (`mcp__*`). This field does not: a
+pattern is not a built-in tool name, so it is refused like a misspelling. Name each tool.
+
 One nuance worth knowing: at the pinned version only `read`, `bash`, `edit` and `write` are ACTIVE by
 default; `powershell`, `grep`, `find` and `ls` are registered but inactive until something activates them.
 Excluding an inactive tool still matters, because the exclusion removes it from the registry, so

@@ -269,6 +269,9 @@ Any trigger type can name the model its jobs run on, and how many turns a job ma
 
   `opencode-go/qwen3.7-plus` and `opencode-go/qwen3.8-max` keep their ids and moved from openai-completions to
   anthropic-messages. 57 models changed price; a run is priced at the rates of the pi it ran on.
+
+  pi 1.0.4 removed two more ids, both on `openrouter`: `qwen/qwen3.8-27b:free` and `stealth/space-bunny-alpha`.
+  14 models changed price (12 on `openrouter`, 2 on `vercel-ai-gateway`).
 - `"model"` is that provider's model id. Case is kept as you wrote it.
 - `"maxTurns"` is a whole number of 1 or more.
 

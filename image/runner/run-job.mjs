@@ -159,7 +159,7 @@ async function main() {
 	// `--internal` network (issue #427). Free, and a no-op unless NODE_USE_ENV_PROXY=1 reached the container.
 	restoreEnvProxyDispatcher();
 	// Same moment as the mount asserts above, same exit code, and the same silent-skip hazard behind it
-	// (issue #291): pi consults excludeTools only through a Set filter, so an unknown name is a no-op
+	// (issue #291): pi matches excludeTools entries by exact name or `*` pattern, so an unknown name is a no-op
 	// with no diagnostic -- the job would run WITH the tool the trigger says to remove. Free, pre-spend,
 	// and before the prompt is even read; the entry is reported verbatim so a padded name reads as itself.
 	if (cfg.excludeTools.length > 0) assertExcludeToolsKnown(cfg.excludeTools);
