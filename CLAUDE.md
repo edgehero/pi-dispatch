@@ -191,8 +191,9 @@ and merges it.
   Put the new value in the same commit as any fix.
 - **Fixes go on `chore/pi-bump`,** as ordinary signed-off commits, and the workflow never overwrites them. It rebuilds
   the branch only while it holds nothing but its own commit: one commit on the merge base, subject
-  `chore(pi): run on pi X`, by Rob Boerman, changing only the pin files and the lockfile (`fixupsOn` in
-  `pi-bump.mjs`). Anything else is a fix. Then a run for a newer pi pushes nothing and comments once per version
+  `chore(pi): run on pi X`, by Rob Boerman, committed as `robboerman+pi-bump@live.nl` (only the workflow uses that
+  committer), changing only the pin files and the lockfile (`fixupsOn` in `pi-bump.mjs`). Anything else is a fix,
+  including the bump commit amended, rebased or squashed, which rewrites its committer. Then a run for a newer pi pushes nothing and comments once per version
   on the pull request ("pi Y is out. ... Merge or close it, and the next run bumps to Y."). There is no flag to
   force it, also not on a manual run: merge or close the pull request, or delete the branch. A branch left without
   a pull request is rebuilt only when a closed pull request still holds its tip (GitHub keeps those commits);

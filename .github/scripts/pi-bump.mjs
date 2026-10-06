@@ -80,6 +80,11 @@ export const titleFor = (version) => `chore(pi): run on pi ${version}`;
 
 /** Who the workflow commits as. The workflow's `git config` lines are held to this by worker/test/pi-bump.test.mjs. */
 export const BUMP_AUTHOR = Object.freeze({ name: "Rob Boerman", email: "robboerman@live.nl" });
+/**
+ * The committer the workflow alone commits as. Amending, rebasing, squashing, cherry-picking and GitHub's "update
+ * branch" all rewrite the committer, so a bump commit a person reworked no longer reads as the workflow's own.
+ */
+export const BUMP_COMMITTER = Object.freeze({ name: "Rob Boerman", email: "robboerman+pi-bump@live.nl" });
 /** The subject of the workflow's own bump commit: titleFor of an exact version, and nothing else. */
 const BUMP_SUBJECT_RE = /^chore\(pi\): run on pi (0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -293,7 +298,7 @@ export function branchTip(refs) {
  * What BRANCH carries beyond the workflow's own bump commit, or [] when it carries only that commit. `ahead` is a
  * `GET /repos/{repo}/compare/{base}...{tip}` answer: the commits on the branch since its merge base with the base, and
  * the files they change. The workflow's commit is exactly one commit on that merge base, with the subject titleFor
- * makes, by BUMP_AUTHOR, changing only BUMP_PATHS. Anything else is a person's work (a fix, a merge of the base, a
+ * makes, by BUMP_AUTHOR, committed as BUMP_COMMITTER, changing only BUMP_PATHS. Anything else is a person's work (a fix, a merge of the base, a
  * regenerated table), and the workflow does not overwrite it.
  */
 export function fixupsOn(ahead) {
@@ -306,6 +311,8 @@ export function fixupsOn(ahead) {
 		const author = commit?.commit?.author ?? {};
 		if (!BUMP_SUBJECT_RE.test(subject)) found.push(`a commit on ${BRANCH} is not a bump commit by its subject`);
 		if (author.name !== BUMP_AUTHOR.name || author.email !== BUMP_AUTHOR.email) found.push(`a commit on ${BRANCH} is not by the bump's author`);
+		const committer = commit?.commit?.committer ?? {};
+		if (committer.name !== BUMP_COMMITTER.name || committer.email !== BUMP_COMMITTER.email) found.push(`a commit on ${BRANCH} was not committed by the workflow`);
 	}
 	if (files.length === 0) found.push(`${BRANCH} lists no changed file`);
 	for (const file of files) if (file?.status !== "modified" || !BUMP_PATHS.includes(file?.filename)) found.push(`${BRANCH} changes a file a bump does not write`);
