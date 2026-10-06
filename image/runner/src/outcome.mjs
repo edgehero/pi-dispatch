@@ -374,12 +374,14 @@ export async function loadRetryPredicate({ module = null, candidates = [], load 
  * record loses the label. The budget is spent on the JSON-escaped form, not on the raw string, because
  * escaping is what the tail sees: a quote or a newline costs two characters and a control byte six, so a
  * raw-length cap of 2000 let a body of control bytes serialize to 12000 and lose the label anyway.
- * 1900 escaped characters plus the worst-case ledger, context, session and resources keeps the whole line
+ * 1800 escaped characters plus the worst-case ledger, context, session and resources keeps the whole line
  * under 6 KiB, a 2 KiB margin inside the tail; worker/test/run-history.test.mjs measures exactly that line.
- * It was 2000 until issue #596's `swapPeak` took the worst-case line 11 characters past 6 KiB: the margin is
- * the tail's, so the diagnostic message gives way rather than the label's safety.
+ * It was 2000 until issue #596's `swapPeak` took the worst-case line past 6 KiB, then 1900 until the test was
+ * found measuring the line unsigned and with a shorter reason than the longest: signed, at the longest runner
+ * policy reason, 1900 left 9 characters. The margin is the tail's, so the diagnostic message gives way rather
+ * than the label's safety.
  */
-export const EXIT_MESSAGE_MAX_CHARS = 1900;
+export const EXIT_MESSAGE_MAX_CHARS = 1800;
 
 /**
  * The outcome with its `message` capped for the exit line. Every exit-line path goes through this.

@@ -1522,7 +1522,7 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	// runner's own capExitMessage is imported here (outcome.mjs has no imports of its own), so this test
 	// exercises the function run-job.mjs calls, through the real sink.
 	const { capExitMessage, EXIT_MESSAGE_MAX_CHARS } = await import("../../image/runner/src/outcome.mjs");
-	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1900, "the literal is pinned here too: this test's margin is measured against it");
+	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1800, "the literal is pinned here too: this test's margin is measured against it");
 
 	// The rest of the line as run-job.mjs builds it, at its WORST CASE, so the budget is not flattered:
 	// the maximal ledger usage-meter.test.mjs builds (8 named rows of 64-character provider and model ids
@@ -1543,7 +1543,11 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 		resources: Object.fromEntries(RESOURCE_KEYS.map((key) => [key, Number.MAX_SAFE_INTEGER])),
 	};
 	const jobId = "repeat:very-long-schedule-name:1767225600000";
-	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId, ...fields, ...rest })}\n`;
+	// Every keyed line also ends in `,"auth":"<64 hex>"` (signExitLine): a 64-character field stands in for
+	// it, because the budget is the SIGNED line's and a test of the unsigned one flattered it by 75 characters.
+	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId, ...fields, ...rest, auth: "f".repeat(64) })}\n`;
+	// The longest runner policy reason, so the label measured is the widest one that can head the line.
+	const reason = [...RUNNER_POLICY_REASONS].reduce((a, b) => (b.length > a.length ? b : a));
 
 	const drive = async (exitText) => {
 		const fs = makeFakeFs({ stream: makeFakeStream() });
@@ -1557,13 +1561,13 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 
 	// An HTML page, and the body that escapes worst: every control byte serializes to six characters.
 	for (const body of [`<html><body>${'<p class="x">Forbidden.</p>\n'.repeat(600)}</body></html>`, "\u0001".repeat(16000)]) {
-		const outcome = { code: 2, reason: "provider-auth-refused", message: `403 ${body}` };
+		const outcome = { code: 2, reason, message: `403 ${body}` };
 		assert.ok(outcome.message.length > 16000);
 		const capped = line(capExitMessage(outcome));
 		// 8 KiB is the tail; the line must stay under 6 KiB of it, so a later field (a ledger column, a new
 		// exit-line key) has 2 KiB to grow into before the label is at risk again.
 		assert.ok(capped.length <= 6 * 1024, `the worst-case capped exit line is ${capped.length} characters`);
-		assert.equal(await drive(capped), "provider-auth-refused");
+		assert.equal(await drive(capped), reason);
 		// The premise, so this test cannot pass for a reason other than the cap: uncapped, the label is lost.
 		assert.equal(await drive(line(outcome)), null);
 	}
