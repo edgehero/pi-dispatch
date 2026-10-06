@@ -207,9 +207,16 @@ export function jobUserRefusal(causeOrDecision) {
  * NOT cached: `unknown`, `unmappable` `runtime-unreadable`, and any decision made without an answered read (an `image`
  * decided on macOS while the daemon was still starting). Each describes an answer rather than a daemon, and a cached one
  * would retry or refuse every later job on that endpoint, or leave the observations unread, until the worker restarted.
- * A cached decision is otherwise kept until the endpoint state changes: a daemon reconfigured behind an unchanged
- * endpoint (rootful to rootless on one socket path) is read again only after a restart, a residual the design entry names.
+ * A cached decision is otherwise kept until the endpoint state changes or for `maxAgeMs` (issue #596), whichever comes
+ * first, and `resolveJobUser.invalidate()` drops it at once. The age exists for the facts that move behind an unchanged
+ * endpoint: Docker Desktop's VM resized to another CPU count changes every job's `--cpus` ceiling, and a daemon
+ * reconfigured on one socket path (rootful to rootless) changes the job user. Ten minutes bounds how long either goes
+ * unseen; a lowered CPU count is caught sooner, because Docker refuses the stale `--cpus` and the job path invalidates
+ * (`cpu_ceiling_stale`, `run-container.mjs`). A read past the age is a fresh read: one that does not answer decides as
+ * the first read on a new endpoint does.
  */
+export const JOB_USER_FACTS_MAX_AGE_MS = 10 * 60_000;
+
 export function makeJobUserResolver({
 	readFacts,
 	platform = process.platform,
@@ -217,12 +224,17 @@ export function makeJobUserResolver({
 	euid = process.geteuid?.(),
 	egid = process.getegid?.(),
 	stat = statSync,
+	now = Date.now,
+	maxAgeMs = JOB_USER_FACTS_MAX_AGE_MS,
 } = {}) {
 	let cached = null;
 	const inFlight = new Map();
+	resolveJobUser.invalidate = () => {
+		cached = null;
+	};
 	return resolveJobUser;
 	async function resolveJobUser({ endpoint, key }) {
-		if (cached && cached.key === key) return cached.value;
+		if (cached && cached.key === key && now() - cached.at < maxAgeMs) return cached.value;
 		if (inFlight.has(key)) return inFlight.get(key);
 		const work = (async () => {
 			// Asked on EVERY platform and endpoint, although a VM-backed platform or an endpoint on another machine decides
@@ -239,7 +251,7 @@ export function makeJobUserResolver({
 			const value = { decision, facts: daemon?.answered ? daemon.facts : null, daemon, socket };
 			// Cached only for an ANSWERED read: an `image` decided on a VM-backed platform while its daemon was still starting
 			// must not pin "not read" for the runtime observations until the endpoint changes.
-			if (decision.mode !== "unknown" && decision.cause !== "runtime-unreadable" && daemon?.answered === true) cached = { key, value };
+			if (decision.mode !== "unknown" && decision.cause !== "runtime-unreadable" && daemon?.answered === true) cached = { key, value, at: now() };
 			return value;
 		})();
 		inFlight.set(key, work);

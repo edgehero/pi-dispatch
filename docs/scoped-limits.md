@@ -224,11 +224,17 @@ memory, light ones less.
 
 - `memory`: the memory each job gets, a whole number of megabytes or gigabytes in lower case: `"512m"`,
   `"1536m"`, `"8g"`. At least `512m`, at most `1024g`. The file keeps one spelling: `"1024m"` is written back as
-  `"1g"`. A job gets **no swap beyond its memory**: a job that needs more needs a bigger size. When a job runs out,
-  it ends `oom-killed` and is not retried ([insights](insights.md)).
+  `"1g"`. A job gets **no swap beyond its memory** wherever the runtime enforces swap limits: a job that needs more
+  needs a bigger size. Docker with `SwapLimit` false (no swap accounting in the kernel) drops that bound; doctor
+  warns, and the worker logs `size_bound_unenforced` for each job it runs there. When a job runs out, it ends
+  `oom-killed` and is not retried ([insights](insights.md)).
 - `cpus`: a number with at most two decimals, at least `0.25`: `0.5`, `2`, `1.25`. It is a **weight, not a cap**.
-  When jobs compete for CPU, each gets CPU in proportion to its `cpus`. When the host is idle, any job may use the
-  idle cores. One core is always kept for the host when it has four or more, so no job can take it.
+  When jobs compete for CPU, a job with more `cpus` gets more CPU than one with fewer. The split is exactly in
+  proportion only on older container runtimes (runc 1.1, crun 1.14: sizes 3:1 got about 3:1, measured); current
+  ones compress it (runc 1.5, crun 1.27: sizes 3:1 got about 2.4:1). When the host is idle, any job may use the
+  idle cores. No single job may use more than the host's cores minus one (when it has four or more). That bound is
+  per job: several busy jobs together can still use every core. A reserve that holds across all jobs comes with the
+  host budget of a later release.
 - A row may set only a size, only one of the two, or a size beside its caps. A field the row does not set comes
   from `PI_JOB_MEMORY` and `PI_JOB_CPUS` in `.env`, which default to `4g` and `2`. A bad value there stops the
   worker at boot with the reason.
@@ -238,12 +244,17 @@ memory, light ones less.
   most of one host the project's running jobs may hold, and `minJobs` how many of its jobs a host makes room for
   first. `minJobs` needs `memory` or `cpus` on the same row and may not be above its `concurrent`. The panel and
   the tools show both with "not enforced yet".
-- A size needs `"version": 3`. The panel and the tools write it for you, and only when a row has a size. **Upgrade
-  every worker before you write one**: an older worker refuses a version 3 file (it would otherwise run the
-  project's jobs at the default size without saying so).
+- A size needs `"version": 3`. The panel and the tools write it for you, and only when a row has a size. A
+  version 3 row refuses a key it does not know (a misspelled `Memory` or `cpu`), so a typo cannot silently drop a
+  size.
+- **Upgrade and restart every worker before you write a size.** An older worker refuses a version 3 file only when
+  it starts. One that is already running keeps its last good file when the file changes (it logs
+  `scoped_limits_reload_invalid`) and keeps running the project's jobs at the default size, without saying so on
+  the job. On a fleet, doctor warns about each worker that predates sizes once this host's file carries one.
 - The worker reads the size when it picks a job up, so an edit applies to the project's next jobs. A running job
-  keeps its size. Each run record says the size the job got and where it came from (`size` in the record).
-- A reopened [sandbox](sandbox.md) gets the size its run had.
+  keeps its size. A retry or a deferred job is a new pickup: it takes the size in force then, not the size of its
+  first attempt. Each run record says the size the job got and where it came from (`size` in the record).
+- A reopened [sandbox](sandbox.md) gets the size its run had. A run whose recorded size is damaged does not open.
 
 What a size does not cover: disk I/O, disk space and the network are not limited per job.
 

@@ -28,6 +28,7 @@ import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS, STALLED_FAILED_REASON } from "./index.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
+import { unenforcedSizeFlags } from "./job-size.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { makeCollectPlan } from "./outbox-plan.mjs";
 import { makePortfolioSnapshot } from "./portfolio-snapshot.mjs";
@@ -41,7 +42,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
-import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, scopeClaimRows } from "./scoped-limits.mjs";
+import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, SCOPED_LIMITS_VERSION, scopeClaimRows } from "./scoped-limits.mjs";
 import { escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
 import { NO_ENVELOPE_FINGERPRINT, makeAllocationAudit, makeAllocationLogReaper, makeAllocationState } from "./allocation.mjs";
@@ -1617,6 +1618,9 @@ export async function startWorker(
 		// Issue #504 part B: the digest of this host's live envelope (`envelopeDigest`, 16 hex, never a value), so doctor can
 		// name a host whose envelope differs; such a host refuses governed jobs as `envelope-mismatch`. `none` without one.
 		fpEnvelope: () => envelope.digest ?? NO_ENVELOPE_FINGERPRINT,
+		// Issue #596: the highest scoped-limits version this build reads, so doctor can name a worker that would keep its
+		// last good file (and run a project's jobs at the default size) once the file carries a size. An integer.
+		limitsVersion: SCOPED_LIMITS_VERSION,
 	});
 
 
@@ -1719,7 +1723,10 @@ export async function startWorker(
 		// shape, and so the argv, it had before.
 		if (chosen.refused || chosen.unavailable) return chosen;
 		// Issue #596: the daemon's CPU count from that same read, for the job's `--cpus` ceiling. Absent when it did not say.
-		const sized = Number.isSafeInteger(facts?.hostCpus) ? { ...chosen, hostCpus: facts.hostCpus } : chosen;
+		// Beside it, the size flags the same daemon said it drops (SwapLimit or CPUShares false), which the job logs.
+		const unenforced = unenforcedSizeFlags(facts);
+		const counted = Number.isSafeInteger(facts?.hostCpus) ? { ...chosen, hostCpus: facts.hostCpus } : chosen;
+		const sized = unenforced.length > 0 ? { ...counted, unenforced } : counted;
 		return relabelsPrivateMounts(facts, endpoint, jobUserIdentity.platform) ? { ...sized, relabel: true } : sized;
 	};
 
@@ -1783,6 +1790,9 @@ export async function startWorker(
 						// reads. A refused teardown is logged with its token.
 						teardownRuntime: (job) => takeAdmittedRuntime(job),
 						log,
+						// Issue #596: Docker refused a job's `--cpus` as above its CPU count, so the count the resolver cached is
+						// stale (a resized Docker Desktop VM); the next pickup reads the daemon again.
+						onCpuCeilingStale: () => resolveJobUser.invalidate?.(),
 					}),
 				}),
 				observationPreflight: localObservationPreflight,

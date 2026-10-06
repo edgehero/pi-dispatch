@@ -14,13 +14,19 @@
  *     give a container swap equal to its memory by default; with the two equal `memory.swap.max` reads 0 on every
  *     venue measured, rootless Podman included (lab, issue #596). A job that needs more memory needs a bigger size,
  *     not a slower one.
- *   - `--cpu-shares=round(cpus x 1024)`: a WEIGHT, not a cap. Under contention each job gets CPU in proportion to its
- *     size; an idle host lets any job use the idle cores. This is the fair share decision 2 of the issue asked for.
+ *   - `--cpu-shares=round(cpus x 1024)`: a WEIGHT, not a cap. Under contention a larger size gets more CPU than a
+ *     smaller one, in order; an idle host lets any job use the idle cores. This is the fair share decision 2 of the
+ *     issue asked for. EXACTLY proportional only on a runtime with the linear mapping (below): measured, sizes 3:1
+ *     split CPU about 3:1 on runc 1.1.13 and crun 1.14, and about 2.4:1 on runc 1.5.1 and crun 1.27, whose curved
+ *     mapping compresses the weights. The order holds on both, which is what a share promises here.
  *   - `--shm-size=min(1g, memory/2)`: Chromium needs a large `/dev/shm` (the reason `1g` was there), and `/dev/shm`
  *     is charged to the container's memory, so it may not be most of a small size.
  *   - `--cpus=<host ceiling>`: the host's CPU count minus a reserve (`hostCpuCeiling`), the same for every job. It
- *     keeps any one job off the reserved core; it is not the job's size, which would be the hard cap decision 2
- *     rejected. Absent when the runtime did not say how many CPUs it has (see `hostCpuCeiling`).
+ *     bounds ONE job: no single job can use more than the ceiling. It does not keep a core free across jobs, because
+ *     each container's quota is its own and they do not sum (measured: two busy jobs on a 4-core cpuset with
+ *     `--cpus=3` used 4.06 cores between them). A reserve that holds across every job is a parent cgroup's quota, the
+ *     phase 2 host budget's work. It is not the job's size either, which would be the hard cap decision 2 rejected.
+ *     Absent when the runtime did not say how many CPUs it has (see `hostCpuCeiling`).
  *
  * THE cpu.weight A SHARE BECOMES DEPENDS ON THE OCI RUNTIME'S VERSION (measured, issue #596): runc 1.1.13 and crun
  * 1.14 map shares linearly (1024 to 39, 2048 to 79), runc 1.5.1 and crun 1.27 map 1024 to 100 and 2048 to 174, and a
@@ -29,6 +35,11 @@
  * old runtime changes is a job's weight against a container started WITHOUT a share (the egress proxy, a Valkey): a
  * default job's 79 is below their 100. That is the right direction (the proxy serves every job), and no such container
  * competes with jobs for long, so the flag is passed as is rather than scaled per runtime version.
+ *
+ * THE OTHER DIRECTION IS OPEN, and it is a known phase 2 item: a large size outweighs everything without a share. At
+ * `cpus` 256 the share is 262144, which a current runtime maps to `cpu.weight` 10000 against the 100 of the egress
+ * proxy, Valkey and the host's own services, so under contention such jobs can starve them. A weight scale that keeps
+ * those served belongs with the parent cgroup reserve, in the host budget.
  */
 
 /** The smallest memory a job may be given: 512 MiB. The runner, pi and a shell need about 200 MB before any tool runs. */
@@ -118,8 +129,9 @@ export function shmMiBOf(memMiB) {
 }
 
 /**
- * The CPUs every job may use at most, `--cpus`: the host's count minus the reserve (one CPU when the host has four or
- * more, else none), or null when the count is unknown.
+ * The CPUs any ONE job may use at most, `--cpus`: the host's count minus the reserve (one CPU when the host has four
+ * or more, else none), or null when the count is unknown. Per container: several busy jobs together can still use
+ * every core, the reserved one included, until the phase 2 host budget puts them under one parent quota.
  *
  * `hostCpus` is the RUNTIME's own count (`docker info`'s `NCPU`, `podman info`'s `host.cpus`), never the worker's
  * `os.availableParallelism()`: on Docker Desktop the daemon runs in a VM with its own count, and Docker refuses a
@@ -133,6 +145,34 @@ export function shmMiBOf(memMiB) {
 export function hostCpuCeiling(hostCpus) {
 	if (!Number.isSafeInteger(hostCpus) || hostCpus < 1) return null;
 	return hostCpus - (hostCpus >= 4 ? 1 : 0);
+}
+
+/**
+ * The highest CPU count a runtime's own refusal of a `--cpus` names, or null when `text` holds no such refusal. Docker
+ * refuses a `--cpus` above the CPUs its daemon has, at create, exit 125: `Range of CPUs is from 0.01 to 4.00, as there
+ * are only 4 CPUs available` (measured, Docker 27.4.0). That is what a ceiling computed from a stale count meets after
+ * Docker Desktop's VM was given fewer CPUs, so the worker reads its facts again (`cpu_ceiling_stale`). Podman 4.9.3 and
+ * 5.8.1 accept a `--cpus` above the host's count (measured, rootless and rootful), so no Podman text matches: a stale
+ * count there is a ceiling that bounds less, never a job that cannot start. Only the leading digits are read.
+ */
+export function cpuRangeRefusal(text) {
+	const match = /range of cpus is from [0-9.]+ to ([0-9]{1,5})(?:\.[0-9]+)?/i.exec(String(text ?? ""));
+	return match ? Number(match[1]) : null;
+}
+
+/**
+ * The size flags a runtime said it will not enforce, from its parsed `docker info` facts (`parseDaemonFacts`): an
+ * empty array, or `--memory-swap` where Docker reports `SwapLimit` false and `--cpu-shares` where it reports
+ * `CPUShares` false. Docker then drops the flag with a client warning only and runs the container anyway (no swap
+ * accounting, no cpu controller), so a job would run past the bound its size promised and nothing would say so. The
+ * worker logs `size_bound_unenforced` per job and doctor warns. A fact that is null (Podman, or a key absent) is no
+ * evidence and adds nothing.
+ */
+export function unenforcedSizeFlags(facts) {
+	const flags = [];
+	if (facts?.swapLimit === false) flags.push("--memory-swap");
+	if (facts?.cpuShares === false) flags.push("--cpu-shares");
+	return flags;
 }
 
 /**

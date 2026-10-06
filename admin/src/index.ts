@@ -1061,12 +1061,8 @@ function registerTools(pi: ExtensionAPI): void {
       dayUsd: Type.Optional(Type.String()),
       weekUsd: Type.Optional(Type.String()),
       monthUsd: Type.Optional(Type.String()),
-      // Issue #596: a project row's job size (version 3). `memory` a string ("1536m"); `cpus` a number or a decimal
-      // string, read by the worker's own parser (`sizeFieldsOf`), so the confirm shows the one spelling the file holds.
-      memory: Type.Optional(Type.String()),
-      cpus: Type.Optional(Type.Union([Type.Number(), Type.String()])),
-      hostShare: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-      minJobs: Type.Optional(Type.Integer({ minimum: 1 })),
+      // Issue #596: a project row's job size (version 3), one table for both tools (`SIZE_FIELD_SCHEMAS`).
+      ...SIZE_FIELD_SCHEMAS,
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
@@ -1148,10 +1144,7 @@ function registerTools(pi: ExtensionAPI): void {
       dayUsd: Type.Optional(Type.String()),
       weekUsd: Type.Optional(Type.String()),
       monthUsd: Type.Optional(Type.String()),
-      memory: Type.Optional(Type.String()),
-      cpus: Type.Optional(Type.Union([Type.Number(), Type.String()])),
-      hostShare: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-      minJobs: Type.Optional(Type.Integer({ minimum: 1 })),
+      ...SIZE_FIELD_SCHEMAS,
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
@@ -1180,10 +1173,7 @@ function registerTools(pi: ExtensionAPI): void {
         weekUsd: usd.weekUsd ?? cur.weekUsd,
         monthUsd: usd.monthUsd ?? cur.monthUsd,
         // The size fields (version 3) the same way: a sent one replaces, an omitted one is carried.
-        memory: size.memory ?? cur.memory,
-        cpus: size.cpus ?? cur.cpus,
-        hostShare: size.hostShare ?? cur.hostShare,
-        minJobs: size.minJobs ?? cur.minJobs,
+        ...sizeFieldsFrom((k) => size[k] ?? cur[k]),
       });
       const envelope = envelopeGuard(paths, deploymentEnv());
       const mutate = (l: any[]) => l.map((w, i) => (i === params.index ? merged : w));
@@ -1921,13 +1911,38 @@ function buildScopedLimit(f: any): any {
   }
   // Version 3's size fields (issue #596) ride through as given; the shared parser validates them, and refuses them on
   // any row that is not a project row.
-  if (typeof f.memory === "string" && f.memory.trim() !== "") l.memory = f.memory.trim();
-  if (typeof f.cpus === "number" || (typeof f.cpus === "string" && f.cpus.trim() !== "")) l.cpus = typeof f.cpus === "string" ? f.cpus.trim() : f.cpus;
-  for (const k of ["hostShare", "minJobs"]) {
-    const v = optInt(f[k]);
+  for (const k of SIZE_LIMIT_FIELDS) {
+    const v = SIZE_FIELD_RIDES[k](f[k]);
     if (v !== undefined) l[k] = v;
   }
   return l;
+}
+
+/**
+ * The version 3 size fields (issue #596), each with the TypeBox schema both limit tools take it by. Keyed in the
+ * worker's `SIZE_LIMIT_FIELDS` order and held to it by a test (`admin/test/size-tools.test.mjs`), so the two schemas,
+ * the edit's carry, the dialog's carry and the builder share one list rather than four hand-written copies.
+ * `memory` is a string ("1536m"); `cpus` a number or a decimal string, read by the worker's own parser
+ * (`sizeFieldsOf`), so the confirm shows the one spelling the file holds.
+ */
+export const SIZE_FIELD_SCHEMAS = {
+  memory: Type.Optional(Type.String()),
+  cpus: Type.Optional(Type.Union([Type.Number(), Type.String()])),
+  hostShare: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+  minJobs: Type.Optional(Type.Integer({ minimum: 1 })),
+};
+
+/** How each size field rides into a built row: its value, or undefined to leave it out. Keyed as above, and pinned. */
+export const SIZE_FIELD_RIDES: Record<string, (v: any) => any> = {
+  memory: (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : undefined),
+  cpus: (v) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? v.trim() : undefined),
+  hostShare: (v) => optInt(v),
+  minJobs: (v) => optInt(v),
+};
+
+/** Every size field, in `SIZE_LIMIT_FIELDS` order, with the value `pick` gives it: a merge or a carry in one line. */
+function sizeFieldsFrom(pick: (field: string) => any): Record<string, any> {
+  return Object.fromEntries(SIZE_LIMIT_FIELDS.map((k: string) => [k, pick(k)]));
 }
 
 /**
@@ -3143,10 +3158,7 @@ export async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Not
     dayUsd: cur.dayUsd,
     weekUsd: cur.weekUsd,
     monthUsd: cur.monthUsd,
-    memory: cur.memory,
-    cpus: cur.cpus,
-    hostShare: cur.hostShare,
-    minJobs: cur.minJobs,
+    ...sizeFieldsFrom((k) => cur[k]),
   });
   const note = scopeChangeNote(buildScopedLimit(cur), merged);
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;

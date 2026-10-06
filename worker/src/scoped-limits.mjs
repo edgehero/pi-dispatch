@@ -85,7 +85,10 @@ export const SCOPED_LIMITS_VERSION = 3;
  *     then it bounds nothing.
  * A version 1 or 2 file that carries one is refused naming version 3, for the version 2 reason: a 3.1.0 worker drops
  * unknown fields, so the file would size its jobs on one build and not on another. Every released build refuses a
- * version 3 file as newer.
+ * version 3 file as newer, but only when it LOADS the file, at boot: a worker already running when the file becomes
+ * version 3 keeps its last good file on reload (`scoped_limits_reload_invalid`) and runs the project's jobs at the
+ * default size until it is upgraded and restarted. So every worker is upgraded and restarted before a size is written.
+ * A version 3 row also refuses a key it does not know, so a misspelled size field cannot drop out silently.
  */
 export const SIZE_LIMIT_FIELDS = Object.freeze(["memory", "cpus", "hostShare", "minJobs"]);
 
@@ -94,6 +97,9 @@ const LIMIT_FIELDS = ["day", "week", "month", "concurrent"];
 
 /** The three dollar window fields (version 2), in display order. Each maps to a dollar window: day, week, month. */
 export const USD_LIMIT_FIELDS = Object.freeze(["dayUsd", "weekUsd", "monthUsd"]);
+
+/** Every key a version 3 row may carry (issue #596). Any other key refuses a version 3 file (`normalizeLimit`). */
+const V3_ROW_KEYS = new Set(["scope", ...LIMIT_FIELDS, ...USD_LIMIT_FIELDS, ...SIZE_LIMIT_FIELDS]);
 
 /**
  * The scope prefix of a per-model row (issue #502 part 6): `model:<provider>/<model>`. Reserved in BOTH versions. A
@@ -179,8 +185,8 @@ export function canonicalScope(job) {
  * Parse, validate, and normalize the scoped-limits file TEXT. Returns the normalized `limits` array
  * (every row rebuilt as an explicit `{ scope, day, week, month, concurrent }` literal in a version 1 file,
  * `{ scope, day, week, month, concurrent, dayUsd, weekUsd, monthUsd }` in a version 2 one, and that plus `memory,
- * cpus, hostShare, minJobs` in a version 3 one, `null` for absent fields, unknown fields dropped -- the operator-file
- * policy). Throws `configError` (fail-loud) on any
+ * cpus, hostShare, minJobs` in a version 3 one, `null` for absent fields, unknown fields dropped in a version 1 or 2
+ * file -- the operator-file policy -- and refused in a version 3 one). Throws `configError` (fail-loud) on any
  * malformed entry. `path` is for error messages only -- this function touches no filesystem.
  */
 export function parseScopedLimits(text, path) {
@@ -282,6 +288,13 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 		throw configError(`${at}: must be an object: ${path}`);
 	}
 	if (!isNonEmptyString(row.scope)) throw configError(`${at}: scope must be a non-empty string: ${path}`);
+	// Version 3 refuses a key it does not know (issue #596): a misspelled `Memory`, `cpu` or `mem` beside a field that
+	// keeps the row valid was dropped, and the project's jobs ran at the default size while the file read as sized.
+	// Versions 1 and 2 keep dropping unknown keys, so a file an older build wrote and reads still loads unchanged.
+	if (version >= 3) {
+		const unknown = Object.keys(row).filter((key) => !V3_ROW_KEYS.has(key));
+		if (unknown.length > 0) throw configError(`${at}: unknown key${unknown.length === 1 ? "" : "s"} ${unknown.map((k) => JSON.stringify(k)).join(", ")} (a version 3 row carries only scope, ${[...LIMIT_FIELDS, ...USD_LIMIT_FIELDS, ...SIZE_LIMIT_FIELDS].join(", ")}; keys are case-sensitive): ${path}`);
+	}
 	const trimmed = row.scope.trim().normalize("NFC"); // the same NFC canonicalScope applies job-side
 	if (isModelScope(trimmed)) return normalizeModelLimit(row, trimmed, at, path, version);
 	// A NEAR MISS of a reserved prefix is refused, never read as a repo or folder row (PR #549's review): a

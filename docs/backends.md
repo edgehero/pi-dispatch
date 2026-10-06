@@ -144,10 +144,12 @@ ones adapters get wrong:
   a real container, and its `/proc/self/mountinfo`.
 - **Every venue on this host runs a job at its size** (issue #596): `--memory` with an equal `--memory-swap` (no
   swap beyond it), `--cpu-shares` for its CPU weight, `--shm-size` at most half its memory, and one `--cpus` ceiling
-  for every job (the runtime's CPU count minus a core kept for the host when it has four or more). Both builders
-  emit the same flags. The size is the job's project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS`
-  ([job sizes](scoped-limits.md#job-sizes-version-3)). Where Docker reports `SwapLimit` false, the swap bound cannot
-  be enforced and doctor warns.
+  on each job (the runtime's CPU count minus one core when it has four or more). The ceiling bounds a single job:
+  several busy jobs together can still use every core. Both builders emit the same flags. The size is the job's
+  project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` ([job sizes](scoped-limits.md#job-sizes-version-3)). Where
+  Docker reports `SwapLimit` or `CPUShares` false, it drops that flag: doctor warns, and the worker logs
+  `size_bound_unenforced` for each job. Where the runtime gives no CPU count, jobs run with no `--cpus` and doctor
+  warns.
 - **`local`'s `nonRoot` and `localFolders` depend on which uid the job runs as** (issue #341). On macOS, Windows
   and Docker Desktop the image's own `USER` runs. On a daemon that enforces bind-mount ownership (native Linux
   Docker, rootful Podman) the worker runs the job as its own uid with `--user` and `HOME=/home/pi`, because

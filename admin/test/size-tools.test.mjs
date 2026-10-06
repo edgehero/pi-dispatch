@@ -121,3 +121,13 @@ test("the panel's edit dialogs carry a row's size, which they do not prompt for,
   assert.deepEqual(read(path).limits[0], { scope: "project:shop", concurrent: 3, dayUsd: "5.00", memory: "2g", cpus: 0.5, hostShare: 40, minJobs: 1 }, said.join("\n"));
   assert.equal(read(path).version, 3);
 });
+
+test("the admin's size-field tables are the worker's SIZE_LIMIT_FIELDS, in its order, so no copy can drift (P1G1-C2)", async () => {
+  const { SIZE_LIMIT_FIELDS } = await import("@edgehero/pi-dispatch/scoped-limits");
+  assert.deepEqual(Object.keys(indexMod.SIZE_FIELD_SCHEMAS), [...SIZE_LIMIT_FIELDS], "both tools' schemas spread this one table");
+  assert.deepEqual(Object.keys(indexMod.SIZE_FIELD_RIDES), [...SIZE_LIMIT_FIELDS], "the builder rides each field by this one table");
+  for (const name of ["dispatch_limit_add", "dispatch_limit_edit"]) {
+    const props = Object.keys(toolByName(name).parameters.properties);
+    for (const field of SIZE_LIMIT_FIELDS) assert.ok(props.includes(field), `${name} takes ${field}`);
+  }
+});

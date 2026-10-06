@@ -966,13 +966,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   windows; a refusal by any ledger gives back the ones before it, and every path that refunds gives back every ledger
   still held. A row naming a project that does not exist refuses the worker's start, never caps nothing in silence.
 - **Job sizes** (issue #596, file version 3): a `project:<id>` row may set the size of every member's job container,
-  `memory` (no swap beyond it) and `cpus` (a CPU weight under contention, under one host ceiling), and a row may set a
-  size and nothing else. A job without one takes the deployment's `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and
+  `memory` (no swap beyond it where the runtime enforces swap limits) and `cpus` (a CPU weight under contention,
+  under one ceiling on any single job), and a row may set a size and nothing else. A job without one takes the deployment's `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and
   `2`), refused at boot when malformed. The size is resolved once at pickup from the same snapshot every other limit
   is read from and recorded on the run. The row may also carry `hostShare` (a whole percentage of a host's job budget)
   and `minJobs` (a soft minimum of the project's jobs per host); both are validated and stored now and are enforced
   by NOTHING until the host budget ships (phase 2 of the issue), which every surface that shows them says. A version
-  1 or 2 file that carries a size field is refused naming version 3; a size field off a project row is refused.
+  1 or 2 file that carries a size field is refused naming version 3; a size field off a project row is refused; a
+  version 3 row carrying a key the file does not define is refused (versions 1 and 2 still drop one). A retry or a
+  deferred job is a new pickup and takes the size in force then.
 - **Why**: Every prior limit was deployment-global: one noisy repo emptied the daily cap for every other
   scope with nothing naming the culprit, and nothing serialized a working tree — two same-folder jobs ran
   containers concurrently in one read-write bind mount, reachable by a single cron trigger with no
@@ -3244,6 +3246,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-06 | Issue #596, phase 1, review gate round 1. **`REQ-SCOPED-LIMITS` CORRECTED and AMENDED**: the job sizes clause said `memory` gives "no swap beyond it" and `cpus` runs "under one host ceiling" without conditions; it now says no swap beyond it where the runtime enforces swap limits (Docker with `SwapLimit` false drops `--memory-swap`) and one ceiling on any SINGLE job (per-container `--cpus` does not sum across jobs, measured). Amended: a version 3 row carrying an unknown key is refused (a misspelled `Memory` beside a valid field was dropped and the project ran at the default size), versions 1 and 2 unchanged; a retry or deferred job is a new pickup and takes the size in force then. Checked and UNCHANGED: `REQ-SPEND-CAPS-MULTI-WINDOW`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-EGRESS-ALLOWLIST`. |
 | 2026-10-06 | Issue #596, phase 1. **`REQ-SCOPED-LIMITS` AMENDED**: a `project:<id>` row (file version 3) may set its members' job size, `memory` with no swap beyond it and `cpus` as a weight under a host ceiling, alone or beside its other limits; a job without one takes `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`, refused at boot when malformed); the size is resolved at pickup from the limits snapshot and recorded on the run. `hostShare` (a whole percentage) and `minJobs` (a soft minimum needing a size, at most the row's `concurrent`) are validated and stored, and ENFORCED BY NOTHING until the phase 2 host budget, which every surface says. Acceptance clauses for each. Checked and UNCHANGED: `REQ-SPEND-CAPS-MULTI-WINDOW`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-EGRESS-ALLOWLIST` (no new refusal, no budget change, no network change). |
 | 2026-10-06 | Issue #587 (a pi bump never rebuilds over fixes made on its pull request). **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: the paragraph on how a bump arrives adds that the workflow rebuilds the rolling branch only while it holds nothing but its own bump commit, so a newer pi waits, with a comment, until a pull request carrying fixes is merged or closed. Every assertion this requirement lists is UNCHANGED, checked. |
 | 2026-10-05 | Issue #587 (every new pi release as a draft pull request). **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: a new paragraph names `.github/workflows/pi-bump.yml` as how the upgrade commit is prepared (pins and lockfile only, no pi code run, one rolling pull request that is always a draft) and says the verdict is this suite's, run by that pull request's own required checks, with the derived-table test and the `image` job's zero-spend provider smoke; the Acceptance adds the draft's red check. Every assertion this requirement lists is UNCHANGED, checked. |

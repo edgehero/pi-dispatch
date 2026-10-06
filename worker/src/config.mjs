@@ -412,6 +412,8 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		monthlyCostUsd: usdSetting(env, "PI_MONTHLY_COST_USD"),
 		// Issue #596: the deployment's default job size (`PI_JOB_MEMORY`, `PI_JOB_CPUS`; 4g and 2 when unset), refused here at
 		// boot (exit 2) naming the key, never at a job. A project row's size overrides it (INT-SCOPED-LIMITS-FILE-CONTRACT).
+		// The VALIDATION is this field's job; nothing reads its value. The pickup resolves each job's size from the same two
+		// settings (`jobSizeEnv`, start.mjs) with the same parser, so a value that got past here cannot be read otherwise.
 		jobSize: jobSizeFrom(env),
 		jobImage: jobImageFrom(env), // || (not ??) so an empty string falls back; "" is falsy and would throw inside buildDockerRunArgs AFTER a budget slot was reserved
 		globalPiDir: resolveGlobalPiDir(env, fileExists), // REQ-GLOBAL-PI-OVERLAY: operator's ~/.pi/agent subset, :ro-mounted; null = off

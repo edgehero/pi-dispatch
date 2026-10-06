@@ -9,6 +9,7 @@ import {
 	jobUserRefusal,
 	makeDaemonFactsReader,
 	makeJobUserResolver,
+	JOB_USER_FACTS_MAX_AGE_MS,
 	parseDaemonFacts,
 	relabelsPrivateMounts,
 	resolveImageUser,
@@ -50,7 +51,7 @@ test("the facts read is one bounded `docker info --format={{json .}}`", () => {
 });
 
 test("parseDaemonFacts reads the Docker shape: OS, rootless and userns markers, pid and memory bounds, never CPU", () => {
-	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1", hostCpus: null, swapLimit: null });
+	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1", hostCpus: null, swapLimit: null, cpuShares: null });
 	assert.equal(facts("dockerRootless").rootless, true);
 	assert.deepEqual(facts("dockerRootless").bounds, { pids: false, memory: false });
 	assert.equal(facts("dockerRemap").userns, true);
@@ -82,6 +83,11 @@ test("parseDaemonFacts reads the runtime's CPU count and Docker's SwapLimit, and
 	assert.equal(docker({ SwapLimit: false }).swapLimit, false, "where --memory-swap cannot be enforced, doctor warns");
 	for (const bad of [0, -1, 2.5, "4", 5000, null]) assert.equal(docker({ NCPU: bad }).hostCpus, null, String(bad));
 	assert.equal(docker({ SwapLimit: "true" }).swapLimit, null);
+	// CPUShares (measured true on Docker Desktop 27.4.0): false means Docker drops --cpu-shares with a client warning.
+	assert.equal(docker({ CPUShares: true }).cpuShares, true);
+	assert.equal(docker({ CPUShares: false }).cpuShares, false);
+	assert.equal(docker({ CPUShares: "false" }).cpuShares, null);
+	assert.equal(parseDaemonFacts(JSON.stringify({ ...BODY.podmanCompatRootful, CPUShares: false })).facts.cpuShares, null, "Podman's compat value is not read");
 	// Podman's compat value is not read, for `bounds`' reason; its CPU count is.
 	const compat = parseDaemonFacts(JSON.stringify({ ...BODY.podmanCompatRootful, NCPU: 4, SwapLimit: false })).facts;
 	assert.equal(compat.swapLimit, null);
@@ -366,4 +372,27 @@ test("`local` never starts an egress-armed job or sandbox on a rootless Podman 4
 		assert.deepEqual([decision.mode, decision.cause], ["unmappable", "rootless"], body);
 		assert.ok(BOOT_REFUSING_JOB_USER_CAUSES.has(decision.cause), "the worker refuses to boot, the sandbox refuses to open");
 	}
+});
+
+test("issue #596: a cached decision is read again after its age or on invalidate, so a resized runtime's CPU count is seen", async () => {
+	let reads = 0;
+	let t = 1_000_000;
+	let ncpu = 14;
+	const readFacts = async () => (reads++, { answered: true, facts: { ...parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, NCPU: ncpu })).facts } });
+	const resolve = makeJobUserResolver({ readFacts, platform: "linux", euid: 1234, egid: 1234, stat: () => ({ uid: 0, gid: 2375 }), now: () => t, maxAgeMs: 600_000 });
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).facts.hostCpus, 14);
+	ncpu = 4;
+	t += 599_999;
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).facts.hostCpus, 14, "inside the age, the cached read");
+	assert.equal(reads, 1);
+	t += 1;
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).facts.hostCpus, 4, "at the age, read again");
+	assert.equal(reads, 2);
+	ncpu = 8;
+	resolve.invalidate();
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).facts.hostCpus, 8, "invalidated, read again at once");
+	assert.equal(reads, 3);
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).facts.hostCpus, 8);
+	assert.equal(reads, 3, "and cached again");
+	assert.equal(JOB_USER_FACTS_MAX_AGE_MS, 10 * 60_000, "the default age is the ten minutes the design entry names");
 });

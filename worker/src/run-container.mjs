@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
-import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
+import { cpuRangeRefusal, DEFAULT_JOB_SIZE, hostCpuCeiling } from "./job-size.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
 import { createJobNetwork, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
@@ -65,6 +65,10 @@ export function makeRunContainer({
 	log = () => {},
 	// Issue #545: the per-job exit-line key, 32 random bytes as hex. A seam so a test can name the key it verifies with.
 	mintExitKey = () => randomBytes(32).toString("hex"),
+	// Issue #596: called when the runtime refused this job's `--cpus` as above its CPU count (`cpu_ceiling_stale`), so
+	// the wiring drops the cached runtime facts the ceiling came from and the next pickup reads them again. The local
+	// venue's is the job-user resolver's `invalidate`; a no-op elsewhere (Podman accepts any `--cpus`, measured).
+	onCpuCeilingStale = () => {},
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -80,7 +84,10 @@ export function makeRunContainer({
 	// handed here as an argument, never through `job.data`; absent, the built-in 4g and 2. `hostCpus` is the runtime's own
 	// CPU count from the job user's facts read, which sets the `--cpus` ceiling; null leaves `--cpus` off (fails open, and
 	// says so in `cpu_ceiling_unknown`).
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+	// `unenforced` (issue #596) is the size flags this runtime said it drops (`unenforcedSizeFlags`: `--memory-swap` where
+	// Docker reports SwapLimit false, `--cpu-shares` where it reports CPUShares false), logged per job as
+	// `size_bound_unenforced` so a run past its size's bound is named where it happens. The flags stay on the argv.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, unenforced = [] }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -202,6 +209,7 @@ export function makeRunContainer({
 		// processor confirms an OOM only when the run's peak reached 90% of it. null when the argv names none.
 		const memoryLimit = memoryBytesOfArgs(args);
 		if (!args.some((a) => typeof a === "string" && a.startsWith("--cpus="))) log("cpu_ceiling_unknown", { container: name });
+		if (Array.isArray(unenforced) && unenforced.length > 0) log("size_bound_unenforced", { container: name, flags: unenforced.filter((f) => typeof f === "string" && /^--[a-z-]{1,32}$/.test(f)) });
 
 		// REQ-EGRESS-ALLOWLIST. This job's own --internal network, created here rather than at boot because
 		// it holds exactly two endpoints -- this container and the proxy -- and that is what makes job-to-job
@@ -218,6 +226,10 @@ export function makeRunContainer({
 		// Host-side per-job log sink, teed off `onOutput`. `name` is `pi-job-<jobId>`; the sink
 		// sanitizes internally. No container mount, no env var -- the sink lives on this side only.
 		const sink = openJobLog(name, { exitKey });
+		// Issue #596: the head of the CLI's stderr, kept only to recognise the runtime's refusal of a stale `--cpus`
+		// (`cpuRangeRefusal`). Bounded, and never logged: only the count it names leaves this function.
+		let stderrHead = "";
+		const STDERR_HEAD_MAX = 4096;
 
 		const run = new Promise((resolve, reject) => {
 			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"] });
@@ -236,7 +248,10 @@ export function makeRunContainer({
 				} catch {}
 			};
 			child.stdout?.on("data", tee);
-			child.stderr?.on("data", tee);
+			child.stderr?.on("data", (chunk) => {
+				if (stderrHead.length < STDERR_HEAD_MAX) stderrHead = (stderrHead + String(chunk)).slice(0, STDERR_HEAD_MAX);
+				tee(chunk);
+			});
 			// docker not found / daemon down -- a transient infra fault, so tag it retryable
 			// (CONST-RETRY-INFRA-ONLY). `reason` also cues the processor to release the budget slot,
 			// since a container that never started spent nothing.
@@ -317,6 +332,19 @@ export function makeRunContainer({
 		// that answer. What a failure leaves behind is a memberless network, which the boot reaper sweeps.
 		try {
 			const result = await run;
+			// Issue #596: the runtime refused the ceiling as above its CPU count. The count it was computed from is stale
+			// (Docker Desktop's VM given fewer CPUs since the facts were read), and every later job would fail the same
+			// way until a restart, so the facts are dropped and the next pickup reads them again. This attempt stays a
+			// never-started one (refunded and retried as infrastructure), and the line names both counts.
+			const runtimeCpus = !result.aborted && (neverStartedExits ?? []).includes(result.code) && Number.isSafeInteger(hostCpus) ? cpuRangeRefusal(stderrHead) : null;
+			if (runtimeCpus !== null) {
+				log("cpu_ceiling_stale", { container: name, cpus: hostCpuCeiling(hostCpus), hostCpus, runtimeCpus });
+				try {
+					onCpuCeilingStale();
+				} catch {
+					// a wiring fault must not rewrite this attempt's answer; the facts age out on their own (`maxAgeMs`)
+				}
+			}
 			// Issue #345: an exit that says "never started" is checked against the cidfile BEFORE the network goes, so a
 			// container found running is stopped while its network still exists. Only when the worker did not abort it.
 			if (!result.aborted && (neverStartedExits ?? []).includes(result.code) && (await stopDetached({ spawnFn, cidFile, fs, bin, ...detachedCheck }))) {
