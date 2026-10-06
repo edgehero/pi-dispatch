@@ -3,8 +3,8 @@ import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS
 import { test } from "node:test";
 import { budgetCapsFor, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { readFileSync, readdirSync } from "node:fs";
-import { InfraRetry, OOM_KILLED, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
-import { buildRecord, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
+import { InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
+import { buildRecord, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -256,7 +256,7 @@ test("every RUNNER_POLICY_REASONS member has its own fixed comment and pages the
 	}
 	// The hook set is DERIVED from the same set, so a new member pages without a second edit.
 	const start = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
-	assert.match(start, /const HOOK_POLICY_REASONS = new Set\(\["worker-abort", "runner-policy", OOM_KILLED, \.\.\.RUNNER_POLICY_REASONS\]\);/);
+	assert.match(start, /const HOOK_POLICY_REASONS = new Set\(\["worker-abort", "runner-policy", EXIT_OOM_KILLED, \.\.\.RUNNER_POLICY_REASONS\]\);/);
 });
 
 test("the exit-line reason never moves a job between classes: exit 1 with a forged provider-auth-refused is still InfraRetry", async () => {
@@ -318,7 +318,9 @@ test("an unbidden 137 (aborted:false, kernel OOM) throws InfraRetry -- infra sta
 // Issue #596: a runner killed for memory. CONFIRMED only by the image supervisor's signed line (`exitOomKilled`, read
 // off a line the per-job key verified) beside the container's own unbidden 137.
 const USED = { memPeak: 4294967296, oomKills: 1, memSomeUsec: 9, memFullUsec: 4, cpuUsec: 1000, throttledUsec: 0, throttled: 0, pidsPeak: 30 };
-const oomRun = (over = {}) => async () => ({ code: 137, aborted: false, exitOomKilled: true, exitAuth: "verified", resources: USED, ...over });
+// The 4g bound every job runs at (containerSpec's default), in bytes: the peak above is AT it, as a cgroup OOM's is.
+const LIMIT_4G = 4 * 1024 ** 3;
+const oomRun = (over = {}) => async () => ({ code: 137, aborted: false, exitOomKilled: true, memoryLimit: LIMIT_4G, exitAuth: "verified", resources: USED, ...over });
 
 test("a confirmed OOM (signed supervisor line + unbidden 137) RETURNS policy oom-killed: not retried, slot kept, one generic comment", async () => {
 	const posted = [];
@@ -326,8 +328,8 @@ test("a confirmed OOM (signed supervisor line + unbidden 137) RETURNS policy oom
 	const { deps: d } = deps({ runContainer: oomRun(), comment: async (_j, t) => posted.push(t), log: (e, f) => logged.push([e, f]) });
 	const r = await runJob(ghJob, d);
 	assert.equal(r.outcome, "policy", "returned, so never retried: the same size would be killed the same way");
-	assert.equal(r.reason, OOM_KILLED);
-	assert.equal(OOM_KILLED, "oom-killed");
+	assert.equal(r.reason, EXIT_OOM_KILLED);
+	assert.equal(EXIT_OOM_KILLED, "oom-killed");
 	assert.equal(r.exitCode, 137);
 	assert.equal(r.budgetReserved, true, "the container ran: its slot is spent like any paid stop");
 	assert.deepEqual(r.resources, USED);
@@ -336,6 +338,38 @@ test("a confirmed OOM (signed supervisor line + unbidden 137) RETURNS policy oom
 	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r });
 	assert.equal(record.reason, "oom-killed");
 	assert.deepEqual(record.resources, USED);
+});
+
+test("a host's OOM is not the job's: the report confirms only when the peak reached 90% of the container's own limit (#596 review)", async () => {
+	// `oom_kill` counts the host's OOM killer too, and the runner's score of 1000 makes it the host's first victim.
+	const at = (memPeak, memoryLimit = LIMIT_4G) => oomRun({ resources: { ...USED, memPeak }, memoryLimit });
+	// Peak AT the limit: the job's own cgroup OOM.
+	const { deps: d } = deps({ runContainer: at(LIMIT_4G) });
+	assert.equal((await runJob(ghJob, d)).reason, "oom-killed");
+	// Exactly 90%, rounded up: still the job's.
+	const { deps: d90 } = deps({ runContainer: at(Math.ceil(LIMIT_4G * 0.9)) });
+	assert.equal((await runJob(ghJob, d90)).reason, "oom-killed");
+	// Peak at HALF the limit: the kill was the host's. InfraRetry, no comment, and the log names the two numbers.
+	for (const memPeak of [LIMIT_4G / 2, Math.ceil(LIMIT_4G * 0.9) - 1, 0]) {
+		const logged = [];
+		const { deps: d2, calls } = deps({ runContainer: at(memPeak), log: (e, f) => logged.push([e, f]) });
+		await assert.rejects(() => runJob(ghJob, d2), (e) => e instanceof InfraRetry && e.reason !== EXIT_OOM_KILLED, String(memPeak));
+		assert.ok(!calls.some((c) => c.startsWith("comment:")));
+		assert.ok(logged.some(([e, f]) => e === "oom_report_below_limit" && f.memPeak === memPeak && f.memoryLimit === LIMIT_4G));
+	}
+	// No peak, no block, or no limit known: nothing to compare, so not confirmed.
+	for (const over of [{ resources: { ...USED, memPeak: null } }, { resources: null }, { resources: undefined }, { memoryLimit: null }, { memoryLimit: undefined }, { memoryLimit: 0 }]) {
+		const { deps: d3 } = deps({ runContainer: oomRun(over) });
+		await assert.rejects(() => runJob(ghJob, d3), (e) => e instanceof InfraRetry && e.reason !== EXIT_OOM_KILLED, JSON.stringify(over));
+	}
+});
+
+test("peakReachedLimit: 90% of a known limit or more, and false for anything it cannot compare", () => {
+	assert.equal(peakReachedLimit(100, 100), true);
+	assert.equal(peakReachedLimit(90, 100), true);
+	assert.equal(peakReachedLimit(89, 100), false);
+	assert.equal(peakReachedLimit(200, 100), true, "a peak past the limit (swap, rounding) is still at it");
+	for (const [p, l] of [[null, 100], [100, null], [100, 0], [-1, 100], [1.5, 100], ["100", 100], [100, -5], [100, 2 ** 53]]) assert.equal(peakReachedLimit(p, l), false, JSON.stringify([p, l]));
 });
 
 test("the oom-killed comment is generic: no size, no project, no number, no path (the TERMINAL_COMMENTS rule)", () => {
@@ -349,7 +383,7 @@ test("the oom-killed comment is generic: no size, no project, no number, no path
 test("an UNCONFIRMED 137 stays InfraRetry: no supervisor line, an unsigned one, an image without a key, or a line with no kill", async () => {
 	for (const over of [{ exitOomKilled: false }, { exitOomKilled: undefined }, { exitAuth: "unverified" }, { exitAuth: undefined }, { exitAuth: null }]) {
 		const { deps: d, calls } = deps({ runContainer: oomRun(over) });
-		await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.reason !== OOM_KILLED, JSON.stringify(over));
+		await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.reason !== EXIT_OOM_KILLED, JSON.stringify(over));
 		assert.ok(!calls.some((c) => c.startsWith("comment:")), "a retried attempt posts nothing");
 	}
 	// The resources still ride the throw, so the retried attempt's record says what it used.

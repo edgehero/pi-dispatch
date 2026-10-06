@@ -261,7 +261,9 @@ The runner's integer must reach the processor unmodified: `0` completed, `1` inf
 (never retried). The **abort flag is separate and load-bearing**: a worker SIGKILL and a kernel OOM both
 surface as `137`, so the code alone cannot say which happened. Report `aborted` independently. A kernel OOM is
 told apart from other kills by the job image's own signed exit line (issue #596), not by the runtime, so a
-backend needs nothing more for it: pass the container's stdout through as it is.
+backend needs nothing more for it: pass the container's stdout through as it is. The worker confirms such a kill
+only when the job's memory peak reached 90% of the bound it set, which it reads off the `--memory=` flag of the argv
+it builds; a backend whose argv carries none has every out-of-memory kill retried as infrastructure.
 
 `neverStartedExits` is your runtime's set for "the runner never ran" (Docker's is 125/126/127). Those refund
 the budget slot. If your runtime has no such codes, declare `[]` and normalise to that outcome yourself. If your

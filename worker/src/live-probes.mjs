@@ -28,7 +28,7 @@
  */
 
 import { READ_BACK_BY_A_LIVE_PROBE } from "./backend-conformance.mjs";
-import { containerSpec } from "./container-spec.mjs";
+import { containerSpec, memoryBytes } from "./container-spec.mjs";
 import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkEndpoints, networkNameFor, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate } from "./netns-keeper.mjs";
@@ -257,9 +257,7 @@ export function expectedPidsLimit(flags = ISOLATION_FLAGS) {
 
 /** The memory bound in bytes, from the spec's own default (`4g`), never a literal. */
 export function expectedMemoryBytes(memory = containerSpec({ image: "i", name: "n", workspace: "/w" }).memory) {
-	const m = /^(\d+)([kmg]?)$/i.exec(String(memory));
-	if (!m) return null;
-	return Number(m[1]) * { "": 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[m[2].toLowerCase()];
+	return memoryBytes(memory);
 }
 
 const verdict = (property, ok, detail, extra = {}) => ({ property, ok, detail, ...extra });

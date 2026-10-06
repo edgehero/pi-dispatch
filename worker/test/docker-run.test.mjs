@@ -553,3 +553,20 @@ test("insideDir: strictly inside, failing closed on anything else (issue #355)",
 		assert.equal(insideDir(outer, inner), false, JSON.stringify([outer, inner]));
 	}
 });
+
+test("memoryBytes and memoryBytesOfArgs: the --memory bound in bytes, binary units, null for anything else (issue #596)", async () => {
+	const { memoryBytes, memoryBytesOfArgs, containerSpec } = await import("../src/container-spec.mjs");
+	assert.equal(memoryBytes("4g"), 4 * 1024 ** 3);
+	assert.equal(memoryBytes("4G"), 4 * 1024 ** 3);
+	assert.equal(memoryBytes("512m"), 512 * 1024 ** 2);
+	assert.equal(memoryBytes("64k"), 64 * 1024);
+	assert.equal(memoryBytes("1000"), 1000);
+	assert.equal(memoryBytes("1000b"), 1000);
+	for (const bad of ["", "4gb", "4t", "-1g", "1.5g", "0", "g", null, undefined, "4 g", "9999999999999999g"]) assert.equal(memoryBytes(bad), null, String(bad));
+	// The spec's default, read the way runContainer reads it: off the argv the builder makes.
+	const args = buildDockerRunArgs({ image: "i", name: "n", workspace: "/w" });
+	assert.equal(memoryBytesOfArgs(args), 4 * 1024 ** 3);
+	assert.equal(containerSpec({ image: "i", name: "n", workspace: "/w" }).memory, "4g");
+	assert.equal(memoryBytesOfArgs(["run", "--cpus=2"]), null);
+	assert.equal(memoryBytesOfArgs(null), null);
+});

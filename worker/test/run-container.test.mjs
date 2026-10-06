@@ -937,12 +937,14 @@ test("resources and the OOM report reach the result from a verified sink, and no
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
 	assert.deepEqual(result.resources, USED);
 	assert.equal(result.exitOomKilled, true);
+	assert.equal(result.memoryLimit, 4 * 1024 ** 3, "the --memory=4g this container got, read off its own argv, beside the report");
 	assert.equal(result.code, 137);
 	for (const closed of [{ ...verified, exitAuth: "unverified" }, { ...verified, exitAuth: undefined }]) {
 		const rc = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin({}, 137), mintExitKey: () => MINTED, openJobLog: () => ({ write() {}, close: async () => closed }) });
 		const r = await rc({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
 		assert.equal(Object.hasOwn(r, "resources"), false, "an unverified line's block is a tool's");
 		assert.equal(Object.hasOwn(r, "exitOomKilled"), false, "and so is its OOM report");
+		assert.equal(Object.hasOwn(r, "memoryLimit"), false, "and the limit rides only beside a report");
 	}
 });
 

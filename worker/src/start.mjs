@@ -8,7 +8,7 @@ import { valkeyClientContext } from "./valkey-endpoint.mjs";
 import { authRefusalFor, makeRedisClient, onValkeyError, parseConnection, valkeyAuthState, valkeyPasswordFor } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
-import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OOM_KILLED } from "./processor.mjs";
+import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
 import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { githubFailureFields } from "./octokit-log.mjs";
@@ -60,7 +60,7 @@ import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootf
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RUNNER_POLICY_REASONS, sanitizeJobId } from "./run-history.mjs";
+import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RUNNER_POLICY_REASONS, sanitizeJobId } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
@@ -1898,7 +1898,7 @@ export async function startWorker(
 	// `operator-cancel`, because the operator initiated it and a push telling them what they just did is
 	// noise with a pager attached.
 	// `oom-killed` (issue #596) is a paid terminal the operator alone can fix (a job's memory size), so it pages too.
-	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy", OOM_KILLED, ...RUNNER_POLICY_REASONS]);
+	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy", EXIT_OOM_KILLED, ...RUNNER_POLICY_REASONS]);
 	// One predicate for the completed listener and the lost-lock path below, so a record replays exactly the page its
 	// result would have sent.
 	const pagesAsPolicy = (result) => Boolean(onFailure) && result?.outcome === "policy" && HOOK_POLICY_REASONS.has(result.reason) && result.budgetReserved !== false;

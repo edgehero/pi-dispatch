@@ -834,7 +834,14 @@ refactor apart.
   an exec-only node (`/opt/pi-dispatch/runner-node`, `0711`, root-owned), which the kernel marks not dumpable, so
   its `/proc/<pid>/mem`, `environ` and `fd` are refused to the job's uid under `--cap-drop=ALL`. That last part is
   load-bearing: a plain node runner's memory gave up the key to a tool child on Docker Desktop (no Yama) and on
-  Fedora (Yama `ptrace_scope` 0), and only Ubuntu's `ptrace_scope` 1 refused it. A MAC rather than the bare key
+  Fedora (Yama `ptrace_scope` 0), and only Ubuntu's `ptrace_scope` 1 refused it. And every process holding the key
+  starts with `--disable-sigusr1` (the entrypoint's exec line for the supervisor, the supervisor's command for the
+  runner): otherwise a tool (same uid) sends SIGUSR1 or calls `process._debugProcess(pid)`, the node opens its
+  inspector on 127.0.0.1:9229 (the loopback exists under `--network none`), and a heap snapshot from there holds the
+  key. That hole was open from #545 until issue #596's review found it; the exec-only node does not close it, because
+  the inspector is the process serving its own memory. `--inspect` in `NODE_OPTIONS` would open it too, but those
+  processes' environment is the worker's closed map, fixed at their start, which the job cannot write.
+  `verify-image.sh` probes both processes on every image that declares `exitAuth`. A MAC rather than the bare key
   on the line, because a tool can open the container's stdout pipe for READING (measured): a stolen signed line is
   only the genuine line again, and one taken off the pipe and not put back reads as missing (the floor). What
   stays outside this: code that runs INSIDE the runner process (an extension), which is trusted at the runner's
@@ -860,11 +867,14 @@ refactor apart.
   missing or malformed); the block is omitted when nothing could be read, so such a line is byte-identical to before.
   From `memory.events` only `oom_kill` is read: under crun the limit sits on the parent scope and the job's leaf shows
   `oom 0` beside a real kill (measured). cgroup v1 is read for the cheap half (peak, OOM kills, CPU time and
-  throttling). Read-only telemetry like `tokens`: it feeds no classification. The worker rebuilds it
+  throttling). Telemetry like `tokens`, with ONE exception: `oomKills` and `memPeak` gate the OOM classification below,
+  and nothing else reads the block for a decision. Produced inside the job's container, so a job can inflate every
+  number: advisory, and a later sizing suggestion must clamp it and never apply itself. The worker rebuilds it
   (`parseExitResources`: an explicit literal over the eight keys, a present value that is not a safe non-negative
-  integer nulls the whole block). The worst-case line, every key at 2^53 - 1, stays inside the 6 KiB budget below.
-  Since the same release the image's entrypoint starts a **supervisor** (`image/runner/supervise.mjs`, under the same
-  exec-only node) between the container's init and the runner. It drains stdin first and hands the same bytes to the
+  integer nulls the whole block). The worst-case line, every key at 2^53 - 1, stays inside the 6 KiB budget above.
+  Since the same release the image's entrypoint starts a **supervisor** (`image/runner/supervise.mjs`, an entry file
+  that always calls `image/runner/src/supervise.mjs`, under the same exec-only node and `--disable-sigusr1`) between
+  the container's init and the runner. It drains stdin first and hands the same bytes to the
   runner on the runner's own stdin, so the key handling above is unchanged; it keeps the key. It starts the runner
   through `/bin/sh`, which writes `1000` to its own `/proc/self/oom_score_adj` and execs the runner (raising needs no
   capability; a non-dumpable process cannot write its own, so the shell does it before the exec), so the runner and
@@ -872,12 +882,27 @@ refactor apart.
   EXITS, the supervisor exits with that code and writes nothing. When the runner is KILLED by a signal, it reads the
   cgroup and writes the signed exit line itself, with no tokens: `code` 128 plus the signal, `reason` `oom-killed` for
   a SIGKILL while `oom_kill` is above 0, `terminated` for SIGTERM, `killed` otherwise, a `signal` name and
-  `resources`; then it exits with that code. Measured: the supervisor survived 15 of 15 OOM kills on three venues with
+  `resources`, and `by: "supervisor"` (inside the signed bytes, on every line it writes); then it exits with that
+  code. **One line decides** (`decisiveExitLine`, read by every exit-line scanner): the last exit line, except a
+  supervisor's line that follows one the runner wrote. That order means the runner finished its line and was killed
+  afterwards (a tool or the kernel), and its own line, with the tokens, usage and session the supervisor never has, is
+  read; the supervisor's is ignored, so such a run reads exactly as before the supervisor (its `137` retries).
+  Measured: the supervisor survived 15 of 15 OOM kills on three venues with
   the score raised, while without it a second OOM in one cgroup killed even a 1 MB main shell on Fedora's 6.19 kernel;
   the shipped image at `--memory=64m` ended 3 of 3 runs on a signed `oom-killed` line and exit `137`. **The worker
-  reads an OOM only as all three**: a container exit `137` it did not cause (the abort flag still wins), the
-  supervisor's line (`parseExitOomKilled`: `code: 137`, `reason: "oom-killed"`, `oomKills` above 0), and that line
-  verified under the run's key (`exitAuth: "verified"`; an unsigned line is a tool's). Then the job is `policy` /
+  reads an OOM only as all four**: a container exit `137` it did not cause (the abort flag still wins), the
+  supervisor's line as the decisive one (`parseExitOomKilled`: `by: "supervisor"`, `code: 137`, `reason:
+  "oom-killed"`, `oomKills` above 0), that line verified under the run's key (`exitAuth: "verified"`; an unsigned line
+  is a tool's), and its `memPeak` at 90% of the container's memory limit or more (`peakReachedLimit`; the limit is the
+  `--memory=` on the argv the worker built, `4g` today, never re-read from the environment). The fourth exists because
+  `oom_kill` also counts a kill by the HOST's OOM killer, whose first choice the runner is at score 1000: a machine
+  short of memory says nothing about the job's size, so such a `137` stays infrastructure and retries. A cgroup OOM
+  happens at the limit, and its peak read the bound exactly or just under it on every venue measured. What it cannot
+  tell apart: a host OOM that strikes a job already at 90% of its own limit (`memory.peak` counts page cache, so a job
+  that read large files can sit there), or after the job reached 90% earlier (the peak is a high-water mark). And a
+  job can forge the report (let a child reach the limit and be killed, then SIGKILL the runner before it writes its
+  line): it can only stop itself, which it could already do, and the floor it settles at is an overcharge, never an
+  undercharge. Then the job is `policy` /
   `oom-killed`, returned and never retried, its slot kept and its dollars settled at the floor (a killed runner reports
   no tokens). A child killed for memory while the runner lives writes no such line: the runner ends on its own code,
   and `resources.oomKills` in the record is the trace. An image without the supervisor is read as before: its
@@ -1550,14 +1575,19 @@ refactor apart.
     image change.
     **`exitAuth`** (issue #545) declares that the baked runner reads the exit line's key from stdin when
     `PI_EXIT_AUTH=stdin`, signs its exit line with it, writes a real exit line on SIGTERM, and is started by the
-    entrypoint under the exec-only `/opt/pi-dispatch/runner-node` (`INT-RUNNER-EXIT-CODE-PROTOCOL`). It is NOT a
+    entrypoint under the exec-only `/opt/pi-dispatch/runner-node`, every key holder with `--disable-sigusr1`
+    (`INT-RUNNER-EXIT-CODE-PROTOCOL`). It is NOT a
     `CAPABILITY_GATES` row: no job is refused for lacking it. The processor hands a key to an image that declares
     it and reads only a signed exit line from it; an image without it is handed nothing and read as before,
-    under the #542 trust rule alone. Its evidence is three runs: the offline `costCap` job handed a key on stdin
+    under the #542 trust rule alone. Its evidence is four runs: the offline `costCap` job handed a key on stdin
     must end on a line whose HMAC under that key verifies (`openssl dgst -sha256 -hmac`); the entrypoint must
     `exec /opt/pi-dispatch/runner-node`; and a child of that node must fail to read its parent's
-    `/proc/<pid>/environ`. A derived image that keeps the label and replaces the entrypoint with plain `node` fails
-    the second, and one that makes the copy readable fails the third (both measured).
+    `/proc/<pid>/environ`; and the image's own entrypoint, run with a stand-in script mounted over `run-job.mjs`,
+    must give a tool child (plain node) no inspector when it calls `process._debugProcess` on the supervisor and on
+    the runner, while a plain node of the tool's own (the control) does open one (issue #596's review; the supervisor
+    may be `absent` on an image whose entrypoint runs the runner directly). A derived image that keeps the label and
+    replaces the entrypoint with plain `node` fails the second, one that makes the copy readable fails the third (both
+    measured), and one that drops `--disable-sigusr1` fails the fourth (measured on the pre-review image).
     `anyUid` (issue #341) declares that
     the image runs correctly as an ARBITRARY non-root uid given `HOME=/home/pi`: the home is writable by any
     uid, and Chromium renders as one. Its evidence is not a grep but two runs as uid `4242` (no passwd entry
@@ -1989,8 +2019,8 @@ refactor apart.
   **An OOM is no longer always infra-retryable (issue #596).** A job whose runner the kernel kills for memory is
   `policy` / `oom-killed`, not retried, when the image's supervisor confirms it on the signed exit line
   (`INT-RUNNER-EXIT-CODE-PROTOCOL`); the same size would be killed the same way on every retry. An unconfirmed `137`
-  (an image without the supervisor, an unsigned line, a SIGKILL with no OOM kill counted) stays infra-retryable, as
-  before. The runtime's own record of the kill is not used: with `--rm` the container's `State.OOMKilled` is gone when
+  (an image without the supervisor, an unsigned line, a SIGKILL with no OOM kill counted, a peak short of 90% of this
+  `--memory`, which is how a kill by the host's own OOM killer reads) stays infra-retryable, as before. The runtime's own record of the kill is not used: with `--rm` the container's `State.OOMKilled` is gone when
   `docker run` returns, Docker's `oom` event fires also when only a child was killed and the job exited 0, and Podman
   (4.9 and 5.8, rootful and rootless) emits no `oom` event and, on 4.9 rootless, never sets `OOMKilled` (measured).
   The flags are UNCHANGED by this: every job still runs at `--memory=4g --cpus=2 --pids-limit=512`, with swap at the
@@ -7526,3 +7556,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-05 | Issue #587, the second review round. **`INT-SDK-SESSION-OPTIONS` AMENDED**, the block and its evidence: the job's runtime is created with `credentials: AuthStorage.inMemory(<auth.json read once at start>)`, the class loaded by file URL from pi-coding-agent's `dist/core/auth-storage.js` (not a root export) and refused as a config error when missing; the 1.0.3 evidence names `create`'s `credentials` option, `prepareRequest`'s env merge and the in-memory store. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_DISPATCH_PRICE_TABLE` is a third reserved runner name (the hash of the price table the runner hands its children). |
 | 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED (wording only)**: the `run.excludeTools` bullet said pi consults the list through a set filter. pi 1.0.4 matches each entry by exact name or `*` pattern, so the bullet now says that an unknown exact name matches nothing, silently. The contract is unchanged: membership in the pinned built-in set is still refused at load, which also refuses a pattern. |
 | 2026-10-06 | Issue #596, phase 0 (measure). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: every exit line carries `resources` (the container's own cgroup v2 counters, read just before the line by the one writer every path uses, last before the signature, omitted when nothing could be read; only `oom_kill` from `memory.events`), and the image's entrypoint starts a supervisor between the init and the runner that passes the key on unchanged, raises the runner tree's `oom_score_adj` to 1000, forwards a stop, and writes the signed line itself only when the runner was killed (`oom-killed` for a SIGKILL with `oom_kill` above 0, `terminated`, `killed`); an unbidden `137` is `policy` / `oom-killed` only with that line, verified, and stays infra-retryable otherwise. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `resources` at the record's tail (eight nullable integers, rebuilt, null when absent or forged) and `oom-killed` in the reason enum. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, its OOM note: an OOM is no longer always infra-retryable, and why the runtime's own records cannot say so (`--rm`, Docker's event on a child's kill, no Podman event); the flags are UNCHANGED (4g, 2 CPUs, 512 pids, default swap). **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: `oom-killed` is a paid terminal and pages. **`INT-CANCEL-CHANNEL-CONTRACT` UNCHANGED, checked**: a cancel converted from a spent attempt keeps that attempt's `resources` beside its tokens and dollars, and nothing else moves. Code evidence: image/runner/supervise.mjs, image/runner/src/cgroup-usage.mjs, image/runner/src/exit-line.mjs, image/entrypoint.sh, worker/src/run-history.mjs, worker/src/run-container.mjs, worker/src/processor.mjs, worker/src/start.mjs, worker/src/index.mjs; tests image/runner/test/supervise.test.mjs, image/runner/test/cgroup-usage.test.mjs, image/runner/test/exit-line.test.mjs, image/runner/test/usage-meter.test.mjs, worker/test/run-history.test.mjs, worker/test/processor.test.mjs, worker/test/run-container.test.mjs, worker/test/resources-record.test.mjs, worker/test/start-wiring.test.mjs; the image job step in pi-upgrade-check.yml. |
+| 2026-10-06 | Issue #596, phase 0, the review round. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: (1) the key's guarantee now includes the Node inspector: every key holder (the supervisor, the runner) starts with `--disable-sigusr1`, because a tool's SIGUSR1 or `process._debugProcess(pid)` opened the inspector on 127.0.0.1:9229 and a heap snapshot held the key, a hole open since #545; `verify-image.sh` probes both. (2) The supervisor's lines carry `by: "supervisor"` inside the signed bytes, and one picked line (`decisiveExitLine`) feeds every scanner: a supervisor line after one the runner wrote is ignored, so a finished run killed afterwards keeps its tokens and outcome. (3) An OOM needs a fourth fact, `memPeak` at 90% of the container's `--memory`, because `oom_kill` counts the host's OOM killer too; the page-cache and high-water residuals and the forged-report residual are stated. (4) `resources` is no longer described as feeding no classification: `oomKills` and `memPeak` gate the OOM reading, and the numbers are advisory because the job produces them. (5) The supervisor is an entry file with no main-module guard. Also corrects "the 6 KiB budget below" to "above". **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: its OOM note names the peak clause among the unconfirmed cases, and the `exitAuth` capability's evidence gains a fourth run (the inspector probe); the flags are UNCHANGED. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record's `resources` keys and the `oom-killed` reason are unchanged (the keys now pinned to `RESOURCE_KEYS` by a test). Code evidence: image/entrypoint.sh, image/runner/supervise.mjs, image/runner/src/supervise.mjs, image/verify-image.sh, worker/src/run-history.mjs, worker/src/container-spec.mjs, worker/src/run-container.mjs, worker/src/processor.mjs; tests image/runner/test/supervise.test.mjs, image/runner/test/exit-line.test.mjs, worker/test/run-history.test.mjs, worker/test/processor.test.mjs, worker/test/run-container.test.mjs, worker/test/docker-run.test.mjs, worker/test/resource-keys.test.mjs. |

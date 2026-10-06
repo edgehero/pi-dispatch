@@ -8,7 +8,7 @@ import { PROJECT_CAP_REASON } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
-import { COST_CAP_WHYS, RUNNER_POLICY_REASONS } from "./run-history.mjs";
+import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
@@ -83,6 +83,29 @@ export const OBSERVATION_COMMENT_UNNAMED = "the venue this job runs on did not c
  * into the queue's retry behaviour -- that is INT-RUNNER-EXIT-CODE-PROTOCOL.
  */
 
+/** The exit code of a container whose main process was SIGKILLed: a worker's stop or the kernel's OOM killer. */
+const EXIT_SIGKILL = 137;
+
+/**
+ * Issue #596: whether a run's memory peak reached the container's own limit closely enough for its OOM kill to be the
+ * job's own: `memPeak` (bytes, off the decisive exit line) at 90% of `limit` (bytes, the `--memory=` the worker passed)
+ * or more. Both must be known; anything else is false, so the 137 stays infrastructure and retries.
+ *
+ * Why the check exists: `memory.events` `oom_kill` counts a kill by ANY OOM killer, the HOST's included, and the runner
+ * tree's `oom_score_adj` of 1000 makes a job the host's first victim when the machine itself runs short. A kill of
+ * that kind says nothing about the job's size, and a retry may well pass. A cgroup OOM happens only at the limit, so its
+ * peak sits there: measured in the issue #596 lab, `memory.peak` read exactly the bound (64m, 80m) or just under it on
+ * every venue. 90% and not 100% is the margin for that "just under"; nothing in between is read as a measurement.
+ *
+ * What it cannot see (the residual): a host OOM that strikes a job which is ALREADY at 90% of its own limit, page
+ * cache included (a job that read large files counts that cache), reads as the job's own OOM. And the peak is a
+ * high-water mark over the whole run, so a job that touched 90% early and was killed by the host later reads the same.
+ */
+export function peakReachedLimit(memPeak, limit) {
+	if (!Number.isSafeInteger(memPeak) || !Number.isSafeInteger(limit) || memPeak < 0 || limit <= 0) return false;
+	return memPeak >= Math.ceil((limit * 9) / 10);
+}
+
 // The post-spend terminal comments (issue #288). Every FREE refusal above the container already comments;
 // these are the paths where money was spent and the run still ended without the agent's own status step,
 // which used to tell the issue nothing (REQ-JOB-STATUS-COMMENTS' acceptance -- "exactly one completion or
@@ -93,11 +116,6 @@ export const OBSERVATION_COMMENT_UNNAMED = "the venue this job runs on did not c
 // status comment lives (the prompt contract instructs it, including for "I cannot fix this"), and exit 2
 // by construction means the agent was cut off before that step.
 // EXPORTED only so a test can hold every RUNNER_POLICY_REASONS member to a row here (issue #437 review).
-/** Issue #596: the reason a job killed for memory records, when the runtime confirmed it (oom-watch.mjs). */
-export const OOM_KILLED = "oom-killed";
-/** The exit code of a container whose main process was SIGKILLed: a worker's stop or the kernel's OOM killer. */
-const EXIT_SIGKILL = 137;
-
 export const TERMINAL_COMMENTS = {
 	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
@@ -113,7 +131,7 @@ export const TERMINAL_COMMENTS = {
 	"model-policy-unenforceable": "Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 	// Issue #596. Never the size or the project: both are operator configuration, and the reader may be an issue author
 	// who can act on neither. The worker log and the run record carry them.
-	[OOM_KILLED]: "Stopped: the job's container ran out of memory and was stopped. Partial work may exist. Not retried, because the same size would stop the same way. The operator can raise this job's memory size.",
+	[EXIT_OOM_KILLED]: "Stopped: the job's container ran out of memory and was stopped. Partial work may exist. Not retried, because the same size would stop the same way. The operator can raise this job's memory size.",
 };
 
 // Issue #502: the `model-unknown` refusal's comment. Names no model: the reader may be an issue author.
@@ -1281,18 +1299,23 @@ export async function runJob(job, deps) {
 		// then only a signed line is read (run-container.mjs, run-history.mjs `authenticExitLines`). An image that does not
 		// declare it is read as before, under the #542 trust rule below alone.
 		const exitAuth = (img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY);
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, resources: ranResources = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}) });
 		containerRan = true;
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
 		resources = ranResources ?? null;
-		// Issue #596: CONFIRMED killed for memory. The image's supervisor (image/runner/supervise.mjs) outlives the runner,
+		// Issue #596: CONFIRMED killed for memory. The image's supervisor (image/runner/src/supervise.mjs) outlives the runner,
 		// whose process tree it gives the highest OOM score, and when the runner dies of SIGKILL with the cgroup's
 		// `oom_kill` above 0 it writes the signed line `code: 137, reason: "oom-killed"` (parseExitOomKilled). All three
 		// facts must agree: that line, verified under this run's key (an unsigned line is a tool's), and the container's
 		// own exit 137. Docker's `oom` event is not used: it fires also when only a child was killed and the job went on
-		// to exit 0, and Podman has no such event at all (both measured in the issue #596 lab).
-		const oomKilled = exitOomKilled === true && exitAuthResult === "verified" && code === EXIT_SIGKILL;
+		// to exit 0, and Podman has no such event at all (both measured in the issue #596 lab). And a fourth: the line's
+		// `memPeak` at 90% of the `--memory` this container got (`memoryLimit`, from runContainer) or more, because
+		// `oom_kill` counts the HOST's OOM killer too (`peakReachedLimit`). A report below it stays infrastructure.
+		const oomReported = exitOomKilled === true && exitAuthResult === "verified" && code === EXIT_SIGKILL;
+		const oomKilled = oomReported && peakReachedLimit(resources?.memPeak ?? null, memoryLimit);
+		// Numbers only (bytes), never a path or a project: the operator's trace of a kill read as the host's.
+		if (oomReported && !oomKilled) log("oom_report_below_limit", { jobId: job.id ?? null, memPeak: resources?.memPeak ?? null, memoryLimit });
 		// `exitAuth: "unverified"` is a run whose image signs its exit line and no signed line was found: the runner died
 		// before writing one, or a line was forged or taken off the pipe. Its tokens read as unknown and its dollars settle
 		// at the floor, the same as a container that wrote no exit line at all.
@@ -1381,15 +1404,16 @@ export async function runJob(job, deps) {
 		// worker's own stop is never relabelled, and before the switch, where the same 137 is an unknown exit and retries.
 		// The same size would be killed the same way on every retry, so it is POLICY: returned, never retried, its slot
 		// kept and its dollars settled above like any other paid stop. An UNCONFIRMED 137 (an image without the supervisor,
-		// an unsigned line, a SIGKILL with no OOM kill in the cgroup) falls through and retries, exactly as before.
+		// an unsigned line, a SIGKILL with no OOM kill in the cgroup, a peak short of the limit, which is how a kill by the
+		// host's OOM killer reads) falls through and retries, exactly as before.
 		//
 		// When only a CHILD was killed, the runner survives and ends on its own code, so this branch is not taken: the
 		// outcome is the runner's, and `resources.oomKills` in the record says a process was killed for memory.
 		if (oomKilled) {
 			// The project and the size go to the log and the record, never to the comment (the TERMINAL_COMMENTS rule).
 			log("oom_killed", { jobId: job.id ?? null });
-			await comment(job, TERMINAL_COMMENTS[OOM_KILLED]);
-			return { outcome: "policy", reason: OOM_KILLED, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}) };
+			await comment(job, TERMINAL_COMMENTS[EXIT_OOM_KILLED]);
+			return { outcome: "policy", reason: EXIT_OOM_KILLED, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}) };
 		}
 
 		switch (code) {

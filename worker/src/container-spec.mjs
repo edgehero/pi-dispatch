@@ -319,3 +319,23 @@ export function copyDowngrades(spec) {
 		.map((b, i) => ({ container: b.container, was: b.readOnlyEnforcedBy, becomes: copied[i].readOnlyEnforcedBy }))
 		.filter((d) => d.was !== null && d.was !== d.becomes);
 }
+
+/**
+ * A container memory bound (`containerSpec`'s `memory`, the `--memory=` value: `4g`, `512m`, `1024k`, a plain byte
+ * count) in bytes, or null for anything else. Binary units, as Docker and Podman read them. Null is the safe answer for
+ * every caller: the live probe then reports the bound as not checked, and the OOM classification (issue #596) does not
+ * confirm a kill it cannot compare with the limit.
+ */
+export function memoryBytes(memory) {
+	const m = /^(\d{1,15})([bkmg]?)$/i.exec(String(memory ?? ""));
+	if (!m) return null;
+	const bytes = Number(m[1]) * { "": 1, b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[m[2].toLowerCase()];
+	return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : null;
+}
+
+/** The `--memory=` bound in a runtime argv, in bytes (`memoryBytes`), or null when the argv carries none. */
+export function memoryBytesOfArgs(args) {
+	if (!Array.isArray(args)) return null;
+	const flag = args.find((a) => typeof a === "string" && a.startsWith("--memory="));
+	return flag === undefined ? null : memoryBytes(flag.slice("--memory=".length));
+}

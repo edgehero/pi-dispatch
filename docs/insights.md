@@ -130,9 +130,17 @@ runner's last line (issue #596). It is not drawn on this page yet; it is in each
 | `pidsPeak` | the most processes at once |
 
 - Each field is a whole number, or null when the venue did not expose it. The whole block is null for a run on an
-  older job image, or one that died before its last line.
-- A job whose container ran out of memory ends `oom-killed`, outcome `policy`, and is not retried. A job where only a
-  child process was killed keeps its own outcome, and `oomKills` above 0 shows it.
+  older job image, or on a venue that hides the cgroup. A runner killed before its last line still has one: the
+  image's supervisor reads the cgroup when it reports the death, so a job killed for memory carries the numbers that
+  show it.
+- **These numbers are advisory.** They are produced inside the job's container, which runs code the job controls, so
+  a job can inflate any of them (or report less). Anything that suggests a size from them (the later phases of issue
+  #596) must clamp them to the container's own bounds and must never apply a size by itself: an operator decides.
+- A job whose container ran out of memory ends `oom-killed`, outcome `policy`, and is not retried. The worker reads it
+  so only when the image's supervisor reported it on a signed line, the container exited 137 without the worker
+  stopping it, and `memPeak` reached 90% of the container's memory limit: the kernel counts a kill by the HOST's
+  out-of-memory killer the same way, and a machine short of memory says nothing about the job's size, so such a run
+  retries. A job where only a child process was killed keeps its own outcome, and `oomKills` above 0 shows it.
 - Every job still runs at 4 GB and 2 CPUs. These numbers are for choosing sizes later, not limits.
 - Disk I/O, disk space and network are not measured or isolated.
 

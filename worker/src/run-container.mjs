@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
-import { CONTAINER_HOME } from "./container-spec.mjs";
+import { CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
 import { createJobNetwork, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
@@ -11,7 +11,7 @@ import { InfraRetry } from "./processor.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
- * `{ code, aborted, turns, tokens, session, usage, context, exitReason, resources?, exitOomKilled? }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
+ * `{ code, aborted, turns, tokens, session, usage, context, exitReason, resources?, exitOomKilled?, memoryLimit? }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
  * the 30-min timeout or graceful shutdown), which the processor classifies as POLICY (no retry) per
  * INT-RUNNER-EXIT-CODE-PROTOCOL. The numeric `code` alone cannot say this: a worker SIGKILL and a
  * kernel OOM both surface as 137, so the abort FLAG -- not the code -- is the discriminator.
@@ -190,6 +190,11 @@ export function makeRunContainer({
 			...(exitKey !== null ? { extraFlags: ["-i"] } : {}),
 		});
 
+		// Issue #596: the memory bound this container actually got, in bytes, read off the argv the runtime is handed (both
+		// builders spell it `--memory=`; the spec's default is `4g`), never re-derived from the environment. The processor
+		// confirms an OOM only when the run's peak reached 90% of it. null when the argv names none.
+		const memoryLimit = memoryBytesOfArgs(args);
+
 		// REQ-EGRESS-ALLOWLIST. This job's own --internal network, created here rather than at boot because
 		// it holds exactly two endpoints -- this container and the proxy -- and that is what makes job-to-job
 		// traffic structurally impossible rather than merely discouraged. A shared network could not do it:
@@ -293,7 +298,8 @@ export function makeRunContainer({
 				// `exitWhy` only when the line named one, so every other run resolves the object it always did.
 				const why = exitWhy !== null ? { exitWhy } : {};
 				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.
-				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true } : {}) };
+				// `memoryLimit` only beside the OOM report, the one place it is read, for the same reason.
+				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true, memoryLimit } : {}) };
 				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth });
 			});
 		});
