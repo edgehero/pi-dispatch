@@ -81,6 +81,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
+          BASE_BRANCH: ${{ github.ref_name }}
         run: |
           if [ -n "$INPUT_VERSION" ]; then
             TARGET="$INPUT_VERSION"
@@ -136,8 +137,10 @@ jobs:
           BASE_BRANCH: ${{ github.ref_name }}
         run: |
           title=$(cat "$RUNNER_TEMP/pr/title.txt")
+          # jq reads the repository and the base from the environment ($ENV), so no value is spliced into the filter.
+          # shellcheck disable=SC2016
           number=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&head=${GITHUB_REPOSITORY_OWNER}:chore/pi-bump" \
-            --jq "[.[] | select(.head.repo.full_name == \"$GITHUB_REPOSITORY\")][0].number // empty")
+            --jq '[.[] | select(.head.repo.full_name == $ENV.GITHUB_REPOSITORY and .base.ref == $ENV.BASE_BRANCH)][0].number // empty')
           if [ -z "$number" ]; then
             gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" --head chore/pi-bump --draft --title "$title" --body-file "$RUNNER_TEMP/pr/body.md"
             exit 0

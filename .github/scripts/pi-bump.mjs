@@ -240,10 +240,14 @@ export function treeProblems(porcelain) {
 
 /**
  * The rolling pull request among a `GET /repos/{repo}/pulls?head=...` answer: the one whose head is BRANCH in THIS
- * repository. A fork's pull request can carry a branch of the same name, and must not count.
+ * repository and whose base is the branch this run bumps. A fork's pull request can carry a branch of the same name,
+ * and must not count. Neither may one into another base: a run on main once took a pull request into a scratch
+ * branch for its own and rewrote it, and a pull request closed there would have stopped main's bump for good.
  */
-export function rollingPulls(pulls, repo) {
-	return (Array.isArray(pulls) ? pulls : []).filter((pull) => pull?.head?.ref === BRANCH && pull?.head?.repo?.full_name === repo && pull?.base?.repo?.full_name === repo);
+export function rollingPulls(pulls, repo, base) {
+	return (Array.isArray(pulls) ? pulls : []).filter(
+		(pull) => pull?.head?.ref === BRANCH && pull?.head?.repo?.full_name === repo && pull?.base?.repo?.full_name === repo && pull?.base?.ref === base,
+	);
 }
 
 /**
@@ -369,7 +373,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		for (const p of BUMP_PATHS) console.log(p);
 	} else if (args[0] === "decide") {
 		const pinned = siteVersion(PI_PIN_SITES[0], readFileSync(new URL(PI_PIN_SITES[0].path, repo), "utf8"));
-		const pulls = rollingPulls(json(process.env.PULLS), process.env.GITHUB_REPOSITORY);
+		const pulls = rollingPulls(json(process.env.PULLS), process.env.GITHUB_REPOSITORY, process.env.BASE_BRANCH);
 		const reason = skipReason({
 			pinned,
 			target: process.env.TARGET,

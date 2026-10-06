@@ -149,11 +149,15 @@ test("the tree a bump commits holds only modified pin files and the lockfile", (
 });
 
 test("only this repository's own rolling branch counts as the rolling pull request, never a fork's of the same name", () => {
-	const pull = (owner, extra = {}) => ({ title: titleFor("1.0.4"), state: "open", head: { ref: "chore/pi-bump", repo: { full_name: `${owner}/pi-dispatch` } }, base: { repo: { full_name: "edgehero/pi-dispatch" } }, ...extra });
-	assert.equal(rollingPulls([pull("edgehero"), pull("mallory")], "edgehero/pi-dispatch").length, 1);
-	assert.deepEqual(rollingPulls([pull("mallory")], "edgehero/pi-dispatch"), []);
-	assert.deepEqual(rollingPulls([pull("edgehero", { head: { ref: "other", repo: { full_name: "edgehero/pi-dispatch" } } })], "edgehero/pi-dispatch"), []);
-	assert.deepEqual(rollingPulls({ message: "Not Found" }, "edgehero/pi-dispatch"), []);
+	const pull = (owner, extra = {}) => ({ title: titleFor("1.0.4"), state: "open", head: { ref: "chore/pi-bump", repo: { full_name: `${owner}/pi-dispatch` } }, base: { ref: "main", repo: { full_name: "edgehero/pi-dispatch" } }, ...extra });
+	assert.equal(rollingPulls([pull("edgehero"), pull("mallory")], "edgehero/pi-dispatch", "main").length, 1);
+	assert.deepEqual(rollingPulls([pull("mallory")], "edgehero/pi-dispatch", "main"), []);
+	assert.deepEqual(rollingPulls([pull("edgehero", { head: { ref: "other", repo: { full_name: "edgehero/pi-dispatch" } } })], "edgehero/pi-dispatch", "main"), []);
+	assert.deepEqual(rollingPulls({ message: "Not Found" }, "edgehero/pi-dispatch", "main"), []);
+	// A rolling pull request into another base is not this run's: a closed one there must not stop main's bump.
+	const scratch = pull("edgehero", { state: "closed", merged_at: null, base: { ref: "scratch/pi-bump-proof", repo: { full_name: "edgehero/pi-dispatch" } } });
+	assert.deepEqual(rollingPulls([scratch], "edgehero/pi-dispatch", "main"), []);
+	assert.equal(rollingPulls([scratch], "edgehero/pi-dispatch", "scratch/pi-bump-proof").length, 1);
 });
 
 test("only an exact newer release is bumped to, once: not a prerelease, a downgrade, the pin, or a version already carried or closed", () => {
