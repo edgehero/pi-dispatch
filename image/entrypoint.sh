@@ -1,7 +1,9 @@
 #!/bin/sh
 # Thin by design. The runner owns the outcome, including the exit code that
-# INT-RUNNER-EXIT-CODE-PROTOCOL depends on -- adding logic here would put a second
-# author on that contract.
+# INT-RUNNER-EXIT-CODE-PROTOCOL depends on, and writes the exit line; the one other
+# author is the supervisor below, which writes a line only when the runner was killed
+# before it could (issue #596). Adding logic here would put a third author on that
+# contract.
 #
 # `exec` so the supervisor replaces this shell and receives SIGTERM when the worker
 # stops the container at REQ-JOB-TIMEOUT-30M, and forwards it to the runner. Without
@@ -22,4 +24,9 @@ set -eu
 # The supervisor (issue #596, image/runner/supervise.mjs) runs first and starts the runner as its child: it passes the
 # key on, forwards a stop, exits with the runner's own code, and writes the signed exit line only when the runner was
 # KILLED, naming an out-of-memory kill. It holds the key too, so it runs under the same exec-only node.
-exec /opt/pi-dispatch/runner-node /app/image/runner/supervise.mjs
+#
+# `--disable-sigusr1` (issue #596's review; the hole dates from #545): a job's tool runs as the same uid, and a SIGUSR1
+# (or `process._debugProcess(pid)`) would open this node's inspector on 127.0.0.1:9229, which exists under
+# `--network none`, and a heap snapshot from there holds the key. The exec-only node closes /proc, not the inspector:
+# that is the process serving its own memory. The supervisor starts the runner with the same flag.
+exec /opt/pi-dispatch/runner-node --disable-sigusr1 /app/image/runner/supervise.mjs

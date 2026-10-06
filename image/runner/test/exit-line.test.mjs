@@ -163,9 +163,10 @@ test("run-job.mjs reads the key and installs the SIGTERM handler before main, an
 test("image entrypoint runs the runner under the exec-only node the Dockerfile installs (issue #545)", () => {
 	const entrypoint = readFileSync(new URL("../../entrypoint.sh", import.meta.url), "utf8");
 	const dockerfile = readFileSync(new URL("../../Dockerfile", import.meta.url), "utf8");
-	// Issue #596: the entrypoint starts the supervisor, which holds the key too, under the same exec-only node, and it
-	// starts the runner under that node in turn (supervise.mjs RUNNER_NODE and RUNNER_SCRIPT, pinned in supervise.test.mjs).
-	assert.match(entrypoint, /\nexec \/opt\/pi-dispatch\/runner-node \/app\/image\/runner\/supervise\.mjs\n/);
+	// Issue #596: the entrypoint starts the supervisor, which holds the key too, under the same exec-only node and with
+	// --disable-sigusr1, and it starts the runner the same way in turn (src/supervise.mjs RUNNER_NODE, RUNNER_NODE_FLAGS
+	// and RUNNER_SCRIPT, pinned in supervise.test.mjs).
+	assert.match(entrypoint, /\nexec \/opt\/pi-dispatch\/runner-node --disable-sigusr1 \/app\/image\/runner\/supervise\.mjs\n/);
 	assert.match(dockerfile, /\nRUN install -o root -g root -m 0711 \/usr\/local\/bin\/node \/opt\/pi-dispatch\/runner-node\n/);
 	assert.ok(dockerfile.indexOf("runner-node") < dockerfile.indexOf("chmod -R a-w /opt/pi-dispatch"), "installed before /opt/pi-dispatch is made read-only");
 });

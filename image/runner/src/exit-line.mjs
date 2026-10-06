@@ -24,6 +24,11 @@ import { readSync, writeSync } from "node:fs";
  * (`/opt/pi-dispatch/runner-node`, mode 0711, root-owned): the kernel marks a process that exec'd a binary its user
  * cannot read as not dumpable, and a non-dumpable process's `/proc/<pid>/mem`, `environ` and `fd` are refused to the
  * same uid without CAP_SYS_PTRACE, which `--cap-drop=ALL` removes. Measured EACCES on all four venues.
+ * And the runner's own INSPECTOR, which the exec-only node does not touch (it is the process serving its own memory):
+ * a SIGUSR1 from the same uid, or `process._debugProcess(pid)`, opens it on 127.0.0.1:9229, and the loopback exists
+ * under `--network none`, so a tool could take a heap snapshot holding the key. Open from #545 until issue #596's
+ * review found it; both key holders (the supervisor and the runner) now start with `--disable-sigusr1`
+ * (image/entrypoint.sh, image/runner/src/supervise.mjs `RUNNER_NODE_FLAGS`), and verify-image.sh probes both.
  *
  * A MAC of the line rather than the bare key printed on it: the job's tools can open the container's stdout pipe for
  * READING (`/proc/1/fd/1`, measured on every venue), so a line carrying the key itself could be read off the pipe and
