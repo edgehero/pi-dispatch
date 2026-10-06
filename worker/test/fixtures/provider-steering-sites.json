@@ -97,7 +97,7 @@
 		"!(bearerTokenKey in process.env)) { throw new T": 1,
 		"st token = { token: process.env[bearerTokenKey] }; setT": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/api/anthropic-messages.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/api/anthropic-messages.js": {
 		"ion(cacheRetention, env) { if (cacheRetenti": 1,
 		"el, cacheRetention, env) { const retention": 1,
 		"ion(cacheRetention, env); if (retention ===": 1,
@@ -107,7 +107,7 @@
 		", options?.headers, options?.env)) { assertReque": 1,
 		"ns?.cacheRetention, options?.env); const compat = ge": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/api/bedrock-converse-stream.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/api/bedrock-converse-stream.js": {
 		"dBedrockCredentials(options.env); if (!skip": 1,
 		"rget(model.baseUrl, options.env); if (proxy": 1,
 		"ons.cacheRetention, options.env); const inf": 1,
@@ -121,13 +121,13 @@
 		"romptCaching(model, env) && result.length > 0)": 1,
 		"dBedrockCredentials(env) { const accessKeyI": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/api/google-vertex.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/api/google-vertex.js": {
 		", options?.headers, options?.env); let param": 1,
 		"on, optionsHeaders, env) { const googleAuth": 1,
 		"ldGoogleAuthOptions(env); return new Google": 1,
 		"ldGoogleAuthOptions(env) { const keyFilenam": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/api/openai-codex-responses.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/api/openai-codex-responses.js": {
 		"ebSocketConstructor(env) { if (!env && _cac": 1,
 		"tor(env) { if (!env && _cachedWebsocket)": 1,
 		"e(/^ws:/, \"http:\"), env); super": 1,
@@ -139,34 +139,34 @@
 		", connectTimeoutMs, env); const entry = { s": 1,
 		"etConnectTimeoutMs, options?.env); let keepConnectio": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/api/openai-completions.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/api/openai-completions.js": {
 		"ion(cacheRetention, env) { if (cacheRetenti": 1,
 		"ns?.cacheRetention, options?.env); const cac": 1,
 		"ns?.cacheRetention, options?.env), grammarToolInputPrope": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/api/openai-responses.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/api/openai-responses.js": {
 		"ion(cacheRetention, env) { if (cacheRetenti": 1,
 		"ns?.cacheRetention, options?.env); const cac": 1,
 		"ns?.cacheRetention, options?.env);": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/api/pi-messages.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/api/pi-messages.js": {
 		"ion(cacheRetention, env) { if (cacheRetenti": 1,
 		"ns?.cacheRetention, options?.env), s": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/api/simple-options.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/api/simple-options.js": {
 		"?.metadata, env: options?.env, }; }": 1,
 		"adata, env: options?.env, }; }": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/auth/context.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/auth/context.js": {
 		"process; return proc?.env; }": 1,
 		"urn { async env(name) {": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/auth/helpers.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/auth/helpers.js": {
 		": credential.key }, env: credential.env, source": 1,
 		"dential.key }, env: credential.env, source: \"stored creden": 1,
 		"const value = await ctx.env(envVar);": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/auth/resolve.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/auth/resolve.js": {
 		"equestAuthContext = overrides?.env ? overlayEnvAuthContext": 1,
 		"ontext(authContext, overrides.env) : authContext; if": 1,
 		"apiKey, env: overrides.env,": 1,
@@ -183,10 +183,10 @@
 		"? resolveApiKey(requestAuthContext, provider.auth.apiKey,": 1,
 		"piKey, provider.id, credential, signal); }": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/compat.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/compat.js": {
 		"Key(model.provider, options?.env); if (!apiKey || ap": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/env-api-keys.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/env-api-keys.js": {
 		"ertexAdcCredentials(env) { const explicitCr": 1,
 		"ndEnvKeys(provider, env) { const envVars =": 1,
 		"derEnvValue(envVar, env)); return found.len": 1,
@@ -197,7 +197,7 @@
 		"ilter((envVar) => !!getProviderEnvValue(envVar, env)); retur": 1,
 		"return getProviderEnvValue(apiKeyEnv, env); }": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/models.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/models.js": {
 		"result.auth.apiKey, env: result.env }; }": 1,
 		"t.auth.apiKey, env: result.env }; } async read": 1,
 		"apiKey, env: options?.env,": 1,
@@ -209,7 +209,7 @@
 		"ion.env ?? {}), ...(options?.env ?? {}) } : undefined;": 1,
 		"s, apiKey, headers, env }; return { req": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/providers/amazon-bedrock.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/providers/amazon-bedrock.js": {
 		"y\", env: { AWS_PROFILE: await i": 1,
 		"=> { const env = async (name) => {": 1,
 		"const value = await ctx.env(name);": 1,
@@ -218,14 +218,14 @@
 		"{}, env: credential?.env,": 1,
 		"env: credential?.env, source": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/providers/anthropic.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/providers/anthropic.js": {
 		": credential.key }, env: credential.env, source": 1,
 		"dential.key }, env: credential.env, source: \"stored creden": 1,
 		"onst apiKey = await ctx.env(envVar);": 1,
 		"const value = await ctx.env(envVar);": 2,
 		"return { auth: {}, env: federation, source: \"w": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/providers/cloudflare-auth.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/providers/cloudflare-auth.js": {
 		"l.key : credential.env?.[name] : u": 1,
 		"const value = await ctx.env(name); signal": 1,
 		"apiKey, env: { CLOUDFLA": 1,
@@ -234,19 +234,19 @@
 		"env: resolved.env, source": 2,
 		"ey, env: { CLOUDFLARE_ACCOUNT_I": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/providers/cloudflare-stream.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/providers/cloudflare-stream.js": {
 		"udflareModel(model, env) { if (!env)": 1,
 		"el, env) { if (!env) return model;": 1,
 		"udflareModel(model, options?.env), context, options),": 3
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/providers/google-vertex.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/providers/google-vertex.js": {
 		"i_key\", env: { GOOG": 1,
 		"=> { const env = async (name) => {": 1,
 		"const value = await ctx.env(name);": 1,
 		"{}, env: credential?.env,": 1,
 		"env: credential?.env, source": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/utils/node-http-proxy.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/utils/node-http-proxy.js": {
 		"on getProxyEnv(key, env) { const lowercaseK": 1,
 		"Case(); return (env?.[lowercaseKey] ||": 1,
 		"caseKey] || env?.[uppercaseKey] ||": 1,
@@ -259,27 +259,27 @@
 		"caseKey] || getProviderEnvValue(lowercaseKey) ||": 1,
 		"caseKey) || getProviderEnvValue(uppercaseKey) ||": 1
 	},
-	"@earendil-works/pi-ai@1.0.3/dist/utils/provider-env.js": {
+	"@earendil-works/pi-ai@1.0.4/dist/utils/provider-env.js": {
 		".bun || Object.keys(process.env).length > 0) {": 1,
 		"viderEnvValue(name, env) { return (env?.[na": 1,
 		"env) { return (env?.[name] ||": 1,
 		"s !== \"undefined\" ? process.env[name] : undefined": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/bun/restore-sandbox-env.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/bun/restore-sandbox-env.js": {
 		"if (Object.keys(process.env).length > 0) re": 1,
 		") { process.env[entry.slice(0, idx)] = entry.sli": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/cli/setup.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/cli/setup.js": {
 		"tle = APP_NAME; process.env.PI_CODING_AGENT = \"true": 1,
 		"AGENT = \"true\"; process.env.AI_AGENT = \"pi\"; pr": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/agent-session.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/agent-session.js": {
 		"s), env: result.env,": 2,
 		"env: result.env, };": 1,
 		"env: result.env, thinki": 1,
 		"ent.streamFunction, request.env, this.settingsManager.g": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/auth-storage.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/auth-storage.js": {
 		"const validEnv = value.env === undefined ||": 1,
 		"(typeof value.env === \"object\" &&": 1,
 		"value.env !== null &&": 1,
@@ -289,33 +289,33 @@
 		"lue(credential.key, credential.env) }; } async mod": 1,
 		"if (validKey && validEnv) co": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/bug-report.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/bug-report.js": {
 		"nment() { const env = (name) => process.env": 1,
 		"nst env = (name) => process.env[name] || null;": 1,
 		"iables: Object.keys(process.env) .filter((n": 1,
 		"ns.headers, env: options.env, s": 1,
 		"aders, env: options.env, sessionId: opt": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/compaction/branch-summarization.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/compaction/branch-summarization.js": {
 		"l, apiKey, headers, env, signal, customInstruct": 1,
 		"{ apiKey, headers, env, signal, maxTokens };": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/compaction/compaction.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/compaction/compaction.js": {
 		"l, apiKey, headers, env, sessionId }; if (m": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/keybindings.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/keybindings.js": {
 		"= process.platform, env = process.env) { re": 1,
 		"ess.platform, env = process.env) { return platform": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/mcp-servers.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/mcp-servers.js": {
 		"} if (value.env !== undefined && !isStr": 1,
 		"&& !isStringRecord(value.env)) return `s": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/model-registry.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/model-registry.js": {
 		"}), env: resolution.env,": 1,
 		"env: resolution.env, };": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/model-runtime.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/model-runtime.js": {
 		"el.provider), { ...(resolution.env ?? {}), ...(overrides.e": 1,
 		"ion.env ?? {}), ...(overrides.env ?? {}) }); retu": 1,
 		"apiKey, env: options?.env,": 1,
@@ -329,7 +329,7 @@
 		"{ apiKey, headers, env, ...rest } = options ??": 1,
 		"{ apiKey, headers, env } : {};": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/package-manager.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/package-manager.js": {
 		"nux\" || Object.keys(process.env).length > 0) {": 1,
 		"0) { return process.env; } try {": 1,
 		"-8\"); const env = {}; for (cons": 1,
@@ -346,7 +346,7 @@
 		"gs) { const env = getEnv(); con": 1,
 		"utf-8\", env, }); if": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/provider-composer.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/provider-composer.js": {
 		"plicit) { const env = { ...explicit };": 1,
 		"es))) { if (env[name] !== undefin": 1,
 		"const value = await ctx.env(name); if": 1,
@@ -368,7 +368,7 @@
 		"config, extension, env) { return resolveHe": 1,
 		"der}/${model.id}\"`, env); } export function res": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/resolve-config-value.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/resolve-config-value.js": {
 		"nvConfigValue(name, env) { return env?.[nam": 1,
 		", env) { return env?.[name] || process.": 1,
 		"turn env?.[name] || process.env[name] || undefine": 1,
@@ -392,7 +392,7 @@
 		"const envValue = resolveEnvConfigValue(part.name, env); if": 1,
 		"g).filter((name) => resolveEnvConfigValue(name, env) === undefin": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/core/tools/bash.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/core/tools/bash.js": {
 		"a, signal, timeout, env }) => { con": 1,
 		"2\", env: env ?? getShellEnv(),": 1,
 		"env: env ?? getShellEnv(),": 1,
@@ -411,49 +411,49 @@
 		"env: spawnContext.env,": 1,
 		"env: spawnContext.env, })": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/extensions/llama/huggingface.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/extensions/llama/huggingface.js": {
 		"indHuggingFaceToken(env = process.env) { co": 1,
 		"gingFaceToken(env = process.env) { const fromEnviro": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/extensions/llama/provider.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/extensions/llama/provider.js": {
 		"env: { LLAMA_BASE_URL: serv": 1,
 		"env: { ...credential?.env,": 1,
 		"env: { ...credential?.env, LLAMA_BASE_URL: server": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/extensions/mcp/cli.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/extensions/mcp/cli.js": {
 		"l: \"value\", env: \"list\", cwd: \"": 1,
 		"lse { const env = parsePairs(\"env\", lis": 1,
 		"rror); if (!env) return 1;": 1,
 		"...(Object.keys(env).length > 0 ? { env } :": 1,
 		"env).length > 0 ? { env } : {}), ..": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/extensions/mcp/runtime.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/extensions/mcp/runtime.js": {
 		"}); } const env = {}; for (const [k": 1,
 		"] of Object.entries(config.env ?? {})) { env[k": 1,
 		"v ?? {})) { env[key] = resolveCo": 1,
 		"d ?? \".\")), env, stderr: \"pipe\"": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/main.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/main.js": {
 		"lineMode) { process.env.PI_OFFLINE = \"1\";": 1,
 		"LINE = \"1\"; process.env.PI_SKIP_VERSION_CHECK =": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/modes/interactive/theme/theme.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/modes/interactive/theme/theme.js": {
 		"etectColorFgBgTheme(env = process.env) { co": 1,
 		"olorFgBgTheme(env = process.env) { const bg = env.C": 1,
 		"{}, reportedScheme, env = process.env) { co": 1,
 		"portedScheme, env = process.env) { const { backgrou": 1,
 		"etectColorFgBgTheme(env) ?? \"dark\"; }": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/modes/rpc/rpc-client.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/modes/rpc/rpc-client.js": {
 		"ns.cwd, env: { ...process.env, ...t": 1,
 		"env: { ...process.env, ...this.options.env },": 1,
 		": { ...process.env, ...this.options.env }, stdio: [": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/rpc-entry.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/rpc-entry.js": {
 		"`${APP_NAME}-rpc`; process.env.PI_CODING_AGENT = \"true": 1,
 		"ING_AGENT = \"true\"; process.env.AI_AGENT = \"pi\"; proces": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/utils/clipboard-image.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/utils/clipboard-image.js": {
 		"on isWaylandSession(env = process.env) { re": 1,
 		"aylandSession(env = process.env) { return Boolean(e": 1,
 		"ptions) { const env = options?.env ?? proce": 1,
@@ -462,37 +462,37 @@
 		"const wsl = isWSL(env); if (isWayland": 1,
 		"f (isWaylandSession(env) || wsl) {": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/utils/clipboard.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/utils/clipboard.js": {
 		"ion isRemoteSession(env) { return Boolean(e": 1,
 		"atform(); const env = process.env; let": 1,
 		"(); const env = process.env; let copied = false": 1,
 		"== \"linux\" && isWSL(env)) {": 1,
 		"&& (isRemoteSession(env) || (!copied && headles": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/utils/shell.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/utils/shell.js": {
 		"t programFilesX86 = process.env[\"ProgramFiles(x86)\"]; if": 1,
 		"thKey = Object.keys(process.env).find((key) => key.toLo": 1,
 		"const currentPath = process.env[pathKey] ?? \"\";": 1,
 		"return { ...process.env, [pathKey]: upd": 1
 	},
-	"@earendil-works/pi-coding-agent@1.0.3/dist/utils/wsl.js": {
+	"@earendil-works/pi-coding-agent@1.0.4/dist/utils/wsl.js": {
 		"port function isWSL(env = process.env) { if": 1,
 		"unction isWSL(env = process.env) { if (env.WSL_DIST": 1
 	},
-	"@earendil-works/pi-mcp@1.0.3/dist/transports/stdio.js": {
+	"@earendil-works/pi-mcp@1.0.4/dist/transports/stdio.js": {
 		"true; const env = this.options.inheritE": 1,
 		"itEnv === false ? { ...this.options.env } : { ...process.env, .": 1,
 		"s.options.env } : { ...process.env, ...this.options.env };": 1,
 		": { ...process.env, ...this.options.env }; const child": 1,
 		"ns.cwd, env, stdio: [\"p": 1
 	},
-	"@earendil-works/pi-telemetry@1.0.3/dist/testing/conformance.js": {
+	"@earendil-works/pi-telemetry@1.0.4/dist/testing/conformance.js": {
 		"ource) || function (env, value, async) { if": 1,
 		"return function (env) { function fai": 1,
 		"il(e) { env.error = env.hasError ?": 1,
 		"\") : e; env.hasError = true;": 1
 	},
-	"@earendil-works/pi-tui@1.0.3/dist/terminal.js": {
+	"@earendil-works/pi-tui@1.0.4/dist/terminal.js": {
 		"olveEscapeTimeoutMs(env = process.env) { co": 1,
 		"capeTimeoutMs(env = process.env) { const configured": 1,
 		"=> { const env = process.env.PI_TUI_WR": 1,
@@ -501,7 +501,7 @@
 		"return path.join(env, `tui-${ts}-${process.p": 1,
 		"} return env; })(); get kitt": 1
 	},
-	"@earendil-works/pi-tui@1.0.3/dist/wheel-scroll.js": {
+	"@earendil-works/pi-tui@1.0.4/dist/wheel-scroll.js": {
 		"Wheel() { const env = process.env; retu": 1,
 		") { const env = process.env; return (process.pl": 1
 	},
