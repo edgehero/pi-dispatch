@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { alreadyNoticed, baseMovedUnder, branchTip, bump, BUMP_AUTHOR, BUMP_PATHS, compareVersions, decide, fixupsOn, heldNotice, LOCKFILE, lockedPiNames, lockfileProblems, packageProblems, PI_PIN_SITES, prunePiTree, renderPullRequest, rewriteOverrides, rewriteSite, rollingPulls, ROOT_PACKAGE, siteVersion, skipReason, titleFor, treeProblems, versionsBetween } from "../../.github/scripts/pi-bump.mjs";
+import { alreadyNoticed, baseMovedUnder, branchTip, bump, BUMP_AUTHOR, BUMP_COMMITTER, BUMP_PATHS, compareVersions, decide, fixupsOn, heldNotice, LOCKFILE, lockedPiNames, lockfileProblems, packageProblems, PI_PIN_SITES, prunePiTree, renderPullRequest, rewriteOverrides, rewriteSite, rollingPulls, ROOT_PACKAGE, siteVersion, skipReason, titleFor, treeProblems, versionsBetween } from "../../.github/scripts/pi-bump.mjs";
 import { piPinProblems, repositoryPins } from "../../.github/scripts/pi-pin-check.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -260,7 +260,7 @@ const REPO = "edgehero/pi-dispatch";
 const TIP = "a".repeat(40);
 const NEXT = PIN.replace(/\d+$/, (n) => String(Number(n) + 1));
 const LATER = PIN.replace(/\d+$/, (n) => String(Number(n) + 2));
-const commitOf = (subject = titleFor(NEXT), author = BUMP_AUTHOR) => ({ sha: "b".repeat(40), commit: { message: `${subject}\n\nMoves every pi pin.\n\nSigned-off-by: ${author.name} <${author.email}>`, author: { ...author, date: "2026-10-06T07:23:40Z" } } });
+const commitOf = (subject = titleFor(NEXT), author = BUMP_AUTHOR, committer = BUMP_COMMITTER) => ({ sha: "b".repeat(40), commit: { message: `${subject}\n\nMoves every pi pin.\n\nSigned-off-by: ${author.name} <${author.email}>`, author: { ...author, date: "2026-10-06T07:23:40Z" }, committer: { ...committer, date: "2026-10-06T07:23:40Z" } } });
 const botAhead = (edit = (a) => a) => edit({ status: "ahead", ahead_by: 1, total_commits: 1, commits: [commitOf()], files: BUMP_PATHS.map((filename) => ({ filename, status: "modified" })) });
 const pullOf = (number, extra = {}) => ({ number, title: titleFor(NEXT), state: "open", merged_at: null, head: { ref: "chore/pi-bump", sha: TIP, repo: { full_name: REPO } }, base: { ref: "main", repo: { full_name: REPO } }, ...extra });
 const decideFor = (over = {}) => decide({ pinned: PIN, target: LATER, repo: REPO, base: "main", pulls: [pullOf(594)], tip: TIP, ahead: botAhead(), behind: { files: [] }, ...over });
@@ -277,6 +277,9 @@ test("a branch holding only the workflow's own commit may be rebuilt; any other 
 	for (const author of [{ name: "Someone Else", email: BUMP_AUTHOR.email }, { name: BUMP_AUTHOR.name, email: "someone@example.com" }]) {
 		assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, commits: [commitOf(titleFor(NEXT), author)] }))), ["a commit on chore/pi-bump is not by the bump's author"], JSON.stringify(author));
 	}
+	assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, commits: [commitOf(titleFor(NEXT), BUMP_AUTHOR, BUMP_AUTHOR)] }))), ["a commit on chore/pi-bump was not committed by the workflow"], "the bump commit amended, rebased or squashed by a person: its committer is theirs");
+	assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, commits: [commitOf(titleFor(NEXT), BUMP_AUTHOR, { name: "GitHub", email: BUMP_COMMITTER.email })] }))), ["a commit on chore/pi-bump was not committed by the workflow"], "the committer's name counts too");
+	assert.notEqual(BUMP_COMMITTER.email, BUMP_AUTHOR.email, "a person committing as the author is not the workflow");
 	for (const subject of [`${titleFor(NEXT)} and a fix`, "fix: x", titleFor("1.0.4-rc.1")]) assert.deepEqual(fixupsOn(botAhead((a) => ({ ...a, commits: [commitOf(subject)] }))), ["a commit on chore/pi-bump is not a bump commit by its subject"], subject);
 	assert.notDeepEqual(fixupsOn(null), [], "an answer that is not a comparison is never read as the workflow's own commit");
 });
@@ -438,6 +441,7 @@ test("the workflow comments once per version, with the bump token, and pushes on
 	assert.doesNotMatch(push, /--force(?!-with-lease)/, "never a bare force");
 	assert.match(WORKFLOW, /LEASE: \$\{\{ steps\.decide\.outputs\.lease \}\}/);
 	assert.match(push, new RegExp(`git config user\\.name "${BUMP_AUTHOR.name}"\ngit config user\\.email "${BUMP_AUTHOR.email.replaceAll(".", "\\.")}"`), "the workflow commits as the author fixupsOn recognises");
+	assert.match(WORKFLOW, new RegExp(`LEASE: .*\n(?: {10}#.*\n)* {10}GIT_COMMITTER_NAME: "${BUMP_COMMITTER.name}"\n {10}GIT_COMMITTER_EMAIL: "${BUMP_COMMITTER.email.replaceAll(".", "\\.").replaceAll("+", "\\+")}"\n {8}run: \\|\n {10}mapfile`), "the push step commits as the committer fixupsOn recognises");
 	const inputs = WORKFLOW.match(/^ {4}inputs:\n((?: {6}.*\n)+)/m)[1];
 	assert.deepEqual(inputs.split("\n").filter((line) => /^ {6}\S/.test(line)), ["      version:"], "a manual run has no input that overrides the hold");
 });

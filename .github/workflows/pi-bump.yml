@@ -20,8 +20,8 @@
 # one with node-gyp at install), so the pull request's review and its CI are the real check on what a package runs.
 #
 # A PERSON'S FIXES ARE KEPT. The branch is rebuilt on the base only while it holds nothing but the workflow's own bump
-# commit (one commit on its merge base, subject `chore(pi): run on pi X`, by Rob Boerman, changing only the pin files
-# and the lockfile), or when a closed pull request keeps its tip. Once a person pushed anything else, a newer pi waits:
+# commit (one commit on its merge base, subject `chore(pi): run on pi X`, by Rob Boerman, committed as
+# robboerman+pi-bump@live.nl, changing only the pin files and the lockfile), or when a closed pull request keeps its tip. Once a person pushed anything else, a newer pi waits:
 # the open pull request gets one comment per version, and the job stays green. There is no input to override that; a
 # person merges or closes the pull request, or deletes the branch. Without fixes, a branch whose base changed a pin
 # file or the lockfile is rebuilt on it even for the same version, so the pull request does not sit on a conflict.
@@ -155,6 +155,10 @@ jobs:
         env:
           PI_BUMP_TOKEN: ${{ secrets.PI_BUMP_TOKEN }}
           LEASE: ${{ steps.decide.outputs.lease }}
+          # The committer only this workflow uses (BUMP_COMMITTER in pi-bump.mjs). An amend, rebase or squash by a person
+          # rewrites it, so the next run sees that commit as a fix.
+          GIT_COMMITTER_NAME: "Rob Boerman"
+          GIT_COMMITTER_EMAIL: "robboerman+pi-bump@live.nl"
         run: |
           mapfile -t paths < <(node .github/scripts/pi-bump.mjs paths)
           git config user.name "Rob Boerman"
