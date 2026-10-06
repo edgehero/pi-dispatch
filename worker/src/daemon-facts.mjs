@@ -80,6 +80,8 @@ export function parseDaemonFacts(output) {
 				serverVersion: displayVersion(body.version?.Version),
 				// Issue #596: the runtime's own CPU count, which sets every job's `--cpus` ceiling (`hostCpuCeiling`).
 				hostCpus: cpuCount(body.host.cpus),
+				// Issue #596, phase 2: the memory the runtime's host has, in MiB, for the host budget's `auto` (`host-budget.mjs`).
+				memTotalMiB: memoryMiB(body.host.memTotal),
 			} };
 		}
 		if (typeof body.ServerVersion === "string" && body.ServerVersion !== "" && (typeof body.OperatingSystem === "string" || Array.isArray(body.SecurityOptions))) {
@@ -104,6 +106,9 @@ export function parseDaemonFacts(output) {
 				// which sets every job's `--cpus` ceiling. Docker refuses a `--cpus` above it, so the worker's own count is
 				// never used in its place.
 				hostCpus: cpuCount(body.NCPU),
+				// Issue #596, phase 2: the daemon's memory (`MemTotal`, bytes; the VM's on Docker Desktop), in MiB, for the host
+				// budget's `auto` (`host-budget.mjs`). The worker's own `os.totalmem()` is never used in its place, for NCPU's reason.
+				memTotalMiB: memoryMiB(body.MemTotal),
 				// Issue #596: whether the daemon can bound swap (`SwapLimit`). Where it is false, `--memory-swap` cannot be
 				// enforced and a job may swap past its memory; doctor warns. null on Podman (its compat value is not read,
 				// for `bounds`' reason) and when the key is absent.
@@ -129,6 +134,16 @@ export function displayVersion(value) {
 /** A runtime's CPU count: a whole number from 1 to 4096, else null (no fact rather than a guess). */
 function cpuCount(value) {
 	return Number.isSafeInteger(value) && value >= 1 && value <= 4096 ? value : null;
+}
+
+/**
+ * A runtime's memory in whole MiB (rounded down), from its byte count: a safe integer of at least 64 MiB and at most
+ * 64 TiB, else null. A host below 64 MiB runs no job at all, so a smaller value is a parse fault rather than a fact.
+ */
+export function memoryMiB(bytes) {
+	if (!Number.isSafeInteger(bytes) || bytes < 64 * 1048576) return null;
+	const mib = Math.floor(bytes / 1048576);
+	return mib <= 64 * 1024 * 1024 ? mib : null;
 }
 
 function isUnixSocketPath(path) {
@@ -185,7 +200,10 @@ export function parsePodmanInfo(stdout) {
 		// graphRoot is: an absolute path with no control character, else no fact (and the live network check refuses).
 		runRoot: typeof body.store?.runRoot === "string" && body.store.runRoot.length <= 4096 && /^\/[^\u0000-\u001f\u007f]*$/.test(body.store.runRoot) ? body.store.runRoot : null,
 		// Issue #596: the host's CPU count as Podman reports it (`host.cpus`, measured 4 on both lab VMs), which sets every
-		// podman job's `--cpus` ceiling. A rootless account's own `cpu.max` may be lower; phase 2's host budget reads it.
+		// podman job's `--cpus` ceiling. A rootless account's own `cpu.max` may be lower; the host budget reads it (`host-budget.mjs`).
 		hostCpus: cpuCount(host.cpus),
+		// Issue #596, phase 2: the host's memory as Podman reports it (`host.memTotal`, bytes), in MiB, for the host budget's
+		// `auto`. A rootless account's own `memory.max` may be lower; `host-budget.mjs` reads that beside it.
+		memTotalMiB: memoryMiB(host.memTotal),
 	};
 }

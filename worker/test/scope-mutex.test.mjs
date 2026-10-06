@@ -458,9 +458,11 @@ function endpointWiring({ endpoints = [OLLAMA], models = OVERLAY, redis = leaseR
 test("the endpoint re-check has a wake instant of its own, distinct from every other deferral", { skip }, async () => {
 	// Nothing records WHY a job sits in the delayed set, so the instant is the only evidence; 11s is the wait
 	// throttle floor, which index.mjs does not export.
-	const instants = [mod.SCOPE_BUSY_RECHECK_MS, mod.SUPERSEDE_RECHECK_MS, 11_000, mod.ENDPOINT_BUSY_RECHECK_MS];
+	// Issue #596, phase 2: the host budget's re-check and the never-fits deferral are two more.
+	const { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS } = await import("../src/host-budget.mjs");
+	const instants = [mod.SCOPE_BUSY_RECHECK_MS, mod.SUPERSEDE_RECHECK_MS, 11_000, mod.ENDPOINT_BUSY_RECHECK_MS, BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS];
 	assert.equal(typeof mod.ENDPOINT_BUSY_RECHECK_MS, "number");
-	assert.equal(new Set(instants).size, instants.length, `four distinct instants: ${instants.join(", ")}`);
+	assert.equal(new Set(instants).size, instants.length, `six distinct instants: ${instants.join(", ")}`);
 });
 
 test("effectiveJobOf is the one precedence, and the endpoint set follows the model it names", { skip }, async () => {

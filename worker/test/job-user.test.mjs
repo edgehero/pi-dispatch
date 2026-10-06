@@ -10,6 +10,7 @@ import {
 	makeDaemonFactsReader,
 	makeJobUserResolver,
 	JOB_USER_FACTS_MAX_AGE_MS,
+	STALE_FACTS_CEILING_MS,
 	parseDaemonFacts,
 	relabelsPrivateMounts,
 	resolveImageUser,
@@ -51,7 +52,7 @@ test("the facts read is one bounded `docker info --format={{json .}}`", () => {
 });
 
 test("parseDaemonFacts reads the Docker shape: OS, rootless and userns markers, pid and memory bounds, never CPU", () => {
-	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1", hostCpus: null, swapLimit: null, cpuShares: null });
+	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1", hostCpus: null, memTotalMiB: null, swapLimit: null, cpuShares: null });
 	assert.equal(facts("dockerRootless").rootless, true);
 	assert.deepEqual(facts("dockerRootless").bounds, { pids: false, memory: false });
 	assert.equal(facts("dockerRemap").userns, true);
@@ -64,7 +65,7 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	assert.equal(facts("podmanCompatRootful").podman, true);
 	assert.equal(facts("podmanCompatRootful").bounds, null, "Podman hard-codes PidsLimit and derives MemoryLimit from the root controllers");
 	assert.equal(facts("podmanCompatRootless").rootless, true);
-	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, selinux: null, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null, hostCpus: null }, "the trimmed shim fixture carries no version");
+	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, selinux: null, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null, hostCpus: null, memTotalMiB: null }, "the trimmed shim fixture carries no version");
 	assert.equal(facts("shimRootless").remoteSocketPath, "/run/user/1234/podman/podman.sock");
 	// Only a unix path is kept, because only a unix path is ever statted.
 	for (const remote of ["ssh://core:hunter2@10.0.0.5:22/run/podman/podman.sock", "tcp://127.0.0.1:8080", "unix://relative", "run/podman.sock", ""]) {
@@ -466,4 +467,33 @@ test("issue #596 gate round 2: invalidate() during an in-flight re-read is honou
 	resolve.invalidate();
 	release({ answered: false, reason: "timeout", transient: true });
 	assert.equal((await pending).decision.mode, "unknown", "the refused count is not served after an invalidate");
+});
+
+test("issue #596, phase 2 (carried from phase 1's gate round 3): an answered read that decides nothing cacheable ends the stale run, and no answer is served past a day", async () => {
+	let t = 1_000_000;
+	const answer = { answered: true, facts: parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, NCPU: 4 })).facts };
+	const failed = { answered: false, reason: "timeout", transient: true };
+	let next = answer;
+	const said = [];
+	const resolve = makeJobUserResolver({ readFacts: async () => next, platform: "linux", euid: 1234, egid: 1234, stat: () => ({ uid: 0, gid: 2375 }), now: () => t, maxAgeMs: 600_000, log: (event, fields) => said.push([event, fields]) });
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).decision.mode, "worker");
+	next = failed;
+	t += 600_000;
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).decision.mode, "worker", "stale while error");
+	assert.equal(said.length, 1);
+	// The daemon ANSWERS, but with no endpoint resolved this decides `unknown`, which is never cached: the run of failures
+	// has ended all the same, so the next failure is said again.
+	next = answer;
+	assert.equal((await resolve({ endpoint: { ...LOCAL, local: null }, key: "k1" })).decision.mode, "unknown");
+	next = failed;
+	await resolve({ endpoint: LOCAL, key: "k1" });
+	assert.equal(said.length, 2, "said again after an answered read");
+	// Past the ceiling the kept answer is no longer served: the pickup is decided as a first read is.
+	assert.equal(STALE_FACTS_CEILING_MS, 24 * 60 * 60_000);
+	t = 1_000_000 + STALE_FACTS_CEILING_MS - 1;
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k1" })).decision.mode, "worker", "a day minus a moment: still served");
+	t = 1_000_000 + STALE_FACTS_CEILING_MS;
+	const expired = await resolve({ endpoint: LOCAL, key: "k1" });
+	assert.equal(expired.decision.mode, "unknown", "a day old: unavailable, as a first read that failed");
+	assert.equal(expired.facts, null);
 });

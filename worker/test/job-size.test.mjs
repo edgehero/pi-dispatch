@@ -204,3 +204,21 @@ test("unenforcedSizeFlags names the size flags a Docker daemon says it drops, an
 	assert.deepEqual(unenforcedSizeFlags({ swapLimit: null, cpuShares: null }), [], "Podman: not read, so not claimed");
 	assert.deepEqual(unenforcedSizeFlags(null), []);
 });
+
+test("issue #596, phase 2: the --cpus ceiling is the host's CPU budget capped at the runtime's count, else the phase 1 ceiling", async () => {
+	const { cpuCeilingCenti, containerSizing } = await import("../src/job-size.mjs");
+	// Hand-written rows: runtime CPUs, CPU budget (hundredths), ceiling (hundredths).
+	const rows = [
+		[8, 700, 700], // the budget
+		[8, 350, 350], // fractional
+		[4, 1200, 400], // a budget above the runtime's count is capped: Docker refuses a --cpus above it
+		[null, 600, 600], // unknown count: the budget as it is
+		[8, null, 700], // no budget: the phase 1 ceiling, the count minus one
+		[2, null, 200],
+		[null, null, null],
+		[8, 0, 700], // not a budget
+	];
+	for (const [hostCpus, budget, ceiling] of rows) assert.equal(cpuCeilingCenti(hostCpus, budget), ceiling, `${hostCpus} CPUs, budget ${budget}`);
+	assert.equal(containerSizing({ memMiB: 4096, cpuCenti: 200 }, 8, 330).cpus, "3.3");
+	assert.equal(containerSizing({ memMiB: 4096, cpuCenti: 200 }, 8).cpus, "7");
+});

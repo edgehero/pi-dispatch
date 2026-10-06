@@ -721,7 +721,20 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// gate, including a refusal there that started no container (it is the size the job WOULD have had); null on a record
 		// written before it (the wait gate's refusals) and from a caller that passes none.
 		size: recordedJobSize(size),
+		// The host budget a never-fits refusal judged the size against (issue #596, phase 2, INT-RUN-HISTORY-FILE-CONTRACT):
+		// `{ memMiB, cpuCenti, hostShare }`, so the record names BOTH sizes where the forge comment names neither. Additive,
+		// nullable, an explicit literal REBUILT here (`recordedHostBudget`), TAIL position after `size` on the same
+		// contract. Integers or null (a budget that is off or unknown never refuses, so it is never here as anything else).
+		// Present only on the `job-size-exceeds-host`, `-share` and `-fleet` records; null on every other.
+		hostBudget: recordedHostBudget(source.hostBudget),
 	};
+}
+
+/** A refusal's host budget as a record carries it: `{ memMiB, cpuCenti, hostShare }`, each a safe integer or null, else null. */
+export function recordedHostBudget(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	const int = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+	return { memMiB: int(value.memMiB), cpuCenti: int(value.cpuCenti), hostShare: int(value.hostShare) };
 }
 
 /** What became of a collected plan. */

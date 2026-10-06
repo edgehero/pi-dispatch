@@ -402,6 +402,26 @@ export function isJobNamespace(name) {
 }
 
 /**
+ * Whether a job container is GONE (issue #596, phase 2): `true` when the runtime lists no container of exactly that name
+ * (running or stopped), `false` when it lists one, `null` when it could not be asked. The host budget keeps the hold of
+ * a job whose stop did not take until this says `true` (`host-budget.mjs` `sweep`), so `null` keeps it: an
+ * unanswered listing must never free room a running container may still use. `-a`, because a stopped container left by
+ * `--rm` failing holds no CPU but is not yet proven gone, and the anchored name test, because `--filter name=` is a
+ * SUBSTRING match (the reaper's measured reason).
+ */
+export function makeContainerGone({ exec = execReaperBounded, binOf = () => "docker" } = {}) {
+	return async (name, venue) => {
+		if (typeof name !== "string" || !isJobNamespace(name)) return null;
+		try {
+			const { stdout } = await exec(binOf(venue), ["ps", "-a", "--filter", `name=${name}`, "--format", "{{.Names}}"]);
+			return !String(stdout ?? "").split("\n").map((n) => n.trim()).includes(name);
+		} catch {
+			return null;
+		}
+	};
+}
+
+/**
  * Boot-time reaper: clear stray `pi-job-*` containers a previous worker crash left behind.
  *
  * MOVED HERE from `start.mjs` (issue #227). It belongs to the backend because the containers it sweeps are

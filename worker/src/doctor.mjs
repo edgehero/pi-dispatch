@@ -87,7 +87,7 @@ import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOI
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
-import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
+import { JOB_NAME_PREFIX, endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
 import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, EGRESS_ENDPOINT_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEndpointProbe, egressEnv, egressProxyName, egressProxyUrl, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
@@ -95,8 +95,9 @@ import { VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopback
 import { urlShown, valkeyContextFromResolution, valkeyPasswordFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
-import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
-import { DEFAULT_JOB_SIZE, formatCpus, formatMemory, hostCpuCeiling, jobSizeDefaults } from "./job-size.mjs";
+import { CONTAINER_HOME, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM } from "./container-spec.mjs";
+import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDefaults, resolveJobSize } from "./job-size.mjs";
+import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
@@ -588,7 +589,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -1830,7 +1831,13 @@ export async function collectChecks(shellVars, seams) {
 	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs, unit: jobUser.unit, ...(podman ? { podman: podman.observed } : {}) }));
 	// Issue #596: the default job size, and what this host's runtime says about the bounds a size becomes.
 	// Each venue this deployment runs, from that venue's own read: `undefined` leaves a venue out, null is "not read".
-	checks.push(...jobSizeChecks(env, { daemon: localUsed ? (daemon ?? null) : undefined, podman: podman?.observed?.read !== undefined && podman?.observed?.read !== null ? podman.observed.read : undefined }));
+	// Issue #596, phase 2: the host budget a worker started now would compute, from the same two reads, and what it means
+	// beside PI_CONCURRENCY and the project sizes in the scoped-limits file (a file that does not load adds no project).
+	// Computed first, because its CPU budget is every job's `--cpus` and the size lines say so.
+	const budgetView = doctorHostBudget(env, { daemon: localUsed ? (daemon ?? null) : undefined, podman: podman?.observed?.read ?? undefined, readFile: (path) => (seams.observationFs ?? { readFileSync }).readFileSync(path, "utf8"), euid: seams.jobUserIdentity?.euid ?? null });
+	checks.push(...jobSizeChecks(env, { daemon: localUsed ? (daemon ?? null) : undefined, podman: podman?.observed?.read !== undefined && podman?.observed?.read !== null ? podman.observed.read : undefined, cpuBudgetCenti: Number.isSafeInteger(budgetView.cpuCenti) ? budgetView.cpuCenti : null }));
+	const concurrencyHere = /^[1-9][0-9]{0,5}$/.test(String(env.PI_CONCURRENCY ?? "").trim()) ? Number(String(env.PI_CONCURRENCY).trim()) : 3;
+	checks.push(...hostBudgetChecks(budgetView, { concurrency: concurrencyHere, limits: scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], env }));
 	checks.push(...jobUser.checks);
 	if (podman) checks.push(...podman.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
@@ -2403,6 +2410,19 @@ export async function collectChecks(shellVars, seams) {
 	// Valkey doctor reads, a host row is another party's text, and a control byte in a name or zone must not reach the
 	// terminal. The registry's own charset already refuses them at the source; this is the reader not relying on it.
 	const peers = (fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name), tz: h.tz ? printable(h.tz) : h.tz })).filter((h) => h.name !== workerNameOf(declaredWorkerName));
+	// Issue #596, phase 2: this host's own row, when its worker runs and publishes one. Its host budget ledger is held
+	// against the size labels of the job containers each venue's runtime lists, read only when the row carries the ledger.
+	const selfRow = (fleet.hosts ?? []).find((h) => printable(h.name) === workerNameOf(declaredWorkerName)) ?? null;
+	if (selfRow && typeof selfRow.usedMemMiB === "string" && selfRow.usedMemMiB !== "") {
+		const listed = [];
+		let listedAll = true;
+		for (const bin of [...(localUsed ? ["docker"] : []), ...(podmanUsed ? ["podman"] : [])]) {
+			const ps = await runCmdCapture(spawn, bin, [...SIZE_LABEL_PS_ARGS], { stdoutOnly: true });
+			if (ps.code !== 0) listedAll = false;
+			else listed.push(...parseSizeLabels(ps.output));
+		}
+		if (listedAll) checks.push(...budgetLedgerChecks({ ...selfRow }, listed));
+	}
 	// The applied split (issue #504 part B): one GET whenever this command may talk to the Valkey, so a single host with
 	// no envelope that refuses every job is told why. `{ digest }`, `{ undecodable: true }` for a key that exists and does
 	// not decode (the worker's EXISTS still counts it as governed), or null (no split, or no answer: nothing is said).
@@ -2502,6 +2522,9 @@ export async function collectChecks(shellVars, seams) {
 		// no edit to the file applies on it. Judged on the DECLARED version, or the derived one if that is higher (gate
 		// round 2). SKIPPED when this host's file does not load.
 		if (scopedLimitFacts.parseError === null) checks.push(...fleetSizeChecks(Math.max(Number(scopedLimitFacts.declaredVersion) || 0, scopedLimitsVersionFor(scopedLimitFacts.limits)), peers));
+		// Issue #596, phase 2: each host's budget and use, and which hosts each project's size fits on, from every row that
+		// publishes a budget (this host's own included). SKIPPED when this host's scoped-limits file does not load.
+		if (scopedLimitFacts.parseError === null) checks.push(...fleetBudgetChecks((fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name) })), { limits: scopedLimitFacts.limits, env }));
 		// Issue #504 part B: one applied split, judged on every host against its own envelope. A host whose envelope digest
 		// differs refuses every governed job as `envelope-mismatch`. SKIPPED when this host's file does not load, for the
 		// projects check's reason above.
@@ -7417,7 +7440,7 @@ export function doctorJobSize(env) {
  * `daemon` is the local venue's one `docker info` answer (null where it was not read), `undefined` where this
  * deployment does not run `local`; `podman` is the podman venue's one `podman info` read the same way.
  */
-export function jobSizeChecks(env, { daemon = undefined, podman = undefined } = {}) {
+export function jobSizeChecks(env, { daemon = undefined, podman = undefined, cpuBudgetCenti = null } = {}) {
 	let d;
 	try {
 		d = jobSizeDefaults(env);
@@ -7432,10 +7455,13 @@ export function jobSizeChecks(env, { daemon = undefined, podman = undefined } = 
 	if (daemon !== undefined) venues.push({ venue: "local", answered: daemon?.answered === true, reason: reasonOf(daemon), hostCpus: daemon?.answered === true ? daemon.facts?.hostCpus : null, cmd: "docker info" });
 	if (podman !== undefined) venues.push({ venue: "podman", answered: podman?.answered === true, reason: reasonOf(podman), hostCpus: podman?.answered === true ? podman.info?.hostCpus : null, cmd: "podman info" });
 	for (const v of venues) {
-		const ceiling = hostCpuCeiling(v.hostCpus);
+		// Issue #596, phase 2: the host's CPU budget is every job's `--cpus` (capped at the runtime's count) once it is known.
+		const ceilingCenti = Number.isSafeInteger(v.hostCpus) ? cpuCeilingCenti(v.hostCpus, cpuBudgetCenti) : null;
+		const ceiling = ceilingCenti === null ? null : formatCpus(ceilingCenti);
 		if (ceiling !== null) {
 			// "any ONE job": each container's quota is its own and they do not sum, so busy jobs together can still use
-			// every core (measured, issue #596); a reserve across jobs is the phase 2 host budget's.
+			// every core (measured, issue #596); the host budget's ledger bounds the jobs' CPU SIZES together, and a reserve
+			// that holds across their USE is the parent cgroup the lab is measuring.
 			checks.push({ ok: true, label: `${v.venue}: any one job may use at most ${ceiling} of this runtime's ${v.hostCpus} CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)` });
 		} else {
 			checks.push({ ok: false, warn: true, label: `${v.venue}: ${v.answered ? `\`${v.cmd}\` gave no CPU count` : `\`${v.cmd}\` gave no answer that says its CPU count (${v.reason})`}, so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)`, fix: `make \`${v.cmd}\` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user` });
@@ -7448,6 +7474,207 @@ export function jobSizeChecks(env, { daemon = undefined, podman = undefined } = 
 	if (facts?.cpuShares === false) {
 		checks.push({ ok: false, warn: true, label: "local: the Docker daemon reports CPUShares false, so it drops --cpu-shares and jobs get no CPU weight by size (size_bound_unenforced)", fix: "enable the cpu cgroup controller for Docker (cgroup v2 with cpu delegated), restart Docker, then re-run doctor" });
 	}
+	return checks;
+}
+
+/**
+ * The host budget as doctor computes it (issue #596, phase 2, DES-HOST-BUDGET), by the worker's own functions from the
+ * same reads the size lines use: `{ settings, jobDefault, facts, memMiB, cpuCenti, detail }`, or `{ error, jobDefault }`
+ * when a setting does not parse (the worker refuses to start on it). `daemon` is the local venue's `docker info` answer
+ * and `podman` the podman venue's `podman info` read, either absent; on rootless Podman the user service's `memory.max`
+ * and `cpu.max` are read beside them (`readFile`, the observation seam), as the worker reads them. Doctor answers for the
+ * CONFIGURATION, so this is the budget a worker started now would compute; the registry row says what a running one has.
+ */
+export function doctorHostBudget(env, { daemon = undefined, podman = undefined, readFile = null, euid = null } = {}) {
+	let jobDefault;
+	try {
+		const d = jobSizeDefaults(env);
+		jobDefault = { memMiB: d.memMiB, cpuCenti: d.cpuCenti };
+	} catch {
+		jobDefault = { memMiB: DEFAULT_JOB_SIZE.memMiB, cpuCenti: DEFAULT_JOB_SIZE.cpuCenti };
+	}
+	let settings;
+	try {
+		settings = hostBudgetSettings(env, jobDefault);
+	} catch (error) {
+		return { error: error.message, jobDefault };
+	}
+	const views = [];
+	let user = {};
+	if (daemon?.answered === true) views.push(daemon.facts);
+	if (podman?.answered === true) {
+		views.push(podman.info);
+		if (podman.info?.rootless === true && typeof readFile === "function") user = readUserServiceLimits({ uid: euid, readFile });
+	}
+	const least = (key) => {
+		const known = views.map((v) => v?.[key]).filter((v) => Number.isSafeInteger(v));
+		return known.length > 0 ? Math.min(...known) : null;
+	};
+	const facts = { memTotalMiB: least("memTotalMiB"), hostCpus: least("hostCpus"), ...user };
+	return { settings, jobDefault, facts, ...computeHostBudget(settings, facts, jobDefault) };
+}
+
+/** A memory budget or size for a line: `28g`, `7936m`, `off`, or `unknown`. */
+function budgetMemShown(memMiB) {
+	return memMiB === Infinity ? "off" : Number.isSafeInteger(memMiB) ? formatMemory(memMiB) : "unknown";
+}
+/** A CPU budget or size for a line: `7`, `3.5`, `off`, or `unknown`. */
+function budgetCpuShown(cpuCenti) {
+	return cpuCenti === Infinity ? "off" : Number.isSafeInteger(cpuCenti) ? formatCpus(cpuCenti) : "unknown";
+}
+
+/**
+ * Every project row's size, as `[{ id, size, hostShare, minJobs }]` in file order: the project rows of the limits that
+ * set `memory` or `cpus`, each resolved by the worker's own function (the deployment's settings fill a field the row
+ * leaves out). A project whose row sets no size runs at the default and is not listed.
+ */
+export function projectSizes(limits, env) {
+	const rows = (Array.isArray(limits) ? limits : []).filter((l) => isProjectScope(l?.scope) && (typeof l.memory === "string" || (l.cpus !== null && l.cpus !== undefined)));
+	const sizes = [];
+	for (const row of rows) {
+		const id = row.scope.slice("project:".length);
+		try {
+			const size = resolveJobSize({ project: id, limits, env });
+			sizes.push({ id, size, ...projectBudgetRow(limits, id) });
+		} catch {
+			// A size the worker refuses is reported by the scoped-limits lines; it fits nowhere and is left out here.
+		}
+	}
+	return sizes;
+}
+
+/**
+ * The host budget lines (issue #596, phase 2): the budget and where each half comes from, which of it and
+ * `PI_CONCURRENCY` binds first, and WARNINGS for what the budget will refuse or cannot keep: a project size larger than
+ * the budget (`job-size-exceeds-host`) or than its `hostShare` of it (`job-size-exceeds-share`), a project whose
+ * `minJobs` times its size is more than its `hostShare` of the budget, and all projects' minimums together above the
+ * budget. Warnings, never failures: the budget is per host, and on a fleet a forge job waits for a host it fits on. A
+ * setting that does not parse is a FAILURE, because the worker refuses to start on it.
+ */
+export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} } = {}) {
+	if (view.error) return [{ ok: false, label: `host budget does not parse: ${view.error}, so the worker REFUSES TO START`, fix: "set PI_HOST_MEMORY_BUDGET and PI_HOST_CPU_BUDGET to auto, off or a value such as 64g or 12, and PI_HOST_RESERVE_MEMORY and PI_HOST_RESERVE_CPUS to auto or a value (or unset all four for auto), then re-run doctor" }];
+	const { memMiB, cpuCenti, detail, settings } = view;
+	const memWhy = settings.memory.mode === "off" ? "off: PI_HOST_MEMORY_BUDGET" : settings.memory.mode === "value" ? "PI_HOST_MEMORY_BUDGET" : detail.memTotalMiB === null ? "auto" : `auto: ${formatMemory(detail.memTotalMiB)} here, ${formatMemory(detail.memReserveMiB)} kept for the host${detail.memFloored ? ", raised to one job of the default size" : ""}`;
+	const cpuWhy = settings.cpus.mode === "off" ? "off: PI_HOST_CPU_BUDGET" : settings.cpus.mode === "value" ? "PI_HOST_CPU_BUDGET" : detail.cpuTotalCenti === null ? "auto" : `auto: ${formatCpus(detail.cpuTotalCenti)} here, ${formatCpus(detail.cpuReserveCenti)} kept for the host${detail.cpuFloored ? ", raised to one job of the default size" : ""}`;
+	const checks = [{ ok: true, label: `Host budget: memory ${budgetMemShown(memMiB)} (${memWhy}), CPUs ${budgetCpuShown(cpuCenti)} (${cpuWhy}); a job starts only when its size fits beside what already runs on this host` }];
+	const unknown = [memMiB === null ? "memory" : null, cpuCenti === null ? "CPU count" : null].filter(Boolean);
+	if (unknown.length > 0) {
+		checks.push({ ok: false, warn: true, label: `host budget: the runtime gave no ${unknown.join(" or ")}, so a worker holds no job back on ${unknown.length === 2 ? "either" : "it"} until it does (host_budget_unknown)`, fix: "make the runtime's info answer for the worker's account (`docker info`, `podman info`), or set PI_HOST_MEMORY_BUDGET and PI_HOST_CPU_BUDGET to values, then re-run doctor" });
+	}
+	// How many jobs of the DEFAULT size the budget holds at once, against PI_CONCURRENCY: whichever is smaller binds.
+	const per = (budget, size) => (budget === null || budget === Infinity ? Infinity : Math.floor(budget / size));
+	const fitDefault = Math.min(per(memMiB, view.jobDefault.memMiB), per(cpuCenti, view.jobDefault.cpuCenti));
+	if (fitDefault === Infinity) checks.push({ ok: true, label: `PI_CONCURRENCY (${concurrency}) is the only bound on how many jobs run at once here: the budget is ${unknown.length > 0 ? "not known yet" : "off"}` });
+	else if (concurrency <= fitDefault) checks.push({ ok: true, label: `PI_CONCURRENCY (${concurrency}) binds first: the budget holds ${fitDefault} job${fitDefault === 1 ? "" : "s"} of the default size (${formatMemory(view.jobDefault.memMiB)}, ${formatCpus(view.jobDefault.cpuCenti)} CPUs) at once` });
+	else checks.push({ ok: true, label: `The host budget binds first: it holds ${fitDefault} job${fitDefault === 1 ? "" : "s"} of the default size (${formatMemory(view.jobDefault.memMiB)}, ${formatCpus(view.jobDefault.cpuCenti)} CPUs) at once, fewer than PI_CONCURRENCY (${concurrency}); bigger sizes fit fewer` });
+	const budget = { memMiB, cpuCenti };
+	const sizes = projectSizes(limits, env);
+	let minMem = 0;
+	let minCpu = 0;
+	for (const p of sizes) {
+		const shown = `${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs`;
+		const misfit = neverFits(p.size, budget, p.hostShare);
+		if (misfit === "host") {
+			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so its jobs are refused here before anything is spent (job-size-exceeds-host); a forge job waits for a host it fits on`, fix: `lower project:${p.id}'s memory or cpus in scoped-limits.json, or raise this host's budget` });
+		} else if (misfit === "share") {
+			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than its hostShare (${p.hostShare}%) of this host's budget, so its jobs are refused here before anything is spent (job-size-exceeds-share)`, fix: `raise project:${p.id}'s hostShare or lower its size in scoped-limits.json` });
+		}
+		if (p.minJobs > 0) {
+			minMem += p.minJobs * p.size.memMiB;
+			minCpu += p.minJobs * p.size.cpuCenti;
+			const share = p.hostShare ?? 100;
+			const room = largestFit(budget, share);
+			const over = (need, cap) => Number.isSafeInteger(cap) && need > cap;
+			if (misfit === null && (over(p.minJobs * p.size.memMiB, room.memMiB) || over(p.minJobs * p.size.cpuCenti, room.cpuCenti))) {
+				checks.push({ ok: false, warn: true, label: `project ${p.id}: minJobs ${p.minJobs} of its size (${shown}) is more than its hostShare (${share}%) of this host's budget, so this host can never keep room for all of them at once`, fix: `lower project:${p.id}'s minJobs or size, or raise its hostShare or this host's budget` });
+			}
+		}
+	}
+	const overAll = (need, cap) => Number.isSafeInteger(cap) && need > cap;
+	if (overAll(minMem, memMiB) || overAll(minCpu, cpuCenti)) {
+		checks.push({ ok: false, warn: true, label: `the projects' minJobs together (${formatMemory(minMem)}, ${formatCpus(minCpu)} CPUs) are more than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so this host cannot keep every minimum at once: the oldest waiting jobs are served first`, fix: "lower some projects' minJobs in scoped-limits.json, or raise this host's budget" });
+	}
+	return checks;
+}
+
+/**
+ * The fleet's budgets (issue #596, phase 2), from the registry rows (this host's own included): one line per host that
+ * publishes a budget (its budget, what its jobs hold, what its holds keep, and the largest project size that fits it),
+ * one line per sized project naming the hosts it fits on (a WARNING when none does: its forge jobs are refused
+ * `job-size-exceeds-fleet` once two reads agree), and a WARNING per host whose budget is below the projects' minJobs
+ * together. Nothing when no host publishes a budget (workers from before it).
+ */
+export function fleetBudgetChecks(rows, { limits = [], env = {} } = {}) {
+	const hosts = (Array.isArray(rows) ? rows : []).map((row) => ({ name: row.name, budget: publishedBudget(row), row })).filter((h) => h.budget.memMiB !== null && h.budget.cpuCenti !== null);
+	if (hosts.length === 0) return [];
+	const sizes = projectSizes(limits, env);
+	const checks = [];
+	const int = (v) => (typeof v === "string" && /^[0-9]{1,15}$/.test(v) ? Number(v) : null);
+	for (const h of hosts) {
+		const fitting = sizes.filter((p) => neverFits(p.size, h.budget, p.hostShare) === null).sort((a, b) => b.size.memMiB - a.size.memMiB || b.size.cpuCenti - a.size.cpuCenti);
+		const largest = fitting.length > 0 ? `largest project size that fits: ${formatMemory(fitting[0].size.memMiB)}, ${formatCpus(fitting[0].size.cpuCenti)} CPUs (${fitting[0].id})` : sizes.length > 0 ? "no project's size fits" : "no project sets a size";
+		const usedMem = int(h.row.usedMemMiB);
+		const usedCpu = int(h.row.usedCpuCenti);
+		const used = usedMem !== null && usedCpu !== null ? `, in use ${usedMem === 0 ? "0" : formatMemory(usedMem)} and ${formatCpus(usedCpu)} CPUs` : "";
+		checks.push({ ok: true, label: `Host ${h.name}: budget ${budgetMemShown(h.budget.memMiB)} and ${budgetCpuShown(h.budget.cpuCenti)} CPUs${used}; ${largest}` });
+		let minMem = 0;
+		let minCpu = 0;
+		for (const p of sizes) {
+			minMem += p.minJobs * p.size.memMiB;
+			minCpu += p.minJobs * p.size.cpuCenti;
+		}
+		const over = (need, cap) => Number.isSafeInteger(cap) && need > cap;
+		if (over(minMem, h.budget.memMiB) || over(minCpu, h.budget.cpuCenti)) {
+			checks.push({ ok: false, warn: true, label: `Host ${h.name}: the projects' minJobs together (${formatMemory(minMem)}, ${formatCpus(minCpu)} CPUs) are more than its budget, so it cannot keep every minimum at once`, fix: "lower some projects' minJobs, or raise that host's budget" });
+		}
+	}
+	for (const p of sizes) {
+		const on = hosts.filter((h) => neverFits(p.size, h.budget, p.hostShare) === null).map((h) => h.name);
+		if (on.length > 0) checks.push({ ok: true, label: `Project ${p.id} (${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs) fits on: ${on.join(", ")}` });
+		else checks.push({ ok: false, warn: true, label: `Project ${p.id} (${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs) fits on no live host's budget, so its forge jobs are refused before anything is spent (job-size-exceeds-fleet)`, fix: `lower project:${p.id}'s size, or raise a host's budget` });
+	}
+	return checks;
+}
+
+/** The `ps` that lists this runtime's job containers with their two size labels (issue #596, phase 2). */
+export const SIZE_LABEL_PS_ARGS = Object.freeze(["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", `{{.Names}}\t{{.Label "${SIZE_LABEL_MEM}"}}\t{{.Label "${SIZE_LABEL_CPU}"}}`]);
+
+/**
+ * The running job containers' size labels, from `SIZE_LABEL_PS_ARGS`' output: `[{ name, memMiB, cpuCenti }]`, a label
+ * that is absent or not an integer read as null. Only names in the job namespace (the filter is a substring match).
+ */
+export function parseSizeLabels(stdout) {
+	const int = (v) => (/^[1-9][0-9]{0,8}$/.test(v ?? "") ? Number(v) : null);
+	return String(stdout ?? "")
+		.split("\n")
+		.map((line) => line.split("\t"))
+		.filter(([name]) => typeof name === "string" && name.startsWith(JOB_NAME_PREFIX))
+		.map(([name, mem, cpu]) => ({ name, memMiB: int(mem?.trim()), cpuCenti: int(cpu?.trim()) }));
+}
+
+/**
+ * The ledger held against what runs (issue #596, phase 2): this host's registry row says what its worker's budget
+ * counts (`usedMemMiB`, `usedCpuCenti`, orphans included); the job containers' labels say what runs. A WARNING when they
+ * differ (a job starting or ending between the two reads differs for a moment, so the fix says to re-run first), and
+ * when a job container carries no size label (one started by a worker from before the labels). Nothing without a row
+ * that publishes the two fields.
+ */
+export function budgetLedgerChecks(selfRow, containers) {
+	const int = (v) => (typeof v === "string" && /^[0-9]{1,15}$/.test(v) ? Number(v) : null);
+	const usedMem = int(selfRow?.usedMemMiB);
+	const usedCpu = int(selfRow?.usedCpuCenti);
+	if (usedMem === null || usedCpu === null || !Array.isArray(containers)) return [];
+	const labelled = containers.filter((c) => c.memMiB !== null && c.cpuCenti !== null);
+	const unlabelled = containers.length - labelled.length;
+	const mem = labelled.reduce((sum, c) => sum + c.memMiB, 0);
+	const cpu = labelled.reduce((sum, c) => sum + c.cpuCenti, 0);
+	const checks = [];
+	if (mem === usedMem && cpu === usedCpu) {
+		checks.push({ ok: true, label: `Host budget ledger matches the running job containers (${containers.length} running, ${mem === 0 ? "0" : formatMemory(mem)} and ${formatCpus(cpu)} CPUs)` });
+	} else {
+		checks.push({ ok: false, warn: true, label: `Host budget ledger holds ${usedMem === 0 ? "0" : formatMemory(usedMem)} and ${formatCpus(usedCpu)} CPUs, while the running job containers are labelled ${mem === 0 ? "0" : formatMemory(mem)} and ${formatCpus(cpu)} CPUs`, fix: "re-run doctor: a job starting or ending between the two reads differs for a moment. A difference that stays is a container the worker does not count, or one whose stop failed (it keeps its hold until the runtime says it is gone)" });
+	}
+	if (unlabelled > 0) checks.push({ ok: false, warn: true, label: `${unlabelled} running job container${unlabelled === 1 ? " carries" : "s carry"} no size label, so the ledger cannot be checked against ${unlabelled === 1 ? "it" : "them"} (started by a worker from before the host budget)`, fix: "nothing to do: the label is on every container a current worker starts" });
 	return checks;
 }
 

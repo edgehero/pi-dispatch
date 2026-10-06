@@ -226,6 +226,17 @@ export function jobUserRefusal(causeOrDecision) {
  */
 export const JOB_USER_FACTS_MAX_AGE_MS = 10 * 60_000;
 
+/**
+ * How long a kept answer may be served while every re-read fails (issue #596, phase 1 gate round 3, carried to phase 2).
+ * Stale-while-error exists so one slow read is not an outage; it must not let a runtime that stopped answering a day ago
+ * keep deciding jobs from what it said then. Past this the kept answer is no longer served and a pickup is decided as a
+ * first read is (unavailable, retried as infrastructure, said per job), which is loud where it belongs. Chosen over
+ * repeating the stale line every max-age plus a doctor field: one comparison in each cache, no new surface, and the
+ * existing per-job unavailability is the honest signal for a runtime that has not answered in a day. Shared by the
+ * podman venue's info cache (`cachedPodmanInfo`).
+ */
+export const STALE_FACTS_CEILING_MS = 24 * 60 * 60_000;
+
 export function makeJobUserResolver({
 	readFacts,
 	platform = process.platform,
@@ -263,7 +274,8 @@ export function makeJobUserResolver({
 			}
 			// The value an expired entry may still serve when this read failed (see STALE WHILE ERROR above). Taken AFTER
 			// the read, so an `invalidate()` that landed while it was out is honoured by this very pickup.
-			const stale = cached && cached.key === key ? cached : null;
+			// Never past `STALE_FACTS_CEILING_MS`: an answer that old is not served, whatever the read says now.
+			const stale = cached && cached.key === key && now() - cached.at < STALE_FACTS_CEILING_MS ? cached : null;
 			if (threw && !stale) throw threw;
 			if (stale && daemon?.answered !== true) {
 				if (!staleSaid) {
@@ -280,6 +292,9 @@ export function makeJobUserResolver({
 			const socket = socketFacts(socketPath, { stat });
 			const decision = decideJobUser({ platform, release, euid, egid, endpoint, daemon, socket });
 			const value = { decision, facts: daemon?.answered ? daemon.facts : null, daemon, socket };
+			// An ANSWERED read ends a run of failures even when it decides nothing cacheable (an `unknown`, a
+			// `runtime-unreadable`), so the next failure after it is said again (gate round 3 of phase 1).
+			if (daemon?.answered === true) staleSaid = false;
 			// Cached only for an ANSWERED read: an `image` decided on a VM-backed platform while its daemon was still starting
 			// must not pin "not read" for the runtime observations until the endpoint changes.
 			if (decision.mode !== "unknown" && decision.cause !== "runtime-unreadable" && daemon?.answered === true) {

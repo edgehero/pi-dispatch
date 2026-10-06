@@ -24,7 +24,8 @@ import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } 
 import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
-import { makeHostRegistry } from "./host-registry.mjs";
+import { makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
+import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS, STALLED_FAILED_REASON } from "./index.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
@@ -51,7 +52,7 @@ import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
+import { endpointShown, makeContainerGone, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
@@ -607,6 +608,10 @@ export async function startWorker(
 		// Issue #341: the one `docker info` the job-user decision reads, and the process facts it reads beside it.
 		// Seams for the same reason as the endpoint: a wiring test decides what the daemon and the process say.
 		readDaemonFacts: readDaemonFactsFn = makeDaemonFactsReader(),
+		// Issue #596, phase 2: a cgroup file's text (a rootless account's `memory.max` and `cpu.max`), for the host budget.
+		readCgroupFile: readCgroupFileFn = (path) => readFileSync(path, "utf8"),
+		// Issue #596, phase 2: whether an orphaned job container is gone, per venue's CLI.
+		containerGone: containerGoneFn = null,
 		// `home` (issue #354) is the account whose rootless Podman runs the podman venue's jobs: its own mounts.conf and
 		// containers.conf are read from there. Absent in a test's identity, it falls to the observation's own default.
 		jobUserIdentity = { platform: process.platform, release: osRelease(), euid: process.geteuid?.(), egid: process.getegid?.(), home: homedir() },
@@ -823,6 +828,9 @@ export async function startWorker(
 	// The per-job read (below, `observationPreflight`) logs only when the answer CHANGES from the last one, so a
 	// deliberate, standing redirect writes one line at boot rather than one per job.
 	let endpointSeen = bootEndpoint ? dockerEndpointState(bootEndpoint) : null;
+	// Issue #596, phase 2: the endpoint the last job-user read asked about, so the host budget's tick reads the SAME cached
+	// facts a job was decided from (and re-reads them when they age), never a second daemon of its own choosing.
+	let budgetEndpoint = bootEndpoint ? { endpoint: bootEndpoint, key: endpointSeen } : null;
 
 	// Issue #341: WHO job containers run as on this daemon (`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`). Decided
 	// from facts, never a probe container, cached per endpoint state. Bounded like the boot image read, because a
@@ -899,6 +907,30 @@ export async function startWorker(
 	// one the first job is decided from rather than a second spawn. Bounded twice: the reader's own timeout (docker info's
 	// 15 s, reused) and this fuse two seconds past it, because a spawn that never settles has no timeout to fire.
 	const podmanInfo = podmanBlessed ? cachedPodmanInfo(readPodmanInfoFn, { now, log }) : null;
+	// Issue #596, phase 2: what the host budget's `auto` is computed from, read on its tick (off every job path) from the
+	// two cached readers above: each blessed venue's memory and CPU count, the SMALLER where both answered (two venues on
+	// one host share it; a desktop VM is the smaller), and on rootless Podman the user service's own `memory.max` and
+	// `cpu.max` beside them. A venue that did not answer adds nothing, so the budget is unknown only when none did.
+	const readHostFacts = async () => {
+		const views = [];
+		let user = {};
+		if (localBlessed && budgetEndpoint) {
+			const read = await resolveJobUser(budgetEndpoint).catch(() => null);
+			if (read?.daemon?.answered === true) views.push(read.daemon.facts);
+		}
+		if (podmanInfo) {
+			const read = await podmanInfo().catch(() => null);
+			if (read?.answered === true) {
+				views.push(read.info);
+				if (read.info?.rootless === true) user = readUserServiceLimits({ uid: jobUserIdentity.euid, readFile: readCgroupFileFn });
+			}
+		}
+		const least = (key) => {
+			const known = views.map((v) => v?.[key]).filter((v) => Number.isSafeInteger(v));
+			return known.length > 0 ? Math.min(...known) : null;
+		};
+		return { memTotalMiB: least("memTotalMiB"), hostCpus: least("hostCpus"), ...user };
+	};
 	const bootPodmanRead = podmanInfo
 		? await settleWithin(
 				Promise.resolve()
@@ -1565,6 +1597,11 @@ export async function startWorker(
 	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
 	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
 	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });
+	// Issue #596, phase 2: one integer of the host budget's snapshot for the beat, or "" before the worker exists.
+	const snapshotField = (key) => {
+		const snap = worker?.hostBudget?.snapshot?.();
+		return Number.isSafeInteger(snap?.[key]) ? String(snap[key]) : "";
+	};
 	// NOT awaited, and that is load-bearing rather than an optimisation. `makeRedisClient` sets
 	// `maxRetriesPerRequest: null` -- required for BullMQ's blocking connections -- which means a command
 	// issued against an unreachable server QUEUES FOREVER instead of rejecting. Awaiting the first beat
@@ -1621,6 +1658,18 @@ export async function startWorker(
 		// Issue #596: the highest scoped-limits version this build reads, so doctor can name a worker that would keep its
 		// last good file (so no size and no later edit to the file applies on it) once the file is version 3. An integer.
 		limitsVersion: SCOPED_LIMITS_VERSION,
+		// Issue #596, phase 2: this host's budget and what its jobs hold against it, integers (MiB and hundredths of a CPU),
+		// `off` for a budget switched off and "" while unknown, so doctor and a forge job's never-fits check can read which
+		// host a size fits on. Thunks over the worker's one budget, so every beat says what is held now.
+		budgetMemMiB: () => budgetField(worker?.hostBudget?.current().memMiB ?? null),
+		budgetCpuCenti: () => budgetField(worker?.hostBudget?.current().cpuCenti ?? null),
+		usedMemMiB: () => snapshotField("usedMemMiB"),
+		usedCpuCenti: () => snapshotField("usedCpuCenti"),
+		heldMemMiB: () => snapshotField("heldMemMiB"),
+		heldCpuCenti: () => snapshotField("heldCpuCenti"),
+		budgetRunning: () => snapshotField("running"),
+		budgetHolds: () => snapshotField("holds"),
+		budgetOrphans: () => snapshotField("orphans"),
 	});
 
 
@@ -1657,6 +1706,7 @@ export async function startWorker(
 			if (endpoint.local === null && endpoint.transient) return { unavailable: true, reason: endpoint.reason };
 			return { refused: true, message: endpointRefusal, observations: [DOCKER_ENDPOINT_LOCAL] };
 		}
+		budgetEndpoint = { endpoint, key: state };
 		const jobUser = await resolveJobUser({ endpoint, key: state });
 		const unit = await readRootfulService({ endpoint, daemon: jobUser.daemon, readService: readPodmanServiceFn });
 		// One read of each host path for this job's two checks (`onceFs`, gate round 3 of PR #473), fresh per job.
@@ -1706,6 +1756,7 @@ export async function startWorker(
 		const venue = resolveBackendName(job, config.defaultBackend);
 		if (venue !== DEFAULT_BACKEND) return { user: null, home: null };
 		const endpoint = observed?.endpoint ?? (await resolveDockerEndpointFn());
+		if (!observed?.jobUser) budgetEndpoint = { endpoint, key: dockerEndpointState(endpoint) };
 		const admittedOn = observed?.jobUser ?? (await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) }));
 		const { decision, socket, facts } = admittedOn;
 		// Issue #452, gate round 5: the runtime THIS job is admitted on, recorded per job for its teardown's detach gate. The
@@ -1933,6 +1984,18 @@ export async function startWorker(
 
 	const worker = createWorkerFn({
 		connection: valkeyConn(),
+		// Issue #596, phase 2 (DES-HOST-BUDGET): the host budget's inputs. `createWorker` builds the ONE budget from them and
+		// shares it between both queues' processors. The settings and the default size were refused at boot if bad.
+		hostBudget: {
+			settings: config.hostBudget,
+			jobDefault: { memMiB: config.jobSize.memMiB, cpuCenti: config.jobSize.cpuCenti },
+			readFacts: readHostFacts,
+			containerGone: containerGoneFn ?? makeContainerGone({ binOf: (venue) => (resolveBackendName(venue ?? {}, config.defaultBackend) === PODMAN_BACKEND ? "podman" : "docker") }),
+			now,
+			log,
+		},
+		// The registry read a forge job too big for this host asks before it is refused as too big for every host.
+		fleetHosts: () => readLiveHosts(redis),
 		// #227. The abort path's stop, resolved per job rather than hard-wired to docker. A container NAME is
 		// not enough to find the runtime holding it once there is more than one venue.
 		stopContainer: backends.stopContainer,

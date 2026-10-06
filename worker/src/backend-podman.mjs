@@ -37,7 +37,7 @@ import { buildPodmanRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, makeEgressPreflight } from "./egress.mjs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FACTS_MAX_AGE_MS } from "./job-user.mjs";
+import { DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FACTS_MAX_AGE_MS, STALE_FACTS_CEILING_MS } from "./job-user.mjs";
 import { PODMAN_INFO_ARGS, parsePodmanInfo } from "./daemon-facts.mjs";
 
 // Moved to the leaf `daemon-facts.mjs` (issue #452, gate round 3) and re-exported, so every importer keeps its path.
@@ -141,7 +141,8 @@ export function cachedPodmanInfo(readInfo, { now = Date.now, maxAgeMs = JOB_USER
 				staleSaid = false;
 				return read;
 			}
-			if (kept) {
+			// Not past `STALE_FACTS_CEILING_MS` (job-user.mjs says why): then the failed read is the answer, as a first one is.
+			if (kept && now() - keptAt < STALE_FACTS_CEILING_MS) {
 				if (!staleSaid) {
 					staleSaid = true;
 					log("podman_info_stale", { reason: read?.reason ?? "unanswered", ageMs: now() - keptAt });

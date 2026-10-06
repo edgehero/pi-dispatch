@@ -16,6 +16,7 @@ import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 import { jobSizeDefaults } from "./job-size.mjs";
+import { hostBudgetSettings } from "./host-budget.mjs";
 import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
 import { modelListProblem } from "./model-ref.mjs";
 import { DOLLAR_ENV_NAMES, DOLLAR_WINDOW_KEYS, checkDollarInvariant, optionalUsdMicros } from "./money.mjs";
@@ -306,6 +307,21 @@ export function jobSizeFrom(env) {
 }
 
 /**
+ * The host budget's four settings (issue #596, phase 2): `PI_HOST_MEMORY_BUDGET`, `PI_HOST_CPU_BUDGET` (each `auto`, a
+ * value or `off`) and `PI_HOST_RESERVE_MEMORY`, `PI_HOST_RESERVE_CPUS` (each `auto` or a value), judged against the
+ * deployment's default job size so a budget below one default job is refused here. A bad value is a config error naming
+ * the key and the rule, at boot (exit 2), never a refusal per job. ENV ONLY in this release, never the settings overlay:
+ * a budget that moved under running jobs would strand the holds taken against the old one.
+ */
+export function hostBudgetFrom(env, jobSize = jobSizeFrom(env)) {
+	try {
+		return hostBudgetSettings(env, jobSize);
+	} catch (error) {
+		throw configError(error.message);
+	}
+}
+
+/**
  * PI_JOB_IMAGE as the worker runs it (issue #471): unset or empty is pi-job:latest (`||`, so "" falls back), and any
  * other value is judged by the one image rule `run.image` is (`image-ref.mjs`). A refused value is a config error at
  * boot (exit 2), naming the key: before #471 a dash-leading value booted, and every job then handed the runtime a flag
@@ -415,6 +431,9 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// The VALIDATION is this field's job; nothing reads its value. The pickup resolves each job's size from the same two
 		// settings (`jobSizeEnv`, start.mjs) with the same parser, so a value that got past here cannot be read otherwise.
 		jobSize: jobSizeFrom(env),
+		// Issue #596, phase 2: the host budget's settings (`hostBudgetFrom`), refused here at boot naming the key. The worker
+		// builds its one budget from them (start.mjs), and doctor reads them with the same function.
+		hostBudget: hostBudgetFrom(env),
 		jobImage: jobImageFrom(env), // || (not ??) so an empty string falls back; "" is falsy and would throw inside buildDockerRunArgs AFTER a budget slot was reserved
 		globalPiDir: resolveGlobalPiDir(env, fileExists), // REQ-GLOBAL-PI-OVERLAY: operator's ~/.pi/agent subset, :ro-mounted; null = off
 		allowGlobalExtensions: globalExtensionsEnabled(env), // REQ-GLOBAL-PI-OVERLAY: ON unless PI_GLOBAL_ALLOW_EXTENSIONS=0

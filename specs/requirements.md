@@ -970,8 +970,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   under one ceiling on any single job), and a row may set a size and nothing else. A job without one takes the deployment's `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and
   `2`), refused at boot when malformed. The size is resolved once at pickup from the same snapshot every other limit
   is read from and recorded on the run. The row may also carry `hostShare` (a whole percentage of a host's job budget)
-  and `minJobs` (a soft minimum of the project's jobs per host); both are validated and stored now and are enforced
-  by NOTHING until the host budget ships (phase 2 of the issue), which every surface that shows them says. A version
+  and `minJobs` (a soft minimum of the project's jobs per host); both are ENFORCED by each worker's host budget since
+  phase 2 of the issue (`REQ-HOST-BUDGET`). A version
   1 or 2 file that carries a size field is refused naming version 3; a size field off a project row is refused; a
   version 3 row carrying a key the file does not define is refused (versions 1 and 2 still drop one). A retry or a
   deferred job is a new pickup and takes the size in force then.
@@ -1021,7 +1021,46 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   row and `PI_JOB_MEMORY=2g`, then `2g` and `env`; given neither, `4g`, 2 CPUs and `default`; given a size in a job's
   payload, then it changes nothing. Given a size field in a version 2 file, or on a repo row, then the file is
   refused; given `minJobs` with no size, or above the row's `concurrent`, then the file is refused; given `hostShare`
-  or `minJobs` accepted, then nothing enforces either yet and the panel and the tools say "not enforced yet".
+  or `minJobs` accepted, then each host's budget enforces them (`REQ-HOST-BUDGET`) and the panel and the tools show
+  them as plain limits.
+
+## REQ-HOST-BUDGET
+
+- **Statement**: Each worker shall keep the jobs it runs inside a **host budget** of memory and CPU (issue #596, phase
+  2): a job starts only when its size fits beside the sizes of the jobs already running on that host, in both memory
+  and CPU, and its project stays within its `hostShare` of the budget. The budget is `PI_HOST_MEMORY_BUDGET` and
+  `PI_HOST_CPU_BUDGET`, each `auto` (the default), a value or `off`. `auto` is the container runtime's own memory and
+  CPU count (on rootless Podman, the smaller of those and the user service's `memory.max` and `cpu.max`), minus a
+  reserve for the host (`PI_HOST_RESERVE_MEMORY`, `PI_HOST_RESERVE_CPUS`; `auto` is 10% of the memory clamped to 1g
+  to 4g, and 1 CPU on a host with 4 or more), and never less than one job of the deployment's default size. A bad
+  setting, or a budget value below one default job, refuses the worker's start. The settings are environment only
+  in this release. `PI_CONCURRENCY` stays an upper bound on the number of jobs: whichever binds first, binds.
+  A waiting job is not starved: the oldest waiting job of each project running fewer than its `minJobs`, and the
+  oldest waiting job of all, HOLD room that no newer job may take. A job too big for a host's budget, or for its
+  project's share of it, is refused before anything is spent (`job-size-exceeds-host`, `job-size-exceeds-share`); a
+  forge job on the shared queue waits for a host it fits on and is refused (`job-size-exceeds-fleet`) only when two
+  registry reads at least 30 s apart show that no live host can fit it.
+- **Why**: A count of containers cannot tell a 20g job from a 2g one, so `PI_CONCURRENCY` alone either wastes a big
+  host or overcommits a small one, and a stream of small jobs starves a big one indefinitely. Decisions 3 and 4 of
+  the issue (an `auto` budget never below one default job; fairness by a soft minimum per project plus an optional
+  cap) are what this requirement states.
+- **Acceptance**: Given a 32g, 8 CPU budget and projects heavy (20g, 4), medium (8g, 2, `minJobs` 1) and light (2g,
+  1) whose light jobs keep the host full, then the sum of the running sizes never exceeds the budget; a waiting heavy
+  job starts within one job duration; a medium job waiting behind it starts first (its project is below its
+  minimum); and without holds the heavy job never starts (the property tests' control). Given a size larger than the
+  budget on a local job, then it is refused `job-size-exceeds-host` before any spend, the log line and the run record
+  name both the size and the budget, and the forge comment names neither. Given a forge job too big for this host
+  while a peer publishes no budget, then it defers and is never refused; given two reads 30 s apart with no fitting
+  host, then it is refused `job-size-exceeds-fleet`. Given a container whose stop did not take, then its hold stays
+  until the runtime says it is gone. Given a waiting job another gate defers (a full scope, a busy endpoint, a pause
+  window), then its hold is suspended. Given `PI_HOST_MEMORY_BUDGET=2g` with `PI_JOB_MEMORY=4g`, then the worker
+  refuses to start naming both. Given doctor, then it shows the budget, which of it and `PI_CONCURRENCY` binds first,
+  warnings for project sizes and minimums the budget cannot hold, per host its budget, use and largest fitting project
+  size, per project the hosts it fits on, and a warning when the running containers' size labels differ from the
+  ledger.
+- **Traces to**: `DES-HOST-BUDGET`, `DES-CONCURRENCY-3`, `INT-HOST-REGISTRY-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `REQ-SCOPED-LIMITS`, `CONST-BUDGET-BEFORE-TOKENS`,
+  `CONST-RETRY-INFRA-ONLY`
 
 ## REQ-DELEGATED-ALLOCATION
 
@@ -3246,6 +3285,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-06 | Issue #596, phase 2 (the host budget). **NEW `REQ-HOST-BUDGET`**: each worker keeps its running jobs' sizes inside a memory and CPU budget (`PI_HOST_MEMORY_BUDGET`, `PI_HOST_CPU_BUDGET`: `auto`, a value or `off`; `auto` is the runtime's own numbers, and on rootless Podman the user service's limits, minus `PI_HOST_RESERVE_MEMORY` and `PI_HOST_RESERVE_CPUS`, never below one default job), with holds for the oldest waiter of each project below its `minJobs` and the oldest waiter of all, the project's `hostShare` enforced, and never-fits sizes refused before any spend (`job-size-exceeds-host`, `-share`, and `-fleet` only after two registry reads 30 s apart); acceptance from the three worked scenarios. **`REQ-SCOPED-LIMITS` AMENDED**: `hostShare` and `minJobs` are enforced by the host budget, no longer "enforced by nothing yet", and the acceptance clause that said so now says each host's budget enforces them. Checked and UNCHANGED: `REQ-SPEND-CAPS-MULTI-WINDOW` (the budget is compute, never dollars, and every refusal it adds is before the reservation), `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS` (a paused job's hold is suspended, the window itself is untouched), `REQ-EGRESS-ALLOWLIST`, `REQ-JOB-TIMEOUT-30M` (the 30-minute bound still frees every count slot; only the budget hold of a container whose stop did not take outlives it). |
 | 2026-10-06 | Issue #596, phase 1, review gate round 1. **`REQ-SCOPED-LIMITS` CORRECTED and AMENDED**: the job sizes clause said `memory` gives "no swap beyond it" and `cpus` runs "under one host ceiling" without conditions; it now says no swap beyond it where the runtime enforces swap limits (Docker with `SwapLimit` false drops `--memory-swap`) and one ceiling on any SINGLE job (per-container `--cpus` does not sum across jobs, measured). Amended: a version 3 row carrying an unknown key is refused (a misspelled `Memory` beside a valid field was dropped and the project ran at the default size), versions 1 and 2 unchanged; a retry or deferred job is a new pickup and takes the size in force then. Checked and UNCHANGED: `REQ-SPEND-CAPS-MULTI-WINDOW`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-EGRESS-ALLOWLIST`. |
 | 2026-10-06 | Issue #596, phase 1. **`REQ-SCOPED-LIMITS` AMENDED**: a `project:<id>` row (file version 3) may set its members' job size, `memory` with no swap beyond it and `cpus` as a weight under a host ceiling, alone or beside its other limits; a job without one takes `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`, refused at boot when malformed); the size is resolved at pickup from the limits snapshot and recorded on the run. `hostShare` (a whole percentage) and `minJobs` (a soft minimum needing a size, at most the row's `concurrent`) are validated and stored, and ENFORCED BY NOTHING until the phase 2 host budget, which every surface says. Acceptance clauses for each. Checked and UNCHANGED: `REQ-SPEND-CAPS-MULTI-WINDOW`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-EGRESS-ALLOWLIST` (no new refusal, no budget change, no network change). |
 | 2026-10-06 | Issue #587 (a pi bump never rebuilds over fixes made on its pull request). **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: the paragraph on how a bump arrives adds that the workflow rebuilds the rolling branch only while it holds nothing but its own bump commit, so a newer pi waits, with a comment, until a pull request carrying fixes is merged or closed. Every assertion this requirement lists is UNCHANGED, checked. |

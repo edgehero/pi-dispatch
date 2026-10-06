@@ -164,7 +164,8 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 		.replace(/\/\*[\s\S]*?\*\//g, "")
 		.replace(/\/\/[^\n]*/g, "");
 	assert.deepEqual(code.match(/\brecordRun\b/g) ?? [], [], "no recordRun reference below the gate");
-	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 8, "exactly the 8 post-gate record paths use it; a new one must be counted here");
+	// Nine since issue #596 phase 2 added the never-fits refusal (`refuseSize`).
+	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 9, "exactly the 9 post-gate record paths use it; a new one must be counted here");
 });
 
 // Issue #596: the job's size is resolved at the same pickup, from the same limits snapshot and project, and reaches the
