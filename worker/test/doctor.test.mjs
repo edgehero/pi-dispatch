@@ -12137,3 +12137,15 @@ test("doctor names each peer that predates job sizes once this host's file is ve
 	assert.deepEqual(fleetSizeChecks(2, peers), [], "no size in the file: nothing at risk yet");
 	assert.deepEqual(fleetSizeChecks(3, [{ name: "a", limitsVersion: "3" }]), [], "every peer reads version 3");
 });
+
+test("issue #596, phase 2: with this host's registry row carrying its ledger, doctor lists the job containers' size labels and holds the two against each other", async () => {
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image": 0, "docker ps --filter name=pi-job- --format": { code: 0, output: "pi-job-1\t4096\t200\n" } };
+	const seams = (row) => collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini1", tz, ...row }] }) });
+	const match = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({ usedMemMiB: "4096", usedCpuCenti: "200" }));
+	assert.ok(match.some((c) => c.ok && /^Host budget ledger matches the running job containers \(1 running, 4g and 2 CPUs\)/.test(c.label)));
+	const differ = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({ usedMemMiB: "0", usedCpuCenti: "0" }));
+	assert.ok(differ.some((c) => c.warn && /^Host budget ledger holds 0 and 0 CPUs, while the running job containers are labelled 4g and 2 CPUs/.test(c.label)));
+	const none = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({}));
+	assert.ok(!none.some((c) => /Host budget ledger/.test(c.label)), "a row without the ledger: no listing, no line");
+});

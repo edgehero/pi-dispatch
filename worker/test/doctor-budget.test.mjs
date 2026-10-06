@@ -72,6 +72,9 @@ test("project sizes: a size the budget can never hold, a size over its share, an
 	]);
 	const over = labels(hostBudgetChecks(view, { limits: limitsOf([{ scope: "project:a", memory: "8g", cpus: 2, minJobs: 3 }, { scope: "project:b", memory: "4g", cpus: 1, minJobs: 3 }]) }));
 	assert.equal(over.at(-1), "warn: the projects' minJobs together (36g, 9 CPUs) are more than this host's budget (32g, 8 CPUs), so this host cannot keep every minimum at once: the oldest waiting jobs are served first");
+	// CPU alone over: 6g of 32g, but 9 CPUs of 8.
+	const cpuOver = labels(hostBudgetChecks(view, { limits: limitsOf([{ scope: "project:a", memory: "1g", cpus: 2, minJobs: 3 }, { scope: "project:b", memory: "1g", cpus: 1, minJobs: 3 }]) }));
+	assert.match(cpuOver.at(-1), /^warn: the projects' minJobs together \(6g, 9 CPUs\)/);
 });
 
 test("the fleet: a line per host with a budget, the projects each fits on, and a warning for a size no host fits", () => {
@@ -107,5 +110,6 @@ test("the ledger against the labels: equal is a green line, a difference and an 
 		"warn: 1 running job container carries no size label, so the ledger cannot be checked against it (started by a worker from before the host budget)",
 	]);
 	assert.deepEqual(budgetLedgerChecks({ usedMemMiB: "" }, listed), [], "a row without the ledger: nothing to hold against");
+	assert.equal(budgetLedgerChecks({ usedMemMiB: "6144", usedCpuCenti: "250" }, listed.slice(0, 2))[0].warn, true, "the CPU half alone differing is a difference");
 	assert.deepEqual(labels(budgetLedgerChecks({ usedMemMiB: "0", usedCpuCenti: "0" }, [])), ["ok: Host budget ledger matches the running job containers (0 running, 0 and 0 CPUs)"]);
 });
