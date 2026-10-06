@@ -261,16 +261,16 @@ export function renderScopedLimits({ limits, scopedBudget, projects = null, doll
 }
 
 /**
- * A scoped-limits row's size, as display bits (issue #596): `memory 4g`, `2 CPUs`, and `hostShare 50% (not enforced
- * yet)` and `minJobs 2 (not enforced yet)`, set fields only. Shared by `renderScopedLimits` and the panel's SCOPED
- * LIMITS view, so the two say a size the same way.
+ * A scoped-limits row's size, as display bits (issue #596): `memory 4g`, `2 CPUs`, `hostShare 50%` and `minJobs 2`,
+ * set fields only. Shared by `renderScopedLimits` and the panel's SCOPED LIMITS view, so the two say a size the same
+ * way. Phase 1 marked the last two "not enforced yet"; each worker's host budget enforces them since phase 2.
  */
 export function sizeBits(l) {
   const bits = [];
   if (typeof l?.memory === "string") bits.push(`memory ${l.memory}`);
   if (typeof l?.cpus === "number") bits.push(`${l.cpus} CPU${l.cpus === 1 ? "" : "s"}`);
-  if (Number.isInteger(l?.hostShare)) bits.push(`hostShare ${l.hostShare}% (not enforced yet)`);
-  if (Number.isInteger(l?.minJobs)) bits.push(`minJobs ${l.minJobs} (not enforced yet)`);
+  if (Number.isInteger(l?.hostShare)) bits.push(`hostShare ${l.hostShare}%`);
+  if (Number.isInteger(l?.minJobs)) bits.push(`minJobs ${l.minJobs}`);
   return bits;
 }
 

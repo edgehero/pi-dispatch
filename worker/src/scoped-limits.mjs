@@ -41,7 +41,7 @@
  *
  * Issue #596 (phase 1) adds version 3: a project row may carry its jobs' size (`memory`, `cpus`) and the host budget's
  * two knobs (`hostShare`, `minJobs`), see `SIZE_LIMIT_FIELDS`. This module only parses them; `job-size.mjs` resolves the
- * size at pickup, and nothing reads `hostShare` or `minJobs` for a decision until the phase 2 host budget.
+ * size at pickup, and the host budget (`host-budget.mjs`, phase 2) enforces `hostShare` and `minJobs`.
  *
  * Custom: scoped limits validated inline per triggers.mjs/pause-windows.mjs precedent; zod not in deps
  */
@@ -78,11 +78,10 @@ export const SCOPED_LIMITS_VERSION = 3;
  *   - `memory`: the project's jobs' memory (`"512m"`, `"4g"`; `job-size.mjs` `parseMemory`), stored in its one spelling;
  *   - `cpus`: their CPU weight (`0.5`, `2`; `parseCpus`), stored as a number;
  *   - `hostShare`: the most of a host's job budget the project's running jobs may hold together, as a whole PERCENTAGE
- *     from 1 to 100 (`50` is half). Parsed, validated and recorded now; ENFORCED only by the host budget (phase 2 of the
- *     issue), and until then it bounds nothing;
+ *     from 1 to 100 (`50` is half). ENFORCED by each host's budget (`host-budget.mjs`): a job that would take the
+ *     project past it waits, and a size above it is refused there (`job-size-exceeds-share`);
  *   - `minJobs`: how many of the project's jobs a host should make room for before it admits other projects' jobs, a
- *     soft minimum. Parsed, validated and recorded now; ENFORCED only by the host budget's holds (phase 2), and until
- *     then it bounds nothing.
+ *     soft minimum. ENFORCED by the host budget's tier 1 holds (`host-budget.mjs` `rankHolds`).
  * A version 1 or 2 file that carries one is refused naming version 3, for the version 2 reason: a 3.1.0 worker drops
  * unknown fields, so the file would size its jobs on one build and not on another. Every released build refuses a
  * version 3 file as newer, but only when it LOADS the file, at boot: a worker already running when the file becomes
@@ -393,8 +392,8 @@ function sizeNulls() {
  * may carry them: a size is what one project's jobs need, and a repo or folder row is not where a job's project is
  * decided. `minJobs` needs a size on the same row (a minimum of jobs of an unstated size reserves nothing anyone can
  * judge) and may not exceed the row's own `concurrent` (a minimum the project can never reach). `hostShare` against
- * `minJobs` times the size is judged where a host's budget is known (the phase 2 host budget), because a percentage of
- * a host is an amount only on a host.
+ * `minJobs` times the size is judged where a host's budget is known (doctor warns, `hostBudgetChecks`), because a
+ * percentage of a host is an amount only on a host.
  */
 function sizeFields(row, norm, { at, path, version, project }) {
 	const present = SIZE_LIMIT_FIELDS.filter((f) => row[f] !== undefined && row[f] !== null);

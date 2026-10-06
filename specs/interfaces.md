@@ -1485,19 +1485,25 @@ refactor apart.
       runtime a default job weighs less than a container started without one (the egress proxy, a Valkey), which is
       the right direction and is left as is. The other direction is open: a large size outweighs every container
       without a share (cpus 256 is a share of 262144, `cpu.weight` 10000 on a current runtime, against the proxy's,
-      Valkey's and the host services' 100), so such jobs can starve them under contention; a weight scale is phase 2;
-    - `--cpus=<n>`, the HOST CEILING, the same for every job: the runtime's own CPU count (`docker info` `NCPU`,
-      `podman info` `host.cpus`, read with the job user's facts) minus a reserve of one CPU when it has four or more.
+      Valkey's and the host services' 100), so such jobs can starve them under contention; a weight scale belongs with
+      the aggregate CPU reserve (a parent cgroup), which is measured per venue before it is built;
+    - `--cpus=<n>`, the HOST CEILING, the same for every job: the host's CPU BUDGET (issue #596, phase 2,
+      `DES-HOST-BUDGET`; fractional allowed, `3.5`), capped at the runtime's own CPU count; with the budget `off` or not
+      known yet, the runtime's own CPU count (`docker info` `NCPU`, `podman info` `host.cpus`, read with the job user's
+      facts) minus a reserve of one CPU when it has four or more.
       It bounds any SINGLE job; it does not keep a core free across jobs, because each container's quota is its own
       and they do not sum (measured: two busy jobs on a 4-core cpuset with `--cpus=3` used 4.06 cores). A reserve
       across all jobs is the phase 2 host budget's (a parent cgroup's quota). It is not the job's size either, which
-      would be the hard cap the issue decided against. When the runtime gave no count the flag is ABSENT (fail open,
+      would be the hard cap the issue decided against. When the runtime gave no count and no budget value is set the flag is ABSENT (fail open,
       logged `cpu_ceiling_unknown`, and doctor warns per venue): Docker refuses a `--cpus` above its own count, and
       the worker's count is not the daemon's on Docker Desktop. The count is a cached read on both venues (`local`:
       the job-user resolver's `docker info`; `podman`: `cachedPodmanInfo`'s `podman info`), re-read by the first
       pickup after ten minutes. A re-read that fails (a timeout, an unreadable reply, a spawn error) keeps serving
       the last answered read until one answers, logged once per run of failures (`job_user_facts_stale` or
-      `podman_info_stale`, each `{ reason, ageMs }`), so the age never turns a slow read into an unavailable pickup.
+      `podman_info_stale`, each `{ reason, ageMs }`), so the age never turns a slow read into an unavailable pickup;
+      but never past 24 hours (`STALE_FACTS_CEILING_MS`, phase 2): an answer that old is no longer served, and the
+      pickup is decided as a first read that failed is (unavailable, retried, said per job). An ANSWERED read ends
+      a run of failures even when it decides nothing cacheable, so the next failure is said again.
       On `local` the cached read is DROPPED at once when Docker refuses a job's `--cpus` as out of its range
       (`Range of CPUs is from 0.01 to <n>`, exit 125, after Docker Desktop's VM was given fewer CPUs): that attempt
       stays never-started (refunded and retried), the worker logs `cpu_ceiling_stale { container, cpus, hostCpus,
@@ -1506,7 +1512,12 @@ refactor apart.
       5.8.1 accept a `--cpus` above the host's count (measured), so the podman venue has no such drop: a stale
       count bounds a single job tighter than it need (after a raise) or looser (after a lowering) until the next
       answered re-read;
-    - `--shm-size=min(1g, memory/2)`, because `/dev/shm` is charged to the container's memory.
+    - `--shm-size=min(1g, memory/2)`, because `/dev/shm` is charged to the container's memory;
+    - `--label=pi.dispatch.mem=<MiB>` and `--label=pi.dispatch.cpu=<hundredths>` (issue #596, phase 2), the size as
+      two integer labels, so doctor can hold the host budget's ledger against what runs. `--label`, `-l` and
+      `--label-file` are refused in `dockerExtra`, so nothing else can make a container read as another size. WHERE
+      a parent cgroup for the aggregate CPU reserve would go (`--cgroup-parent`, refused in `dockerExtra` already) is
+      marked in the builder and emitted by nothing yet.
     `--pids-limit=512` stays fixed. `dockerExtra` refuses every flag that sets a CPU or memory bound, a weight or an
     OOM preference (`-m`, `-c`, `--cpu-shares`, `--cpu-quota`, `--cpu-period`, `--cpu-rt-*`, `--cpuset-*`,
     `--memory-reservation`, `--memory-swap`, `--memory-swappiness`, `--kernel-memory`, `--blkio-weight*`,
@@ -4754,7 +4765,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-size-exceeds-fleet|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -4804,7 +4815,9 @@ validator rather than a second copy of it.
                    "cpuUsec": <int> | null, "throttledUsec": <int> | null,                // bytes, microseconds and counts
                    "throttled": <int> | null, "pidsPeak": <int> | null } | null,
     "size":    { "memMiB": <int>, "cpuCenti": <int>,                                    // issue #596, phase 1: the size the job was GIVEN,
-                 "source": "project" | "env" | "default" } | null }                      // resolved at pickup
+                 "source": "project" | "env" | "default" } | null,                       // resolved at pickup
+    "hostBudget": { "memMiB": <int> | null, "cpuCenti": <int> | null,                   // issue #596, phase 2: the budget a never-fits
+                    "hostShare": <int> | null } | null }                                // refusal judged the size against
   ```
   **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
   after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
@@ -4827,6 +4840,15 @@ validator rather than a second copy of it.
   null on a record written before it (the wait gate's refusals) and on every record before the field. Integers and
   a fixed word, so PII-free by construction. A retry or a deferred attempt is a NEW pickup: it resolves the size in
   force then, so two attempts of one job can record two sizes when the file was edited between them.
+  **`hostBudget` (issue #596, phase 2) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL
+  position** after `size`: on the three never-fits refusals (`job-size-exceeds-host`, `job-size-exceeds-share`,
+  `job-size-exceeds-fleet`) the host budget the size was judged against, in MiB and hundredths of a CPU, and the
+  project's `hostShare` (null without one), so the record names BOTH sizes where the forge comment names neither.
+  Null on every other record. Integers or null, so PII-free by construction. The three reasons are POLICY outcomes
+  with `budgetReserved: false`, decided right after the size at the pickup gate, before any token, clone, reservation
+  or container (`CONST-BUDGET-BEFORE-TOKENS`), and never retried (`CONST-RETRY-INFRA-ONLY`); their comments are fixed
+  generic sentences (`index.mjs` `SIZE_REFUSAL_COMMENTS`). A job the budget merely cannot hold NOW is deferred and
+  writes no record.
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
   only the attempts that FINISHED before this one (it increments in `moveToFinished`/`moveToFailed`, bullmq 5.80.4),
@@ -6092,14 +6114,16 @@ validator rather than a second copy of it.
     - `cpus`: a number or decimal string above 0 with at most two decimals, at least `0.25` and at most `256`,
       stored as a number. It is the job's CPU WEIGHT under contention (`--cpu-shares`), not a cap.
     - `hostShare`: a whole PERCENTAGE from 1 to 100: the most of one host's job budget the project's running jobs
-      may hold together. **Parsed, validated and stored now, and ENFORCED BY NOTHING YET**: the host budget that
-      enforces it is the issue's phase 2, and until that ships a share bounds nothing. The views say "not enforced
-      yet" beside it.
+      may hold together, in memory and in CPU. **ENFORCED by each host's budget** (issue #596, phase 2,
+      `DES-HOST-BUDGET`): a job that would take its project past the share waits (it holds no room meanwhile), and a
+      size larger than the share of a host's budget is refused there as `job-size-exceeds-share`.
     - `minJobs`: an integer ≥ 1, how many of the project's jobs a host should make room for before admitting other
       projects' jobs: a SOFT minimum. Needs `memory` or `cpus` on the same row, and may not exceed the row's own
-      `concurrent`. **Parsed, validated and stored now, and ENFORCED BY NOTHING YET** (phase 2's holds), said so
-      beside it as `hostShare` is. Whether `hostShare` leaves room for `minJobs` times the size is a question about
-      a host's budget, so it is judged where that budget is known (phase 2), not at load.
+      `concurrent`. **ENFORCED by each host's budget**: while the project runs fewer than this many jobs on a host, its
+      oldest waiting job holds room there that no newer job may take (a tier 1 hold). Whether `hostShare` leaves room
+      for `minJobs` times the size, and whether every project's minimum fits together, is a question about a host's
+      budget, so doctor WARNS where that budget is known rather than the file refusing at load: one file serves hosts
+      of different sizes.
     Unset, a job takes the deployment's `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`), field by field.
     The size is resolved once at pickup from this snapshot and recorded on the run (`INT-RUN-HISTORY-FILE-CONTRACT`
     `size`); an edit applies to the project's NEXT pickups, a retry or a deferred attempt included.
@@ -7186,6 +7210,14 @@ abstains.
     fpProjects      a fingerprint of this host's live projects: ids and member hashes, never a name
     fpEnvelope      the digest of this host's live allocation envelope, or "none" without one
     limitsVersion   the highest scoped-limits file version this build reads (an integer; 3 since job sizes)
+    budgetMemMiB    this host's memory budget in MiB, `off`, or "" while unknown (issue #596, phase 2)
+    budgetCpuCenti  this host's CPU budget in hundredths of a CPU, `off`, or "" while unknown
+    usedMemMiB      what the host budget's ledger holds for running jobs (orphans included), in MiB
+    usedCpuCenti    the same, in hundredths of a CPU
+    heldMemMiB      what the budget keeps for waiting jobs (the ranked holds), in MiB
+    heldCpuCenti    the same, in hundredths of a CPU
+    budgetRunning   how many jobs the ledger holds; budgetHolds how many holds rank; budgetOrphans how many
+                    containers whose stop did not take still hold their room
 ```
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
@@ -7262,6 +7294,18 @@ the job. Only `doctor` reads the field, to WARN (`doctor.mjs -> fleetSizeChecks`
 version 3 (it DECLARES 3, as an older build judges it, or a row carries a size), each peer whose `limitsVersion` is
 absent or below 3 is named, with "upgrade and restart every worker" as the fix. When this host's file does not load, nothing is compared. Nothing
 refuses on it.
+
+**The host budget fields are integers, `off` or empty** (issue #596, phase 2, `DES-HOST-BUDGET`). Each is a thunk over
+the worker's one budget, so every beat says what is held now. Two readers. `doctor` shows per host its budget, what
+its jobs hold and the largest project size that fits it, per project the hosts it fits on, a warning per host whose
+budget is below the projects' minimums together, and holds THIS host's `usedMemMiB` and `usedCpuCenti` against the
+`pi.dispatch.mem` and `pi.dispatch.cpu` labels of the job containers its runtime lists (a warning when they differ or
+a container carries none). And a FORGE job too big for this host reads the live rows before it is refused
+`job-size-exceeds-fleet`: it is refused only when two reads at least 30 s apart each list THIS host and every listed
+host publishes both budgets and none fits; a read that fails, a row without a budget (a worker from before the field,
+or one whose facts are not read yet) or no row for this host only defers it. This is the first field a refusal reads,
+so the falsification test below is AMENDED for it, never waived: deleting the keyspace can only DELAY that refusal
+(no self row, so the read proves nothing and the job defers until the next beats), never invent one.
 
 **The TTL is refreshed on EVERY beat**, which reverses this project's stated set-once rule (`budget.mjs`:
 *"set the TTL only when the key is first created, so a long window cannot push its expiry forward"*). The
@@ -7351,7 +7395,9 @@ host declares `PI_WORKER_NAME`; nothing detects the collision yet.
 
 **The falsification test for anything added here later**: DELETE THE WHOLE `host:*` KEYSPACE WHILE THE
 FLEET RUNS, and every host must behave exactly as it did before this contract existed. That holds because
-absence is read as "no peers", which is the single-host behaviour. A Redis-side toggle fails that test --
+absence is read as "no peers", which is the single-host behaviour. Since issue #596 phase 2 one decision reads the
+rows (a forge job's `job-size-exceeds-fleet`), and it is built so the test still holds in the only direction that
+matters: absence can postpone that refusal by a beat or two, and can never cause one. A Redis-side toggle fails that test --
 deleting it loses the operator's edit -- which is precisely why `OQ-008` refuses one, and why this
 keyspace is not that.
 
@@ -7501,6 +7547,7 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 
 | Date | Change |
 |---|---|
+| 2026-10-06 | Issue #596, phase 2 (the host budget, `DES-HOST-BUDGET`). **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: the row gains `budgetMemMiB`, `budgetCpuCenti` (integers, `off`, or empty while unknown), `usedMemMiB`, `usedCpuCenti`, `heldMemMiB`, `heldCpuCenti`, `budgetRunning`, `budgetHolds` and `budgetOrphans`, thunks over the worker's one budget; doctor shows them per host and holds this host's ledger against its containers' size labels; and a forge job too big for this host reads the rows before it is refused `job-size-exceeds-fleet`, only on two reads 30 s apart that each list this host with every host publishing a budget that does not fit. The falsification test is AMENDED, not waived: deleting the keyspace can postpone that refusal and never cause one. The content rule (integers only), the TTL and the close gating are UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-size-exceeds-host`, `job-size-exceeds-share` and `job-size-exceeds-fleet` (policy, `budgetReserved: false`, decided before any spend, never retried, generic comments), and the record gains `hostBudget` `{ memMiB, cpuCenti, hostShare }` at its tail after `size`, present on those three refusals only, so the record names both sizes; a job merely deferred by the budget writes no record. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `--cpus` is the host's CPU budget capped at the runtime's count (fractional allowed), the phase 1 ceiling where the budget is off or unknown; every job container carries `--label=pi.dispatch.mem` and `--label=pi.dispatch.cpu`, and `--label`, `-l`, `--label-file` are refused in `dockerExtra`; the parent cgroup's place is marked and nothing emits it; a kept facts answer is not served past 24 h and an answered read resets the stale line (both carried from phase 1's gate round 3). **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: `hostShare` and `minJobs` are enforced by each host's budget (the share at admission, the minimum as a tier 1 hold), and the per-host room checks are doctor warnings. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, one clause: the expected `cpu.max` quota is rounded to an integer, so a fractional ceiling reads back as the runtime writes it. Checked and UNCHANGED: `INT-CONFIG-OVERLAY-CONTRACT` (the four budget settings are env only, never overlay keys), `INT-SANDBOX-CONTRACT` (a sandbox takes no budget hold; its containers carry the labels as every container does), `INT-PROJECTS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-EGRESS-POLICY-CONTRACT`. |
 | 2026-08-30 | Issue #57, the identity slice. **NEW `INT-HOST-REGISTRY-CONTRACT`**: the `host:` keyspace -- a live SET plus one PEXPIRE'd HASH per worker, every row a host's own self-description and none of it an instruction to anybody. Three of its clauses are the load-bearing ones. The CONTENT RULE (names, integers and digests; never a path, a credential-bearing URL, a repository name or operator free text) is `targetFor`'s `local:<basename>` discipline applied to a Valkey value, and it earns its strictness from the READER: the panel is where an operator screenshots and doctor prints these rows. The TTL is refreshed on every beat, which REVERSES `budget.mjs`'s stated set-once rule, and the reversal is recorded with its reason rather than left to be discovered -- a counter whose TTL refreshes stops being a window, while a lease's expiry IS its liveness claim, and the in-repo precedent (`wait-state.hold` re-expiring the supersede lease) is lease-shaped. And the falsification test any later addition must pass: delete the whole `host:*` keyspace while the fleet runs, and every host must behave exactly as it did before -- which is what distinguishes this from the Redis-side toggle `OQ-008` refuses, since deleting THAT loses the operator's edit. `tz` is carried because a cron pattern has none: `triggers.json` has no `tz` field on a cron entry and BullMQ hands the pattern to cron-parser with no zone, so one pattern is two different instants on two hosts in different zones -- unlike `pause-windows.json`, whose every window is already zone-explicit and therefore already fleet-correct. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record gains `host` as key 25, additive, nullable, unconditional and in tail position. The admissibility paragraph engages this record's own sentences rather than sidestepping them -- `host` holds no attacker-chosen string absolutely (no path from any payload reaches it, it is fixed once at boot, and its charset excludes the separators that would let it be path-shaped), but it is NOT anonymous, since the default is a hostname and a personal machine's hostname is often a person's name. The honest word is operator-disclosed, and `PI_WORKER_NAME` is the documented answer for anyone who wants something else. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the worker name is environment-only and deliberately not an overlay key -- the registry publishes it before the first per-job settings read, and a name the panel could change mid-flight would rename a host between two of its own log lines. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no mount, flag or env var moves, and the name never enters the container. **Code evidence**: worker/src/host-registry.mjs -> makeHostRegistry, readLiveHosts; worker/src/config.mjs -> WORKER_NAME_RE, sanitizeWorkerName, defaultWorkerName; worker/src/run-history.mjs -> buildRecord; worker/src/start.mjs -> startWorker (the log closure, recordRun, the registry wiring); worker/src/image-preflight.mjs -> parseLabels. |
 | 2026-08-30 | v1.6.1, two corrections found by an adversarial pass over the #57 plan rather than by a failure. Both are places where a contract this file states was true of the code one level up and false one level down. **`INT-WAIT-PROFILES-CONTRACT` CORRECTED**: the check lease is released on every exit from the polled arm. It was acquired before the supersede claim and released only around the check loop, so both of the claim's exits -- the `wait-superseded` return and the unverified-holder re-defer -- left holding it. At the shipped default of one slot that wedged every wait check on the worker until restart, and it pointed at the wrong culprit: later held jobs throttled and recorded `wait-expired`/`max-wait-unchecked`, blaming deployment capacity for a leak. Reproduced by driving the real `makeProcessor`, and pinned by two tests whose mutation is the pre-fix block structure. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED, twice, and the pair is one finding**: this file has always said the record is PII-free by construction and that `session.reason` is a CLOSED enum, and neither was enforced where the container's copy is admitted. `parseExitTokens` returned the container's object VERBATIM whenever `total` was numeric, so an invented key -- a path, a branch name, a string read out of the workspace -- reached the durable record; `parseExitSession` accepted any string as `reason`. Both now rebuild: `tokens` from a closed twelve-key list in the runner's own emission order, so a conformant object round-trips byte-identically and an omitted key stays omitted rather than becoming a measured zero; `reason` against the enum this file publishes. The asymmetry that made this findable is that `usage` was already given exactly this treatment (`parseExitUsage`'s rebuild, with the reason written on it) and its two siblings were not -- an oversight, not a decision. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: all three fields stay read-only telemetry feeding no classification, and no exit code moves. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no mount, flag or env var moves, and a conformant image's exit line is accepted exactly as before. **Code evidence**: worker/src/index.mjs -> makeProcessor (the polled arm's try/finally); worker/src/run-history.mjs -> rebuildTokens, SESSION_REASONS, parseExitTokens, parseExitSession. |
 | 2026-08-30 | Issue #230, the doctor and docs slice. **`INT-WAIT-PROFILES-CONTRACT` AMENDED**: it now carries the LOAD-TIME half that `INT-TRIGGERS-FILE-CONTRACT`'s `run.waitFor` bullet has pointed at since the grammar landed, four checks, with the FAILURE-versus-warning line drawn at whether something actually refuses -- a worker that will not start or a delivery that will not run, never a preference. An undeclared profile a trigger names (`secretProfiles`' check exactly, the file being valid while the deployment is not); a declared path that does not resolve to an executable regular file, probed the way the checker probes it at spawn, symlinks included, so doctor and the gate cannot disagree about what will run; a `PI_WAIT_PROFILES` that does not parse, REPORTED rather than thrown since the operator running doctor is very likely running it because the worker refused to boot on that exact line; and an `after` beyond `PI_WAIT_AFTER_MAX_MS`, which refuses every delivery at first pickup and which doctor can see before anything is enqueued because it holds both the instant and the ceiling. Two of those four were settled by TESTING the block rather than by writing it, and both inverted a decision the first draft had made. The parse check is now asked UNCONDITIONALLY: `loadConfig` parses `PI_WAIT_PROFILES` on every boot whether or not a trigger holds anything, so a garbled value is a worker that will not START, and the `waiting > 0` gate hid it from exactly the operator the check exists for -- reached by the ordinary sequence of declaring the variable, restarting, and only then writing the trigger. And a declared profile NO trigger names now only warns, because nothing looks it up and failing the whole command on a retired `.env` entry is the same always-on advisory the gate exists to prevent. Everything else stays behind `waiting > 0`, which is why `readTriggerFacts` grew `waiting`, `waitProfiles` and `waitAfters`: a deployment that holds no jobs must hear nothing about a feature it does not use. One gap is recorded rather than closed: a resolver gets a group/world-writable warning and a wait profile does not, so the docs say plainly that doctor checks what a check IS and not who may edit it. The VERSION FLOOR is the deliberate exception and is disclosed once as `ok: true` -- doctor runs on the worker host and cannot see the receiver's installed version, so an unconditional warning would be the always-on amber the panel's own design rejects, and the skew is already enforced where it can be by the worker's own `wait-skew` refusal, which the line names rather than duplicates. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: no field, no load refusal and no pre-spend refusal moved; this slice builds the half it already promised. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: doctor writes no record and the reason enum gains nothing. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the eight `PI_WAIT_*` keys still join no `KNOWN_KEYS`, and doctor reads them from the environment for the same reason the gate does. Operator docs land with it: NEW `docs/wait-for.md` on `docs/scoped-limits.md`'s section shape, organised by CHECK SHAPE with the vendors as instances rather than one section per vendor, carrying the version floor in `docs/secrets.md`'s own words and leading its traps with the receiver skew, which is the one failure whose symptom is a run that looks entirely correct. `docs/scoped-limits.md`'s "deferrals are visible only as the delayed count" caveat is corrected rather than deleted -- a SCOPE deferral still is, a wait no longer is, and the reason only one of them earned a section is stated so the asymmetry does not read as an oversight. One defect found while building it is fixed here rather than filed, and it was not in the new code alone: both `parseWaitProfilesSafe` and the `parseSecretProfilesSafe` it was copied from returned the profile table with an `error` key beside the profiles, and `error` passes the profile charset -- so `PI_SECRET_PROFILES=error:/opt/pi/r.sh` declared one profile whose PATH then read as a parse failure, and doctor reported the variable as unparseable, quoted the path as the message, and skipped every check below it on a deployment that was entirely correct. Both return an envelope now and both are pinned, since the second was the first's copy and a fix to one alone would leave the older half broken. No contract term moved: `INT-WAIT-PROFILES-CONTRACT` and `INT-TRIGGERS-FILE-CONTRACT` both already say what an undeclared profile does, and this is doctor failing to ask the question rather than the answer changing. The version floor those docs and doctor both state (worker 1.6.0, admin 1.6.0, receiver 1.4.0) names versions this tree does not yet carry, and that ORDERING is a dependency rather than an oversight: the release slice bumps all four package versions plus the wizard's `RUNTIME_VERSION` and `RECEIVER_VERSION`, and it must land before anything here is published, or doctor tells an operator to run a worker newer than the worker printing the line. **Code evidence**: worker/src/doctor.mjs -> readTriggerFacts, collectChecks (the wait block), statPath, parseWaitProfilesSafe, parseSecretProfilesSafe; worker/src/config.mjs -> loadConfig (the unconditional parse this mirrors). |

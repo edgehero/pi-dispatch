@@ -92,8 +92,8 @@ test("dispatch_limit_edit replaces a sent size field, CARRIES the others, and an
   assert.equal(read(path).version, 3);
 });
 
-test("the views say a project's size, and say hostShare and minJobs are not enforced yet", () => {
-  assert.deepEqual(sizeBits({ scope: "project:shop", memory: "16g", cpus: 4, hostShare: 50, minJobs: 2 }), ["memory 16g", "4 CPUs", "hostShare 50% (not enforced yet)", "minJobs 2 (not enforced yet)"]);
+test("the views say a project's size with its hostShare and minJobs, which the host budget enforces (#596 phase 2)", () => {
+  assert.deepEqual(sizeBits({ scope: "project:shop", memory: "16g", cpus: 4, hostShare: 50, minJobs: 2 }), ["memory 16g", "4 CPUs", "hostShare 50%", "minJobs 2"]);
   assert.deepEqual(sizeBits({ scope: "project:shop", cpus: 1 }), ["1 CPU"]);
   assert.deepEqual(sizeBits({ scope: "acme/web", day: 3, memory: null, cpus: null, hostShare: null, minJobs: null }), [], "a version 3 row with no size says nothing");
   const text = renderScopedLimits({ limits: { limits: [{ scope: "project:shop", concurrent: 2, memory: "1536m", cpus: 0.5 }] }, scopedBudget: null, projects: { projects: [{ id: "shop", members: ["github:acme/web"] }] } });

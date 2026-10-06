@@ -296,7 +296,93 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   its refresh IS the claim, so the claim dies with the process -- no reaper, no third party. Where the
   argument does not transfer is named rather than glossed: the wait-check lease and a per-scope
   in-flight count ARE claims of this entry's kind, and this keyspace closes neither.
-- **Traces to**: `OQ-002`, `REQ-QUEUE-BURST-NO-DROP`, `REQ-SCOPED-LIMITS`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`
+- **A third axis since issue #596 (phase 2), the host budget**: `PI_CONCURRENCY` counts containers and cannot tell a
+  20g job from a 2g one, so each worker also keeps a ledger of the SIZES its running jobs started at and admits a job
+  only when its size fits the host's memory and CPU budget (`DES-HOST-BUDGET`). `PI_CONCURRENCY` stays an UPPER BOUND
+  on the count, and whichever is reached first binds; doctor says which. On a small host the `auto` budget can bind
+  first (a 4 CPU host's budget of 3 CPUs holds one default 2 CPU job), which is the release note's "small hosts may run
+  fewer jobs at once". The ledger is process memory for this entry's own reason above, and the registry only publishes
+  it. The RAM reasoning in the Why above is superseded by measurement: sizes are per project now, so the budget, not a
+  guess at an average job, is what bounds memory.
+- **Traces to**: `OQ-002`, `REQ-QUEUE-BURST-NO-DROP`, `REQ-SCOPED-LIMITS`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-HOST-BUDGET`
+
+## DES-HOST-BUDGET
+
+- **Decision** (issue #596, phase 2): each worker keeps ONE ledger of the sizes its running jobs were started at, and
+  starts a job only when that size fits beside them inside the host's budget, in memory AND CPU, with its project
+  inside its `hostShare` of the budget. `worker/src/host-budget.mjs`, built once in `createWorker` and shared by both
+  queues' processors, armed with one queue too. The pieces, each with its reason:
+  - **The budget**: `PI_HOST_MEMORY_BUDGET`, `PI_HOST_CPU_BUDGET` (`auto`, a value, `off`). `auto` is the runtime's own
+    `MemTotal`/`NCPU` (Docker) or `host.memTotal`/`host.cpus` (Podman), the smaller where two venues answer, and on
+    rootless Podman also the smallest `memory.max` and `cpu.max` of the account's slice and user service, minus the
+    reserve (`PI_HOST_RESERVE_MEMORY`: 10% clamped to 1g..4g; `PI_HOST_RESERVE_CPUS`: 1 from 4 CPUs, else 0), and never
+    below one job of the deployment's default size (decision 3). A value IS the budget (no reserve taken), and one
+    below a default job refuses the start. The runtime's numbers, never `os.totalmem()`: on Docker Desktop the jobs run
+    in a VM with its own. Env only for this release: a budget that moved under running jobs would strand the holds
+    taken against the old one. The facts are read on the budget's TICK (5 s) from the cached readers, never inside the
+    gate; with none answered a dimension is UNKNOWN and fails open, said once per change (`host_budget_unknown`).
+  - **The ledger**: keyed by job id, the size IN FORCE AT START, in integers (MiB, hundredths), so a release is
+    idempotent and gives back exactly what was taken whatever the limits file says by then. Sum and compare in
+    integers, never floats.
+  - **Admission** (`admit`, pure): used + the ask + every hold RANKED ABOVE the ask fits both dimensions, and the
+    project's running sizes plus the ask fit its `hostShare` percent of each (the share judged first, so a job its own
+    share stops does not hold room). Synchronous: read, decide and write with no await between, so on Node's one thread
+    two pickups on one host cannot take the same room.
+  - **Holds, so nothing starves**: a deferred job goes to the back of the delayed set, so a 20g job behind a stream of
+    2g jobs would never find 20g free. Tier 1: the oldest waiter of each project running fewer than its `minJobs`
+    here; tier 2: the single oldest waiter of all. A waiter keeps its `firstAt` across deferrals. A hold is SUSPENDED
+    while another gate defers its job (scope, project `concurrent`, endpoint, pause, wait), so room is kept only for a
+    job whose ONLY obstacle is the budget. A hold whose job has not come back for 15 s is verified with the job's own
+    `getState`: dropped when completed, failed, gone, or active and not in this host's processors; kept while waiting
+    or delayed; on a Valkey error dropped once the job has been away 120 s.
+  - **Gate order** in the processor: the host slot; the size and the never-fits check; the repo scope; the project
+    `concurrent`; the endpoint gate; the BUDGET LAST. The waiter bookkeeping is one wrapper around the whole pickup
+    (a budget deferral keeps the waiter, any other deferral suspends it, any other end forgets it), and every hold is
+    given back by ONE `releaseAllHolds`, pinned by a bolt test.
+  - **Never fits**: a size above the budget, or above the project's share of it, is a determinate POLICY refusal before
+    any spend (`job-size-exceeds-host`, `-share`), recorded with both sizes (`hostBudget` on the record, the log line);
+    the forge comment is generic. A forge job on the shared queue may fit another host, so it defers 60 s and is
+    refused `job-size-exceeds-fleet` (this host's own reason when the registry lists only this host) only after TWO
+    registry reads at least 30 s apart, each listing this host and every listed host publishing a budget that does not
+    fit; the first is remembered on the job, an answer that a host may fit forgets it, a failed read keeps it.
+  - **A container whose stop did not take** keeps its hold as an ORPHAN until `docker ps -a` (or `podman ps -a`) by
+    exact name says it is gone; an unanswered listing keeps it. The boot reaper, which removes every job container
+    before a worker drains, is the backstop across a restart. Every COUNT slot still goes back at the 30-minute bound.
+  - **CPU ceiling**: every job's `--cpus` is the CPU budget, capped at the runtime's count (Docker refuses more), so no
+    single job can use the reserve; with the budget off or unknown the phase 1 ceiling stands.
+  - **Fleet and doctor**: the registry row publishes the budget, what runs and what the holds keep, integers; doctor
+    shows the budget and which of it and `PI_CONCURRENCY` binds first, warns for project sizes and minimums a host
+    cannot hold, lists per host its budget, use and largest fitting project size and per project the hosts it fits
+    on, and holds the ledger against the `pi.dispatch.mem` and `pi.dispatch.cpu` labels every job container carries.
+- **Why a ledger in PROCESS MEMORY**: `DES-CONCURRENCY-3`'s own argument. It counts this host's containers, the boot
+  reaper clears survivors before draining, and a Redis-held ledger would survive a crash claiming room for containers
+  the reaper just killed. The registry row only PUBLISHES it, for doctor and for the fleet check.
+- **Rejected**:
+  - *Counting containers per size class* (small, medium, large slots): a class is a guess at a size, and the issue's
+    sizes are raw numbers so the budget can adapt per machine.
+  - *Admitting by memory alone*: CPU is a weight, not a cap, but its SIZE is still what the job was promised; a host
+    whose CPU sizes oversubscribe it gives every job less than it asked for, which is the overcommit the budget exists
+    to refuse. Admitting in both is what the plan's worked scenarios assume.
+  - *BullMQ priorities or a re-enqueue at the head* for a waiting big job: priorities reorder the wait list, never the
+    delayed set a deferral uses, and a re-enqueue changes the job's identity and dedup key. A hold is local and free.
+  - *A refusal when the host is merely full*: a full host is transient state (`CONST-RETRY-INFRA-ONLY`); only a size
+    that can NEVER fit is a verdict.
+  - *Refusing a forge job for the fleet on one read*: a peer missing from one read (a restart, a deleted keyspace)
+    would invent a refusal, which `INT-HOST-REGISTRY-CONTRACT`'s falsification test forbids; two reads across two beats
+    can only delay one.
+  - *Releasing an orphan's hold at the 30-minute bound*: the container may still run and still use its size, which is
+    exactly the promise the budget makes to every other job.
+  - *Reading the facts inside the gate*: an await between the read and the take is a window two pickups share.
+  - *An aggregate CPU reserve by `--cpus` alone*: per-container quotas do not sum (measured, phase 1: two busy jobs
+    with `--cpus=3` on 4 cores used 4.06). The reserve across all jobs is a parent cgroup with its own quota, being
+    measured per venue; `docker-run.mjs` marks where its `--cgroup-parent` goes, and nothing emits one yet.
+- **Residuals**: the budget bounds SIZES, not use: a job may still use idle CPU beyond its weight up to the ceiling,
+  and memory inside its own `--memory`. The aggregate CPU reserve and a weight clamp that keeps the egress proxy and
+  Valkey served (a share of 262144 maps to `cpu.weight` 10000 against their 100) are the parent cgroup's, pending the
+  lab. A hold verified as waiting may still sit in a full `PI_CONCURRENCY` wait list for as long as the slots stay busy.
+- **Traces to**: `REQ-HOST-BUDGET`, `DES-CONCURRENCY-3`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-HOST-REGISTRY`,
+  `INT-HOST-REGISTRY-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-BUDGET-BEFORE-TOKENS`,
+  `CONST-RETRY-INFRA-ONLY`
 
 ## DES-CRON-VIA-BULLMQ-SCHEDULER
 
@@ -5010,11 +5096,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the argv agree, and the argv's memory is the spelling `memoryBytes` reads (pinned over the whole range), which the
   phase 0 OOM rule compares with. `hostShare` is a whole PERCENTAGE of a host's job budget (rejected: a fraction,
   whose float spelling invites `0.3333`; an absolute amount, which would not follow a fleet of unequal hosts).
-  `hostShare` and `minJobs` are parsed, validated and stored in phase 1 and ENFORCED by phase 2's host budget, and
-  nothing in phase 1 reads them for a decision; the views and tools say "not enforced yet" rather than let a stored
-  number read as a bound. The load-time checks are the host-independent ones (`minJobs` needs a size and may not
-  exceed the row's `concurrent`); whether a share leaves room for `minJobs` times the size depends on a host's
-  budget, so it is judged where the budget is known. Version 3 because a released build drops unknown fields: a
+  `hostShare` and `minJobs` were parsed, validated and stored in phase 1 and are ENFORCED since phase 2 by each
+  host's budget (`DES-HOST-BUDGET`: the share at admission, the minimum through tier 1 holds); phase 1's views said
+  "not enforced yet", and say them as plain limits now. The load-time checks are the host-independent ones (`minJobs`
+  needs a size and may not exceed the row's `concurrent`); whether a share leaves room for `minJobs` times the size,
+  and whether all minimums fit together, depends on a host's budget, so doctor WARNS where the budget is known rather
+  than the file refusing at load: one file serves hosts of different sizes. Version 3 because a released build drops unknown fields: a
   size in a version 2 file would size jobs on one build and silently not on another. For the same reason a version
   3 row refuses a key it does not define (a misspelled `Memory` beside a valid field would otherwise drop out and
   the project would run at the default size); versions 1 and 2 keep the drop-unknown policy, so no file an older
@@ -8333,6 +8420,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-10-06 | Issue #596, phase 2 (the host budget). **NEW `DES-HOST-BUDGET`**: one process-memory ledger per worker of the sizes its running jobs started at, keyed by job id (release idempotent, integers), admitting a job only when it fits the host's memory AND CPU budget beside what runs and every hold ranked above it, with its project inside its `hostShare`; the budget `auto` (the runtime's own numbers, on rootless Podman also the user service's `memory.max` and `cpu.max`, minus a reserve, never below one default job), a value or `off`, env only; holds in two tiers (each project below its `minJobs`, then the oldest waiter), suspended while another gate defers the job and verified by `getState` after 15 s (dropped on a Valkey error after 120 s); the budget gate LAST, the waiter bookkeeping in one wrapper and every release through one `releaseAllHolds` (bolted); never-fits sizes refused before spend, a forge job refused for the fleet only after two registry reads 30 s apart; a container whose stop did not take keeps its hold as an orphan until the runtime says it is gone; every job's `--cpus` is the CPU budget; the registry publishes the ledger and doctor holds it against the containers' size labels. Rejected, with reasons: size classes, memory-only admission, BullMQ priorities, refusing a full host, a one-read fleet refusal, freeing an orphan at the 30-minute bound, reading facts inside the gate, and an aggregate CPU reserve by `--cpus` alone (the parent cgroup is lab-pending, and its seam is marked in the argv builder). **`DES-CONCURRENCY-3` AMENDED**: a third axis, the host budget; `PI_CONCURRENCY` stays an upper bound and doctor says which binds; the RAM reasoning is superseded by per-project sizes. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: `hostShare` and `minJobs` are enforced, and the per-host checks that phase 1 deferred are doctor warnings, not load refusals, because one file serves hosts of different sizes. Checked and UNCHANGED: `DES-HOST-REGISTRY` (rows still describe their own host; the new fields are integers), `DES-FLEET-LEASES-FOR-SHARED-BOUNDS` (the budget is per host and holds no fleet claim), `DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR`, `DES-PODMAN-NATIVE-ROOTLESS-BACKEND` (the same argv builder carries the labels; the user service's limits it named as phase 2's are now read), `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` (the facts it reads are also the budget's, and a kept answer is no longer served past 24 h, carried from phase 1's gate). |
 | 2026-08-30 | Issue #57, the shared-bounds slice. **NEW `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`**: the two ceilings that describe a DEPLOYMENT rather than a process gain a fleet-wide layer beneath the unchanged in-process one. The entry's substance is what it owes `OQ-008` and this file's own refusal of Redis-held in-flight counts, and the two halves answer it differently. The check lease claims no container at all -- a subprocess this process spawned, bounded by a configured timeout, holding no folder and spending nothing -- so all three properties that made the container count wrong invert, and its TTL is derived rather than guessed. The scope claim really is for a container, so the refusal lands, and the answer is the boot reaper: it establishes that this host holds no containers, so deleting a claim that names this host is the same source of truth writing down what it just established. That argument has a PRECONDITION and the precondition is checked -- `makeReaper` catches its own `docker ps` failure, and on that path nothing was enumerated, so the sweep is skipped rather than freeing slots for containers that may still be running on a machine that would then be joined by another. Local scopes deliberately never claim, because the key would be a hash of a path string and `/srv/site` on two machines is usually two different repositories. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: its rejection of Redis in-flight counters is NARROWED rather than reversed, and the narrowing is stated in the Rejected list itself so a reader meets it where the refusal is. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the one-worker-per-daemon invariant and the process-memory argument for the folder mutex are untouched. **Code evidence**: worker/src/fleet-lease.mjs -> makeFleetLease, makeScopeClaimSweeper; worker/src/index.mjs -> makeProcessor (the check and scope arms); worker/src/start.mjs -> startWorker, makeReaper. |
 | 2026-08-30 | Issue #57, the placement slice. **`DES-CONCURRENCY-3` AMENDED**: `PI_CONCURRENCY` is restored as a bound on the MACHINE. A worker that drains a host-affine queue as well as the shared one runs two BullMQ Workers, and BullMQ's concurrency is per Worker, so two at 3 would run six containers and break the RAM and provider-throttle reasoning this entry rests on. An in-process semaphore at the pickup gate caps the sum, deferring the excess at the scope gate's cadence -- and process memory is still the CORRECT store for this entry's own unchanged reason, since it counts this host's containers and the boot reaper clears survivors before draining. The one-worker-per-docker-daemon invariant is untouched; multi-host means one worker per host, never two per daemon. **`DES-CRON-VIA-BULLMQ-SCHEDULER` AMENDED**: a host's schedulers live on its own queue, which makes the orphan prune correct by construction rather than by agreement. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked, and the check is the interesting one**: the folder mutex stays an in-process count, and ROUTING is what keeps it complete across hosts -- a local folder exists on exactly one machine, so only that machine's worker ever runs jobs for it. Affinity preserves the mutex rather than being bolted beside it. The residual is a folder present on two hosts through a shared mount, which the registry can detect and nothing yet does. **`DES-WORKER-ON-HOST` UNCHANGED, checked**: the worker is still a host process shelling out to a local docker, and every bind mount is still a path on its own filesystem -- which is precisely why placement is a routing problem rather than a scheduling one. **Code evidence**: worker/src/index.mjs -> createWorker, makeProcessor; worker/src/queue.mjs -> hostQueueName; worker/src/schedules.mjs -> loadSchedules, servedSchedules. |
 | 2026-08-30 | Issue #57, the identity slice. **NEW `DES-HOST-REGISTRY`**: one TTL'd heartbeated row per worker, about itself, because six gaps wanting the same missing fact would otherwise grow six disagreeing answers. Three decisions carry their reasons. A registry rather than `CLIENT LIST`, because BullMQ's own doc-comment says `getWorkers()` does not work where CLIENT SETNAME is unsupported, and a host list that silently empties cannot be what a decision reads -- the Worker is named anyway, for the `processedBy` stamp it buys free. Boot never AWAITS the registry, which is correctness rather than speed: `maxRetriesPerRequest: null` (required by BullMQ's blocking connections) means a command against an unreachable server queues forever instead of rejecting, so awaiting the first beat would hang boot with no timeout on a deployment whose Valkey is down. And the name is validated rather than hashed, inverting `scopeKeyPrefix`'s call for a reason that is stated: a folder path was never chosen for key-safety and cannot be refused, while a declared name can -- and hashing would destroy the readability the structure exists for. **`DES-CONCURRENCY-3` UNCHANGED, checked**, plus one sentence saying why: the refused object is a claim whose truth-maker lives on the host while the claim lives in Redis, and a registry row's truth-maker is the process whose refresh IS the claim. The sentence also names where the argument does NOT transfer, because the naive reading is that #57 has retired this entry -- the wait-check lease and the per-scope in-flight count are claims of exactly this kind, and nothing here closes either. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: the sidecars remain the durable record and nothing about where they live has moved; the record gained one nullable field and no new store. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked**: the in-flight map is untouched and still process memory. **Code evidence**: worker/src/host-registry.mjs -> makeHostRegistry, readLiveHosts; worker/src/start.mjs -> startWorker; worker/src/config.mjs -> WORKER_NAME_RE, sanitizeWorkerName. |

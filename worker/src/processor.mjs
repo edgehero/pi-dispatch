@@ -391,6 +391,9 @@ export async function runJob(job, deps) {
 		// reopens the run at its size) and to `runContainer`, never through `job.data`. null on a bare wiring: neither call
 		// then carries it, and the container gets the built-in 4g and 2.
 		jobSize = null,
+		// Issue #596, phase 2: the host's CPU budget at pickup in hundredths (`host-budget.mjs`), or null when it is off or
+		// unknown. It becomes every job's `--cpus` (capped at the runtime's count), so no job can use the reserve.
+		cpuBudgetCenti = null,
 		// Issue #503 part 7: the builtin catalog's model object for (provider, id), or null (model-catalog.mjs
 		// `builtinModel`). Read only by the zero-rated check; the default knows no builtin model, so an unwired
 		// processor judges overlay models alone and reserves for every other.
@@ -1307,7 +1310,7 @@ export async function runJob(job, deps) {
 		// then only a signed line is read (run-container.mjs, run-history.mjs `authenticExitLines`). An image that does not
 		// declare it is read as before, under the #542 trust rule below alone.
 		const exitAuth = (img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY);
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}) });
 		containerRan = true;
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.

@@ -951,3 +951,21 @@ test("the boot reaper's detach-gate read gets the gate's own bound, 15 s and 1 M
 	await reaperExec({ execFileFn: fake })("docker", ["ps"]);
 	assert.deepEqual(got.map((o) => [o.timeout, o.maxBuffer]), [[15_000, 1024 * 1024], [30_000, 1024 * 1024]]);
 });
+
+test("issue #596, phase 2: makeContainerGone says gone only when the runtime lists no container of exactly that name", async () => {
+	const { makeContainerGone } = await import("../src/backend-local.mjs");
+	const asked = [];
+	let stdout = "";
+	let fail = false;
+	const gone = makeContainerGone({ exec: async (bin, args) => (asked.push([bin, ...args]), fail ? Promise.reject(new Error("daemon down")) : { stdout }), binOf: (venue) => (venue?.backend === "podman" ? "podman" : "docker") });
+	assert.equal(await gone("pi-job-7", { backend: "podman" }), true);
+	assert.deepEqual(asked[0], ["podman", "ps", "-a", "--filter", "name=pi-job-7", "--format", "{{.Names}}"]);
+	stdout = "pi-job-70\nmy-pi-job-7\n";
+	assert.equal(await gone("pi-job-7", null), true, "a substring match is not the container");
+	stdout = "pi-job-70\npi-job-7\n";
+	assert.equal(await gone("pi-job-7", null), false);
+	fail = true;
+	assert.equal(await gone("pi-job-7", null), null, "could not ask: the hold stays");
+	assert.equal(await gone("someone-else", null), null, "never asked about a name outside the job namespace");
+	assert.equal(await gone(null, null), null);
+});

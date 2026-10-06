@@ -35,6 +35,8 @@ function infoBody(over = {}) {
 				rootlessNetworkCmd: "pasta",
 				// Issue #596: the host's CPU count (measured 4 on both lab VMs), which sets a podman job's `--cpus` ceiling.
 				cpus: 4,
+				// Issue #596, phase 2: the host's memory in bytes (an illustrative 7937.5 MiB, so the MiB is rounded down).
+				memTotal: 8_323_072_000,
 				...host,
 			},
 			store: { graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" },
@@ -46,7 +48,7 @@ function infoBody(over = {}) {
 }
 // An escape byte built at run time: a literal one in source survives a copy and paste and then does not.
 const ESC = String.fromCharCode(27);
-const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers", rootlessNetworkCmd: "pasta", hostCpus: 4 });
+const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers", rootlessNetworkCmd: "pasta", hostCpus: 4, memTotalMiB: 7937 });
 const answered = (over = {}) => ({ answered: true, info: { ...INFO(), ...over } });
 
 /**
@@ -95,9 +97,9 @@ test("parsePodmanInfo reads the measured shape and nothing else", { skip }, () =
 	}
 	// Every field null when absent or the wrong type: a missing `rootless` is never read as rootless, nor a missing
 	// `serviceIsRemote` as local.
-	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null, runRoot: null, hostCpus: null });
-	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupManager: `systemd${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"], rootlessNetworkCmd: `pasta${ESC}[2J`, cpus: "4" }, version: { Version: `5.8.1${ESC}]0;x` } }));
-	assert.deepEqual(odd, { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers", hostCpus: null });
+	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null, runRoot: null, hostCpus: null, memTotalMiB: null });
+	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupManager: `systemd${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"], rootlessNetworkCmd: `pasta${ESC}[2J`, cpus: "4", memTotal: "8323072000" }, version: { Version: `5.8.1${ESC}]0;x` } }));
+	assert.deepEqual(odd, { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers", hostCpus: null, memTotalMiB: null });
 	// The store is a path or nothing: a relative one, a non-string or one carrying a control byte is no fact.
 	for (const graphRoot of ["relative/path", 7, `/home/op${ESC}[2J`, ""]) assert.equal(mod.parsePodmanInfo(JSON.stringify({ host: {}, store: { graphRoot } })).graphRoot, null, JSON.stringify(graphRoot));
 	// And so is its runtime state (issue #450), under which Podman 5 records the rootless network helper.
@@ -1320,4 +1322,17 @@ test("the remedy resets the rootless network only for the keys that shape it; a 
 		assert.ok(!fix.includes(mod.ROOTLESS_NETNS_RESET), key);
 		assert.match(fix, /^remove that key from that file; the next podman job runs once it is gone/, key);
 	}
+});
+
+test("issue #596, phase 2: cachedPodmanInfo serves a kept answer while re-reads fail for at most a day, then the failed read is the answer", { skip }, async () => {
+	const { STALE_FACTS_CEILING_MS } = await import("../src/job-user.mjs");
+	let t = 0;
+	let next = answered({ hostCpus: 4 });
+	const cached = mod.cachedPodmanInfo(async () => next, { now: () => t, maxAgeMs: 600_000 });
+	assert.equal((await cached()).info.hostCpus, 4);
+	next = { answered: false, reason: "timeout", transient: true };
+	t = STALE_FACTS_CEILING_MS - 1;
+	assert.equal((await cached()).answered, true, "a day minus a moment: the kept answer");
+	t = STALE_FACTS_CEILING_MS;
+	assert.deepEqual(await cached(), { answered: false, reason: "timeout", transient: true }, "a day old: the failed read itself");
 });

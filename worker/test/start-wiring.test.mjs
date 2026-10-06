@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -267,6 +267,12 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			// Issue #448: never this machine's systemd. An idle podman.service unless a test says otherwise; only a local
 			// daemon that is rootful Podman on this host ever asks.
 			readPodmanService: readPodmanService ?? IDLE_PODMAN_SERVICE,
+			// Issue #596, phase 2: never this machine's cgroup files. No user service limit unless a test says otherwise.
+			readCgroupFile:
+				readCgroupFile ??
+				(() => {
+					throw Object.assign(new Error("absent"), { code: "ENOENT" });
+				}),
 			makePodmanReaper: makePodmanReaper ?? (() => async () => ({ reaped: true })),
 			makePodmanBackend: podmanBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
@@ -4627,4 +4633,56 @@ test("issue #596 (gate round 2): the boot's clock and log reach the job-user res
 	assert.equal(stale.hostCpus, 14, "the last answer, not an unavailable pickup");
 	assert.equal(stale.unavailable, undefined);
 	assert.deepEqual(logsNow().filter((l) => l.event === "job_user_facts_stale").map((l) => [l.reason, l.ageMs]), [["timeout", 10 * 60_000]], "the boot's log, the boot's clock");
+});
+
+test("issue #596, phase 2: createWorker is handed the host budget's inputs and the fleet read, and the registry beat publishes the budget", { skip }, async () => {
+	const endpoint = { local: true, context: "default", endpoint: "unix:///run/pd-test/docker.sock", reason: null, transient: false };
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	let published = null;
+	const { captured } = await runStart({
+		env: { PI_HOST_MEMORY_BUDGET: "auto", PI_HOST_CPU_BUDGET: "6", PI_JOB_MEMORY: "2g" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: DOCKER_FACTS({ hostCpus: 8, memTotalMiB: 16384 }),
+		jobUserIdentity: { ...LINUX_ID(1001), stat: () => ({ uid: 0, gid: 2375 }) },
+		resolveDockerEndpoint: async () => endpoint,
+		makeHostRegistry: (args) => {
+			const real = makeHostRegistry(args);
+			return { ...real, start: (fields, opts) => ((published = fields), real.start(fields, opts)) };
+		},
+	});
+	const opts = captured.hostBudget;
+	assert.deepEqual(opts.settings, { memory: { mode: "auto" }, cpus: { mode: "value", cpuCenti: 600 }, reserveMemory: { mode: "auto" }, reserveCpus: { mode: "auto" } });
+	assert.deepEqual(opts.jobDefault, { memMiB: 2048, cpuCenti: 200 }, "auto never falls below one job of the DEPLOYMENT's default size");
+	assert.deepEqual(await opts.readFacts(), { memTotalMiB: 16384, hostCpus: 8 }, "the local venue's cached facts read");
+	assert.equal(typeof opts.containerGone, "function");
+	assert.equal(typeof captured.fleetHosts, "function");
+	assert.equal(captured.deps.hostBudget, undefined, "beside the other worker-wide inputs, never in deps");
+	for (const key of ["budgetMemMiB", "budgetCpuCenti", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "budgetRunning", "budgetHolds", "budgetOrphans"]) {
+		assert.equal(typeof published[key], "function", `${key} is a thunk, re-read every beat`);
+	}
+});
+
+test("issue #596, phase 2: on rootless Podman the budget's facts carry the user service's own memory.max and cpu.max, the smaller over both cgroup levels", { skip }, async () => {
+	const files = {
+		"/sys/fs/cgroup/user.slice/user-1234.slice/memory.max": "max\n",
+		"/sys/fs/cgroup/user.slice/user-1234.slice/cpu.max": "max 100000\n",
+		"/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/memory.max": "8589934592\n",
+		"/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/cpu.max": "250000 100000\n",
+	};
+	const { captured } = await runStart({
+		env: { PI_BACKENDS: "podman", PI_JOB_IMAGE: "pi-job:ci" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		jobUserIdentity: PODMAN_ID,
+		observationFs: PODMAN_FILES,
+		makePodmanReaper: () => async () => ({ reaped: true }),
+		bootImage: { ok: true, image: "pi-job:ci", imageDigest: "sha256:pod", piVersion: "0.80.7", capabilities: ["anyUid"] },
+		readPodmanInfo: PODMAN_INFO({ hostCpus: 4, memTotalMiB: 16384 }),
+		readCgroupFile: (path) => {
+			if (!(path in files)) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+			return files[path];
+		},
+	});
+	assert.deepEqual(await captured.hostBudget.readFacts(), { memTotalMiB: 16384, hostCpus: 4, userMemMiB: 8192, userCpuCenti: 250 });
 });

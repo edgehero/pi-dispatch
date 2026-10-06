@@ -275,9 +275,11 @@ export function expectedMemoryBytes(memory = containerSpec({ image: "i", name: "
  * `{ pidsLimit, memoryBytes, cpuShares, cpuMax }`, `cpuMax` being the `cpu.max` line `--cpus` writes (`<quota> 100000`,
  * or `max 100000` with no ceiling).
  */
-export function expectedBounds(size = DEFAULT_JOB_SIZE, hostCpus = null) {
-	const spec = containerSpec({ image: "i", name: "n", workspace: "/w", size, hostCpus });
-	return { pidsLimit: expectedPidsLimit(), memoryBytes: memoryBytes(spec.memory), cpuShares: spec.cpuShares, cpuMax: spec.cpus === null ? "max 100000" : `${Number(spec.cpus) * 100000} 100000` };
+export function expectedBounds(size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null) {
+	const spec = containerSpec({ image: "i", name: "n", workspace: "/w", size, hostCpus, cpuBudgetCenti });
+	// ROUNDED (issue #596, gate round 3 of phase 1): under a CPU budget the ceiling may be fractional (`3.3`), and
+	// `3.3 * 100000` is 329999.99999999994 in floating point, while the runtime writes the integer quota 330000.
+	return { pidsLimit: expectedPidsLimit(), memoryBytes: memoryBytes(spec.memory), cpuShares: spec.cpuShares, cpuMax: spec.cpus === null ? "max 100000" : `${Math.round(Number(spec.cpus) * 100000)} 100000` };
 }
 
 /**

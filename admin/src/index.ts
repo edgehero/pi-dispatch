@@ -1042,9 +1042,12 @@ function registerTools(pi: ExtensionAPI): void {
       "(maxCostUsd). A project:<id> row may also set its jobs' SIZE: `memory` (a string such as \"512m\", \"1536m\" " +
       "or \"4g\", at least 512m; no swap is given beyond it) and `cpus` (a number such as 0.5 or 2, at least 0.25, at " +
       "most two decimals; a CPU WEIGHT under contention, not a cap). Unset, a job takes PI_JOB_MEMORY and PI_JOB_CPUS " +
-      "(4g and 2). `hostShare` (a whole percentage, 1 to 100, of a host's job budget) and `minJobs` (an integer >= 1, " +
-      "needs memory or cpus on the row, at most its concurrent) are checked and stored now but NOT ENFORCED yet: the " +
-      "host budget that enforces them is a later release. A row may carry a size and nothing else. The file stays " +
+      "(4g and 2). `hostShare` (a whole percentage, 1 to 100, of a host's job budget: the most the project's running " +
+      "jobs may hold together on one host) and `minJobs` (an integer >= 1, needs memory or cpus on the row, at most its " +
+      "concurrent: how many of its jobs a host keeps room for first) are enforced by each worker's host budget " +
+      "(PI_HOST_MEMORY_BUDGET, PI_HOST_CPU_BUDGET). A size larger than a host's budget, or than the project's hostShare " +
+      "of it, is refused before any spend (job-size-exceeds-host, -share, or -fleet when no host fits). A row may " +
+      "carry a size and nothing else. The file stays " +
       "version 1 unless a row needs version 2, or 3 for a size field (a worker older than this one then refuses the " +
       "file, so upgrade every worker first). The operator MUST approve a confirm dialog showing the entry; refused " +
       "with no interactive operator.",
@@ -2049,8 +2052,7 @@ function limitSummary(l: any): string {
   if (typeof l?.dayUsd === "string") bits.push(`day $${l.dayUsd}`);
   if (typeof l?.weekUsd === "string") bits.push(`week $${l.weekUsd}`);
   if (typeof l?.monthUsd === "string") bits.push(`month $${l.monthUsd}`);
-  // Version 3's size (issue #596). hostShare and minJobs are said as not enforced yet, so the summary never reads as a
-  // promise the worker does not keep.
+  // Version 3's size (issue #596), with hostShare and minJobs, which each worker's host budget enforces since phase 2.
   bits.push(...sizeBits(l));
   return bits.join(" · ");
 }

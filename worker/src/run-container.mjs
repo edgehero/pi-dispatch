@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
-import { cpuRangeRefusal, DEFAULT_JOB_SIZE, hostCpuCeiling } from "./job-size.mjs";
+import { cpuCeilingCenti, cpuRangeRefusal, DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
 import { createJobNetwork, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
@@ -83,11 +83,12 @@ export function makeRunContainer({
 	// `size` (issue #596) is the job's `{ memMiB, cpuCenti, source }`, resolved at pickup from the limits snapshot and
 	// handed here as an argument, never through `job.data`; absent, the built-in 4g and 2. `hostCpus` is the runtime's own
 	// CPU count from the job user's facts read, which sets the `--cpus` ceiling; null leaves `--cpus` off (fails open, and
-	// says so in `cpu_ceiling_unknown`).
+	// says so in `cpu_ceiling_unknown`). `cpuBudgetCenti` (phase 2) is the host's CPU budget at pickup, which replaces that
+	// ceiling while it is in force (`cpuCeilingCenti`).
 	// `unenforced` (issue #596) is the size flags this runtime said it drops (`unenforcedSizeFlags`: `--memory-swap` where
 	// Docker reports SwapLimit false, `--cpu-shares` where it reports CPUShares false), logged per job as
 	// `size_bound_unenforced` so a run past its size's bound is named where it happens. The flags stay on the argv.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, unenforced = [] }) {
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [] }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -189,6 +190,7 @@ export function makeRunContainer({
 			name,
 			size, // issue #596: memory, swap equal to it, the CPU weight and /dev/shm, through containerSpec's one function
 			hostCpus, // issue #596: the `--cpus` ceiling every job shares; null leaves the flag off
+			cpuBudgetCenti, // issue #596, phase 2: the host's CPU budget, the ceiling while it is in force
 			network, // REQ-EGRESS-ALLOWLIST: null when no policy is armed, and the flag is then absent
 			user, // issue #341: the worker's own "<uid>:<gid>" on a daemon that enforces bind-mount ownership, else null
 			cidFile, // issue #345: where the CLI writes this attempt's container ID, read below when the run exits "never started"
@@ -338,7 +340,7 @@ export function makeRunContainer({
 			// never-started one (refunded and retried as infrastructure), and the line names both counts.
 			const runtimeCpus = !result.aborted && (neverStartedExits ?? []).includes(result.code) && Number.isSafeInteger(hostCpus) ? cpuRangeRefusal(stderrHead) : null;
 			if (runtimeCpus !== null) {
-				log("cpu_ceiling_stale", { container: name, cpus: hostCpuCeiling(hostCpus), hostCpus, runtimeCpus });
+				log("cpu_ceiling_stale", { container: name, cpus: (cpuCeilingCenti(hostCpus, cpuBudgetCenti) ?? 0) / 100, hostCpus, runtimeCpus });
 				try {
 					onCpuCeilingStale();
 				} catch {

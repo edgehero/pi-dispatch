@@ -264,8 +264,15 @@ test("the builder REFUSES a hand-built spec whose size allows swap, or that has 
 		{ ...good, cpuShares: "1024" },
 		{ ...good, cpus: "0" },
 		{ ...good, cpus: 3 },
-		{ ...good, cpus: "1.5" },
+		{ ...good, cpus: "1.555" },
+		{ ...good, cpus: "0.00" },
+		{ ...good, cpus: "01" },
 		{ ...good, cpus: undefined },
+		// Issue #596, phase 2: the size labels are exactly the two, with integer values.
+		{ ...good, labels: { "pi.dispatch.mem": "2048" } },
+		{ ...good, labels: { "pi.dispatch.mem": "2048", "pi.dispatch.cpu": "1.5" } },
+		{ ...good, labels: { "pi.dispatch.mem": "2048", "pi.dispatch.cpu": "100", other: "1" } },
+		{ ...good, labels: null },
 		{ ...good, shmSize: "1G" },
 		{ ...good, shmSize: undefined },
 	];
@@ -535,6 +542,8 @@ test("the podman argv, literally: --userns=keep-id immediately after --user=, th
 		"--cpus=3",
 		"--cpu-shares=512",
 		"--shm-size=512m",
+		"--label=pi.dispatch.mem=1024",
+		"--label=pi.dispatch.cpu=50",
 		"--network=pi-job-1-net",
 		"--user=1234:1234",
 		"--userns=keep-id",
@@ -623,4 +632,18 @@ test("memoryBytes and memoryBytesOfArgs: the --memory bound in bytes, binary uni
 	assert.equal(containerSpec({ image: "i", name: "n", workspace: "/w" }).memory, "4g");
 	assert.equal(memoryBytesOfArgs(["run", "--cpus=2"]), null);
 	assert.equal(memoryBytesOfArgs(null), null);
+});
+
+test("issue #596, phase 2: every job container carries its size as two labels, a fractional CPU budget is a valid --cpus, and no extra flag can relabel", () => {
+	const spec = containerSpec({ image: "i", name: "pi-job-1", workspace: "/w", size: { memMiB: 1536, cpuCenti: 50 }, hostCpus: 8, cpuBudgetCenti: 350 });
+	assert.deepEqual(spec.labels, { "pi.dispatch.mem": "1536", "pi.dispatch.cpu": "50" });
+	const args = dockerArgsFromSpec(spec);
+	assert.deepEqual(args.filter((a) => a.startsWith("--label=") || a.startsWith("--cpus=")), ["--cpus=3.5", "--label=pi.dispatch.mem=1536", "--label=pi.dispatch.cpu=50"]);
+	assert.equal(args.indexOf("--label=pi.dispatch.mem=1536"), args.indexOf("--shm-size=768m") + 1, "right after the size flags, before the network");
+	// The podman argv is built by the same function, so it carries them too.
+	assert.ok(buildPodmanRunArgs({ image: "i", name: "pi-job-1", workspace: "/w", user: "1234:1234", size: { memMiB: 1536, cpuCenti: 50 } }).includes("--label=pi.dispatch.cpu=50"));
+	for (const flag of ["--label", "-l", "--label-file"]) {
+		assert.ok(DOCKER_EXTRA_FORBIDDEN.includes(flag), `${flag} must be denied`);
+		assert.throws(() => buildDockerRunArgs({ image: "i", name: "n", workspace: "/w", extraFlags: [flag, "pi.dispatch.mem=1"] }), /supersede the isolation boundary/, flag);
+	}
 });

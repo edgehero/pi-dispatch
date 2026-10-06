@@ -232,18 +232,23 @@ memory, light ones less.
   When jobs compete for CPU, a job with more `cpus` gets more CPU than one with fewer. The split is exactly in
   proportion only on older container runtimes (runc 1.1, crun 1.14: sizes 3:1 got about 3:1, measured); current
   ones compress it (runc 1.5, crun 1.27: sizes 3:1 got about 2.4:1). When the host is idle, any job may use the
-  idle cores. No single job may use more than the host's cores minus one (when it has four or more). That bound is
-  per job: several busy jobs together can still use every core. A reserve that holds across all jobs comes with the
-  host budget of a later release.
+  idle cores. No single job may use more than the host's CPU budget (by default the host's cores minus one, when it
+  has four or more; see [the host budget](multi-host.md#the-host-budget)). That bound is per job: several busy jobs
+  together can still use every core. A reserve that holds across all jobs is not built yet.
 - A row may set only a size, only one of the two, or a size beside its caps. A field the row does not set comes
   from `PI_JOB_MEMORY` and `PI_JOB_CPUS` in `.env`, which default to `4g` and `2`. A bad value there stops the
   worker at boot with the reason.
 - A size is only allowed on a `project:<id>` row. On a repo, folder or model row it refuses the file.
-- `hostShare` (a whole percentage from 1 to 100) and `minJobs` (an integer, at least 1) are **checked and stored
-  now, but nothing enforces them yet.** They are for the host budget of a later release: `hostShare` will be the
-  most of one host the project's running jobs may hold, and `minJobs` how many of its jobs a host makes room for
-  first. `minJobs` needs `memory` or `cpus` on the same row and may not be above its `concurrent`. The panel and
-  the tools show both with "not enforced yet".
+- `hostShare` (a whole percentage from 1 to 100) is the most of one host's [budget](multi-host.md#the-host-budget)
+  the project's running jobs may hold together, in memory and in CPU. A job that would take the project past it
+  waits, and holds no room while it does. A size larger than the share of a host's budget can never start there and
+  is refused before anything is spent (`job-size-exceeds-share`).
+- `minJobs` (an integer, at least 1) is how many of the project's jobs a host makes room for first. While the project
+  runs fewer than that on a host, its oldest waiting job holds room there that no newer job may take. It is a soft
+  minimum: it never stops a job that is already running. `minJobs` needs `memory` or `cpus` on the same row and may
+  not be above its `concurrent`.
+- Whether a host's budget can hold a project's `minJobs` times its size inside its `hostShare`, and every project's
+  minimum together, depends on that host, so the file accepts it and `pi-dispatch doctor` warns where it cannot.
 - A size needs `"version": 3`. The panel and the tools write it for you, and only when a row has a size. A
   version 3 row refuses a key it does not know (a misspelled `Memory` or `cpu`), so a typo cannot silently drop a
   size.

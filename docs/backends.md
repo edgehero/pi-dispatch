@@ -143,9 +143,14 @@ ones adapters get wrong:
   --live` reads what these cannot: `pids.max`, `memory.max`, `memory.swap.max`, `cpu.max` and `cpu.weight` inside
   a real container, and its `/proc/self/mountinfo`.
 - **Every venue on this host runs a job at its size** (issue #596): `--memory` with an equal `--memory-swap` (no
-  swap beyond it), `--cpu-shares` for its CPU weight, `--shm-size` at most half its memory, and one `--cpus` ceiling
-  on each job (the runtime's CPU count minus one core when it has four or more). The ceiling bounds a single job:
-  several busy jobs together can still use every core. Both builders emit the same flags. The size is the job's
+  swap beyond it), `--cpu-shares` for its CPU weight, `--shm-size` at most half its memory, one `--cpus` ceiling
+  on each job (the host's CPU budget, by default the runtime's CPU count minus one core when it has four or more),
+  and two labels with its size (`pi.dispatch.mem`, `pi.dispatch.cpu`) that doctor holds the
+  [host budget](multi-host.md#the-host-budget) against. The ceiling bounds a single job: several busy jobs together
+  can still use every core. Both builders emit the same flags. A venue's `info` gives the budget's `auto` its memory
+  and CPU count; a venue that gives neither leaves the budget unknown, and the worker then holds no job back on it
+  and says so (`host_budget_unknown`). A container whose stop fails keeps its room in the budget until the venue's own
+  `ps -a` no longer lists it, so a venue's container names must stay exact. The size is the job's
   project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` ([job sizes](scoped-limits.md#job-sizes-version-3)). Where
   Docker reports `SwapLimit` or `CPUShares` false, it drops that flag: doctor warns, and the worker logs
   `size_bound_unenforced` for each job. Where the runtime gives no CPU count, jobs run with no `--cpus` and doctor

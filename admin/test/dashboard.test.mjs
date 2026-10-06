@@ -2276,7 +2276,7 @@ test("scoped limit rows: used/cap per capped window, '-' on a failed cell, confi
   assert.match(out, /● \/srv\/site\s+day 3\/3/, "at cap: the row's dot goes amber (● not ○)");
 });
 
-test("a project row's job size shows beside its caps, hostShare and minJobs marked not enforced yet (#596)", async () => {
+test("a project row's job size shows beside its caps, with its hostShare and minJobs (#596)", async () => {
   const snap = {
     ...SNAPSHOT,
     scopedLimits: { limits: [{ scope: "project:shop", day: null, week: null, month: null, concurrent: 2, memory: "8g", cpus: 4, hostShare: 50, minJobs: 1 }] },
@@ -2286,7 +2286,8 @@ test("a project row's job size shows beside its caps, hostShare and minJobs mark
   await flush();
   const out = comp.render(200).join("\n");
   await comp.dispose();
-  assert.match(out, /project:shop\s+≤2 at once\s+memory 8g\s+4 CPUs\s+hostShare 50% \(not enforced yet\)\s+minJobs 1 \(not enforced yet\)/);
+  assert.match(out, /project:shop\s+≤2 at once\s+memory 8g\s+4 CPUs\s+hostShare 50%\s+minJobs 1/);
+  assert.doesNotMatch(out, /not enforced/, "enforced since phase 2 of #596");
 });
 
 test("scoped limit section degrades on missing/invalid and never shows an in-flight count", async () => {

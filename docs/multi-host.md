@@ -173,6 +173,51 @@ If you were relying on that accidental multiplication, raise the knob deliberate
 arithmetic in [`docs/wait-for.md`](wait-for.md) is now what it says: about one check every ten seconds
 for the whole deployment, not per host.
 
+## The host budget
+
+`PI_CONCURRENCY` counts jobs, and a count cannot tell a 20g job from a 2g one. So each worker also keeps a
+**budget** of memory and CPU for its jobs, and starts a job only when its size (its project's `memory` and `cpus`,
+see [job sizes](scoped-limits.md#job-sizes-version-3)) fits beside the sizes of the jobs already running on that
+machine, in both memory and CPU. `PI_CONCURRENCY` still caps the number of jobs; whichever is reached first applies,
+and `pi-dispatch doctor` says which. A job that does not fit yet waits and starts once room frees.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `PI_HOST_MEMORY_BUDGET` | `auto` | The memory this machine's jobs may hold together: `auto`, an amount (`64g`, `49152m`), or `off`. |
+| `PI_HOST_CPU_BUDGET` | `auto` | The CPUs they may hold together: `auto`, a number (`12`, `3.5`), or `off`. |
+| `PI_HOST_RESERVE_MEMORY` | `auto` | What `auto` leaves for the machine itself: 10% of its memory, at least 1g and at most 4g. |
+| `PI_HOST_RESERVE_CPUS` | `auto` | The same for CPUs: 1 when the machine has 4 or more, else 0. |
+
+`auto` reads the container runtime's own numbers (`docker info`, `podman info`; on Docker Desktop that is the VM's),
+the smaller of the two when a worker runs both venues, and on rootless Podman also the limits set on the account's
+systemd user service (`memory.max`, `cpu.max`). It takes the reserve off, and never goes below one job of the default
+size (`PI_JOB_MEMORY`, `PI_JOB_CPUS`). An amount is the budget itself: the reserve is not taken from it. A value
+below one default job, or one that does not parse, stops the worker at boot with the reason. The four settings are
+read from `.env` only, not from the panel's settings.
+
+**On a small machine the budget may run fewer jobs than before.** A 4 CPU machine has a CPU budget of 3, which holds
+one job of the default 2 CPUs at a time. Lower `PI_JOB_CPUS` or a project's `cpus`, or set `PI_HOST_CPU_BUDGET`, if
+you want more at once.
+
+**A big job is not starved by small ones.** Room is kept for the oldest waiting job of each project that runs fewer
+than its `minJobs` here, and then for the oldest waiting job of all, so a stream of small jobs cannot take every
+core the moment it frees. A waiting job that something else is holding back (a full scope, a busy model server, a
+pause window) keeps its place in line but keeps no room. A job that stops coming back (finished elsewhere, removed)
+loses its place after a check of the queue.
+
+**A size that can never fit is refused before anything is spent.** A job larger than this machine's budget is refused
+`job-size-exceeds-host`; one larger than its project's `hostShare` of the budget, `job-size-exceeds-share`. A forge
+job waits instead, for a machine it fits on, and is refused `job-size-exceeds-fleet` only when two looks at the host
+registry, at least 30 seconds apart, both show that no running worker's budget can hold it. The worker log and the run
+record name the job's size and the budget; the forge comment names neither.
+
+**A container that would not stop keeps its room** until the runtime says it is gone, so a job past its time limit
+whose stop failed cannot make room for another while it may still be running. The next start of the worker removes it.
+
+Every job container carries its size as two labels, `pi.dispatch.mem` (MiB) and `pi.dispatch.cpu` (hundredths of a
+CPU), and every job's `--cpus` is the CPU budget, so no single job can use the reserve. Several busy jobs together can
+still use every core: a reserve that holds across all jobs is not built yet.
+
 ## The traps
 
 ### 1. A cron pattern carries no timezone
@@ -262,6 +307,12 @@ a host with only a per-job cap leaves none.
 It never refuses a job over it. Set the same values on every host. An `.env` change needs a restart; an
 overlay or scoped-limits edit shows within fifteen seconds.
 
+**Each host's budget is its own.** Doctor shows this machine's [host budget](#the-host-budget), which of it and
+`PI_CONCURRENCY` binds first, and warns about a project size it can never hold and about `minJobs` it cannot keep.
+On a fleet it lists every host's budget, what its jobs hold and the largest project size that fits it, and for each
+sized project the hosts it fits on, warning when it fits on none. It also checks this host's own count against the
+size labels of the job containers that are running and warns when they differ.
+
 What it does **not** check yet: whether two hosts are sharing a directory they should not be. That one is
 on you.
 
@@ -284,6 +335,7 @@ produce different digests legitimately. It means "check", not "broken".
 |---|---|---|
 | `PI_WORKER_NAME` | this machine's hostname, sanitized | Names this host. Declaring it turns on routing. |
 | `PI_CONCURRENCY` | 3 | Containers at once **on this machine**, across every queue it drains. |
+| `PI_HOST_MEMORY_BUDGET`, `PI_HOST_CPU_BUDGET` | `auto` | The memory and CPU this machine's jobs may hold together ([the host budget](#the-host-budget)). |
 | `PI_WAIT_CHECK_SLOTS` | 1 | Wait checks at once, fleet-wide when a name is declared. |
 
 | Key | What it holds |
@@ -292,13 +344,15 @@ produce different digests legitimately. It means "check", not "broken".
 | `host:h:<name>` | one host's own description, refreshed every 15s, expiring after 90s |
 | `host:h:<name>` field `caps` | the secret and wait profile NAMES this host declares, comma separated |
 | `host:h:<name>` field `fpUsd` | a fingerprint of this host's dollar caps, scoped-limits dollar rows and `PI_ALLOWED_MODELS` model rows |
+| `host:h:<name>` fields `budgetMemMiB`, `budgetCpuCenti`, `usedMemMiB`, `usedCpuCenti`, `heldMemMiB`, `heldCpuCenti` | this host's budget, what its running jobs hold, and what it keeps for waiting jobs (MiB, hundredths of a CPU) |
 | `wait:check:<i>` | the fleet-wide wait-check slots |
 | `slot:s:<hash>:<i>` | the fleet-wide slots for a limited forge scope |
 | `runs:index` | the merged run history's index, newest first |
 | `runs:rec:<jobId>` | one run's record, a copy of the sidecar on its host's disk |
 
 Deleting the whole `host:*` keyspace while the fleet is running is safe: every host falls back to
-behaving as a single host, which is the behaviour before any of this existed. The same is true of
+behaving as a single host, which is the behaviour before any of this existed. The one decision that reads it, a
+forge job refused as too big for every host, can only be delayed by that, never caused. The same is true of
 `runs:*`: you lose the merged view until the next runs repopulate it, and never a record, because the
 record is the file on disk.
 

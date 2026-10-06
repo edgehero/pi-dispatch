@@ -93,6 +93,13 @@ export function assertJobUser(user) {
  */
 export const USERNS_MODES = Object.freeze(["keep-id"]);
 
+/**
+ * The two labels every job container carries (issue #596, phase 2): its memory size in MiB and its CPU size in
+ * hundredths, so `doctor` can sum what runs on this host and hold it against the host budget's ledger.
+ */
+export const SIZE_LABEL_MEM = "pi.dispatch.mem";
+export const SIZE_LABEL_CPU = "pi.dispatch.cpu";
+
 /** Throws unless `userns` is null/undefined or a member of `USERNS_MODES` (issue #354). */
 export function assertUserns(userns) {
 	if (userns === null || userns === undefined) return;
@@ -131,6 +138,9 @@ export function assertUserns(userns) {
  *                   through ONE function, `containerSizing`, so no caller can pair a memory with another swap bound.
  * @param hostCpus   the runtime's own CPU count (`docker info` `NCPU`, `podman info` `host.cpus`), or null. It sets
  *                   `cpus`, the host ceiling every job shares (`hostCpuCeiling`), never the job's own size.
+ * @param cpuBudgetCenti the host's CPU budget in hundredths (`host-budget.mjs`), or null when it is off or unknown. With
+ *                   one, `cpus` is the budget capped at the runtime's count (`cpuCeilingCenti`), so no job can use the
+ *                   CPUs `auto` reserved for the host; without, the phase 1 ceiling stands.
  * @param network    the per-job egress network this container joins (REQ-EGRESS-ALLOWLIST); null = the
  *                   docker default bridge, which is what every job did before that requirement existed
  * @param user       "<uid>:<gid>" the job runs as (issue #341), or null for the image's own USER. Portable: it says WHO
@@ -157,6 +167,7 @@ export function containerSpec({
 	name,
 	size = DEFAULT_JOB_SIZE,
 	hostCpus = null,
+	cpuBudgetCenti = null,
 	network = null,
 	user = null,
 	userns = null,
@@ -172,7 +183,7 @@ export function containerSpec({
 	if (!name) throw new Error("docker run: container name is required");
 	if (!workspace) throw new Error("docker run: workspace mount is required");
 	// Throws on a size outside the floors and ceilings, before any field is built (issue #596).
-	const sizing = containerSizing(size, hostCpus);
+	const sizing = containerSizing(size, hostCpus, cpuBudgetCenti);
 	// Booleans, strictly: a truthy string from a caller that forwarded an option bag must not re-own host directories.
 	if (typeof relabel !== "boolean") throw new Error(`docker run: relabel must be a boolean; got ${typeof relabel}`);
 	if (typeof workspaceOwned !== "boolean") throw new Error(`docker run: workspaceOwned must be a boolean; got ${typeof workspaceOwned}`);
@@ -223,6 +234,10 @@ export function containerSpec({
 		cpus: sizing.cpus,
 		cpuShares: sizing.cpuShares,
 		shmSize: sizing.shmSize,
+		// Issue #596, phase 2: the size the job was started at, as two labels on the container, so doctor can hold the host
+		// budget's ledger against what actually runs (`pi.dispatch.mem` in MiB, `pi.dispatch.cpu` in hundredths). Integers
+		// from the validated size, never anything a job or an operator writes as text.
+		labels: { [SIZE_LABEL_MEM]: String(size.memMiB), [SIZE_LABEL_CPU]: String(size.cpuCenti) },
 		network,
 		user,
 		// Issue #354. Always present and `null` by default (the parameter default turns an `undefined` into it, so a spec

@@ -21,7 +21,7 @@
 // row, and this move is recorded in its own row rather than by leaving that pointer to rot.
 export { containerSpec, CONTAINER_GLOBAL_PI_DIR, CONTAINER_SESSION_DIR, CONTAINER_SESSION_FILE } from "./container-spec.mjs";
 import { isAbsolute, relative } from "node:path";
-import { assertCidFile, assertJobUser, containerSpec } from "./container-spec.mjs";
+import { SIZE_LABEL_CPU, SIZE_LABEL_MEM, assertCidFile, assertJobUser, containerSpec } from "./container-spec.mjs";
 import { CPU_SHARES_MAX, CPU_SHARES_MIN } from "./job-size.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
@@ -129,6 +129,11 @@ export const DOCKER_EXTRA_FORBIDDEN = [
 	"--device-read-iops",
 	"--device-write-iops",
 	"--oom-score-adj",
+	// Issue #596, phase 2: the size labels doctor holds the host budget against; a second `--label` would win last and
+	// make a container read as another size.
+	"--label",
+	"-l",
+	"--label-file",
 	"--network",
 	"--net",
 	"--pull",
@@ -276,6 +281,13 @@ function argsFromSpec(spec, { userns }) {
 	const args = ["run", `--name=${spec.name}`, ...ISOLATION_FLAGS, `--memory=${spec.memory}`, `--memory-swap=${spec.memorySwap}`];
 	if (spec.cpus !== null) args.push(`--cpus=${spec.cpus}`);
 	args.push(`--cpu-shares=${spec.cpuShares}`, `--shm-size=${spec.shmSize}`);
+	// THE SEAM FOR THE AGGREGATE CPU RESERVE (issue #596, phase 2, P1G1-L1). `--cpus` above bounds ONE job; what keeps
+	// the host's reserve free across ALL of them is a parent cgroup with its own quota that every job container is
+	// started under (`--cgroup-parent=<slice>` here on Docker, the rootless Podman equivalent on the podman venue), with
+	// the job weights scaled so the egress proxy and Valkey are not starved. It is measured per venue before it is
+	// built, so nothing is emitted here yet; `--cgroup-parent` is refused in `dockerExtra` so nothing else can put one.
+	// Issue #596, phase 2: the size labels (`SIZE_LABEL_MEM`, `SIZE_LABEL_CPU`), integers from the validated size.
+	for (const [key, value] of Object.entries(spec.labels ?? {})) args.push(`--label=${key}=${value}`);
 	if (spec.network) args.push(`--network=${spec.network}`);
 	else if (userns) args.push("--network=private");
 	// null => ABSENT, so a job the image's own USER runs has an argv byte-identical to one built before issue #341.
@@ -316,15 +328,24 @@ function argsFromSpec(spec, { userns }) {
 /**
  * The size fields of a spec, re-checked for a hand-built one (issue #596): `memory` and `shmSize` in the spelling
  * `formatMemory` writes, `memorySwap` EQUAL to `memory` (a spec that allows swap is refused, never repaired), `cpus` a
- * positive whole number of CPUs or null, `cpuShares` an integer in the runtime's range. A spec from before these fields
- * is refused rather than given `--memory-swap=undefined`.
+ * positive number of CPUs with at most two decimals (a CPU budget may be fractional, issue #596 phase 2) or null,
+ * `cpuShares` an integer in the runtime's range, and `labels` absent or exactly the two size labels with integer values.
+ * A spec from before these fields is refused rather than given `--memory-swap=undefined`.
  */
+function labelsOk(labels) {
+	if (labels === undefined) return true;
+	if (labels === null || typeof labels !== "object") return false;
+	const keys = Object.keys(labels);
+	return keys.length === 2 && keys.includes(SIZE_LABEL_MEM) && keys.includes(SIZE_LABEL_CPU) && keys.every((k) => typeof labels[k] === "string" && /^[1-9]\d{0,8}$/.test(labels[k]));
+}
+
 function assertSizing(spec) {
 	const memoryish = (v) => typeof v === "string" && /^[1-9]\d{0,6}[mg]$/.test(v);
 	const ok = memoryish(spec.memory)
 		&& spec.memorySwap === spec.memory
 		&& memoryish(spec.shmSize)
-		&& (spec.cpus === null || (typeof spec.cpus === "string" && /^[1-9]\d{0,5}$/.test(spec.cpus)))
+		&& (spec.cpus === null || (typeof spec.cpus === "string" && /^(?:0|[1-9]\d{0,5})(?:\.\d{1,2})?$/.test(spec.cpus) && Number(spec.cpus) > 0))
+		&& labelsOk(spec.labels)
 		&& Number.isSafeInteger(spec.cpuShares) && spec.cpuShares >= CPU_SHARES_MIN && spec.cpuShares <= CPU_SHARES_MAX;
 	if (!ok) throw new Error(`docker run: refusing a spec whose size fields are not containerSpec's (memory, memorySwap equal to it, cpus, cpuShares, shmSize): ${JSON.stringify({ memory: spec.memory ?? null, memorySwap: spec.memorySwap ?? null, cpus: spec.cpus ?? null, cpuShares: spec.cpuShares ?? null, shmSize: spec.shmSize ?? null })}`);
 }

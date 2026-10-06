@@ -6,7 +6,7 @@
  * scope string (`project:<id>`) rather than through `scoped-limits.mjs`; a test holds the two spellings equal.
  *
  * A size is held as TWO INTEGERS, never as the strings an operator writes: `memMiB` (mebibytes) and `cpuCenti`
- * (hundredths of a CPU). Integers so a size compares, sums and records exactly (the host budget of phase 2 adds them
+ * (hundredths of a CPU). Integers so a size compares, sums and records exactly (the host budget, `host-budget.mjs`, adds them
  * up), and so the one spelling the runtime is handed is derived from them (`formatMemory`), never passed through.
  *
  * WHAT A SIZE BECOMES (`containerSizing`, read by `containerSpec`):
@@ -21,11 +21,12 @@
  *     mapping compresses the weights. The order holds on both, which is what a share promises here.
  *   - `--shm-size=min(1g, memory/2)`: Chromium needs a large `/dev/shm` (the reason `1g` was there), and `/dev/shm`
  *     is charged to the container's memory, so it may not be most of a small size.
- *   - `--cpus=<host ceiling>`: the host's CPU count minus a reserve (`hostCpuCeiling`), the same for every job. It
+ *   - `--cpus=<host ceiling>`: the host's CPU budget, else its CPU count minus a reserve (`cpuCeilingCenti`), the same for every job. It
  *     bounds ONE job: no single job can use more than the ceiling. It does not keep a core free across jobs, because
  *     each container's quota is its own and they do not sum (measured: two busy jobs on a 4-core cpuset with
- *     `--cpus=3` used 4.06 cores between them). A reserve that holds across every job is a parent cgroup's quota, the
- *     phase 2 host budget's work. It is not the job's size either, which would be the hard cap decision 2 rejected.
+ *     `--cpus=3` used 4.06 cores between them). A reserve that holds across every job is a parent cgroup's quota,
+ *     measured per venue before it is built. It is not the job's size either, which would be the hard cap decision 2
+ *     rejected; the host budget bounds the jobs' SIZES together, not their use.
  *     Absent when the runtime did not say how many CPUs it has (see `hostCpuCeiling`).
  *
  * THE cpu.weight A SHARE BECOMES DEPENDS ON THE OCI RUNTIME'S VERSION (measured, issue #596): runc 1.1.13 and crun
@@ -36,10 +37,10 @@
  * default job's 79 is below their 100. That is the right direction (the proxy serves every job), and no such container
  * competes with jobs for long, so the flag is passed as is rather than scaled per runtime version.
  *
- * THE OTHER DIRECTION IS OPEN, and it is a known phase 2 item: a large size outweighs everything without a share. At
+ * THE OTHER DIRECTION IS OPEN, and it is a known item of the host budget's aggregate reserve: a large size outweighs everything without a share. At
  * `cpus` 256 the share is 262144, which a current runtime maps to `cpu.weight` 10000 against the 100 of the egress
  * proxy, Valkey and the host's own services, so under contention such jobs can starve them. A weight scale that keeps
- * those served belongs with the parent cgroup reserve, in the host budget.
+ * those served belongs with the parent cgroup reserve, which is not built yet.
  */
 
 /** The smallest memory a job may be given: 512 MiB. The runner, pi and a shell need about 200 MB before any tool runs. */
@@ -131,12 +132,12 @@ export function shmMiBOf(memMiB) {
 /**
  * The CPUs any ONE job may use at most, `--cpus`: the host's count minus the reserve (one CPU when the host has four
  * or more, else none), or null when the count is unknown. Per container: several busy jobs together can still use
- * every core, the reserved one included, until the phase 2 host budget puts them under one parent quota.
+ * every core, the reserved one included, until a parent cgroup puts them under one quota.
  *
  * `hostCpus` is the RUNTIME's own count (`docker info`'s `NCPU`, `podman info`'s `host.cpus`), never the worker's
  * `os.availableParallelism()`: on Docker Desktop the daemon runs in a VM with its own count, and Docker refuses a
- * `--cpus` above the CPUs it has. The phase 2 host budget refines this (an operator's reserve, a rootless service's
- * own `cpu.max`); until then the reserve is the default the issue decided.
+ * `--cpus` above the CPUs it has. Under a CPU budget the ceiling is the budget instead (`cpuCeilingCenti`), which
+ * carries an operator's reserve and a rootless service's own `cpu.max`; this is the ceiling without one.
  *
  * NULL FAILS OPEN, and says so: the argv then carries no `--cpus`, so a job may use every core, reserve included, as a
  * container with no bound does. The shares still apply. The worker logs `cpu_ceiling_unknown` when it happens; it
@@ -145,6 +146,20 @@ export function shmMiBOf(memMiB) {
 export function hostCpuCeiling(hostCpus) {
 	if (!Number.isSafeInteger(hostCpus) || hostCpus < 1) return null;
 	return hostCpus - (hostCpus >= 4 ? 1 : 0);
+}
+
+/**
+ * The `--cpus` every job gets, in hundredths (issue #596, phase 2): the host's CPU BUDGET when one is in force (an
+ * integer `cpuBudgetCenti`, `host-budget.mjs`), capped at the runtime's own count where that is known (Docker refuses a
+ * `--cpus` above it), else the phase 1 ceiling (`hostCpuCeiling`: the count minus the default reserve), else null. With
+ * the budget off or unknown the phase 1 ceiling stands, so a deployment that sets nothing gets the same flag as before
+ * whenever `auto` reads the same count. It bounds ONE job; the budget's ledger is what bounds them together.
+ */
+export function cpuCeilingCenti(hostCpus, cpuBudgetCenti = null) {
+	const runtime = Number.isSafeInteger(hostCpus) && hostCpus >= 1 ? hostCpus * 100 : null;
+	if (Number.isSafeInteger(cpuBudgetCenti) && cpuBudgetCenti > 0) return runtime === null ? cpuBudgetCenti : Math.min(cpuBudgetCenti, runtime);
+	const ceiling = hostCpuCeiling(hostCpus);
+	return ceiling === null ? null : ceiling * 100;
 }
 
 /**
@@ -177,13 +192,14 @@ export function unenforcedSizeFlags(facts) {
 
 /**
  * What a size becomes on a container's argv, as `containerSpec` fields: `{ memory, memorySwap, cpus, cpuShares,
- * shmSize }`. `memory` and `memorySwap` are the SAME string by construction; `cpus` is the host ceiling or null.
+ * shmSize }`. `memory` and `memorySwap` are the SAME string by construction; `cpus` is the host ceiling
+ * (`cpuCeilingCenti`, which may be fractional, `3.5`, under a CPU budget) or null.
  */
-export function containerSizing(size, hostCpus = null) {
+export function containerSizing(size, hostCpus = null, cpuBudgetCenti = null) {
 	assertJobSize(size);
 	const memory = formatMemory(size.memMiB);
-	const ceiling = hostCpuCeiling(hostCpus);
-	return { memory, memorySwap: memory, cpus: ceiling === null ? null : String(ceiling), cpuShares: cpuSharesOf(size.cpuCenti), shmSize: formatMemory(shmMiBOf(size.memMiB)) };
+	const ceiling = cpuCeilingCenti(hostCpus, cpuBudgetCenti);
+	return { memory, memorySwap: memory, cpus: ceiling === null ? null : formatCpus(ceiling), cpuShares: cpuSharesOf(size.cpuCenti), shmSize: formatMemory(shmMiBOf(size.memMiB)) };
 }
 
 /** Throws unless `size` is `{ memMiB, cpuCenti }` within the floors and ceilings above. */

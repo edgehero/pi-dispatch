@@ -17,6 +17,7 @@ import { dollarWindowCaps } from "./dollar-budget.mjs";
 import { concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, projectDollarCapsFor, projectRowFor, rowScopeFor, scopedLedgers } from "./scoped-limits.mjs";
 import { memberScopeOf, projectOf } from "./projects.mjs";
 import { resolveJobSize } from "./job-size.mjs";
+import { BUDGET_RECHECK_MS, FLEET_NO_FIT_CONFIRM_MS, HOST_BUDGET_TICK_MS, NEVER_FITS_RECHECK_MS, fleetFit, makeHostBudget } from "./host-budget.mjs";
 import { governedDollars } from "./allocation.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -91,7 +92,7 @@ const ABORT_GRACE_MS = 30_000;
  * container produces, so nothing downstream needs to know the difference -- the processor's abort
  * classification, the run record and the refund all behave exactly as they do for a stop that worked.
  */
-function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS) {
+function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS, onStopDidNotTake = () => {}) {
 	if (!signal) return run;
 	return new Promise((resolve, reject) => {
 		let timer = null;
@@ -107,6 +108,8 @@ function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS) {
 				if (settled) return;
 				settled = true;
 				log("stop_did_not_take", { job: job.id, graceMs });
+				// Issue #596, phase 2: the container may still run, so its host budget hold must outlive this job.
+				onStopDidNotTake();
 				resolve({ code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null });
 			}, graceMs);
 			// A boot-blocking handle is not wanted here: the worker should be able to exit if everything else
@@ -187,7 +190,7 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, fleetHosts = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -200,7 +203,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		if (rejectedSeen.size > REJECTED_SEEN_MAX) rejectedSeen.delete(rejectedSeen.values().next().value);
 		return true;
 	};
-	return async function processor(job, token, signal) {
+	// THE HOST BUDGET'S WAITER BOOKKEEPING (issue #596, phase 2), in ONE place around the whole pickup rather than at each
+	// exit: a job the budget deferred keeps its waiter (and so its hold); a job another gate deferred (a pause window, a
+	// wait, a full scope, a busy endpoint) keeps its waiter SUSPENDED, so it holds no room it could not use; a job that
+	// ended any other way (it ran, it was refused, it failed) is no waiter at all. Listing this per exit is how one of
+	// the many deferral sites would come to leave a live hold behind.
+	const pickup = async (job, token, signal, budgetState) => {
 		// THE LOST-LOCK GATE, first because it is free and because it can only ever stop a run (CONST-RETRY-INFRA-ONLY).
 		// BullMQ hands a job to the processor again after its stall check took it back. That happens to a job whose
 		// processor FINISHED when Valkey was unreachable for longer than the lock renewal window: the record was
@@ -584,6 +592,54 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// Before the scope acquire, so a job that cannot run on this machine at all never takes a folder
 		// mutex it would immediately have to give back, and so the two releases nest rather than interleave.
 		let hostHeld = false;
+		// THE ONE RELEASE (issue #596, phase 2). Every hold this pickup takes (the host slot, the repo or folder slot and
+		// the project slot with their fleet claims, the endpoint slots, and the host budget's hold) is given back here and
+		// nowhere else, at every exit: each gate's deferral, the setup guard and the finally. A release site that lists
+		// holds by hand is the one that forgets the hold added after it was written, and a bolt test refuses a bare
+		// release anywhere else in this function. Last taken, first given back: the endpoint holds (issue #503), then the
+		// scope holds (project, then repo), then the host slot, then the budget.
+		//
+		// `orphan` is the finally's: when the container's stop did not take (`stop_did_not_take`), the container may still
+		// run, so the budget hold becomes an ORPHAN that keeps its room until the runtime says the container is gone
+		// (`host-budget.mjs` `sweep`; the boot reaper is the backstop). Every count slot still goes back, as before: they
+		// bound starts, and the 30-minute bound already ended this job.
+		//
+		// The in-process halves go back synchronously, before the first await, so a caller that cannot await (the setup
+		// guard) still frees every local slot before it rethrows; the fleet halves are release-if-mine and awaited where
+		// the caller can. Draining, so a second call releases nothing: the in-process map's release is not idempotent.
+		let budgetHeld = false;
+		let stopDidNotTake = false;
+		let name;
+		let venue;
+		// THE SCOPE HOLDS, in acquire order (issue #499 part B): the repo or folder slot, then the project slot. Each is
+		// `{ key, fleet }`: the in-process slot under `key` (the row scope) and its fleet claim, or null.
+		const scopeHolds = [];
+		const releaseScopeHolds = () => {
+			const taken = scopeHolds.splice(0).reverse();
+			for (const hold of taken) inFlight.release(hold.key);
+			return Promise.all(taken.map((hold) => hold.fleet?.release?.()));
+		};
+		// THE ENDPOINT HOLDS (issue #503), `{ id, fleet }` each, in id order.
+		const endpointHolds = [];
+		const releaseEndpointHolds = () => {
+			const taken = endpointHolds.splice(0).reverse();
+			for (const hold of taken) endpointSlots.release(hold.id);
+			return Promise.all(taken.map((hold) => hold.fleet?.release?.()));
+		};
+		const releaseAllHolds = ({ orphan = false } = {}) => {
+			const endpointsReleased = releaseEndpointHolds();
+			const scopesReleased = releaseScopeHolds();
+			if (hostHeld) {
+				hostBound.slots.release(HOST_SLOT_KEY);
+				hostHeld = false;
+			}
+			if (budgetHeld) {
+				budgetHeld = false;
+				if (orphan) hostBudget.orphan(job.id, { name, venue });
+				else hostBudget.release(job.id);
+			}
+			return Promise.all([endpointsReleased, scopesReleased]);
+		};
 		if (hostBound) {
 			if (!hostBound.slots.tryAcquire(HOST_SLOT_KEY, hostBound.limit())) {
 				deps?.log?.("host_busy_deferred", { jobId: job.id, delayMs: SCOPE_BUSY_RECHECK_MS });
@@ -612,33 +668,74 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// record below carries it beside the project.
 		const size = resolveJobSize({ project, limits, env: jobSizeEnv });
 		const recordAfterGate = (args) => recordRun({ ...args, project, size });
+
+		// THE NEVER-FITS CHECK (issue #596, phase 2, DES-HOST-BUDGET). A size larger than this host's budget, or than its
+		// project's `hostShare` of it, can never start here however long it waits, so it is a determinate policy refusal,
+		// RETURNED before anything is spent (CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY), right after the size is
+		// resolved: `job-size-exceeds-host` or `job-size-exceeds-share`. The log line and the record name both sizes; the
+		// forge comment names neither (an issue author can act on neither).
+		//
+		// A FORGE job on the SHARED queue may fit another host, so it is deferred for `NEVER_FITS_RECHECK_MS` instead, and
+		// refused (`job-size-exceeds-fleet`, or this host's own reason when the registry lists this host alone) only after
+		// TWO successful registry reads at least `FLEET_NO_FIT_CONFIRM_MS` apart that show no live host whose published
+		// budget fits it. A read that fails, a host row without a budget, or no row for this host is "unknown", which only
+		// defers: the registry can delay a refusal, never invent one. A local job, and any job on this host's own queue,
+		// can run nowhere else and is refused at once.
+		if (hostBudget) {
+			await hostBudget.ready;
+			const misfit = hostBudget.neverFits(size, project, limits);
+			if (misfit !== null) {
+				const budgetNow = hostBudget.current();
+				const share = hostBudget.shareOf(project, limits);
+				const sizeFields = { memMiB: size.memMiB, cpuCenti: size.cpuCenti, budgetMemMiB: budgetNow.memMiB, budgetCpuCenti: budgetNow.cpuCenti, hostShare: share };
+				const refuseSize = async (reason) => {
+					await releaseAllHolds();
+					deps?.log?.(reason.replaceAll("-", "_"), { jobId: job.id, project, ...sizeFields });
+					if (deps?.comment) await Promise.resolve(deps.comment(job.data, SIZE_REFUSAL_COMMENTS[reason])).catch(() => {});
+					const at = new Date(now()).toISOString();
+					const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false, hostBudget: { memMiB: budgetNow.memMiB, cpuCenti: budgetNow.cpuCenti, hostShare: share } };
+					recordAfterGate({ job, result, startedAt: at, endedAt: new Date().toISOString() });
+					return result;
+				};
+				const shared = job.data?.kind !== "local" && (job.queueName ?? QUEUE) === QUEUE;
+				if (!shared || typeof fleetHosts !== "function") return await refuseSize(`job-size-exceeds-${misfit}`);
+				let read;
+				try {
+					read = await fleetHosts();
+				} catch {
+					read = { unreachable: "registry read threw" };
+				}
+				const verdict = read?.unreachable ? "unknown" : fleetFit(size, share, read?.hosts ?? [], hostName);
+				const seenAt = Number.isFinite(job.data?.sizeNoFitAtMs) ? job.data.sizeNoFitAtMs : null;
+				if (verdict === "none" && seenAt !== null && nowMs - seenAt >= FLEET_NO_FIT_CONFIRM_MS) {
+					const alone = (read.hosts ?? []).every((h) => h?.name === hostName);
+					return await refuseSize(alone ? `job-size-exceeds-${misfit}` : "job-size-exceeds-fleet");
+				}
+				// The first "none" is remembered ON THE JOB (a deferral keeps its data, and the next pickup may be another
+				// host's); an answer that a host may fit forgets it, so two "none" reads must stand together with nothing
+				// between them saying otherwise. A read that failed says nothing either way and leaves it. A failed write only
+				// delays the refusal.
+				const mark = verdict === "none" ? (seenAt ?? nowMs) : read?.unreachable ? seenAt : null;
+				if (mark !== seenAt) {
+					const { sizeNoFitAtMs: _was, ...rest } = job.data ?? {};
+					await Promise.resolve(job.updateData?.(mark === null ? rest : { ...rest, sizeNoFitAtMs: mark })).catch(() => {});
+				}
+				await releaseAllHolds();
+				deps?.log?.("job_size_never_fits_here_deferred", { jobId: job.id, project, fleet: verdict, delayMs: NEVER_FITS_RECHECK_MS, ...sizeFields });
+				await job.moveToDelayed(nowMs + NEVER_FITS_RECHECK_MS, token);
+				throw new DelayedError();
+			}
+		}
 		// The MATCHED ROW's scope keys both the in-process slot and the fleet lease (issue #498), the same string
 		// `budgetCapsFor` hashes below and the boot sweeper hashes from the file: a qualified `github:acme/web` row holds
 		// GitHub jobs only, a bare `acme/web` row holds every forge's under the key it always had. With no row it is the
 		// job's canonical scope, so the folder mutex is keyed exactly as before.
 		const scope = rowScopeFor(job.data, limits);
-		// THE SCOPE HOLDS, in acquire order (issue #499 part B): the repo or folder slot, then the project slot. Each is
-		// `{ key, fleet }`: the in-process slot under `key` (the row scope) and its fleet claim, or null. ONE drain gives
-		// every hold back, last first, at every exit (a deferral, the setup guard, the finally), the endpoint holds' shape:
-		// a release site that lists slots by hand is the one that forgets the slot added after it was written.
-		const scopeHolds = [];
-		// Drains the holds, so a second call releases nothing: the in-process map's release is not idempotent. The
-		// in-process half goes back synchronously, so a caller that cannot await (the setup guard) still frees every local
-		// slot before it rethrows; the fleet half is release-if-mine and awaited where it can be.
-		const releaseScopeHolds = () => {
-			const taken = scopeHolds.splice(0).reverse();
-			for (const hold of taken) inFlight.release(hold.key);
-			return Promise.all(taken.map((hold) => hold.fleet?.release?.()));
-		};
 		// Give every hold back (scope and host), then defer. Every scope-gate deferral goes through here.
 		const deferScope = async (fields) => {
-			await releaseScopeHolds();
-			// The host slot goes back before we defer: `makeInFlight().release` is not idempotent, so a slot
-			// held across a deferral would be a slot this machine never gets back.
-			if (hostHeld) {
-				hostBound.slots.release(HOST_SLOT_KEY);
-				hostHeld = false;
-			}
+			// Every hold goes back before we defer, the host slot too: `makeInFlight().release` is not idempotent, so a
+			// slot held across a deferral would be a slot this machine never gets back.
+			await releaseAllHolds();
 			deps?.log?.(fields.event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS, ...fields.extra });
 			await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
 			throw new DelayedError();
@@ -736,16 +833,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// One snapshot per pickup (the endpoints, the overlay models, the derived set), handed to runJob as
 		// `modelEndpoints` so a later gate reads the same declaration this one leased against. With no endpoints
 		// declared the overlay is not even read, and the job touches nothing new: no command, no key, no field.
-		const endpointHolds = [];
 		let endpointSnapshot = null;
-		// Drains the holds, so a second call releases nothing: the in-process map's release is not idempotent.
-		// The in-process half goes back synchronously, so a caller that cannot await (the setup guard) still frees
-		// every local slot before it rethrows; the fleet half is release-if-mine and awaited where it can be.
-		const releaseEndpointHolds = () => {
-			const taken = endpointHolds.splice(0).reverse();
-			for (const hold of taken) endpointSlots.release(hold.id);
-			return Promise.all(taken.map((hold) => hold.fleet?.release?.()));
-		};
 		if (modelEndpoints && !settingsThrew && !settings?.invalid) {
 			let endpoints = [];
 			let models = null;
@@ -797,19 +885,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// fleet half; the in-process bound above is exact for a server only this host reaches.
 					fleet = await endpointLease.acquire(job.id, { slots: endpoint.slots, keyArgs: [hash16(endpoint.id)] });
 					if (!fleet) {
-						endpointSlots.release(endpoint.id);
+						// Taken in process above, so it goes back through the one release with every other hold.
+						endpointHolds.push({ id: endpoint.id, fleet: null });
 						where = "fleet";
 					} else if (fleet.degraded) {
 						deps?.log?.("endpoint_lease_degraded", { jobId: job.id, endpoint: endpoint.id });
 					}
 				}
 				if (where !== null) {
-					await releaseEndpointHolds();
-					await releaseScopeHolds();
-					if (hostHeld) {
-						hostBound.slots.release(HOST_SLOT_KEY);
-						hostHeld = false;
-					}
+					await releaseAllHolds();
 					deps?.log?.("endpoint_busy_deferred", { jobId: job.id, endpoint: endpoint.id, where, delayMs: ENDPOINT_BUSY_RECHECK_MS });
 					await job.moveToDelayed(nowMs + ENDPOINT_BUSY_RECHECK_MS, token);
 					throw new DelayedError();
@@ -818,8 +902,25 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 		}
 
+		// THE HOST BUDGET GATE (issue #596, phase 2, DES-HOST-BUDGET), LAST of the gates, so a job waits on the budget only
+		// when the budget is its only obstacle: a job a scope, its project's `concurrent` or an endpoint deferred never got
+		// here, so its hold (if it had one) is suspended rather than kept (`processor` above). Synchronous: the ledger is
+		// read, decided on and written with no await between, so two pickups on this host never both take the same room.
+		// A deferral, never a refusal: a full host is transient state (CONST-RETRY-INFRA-ONLY), and it is free.
+		// Skipped when the settings are unreadable or invalid: that job is refused or retried below without a container.
+		if (hostBudget && !settingsThrew && !settings?.invalid) {
+			const verdict = hostBudget.gate({ id: job.id, project, size, getState: typeof job.getState === "function" ? () => job.getState() : null, limits });
+			if (!verdict.admitted) {
+				await releaseAllHolds();
+				budgetState.budgetDeferred = true;
+				deps?.log?.("host_budget_deferred", { jobId: job.id, project, why: verdict.why, rank: verdict.rank, memMiB: size.memMiB, cpuCenti: size.cpuCenti, delayMs: BUDGET_RECHECK_MS });
+				await job.moveToDelayed(nowMs + BUDGET_RECHECK_MS, token);
+				throw new DelayedError();
+			}
+			budgetHeld = true;
+		}
+
 		let startedAt;
-		let name;
 		let timer;
 		let cancelPoll;
 		let cancelPolling = false;
@@ -861,7 +962,6 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 		};
 		let onAbort;
-		let venue;
 		try {
 			// Nothing between the acquire above and the main `try` below may throw unguarded: the releasing
 			// finally belongs to THAT try, so an unguarded throw here would leak the hold and wedge the
@@ -975,12 +1075,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		} catch (error) {
 			// Release and DRAIN: this throw never reaches the main finally below, but a shared scope must never be
 			// releasable twice -- a double release frees another holder's slot. Last taken, first given back.
-			void releaseEndpointHolds();
-			void releaseScopeHolds();
-			if (hostHeld) {
-				hostBound.slots.release(HOST_SLOT_KEY);
-				hostHeld = false;
-			}
+			void releaseAllHolds();
 			clearTimeout(timer);
 			clearInterval(cancelPoll);
 			throw error;
@@ -1071,6 +1166,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				folderProject: (folder) => projectOf({ kind: "local", folder }, pickupProjects),
 				// Issue #596: the size resolved at pickup above, for the retained run's manifest and the container's argv.
 				jobSize: size,
+				// Issue #596, phase 2: the host's CPU budget, every job's `--cpus` while it is a number (off or unknown: null).
+				...(hostBudget && Number.isSafeInteger(hostBudget.current().cpuCenti) ? { cpuBudgetCenti: hostBudget.current().cpuCenti } : {}),
 				// Issue #504 part B: `_other`'s ledger, the deployment cap's source and the envelope verdict, under an envelope;
 				// absent without one, so the processor's defaults keep such a deployment byte-identical.
 				...(dollarInputs.otherDollars ? { otherDollars: dollarInputs.otherDollars } : {}),
@@ -1123,7 +1220,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// promised: the run is recorded as that cancel (the existing path, "partial work may exist") even when the
 				// container happened to exit on its own, because the operator was told the record would say operator-cancel.
 				runContainer: (ctx) =>
-					boundAfterAbort(deps.runContainer({ ...ctx, name, signal }), signal, job, deps.log ?? (() => {})).then(async (r) => {
+					boundAfterAbort(deps.runContainer({ ...ctx, name, signal }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
+						stopDidNotTake = true;
+					}).then(async (r) => {
 						await stopCancelPoll();
 						const raced = r && r.aborted !== true && signal.aborted === true && signal.reason === "operator-cancel";
 						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });
@@ -1332,14 +1431,28 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// full re-check interval while the slot it wanted went free behind it. The finally is already inside
 			// an async function, and `release` never throws. Last taken, first given back: the endpoint holds
 			// (issue #503), then the scope holds (project, then repo), then the host slot.
-			const endpointsReleased = releaseEndpointHolds();
-			const scopesReleased = releaseScopeHolds();
-			if (hostHeld) hostBound.slots.release(HOST_SLOT_KEY);
-			await endpointsReleased;
-			await scopesReleased;
+			await releaseAllHolds({ orphan: stopDidNotTake });
 			clearTimeout(timer);
 			clearInterval(cancelPoll);
 			signal.removeEventListener("abort", onAbort);
+		}
+	};
+	return async function processor(job, token, signal) {
+		if (!hostBudget) return pickup(job, token, signal, { budgetDeferred: false });
+		const budgetState = { budgetDeferred: false };
+		hostBudget.enter(job.id);
+		try {
+			const result = await pickup(job, token, signal, budgetState);
+			hostBudget.forget(job.id);
+			return result;
+		} catch (error) {
+			if (!budgetState.budgetDeferred) {
+				if (error instanceof DelayedError) hostBudget.suspend(job.id);
+				else hostBudget.forget(job.id);
+			}
+			throw error;
+		} finally {
+			hostBudget.leave(job.id);
 		}
 	};
 }
@@ -1349,6 +1462,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
  * round trip under load, and far under the 30 s abort grace; past it a read still hanging cannot acknowledge anything.
  */
 export const CANCEL_STOP_BOUND_MS = 1_000;
+
+/**
+ * The forge comments for the three never-fits refusals (issue #596, phase 2). GENERIC on purpose: never the size, the
+ * budget or the project, which are operator configuration an issue author can act on none of. The worker log, the run
+ * record and doctor name both sizes.
+ */
+export const SIZE_REFUSAL_COMMENTS = Object.freeze({
+	"job-size-exceeds-host": "Refused: this job's size is larger than the worker host's job budget, so it could never start there. No container was started and nothing was spent. Ask the operator to lower this project's job size or raise the host budget. Not run.",
+	"job-size-exceeds-share": "Refused: this job's size is larger than the share of the worker host's job budget its project may use, so it could never start there. No container was started and nothing was spent. Ask the operator to lower this project's job size or raise its host share. Not run.",
+	"job-size-exceeds-fleet": "Refused: this job's size is larger than the job budget of every worker host, so it could never start anywhere. No container was started and nothing was spent. Ask the operator to lower this project's job size or raise a host's budget. Not run.",
+});
 
 /** The comment for a job the operator cancelled before it started, where it would have been held or retried (gate of PR #479). */
 export const CANCELLED_BEFORE_START_COMMENT = "Stopped: the operator cancelled this run before it started. Nothing was spent. Not retried.";
@@ -1378,7 +1502,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [] }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, fleetHosts = null }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1404,6 +1528,19 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	const hostBound = hostQueue ? { slots: hostSlots, limit: () => liveConcurrency() } : null;
 	const liveConcurrency = () => workers[0]?.concurrency ?? concurrency;
 
+	// THE HOST BUDGET (issue #596, phase 2, DES-HOST-BUDGET), built ONCE here and handed to every processor, for the host
+	// slot's reason: it bounds the MACHINE, so two queues with two ledgers would each admit a full budget. Unlike the host
+	// slot it is armed with ONE queue too, because a single Worker's count still cannot tell a 20g job from a 2g one.
+	// `hostBudgetOptions` is start.mjs's (the settings, the default size, the facts reader, the orphan check); a bare
+	// wiring passes none and keeps today's behaviour. The tick re-reads the facts, verifies stale holds and sweeps
+	// orphans, off every job path, unref'd and cleared on stop like the registry's beat.
+	const hostBudget = hostBudgetOptions ? makeHostBudget({ scopedLimits, ...hostBudgetOptions }) : null;
+	let budgetTick = null;
+	if (hostBudget) {
+		budgetTick = setInterval(() => void hostBudget.tick(), hostBudgetOptions.tickMs ?? HOST_BUDGET_TICK_MS);
+		budgetTick.unref?.();
+	}
+
 	for (const queueName of names) {
 		let worker; // referenced by cancelJob/applyConcurrency before assignment; only called later, so the TDZ is fine
 		const processor = makeProcessor({
@@ -1422,6 +1559,9 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			containerName,
 			redis,
 			getSettings,
+			// Issue #596, phase 2: the ONE host budget, and the registry read the never-fits check asks of the fleet.
+			hostBudget,
+			fleetHosts,
 			// Late-bound over EVERY worker: an overlay concurrency change re-binds the live slot count at the
 			// next job start, and with two queues both have to move or the host bound and the queue bounds
 			// stop agreeing. Guarded so only an integer that actually differs touches the property.
@@ -1492,12 +1632,15 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	// The host-queue worker, for the caller that must register listeners on both. Attached rather than
 	// returned as a pair so every existing caller keeps receiving exactly what it received before.
 	primary.hostWorker = workers[1] ?? null;
+	// Issue #596, phase 2: the host budget, for the registry beat's thunks (start.mjs) and doctor-facing snapshots.
+	primary.hostBudget = hostBudget;
 
 	const stop = async () => {
 		// Abort active jobs (=> docker stop via onAbort), then close. Without the cancel,
 		// worker.close() would wait up to 30 minutes for the container. ONE shutdown for every queue: two
 		// registrations would mean two `process.exit(0)` racing, and the second worker's containers would
 		// outlive the handler that was meant to stop them.
+		if (budgetTick) clearInterval(budgetTick);
 		for (const w of workers) await Promise.resolve(w.cancelAllJobs?.("shutdown")).catch(() => {});
 		for (const w of workers) await w.close().catch(() => {});
 		// Close auxiliary resources (a cron scheduler, the live-edit file watchers) after the worker drains.

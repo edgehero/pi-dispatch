@@ -1113,3 +1113,14 @@ test("PI_JOB_MEMORY and PI_JOB_CPUS: 4g and 2 when unset or empty, parsed when s
 		assert.throws(() => loadConfig(env), (error) => error.piDispatchConfig === true && why.test(error.message), JSON.stringify(env));
 	}
 });
+
+test("issue #596, phase 2: the host budget's four settings are judged at boot, a bad one a config error naming the key", async () => {
+	const { hostBudgetFrom } = await import("../src/config.mjs");
+	assert.deepEqual(hostBudgetFrom({}).memory, { mode: "auto" });
+	assert.deepEqual(hostBudgetFrom({ PI_HOST_CPU_BUDGET: "off" }).cpus, { mode: "off" });
+	for (const [key, value] of [["PI_HOST_MEMORY_BUDGET", "lots"], ["PI_HOST_CPU_BUDGET", "1"], ["PI_HOST_RESERVE_MEMORY", "off"], ["PI_HOST_RESERVE_CPUS", "1.234"]]) {
+		assert.throws(() => hostBudgetFrom({ [key]: value }), (e) => e.piDispatchConfig === true && e.message.includes(key), `${key}=${value}`);
+	}
+	// Judged against the deployment's own default size: 1 CPU is a budget when the default job takes 1.
+	assert.equal(hostBudgetFrom({ PI_HOST_CPU_BUDGET: "1", PI_JOB_CPUS: "1" }).cpus.cpuCenti, 100);
+});

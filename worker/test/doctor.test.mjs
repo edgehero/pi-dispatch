@@ -8029,7 +8029,9 @@ const mixedPinRun = async (scenario) => {
 	// Issue #596, gate round 2: the Podman 5.8.1 this pin models answers with its CPU count (`host.cpus`), as every one
 	// does, so the pin prints the ceiling a healthy host prints rather than a cpu_ceiling_unknown none does. The local
 	// count stays unknown on purpose: docker is absent ("absent") or answers with no body (below).
-	const info = PODMAN_INFO({ cpus: 4 });
+	// Issue #596, phase 2: and with its memory (`host.memTotal`, an illustrative 7937.5 MiB), so the host budget line is a
+	// healthy host's too.
+	const info = PODMAN_INFO({ cpus: 4, memTotal: 8_323_072_000 });
 	const { docker: _absent, ...podmanOnly } = podmanPlan({ info, image: scenario !== "podmanMissing" });
 	const plan =
 		scenario === "absent"
@@ -8087,6 +8089,8 @@ const MIXED_PIN = {
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8156,6 +8160,8 @@ const MIXED_PIN = {
 			"⚠ local: `docker info` gave no answer that says its CPU count (docker-not-found), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
 			"✓ podman: cgroup v2 controllers are delegated to this account (cpuset, cpu, io, memory, pids), so a job's pid, memory and cpu bounds are applied",
 			"✓ podman: SELinux does not confine containers here, so nothing a job mounts is relabelled",
@@ -8216,6 +8222,8 @@ const MIXED_PIN = {
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8273,6 +8281,8 @@ const MIXED_PIN = {
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -9123,6 +9133,9 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		pauseWindowsFilePath: (e) => cfg.pauseWindowsFilePath(e),
 		// Issue #596: the default job size, as the worker's config reads it.
 		jobSizeDefaults: async (e) => (await import("../src/job-size.mjs")).jobSizeDefaults(e),
+		// Issue #596, phase 2: the host budget's settings and a project's size, as the worker reads them.
+		hostBudgetSettings: async (e) => (await import("../src/host-budget.mjs")).hostBudgetSettings(e),
+		resolveJobSize: async (e) => (await import("../src/job-size.mjs")).resolveJobSize({ env: e }),
 		scopedLimitsFilePath: (e) => cfg.scopedLimitsFilePath(e),
 		modelEndpointsFilePath: (e) => cfg.modelEndpointsFilePath(e),
 		// Issue #503: whether endpoints are declared, read as the service reads PI_MODEL_ENDPOINTS_FILE.
@@ -9514,6 +9527,8 @@ const podmanProbeArgv = (slug, url, script = egressCanaryScript(url)) => [
 	"--memory-swap=4g",
 	"--cpu-shares=2048",
 	"--shm-size=1g",
+	"--label=pi.dispatch.mem=4096",
+	"--label=pi.dispatch.cpu=200",
 	"--network=pi-dispatch-egress-doctor-1",
 	"--user=1234:1234",
 	"--userns=keep-id",
@@ -10098,7 +10113,8 @@ const dockerCanaryPinRun = async (scenario, t = null) => {
 	};
 	// Issue #596, gate round 2: the Docker 27.5.1 this pin models answers with its CPU count, as every Docker does, so the
 	// pin prints the ceiling a healthy host prints rather than a cpu_ceiling_unknown none does. Assigned, keeping its place.
-	plan["docker info --format={{json .}}"] = { code: 0, output: `${JSON.stringify({ ...JSON.parse(ROOTFUL_INFO), NCPU: 4 })}\n` };
+	// Issue #596, phase 2: and with its memory (`MemTotal`), so the host budget line is a healthy host's too.
+	plan["docker info --format={{json .}}"] = { code: 0, output: `${JSON.stringify({ ...JSON.parse(ROOTFUL_INFO), NCPU: 4, MemTotal: 8_323_072_000 })}\n` };
 	// Assigned, not spread: `green` already carries this key, and a spread keeps the FIRST key's place with the last value.
 	if (scenario === "stale") plan["docker run --rm --name pi-dispatch-egress-probe-provider"] = EGRESS_CANARY_STALE_RUNNER;
 	if (scenario === "unfinished") plan["docker run --rm --name pi-dispatch-egress-probe-provider"] = { code: null, output: "" };
@@ -10181,6 +10197,8 @@ const DOCKER_CANARY_PIN = {
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10255,6 +10273,8 @@ const DOCKER_CANARY_PIN = {
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10335,6 +10355,8 @@ const DOCKER_CANARY_PIN = {
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10419,6 +10441,8 @@ const DOCKER_CANARY_PIN = {
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10503,6 +10527,8 @@ const DOCKER_CANARY_PIN = {
 			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
+			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
