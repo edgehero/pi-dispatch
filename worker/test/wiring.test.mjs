@@ -1090,3 +1090,39 @@ test("the prepareWorkspace wrapper EXTENDS runJob's options instead of replacing
 	assert.equal(opts?.piVersion, "1.2.3", "the image's pi version must survive the wrapper, or no session ever resumes");
 	assert.equal(opts?.queueJobId, "j1", "and the wrapper's own injection is still there");
 });
+
+test("issue #596, phase 2: createWorker builds ONE host budget, ticks it off the job path, and stops the tick on shutdown", { skip }, async () => {
+	const origExit = process.exit;
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	let reads = 0;
+	let worker;
+	try {
+		process.exit = () => {};
+		worker = mod.createWorker({
+			connection: parseConnection("redis://127.0.0.1:1"),
+			concurrency: 1,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+			redis: {},
+			deps: {},
+			stopContainer: async () => {},
+			hostBudget: { settings: { memory: { mode: "auto" }, cpus: { mode: "auto" }, reserveMemory: { mode: "auto" }, reserveCpus: { mode: "auto" } }, readFacts: async () => (reads++, { memTotalMiB: 16384, hostCpus: 4 }), tickMs: 5 },
+		});
+		worker.on("error", () => {});
+		assert.ok(worker.hostBudget, "built, with a single queue too");
+		await worker.hostBudget.ready;
+		assert.deepEqual(worker.hostBudget.current(), { memMiB: 16384 - 1638, cpuCenti: 300 });
+		await new Promise((r) => setTimeout(r, 60));
+		assert.ok(reads >= 3, `the tick re-reads the facts (${reads} reads)`);
+		const shutdown = process.listeners("SIGTERM").find((l) => !beforeTerm.has(l));
+		await shutdown();
+		const after = reads;
+		await new Promise((r) => setTimeout(r, 40));
+		assert.ok(reads <= after + 1, "stopped with the worker");
+	} finally {
+		process.exit = origExit;
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+		await Promise.resolve(worker?.close()).catch(() => {});
+	}
+});

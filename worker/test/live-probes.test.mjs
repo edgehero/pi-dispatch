@@ -1580,6 +1580,9 @@ test("issue #596, phase 2 (carried from phase 1's gate round 3): a fractional ce
 	// 3.3 x 100000 is 329999.99999999994 in floating point; the runtime writes 330000.
 	assert.equal(expectedBounds({ memMiB: 4096, cpuCenti: 200 }, 8, 330).cpuMax, "330000 100000");
 	assert.equal(expectedBounds({ memMiB: 4096, cpuCenti: 200 }, 8, 290).cpuMax, "290000 100000");
+	// 0.57 x 100000 is 56999.99999999999 and 1.1 x 100000 is 110000.00000000001 unrounded.
+	assert.equal(expectedBounds({ memMiB: 4096, cpuCenti: 50 }, 8, 57).cpuMax, "57000 100000");
+	assert.equal(expectedBounds({ memMiB: 4096, cpuCenti: 50 }, 8, 110).cpuMax, "110000 100000");
 	assert.equal(expectedBounds({ memMiB: 4096, cpuCenti: 200 }, 8).cpuMax, "700000 100000");
 	assert.equal(expectedBounds({ memMiB: 4096, cpuCenti: 200 }).cpuMax, "max 100000");
 });

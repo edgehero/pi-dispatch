@@ -146,7 +146,7 @@ test("a rootless account's limits: the smaller of its slice's and its user servi
 	assert.equal(parseCpuMax("50000 100000"), 50);
 	assert.equal(parseCpuMax("0 100000"), null);
 	const files = {
-		"/sys/fs/cgroup/user.slice/user-1234.slice/memory.max": "34359738368\n",
+		"/sys/fs/cgroup/user.slice/user-1234.slice/memory.max": "8589934592\n",
 		"/sys/fs/cgroup/user.slice/user-1234.slice/cpu.max": "max 100000\n",
 		"/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/memory.max": "17179869184\n",
 		"/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/cpu.max": "400000 100000\n",
@@ -155,7 +155,8 @@ test("a rootless account's limits: the smaller of its slice's and its user servi
 		if (!(path in files)) throw Object.assign(new Error("absent"), { code: "ENOENT" });
 		return files[path];
 	};
-	assert.deepEqual(readUserServiceLimits({ uid: 1234, readFile }), { userMemMiB: 16384, userCpuCenti: 400 });
+	// The slice's 8g is below the service's 16g, and the service's 4 CPUs below the slice's none: the smaller of each.
+	assert.deepEqual(readUserServiceLimits({ uid: 1234, readFile }), { userMemMiB: 8192, userCpuCenti: 400 });
 	assert.deepEqual(readUserServiceLimits({ uid: 99, readFile }), { userMemMiB: null, userCpuCenti: null }, "unreadable is no bound, never an error");
 	assert.deepEqual(readUserServiceLimits({ uid: undefined, readFile }), { userMemMiB: null, userCpuCenti: null });
 });
@@ -248,6 +249,12 @@ test("the gate: a hold is taken synchronously, release is idempotent, and a job 
 	assert.deepEqual(b.gate({ id: "b", project: "p", size: { memMiB: 8192, cpuCenti: 100 } }), { admitted: true });
 	assert.equal(b.waiting().length, 0, "admitted: no longer a waiter");
 	assert.deepEqual(b.snapshot(), { memMiB: 36864, cpuCenti: 800, usedMemMiB: 8192, usedCpuCenti: 100, heldMemMiB: 0, heldCpuCenti: 0, running: 1, orphans: 0, holds: 0, waiters: 0 });
+	// A job its own project's share stops is a waiter that HOLDS NOTHING: the budget is not its obstacle.
+	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:q", memory: "1g", cpus: 1, hostShare: 10 }] }), "sl.json");
+	b.gate({ id: "q1", project: "q", size: { memMiB: 1024, cpuCenti: 50 }, limits });
+	assert.deepEqual(b.gate({ id: "q2", project: "q", size: { memMiB: 4096, cpuCenti: 50 }, limits }), { admitted: false, why: "share", rank: 0 });
+	assert.equal(b.waiting().find((x) => x.id === "q2").suspended, true, "share-stopped: suspended, so it keeps no room");
+	b.forget("q2");
 });
 
 test("an orphan keeps its hold until the runtime says its container is gone; an unanswered check keeps it too", async () => {
