@@ -227,20 +227,30 @@ test("readOverlayModels: absence is null, every other read error is rethrown wit
 	assert.throws(() => readOverlayModels(dir, { readFileSync: () => "{ nope" }), (e) => e.piDispatchConfig === true && /not valid JSON/.test(e.message));
 });
 
-// Issue #556: a FIFO, socket or device at models.json is judged from the reader's lstat and never opened. The read runs
-// in a CHILD with a deadline, because a FIFO with no writer blocks readFileSync for good: a hang there is a red test,
-// never a hung suite.
+// Issue #556: a FIFO, socket or device at models.json is judged from the reader's lstat and never opened.
 const READER = new URL("../src/model-endpoints.mjs", import.meta.url).href;
 const canFifo = process.platform !== "win32" && spawnSync("mkfifo", ["--version"]).error === undefined;
-test("readOverlayModels refuses a models.json that is a FIFO, without opening it (issue #556)", { skip: canFifo ? false : "mkfifo is not available here", timeout: 20000 }, () => {
+test("readOverlayModels refuses a models.json that is a FIFO, without opening it (issue #556)", { skip: canFifo ? false : "mkfifo is not available here", timeout: 60000 }, () => {
 	const dir = tmp();
 	execFileSync("mkfifo", [join(dir, "models.json")]);
+	// The proof, in process: the real lstat sees the real FIFO, and the read seam fails the test if it is called.
+	// No deadline is involved, so a loaded machine cannot turn it red.
+	assert.throws(() => readOverlayModels(dir, { readFileSync: () => assert.fail("opened") }), (e) => e.overlayNotAFile === true && e.piDispatchConfig === true);
+	// And the default seams, in a CHILD, because a FIFO with no writer blocks readFileSync for good: a hang there is
+	// a red test, never a hung suite. The child prints `ready` just before the call, so a deadline that passes
+	// before the marker is a slow start, and only one that passes after it is a hang.
 	const script = `import { readOverlayModels } from ${JSON.stringify(READER)};
+console.log("ready");
 try { readOverlayModels(${JSON.stringify(dir)}); console.log(JSON.stringify({ read: true })); }
 catch (e) { console.log(JSON.stringify({ notAFile: e.overlayNotAFile === true, config: e.piDispatchConfig === true, code: e.code ?? null })); }`;
-	const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 5000 });
-	assert.equal(child.signal, null, "the read returned at once: a FIFO with no writer would block it until the deadline");
-	assert.deepEqual(JSON.parse(child.stdout.trim()), { notAFile: true, config: true, code: null }, child.stderr);
+	const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 30000 });
+	const [marker, result] = child.stdout.trim().split("\n");
+	if (child.signal !== null) {
+		assert.ok(marker === "ready", `the child did not reach the call within 30 s (a slow start, not a hang): ${child.stderr}`);
+		assert.ok(result !== undefined, "the read blocked: the child reached the call and never returned, so it opened the FIFO");
+	}
+	assert.equal(marker, "ready", child.stderr);
+	assert.deepEqual(JSON.parse(result), { notAFile: true, config: true, code: null }, child.stderr);
 });
 
 test("readOverlayModels refuses a models.json that is a socket or a device, and never opens it (issue #556)", () => {
