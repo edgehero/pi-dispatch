@@ -477,10 +477,10 @@ test("capExitMessage bounds the exit line's message and marks the cut; shorter o
 	for (const outcome of [{ code: 0, reason: "stop" }, { code: 2, reason: "x", message: 5 }, null, undefined]) assert.equal(capExitMessage(outcome), outcome);
 });
 
-test("the exit-line message budget is 1900 characters AS SERIALIZED, whatever the body escapes to", () => {
+test("the exit-line message budget is 1800 characters AS SERIALIZED, whatever the body escapes to", () => {
 	// The literal, pinned: every other test here derives from the constant, so a raised cap would pass them
 	// all while the worker's tail lost the label. worker/test/run-history.test.mjs measures the real line.
-	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1900);
+	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1800);
 	const escaped = (message) => JSON.stringify(message).length - 2;
 	// A quote or newline serializes to 2 characters and a control byte to 6: the budget is what the tail
 	// sees, so each of these must come out at or under the budget in escaped characters, plus the marker.
