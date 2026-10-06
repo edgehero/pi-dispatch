@@ -162,8 +162,10 @@ and merges it.
   file other than the pin files and the lockfile. The install-script check cannot see a tarball's `binding.gyp`
   (npm builds one with node-gyp at install whatever the metadata says), so the review and the pull request's CI are
   the real check on what a new package runs. Then it commits exactly those files as Rob Boerman with `-s`, force-pushes
-  `chore/pi-bump`, and opens or updates the one pull request titled `chore(pi): run on pi X`. It skips a target that
-  is the pin, older than it, not an exact release, already carried by the open pull request, or closed unmerged.
+  `chore/pi-bump` (leased to the tip it judged), and opens or updates the one pull request titled
+  `chore(pi): run on pi X`. It skips a target that is the pin, older than it, not an exact release, already carried
+  by the open pull request (unless the base changed a pin file or the lockfile under it: then it rebuilds), or closed
+  unmerged.
 - **The pull request is ALWAYS a draft.** The workflow cannot know whether the bump holds; the pull request's own
   required checks say so (the suite, the pinned-assumption tests and the image job's zero-spend smoke, on the new pi).
   Each red check names what broke. When everything is fixed and green, a person marks it ready.
@@ -187,9 +189,14 @@ and merges it.
     `admin/test/helpers/renderer.mjs`'s `PI_TUI_UTILS_SHA256`) are `shasum -a 256` of the named file.
 
   Put the new value in the same commit as any fix.
-- **Fixes go on `chore/pi-bump`,** as ordinary signed-off commits. A later rebuild (a run for a newer pi) force-pushes
-  the branch from the base and OVERWRITES them, on purpose: a fix for the older release has to be re-verified
-  anyway. A rebuild also puts a ready pull request back to draft.
+- **Fixes go on `chore/pi-bump`,** as ordinary signed-off commits, and the workflow never overwrites them. It rebuilds
+  the branch only while it holds nothing but its own commit: one commit on the merge base, subject
+  `chore(pi): run on pi X`, by Rob Boerman, changing only the pin files and the lockfile (`fixupsOn` in
+  `pi-bump.mjs`). Anything else is a fix. Then a run for a newer pi pushes nothing and comments once per version
+  on the pull request ("pi Y is out. ... Merge or close it, and the next run bumps to Y."). There is no flag to
+  force it, also not on a manual run: merge or close the pull request, or delete the branch. A branch left without
+  a pull request is rebuilt only when a closed pull request still holds its tip (GitHub keeps those commits);
+  otherwise the run warns and leaves it. A rebuild puts a ready pull request back to draft.
 - **The `PI_BUMP_TOKEN` secret** is a fine-grained personal access token of the owner's account, so the push and
   the pull request run every required check (a pull request opened with the workflow's own token runs none).
   Create it at GitHub, Settings, Developer settings, Fine-grained tokens: resource owner `edgehero`, repository
