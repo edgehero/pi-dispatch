@@ -804,8 +804,8 @@ refactor apart.
   **The exit line's `reason` is read for one purpose and cannot move a job between classes** (issue #437).
   `parseExitReason` returns it only when it is a member of the worker's CLOSED `RUNNER_POLICY_REASONS`
   (`provider-auth-refused`, and since issues #501/#502 `cost-cap`, `model-not-allowed`,
-  `cost-cap-unenforceable` and `model-policy-unenforceable`) AND the same, LAST exit line says `code: 2`; anything else is
-  `null`. The processor consults it only inside its container-exit-`2` branch, where it replaces the
+  `cost-cap-unenforceable` and `model-policy-unenforceable`) AND the same line, the decisive exit line (defined
+  below), says `code: 2`; anything else is `null`. The processor consults it only inside its container-exit-`2` branch, where it replaces the
   `runner-policy` label and nothing else: **the container exit code alone decides the retry class**, so a
   container exiting `1` while printing a refusal line is still an infra retry, and the worst a forged line
   can do on a real `2` is swap one not-retried label for another from the closed set. Every other runner
@@ -815,7 +815,7 @@ refactor apart.
   `reason: "<member>"` or, for the four policy reasons, as an exported literal (`export const COST_CAP = "cost-cap";`)
   that the meter and the policy check emit through.
   **A `cost-cap` line's `why` is read the same way** (issue #507). `parseExitWhy` returns it only when it is a member
-  of the worker's CLOSED `COST_CAP_WHYS` (`unboundable`, `external`, `over-cap`) AND the same, LAST exit line says
+  of the worker's CLOSED `COST_CAP_WHYS` (`unboundable`, `external`, `over-cap`) AND the same, decisive exit line says
   `code: 2` and `reason: "cost-cap"`; anything else is `null`, so no container-written string reaches the record.
   The processor attaches it as the result's `why` only beside a `cost-cap` reason in its exit-`2` branch; it feeds
   no classification, and the worst a forged line can do is name the wrong rule of the three. A worker test reads
@@ -839,15 +839,21 @@ refactor apart.
   runner): otherwise a tool (same uid) sends SIGUSR1 or calls `process._debugProcess(pid)`, the node opens its
   inspector on 127.0.0.1:9229 (the loopback exists under `--network none`), and a heap snapshot from there holds the
   key. That hole was open from #545 until issue #596's review found it; the exec-only node does not close it, because
-  the inspector is the process serving its own memory. `--inspect` in `NODE_OPTIONS` would open it too, but those
-  processes' environment is the worker's closed map, fixed at their start, which the job cannot write.
-  `verify-image.sh` probes both processes on every image that declares `exitAuth`. A MAC rather than the bare key
-  on the line, because a tool can open the container's stdout pipe for READING (measured): a stolen signed line is
-  only the genuine line again, and one taken off the pipe and not put back reads as missing (the floor). What
-  stays outside this: code that runs INSIDE the runner process (an extension), which is trusted at the runner's
-  own level and could reach the key; and an image that does not declare `exitAuth` (any image built before it),
-  read exactly as before. The runner also handles **SIGTERM** now: `docker stop` reaches it through the init
-  process, and it writes its exit line once, with `code: 143`, `reason: "terminated"`, the turn count, the
+  the inspector is the process serving its own memory. `verify-image.sh` probes every process running under
+  `/opt/pi-dispatch/runner-node` (at least the supervisor and the runner) on every image that declares `exitAuth`.
+  **`--disable-sigusr1` closes only the route from OUTSIDE the process** (review round 2 of issue #596). Two
+  routes in stay open, both older than #596 and both outside the key's guarantee. Code loaded INTO the runner
+  process itself can open `node:inspector` from the inside, or read the key outright: the serviced repo's
+  `/workspace/.pi/extensions` load into the runner after the key was read (`image/runner/src/loader.mjs`), trusted
+  at the runner's own level, as is every extension. And an operator who puts `NODE_OPTIONS` into the job's
+  environment (a trigger's secret named so, or `PI_FORWARD_ENV`) sets the flags of both holders, so
+  `NODE_OPTIONS=--inspect` opens both inspectors at start; the job's own tools cannot write that environment, which
+  is the worker's closed map fixed at each process's start, but the operator can, and no name is reserved against
+  it. A MAC rather than the bare key on the line, because a tool can open the container's stdout pipe for READING
+  (measured): a stolen signed line is only the genuine line again, and one taken off the pipe and not put back
+  reads as missing (the floor). What else stays outside this: an image that does not declare `exitAuth` (any image
+  built before it), read exactly as before. The runner also handles **SIGTERM** now: `docker stop` reaches it
+  through the init process, and it writes its exit line once, with `code: 143`, `reason: "terminated"`, the turn count, the
   session and whatever the meter counted (`tokens`, `usage`), then exits `143`, well inside the stop's grace
   period. The line is written synchronously to fd 1, every byte, before the exit, because an asynchronous stdout
   write followed at once by `process.exit` can lose a large line's tail on a pipe (measured with a 1 MB line). A
@@ -883,7 +889,8 @@ refactor apart.
   cgroup and writes the signed exit line itself, with no tokens: `code` 128 plus the signal, `reason` `oom-killed` for
   a SIGKILL while `oom_kill` is above 0, `terminated` for SIGTERM, `killed` otherwise, a `signal` name and
   `resources`, and `by: "supervisor"` (inside the signed bytes, on every line it writes); then it exits with that
-  code. **One line decides** (`decisiveExitLine`, read by every exit-line scanner): the last exit line, except a
+  code. **One line decides**, the **decisive exit line** (`decisiveExitLine`, read by every exit-line scanner, and
+  what "the decisive exit line" means everywhere in these specs): the last exit line, except a
   supervisor's line that follows one the runner wrote. That order means the runner finished its line and was killed
   afterwards (a tool or the kernel), and its own line, with the tokens, usage and session the supervisor never has, is
   read; the supervisor's is ignored, so such a run reads exactly as before the supervisor (its `137` retries).
@@ -1583,11 +1590,17 @@ refactor apart.
     must end on a line whose HMAC under that key verifies (`openssl dgst -sha256 -hmac`); the entrypoint must
     `exec /opt/pi-dispatch/runner-node`; and a child of that node must fail to read its parent's
     `/proc/<pid>/environ`; and the image's own entrypoint, run with a stand-in script mounted over `run-job.mjs`,
-    must give a tool child (plain node) no inspector when it calls `process._debugProcess` on the supervisor and on
-    the runner, while a plain node of the tool's own (the control) does open one (issue #596's review; the supervisor
-    may be `absent` on an image whose entrypoint runs the runner directly). A derived image that keeps the label and
+    must give a tool child (plain node) no inspector when it calls `process._debugProcess` on every process whose
+    `/proc/<pid>/cmdline` names `/opt/pi-dispatch/runner-node` as argv[0] (readable for a process that is not
+    dumpable), of which there must be at least two (the supervisor and the runner), while a plain node of the tool's
+    own (the control) does open one (issue #596's review). The holders are found by their executable, never by a
+    file name or by parentage (review round 2): the first probe took the stand-in's parent as the supervisor only
+    when its argv said `supervise`, so a renamed supervisor without the flag, or a runner whose shell did not exec,
+    read `absent` and passed with an inspector open. An image whose entrypoint runs the runner with no supervisor
+    therefore fails the fourth run; keep this repo's `ENTRYPOINT`. A derived image that keeps the label and
     replaces the entrypoint with plain `node` fails the second, one that makes the copy readable fails the third (both
-    measured), and one that drops `--disable-sigusr1` fails the fourth (measured on the pre-review image).
+    measured), and one that drops `--disable-sigusr1` from either holder, or runs a renamed supervisor without it,
+    fails the fourth (measured on derived images of the issue #596 image).
     `anyUid` (issue #341) declares that
     the image runs correctly as an ARBITRARY non-root uid given `HOME=/home/pi`: the home is writable by any
     uid, and Chromium renders as one. Its evidence is not a grep but two runs as uid `4242` (no passwd entry
@@ -4777,7 +4790,8 @@ validator rather than a second copy of it.
   - `metered`: the container ran, its exit line is TRUSTED, and its metered cost was COMPLETE, so the windows were
     charged `ceil(tokens.cost x 1e6)`, the overshoot above the reservation included. Trusted means the container
     exited on its own (the worker did not time it out, cancel it, stop it at shutdown or find it detached) AND the
-    last exit line's own `code` equals the container's exit code: the job's own tools can write a line to the
+    decisive exit line's own `code` (`decisiveExitLine`, `INT-RUNNER-EXIT-CODE-PROTOCOL`) equals the container's
+    exit code: the job's own tools can write a line to the
     runner's stdout, so a line read after a stop is never believed. Complete means ALL of:
     `tokens.metered` is `true`; `tokens.costCapMicros` is present and not above `reservedMicros`; `unresolved`,
     `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `costUnreported` and
@@ -7557,3 +7571,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED (wording only)**: the `run.excludeTools` bullet said pi consults the list through a set filter. pi 1.0.4 matches each entry by exact name or `*` pattern, so the bullet now says that an unknown exact name matches nothing, silently. The contract is unchanged: membership in the pinned built-in set is still refused at load, which also refuses a pattern. |
 | 2026-10-06 | Issue #596, phase 0 (measure). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: every exit line carries `resources` (the container's own cgroup v2 counters, read just before the line by the one writer every path uses, last before the signature, omitted when nothing could be read; only `oom_kill` from `memory.events`), and the image's entrypoint starts a supervisor between the init and the runner that passes the key on unchanged, raises the runner tree's `oom_score_adj` to 1000, forwards a stop, and writes the signed line itself only when the runner was killed (`oom-killed` for a SIGKILL with `oom_kill` above 0, `terminated`, `killed`); an unbidden `137` is `policy` / `oom-killed` only with that line, verified, and stays infra-retryable otherwise. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `resources` at the record's tail (eight nullable integers, rebuilt, null when absent or forged) and `oom-killed` in the reason enum. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, its OOM note: an OOM is no longer always infra-retryable, and why the runtime's own records cannot say so (`--rm`, Docker's event on a child's kill, no Podman event); the flags are UNCHANGED (4g, 2 CPUs, 512 pids, default swap). **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: `oom-killed` is a paid terminal and pages. **`INT-CANCEL-CHANNEL-CONTRACT` UNCHANGED, checked**: a cancel converted from a spent attempt keeps that attempt's `resources` beside its tokens and dollars, and nothing else moves. Code evidence: image/runner/supervise.mjs, image/runner/src/cgroup-usage.mjs, image/runner/src/exit-line.mjs, image/entrypoint.sh, worker/src/run-history.mjs, worker/src/run-container.mjs, worker/src/processor.mjs, worker/src/start.mjs, worker/src/index.mjs; tests image/runner/test/supervise.test.mjs, image/runner/test/cgroup-usage.test.mjs, image/runner/test/exit-line.test.mjs, image/runner/test/usage-meter.test.mjs, worker/test/run-history.test.mjs, worker/test/processor.test.mjs, worker/test/run-container.test.mjs, worker/test/resources-record.test.mjs, worker/test/start-wiring.test.mjs; the image job step in pi-upgrade-check.yml. |
 | 2026-10-06 | Issue #596, phase 0, the review round. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: (1) the key's guarantee now includes the Node inspector: every key holder (the supervisor, the runner) starts with `--disable-sigusr1`, because a tool's SIGUSR1 or `process._debugProcess(pid)` opened the inspector on 127.0.0.1:9229 and a heap snapshot held the key, a hole open since #545; `verify-image.sh` probes both. (2) The supervisor's lines carry `by: "supervisor"` inside the signed bytes, and one picked line (`decisiveExitLine`) feeds every scanner: a supervisor line after one the runner wrote is ignored, so a finished run killed afterwards keeps its tokens and outcome. (3) An OOM needs a fourth fact, `memPeak` at 90% of the container's `--memory`, because `oom_kill` counts the host's OOM killer too; the page-cache and high-water residuals and the forged-report residual are stated. (4) `resources` is no longer described as feeding no classification: `oomKills` and `memPeak` gate the OOM reading, and the numbers are advisory because the job produces them. (5) The supervisor is an entry file with no main-module guard. Also corrects "the 6 KiB budget below" to "above". **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: its OOM note names the peak clause among the unconfirmed cases, and the `exitAuth` capability's evidence gains a fourth run (the inspector probe); the flags are UNCHANGED. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record's `resources` keys and the `oom-killed` reason are unchanged (the keys now pinned to `RESOURCE_KEYS` by a test). Code evidence: image/entrypoint.sh, image/runner/supervise.mjs, image/runner/src/supervise.mjs, image/verify-image.sh, worker/src/run-history.mjs, worker/src/container-spec.mjs, worker/src/run-container.mjs, worker/src/processor.mjs; tests image/runner/test/supervise.test.mjs, image/runner/test/exit-line.test.mjs, worker/test/run-history.test.mjs, worker/test/processor.test.mjs, worker/test/run-container.test.mjs, worker/test/docker-run.test.mjs, worker/test/resource-keys.test.mjs. |
+| 2026-10-06 | Issue #596, phase 0, review round 2. **CORRECTS the review round's row above**: it said a finished run killed afterwards "keeps its tokens and outcome". It keeps its tokens, usage and session (the runner's own line decides, `decisiveExitLine`), but not its outcome: the container still exited `137` without the worker causing it, so the run retries and its dollars settle at the floor, exactly as before the supervisor existed; the protocol's body already said so and is unchanged. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: (1) "the decisive exit line" is defined once, at `decisiveExitLine`, and the `reason` and `why` paragraphs use it instead of "the LAST exit line", which stopped being true when the supervisor's late line began to be ignored. (2) It states that `--disable-sigusr1` closes only the route from outside the process: code loaded into the runner itself (the serviced repo's `/workspace/.pi/extensions`, imported after the key was read, `image/runner/src/loader.mjs`) can open `node:inspector` in process, and an operator who sets `NODE_OPTIONS` (a trigger's secret named so, or `PI_FORWARD_ENV`) reaches both holders. Both predate #596 and stay outside the key's guarantee; the environment reservation is UNCHANGED. This corrects the review round's sentence that the job "cannot write" that environment, which held for the job's tools and not for the operator. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the `exitAuth` evidence's fourth run finds every key holder by its executable (`/opt/pi-dispatch/runner-node` as argv[0] in `/proc/<pid>/cmdline`, readable for a process that is not dumpable), wants at least two (the supervisor and the runner), each closed, and the control open; an image whose entrypoint runs the runner without the supervisor now fails it. The probe it replaces found the supervisor by parentage and a name, so a renamed supervisor without the flag, or a runner whose shell did not exec, read `absent` and passed (both measured). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED (wording)**: the dollar basis's trust rule names the decisive exit line. Code evidence: image/verify-image.sh, docs/job-image.md, worker/src/run-history.mjs (JSDoc), worker/src/run-container.mjs (comment), worker/src/processor.mjs (`oom_report_below_limit` is not logged on an aborted run); test worker/test/processor.test.mjs. |

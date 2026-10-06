@@ -87,8 +87,9 @@ function parseTailLine(line) {
 export const EXIT_BY_SUPERVISOR = "supervisor";
 
 /**
- * THE exit line every `parseExit*` scanner reads (issue #596), parsed, or null when `text` holds none. One picker, so
- * the scanners cannot disagree about which line decided the run.
+ * THE exit line every `parseExit*` scanner reads (issue #596), parsed, or null when `text` holds none: "the decisive
+ * exit line" everywhere in this file and in the specs means this function's pick, never simply the last line. One
+ * picker, so the scanners cannot disagree about which line decided the run.
  *
  * Normally the LAST `exit` event, found from the end with `parseTailLine`'s glue repair. One exception: a line the
  * image's supervisor wrote (`by: "supervisor"`) when an EARLIER exit line exists that is not the supervisor's. That
@@ -126,9 +127,9 @@ function decisiveExitLine(text) {
  * own lines. Only the decided-outcome exit line carries `turns` (`image/runner/run-job.mjs:431`); the
  * catch-path exit line (`:446`) omits it. The decided line's `retryTurns` (issue #449, pi's own
  * auto-retry turns, which the turn budget does not count) is not recovered here: it is diagnostic, read
- * from the container log, and the record's `turns` stays the budgeted count. Scan from the end and
- * return the turns of the last `exit` event that reports an integer count, repairing a glued line on
- * the way (`parseTailLine`).
+ * from the container log, and the record's `turns` stays the budgeted count. Return the turns of the
+ * decisive exit line (`decisiveExitLine`, which repairs a glued line on the way through `parseTailLine`)
+ * when it reports an integer count.
  *
  * This is read-only telemetry: it MUST NEVER throw and MUST NOT feed exit-code or retry
  * classification -- that is the container exit code's job (INT-RUNNER-EXIT-CODE-PROTOCOL). Every parse
@@ -161,17 +162,16 @@ export function parseExitTurns(text) {
 export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]);
 
 /**
- * The reason off the LAST runner exit line, or `null`: a member of `RUNNER_POLICY_REASONS` and only when
- * that same line says `code: 2`. Scanned from the end exactly as `parseExitTurns` is, repairing a glued
- * line through `parseTailLine`, and NEVER throws.
+ * The reason off the decisive exit line (`decisiveExitLine`), or `null`: a member of `RUNNER_POLICY_REASONS`
+ * and only when that same line says `code: 2`. Read off the same line as `parseExitTurns`, and NEVER throws.
  *
  * Why this may reach the outcome when its five siblings may not: it cannot change the retry class. The
  * processor consults it only inside its container-exit-2 branch, so a container that exits 1 while
  * printing `{"event":"exit","code":2,"reason":"provider-auth-refused"}` is still InfraRetry, and the
  * worst a forged line can do on a real exit 2 is swap one not-retried label for another from a closed
  * set. The `code === 2` check on the line itself is what keeps a stale or mismatched line (a runner
- * that said 1 in its own words) from naming the outcome. Only the LAST exit event counts, because an
- * earlier one in the tail is not the one the runner exited on. A fixed enum, so the PII-free record stays so.
+ * that said 1 in its own words) from naming the outcome. Only the decisive exit line counts, because any
+ * other in the tail is not the one the runner exited on. A fixed enum, so the PII-free record stays so.
  */
 export function parseExitReason(text) {
 	const parsed = decisiveExitLine(text);
@@ -187,8 +187,8 @@ export function parseExitReason(text) {
 export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap"]);
 
 /**
- * The `why` off the LAST runner exit line, or `null`: a member of `COST_CAP_WHYS`, and only when that same line says
- * `code: 2` and `reason: "cost-cap"`. Scanned from the end exactly as `parseExitReason` is, and NEVER throws.
+ * The `why` off the decisive exit line (`decisiveExitLine`), or `null`: a member of `COST_CAP_WHYS`, and only when that
+ * same line says `code: 2` and `reason: "cost-cap"`. Read off the same line as `parseExitReason`, and NEVER throws.
  *
  * The line is container-written, so nothing it carries is trusted as text: a value outside the closed set is null,
  * never a string copied through. It feeds no classification. The processor reads it only in its exit-2 branch, and
@@ -202,13 +202,13 @@ export function parseExitWhy(text) {
 }
 
 /**
- * The LAST runner exit line's own `code`, an integer, or `null` (issue #501, PR #542's review round 3). Scanned from
- * the end exactly as its siblings are, repairing a glued line through `parseTailLine`, and NEVER throws.
+ * The decisive exit line's own `code` (`decisiveExitLine`), an integer, or `null` (issue #501, PR #542's review round
+ * 3). Read off the same line as its siblings, and NEVER throws.
  *
  * Read for ONE purpose: the dollar settlement trusts an exit line's cost only when the line's `code` equals the
  * container's real exit code (processor.mjs). The runner writes the code it exits with on both exit lines
  * (`image/runner/run-job.mjs`: `...capExitMessage(outcome)` then `return outcome.code` on the decided path, and
- * `code: capped.code` on the catch path; pinned by a test), so a genuine last line always matches, while a line a
+ * `code: capped.code` on the catch path; pinned by a test), so the runner's genuine line always matches, while a line a
  * job's own tool forged before a `docker stop` (exit 137, no genuine line after it) does not. It never feeds the
  * retry class (INT-RUNNER-EXIT-CODE-PROTOCOL).
  */
@@ -221,7 +221,7 @@ export function parseExitCode(text) {
 /**
  * Recover the agent's token usage from buffered container stdout, or `null` if it is not reported.
  *
- * Mirrors `parseExitTurns`: scan from the end for the last `exit` event and read its `tokens` object
+ * Mirrors `parseExitTurns`: read the `tokens` object of the decisive exit line (`decisiveExitLine`)
  * (`{ input, output, total, cost }`). Only the success exit line carries it
  * (`image/runner/run-job.mjs`); the catch-path exit line omits it, and a container that died before the
  * runner's exit line yields none -- all three cases are `null`.

@@ -1314,8 +1314,10 @@ export async function runJob(job, deps) {
 		// `oom_kill` counts the HOST's OOM killer too (`peakReachedLimit`). A report below it stays infrastructure.
 		const oomReported = exitOomKilled === true && exitAuthResult === "verified" && code === EXIT_SIGKILL;
 		const oomKilled = oomReported && peakReachedLimit(resources?.memPeak ?? null, memoryLimit);
-		// Numbers only (bytes), never a path or a project: the operator's trace of a kill read as the host's.
-		if (oomReported && !oomKilled) log("oom_report_below_limit", { jobId: job.id ?? null, memPeak: resources?.memPeak ?? null, memoryLimit });
+		// Numbers only (bytes), never a path or a project: the operator's trace of a kill read as the host's. Never on a run
+		// the worker stopped itself (a timeout, a cancel, a shutdown): that 137 is the worker's own, the abort decides it
+		// below, and a line naming the host's OOM killer would send the operator after a kill that never happened.
+		if (oomReported && !oomKilled && !aborted) log("oom_report_below_limit", { jobId: job.id ?? null, memPeak: resources?.memPeak ?? null, memoryLimit });
 		// `exitAuth: "unverified"` is a run whose image signs its exit line and no signed line was found: the runner died
 		// before writing one, or a line was forged or taken off the pipe. Its tokens read as unknown and its dollars settle
 		// at the floor, the same as a container that wrote no exit line at all.

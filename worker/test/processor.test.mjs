@@ -357,6 +357,16 @@ test("a host's OOM is not the job's: the report confirms only when the peak reac
 		assert.ok(!calls.some((c) => c.startsWith("comment:")));
 		assert.ok(logged.some(([e, f]) => e === "oom_report_below_limit" && f.memPeak === memPeak && f.memoryLimit === LIMIT_4G));
 	}
+	// A run the worker stopped itself (#596 review round 2): the 137 is the abort's, so no line blames the host's OOM
+	// killer, whatever the supervisor's report says. Below the limit and at it alike.
+	for (const memPeak of [0, LIMIT_4G / 2, LIMIT_4G]) {
+		const logged = [];
+		const { deps: dA } = deps({ runContainer: async () => ({ ...(await at(memPeak)()), aborted: true, abortReason: "timeout" }), log: (e, f) => logged.push([e, f]) });
+		const r = await runJob(ghJob, dA).catch((e) => e);
+		assert.notEqual(r?.reason, EXIT_OOM_KILLED, `aborted at ${memPeak}: the abort wins`);
+		assert.ok(!logged.some(([e]) => e === "oom_report_below_limit"), `aborted at ${memPeak}: no host-OOM line`);
+		assert.ok(logged.some(([e, f]) => e === "container_exit" && f.aborted === true), "the run did reach the classification");
+	}
 	// No peak, no block, or no limit known: nothing to compare, so not confirmed.
 	for (const over of [{ resources: { ...USED, memPeak: null } }, { resources: null }, { resources: undefined }, { memoryLimit: null }, { memoryLimit: undefined }, { memoryLimit: 0 }]) {
 		const { deps: d3 } = deps({ runContainer: oomRun(over) });

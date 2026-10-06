@@ -248,8 +248,8 @@ export function makeRunContainer({
 				// RUNNER_POLICY_REASONS set and to a line that itself said code 2. The processor still decides
 				// the retry class from `code` alone; this only picks the label inside exit 2.
 				let exitReason = null;
-				// Issue #501 (PR #542's review, round 3): the LAST exit line's own `code`, which the dollar settlement
-				// compares with the container's real exit code before it trusts that line's cost.
+				// Issue #501 (PR #542's review, round 3): the decisive exit line's own `code` (decisiveExitLine), which the
+				// dollar settlement compares with the container's real exit code before it trusts that line's cost.
 				let exitLineCode = null;
 				// Issue #507: the cost guard's rule on a `cost-cap` line, already filtered by parseExitWhy to COST_CAP_WHYS.
 				let exitWhy = null;
