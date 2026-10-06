@@ -58,7 +58,7 @@ const RESIDUAL = new Set(["AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "ALL_PROXY", "http
 const RUNTIME_NOT_PROVIDER = ["HOME", "PATH", "APPDATA", "USERPROFILE", "XDG_CONFIG_HOME", "HOMEDRIVE", "HOMEPATH"];
 
 // The pins below are the classifier's own output at the pin, reviewed; each test says what they mean.
-// Every counted occurrence in every scanned file that names nothing, WITH ITS COUNT, per package version and
+// Every counted occurrence in every scanned file that names nothing, WITH ITS COUNT, per package and
 // file (see the test that reads it). A JSON file rather than a literal here because it is long and is only
 // ever replaced wholesale from the failure message, after reading what changed.
 const SITES_FILE = new URL("./fixtures/provider-steering-sites.json", import.meta.url);
@@ -347,11 +347,42 @@ function assertPinned(actual, pinned, why) {
 	assert.deepEqual(actual, pinned, `${why}\nactual: ${JSON.stringify(actual, null, "\t")}`);
 }
 
-/** `${spec}@${version}/${file}` for a scanned file: the key the per-file pin uses. */
-function siteKey(spec, root, file) {
-	const { version } = JSON.parse(readFileSync(`${root}/package.json`, "utf8"));
-	return `${spec}@${version}/${relative(root, file)}`;
+/**
+ * The per-file pin's table: `${spec}/${file}` -> { site text: count }, from one row per scanned file
+ * ({ spec, version, file, counts }). The key carries NO version, so a release that leaves a file's sites alone
+ * (every pi bump moves pi's version) stays green, and only a changed text, count or file goes red, by name. The
+ * one exception is a package the scan finds in more than one version (two copies that really differ): its keys
+ * keep `@${version}` so the two cannot overwrite each other. Copies that share a key must agree; `disagree`
+ * names the keys where they do not.
+ */
+function siteTable(rows) {
+	const versions = new Map();
+	for (const { spec, version } of rows) versions.set(spec, (versions.get(spec) ?? new Set()).add(version));
+	const table = {};
+	const disagree = [];
+	for (const { spec, version, file, counts } of rows) {
+		const key = versions.get(spec).size > 1 ? `${spec}@${version}/${file}` : `${spec}/${file}`;
+		if (table[key] && JSON.stringify(table[key]) !== JSON.stringify(counts)) disagree.push(key);
+		table[key] = counts;
+	}
+	return { table, disagree };
 }
+
+test("the per-file pin's keys ignore a version-only change and keep two real versions apart (siteTable)", () => {
+	const counts = { "process.env[k]": 1 };
+	const at = (version, c = counts) => [{ spec: "@earendil-works/pi-ai", version, file: "dist/a.js", counts: c }];
+	// A bump that changes no site: the same table, so the pin stays green.
+	assert.deepEqual(siteTable(at("1.0.3")).table, siteTable(at("1.0.4")).table);
+	assert.deepEqual(Object.keys(siteTable(at("1.0.4")).table), ["@earendil-works/pi-ai/dist/a.js"]);
+	// A changed count is a different table.
+	assert.notDeepEqual(siteTable(at("1.0.4", { "process.env[k]": 2 })).table, siteTable(at("1.0.3")).table);
+	// Two versions of one package in the scan: versioned keys, both kept.
+	const two = siteTable([...at("10.6.2"), ...at("10.9.1", { "process.env[k]": 3 })]);
+	assert.deepEqual(two.table, { "@earendil-works/pi-ai@10.6.2/dist/a.js": counts, "@earendil-works/pi-ai@10.9.1/dist/a.js": { "process.env[k]": 3 } });
+	assert.deepEqual(two.disagree, []);
+	// Two copies of one version that differ: named.
+	assert.deepEqual(siteTable([...at("1.0.4"), ...at("1.0.4", { "process.env[k]": 2 })]).disagree, ["@earendil-works/pi-ai/dist/a.js"]);
+});
 
 test("every counted occurrence that names nothing is pinned, per file, WITH ITS COUNT", { skip }, async () => {
 	// The rule that makes the derivation complete by construction (issue #511, gate rounds 1 and 2). The
@@ -360,19 +391,15 @@ test("every counted occurrence that names nothing is pinned, per file, WITH ITS 
 	// names a variable, which the equality test sees, or it is a SITE, pinned here by file and text with a
 	// count. So a new occurrence ANYWHERE either names something or changes a count: a helper that reads
 	// `process.env[name]` for a new caller, `const v = env(); v.X` where X did not resolve, a key built at
-	// runtime, a new spread of the environment into a child. Keyed by package VERSION too, because the two
-	// copies differ (google-auth-library 10.9.1 hoisted, 10.6.2 for the runner); a key both copies share
-	// must agree, so an edit to one copy of the same version fails here as well.
-	const all = everyPackage(await derive());
-	const actual = {};
-	const disagree = [];
-	for (const { spec, root, reads } of all) {
-		for (const [file, counts] of reads.sites) {
-			const key = siteKey(spec, root, file);
-			if (actual[key] && JSON.stringify(actual[key]) !== JSON.stringify(counts)) disagree.push(key);
-			actual[key] = counts;
-		}
+	// runtime, a new spread of the environment into a child. Keyed by package and file, not version
+	// (siteTable says why and when a version does enter the key), so a pi bump that leaves every site alone
+	// stays green; a key two copies share must agree, so an edit to one copy fails here as well.
+	const rows = [];
+	for (const { spec, root, reads } of everyPackage(await derive())) {
+		const { version } = JSON.parse(readFileSync(`${root}/package.json`, "utf8"));
+		for (const [file, counts] of reads.sites) rows.push({ spec, version, file: relative(root, file), counts });
 	}
+	const { table: actual, disagree } = siteTable(rows);
 	assert.deepEqual(disagree, [], "two copies of the same package version disagree about these files: one of them was edited");
 	const pinned = JSON.parse(readFileSync(SITES_FILE, "utf8"));
 	const changed = [...new Set([...Object.keys(actual), ...Object.keys(pinned)])].filter((k) => JSON.stringify(actual[k] ?? null) !== JSON.stringify(pinned[k] ?? null)).sort();
@@ -504,9 +531,10 @@ test("the residuals are the ONLY hand-written members, and they are still unfind
 		assert.equal(sdk.has(name) || pi.names.has(name), false, `${name} is now reachable by the scan: move it out of UNREACHABLE_BY_SCAN so the derivation owns it`);
 	}
 	const sites = Object.entries(JSON.parse(readFileSync(SITES_FILE, "utf8")));
-	const siteIn = (prefix, needle) => sites.some(([k, counts]) => k.startsWith(prefix) && Object.keys(counts).some((t) => t.includes(needle)));
-	assert.ok(siteIn("@smithy/core@", "ENV_ENDPOINT_URL, ...serviceSuffixParts"), "the smithy AWS_ENDPOINT_URL_<SERVICE> key is gone: re-check AWS_ENDPOINT_URL_BEDROCK_RUNTIME");
-	assert.ok(siteIn("@earendil-works/pi-ai@", "[uppercaseKey]"), "pi's proxy reader no longer builds its keys: re-check the proxy residuals");
+	// A key is `${spec}/${file}`, or `${spec}@${version}/${file}` for a package scanned in two versions.
+	const siteIn = (spec, needle) => sites.some(([k, counts]) => (k.startsWith(`${spec}/`) || k.startsWith(`${spec}@`)) && Object.keys(counts).some((t) => t.includes(needle)));
+	assert.ok(siteIn("@smithy/core", "ENV_ENDPOINT_URL, ...serviceSuffixParts"), "the smithy AWS_ENDPOINT_URL_<SERVICE> key is gone: re-check AWS_ENDPOINT_URL_BEDROCK_RUNTIME");
+	assert.ok(siteIn("@earendil-works/pi-ai", "[uppercaseKey]"), "pi's proxy reader no longer builds its keys: re-check the proxy residuals");
 	const proxy = readFileSync(`${dirname(piEntry)}/utils/node-http-proxy.js`, "utf8");
 	assert.match(proxy, /toLowerCase\(\)/, "pi's proxy reader no longer lowercases its key, so the lowercase spellings may no longer be read");
 	assert.match(proxy, /\$\{protocol\}_proxy/, "pi no longer builds `${protocol}_proxy`: re-check http_proxy and https_proxy");
