@@ -200,6 +200,61 @@ else
 				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --entrypoint /opt/pi-dispatch/runner-node "$IMAGE_REF" \
 					-e 'const r = require("node:child_process").spawnSync("sh", ["-c", "cat /proc/$PPID/environ"], { stdio: "ignore" }); process.exit(r.status === 0 ? 1 : 0)' >/dev/null 2>&1 \
 					|| fail "the image declares 'exitAuth' but a child of /opt/pi-dispatch/runner-node can read its /proc entries -- the job's tools could read the exit line's key out of the runner"
+				# Issue #596's review found a second way in, open since #545: a tool (same uid) sends SIGUSR1, or calls
+				# process._debugProcess(pid), and a node process holding the key opens its inspector on 127.0.0.1:9229 (the
+				# loopback exists under --network none), where a heap snapshot carries the key. The exec-only node does not
+				# close that. So every key holder must start with --disable-sigusr1: the supervisor (the entrypoint's node) and
+				# the runner (started by the supervisor). Proved by running the image's own entrypoint and supervisor with a
+				# stand-in runner script mounted over run-job.mjs: it runs under whatever node flags the supervisor gives the
+				# real one, and starts a tool child (plain node) that pokes the supervisor, then the runner, then a plain node
+				# of its own as the control, which must OPEN (else the probe proves nothing on this host). An image whose
+				# entrypoint runs the runner with no supervisor reports the supervisor `absent`, which passes. Once one process
+				# opens, the port stays taken and every later check reads `open` too: any `open` fails, and the FIRST names it.
+				probe_dir=$(mktemp -d)
+				cat >"$probe_dir/run-job.mjs" <<'PROBE'
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+let parent = "";
+try {
+	parent = readFileSync(`/proc/${process.ppid}/cmdline`, "utf8");
+} catch {}
+const tool = `
+const { spawn } = require("node:child_process");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const open = () => fetch("http://127.0.0.1:9229/json/list", { signal: AbortSignal.timeout(1000) }).then(() => true, () => false);
+async function poke(pid) {
+	try { process._debugProcess(pid); } catch { return "unsignalled"; }
+	for (let i = 0; i < 20; i++) { await sleep(100); if (await open()) return "open"; }
+	return "closed";
+}
+(async () => {
+	const [runner, supervisor] = process.argv.slice(1).map(Number);
+	const s = supervisor > 0 ? await poke(supervisor) : "absent";
+	const r = await poke(runner);
+	const control = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { stdio: "ignore" });
+	await sleep(300);
+	const c = await poke(control.pid);
+	control.kill("SIGKILL");
+	console.log("inspector-probe control=" + c + " supervisor=" + s + " runner=" + r);
+})();
+`;
+const supervisor = parent.includes("supervise") ? process.ppid : 0;
+// spawn, never spawnSync: a node whose main thread is blocked cannot start its inspector, so a stand-in waiting in
+// spawnSync would read `closed` with or without the flag and prove nothing.
+const child = spawn("node", ["-e", tool, String(process.pid), String(supervisor)], { stdio: ["ignore", "inherit", "inherit"] });
+const stop = setTimeout(() => child.kill("SIGKILL"), 30000);
+child.on("exit", () => {
+	clearTimeout(stop);
+	process.exit(0);
+});
+PROBE
+				chmod -R a+rX "$probe_dir"
+				probe_out=$(docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$probe_dir/run-job.mjs:/app/image/runner/run-job.mjs:ro" "$IMAGE_REF" 2>&1) || true
+				rm -rf "$probe_dir"
+				probe_line=$(echo "$probe_out" | grep '^inspector-probe ' | tail -1)
+				echo "$probe_line" | grep -Eq '^inspector-probe control=open supervisor=(closed|absent) runner=closed$' \
+					|| fail "the image declares 'exitAuth' but a tool's SIGUSR1 opens the Node inspector of a process holding the exit line's key, or the probe could not run (${probe_line:-no probe line}): start the supervisor and the runner with --disable-sigusr1"
 				;;
 			excludeTools)
 				# Same evidence style as 'commands': the baked runner config must actually read the variable.

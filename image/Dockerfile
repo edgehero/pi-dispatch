@@ -285,8 +285,9 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # `exitAuth` (issue #545) tells the worker this runner reads a per-job key from stdin (PI_EXIT_AUTH=stdin), signs its exit
 # line with it, writes a real exit line on SIGTERM, and runs under the exec-only node above, so the job's own tools can
 # neither read the key nor sign a line. The worker hands a key only to an image declaring it, and then reads only a
-# signed line; an image without it is read as before. verify-image.sh runs a job with a key and checks the MAC, and
-# checks from a tool child that the runner's memory is closed.
+# signed line; an image without it is read as before. verify-image.sh runs a job with a key and checks the MAC, checks
+# from a tool child that the runner's memory is closed, and checks that a tool's SIGUSR1 opens no inspector in the
+# supervisor or the runner (both start with --disable-sigusr1, issue #596).
 LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth"
 
 USER pi
