@@ -1072,6 +1072,30 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `REQ-SCOPED-LIMITS`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-RETRY-INFRA-ONLY`
 
+## REQ-SIZE-SUGGESTIONS
+
+- **Statement**: The operator shall be told, per project, what job size its recent runs suggest (issue #596, phase
+  3): its memory and CPUs now, the p95 of what its runs used, and either "fits", "not enough runs", or a suggested
+  size with its reason and the exact `dispatch_limit_edit` call (`dispatch_limit_add` when the project has no row)
+  that applies it. It is shown by doctor (one line per project, a warning for a raise and for a size above this
+  host's budget), in the panel's PROJECTS view, in the `dispatch_limit_edit` confirm when a size field of a project
+  row is edited, and on the insights page, which also draws each run's peak memory over time against its size, and
+  each live host's budget and use. A suggestion is NEVER applied by anything but that call, confirmed by the operator.
+- **Why**: Decision 1 of the issue was to measure first; sizes per project are only as good as the operator's guess
+  without the measurement read back. The measurements come from inside the jobs' containers, so they may inform a
+  decision and may never make one.
+- **Acceptance**: Given a project whose run ended `oom-killed` at 4g, then doctor warns with the fix
+  `dispatch_limit_edit {"index":<its row>,"memory":"6g"}` and the panel shows the same call. Given 10 runs of a 5g
+  project whose p95 peak is 3g, then the suggestion is 4g (1.25 x 3g is 0.75 x 5g); one byte more and it fits. Given
+  9 runs, then "not enough runs" unless one of them was killed for memory or more than 10% ran into the limit.
+  Given runs from before `resources` or `size`, then they are ignored. Given a record whose peak is negative, a
+  fraction or a string, then that record gives no memory sample; given one above its own limit, then it reads at the
+  limit. Given a suggestion above the budget, then doctor says a job of it would never fit this host. Given a
+  `dispatch_limit_edit` of a project row's memory, then its confirm names the project's p95 peak and cores and what
+  they suggest; given an edit of a count, then it does not.
+- **Traces to**: `DES-SIZE-SUGGESTIONS`, `REQ-HOST-BUDGET`, `REQ-SCOPED-LIMITS`, `REQ-INSIGHTS-HTML-EXPORT`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`
+
 ## REQ-DELEGATED-ALLOCATION
 
 - **Statement**: The worker shall apply a **priorities plan** (`INT-PRIORITIES-PLAN-CONTRACT`) with no human keypress,
@@ -3296,6 +3320,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-07 | Issue #596, phase 3 (size suggestions). **NEW `REQ-SIZE-SUGGESTIONS`**: per project, doctor, the panel's PROJECTS view, the `dispatch_limit_edit` confirm of a size field and the insights page show the size, the p95 of what its runs used, and "fits", "not enough runs" or a suggested size with its reason and the exact call that applies it; the insights page draws each run's peak against its size and each live host's budget and use; nothing applies a suggestion but that call, confirmed. Checked and UNCHANGED: `REQ-HOST-BUDGET` (the budget a suggestion is flagged against), `REQ-SCOPED-LIMITS` (the call is its existing tool), `REQ-INSIGHTS-HTML-EXPORT` (a section is added under its existing posture: self-contained, deterministic, allowlisted). |
 | 2026-10-07 | Issue #596, phase 2, the last review round. **`REQ-HOST-BUDGET` WORDING CORRECTED**: a worker without `PI_WORKER_NAME` "never waits for another host, even one it would fit", where the text said "there is no other host to wait for", which is false when peers share its Valkey; the rule itself is UNCHANGED, and doctor names `PI_WORKER_NAME` as the fix when it sees peers. Checked and UNCHANGED: `REQ-HOST-REGISTRY`, `REQ-JOB-SIZE`. |
 | 2026-10-07 | Issue #596, phase 2, review gate round 2. **`REQ-HOST-BUDGET` CORRECTED**: a worker without `PI_WORKER_NAME` refuses a size that never fits it (`job-size-exceeds-host`, `-share`), on whatever queue, because it declares no fleet and so has no other host to wait for; only a worker that declared a fleet defers a shared-queue never-fits job. The acceptance gains that case. Checked and UNCHANGED: `REQ-HOST-REGISTRY`, `REQ-JOB-SIZE`, `REQ-WAIT-FOR`. |
 | 2026-10-07 | Issue #596, phase 2, review gate round 1. **`REQ-HOST-BUDGET` CORRECTED**: a job on the shared queue is never refused for its size (the fleet refusal is removed: the registry lists no host that is restarting), the two never-fits refusals apply to a job on a host's own queue and come before any wait; `PI_CONCURRENCY` is judged inside the budget so a hold keeps a job slot; a restarted worker counts the job containers its reaper left before admitting anything; a second pickup of a running job id frees nothing; a job's CPUs count as reserved CPU. The acceptance gains the repros' cases (the stalled repeat, the flood behind host slots, the survivor, the waiting job). **`REQ-MULTI-HOST-COORDINATION` AMENDED**, one sentence: with a budget the host-wide bound is the budget's job count. Checked and UNCHANGED: `REQ-SCOPED-LIMITS`, `REQ-WAIT-FOR`, `REQ-QUEUE-BURST-NO-DROP`. |

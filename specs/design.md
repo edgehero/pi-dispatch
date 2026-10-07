@@ -497,6 +497,75 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `INT-HOST-REGISTRY-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-LIVE-PROBE-CONTRACT`
 
+## DES-SIZE-SUGGESTIONS
+
+- **Decision** (issue #596, phase 3): a project's size is SUGGESTED from what its recent runs used, by ONE pure
+  function (`worker/src/size-suggest.mjs`, `suggestSize`), and only suggested: doctor, the panel's PROJECTS view, the
+  `dispatch_limit_edit` preview and the insights page all call it and show its answer, and each names the exact
+  `dispatch_limit_edit` call (`dispatch_limit_add` for a project with no row of its own) that applies it. Nothing
+  applies a suggestion; the operator's confirm of that call is the decision. The pieces, each with its reason:
+  - **What it reads**: the project's run records of the last 30 days or its last 50 runs, whichever is fewer runs,
+    that carry BOTH `resources` and `size` (`INT-RUN-HISTORY-FILE-CONTRACT`). A record from before either is ignored,
+    never guessed: without a size a peak cannot say whether it was cut off, and without `resources` there is nothing to
+    read. In each dimension only the runs given AT LEAST the current size count: a run at a smaller size that was cut
+    off says the old size was too small, which is no longer the question, and counted, the OOM that caused a raise
+    would ask for the raise again (1.5x of the NEW size) until it aged out of the window. A run at a larger size counts,
+    because its peak below its limit is a true measurement, which is what a lowering needs.
+  - **Memory**, the first rule that applies decides: an `oom-killed` run raises to the larger of 1.5x the size and
+    1.25x the p95 peak; more than 10% of the runs at 90% of their own limit or more raises to 1.5x; fewer than 10
+    runs is "not enough runs"; the target 1.25x the p95 at most 0.75x the size lowers to the target; otherwise it fits.
+    The first two need no minimum: an OOM, or a run cut off, is a fact about the size by itself. `memory.peak`
+    counts page cache, which the kernel reclaims at the limit, so a peak AT the limit is a run that was cut off, not a
+    measured need; the at-limit share is that signal, and erring high is the safe direction. A size rounds UP to a
+    step (256m up to 2g, 512m up to 8g, then 1g) and never below the 512m floor, so a suggestion is one an operator
+    would write, and a lowering that rounds back to the size is "fits".
+  - **CPUs**, after the 10 run minimum (no single CPU event decides alone): the median run held back by its CPU limit
+    more than 25% of its wall time raises by 50%; the p95 cores used (CPU time over wall time) below 0.4x the cpus
+    lowers to 1.25x that p95; otherwise it fits. A step is 0.25, the floor 0.25. The wall time is the record's
+    pickup-to-end span, which includes the clone before the container starts, so cores read slightly low; the 0.4
+    threshold leaves that margin. Throttling is against the job's `--cpus`, which is the host's CPU ceiling, not its
+    size (`DES-HOST-BUDGET`): a raise there buys the job a larger WEIGHT, more CPU under contention, which is what a
+    size is.
+  - **Every boundary in integers** (BigInt where a product can pass 2^53): "exactly 10%" and "exactly 0.75x" land on the
+    side the rule says, on every host, and the tests pin each boundary from both sides.
+  - **The numbers are untrusted.** `resources` is produced inside the job's container, so the function judges every
+    record again, whatever the worker judged when it wrote it (a record is a file the account can edit; a mirrored
+    one crossed Valkey): a field that is not a safe non-negative integer leaves that record out of that dimension, a
+    peak above the run's own limit is clamped to it (it reads AT the limit: a job may honestly allocate that much, so
+    inflating a peak buys it nothing it could not take), CPU time is clamped to 256 cores of the wall time and throttled
+    time to the wall time, and a wall time that is missing, not positive or over 7 days gives no CPU sample.
+  - **The budget**: a suggestion above the host budget a surface knows is FLAGGED, never capped: doctor judges it
+    against this host's budget, the panel and the insights page against the largest budget any live host publishes
+    (above it, the size fits no host). A budget that is off or unknown flags nothing.
+  - **One function, a leaf**: it imports only `job-size.mjs`, so the admin bundle inlines it, and the insights page
+    (which refuses every worker import) gets its answer from its caller. One function is what keeps four surfaces
+    from disagreeing about one project.
+- **Why a separate entry, not an amendment of `DES-HOST-BUDGET` or the job size rules**: those decide what a job IS
+  given and whether it may START, from operator-authored files, synchronously at pickup. This decides what an operator
+  is TOLD, from job-produced numbers, off any job path. Folding it into the admission entry would put an untrusted
+  input beside the rules that must never read one.
+- **Rejected**:
+  - *Applying a suggestion automatically*: the numbers come from code the job controls, so a job could size itself
+    up to the budget and take room other projects were promised. The plan's decision; it is why every surface names
+    a call instead of a button.
+  - *Counting every run in the window whatever its size*: the OOM that triggered a raise keeps asking for another,
+    so each raise would ask for the next until the OOM aged out of the window (the tests pin that it does not).
+  - *Trusting the record's validation*: the record's rebuild nulls a malformed block at write time, but the file is
+    read back later from a directory and a Valkey mirror the job's own account may reach.
+  - *A float comparison at the boundaries*: 0.75x and 10% are not exact in binary, so the same records could flip a
+    verdict between two hosts.
+  - *p99 or the maximum*: one burst would hold a size up forever; p95 of at most 50 runs still lets two outliers in
+    50 count.
+- **Residuals**: a job can deflate its numbers too (report a small peak), which suggests a LOWER size; the next runs
+  at that size then run into the limit or the OOM, which the raise rules see. The panel and the insights page flag
+  against the largest budget per dimension, so a size whose memory fits one host and CPUs another is not flagged
+  there; that host's doctor says so. Each surface reads the run records of its own host (a shared `PI_LOGS_DIR`
+  holds every host's), never the Valkey mirror of other hosts' runs, so on a fleet with separate logs each host suggests
+  from the runs it ran. CPU suggestions read the job's whole span, so a job that idles waiting on a
+  provider reads as underused, which is true of the CPU it holds.
+- **Traces to**: `REQ-SIZE-SUGGESTIONS`, `DES-HOST-BUDGET`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-HOST-REGISTRY-CONTRACT`, `INT-SCOPED-LIMITS-FILE-CONTRACT`
+
 ## DES-CRON-VIA-BULLMQ-SCHEDULER
 
 - **Decision**: Scheduled triggers use BullMQ **Job Schedulers** (`upsertJobScheduler`). We do not build a
@@ -8797,3 +8866,4 @@ a tunnel.
 | 2026-10-07 | Issue #596, phase 2, review gate round 1. **`DES-HOST-BUDGET` CORRECTED** in six places, each refuted by a repro against the real processor and budget. (1) The ledger was keyed by job id alone, and the same id reaches the gate twice on one host (a scheduled job whose lock lapsed is moved back to wait while attempt 1 still runs): attempt 2 overwrote the entry and its release freed attempt 1's room (60g on a 48g budget). Now every pickup has a TICKET, an entry acts only for the ticket that took it, and the gate defers a job id the ledger holds (`running-here`, running or orphan) without making it a waiter. (2) The fleet refusal (`job-size-exceeds-fleet`, two registry reads 30 s apart) is REMOVED: a restarting host is absent from the registry (a clean stop deletes its row, a crash lets it expire, a timed-out read drops it), so a job only it could run was refused for good. A job on the shared queue is never refused for its size, nor for this host's share (a larger host may fit it); it defers 60 s with a named line, and doctor names a project that fits no live host. `job-size-exceeds-host` and `-share` stay for a job on the host's own queue. (3) The `PI_CONCURRENCY` host slot was taken before the budget and starved a big shared-queue job behind a host-queue flood (its hold suspended at the slot); the count is now the budget's third dimension, one per job against the live limit, so the oldest waiter's hold keeps a job slot; without a budget the host slot stands. (4) A worker that restarts seeds the ledger after its reaper from every blessed venue's remaining job containers (labels, else the largest size any project could have), and admits nothing while that listing is unread (`unseeded`, `host_budget_seed_unread`, the registry's `budgetSeed`, doctor). (5) An orphan whose container is `exited`, `dead` or `stopped` is gone; one still `created` is removed first. (6) The size and the never-fits check moved above the wait gate. Also: every hold's `getState` is bounded at 5 s and the tick runs its four pieces with one in flight each, none waiting on another (an unbounded read on a `maxRetriesPerRequest: null` client held verify and the sweep forever); a job's `cpus` are said to be counted as reserved CPU though the runtime uses them as a weight; the residual names the hop of a never-fits job between hosts and the idle holds of a job waiting on several; and the aggregate reserve's fail-open line says what a quota that DIFFERS means (from the executing review: with the budget off and the operator's quota still set it said no quota was held, while one was, capping jobs to a budget turned off). Rejected, with reasons: any fleet refusal, a share refusal on the shared queue, a host slot before the budget, `rm -f` of every listed orphan, admitting from an unread boot listing. The phase 2 rows above this one, which had been put at the top of this oldest-first table, are moved to its end. Checked and UNCHANGED: `DES-CONCURRENCY-3` beyond its one amended sentence (the count is judged in the budget), `DES-HOST-REGISTRY` (one more self-describing field; no decision reads the rows), `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-WAIT-FOR` (the wait gate itself is unchanged; it now runs after the size check). |
 | 2026-10-07 | Issue #596, phase 2, review gate round 2. **`DES-HOST-BUDGET` CORRECTED** in three places, each refuted by a repro against the real processor and budget. (1) Round 1's "a job on the shared queue is never refused for its size" held only on a fleet: a worker without `PI_WORKER_NAME` drains no host queue, so EVERY job sits on the shared queue with no declared fleet to wait for, and a never-fits job deferred every 60 s forever with no record. Now a worker that declared no fleet refuses it (`job-size-exceeds-host`, `-share`), free and before any spend, recorded and logged with both sizes, as it does a job on its own queue; only a multi-host worker defers a shared-queue never-fits job. (2) The boot listing is read PER VENUE: one listing for the whole host made `PI_BACKENDS=local,podman` with Podman absent or down answer `unseeded` for every docker job, forever. An unread venue now stops only its own jobs; a venue whose binary is absent (`ENOENT`) or whose boot job-user decision is `unmappable` counts as holding no container; the registry's `budgetSeed` names the unread venues and doctor says which. The rejected-alternative sentence claiming a host whose runtime does not answer cannot start a job anyway is corrected: the other venue's runtime can. (3) A seeded survivor is keyed by its container name, so the id check admitted the retried job whose container that is, and the sweep then removed that job's freshly created container; the gate now defers `running-here` a job whose container name an orphan carries, and the sweep never asks about a name a live entry carries. Also: an unlabelled survivor's guessed size is capped at the budget (the first refresh now precedes the first listing) and doctor names each unlabelled job container; the release comment says an orphan and a seeded survivor keep a `PI_CONCURRENCY` slot until gone (this entry already said every count slot OUTSIDE the budget goes back); `makeHostBudget`'s `countLimit` is required, since a default of "no bound" let a wiring drop the count silently. Rejected: deferring a never-fits job on a single host (there is no other host), seeding the absent venue as "unread forever". Checked and UNCHANGED: `DES-CONCURRENCY-3`, `DES-HOST-REGISTRY` (one field's values widen; no decision reads the rows), `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-WAIT-FOR`, and the constitution (`CONST-BUDGET-BEFORE-TOKENS` and `CONST-RETRY-INFRA-ONLY` are what the single-host refusal now honours). |
 | 2026-10-07 | Issue #596, phase 2, review gate round 3. **`DES-HOST-BUDGET` CORRECTED** in two sentences. (1) Round 2's "a venue whose boot job-user decision is `unmappable` counts as holding no container" held only for the causes that refuse a boot (`BOOT_REFUSING_JOB_USER_CAUSES`, `PODMAN_BOOT_REFUSING_CAUSES`): `runtime-unreadable` and `podman-unreadable` describe one unreadable answer, are decided again per job, and can clear, after which that venue would run jobs beside survivors nobody counted. Those venues now stay unread while their listing fails. (2) An unlabelled survivor's guessed size was capped at the budget only when the first refresh ran before the first listing, and the tick can list first; the guess is now kept uncapped on the entry and capped at the budget in force on every refresh. Checked and UNCHANGED: `DES-CONCURRENCY-3`, `DES-HOST-REGISTRY`, `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, and the constitution. |
+| 2026-10-07 | Issue #596, phase 3 (size suggestions). **NEW `DES-SIZE-SUGGESTIONS`**: one pure function (`worker/src/size-suggest.mjs`) suggests a project's memory and CPUs from its runs of the last 30 days or 50 runs, only those carrying `resources` and `size` and given at least the current size; memory raises on an OOM (the larger of 1.5x and 1.25x the p95) or on more than 10% of the runs at 90% of their limit (1.5x), says "not enough runs" under 10, and lowers to 1.25x the p95 when that is at most 0.75x the size, rounded up to 256m, 512m or 1g steps from 512m; CPUs raise by 50% when the median run is throttled over 25% of its wall time and lower to 1.25x the p95 cores when those are below 0.4x the size, in 0.25 steps; every boundary in integers; every record judged again as untrusted (non-integers ignored, values clamped to the container's bounds). Doctor, the PROJECTS view, the `dispatch_limit_edit` preview and the insights page call it, each naming the exact call that applies it, and nothing applies it. A separate entry, not an amendment of `DES-HOST-BUDGET`: that entry decides admission from operator files, this one advice from job-produced numbers. Checked and UNCHANGED: `DES-HOST-BUDGET` (the suggestion is flagged against the budget, never admitted by it), `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-CONCURRENCY-3`, `DES-HOST-REGISTRY` (its budget fields gain readers, no writer). |

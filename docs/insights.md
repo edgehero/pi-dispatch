@@ -118,7 +118,8 @@ trigger's own `model`/`provider` fields or the `/dispatch set` knobs.
 ## What each run records about resources
 
 Every run record carries `resources`: what the job's container used, read from its own cgroup just before the
-runner's last line (issue #596). It is not drawn on this page yet; it is in each `<logsDir>/<jobId>.json`.
+runner's last line (issue #596). It is in each `<logsDir>/<jobId>.json`, and the page's **job sizes** section draws
+the memory part of it (below).
 
 | Field | What it is |
 |---|---|
@@ -135,8 +136,9 @@ runner's last line (issue #596). It is not drawn on this page yet; it is in each
   image's supervisor reads the cgroup when it reports the death, so a job killed for memory carries the numbers that
   show it.
 - **These numbers are advisory.** They are produced inside the job's container, which runs code the job controls, so
-  a job can inflate any of them (or report less). Anything that suggests a size from them (the later phases of issue
-  #596) must clamp them to the container's own bounds and must never apply a size by itself: an operator decides.
+  a job can inflate any of them (or report less). The size suggestions read them again as untrusted: a value that is
+  not a whole number is ignored, one past the container's own bounds is clamped to them, and no suggestion is applied
+  by anything but the call it names, which you confirm.
 - A job whose container ran out of memory ends `oom-killed`, outcome `policy`, and is not retried. The worker reads it
   so only when the image's supervisor reported it on a signed line, the container exited 137 without the worker
   stopping it, and `memPeak` reached 90% of the container's memory limit: the kernel counts a kill by the HOST's
@@ -146,6 +148,21 @@ runner's last line (issue #596). It is not drawn on this page yet; it is in each
   4 GB and 2 CPUs). Every record says which in `size` (`memMiB`, `cpuCenti` in hundredths of a CPU, and `source`:
   `project`, `env` or `default`). Compare `memPeak` with it to choose a size ([job sizes](scoped-limits.md#job-sizes-version-3)).
 - Disk I/O, disk space and network are not measured or isolated.
+
+### The job sizes section
+
+- **Each host's budget in use**: every live host's memory and CPU budget, and what its running jobs hold now, as the
+  hosts publish them. "unknown" while a host has not read its runtime yet, "off" for a budget switched off.
+- **Per project, a chart of peak memory over time against the size line.** One dot per run (red for a run that ended
+  `oom-killed`) at its peak, over the last 30 days. The line is each run's size from that run on, and it steps to the
+  project's current size at the right edge. A dot on the line is a run that reached its limit. A peak above its
+  size is drawn at the size.
+- **The suggestion** above each chart, and the exact call that applies it. These are the same runs and the same rules
+  as `pi-dispatch doctor` and the panel's PROJECTS view use
+  ([choosing a size from the runs](scoped-limits.md#choosing-a-size-from-the-runs)). A suggestion larger than every
+  live host's budget says so. Nothing on this page changes a size.
+- Only this host's run records are read for the sizes. A run another host recorded is counted only on a shared
+  `PI_LOGS_DIR`.
 
 ## Honest limits
 
