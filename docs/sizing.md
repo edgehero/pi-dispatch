@@ -1,8 +1,9 @@
 # Sizing jobs
 
 Every job runs in its own container, and every container has a **size**: the memory it may hold and the CPU weight
-it gets. Every worker also keeps a **host budget**: how much memory and CPU its running jobs may hold together. A job
-starts only when its size fits beside what already runs on that machine.
+it gets (its **weight** is its share of the CPU when jobs compete for it, not a cap). Every worker also keeps a
+**host budget**: how much memory and CPU its running jobs may hold together. A job starts only when its size fits
+beside what already runs on that machine.
 
 Out of the box every job is `4g` and `2` CPUs, and the budget is read from the machine. That is a sane start, and
 this page is how you go from there to sizes that match your projects:
@@ -16,8 +17,8 @@ this page is how you go from there to sizes that match your projects:
 
 Then [a worked example](#a-worked-example) on one 64 GB machine with three projects. The reference for each setting
 lives with its feature: [job sizes](scoped-limits.md#job-sizes-version-3) in scoped limits, [the host
-budget](multi-host.md#the-host-budget) in multi host, and [what each run records](insights.md#what-each-run-records-about-resources)
-in insights.
+budget](multi-host.md#the-host-budget) in multi host, and [what each run
+records](insights.md#what-each-run-records-about-resources) in insights.
 
 ## What is isolated, and what is not
 
@@ -34,7 +35,8 @@ A size isolates **memory and CPU**, and nothing else.
 - **Disk space is not isolated.** A job's clone, its build output and its container's writable layer all land on the
   machine's disk, and one job can fill it for everyone.
 - **Network bandwidth is not isolated.** Jobs share the machine's link and the egress proxy in front of it.
-- **The page cache counts toward a job's memory.** Files a job reads fill the cache, and that cache is charged to the
+- **The page cache counts toward a job's memory.** The page cache is the kernel's copy, in memory, of files read or
+  written recently. Files a job reads fill the cache, and that cache is charged to the
   job. So a job that reads many files shows a memory peak at its limit even when it was never short: the kernel gives
   cache back before it kills anything (measured: a `512m` container reading 1.2 GB of files peaked at exactly `512m`,
   with no kill). That is why a peak at the limit raises no suggestion, and only a confirmed out of memory kill does.
@@ -45,7 +47,8 @@ Change nothing yet. Every run already records what it was given and what it used
 
 - **`size`**: the memory and CPUs the job got (`memMiB`, `cpuCenti` in hundredths of a CPU) and where they came from
   (`project`, `env` or `default`).
-- **`resources`**: what its container used, read from its own cgroup at the end of the run: the memory peak, CPU time,
+- **`resources`**: what its container used, read from its own cgroup (the kernel's group that holds a container's
+  processes and keeps count of, and limits, what they use) at the end of the run: the memory peak, CPU time,
   how long the CPU ceiling held it back, out of memory kills, memory pressure and the process peak. The fields are
   listed in [insights](insights.md#what-each-run-records-about-resources). A run on a job image from before sizes
   records `null` here, so pull or rebuild the job image first.
@@ -56,12 +59,14 @@ Where to see them:
 - **The insights page** (`/dispatch insights`): its job sizes section draws each project's memory peaks over the last
   30 days against its size line, with every `oom-killed` run in red ([insights](insights.md#the-job-sizes-section)).
 - **The panel's PROJECTS view** (`j` in `/dispatch`): each project's size and the p95 of its runs' memory peaks and
-  cores used.
+  cores used (the p95 is the value 95 of every 100 runs stay at or below, so one odd run does not move it).
 - **`pi-dispatch doctor`**: one line per project with its size and what its runs suggest.
 
-A lowering needs at least 10 measured runs of the project in the last 30 days (until then doctor says "not enough
-runs to suggest a size yet"), and a raise needs one confirmed out of memory kill. These numbers are produced inside the job's container, which runs code the job controls,
-so read them as advisory: a job can inflate them or report less.
+Only runs that carry both `size` and `resources` count, which means runs of an upgraded worker with an upgraded job
+image: the count starts when you upgrade, not before. A lowering needs at least 10 such runs of the project in the
+last 30 days (until then doctor says "not enough runs to suggest a size yet"), and a raise needs one confirmed out of
+memory kill. These numbers are produced inside the job's container, which runs code the job controls, so read them
+as advisory: a job can inflate them or report less.
 
 ## 2. Set a size per project
 
@@ -84,10 +89,12 @@ A size lives on a project's row in the scoped-limits file, so first group the re
 - **Everything else gets the default:** `PI_JOB_MEMORY` and `PI_JOB_CPUS` in `.env`, `4g` and `2` unless you set
   them. A row that sets only one of the two takes the other from there. A bad value stops the worker at boot.
 - **No swap beyond memory.** A job that needs more memory needs a bigger size, not swap.
-- **`/dev/shm`** is half the job's memory, at most `1g`. Nothing sets it separately.
+- **`/dev/shm`** is half the job's memory, at most `1g`. Nothing sets it separately, and what a job writes there
+  counts toward its memory.
 - **Processes** stay at 512 per job whatever the size.
-- **A size needs `"version": 3`,** and only a `project:<id>` row may carry one. The panel (`m`) and the tools
-  (`dispatch_limit_add`, `dispatch_limit_edit`) write the version for you, behind your confirm.
+- **A size needs `"version": 3`,** and only a `project:<id>` row may carry one. The tools (`dispatch_limit_add`,
+  `dispatch_limit_edit`) write the version for you, behind your confirm. The panel's limit dialogs (`m`) keep a row's
+  size as it is and cannot set one.
 - **Upgrade and restart every worker before you write a size.** An older worker refuses a version 3 file when it
   starts, and one already running keeps its last good file, so neither the size nor any later edit applies on it.
   Doctor warns about such a worker on a fleet.
@@ -111,8 +118,27 @@ in memory and in CPU, set by four `.env` settings ([the full table](multi-host.m
 - **A value** (`64g`, `49152m`, `12`, `3.5`) is the budget itself: no reserve is taken from it. A value below one
   default job stops the worker at boot.
 - **`off`** puts no limit on that resource. Only `PI_CONCURRENCY` then bounds it.
-- The budget settings are read from `.env` only, never from the panel's settings, so a budget never moves under
-  running jobs.
+- The four budget settings are read from `.env` only, never from the panel's settings, and only when the worker
+  starts, so a budget never moves under running jobs. Restart the worker after you change one.
+
+To turn the budget off, so that only `PI_CONCURRENCY` bounds the jobs, put these lines in `.env` and restart the
+worker:
+
+```sh
+PI_HOST_MEMORY_BUDGET=off
+PI_HOST_CPU_BUDGET=off
+```
+
+To keep `auto` but change what it leaves for the machine, give a reserve a value: a memory amount such as `2g` or
+`1536m`, a number of CPUs such as `0.5`, or `0` for none (`0g` is refused):
+
+```sh
+PI_HOST_RESERVE_MEMORY=2g
+PI_HOST_RESERVE_CPUS=0.5
+```
+
+**On Docker Desktop the budget is the VM's,** not your computer's. To give jobs more, raise the memory and CPUs of
+the VM in Docker Desktop's settings (Resources), then restart the worker so it reads the new size at once.
 
 **`PI_CONCURRENCY` is the third dimension.** The budget counts it beside memory and CPU, and whichever is reached
 first applies. Doctor says which one binds on this machine. On a small machine the budget may run fewer jobs than
@@ -165,14 +191,15 @@ included. So every job container, sandbox and doctor probe runs inside one paren
 CPU quota is the CPU budget. All jobs together then stay inside the budget, and the reserve stays free for the egress
 proxy, Valkey, the worker and the rest of the machine.
 
-Who sets that quota depends on the container runtime:
+Who sets that quota, and whether doctor can read it back, depends on the container runtime:
 
-| Runtime | Who sets the quota |
-|---|---|
-| Rootless Podman | The worker, at start and whenever the budget changes, through your account's systemd user manager. It survives a reboot. |
-| Docker Desktop, and Docker with the `cgroupfs` driver | The worker, at start, through a short helper container of the job image. A Docker Desktop restart drops it; the worker checks it every ten minutes and writes it again. |
-| Docker on Linux with systemd, and rootful Podman | You, once, as root. It survives a reboot. Doctor prints the exact command with your budget. |
-| Rootless Docker | You, once, as the daemon's account, with `systemctl --user`. Doctor prints the command. |
+| Runtime | Who sets the quota | Does doctor read it back |
+|---|---|---|
+| Rootless Podman | The worker, at start and whenever the budget changes, through your account's systemd user manager. It survives a reboot. | Yes |
+| Docker Desktop, and Docker with the `cgroupfs` driver | The worker, at start, through a short helper container of the job image. A Docker Desktop restart drops it; the worker checks it every ten minutes and writes it again. | Yes |
+| Docker with systemd on this machine | You, once, as root. It survives a reboot. Doctor prints the exact command with your budget. | Yes |
+| Rootful Podman, and a Docker daemon with systemd on another machine | You, once, as root on the machine the containers run on. It survives a reboot. Doctor prints the command. | No |
+| Rootless Docker | You, once, as the daemon's account, with `systemctl --user`. Doctor prints the command. | No |
 
 For a CPU budget of 15 the root command is:
 
@@ -180,11 +207,34 @@ For a CPU budget of 15 the root command is:
 sudo systemctl set-property pidispatch.slice CPUQuota=1500%
 ```
 
-Doctor reads the quota back on each runtime and warns "no host CPU reserve across jobs" with the command when it is
-missing or differs from the budget. Jobs still run without it, inside the parent (the worker logs
-`cpu_reserve_fail_open`). Where rootless Podman uses the `cgroupfs` cgroup manager, jobs run without the parent and
-each job's CPU weight is capped at the default, so the proxy and Valkey get a fair share of the CPU, not a reserve.
-With `PI_HOST_CPU_BUDGET=off` no quota is set.
+**What that command does.** It puts a CPU limit on `pidispatch.slice`, the systemd group every job container runs
+in: all jobs together may use at most 15 CPUs (`1500%` is 15 times one CPU). systemd saves the setting, so it
+survives a reboot, and you run it once. When the CPU budget changes (a bigger machine, a new `PI_HOST_CPU_BUDGET`),
+run it again with the new number; on Docker with systemd doctor tells you when the quota differs from the budget. To
+remove it, run the same command with nothing after the `=`:
+
+```sh
+sudo systemctl set-property pidispatch.slice CPUQuota=
+```
+
+**Where doctor reads the quota back** (rootless Podman, Docker Desktop and Docker's `cgroupfs` driver, Docker with
+systemd on this machine), it warns "no host CPU reserve across jobs" with the command when the quota is missing or
+differs from the budget, and the warning goes away once the quota is right. **Where it cannot** (rootful Podman,
+rootless Docker, a Docker daemon on another machine), nothing can read the quota from here: doctor always warns "no
+host CPU reserve across jobs" and says why (the worker does not manage that slice, or it cannot be read from here),
+even after you ran the command, and the worker logs `cpu_reserve_fail_open` with the status `unmanaged`. On a host
+with cgroup v1 no quota is kept at all. Jobs run in every case, inside the parent. Where rootless Podman uses the
+`cgroupfs` cgroup manager, jobs run without the parent and each job's CPU weight is capped at the default, so the
+proxy and Valkey get a fair share of the CPU, not a reserve.
+
+On Docker Desktop and Docker's `cgroupfs` driver the helper is a container of the job image, so the job image must be
+present: without it doctor says "the quota of pidispatch.slice was not readable (job-image-absent)", and the worker
+cannot write the quota either. Pull or build the job image, then restart the worker.
+
+**With `PI_HOST_CPU_BUDGET=off`** the worker clears the quota only where it sets it itself (rootless Podman, Docker
+Desktop and Docker's `cgroupfs` driver). A quota set with `sudo` stays, and keeps all jobs together under it, until
+you clear it with `sudo systemctl set-property pidispatch.slice CPUQuota=`. On Docker with systemd doctor warns about
+it: "the CPU budget is off, but pidispatch.slice still has a quota of 15 CPUs, so jobs together are held to it".
 
 There is no memory limit across all jobs, on purpose: when a group of containers runs out of memory together, the
 kernel kills the largest job in the group, not the one that grew. The budget keeps the sizes inside the memory budget
@@ -195,7 +245,8 @@ venue](podman.md#the-cpu-reserve-on-this-venue).
 ## 6. Reading the suggestions
 
 pi-dispatch suggests a size for each project from its measured runs of the last 30 days (the newest 50 at most).
-The same runs and the same rules show in four places:
+It reads the run records of this machine only (`PI_LOGS_DIR`), so on a fleet each machine suggests from its own runs
+unless the machines share that directory. The same runs and the same rules show in four places:
 
 - **`pi-dispatch doctor`**: one line per project, with the exact call that applies it.
 - **The panel's PROJECTS view** (`j`): the size, the p95 peaks, the suggestion and the call.
@@ -205,7 +256,8 @@ The same runs and the same rules show in four places:
 
 How to read one:
 
-- **Memory is raised only after a confirmed out of memory kill.** A run that ended `oom-killed` suggests 1.5 times
+- **Memory is raised only after a confirmed out of memory kill** at the current size or larger (a kill at a smaller
+  size, from before an earlier raise, does not raise it again). A run that ended `oom-killed` suggests 1.5 times
   the larger of the size and the largest size killed in the window. A peak at the limit raises nothing (the page
   cache, above); when such runs were also stalled for memory, the line says so as a fact, with no call.
 - **Memory is lowered** when 1.25 times the p95 peak is at most 0.75 times the size, never below 1.25 times the
@@ -216,11 +268,16 @@ How to read one:
 - **A suggestion is capped at what the host offers:** the budget, or the project's `hostShare` of it. Where the runs
   ask for more, the line says "this project's runs need more than this host offers". Nothing ever suggests growing
   the host's budget: that budget is what the machine promised every other project.
-- **A call is offered exactly when the worker would admit the suggested job.** Where it would not, the line names
-  what does not fit and offers no call.
+- **A call is offered exactly when the suggested size could ever start on this host.** Where it could not, the line
+  names what does not fit and offers no call.
 - **Nothing is applied automatically.** The numbers come from inside the job, so a job could make them up. You apply
   a suggestion with the call it names, `dispatch_limit_edit` (or `dispatch_limit_add` for a project without a row),
   behind your confirm.
+
+**How to apply a call.** Open pi with the admin extension (the one that gives you `/dispatch`) and ask it to run the
+call, for example "run dispatch_limit_edit {"index":1,"memory":"12g"}". It shows you the row before and after, with
+the project's peaks, and asks you to confirm; nothing is written until you do, and it refuses where nobody can
+confirm. The panel's limit dialogs (`m` in `/dispatch`) cannot do this: they edit a row's counts and keep its size.
 
 The rules in full, with their rounding steps, are in [choosing a size from the
 runs](scoped-limits.md#choosing-a-size-from-the-runs).
@@ -305,13 +362,13 @@ is `42g`, 13 CPUs and 9 jobs, all inside the budget. Without the share, the ligh
 slot, and the `heavy` job would have waited for the first of them to end.
 
 **A stream of `medium` jobs arrives.** Seven start, which fills the budget in both memory (`56g` of 60108m) and CPU
-(14 of 15). Then a `heavy` job arrives. It does not fit, so it waits. The `medium` jobs still queued arrived before it, but
-`heavy` runs fewer jobs here than its `minJobs` (1), so the room is kept for the `heavy` job first. When one `medium` job
-ends, the next `medium` job does not start, because that would take the room kept for the `heavy` one. When three have
-ended, 4 medium jobs (`32g`, 8 CPUs) leave room for `20g` and 4 CPUs, and the `heavy` job starts at its next check,
-within about nine seconds. From then on the `medium` jobs start again as others end. Without `minJobs` it would not
-starve either, but it would wait its turn: room is kept for the oldest waiting job, so every `medium` job queued
-before it would start first.
+(14 of 15). Then a `heavy` job arrives. It does not fit, so it waits. The `medium` jobs still queued arrived before
+it, but `heavy` runs fewer jobs here than its `minJobs` (1), so the room is kept for the `heavy` job first. When one
+`medium` job ends, the next `medium` job does not start, because that would take the room kept for the `heavy` one.
+When three have ended, 4 medium jobs (`32g`, 8 CPUs) leave room for `20g` and 4 CPUs, and the `heavy` job starts at
+its next check, within about nine seconds. From then on the `medium` jobs start again as others end. Without
+`minJobs` it would not starve either, but it would wait its turn: room is kept for the oldest waiting job, so every
+`medium` job queued before it would start first.
 
 **A size that can never fit.** If `heavy` were set to `64g`, it would be larger than this machine's budget of 60108m.
 On this single worker its jobs would be refused before anything is spent (`job-size-exceeds-host`), and doctor would

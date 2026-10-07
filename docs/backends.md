@@ -143,32 +143,36 @@ ones adapters get wrong:
   --live` reads what these cannot: `pids.max`, `memory.max`, `memory.swap.max`, `cpu.max` and `cpu.weight` inside
   a real container, and its `/proc/self/mountinfo`.
 - **Every venue on this host runs a job at its size** (issue #596): `--memory` with an equal `--memory-swap` (no
-  swap beyond it), `--cpu-shares` for its CPU weight, `--shm-size` at most half its memory, one `--cpus` ceiling
-  on each job (the host's CPU budget, by default the runtime's CPU count minus one core when it has four or more),
-  and two labels with its size (`pi.dispatch.mem`, `pi.dispatch.cpu`) that doctor holds the
-  [host budget](multi-host.md#the-host-budget) against. The ceiling bounds a single job; every job container also
-  runs under the one parent cgroup `pidispatch.slice` (`--cgroup-parent`), whose CPU quota is the CPU budget, so all
-  jobs together keep the reserve ([the CPU reserve across all jobs](multi-host.md#the-cpu-reserve-across-all-jobs)).
-  The egress proxy and Valkey never run under it. Who sets that quota depends on the venue: the worker itself on
+  swap beyond it), `--cpu-shares` for its CPU weight, `--shm-size` at most half its memory, one `--cpus` ceiling on
+  each job (the host's CPU budget, by default the runtime's CPU count minus one core when it has four or more), and
+  two labels with its size (`pi.dispatch.mem`, `pi.dispatch.cpu`) that doctor holds the [host
+  budget](multi-host.md#the-host-budget) against. The ceiling bounds a single job; every job container also runs
+  under the one parent cgroup `pidispatch.slice` (`--cgroup-parent`), whose CPU quota is the CPU budget, so all jobs
+  together keep the reserve ([the CPU reserve across all jobs](multi-host.md#the-cpu-reserve-across-all-jobs)). The
+  egress proxy and Valkey never run under it. Who sets that quota depends on the venue: the worker itself on
   rootless Podman (`systemctl --user`) and on Docker's `cgroupfs` driver, Docker Desktop included (a short helper
-  container that writes `cpu.max`, written again after a Docker Desktop restart), the operator once as root on Docker
-  with systemd and on rootful Podman, and as the daemon's account on rootless Docker (doctor prints the command). A quota that is not in place never stops a job: doctor warns "no host CPU reserve
-  across jobs" and the worker logs `cpu_reserve_fail_open`. There is no memory limit across jobs (the kernel would
-  kill the largest job, not the one that grew); the budget's admission bounds memory. Both builders emit the same
-  flags. A venue's `info` gives the budget's `auto` its memory
-  and CPU count; a venue that gives neither leaves the budget unknown, and the worker then holds no job back on it
-  and says so (`host_budget_unknown`). A container whose stop fails keeps its room in the budget until the venue's own
-  `ps -a` no longer lists it or lists it as `exited`, `dead` or `stopped` (one still `created` is removed first), so a
-  venue's container names and its `{{.State}}` words must stay exact. When the worker starts, it lists the venue's job
-  containers left after its reaper (`ps -a` with `{{.State}}` and the two size labels) and counts each until it is
-  gone; while that listing fails, it admits no job on that venue (the other venues' jobs still run). A venue whose
-  binary is not installed, or whose job user is refused, holds no container and counts as none. The size is the job's
-  project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` ([job sizes](scoped-limits.md#job-sizes-version-3)). Where
-  Docker reports `SwapLimit` or `CPUShares` false, it drops that flag: doctor warns, and the worker logs
-  `size_bound_unenforced` for each job. Where the runtime gives no CPU count, jobs run with no `--cpus` and doctor
-  warns. On Docker Desktop, after you give the VM fewer CPUs the first job loses one attempt (refunded and retried)
-  and the worker logs `cpu_ceiling_stale`; the next pickup reads the new count. How to choose sizes and a budget,
-  and what is not isolated (disk I/O, disk space, network bandwidth), is in [sizing jobs](sizing.md).
+  container that writes `cpu.max`, written again after a Docker Desktop restart), the operator once as root on
+  Docker with systemd and on rootful Podman, and as the daemon's account on rootless Docker (doctor prints the
+  command). A quota that is not in place never stops a job: doctor warns "no host CPU reserve across jobs" and the
+  worker logs `cpu_reserve_fail_open`. Doctor reads the quota back on rootless Podman, on the `cgroupfs` driver and
+  on Docker with systemd on this host; on rootful Podman, rootless Docker and a daemon on another machine nothing
+  can read it from here, so that warning stays even after the command ran. There is no memory limit across jobs (the
+  kernel would kill the largest job, not the one that grew); the budget's admission bounds memory. Both builders
+  emit the same flags. A venue's `info` gives the budget's `auto` its memory and CPU count; a venue that gives
+  neither leaves the budget unknown, and the worker then holds no job back on it and says so
+  (`host_budget_unknown`). A container whose stop fails keeps its room in the budget until the venue's own `ps -a`
+  no longer lists it or lists it as `exited`, `dead` or `stopped` (one still `created` is removed first), so a
+  venue's container names and its `{{.State}}` words must stay exact. When the worker starts, it lists the venue's
+  job containers left after its reaper (`ps -a` with `{{.State}}` and the two size labels) and counts each until it
+  is gone; while that listing fails, it admits no job on that venue (the other venues' jobs still run). A venue
+  whose binary is not installed, or whose job user is refused, holds no container and counts as none. The size is
+  the job's project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` ([job
+  sizes](scoped-limits.md#job-sizes-version-3)). Where Docker reports `SwapLimit` or `CPUShares` false, it drops
+  that flag: doctor warns, and the worker logs `size_bound_unenforced` for each job. Where the runtime gives no CPU
+  count, jobs run with no `--cpus` and doctor warns. On Docker Desktop, after you give the VM fewer CPUs the first
+  job loses one attempt (refunded and retried) and the worker logs `cpu_ceiling_stale`; the next pickup reads the
+  new count. How to choose sizes and a budget, and what is not isolated (disk I/O, disk space, network bandwidth),
+  is in [sizing jobs](sizing.md).
 - **`local`'s `nonRoot` and `localFolders` depend on which uid the job runs as** (issue #341). On macOS, Windows
   and Docker Desktop the image's own `USER` runs. On a daemon that enforces bind-mount ownership (native Linux
   Docker, rootful Podman) the worker runs the job as its own uid with `--user` and `HOME=/home/pi`, because
