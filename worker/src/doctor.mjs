@@ -97,7 +97,8 @@ import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } f
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM } from "./container-spec.mjs";
 import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDefaults, resolveJobSize } from "./job-size.mjs";
-import { SUGGEST_WINDOW_DAYS, suggestSize, suggestionCall, suggestionEvidence } from "./size-suggest.mjs";
+import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, suggestSize, suggestionCall, suggestionEvidence } from "./size-suggest.mjs";
+import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CGROUP_PARENT, cgroupParentFor, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -1847,13 +1848,26 @@ export async function collectChecks(shellVars, seams) {
 	const budgetChecksAt = checks.length;
 	const budgetChecksHere = hostBudgetChecks(budgetView, budgetChecksArgs);
 	checks.push(...budgetChecksHere);
-	// Issue #596, phase 3: one line per project with its size and what its recent runs suggest, judged against this host's
-	// budget. The records are read only when there is a project to suggest for.
+	// Issue #596, phase 3: one line per project with its size and what its recent runs suggest, capped at what this host
+	// offers. The records are read only when there is a project to suggest for, and not at all when the scoped-limits
+	// file does not load: every size read without it would be the default, not the project's, and a project that has a
+	// row would be told to `dispatch_limit_add` one.
 	const sizingProjects = readProjectFacts(env, fileExists).projects;
 	if (sizingProjects.length > 0 && !budgetView.error) {
-		const nowMs = (typeof seams.wallClock === "function" ? seams.wallClock : Date.now)();
-		const records = typeof seams.readRunRecords === "function" ? seams.readRunRecords(nowMs) : readSizingRecords(logsDirPath(env, home), { nowMs });
-		checks.push(...sizeSuggestionChecks({ projects: sizingProjects, limits: budgetChecksArgs.limits, env, records, budget: { memMiB: budgetView.memMiB, cpuCenti: budgetView.cpuCenti }, nowMs }));
+		if (scopedLimitFacts.parseError !== null) {
+			checks.push({ ok: true, label: "size suggestions: off until the scoped-limits file loads (a size read without it would be the default, not the project's)" });
+		} else {
+			const nowMs = (typeof seams.wallClock === "function" ? seams.wallClock : Date.now)();
+			const read = typeof seams.readRunRecords === "function" ? { records: seams.readRunRecords(nowMs), skipped: 0 } : readSizingRecords(logsDirPath(env, home), { nowMs });
+			const f = budgetView.facts ?? {};
+			const least = (...vs) => {
+				const known = vs.filter((v) => Number.isSafeInteger(v) && v > 0);
+				return known.length === 0 ? null : Math.min(...known);
+			};
+			const total = { memMiB: least(f.memTotalMiB, f.userMemMiB), cpuCenti: least(Number.isSafeInteger(f.hostCpus) ? f.hostCpus * 100 : null, f.userCpuCenti) };
+			checks.push(...sizeSuggestionChecks({ projects: sizingProjects, limits: budgetChecksArgs.limits, env, records: read.records, budget: { memMiB: budgetView.memMiB, cpuCenti: budgetView.cpuCenti }, total, nowMs }));
+			if (read.skipped > 0) checks.push({ ok: true, label: `size suggestions: ${read.skipped} run record${read.skipped === 1 ? "" : "s"} over ${SIZING_RECORD_MAX_BYTES / 1024} KiB skipped, not read` });
+		}
 	}
 	// Issue #596, phase 2: the aggregate CPU reserve per venue, read (never written) the way the worker reads it.
 	if (!budgetView.error) {
@@ -7782,45 +7796,23 @@ export function fleetBudgetChecks(rows, { limits = [], env = {} } = {}) {
 	return checks;
 }
 
-/** The `ps` that lists this runtime's job containers with their two size labels (issue #596, phase 2). */
-/**
- * The run records a size suggestion reads (issue #596, phase 3): every `*.json` in the logs directory written in the
- * suggestion's window (by the file's mtime, the time the worker wrote it, plus a day for skew), parsed, junk skipped.
- * The mtime filter keeps a keep-forever logs directory (PI_LOG_RETENTION_DAYS=0) from being read whole. Never throws:
- * an absent or unreadable directory holds no records, and the line then says there are not enough runs.
- */
-export function readSizingRecords(logsDir, { nowMs, fs = { readdirSync, readFileSync, statSync } } = {}) {
-	const since = nowMs - (SUGGEST_WINDOW_DAYS + 1) * 24 * 60 * 60 * 1000;
-	let names;
-	try {
-		names = fs.readdirSync(logsDir);
-	} catch {
-		return [];
-	}
-	const records = [];
-	for (const name of names) {
-		if (!name.endsWith(".json")) continue;
-		try {
-			const path = join(logsDir, name);
-			if (fs.statSync(path).mtimeMs < since) continue;
-			records.push(JSON.parse(fs.readFileSync(path, "utf8")));
-		} catch {
-			// unparseable, or reaped between the listing and the read
-		}
-	}
-	return records;
-}
-
 /**
  * One line per project in projects.json with its job size and what its recent runs suggest (issue #596, phase 3,
  * DES-SIZE-SUGGESTIONS), from the one pure `suggestSize` the panel and the insights page also call: "fits", "not enough
  * runs", or a suggestion naming the exact `dispatch_limit_edit` call (`dispatch_limit_add` for a project with no row)
- * that applies it. A RAISE is a warning with the call as its fix; a lowering is a fact line carrying the call. A
- * suggestion above this host's budget is a warning that says so. Nothing here applies a size: the numbers come from
+ * that applies it. A RAISE is a warning with the call as its fix; a lowering is a fact line carrying the call.
+ *
+ * Every raise is CAPPED at what this host offers (`hostCap`: its budget per dimension, or with the budget off or unknown
+ * the runtime's memory and CPU count, `total`): where the cap binds the line says the project's runs need more than
+ * this host offers, and where the size already is the cap it says so and offers no call. Nothing here advises growing
+ * the host's budget: that budget is what the host promised every other project. A suggestion above the project's own
+ * `hostShare` of the budget is flagged too: such a job would be refused here. Facts (memory pressure at the limit, the
+ * host's CPU ceiling) ride along as information, with no call. Nothing here applies a size: the numbers come from
  * inside the jobs' containers, and an operator confirms the call.
  */
-export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, records = [], budget = null, nowMs }) {
+export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, records = [], budget = null, total = null, nowMs }) {
 	const checks = [];
+	const cap = hostCap(budget, total);
 	for (const project of Array.isArray(projects) ? projects : []) {
 		const id = project?.id;
 		let current;
@@ -7829,31 +7821,46 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		} catch {
 			continue; // a refused PI_JOB_MEMORY or PI_JOB_CPUS fails the size lines above; the worker does not start
 		}
-		const s = suggestSize({ project: id, records, current, budget, now: nowMs });
+		const s = suggestSize({ project: id, records, current, cap, now: nowMs });
 		const words = suggestionEvidence(s);
-		const size = `${formatMemory(current.memMiB)}, ${formatCpus(current.cpuCenti)} CPUs`;
+		const size = `${formatMemory(current.memMiB)}, ${cpusText(current.cpuCenti)}`;
 		const call = suggestionCall(s, limits);
-		if (call === null) {
+		const facts = [words.memoryFact, words.cpuFact].filter(Boolean);
+		const factTail = facts.length > 0 ? `; ${facts.join("; ")}` : "";
+		const held = s.memory.suggested === null && s.memory.held !== null;
+		if (call === null && !held) {
 			const both = s.memory.reason === "not-enough-runs" && s.cpu.reason === "not-enough-runs";
 			const why = both ? `not enough runs to suggest a size yet (${words.memory} in the last ${SUGGEST_WINDOW_DAYS} days)` : `fits its runs (memory: ${s.memory.reason === "fits" ? words.memory : `${s.memory.reason}, ${words.memory}`}; CPUs: ${s.cpu.reason === "fits" ? words.cpu : `${s.cpu.reason}, ${words.cpu}`})`;
-			checks.push({ ok: true, label: `project ${id}: size ${size}${both ? ": " : " "}${why}` });
+			checks.push({ ok: true, label: `project ${id}: size ${size}${both ? ": " : " "}${why}${factTail}` });
 			continue;
 		}
 		const parts = [];
-		if (s.memory.suggested) parts.push(`memory ${formatMemory(s.memory.suggested)} (${s.memory.reason}: ${words.memory})`);
-		if (s.cpu.suggested) parts.push(`${formatCpus(s.cpu.suggested)} CPUs (${s.cpu.reason}: ${words.cpu})`);
-		const over = [s.memory.overBudget ? `memory ${formatMemory(s.memory.suggested)} is above this host's budget (${formatMemory(budget.memMiB)})` : null, s.cpu.overBudget ? `${formatCpus(s.cpu.suggested)} CPUs are above this host's budget (${formatCpus(budget.cpuCenti)})` : null].filter(Boolean);
+		if (s.memory.suggested) parts.push(`memory ${formatMemory(s.memory.suggested)} (${s.memory.reason}: ${words.memory}${s.memory.held === "cap" ? `; ${words.memoryHeld}` : ""})`);
+		if (s.cpu.suggested) parts.push(`${cpusText(s.cpu.suggested)} (${s.cpu.reason}: ${words.cpu})`);
+		const heldText = held ? `${words.memory}; ${words.memoryHeld}` : "";
+		const over = [s.memory.overBudget ? `memory ${formatMemory(s.memory.suggested)} is above the largest size this host offers (${formatMemory(cap.memMiB)})` : null, s.cpu.overBudget ? `${cpusText(s.cpu.suggested)} are above the most this host offers (${formatCpus(cap.cpuCenti)})` : null].filter(Boolean);
+		// the project's hostShare of an integer budget: a size above it is refused here (`job-size-exceeds-share`).
+		const share = projectBudgetRow(limits, id).hostShare;
+		const pair = { memMiB: s.memory.suggested ?? current.memMiB, cpuCenti: s.cpu.suggested ?? current.cpuCenti };
+		const overShare = over.length === 0 && call !== null && share !== null && budget !== null && neverFits(pair, budget, share) === "share";
+		if (overShare) over.push(`that is above its hostShare (${share}% of this host's budget)`);
 		const raise = (s.memory.suggested ?? 0) > current.memMiB || (s.cpu.suggested ?? 0) > current.cpuCenti;
-		const label = `project ${id}: size ${size}; its runs in the last ${SUGGEST_WINDOW_DAYS} days suggest ${parts.join(" and ")}${over.length > 0 ? `, but ${over.join(" and ")}, so a job of it would never fit this host` : ""}`;
-		if (raise || over.length > 0) {
-			checks.push({ ok: false, warn: true, label, fix: `${over.length > 0 ? "raise this host's budget first, then " : ""}apply it in the admin panel with ${call} (an operator confirms it; nothing applies a size by itself)` });
+		const suggests = parts.length > 0 ? `its runs in the last ${SUGGEST_WINDOW_DAYS} days suggest ${parts.join(" and ")}` : "";
+		const label = `project ${id}: size ${size}; ${[heldText ? `in the last ${SUGGEST_WINDOW_DAYS} days ${heldText}` : "", suggests].filter(Boolean).join("; ")}${over.length > 0 ? `, but ${over.join(" and ")}, so a job of it would never fit this host` : ""}${factTail}`;
+		const apply = call === null ? "" : `apply it in the admin panel with ${call} (an operator confirms it; nothing applies a size by itself)`;
+		if (held) {
+			const none = s.memory.held === "largest" ? "no larger memory is offered: no larger size fits this host" : "no memory call is offered while the largest size this host offers is unknown (its budget is off or unknown and its runtime's memory was not read)";
+			checks.push({ ok: false, warn: true, label, fix: apply ? `${none}; for the rest, ${apply}` : none });
+		} else if (raise || over.length > 0) {
+			checks.push({ ok: false, warn: true, label, fix: apply });
 		} else {
-			checks.push({ ok: true, label: `${label}; apply it in the admin panel with ${call}` });
+			checks.push({ ok: true, label: `${label}; ${apply.replace(/ \(an operator confirms it; nothing applies a size by itself\)$/, "")}` });
 		}
 	}
 	return checks;
 }
 
+/** The `ps` that lists this runtime's job containers with their two size labels (issue #596, phase 2). */
 export const SIZE_LABEL_PS_ARGS = Object.freeze(["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", `{{.Names}}\t{{.Label "${SIZE_LABEL_MEM}"}}\t{{.Label "${SIZE_LABEL_CPU}"}}`]);
 
 /**

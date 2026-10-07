@@ -32,7 +32,7 @@ import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
-import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS } from "@edgehero/pi-dispatch/size-suggest";
+import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS, coresText, cpusText } from "@edgehero/pi-dispatch/size-suggest";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
@@ -2345,36 +2345,82 @@ function projectRowNote(l: any, projects: any): { text: string; missing: boolean
   return { text: `${n} member${n === 1 ? "" : "s"}`, missing: false };
 }
 
-/** The budget the PROJECTS view's suggestions are flagged against: the largest any live host publishes, per dimension. */
-function budgetShown(budget: any): string {
-  if (!budget) return "no host publishes a budget";
-  const mem = budget.memMiB === Infinity ? "off" : Number.isSafeInteger(budget.memMiB) ? formatMemory(budget.memMiB) : "unknown";
-  const cpu = budget.cpuCenti === Infinity ? "off" : Number.isSafeInteger(budget.cpuCenti) ? formatCpus(budget.cpuCenti) : "unknown";
-  return `largest host budget ${mem}, ${cpu} CPUs`;
+/** What the PROJECTS view's suggestions are capped by: each live host's own budget pair, or none read. */
+function budgetShown(sizing: any): string {
+  const n = sizing?.hostBudgetCount;
+  if (!Number.isSafeInteger(n) || n === 0) return "no host budget read";
+  return `capped by ${n} host budget${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Plain text that must reach the operator WHOLE (an exact call), wrapped onto continuation lines of at most `width`
+ * columns: broken after a comma or a space where it can be, and only where one token is wider than the line, at a
+ * column (`wrapColumns`). Never clipped: a clipped call is a different call, or none.
+ */
+function wrapWhole(text: string, width: number, styler: any): string[] {
+  const w = Math.max(1, Math.trunc(width) || 1);
+  const lines: string[] = [];
+  let cur = "";
+  for (const token of String(text ?? "").split(/(?<=[, ])/)) {
+    if (styler.visibleLen(cur + token) <= w) {
+      cur += token;
+      continue;
+    }
+    if (cur) lines.push(cur);
+    cur = "";
+    if (styler.visibleLen(token) <= w) cur = token;
+    else {
+      const parts = wrapColumns(token, w, styler);
+      cur = parts.pop() ?? "";
+      lines.push(...parts);
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/** One dimension's verdict in the PROJECTS view: a suggestion, a held raise, or null (fits / not enough runs). */
+function sizingVerdict(dim: any, name: string, shown: (v: number) => string): string | null {
+  if (dim.suggested) return `${name} ${shown(dim.suggested)} (${dim.reason}${dim.held === "cap" ? ", the most a live host offers" : ""})`;
+  if (dim.held === "largest") return `${name} stays (${dim.reason}, already the largest size a live host offers)`;
+  if (dim.held === "no-cap") return `${name} wants ${shown(dim.wanted)} (${dim.reason}, no host budget read: no call)`;
+  return null;
 }
 
 /**
  * A project's size lines in the PROJECTS view (issue #596, phase 3, DES-SIZE-SUGGESTIONS): its size, its runs' peaks
- * (p95 memory, p95 cores) and what they suggest, from the worker's own `suggestSize` (index.ts reads the records), then
- * the EXACT `dispatch_limit_edit` call that applies it, on its own line. Never applied from here: the call is what an
- * operator (or their agent) runs, and its confirm is the decision. Every cell is digits, fixed words and the project id.
+ * (p95 memory, p95 cores) and the verdict, from the worker's own `suggestSize` (index.ts reads the records); a
+ * suggestion is spelled out on its own lines, then the EXACT `dispatch_limit_edit` call that applies it, then any fact
+ * about the runs (information, no call). Everything after the first line WRAPS onto continuation lines and is never
+ * clipped: a clipped call is a different call, or none. Never applied from here: the call is what an operator (or their
+ * agent) runs, and its confirm is the decision. Every cell is digits, fixed words and the project id.
  */
 function sizingLines(sizing: any, id: string, iw: number, styler: any): string[] {
   const s = sizing?.projects?.[id];
   if (!s) return [];
   const m = s.memory;
   const c = s.cpu;
-  const size = `${formatMemory(m.current)}, ${formatCpus(c.current)} CPUs`;
-  const peaks = `p95 ${m.evidence?.p95MiB === null || m.evidence?.p95MiB === undefined ? "-" : formatMemory(m.evidence.p95MiB)}, ${c.evidence?.p95CoresCenti === null || c.evidence?.p95CoresCenti === undefined ? "-" : formatCpus(c.evidence.p95CoresCenti)} cores`;
-  const parts: string[] = [];
-  if (m.suggested) parts.push(`${formatMemory(m.suggested)} (${m.reason})`);
-  if (c.suggested) parts.push(`${formatCpus(c.suggested)} CPUs (${c.reason})`);
+  const size = `${formatMemory(m.current)}, ${cpusText(c.current)}`;
+  const peaks = `p95 ${m.evidence?.p95MiB === null || m.evidence?.p95MiB === undefined ? "-" : formatMemory(m.evidence.p95MiB)}, ${c.evidence?.p95CoresCenti === null || c.evidence?.p95CoresCenti === undefined ? "-" : coresText(c.evidence.p95CoresCenti)}`;
+  const verdicts = [sizingVerdict(m, "memory", formatMemory), sizingVerdict(c, "CPUs", formatCpus)].filter((v): v is string => v !== null);
   const enough = m.reason !== "not-enough-runs" || c.reason !== "not-enough-runs";
-  const over = m.overBudget || c.overBudget;
-  const verdict = parts.length > 0 ? styler.fg(over ? "error" : "warning", `suggest ${parts.join(", ")}`) : styler.fg("dim", enough ? "fits" : `not enough runs (${m.evidence?.samples ?? 0} of ${SUGGEST_MIN_SAMPLES})`);
-  const out = [fitLine(`    ${styler.fg("muted", size)} · ${styler.fg("text", peaks)} · ${verdict}`, iw, styler)];
-  if (typeof s.call === "string") out.push(fitLine(`    ${styler.fg("accent", cellOf(s.call))}`, iw, styler));
-  if (over) out.push(fitLine(`    ${styler.fg("error", "above every host's budget: raise one first")}`, iw, styler));
+  const over = m.overBudget === true || c.overBudget === true;
+  const tone = over ? "error" : "warning";
+  const headText = verdicts.length > 0 ? "suggest" : enough ? "fits" : `not enough runs (${m.evidence?.samples ?? 0} of ${SUGGEST_MIN_SAMPLES})`;
+  const headTone = verdicts.length > 0 ? tone : "dim";
+  const indent = "      ";
+  const sub = Math.max(1, iw - indent.length);
+  const push = (lines: string[], color: string) => {
+    for (const l of lines) out.push(fitLine(`${indent}${styler.fg(color, l)}`, iw, styler));
+  };
+  // the verdict rides on the size line where it fits, and on its own line where it does not: never clipped
+  const fits = styler.visibleLen(`    ${size} · ${peaks} · ${headText}`) <= iw;
+  const out = [fitLine(`    ${styler.fg("muted", size)} · ${styler.fg("text", peaks)}${fits ? ` · ${styler.fg(headTone, headText)}` : ""}`, iw, styler)];
+  if (!fits) push(wrapColumns(headText, sub, styler), headTone);
+  if (verdicts.length > 0) push(wrapColumns(verdicts.join("; "), sub, styler), tone);
+  if (typeof s.call === "string") push(wrapWhole(cellOf(s.call), sub, styler), "accent");
+  if (over) push(wrapColumns("larger than any live host offers: a job of it would wait for a host that never comes", sub, styler), "error");
+  for (const fact of [s.words?.memoryFact, s.words?.cpuFact]) if (typeof fact === "string" && fact !== "") push(wrapColumns(cellOf(fact), sub, styler), "dim");
   return out;
 }
 
@@ -2419,7 +2465,10 @@ function projectsView(snapshot: any, info: any, selected: number, runProject: an
     lines.push(styler.cell("spend this month, by the project each run recorded", iw, { color: "dim" }));
   } else lines.push(styler.cell("spend not read (no records scan wired)", iw, { color: "dim" }));
   if (info?.sizing?.unreachable) lines.push(styler.cell(`sizes unreadable (${cellOf(info.sizing.unreachable)})`, iw, { color: "error" }));
-  else if (info?.sizing) lines.push(styler.cell(`sizes: p95 of ${SUGGEST_WINDOW_DAYS} days' runs · ${budgetShown(info.sizing.budget)}`, iw, { color: "dim" }));
+  else if (info?.sizing) {
+    lines.push(styler.cell(`sizes: p95 of ${SUGGEST_WINDOW_DAYS} days' runs · ${budgetShown(info.sizing)}`, iw, { color: "dim" }));
+    if (Number.isSafeInteger(info.sizing.skipped) && info.sizing.skipped > 0) lines.push(styler.cell(`${info.sizing.skipped} run record${info.sizing.skipped === 1 ? "" : "s"} over 256 KiB skipped`, iw, { color: "warning" }));
+  }
   const rows = projectRows(snapshot, info);
   rows.forEach((row: any, i: number) => {
     const cursor = i === selected ? styler.fg("accent", "›") : " ";

@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12257,11 +12257,22 @@ test("issue #596, phase 3: doctor reads the runs only when a project exists, at 
 	assert.deepEqual(asked, [at]);
 	const line = checks.find((c) => /^project web: size 4g, 2 CPUs/.test(c.label));
 	assert.deepEqual([line?.ok, line?.warn], [false, true], JSON.stringify(line));
-	assert.match(line.fix, /dispatch_limit_edit \{"index":0,"memory":"6g"\}/);
-	assert.match(line.label, /but memory 6g is above this host's budget \(5g\)/, "judged against this host's budget");
+	assert.match(line.fix, /dispatch_limit_edit \{"index":0,"memory":"5g"\}/);
+	assert.match(line.label, /suggest memory 5g .*this project's runs need more than this host offers: they ask for 6g, the largest here is 5g\)$/, "capped at this host's budget");
 	// an hour past the window's end, the same record is out of it
 	const later = await collectChecks(env, collectSeams(plan, { nodeVersion: "22.19.0", wallClock: () => at + 31 * 24 * 3600 * 1000, readRunRecords: () => [oom] }));
 	assert.match(later.find((c) => /^project web:/.test(c.label)).label, /not enough runs/);
+	// with the budget off, the cap is the runtime's own memory (MemTotal, 7937m here): a 6g project killed at 6g asks
+	// for 9g and is offered 7937m, the most this host has, never "raise the budget"
+	const six = join(dir, "six.json");
+	writeFileSync(six, JSON.stringify({ version: 3, limits: [{ scope: "project:web", memory: "6g" }] }));
+	const oom6 = { ...oom, size: { memMiB: 6144, cpuCenti: 200, source: "project" }, resources: { memPeak: 6144 * 1024 * 1024 } };
+	// first, so the plan's shorter "docker info" key does not answer it
+	const planMem = { "docker info --format={{json .}}": { code: 0, output: `${JSON.stringify({ ...JSON.parse(ROOTFUL_INFO), NCPU: 4, MemTotal: 8_323_072_000 })}\n` }, ...plan };
+	const offChecks = await collectChecks({ ...env, PI_SCOPED_LIMITS_FILE: six, PI_HOST_MEMORY_BUDGET: "off" }, collectSeams(planMem, { nodeVersion: "22.19.0", wallClock: () => at, readRunRecords: () => [oom6] }));
+	const offLine = offChecks.find((c) => /^project web:/.test(c.label));
+	assert.match(offLine?.label ?? "", /suggest memory 7937m .*they ask for 9g, the largest here is 7937m\)$/, JSON.stringify(offLine));
+	assert.match(offLine.fix, /dispatch_limit_edit \{"index":0,"memory":"7937m"\}/);
 	// no projects file: no read and no line
 	const none = [];
 	const quiet = await collectChecks({ VALKEY_URL: "redis://x" }, collectSeams(plan, { nodeVersion: "22.19.0", readRunRecords: () => (none.push(1), []) }));
@@ -12270,8 +12281,20 @@ test("issue #596, phase 3: doctor reads the runs only when a project exists, at 
 	const logs = join(dir, "logs");
 	mkdirSync(logs);
 	writeFileSync(join(logs, "j1.json"), JSON.stringify(oom));
+	utimesSync(join(logs, "j1.json"), at / 1000, at / 1000);
+	// and a record over the 256 KiB cap is skipped, never parsed, and said once
+	writeFileSync(join(logs, "big.json"), JSON.stringify({ ...oom, pad: "x".repeat(256 * 1024) }));
+	utimesSync(join(logs, "big.json"), at / 1000, at / 1000);
 	const real = await collectChecks({ ...env, PI_LOGS_DIR: logs }, collectSeams(plan, { nodeVersion: "22.19.0", wallClock: () => at, readRunRecords: undefined }));
 	assert.match(real.find((c) => /^project web:/.test(c.label)).label, /oom-killed/);
+	assert.ok(real.some((c) => c.ok && c.label === "size suggestions: 1 run record over 256 KiB skipped, not read"));
+	// a scoped-limits file that does not load: no size line and no read, one line saying suggestions are off
+	const broken = join(dir, "broken.json");
+	writeFileSync(broken, "{ nope");
+	const offRead = [];
+	const off = await collectChecks({ ...env, PI_SCOPED_LIMITS_FILE: broken }, collectSeams(plan, { nodeVersion: "22.19.0", wallClock: () => at, readRunRecords: () => (offRead.push(1), [oom]) }));
+	assert.deepEqual([offRead.length, off.some((c) => /^project web:/.test(c.label)), off.some((c) => /dispatch_limit_add/.test(`${c.label} ${c.fix ?? ""}`))], [0, false, false]);
+	assert.ok(off.some((c) => c.ok && c.label === "size suggestions: off until the scoped-limits file loads (a size read without it would be the default, not the project's)"));
 });
 
 test("issue #596, phase 3: runDoctor hands its readRunRecords seam on, and prints the project's line with its fix", async () => {
@@ -12281,8 +12304,8 @@ test("issue #596, phase 3: runDoctor hands its readRunRecords seam on, and print
 	const at = Date.parse("2026-10-01T12:00:00.000Z");
 	const oom = { project: "web", reason: "oom-killed", startedAt: "2026-10-01T11:00:00.000Z", endedAt: "2026-10-01T11:10:00.000Z", resources: { memPeak: 4096 * 1024 * 1024 }, size: { memMiB: 4096, cpuCenti: 200, source: "default" } };
 	const { out, text } = capture();
-	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), PI_PROJECTS_FILE: projectsFile }), { ...imgDeps(out, green), wallClock: () => at, readRunRecords: () => [oom] });
-	assert.match(text(), /⚠ project web: size 4g, 2 CPUs; its runs in the last 30 days suggest memory 6g \(oom-killed: 1 run ended oom-killed\)\n {4}→ apply it in the admin panel with dispatch_limit_add \{"scope":"project:web","memory":"6g"\}/);
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), PI_PROJECTS_FILE: projectsFile, PI_HOST_MEMORY_BUDGET: "8g" }), { ...imgDeps(out, green), wallClock: () => at, readRunRecords: () => [oom] });
+	assert.match(text(), /⚠ project web: size 4g, 2 CPUs; its runs in the last 30 days suggest memory 6g \(oom-killed: 1 run ended oom-killed \(the largest size killed 4g\)\)\n {4}→ apply it in the admin panel with dispatch_limit_add \{"scope":"project:web","memory":"6g"\}/);
 });
 
 test("issue #596, a worker whose boot listing of left-over job containers is unread admits no job, and doctor warns so", async () => {
