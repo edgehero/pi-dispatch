@@ -4645,7 +4645,8 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	const { makeHostRegistry } = await import("../src/host-registry.mjs");
 	let published = null;
 	const listed = [];
-	const snap = { seeded: false };
+	let listAnswer = () => [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50 }];
+	const snap = { seeded: false, unseeded: ["local"] };
 	const { captured } = await runStart({
 		workerHostBudget: { snapshot: () => ({ ...snap }), current: () => ({ memMiB: null, cpuCenti: null }) },
 		env: { PI_HOST_MEMORY_BUDGET: "auto", PI_HOST_CPU_BUDGET: "6", PI_JOB_MEMORY: "2g" },
@@ -4654,7 +4655,7 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 		readDaemonFacts: DOCKER_FACTS({ hostCpus: 8, memTotalMiB: 16384 }),
 		jobUserIdentity: { ...LINUX_ID(1001), stat: () => ({ uid: 0, gid: 2375 }) },
 		resolveDockerEndpoint: async () => endpoint,
-		listJobContainers: (bin) => async () => (listed.push(bin), [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50 }]),
+		listJobContainers: (bin) => async () => (listed.push(bin), listAnswer()),
 		makeHostRegistry: (args) => {
 			const real = makeHostRegistry(args);
 			return { ...real, start: (fields, opts) => ((published = fields), real.start(fields, opts)) };
@@ -4670,17 +4671,42 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	assert.equal(typeof opts.onRefresh, "function");
 	assert.equal(typeof opts.containerGone, "function");
 	assert.equal("fleetHosts" in captured, false, "no registry read decides a job's size any more (P2G1-L2)");
-	// P2G1-L4: the boot listing of every blessed venue's remaining job containers, each named with its venue.
-	assert.deepEqual(await opts.survivors(), [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50, venue: { backend: "local" } }]);
-	assert.deepEqual(listed, ["docker"], "local is the only blessed venue here");
+	// P2G1-L4: the boot listing of every blessed venue's remaining job containers, each named with its venue. PER VENUE
+	// (P2G2-2): one lister per blessed venue, and the default venue named, so an unread venue stops only its own jobs.
+	assert.deepEqual(Object.keys(opts.survivors), ["local"], "local is the only blessed venue here");
+	assert.equal(opts.defaultVenue, "local");
+	assert.deepEqual(await opts.survivors.local(), [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50, venue: { backend: "local" } }]);
+	assert.deepEqual(listed, ["docker"]);
+	// A venue whose binary is absent holds no container: none, not unread. Any other failure is unread (it throws).
+	listAnswer = () => {
+		throw Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" });
+	};
+	assert.deepEqual(await opts.survivors.local(), []);
+	listAnswer = () => {
+		throw Object.assign(new Error("Cannot connect to the Docker daemon"), { code: 1 });
+	};
+	await assert.rejects(() => opts.survivors.local(), /Cannot connect/);
 	assert.equal(captured.deps.hostBudget, undefined, "beside the other worker-wide inputs, never in deps");
 	for (const key of ["budgetMemMiB", "budgetCpuCenti", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "budgetRunning", "budgetHolds", "budgetOrphans", "budgetSeed"]) {
 		assert.equal(typeof published[key], "function", `${key} is a thunk, re-read every beat`);
 	}
 	// P2G1-L4: the boot listing's state, read at every beat.
-	assert.equal(published.budgetSeed(), "unlisted");
+	assert.equal(published.budgetSeed(), "unlisted:local", "the unread venues, named");
 	snap.seeded = true;
 	assert.equal(published.budgetSeed(), "listed");
+});
+
+test("issue #596, P2G2-2: each blessed venue is listed on its own, and a venue whose job user is unmappable counts as holding none", { skip }, async () => {
+	const failing = (bin) => async () => {
+		throw Object.assign(new Error(`${bin} does not answer`), { code: 125 });
+	};
+	// Rootful podman beside local: every podman job is refused before a container (podman-rootful), so its listing
+	// failing is no unread venue; local's failing still is.
+	const { captured } = await runStart({ env: { PI_BACKENDS: "local,podman" }, readPodmanInfo: PODMAN_INFO({ rootless: false }), jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), listJobContainers: failing });
+	const opts = captured.hostBudget;
+	assert.deepEqual(Object.keys(opts.survivors).sort(), ["local", "podman"]);
+	assert.deepEqual(await opts.survivors.podman(), [], "unmappable: none");
+	await assert.rejects(() => opts.survivors.local(), /docker does not answer/, "local's decision maps a user: unread");
 });
 
 test("issue #596, phase 2: the CPU reserve plan reads a systemd daemon's slice only where the endpoint is observed on this host", { skip }, async () => {

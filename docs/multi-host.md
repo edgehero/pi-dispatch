@@ -212,8 +212,9 @@ loses its place after a check of the queue.
 **A size that can never fit this machine.** A job on this machine's own queue (`pi-jobs@<name>`: its folders, its
 wait checks) can run nowhere else, so one larger than the budget is refused before anything is spent,
 `job-size-exceeds-host`, and one larger than its project's `hostShare` of the budget, `job-size-exceeds-share`. That
-happens before the job waits on any condition. A job on the shared queue is never refused for its size: another
-machine may have the room. It is put back for 60 seconds (`job_size_never_fits_here_deferred` in the log, with both
+happens before the job waits on any condition. A worker without `PI_WORKER_NAME` refuses every such job the same way,
+whatever queue it is on: it has declared no fleet, so there is no other machine to wait for. On a worker with
+`PI_WORKER_NAME`, a job on the shared queue is never refused for its size: another machine may have the room. It is put back for 60 seconds (`job_size_never_fits_here_deferred` in the log, with both
 sizes) and picked up again by whichever worker asks first. `pi-dispatch doctor` warns about a project that fits on no
 running worker; such a job waits until one is started (or the size is lowered). The worker log and the run record name
 the job's size and the budget; the forge comment names neither.

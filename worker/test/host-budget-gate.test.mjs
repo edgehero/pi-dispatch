@@ -147,7 +147,7 @@ test("the budget gate is LAST: a job another gate defers never waits on the budg
 
 test("a size that can never fit this host is REFUSED before anything is spent when the job is on this host's OWN queue, named in the log and the record, never in the comment", { skip }, async () => {
 	const { b } = await budgetOf();
-	const h = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" } });
+	const h = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" }, extra: { multiHost: true } });
 	const local = localJob("big", "/srv/shop", HOST_QUEUE);
 	const result = await h.processor(local.job, "tok", signal());
 	assert.deepEqual(result, { outcome: "policy", reason: "job-size-exceeds-host", exitCode: null, turns: null, tokens: null, budgetReserved: false, hostBudget: { memMiB: 36864, cpuCenti: 800, hostShare: null } });
@@ -173,7 +173,7 @@ test("a size that can never fit this host is REFUSED before anything is spent wh
 test("a size over its project's hostShare of the budget is refused as job-size-exceeds-share on this host's own queue, with the share in the record", { skip }, async () => {
 	const { b } = await budgetOf();
 	const limits = limitsOf([{ scope: "project:shop", memory: "20g", cpus: 2, hostShare: 50 }]);
-	const h = harness({ hostBudget: b, limits });
+	const h = harness({ hostBudget: b, limits, extra: { multiHost: true } });
 	const result = await h.processor(localJob("s", "/srv/shop", HOST_QUEUE).job, "tok", signal());
 	assert.equal(result.reason, "job-size-exceeds-share");
 	assert.deepEqual(result.hostBudget, { memMiB: 36864, cpuCenti: 800, hostShare: 50 });
@@ -188,7 +188,7 @@ test("a size over its project's hostShare of the budget is refused as job-size-e
 test("a job on the SHARED queue too big for this host is NEVER refused: deferred with both sizes named, whatever the registry says (P2G1-L2)", { skip }, async () => {
 	const clock = { t: NOW };
 	const { b } = await budgetOf({ clock });
-	const h = harness({ hostBudget: b, clock, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" } });
+	const h = harness({ hostBudget: b, clock, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" }, extra: { multiHost: true } });
 	const j = ghJob("f");
 	for (let i = 0; i < 5; i++) {
 		await assert.rejects(() => h.processor(j.job, "tok", signal()), (e) => e.name === "DelayedError");
@@ -204,10 +204,71 @@ test("a job on the SHARED queue too big for this host is NEVER refused: deferred
 	assert.equal("job-size-exceeds-fleet" in mod.SIZE_REFUSAL_COMMENTS, false, "the fleet refusal is gone");
 });
 
+test("a worker with NO host queue (no PI_WORKER_NAME) REFUSES a never-fits job on the shared queue, local or forge, recorded and logged with both sizes (P2G2-1)", { skip }, async () => {
+	const { b } = await budgetOf();
+	const limits = limitsOf([{ scope: "project:shop", memory: "20g", cpus: 2, hostShare: 50 }]);
+	// The default wiring: `multiHost` false, as createWorker passes it without a host queue.
+	const h = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" } });
+	const local = localJob("L1", "/srv/other");
+	const forge = ghJob("G1", "acme/other");
+	for (const j of [local, forge]) {
+		const result = await h.processor(j.job, "tok", signal());
+		assert.deepEqual(result, { outcome: "policy", reason: "job-size-exceeds-host", exitCode: null, turns: null, tokens: null, budgetReserved: false, hostBudget: { memMiB: 36864, cpuCenti: 800, hostShare: null } });
+		assert.deepEqual(j.moves, [], "refused at once: no other host drains this queue, so a deferral would ask again forever");
+	}
+	assert.equal(h.seen.started, 0);
+	assert.equal(h.seen.records.length, 2);
+	assert.deepEqual(h.seen.logs.filter((l) => l.event === "job_size_exceeds_host").map((l) => [l.fields.jobId, l.fields.memMiB, l.fields.budgetMemMiB]), [["L1", 40960, 36864], ["G1", 40960, 36864]], "the log names both sizes");
+	assert.deepEqual(h.seen.comments, [mod.SIZE_REFUSAL_COMMENTS["job-size-exceeds-host"], mod.SIZE_REFUSAL_COMMENTS["job-size-exceeds-host"]], "the generic comment");
+	assert.equal(h.seen.logs.some((l) => l.event === "job_size_never_fits_here_deferred"), false);
+	// Over its project's share, the same: refused -share.
+	const hs = harness({ hostBudget: b, limits });
+	const shared = ghJob("S1");
+	assert.equal((await hs.processor(shared.job, "tok", signal())).reason, "job-size-exceeds-share");
+	assert.deepEqual(shared.moves, []);
+	// createWorker passes the fact: a host queue armed is a multi-host worker.
+	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
+	assert.match(src, /multiHost: hostQueue !== null,/);
+	assert.match(src, /if \(!multiHost \|\| \(job\.queueName \?\? QUEUE\) !== QUEUE\) \{/);
+});
+
+test("the processor tells the gate the job's VENUE and its container NAME: an unread venue stops only its jobs (P2G2-2), and a survivor carrying the job's name defers it running-here (P2G2-3)", { skip }, async () => {
+	let podman = () => {
+		throw new Error("podman down");
+	};
+	const b = makeHostBudget({
+		settings: hostBudgetSettings({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }, { memMiB: 512, cpuCenti: 25 }),
+		jobDefault: { memMiB: 512, cpuCenti: 25 },
+		countLimit: () => null,
+		survivors: { local: async () => [{ name: "pi-job-X", memMiB: 1024, cpuCenti: 50 }], podman: async () => podman() },
+		defaultVenue: "local",
+		now: () => NOW,
+	});
+	await b.ready;
+	const h = harness({ hostBudget: b, hold: false });
+	const onPodman = spyJob("P", { kind: "local", folder: "/srv/shop", flow: "tidy", task: "t", backend: "podman" });
+	await assert.rejects(() => h.processor(onPodman.job, "tok", signal()), (e) => e.name === "DelayedError");
+	assert.equal(h.seen.logs.find((l) => l.event === "host_budget_deferred").fields.why, "unseeded");
+	const retried = localJob("X");
+	await assert.rejects(() => h.processor(retried.job, "tok", signal()), (e) => e.name === "DelayedError");
+	assert.deepEqual(h.seen.logs.filter((l) => l.event === "host_budget_deferred").map((l) => [l.fields.jobId, l.fields.why]), [["P", "unseeded"], ["X", "running-here"]], "job X waits for its old container's name");
+	assert.equal(h.seen.started, 0);
+	const other = localJob("L");
+	await h.processor(other.job, "tok", signal());
+	assert.equal(h.seen.started, 1, "a docker job runs beside the unread podman venue and the survivor");
+	// A venue the registry does not hold names no container: the gate's name is null rather than a throw, so the job
+	// goes on to the registry's own refusal path below the gate (here the fake runs it), exactly as it did before.
+	const named = harness({ hostBudget: b, hold: false, extra: { containerName: () => {
+		throw Object.assign(new Error("unregistered"), { code: "BACKEND_NOT_REGISTERED" });
+	} } });
+	await named.processor(localJob("Z").job, "tok", signal());
+	assert.equal(named.seen.started, 1, "past the gate: a name the venue cannot build is no name to check");
+});
+
 test("the never-fits check is ABOVE the wait gate: a waiting job is refused (or deferred) for its size before it waits (P2G1-L6)", { skip }, async () => {
 	const { b } = await budgetOf();
 	let waitReads = 0;
-	const h = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" }, extra: { waitState: new Proxy({}, { get: () => async () => (waitReads++, null) }) } });
+	const h = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" }, extra: { multiHost: true, waitState: new Proxy({}, { get: () => async () => (waitReads++, null) }) } });
 	const tomorrow = new Date(NOW + 24 * 3600 * 1000).toISOString();
 	const routed = spyJob("w", { kind: "github", repo: "acme/web", target: { number: 1 }, flow: "fix", trigger: { deliveryId: "w", sender: { id: 1 } }, waitFor: [{ after: tomorrow }] }, HOST_QUEUE);
 	assert.equal((await h.processor(routed.job, "tok", signal())).reason, "job-size-exceeds-host");

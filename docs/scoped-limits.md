@@ -244,8 +244,9 @@ memory, light ones less.
 - `hostShare` (a whole percentage from 1 to 100) is the most of one host's [budget](multi-host.md#the-host-budget)
   the project's running jobs may hold together, in memory and in CPU. A job that would take the project past it
   waits, and holds no room while it does. A size larger than the share of a host's budget can never start there: a
-  job on that host's own queue is refused before anything is spent (`job-size-exceeds-share`), and a job on the
-  shared queue waits for a host whose share fits it.
+  job on that host's own queue, or any job on a host without `PI_WORKER_NAME`, is refused before anything is spent
+  (`job-size-exceeds-share`), and a job on the shared queue of a host with `PI_WORKER_NAME` waits for a host whose
+  share fits it.
 - `minJobs` (an integer, at least 1) is how many of the project's jobs a host makes room for first. While the project
   runs fewer than that on a host, its oldest waiting job holds room there that no newer job may take. It is a soft
   minimum: it never stops a job that is already running. `minJobs` needs `memory` or `cpus` on the same row and may

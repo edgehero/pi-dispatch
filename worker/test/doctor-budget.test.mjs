@@ -67,7 +67,12 @@ test("project sizes: a size the budget can never hold, a size over its share, an
 		{ scope: "project:counted", concurrent: 2 },
 	]);
 	assert.deepEqual(projectSizes(limits, {}).map((p) => p.id), ["huge", "greedy", "many", "ok"], "a project row without a size runs at the default and is not listed");
-	const lines = labels(hostBudgetChecks(view, { limits }));
+	const lines = labels(hostBudgetChecks(view, { limits, env: { PI_WORKER_NAME: "mini1" } }));
+	// P2G2-1: a worker without PI_WORKER_NAME declares no fleet, so it refuses every never-fits job, on whatever queue.
+	assert.deepEqual(labels(hostBudgetChecks(view, { limits })).slice(3, 5), [
+		"warn: project huge: its job size (40g, 2 CPUs) is larger than this host's budget (32g, 8 CPUs), so every job of it is refused before anything is spent (job-size-exceeds-host): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for",
+		"warn: project greedy: its job size (20g, 2 CPUs) is larger than its hostShare (50%) of this host's budget, so every job of it is refused before anything is spent (job-size-exceeds-share): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for",
+	]);
 	assert.deepEqual(lines.slice(3), [
 		"warn: project huge: its job size (40g, 2 CPUs) is larger than this host's budget (32g, 8 CPUs), so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-host), and one on the shared queue waits for a host it fits on",
 		"warn: project greedy: its job size (20g, 2 CPUs) is larger than its hostShare (50%) of this host's budget, so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-share), and one on the shared queue waits for a host it fits on",
@@ -112,9 +117,12 @@ test("the ledger against the labels: equal is a green line, a difference and an 
 	assert.deepEqual(labels(budgetLedgerChecks({ usedMemMiB: "6144", usedCpuCenti: "300" }, listed.slice(0, 2))), ["ok: Host budget ledger matches the running job containers (2 running, 6g and 3 CPUs)"]);
 	assert.deepEqual(labels(budgetLedgerChecks({ usedMemMiB: "4096", usedCpuCenti: "200" }, listed)), [
 		"warn: Host budget ledger holds 4g and 2 CPUs, while the running job containers are labelled 6g and 3 CPUs",
-		"warn: 1 running job container carries no size label, so the ledger cannot be checked against it (started by a worker from before the host budget)",
+		"warn: 1 running job container carries no size label (pi-job-4), so the ledger cannot be checked against it (started by a worker from before the host budget); a worker that found it at its start counts each at the largest size a project may run at, capped at the budget, until it is gone",
 	]);
 	assert.deepEqual(budgetLedgerChecks({ usedMemMiB: "" }, listed), [], "a row without the ledger: nothing to hold against");
 	assert.equal(budgetLedgerChecks({ usedMemMiB: "6144", usedCpuCenti: "250" }, listed.slice(0, 2))[0].warn, true, "the CPU half alone differing is a difference");
 	assert.deepEqual(labels(budgetLedgerChecks({ usedMemMiB: "0", usedCpuCenti: "0" }, [])), ["ok: Host budget ledger matches the running job containers (0 running, 0 and 0 CPUs)"]);
+	// P2G2-4: each unlabelled container is NAMED (five at most, then a count), and a half-labelled one is unlabelled.
+	const seven = Array.from({ length: 7 }, (_, i) => ({ name: `pi-job-u${i}`, memMiB: i === 0 ? 1024 : null, cpuCenti: null }));
+	assert.match(labels(budgetLedgerChecks({ usedMemMiB: "0", usedCpuCenti: "0" }, seven))[1], /^warn: 7 running job containers carry no size label \(pi-job-u0, pi-job-u1, pi-job-u2, pi-job-u3, pi-job-u4 and 2 more\), so the ledger cannot be checked against them /);
 });

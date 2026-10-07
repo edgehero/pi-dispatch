@@ -1040,8 +1040,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   A waiting job is not starved: the oldest waiting job of each project running fewer than its `minJobs`, and the
   oldest waiting job of all, HOLD room (and a job slot) that no newer job may take. A job on a host's own queue too
   big for that host's budget, or for its project's share of it, is refused before anything is spent and before it
-  waits on a condition (`job-size-exceeds-host`, `job-size-exceeds-share`); a job on the shared queue is never refused
-  for its size, and waits for a host it fits on. A worker that restarts counts the job containers its reaper could not
+  waits on a condition (`job-size-exceeds-host`, `job-size-exceeds-share`), and so is any such job on a host without
+  `PI_WORKER_NAME` (it declares no fleet, so there is no other host to wait for); a job on the shared queue of a host with `PI_WORKER_NAME` is never
+  refused for its size, and waits for a host it fits on. A worker that restarts counts the job containers its reaper could not
   remove before it admits anything, and the same job id picked up twice on one host never frees the other pickup's
   room.
 - **Why**: A count of containers cannot tell a 20g job from a 2g one, so `PI_CONCURRENCY` alone either wastes a big
@@ -1054,8 +1055,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   minimum); and without holds the heavy job never starts (the property tests' control). Given a size larger than the
   budget on a job on the host's own queue, then it is refused `job-size-exceeds-host` before any spend (also when it
   carries a wait condition: before it waits), the log line and the run record name both the size and the budget, and
-  the forge comment names neither. Given the same size on the shared queue, then it defers 60 s and is never refused,
-  whatever the registry lists. Given a container whose stop did not take, then its hold stays until the runtime says
+  the forge comment names neither. Given the same size on the shared queue of a host with `PI_WORKER_NAME`, then it
+  defers 60 s and is never refused, whatever the registry lists; given it on a host without one, then it is refused
+  `job-size-exceeds-host` at once, recorded and logged with both sizes. Given a container whose stop did not take, then its hold stays until the runtime says
   it is gone or lists it exited. Given a second pickup of a job id still running on the host, then it defers
   `running-here` and the first's hold stays held. Given a flood of small jobs on the host queue keeping
   `PI_CONCURRENCY` full, then a waiting big shared-queue job starts at its first wake after one small ends. Given a
@@ -3294,6 +3296,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-07 | Issue #596, phase 2, review gate round 2. **`REQ-HOST-BUDGET` CORRECTED**: a worker without `PI_WORKER_NAME` refuses a size that never fits it (`job-size-exceeds-host`, `-share`), on whatever queue, because it declares no fleet and so has no other host to wait for; only a worker that declared a fleet defers a shared-queue never-fits job. The acceptance gains that case. Checked and UNCHANGED: `REQ-HOST-REGISTRY`, `REQ-JOB-SIZE`, `REQ-WAIT-FOR`. |
 | 2026-10-07 | Issue #596, phase 2, review gate round 1. **`REQ-HOST-BUDGET` CORRECTED**: a job on the shared queue is never refused for its size (the fleet refusal is removed: the registry lists no host that is restarting), the two never-fits refusals apply to a job on a host's own queue and come before any wait; `PI_CONCURRENCY` is judged inside the budget so a hold keeps a job slot; a restarted worker counts the job containers its reaper left before admitting anything; a second pickup of a running job id frees nothing; a job's CPUs count as reserved CPU. The acceptance gains the repros' cases (the stalled repeat, the flood behind host slots, the survivor, the waiting job). **`REQ-MULTI-HOST-COORDINATION` AMENDED**, one sentence: with a budget the host-wide bound is the budget's job count. Checked and UNCHANGED: `REQ-SCOPED-LIMITS`, `REQ-WAIT-FOR`, `REQ-QUEUE-BURST-NO-DROP`. |
 | 2026-10-06 | Issue #596, phase 2 (the host budget). **NEW `REQ-HOST-BUDGET`**: each worker keeps its running jobs' sizes inside a memory and CPU budget (`PI_HOST_MEMORY_BUDGET`, `PI_HOST_CPU_BUDGET`: `auto`, a value or `off`; `auto` is the runtime's own numbers, and on rootless Podman the user service's limits, minus `PI_HOST_RESERVE_MEMORY` and `PI_HOST_RESERVE_CPUS`, never below one default job), with holds for the oldest waiter of each project below its `minJobs` and the oldest waiter of all, the project's `hostShare` enforced, and never-fits sizes refused before any spend (`job-size-exceeds-host`, `-share`, and `-fleet` only after two registry reads 30 s apart); acceptance from the three worked scenarios. **`REQ-SCOPED-LIMITS` AMENDED**: `hostShare` and `minJobs` are enforced by the host budget, no longer "enforced by nothing yet", and the acceptance clause that said so now says each host's budget enforces them. Checked and UNCHANGED: `REQ-SPEND-CAPS-MULTI-WINDOW` (the budget is compute, never dollars, and every refusal it adds is before the reservation), `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS` (a paused job's hold is suspended, the window itself is untouched), `REQ-EGRESS-ALLOWLIST`, `REQ-JOB-TIMEOUT-30M` (the 30-minute bound still frees every count slot; only the budget hold of a container whose stop did not take outlives it). |
 | 2026-10-06 | Issue #596, phase 1, review gate round 1. **`REQ-SCOPED-LIMITS` CORRECTED and AMENDED**: the job sizes clause said `memory` gives "no swap beyond it" and `cpus` runs "under one host ceiling" without conditions; it now says no swap beyond it where the runtime enforces swap limits (Docker with `SwapLimit` false drops `--memory-swap`) and one ceiling on any SINGLE job (per-container `--cpus` does not sum across jobs, measured). Amended: a version 3 row carrying an unknown key is refused (a misspelled `Memory` beside a valid field was dropped and the project ran at the default size), versions 1 and 2 unchanged; a retry or deferred job is a new pickup and takes the size in force then. Checked and UNCHANGED: `REQ-SPEND-CAPS-MULTI-WINDOW`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-EGRESS-ALLOWLIST`. |

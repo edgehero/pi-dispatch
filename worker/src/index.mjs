@@ -190,7 +190,7 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -272,13 +272,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// THEN be told so (the wait gate's own determinate-refusals-then-holds rule). Nothing is held yet, so nothing is
 		// given back.
 		//
-		// A job on THIS HOST'S OWN QUEUE (`pi-jobs@<name>`) can run nowhere else, so a size larger than this host's budget,
-		// or than its project's `hostShare` of it, is a determinate POLICY refusal, RETURNED before anything is spent
-		// (CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY): `job-size-exceeds-host` or `job-size-exceeds-share`. The log
-		// line and the record name both sizes; the forge comment names neither (an issue author can act on neither).
+		// A job that can run on NO OTHER HOST is refused: a size larger than this host's budget, or than its project's
+		// `hostShare` of it, is a determinate POLICY refusal, RETURNED before anything is spent (CONST-BUDGET-BEFORE-TOKENS,
+		// CONST-RETRY-INFRA-ONLY): `job-size-exceeds-host` or `job-size-exceeds-share`. The log line and the record name
+		// both sizes; the forge comment names neither (an issue author can act on neither). Two such jobs: one on THIS
+		// HOST'S OWN QUEUE (`pi-jobs@<name>`), and EVERY job on a worker with no host queue (`multiHost` false, no
+		// `PI_WORKER_NAME`): there the shared queue is this host's alone in all but name, since no other host that
+		// declared a fleet drains it, and deferring a never-fits job there (gate round 2 of phase 2, P2G2-1) re-asked it
+		// every 60 s forever with no record, which is the silent no-op this project refuses.
 		//
-		// A job on the SHARED queue is NEVER refused for its size (P2G1-L2), local or forge: another host draining the
-		// queue may have a larger budget, or give the project a larger share of it. It is deferred for
+		// A job on the SHARED queue of a MULTI-HOST worker is NEVER refused for its size (P2G1-L2), local or forge: another
+		// host draining the queue may have a larger budget, or give the project a larger share of it. It is deferred for
 		// `NEVER_FITS_RECHECK_MS` with a named line carrying both sizes, and doctor names a project that fits no live
 		// host. There used to be a fleet refusal after two registry reads agreed that no live host fits, and the registry
 		// cannot carry that verdict: a host's row is deleted while it restarts (a clean stop) or expires after a crash, and a
@@ -290,7 +294,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const budgetNow = hostBudget.current();
 				const share = hostBudget.shareOf(project, limits);
 				const sizeFields = { memMiB: size.memMiB, cpuCenti: size.cpuCenti, budgetMemMiB: budgetNow.memMiB, budgetCpuCenti: budgetNow.cpuCenti, hostShare: share };
-				if ((job.queueName ?? QUEUE) !== QUEUE) {
+				if (!multiHost || (job.queueName ?? QUEUE) !== QUEUE) {
 					const reason = `job-size-exceeds-${misfit}`;
 					deps?.log?.(reason.replaceAll("-", "_"), { jobId: job.id, project, ...sizeFields });
 					if (deps?.comment) await Promise.resolve(deps.comment(job.data, SIZE_REFUSAL_COMMENTS[reason])).catch(() => {});
@@ -659,8 +663,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		//
 		// `orphan` is the finally's: when the container's stop did not take (`stop_did_not_take`), the container may still
 		// run, so the budget hold becomes an ORPHAN that keeps its room until the runtime says the container is gone
-		// (`host-budget.mjs` `sweep`; the boot reaper is the backstop). Every count slot still goes back, as before: they
-		// bound starts, and the 30-minute bound already ended this job.
+		// (`host-budget.mjs` `sweep`; the boot reaper is the backstop). The count slots OUTSIDE the budget (the scope, the
+		// project and the endpoint slots, and the host slot when there is no budget) still go back: they bound starts, and
+		// the 30-minute bound already ended this job. The `PI_CONCURRENCY` slot does NOT: with a budget the count is the
+		// budget's third dimension (P2G1-L3), so an orphan, like a seeded survivor, holds one job slot until its container
+		// is gone (gate round 2 of phase 2, P2G2-5).
 		//
 		// The in-process halves go back synchronously, before the first await, so a caller that cannot await (the setup
 		// guard) still frees every local slot before it rethrows; the fleet halves are release-if-mine and awaited where
@@ -902,8 +909,20 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// container outlived it as an orphan) and `unseeded` (the job containers left from before this worker started are
 		// not listed yet, so nothing is admitted).
 		// Skipped when the settings are unreadable or invalid: that job is refused or retried below without a container.
+		//
+		// The gate is told the job's VENUE (the name it names, null for the default) and the container NAME this pickup
+		// will use (gate round 2 of phase 2): an unread boot listing blocks only its own venue's jobs (P2G2-2), and a
+		// seeded survivor or orphan whose container carries this name defers the job `running-here` (P2G2-3), since its
+		// `docker run` would create a container of that very name, which the sweep would take for the survivor. A name the
+		// venue cannot build is null here; the registry's refusal below records that job.
 		if (hostBudget && !settingsThrew && !settings?.invalid) {
-			const verdict = hostBudget.gate({ id: job.id, ticket: budgetState.ticket, project, size, getState: typeof job.getState === "function" ? () => job.getState() : null, limits });
+			let budgetName = null;
+			try {
+				budgetName = containerName({ ...job.data, id: job.id });
+			} catch {
+				budgetName = null;
+			}
+			const verdict = hostBudget.gate({ id: job.id, ticket: budgetState.ticket, project, size, venue: job.data?.backend ?? null, name: typeof budgetName === "string" ? budgetName : null, getState: typeof job.getState === "function" ? () => job.getState() : null, limits });
 			if (!verdict.admitted) {
 				await releaseAllHolds();
 				budgetState.budgetDeferred = true;
@@ -1556,8 +1575,11 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			containerName,
 			redis,
 			getSettings,
-			// Issue #596, phase 2: the ONE host budget, and the registry read the never-fits check asks of the fleet.
+			// Issue #596, phase 2: the ONE host budget. `multiHost` is whether this worker declared a fleet (a host queue):
+			// without one it declares no fleet and no other host is there to wait for, so a size that never fits here is refused rather than
+			// deferred for a host that does not exist (gate round 2 of phase 2, P2G2-1).
 			hostBudget,
+			multiHost: hostQueue !== null,
 			// Late-bound over EVERY worker: an overlay concurrency change re-binds the live slot count at the
 			// next job start, and with two queues both have to move or the host bound and the queue bounds
 			// stop agreeing. Guarded so only an integer that actually differs touches the property.

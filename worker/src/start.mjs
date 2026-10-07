@@ -1687,10 +1687,12 @@ export async function startWorker(
 		budgetHolds: () => snapshotField("holds"),
 		budgetOrphans: () => snapshotField("orphans"),
 		// P2G1-L4: whether the boot listing of the job containers left from before this worker started has been read
-		// (`listed`); until it is, the worker admits no job (`unlisted`), and doctor says so. "" before the worker exists.
+		// (`listed`); until a venue's is, the worker admits no job on it (`unlisted:<venue>[,<venue>]`, gate round 2 of
+		// phase 2, P2G2-2), and doctor names the venues. "" before the worker exists.
 		budgetSeed: () => {
 			const snap = worker?.hostBudget?.snapshot?.();
-			return typeof snap?.seeded === "boolean" ? (snap.seeded ? "listed" : "unlisted") : "";
+			if (typeof snap?.seeded !== "boolean") return "";
+			return snap.seeded ? "listed" : `unlisted:${(snap.unseeded ?? []).join(",")}`;
 		},
 	});
 
@@ -2015,16 +2017,25 @@ export async function startWorker(
 			onRefresh: syncCpuReserve,
 			containerGone: containerGoneFn ?? makeContainerGone({ binOf: (venue) => (resolveBackendName(venue ?? {}, config.defaultBackend) === PODMAN_BACKEND ? "podman" : "docker") }),
 			// P2G1-L4: AFTER the boot reaper (above), every blessed venue's remaining job containers, seeded into the ledger
-			// as orphans from their size labels. One venue that cannot be listed fails the whole listing: the budget then
-			// admits nothing until a tick reads it, because a container nobody counted is an overcommit.
-			survivors: async () => {
-				const venues = [...(localBlessed ? [[DEFAULT_BACKEND, "docker"]] : []), ...(podmanBlessed ? [[PODMAN_BACKEND, "podman"]] : [])];
-				const all = [];
-				for (const [backend, bin] of venues) {
-					for (const c of await listJobContainersFn(bin)()) all.push({ ...c, venue: { backend } });
-				}
-				return all;
-			},
+			// as orphans from their size labels. PER VENUE (gate round 2 of phase 2, P2G2-2): a venue that cannot be listed
+			// stops only its own jobs until a tick reads it, because a container nobody counted is an overcommit, while the
+			// other venue's jobs run. A venue that holds no container by construction counts as none rather than as unread:
+			// its binary is absent (ENOENT, nothing of it can run), or its boot job-user decision is `unmappable` (every
+			// job on it is refused before a container, so this worker starts none there).
+			survivors: Object.fromEntries(
+				[...(localBlessed ? [[DEFAULT_BACKEND, "docker", bootDecision]] : []), ...(podmanBlessed ? [[PODMAN_BACKEND, "podman", bootPodmanDecision]] : [])].map(([backend, bin, decision]) => [
+					backend,
+					async () => {
+						try {
+							return (await listJobContainersFn(bin)()).map((c) => ({ ...c, venue: { backend } }));
+						} catch (error) {
+							if (error?.code === "ENOENT" || decision?.mode === "unmappable") return [];
+							throw error;
+						}
+					},
+				]),
+			),
+			defaultVenue: config.defaultBackend,
 			now,
 			log,
 		},

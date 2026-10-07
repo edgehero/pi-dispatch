@@ -2429,9 +2429,18 @@ export async function collectChecks(shellVars, seams) {
 	// Issue #596, phase 2: this host's own row, when its worker runs and publishes one. Its host budget ledger is held
 	// against the size labels of the job containers each venue's runtime lists, read only when the row carries the ledger.
 	const selfRow = (fleet.hosts ?? []).find((h) => printable(h.name) === workerNameOf(declaredWorkerName)) ?? null;
-	// P2G1-L4: a worker that has not read its boot listing of the job containers left from before it started admits nothing.
-	if (selfRow?.budgetSeed === "unlisted") {
-		checks.push({ ok: false, warn: true, label: "this host's worker admits NO job: it could not list the job containers left from before it started, so it cannot count what they hold (host_budget_seed_unread)", fix: "make the runtime answer for the worker's account (`docker ps -a`, `podman ps -a`); the worker asks again every few seconds and starts admitting once it reads the listing" });
+	// P2G1-L4: a worker that has not read its boot listing of the job containers left from before it started admits nothing
+	// on that venue. Per venue since gate round 2 of phase 2 (P2G2-2): `unlisted:<venue>[,<venue>]`, each a backend name;
+	// a bare `unlisted` (a worker of this round's first draft) is the whole host.
+	const seedField = typeof selfRow?.budgetSeed === "string" ? selfRow.budgetSeed : "";
+	if (seedField === "unlisted" || seedField.startsWith("unlisted:")) {
+		const unread = seedField
+			.slice("unlisted:".length)
+			.split(",")
+			.filter((v) => /^[a-z][a-z0-9-]{0,31}$/.test(v));
+		const bins = unread.map((v) => (v === "podman" ? "`podman ps -a`" : "`docker ps -a`"));
+		const where = unread.length === 0 ? "NO job" : `NO job on the ${unread.join(" and ")} venue${unread.length === 1 ? "" : "s"} (the other venues' jobs still run)`;
+		checks.push({ ok: false, warn: true, label: `this host's worker admits ${where}: it could not list the job containers left from before it started there, so it cannot count what they hold (host_budget_seed_unread)`, fix: `make the runtime answer for the worker's account (${bins.length > 0 ? [...new Set(bins)].join(", ") : "`docker ps -a`, `podman ps -a`"}); the worker asks again every few seconds and starts admitting once it reads the listing` });
 	}
 	if (selfRow && typeof selfRow.usedMemMiB === "string" && selfRow.usedMemMiB !== "") {
 		const listed = [];
@@ -7665,6 +7674,8 @@ export function projectSizes(limits, env) {
 export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} } = {}) {
 	if (view.error) return [{ ok: false, label: `host budget does not parse: ${view.error}, so the worker REFUSES TO START`, fix: "set PI_HOST_MEMORY_BUDGET and PI_HOST_CPU_BUDGET to auto, off or a value such as 64g or 12, and PI_HOST_RESERVE_MEMORY and PI_HOST_RESERVE_CPUS to auto or a value (or unset all four for auto), then re-run doctor" }];
 	const { memMiB, cpuCenti, detail, settings } = view;
+	// P2G2-1: a worker without PI_WORKER_NAME drains no host queue and declares no fleet, so it refuses every never-fits job.
+	const multiHost = Boolean(env?.PI_WORKER_NAME);
 	const memWhy = settings.memory.mode === "off" ? "off: PI_HOST_MEMORY_BUDGET" : settings.memory.mode === "value" ? "PI_HOST_MEMORY_BUDGET" : detail.memTotalMiB === null ? "auto" : `auto: ${formatMemory(detail.memTotalMiB)} here, ${formatMemory(detail.memReserveMiB)} kept for the host${detail.memFloored ? ", raised to one job of the default size" : ""}`;
 	const cpuWhy = settings.cpus.mode === "off" ? "off: PI_HOST_CPU_BUDGET" : settings.cpus.mode === "value" ? "PI_HOST_CPU_BUDGET" : detail.cpuTotalCenti === null ? "auto" : `auto: ${formatCpus(detail.cpuTotalCenti)} here, ${formatCpus(detail.cpuReserveCenti)} kept for the host${detail.cpuFloored ? ", raised to one job of the default size" : ""}`;
 	const checks = [{ ok: true, label: `Host budget: memory ${budgetMemShown(memMiB)} (${memWhy}), CPUs ${budgetCpuShown(cpuCenti)} (${cpuWhy}); a job starts only when its size fits beside what already runs on this host` }];
@@ -7689,9 +7700,9 @@ export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} 
 		const shown = `${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs`;
 		const misfit = neverFits(p.size, budget, p.hostShare);
 		if (misfit === "host") {
-			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-host), and one on the shared queue waits for a host it fits on`, fix: `lower project:${p.id}'s memory or cpus in scoped-limits.json, or raise this host's budget` });
+			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so ${multiHost ? "a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-host), and one on the shared queue waits for a host it fits on" : "every job of it is refused before anything is spent (job-size-exceeds-host): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for"}`, fix: `lower project:${p.id}'s memory or cpus in scoped-limits.json, or raise this host's budget` });
 		} else if (misfit === "share") {
-			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than its hostShare (${p.hostShare}%) of this host's budget, so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-share), and one on the shared queue waits for a host it fits on`, fix: `raise project:${p.id}'s hostShare or lower its size in scoped-limits.json` });
+			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than its hostShare (${p.hostShare}%) of this host's budget, so ${multiHost ? "a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-share), and one on the shared queue waits for a host it fits on" : "every job of it is refused before anything is spent (job-size-exceeds-share): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for"}`, fix: `raise project:${p.id}'s hostShare or lower its size in scoped-limits.json` });
 		}
 		if (p.minJobs > 0) {
 			minMem += p.minJobs * p.size.memMiB;
@@ -7789,7 +7800,14 @@ export function budgetLedgerChecks(selfRow, containers) {
 	} else {
 		checks.push({ ok: false, warn: true, label: `Host budget ledger holds ${usedMem === 0 ? "0" : formatMemory(usedMem)} and ${formatCpus(usedCpu)} CPUs, while the running job containers are labelled ${mem === 0 ? "0" : formatMemory(mem)} and ${formatCpus(cpu)} CPUs`, fix: "re-run doctor: a job starting or ending between the two reads differs for a moment. A difference that stays is a container the worker does not count, or one whose stop failed (it keeps its hold until the runtime says it is gone)" });
 	}
-	if (unlabelled > 0) checks.push({ ok: false, warn: true, label: `${unlabelled} running job container${unlabelled === 1 ? " carries" : "s carry"} no size label, so the ledger cannot be checked against ${unlabelled === 1 ? "it" : "them"} (started by a worker from before the host budget)`, fix: "nothing to do: the label is on every container a current worker starts" });
+	// P2G2-4: NAMED, so an operator can find each one (`pi-job-<id>`, a job id and never payload text). A worker that
+	// started beside one counts it at the largest size a project row or the default could have started it at, capped
+	// at the budget, so the ledger line above differs while it runs.
+	if (unlabelled > 0) {
+		const names = containers.filter((c) => c.memMiB === null || c.cpuCenti === null).map((c) => c.name);
+		const shown = names.length > 5 ? `${names.slice(0, 5).join(", ")} and ${names.length - 5} more` : names.join(", ");
+		checks.push({ ok: false, warn: true, label: `${unlabelled} running job container${unlabelled === 1 ? " carries" : "s carry"} no size label (${shown}), so the ledger cannot be checked against ${unlabelled === 1 ? "it" : "them"} (started by a worker from before the host budget); a worker that found ${unlabelled === 1 ? "it" : "them"} at its start counts each at the largest size a project may run at, capped at the budget, until ${unlabelled === 1 ? "it is" : "they are"} gone`, fix: "nothing to do: the label is on every container a current worker starts; stop one early with `docker stop <name>` (or `podman stop`) to give its room back sooner" });
+	}
 	return checks;
 }
 
