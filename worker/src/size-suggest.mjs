@@ -287,6 +287,61 @@ function fleetCapWhy(budgets, current, share) {
 }
 
 /**
+ * How one host's admission refuses `pair` for ever, per dimension, or null when it may start there some day: the
+ * worker's own `neverFits` (host-budget.mjs) restated, since this module imports nothing heavy, and held equal to it
+ * over a grid by size-suggest.test.mjs. A dimension above the whole budget is `host`; only when neither is, a dimension
+ * above the project's `share` of it is `share`. `off` (Infinity) and unknown (null) refuse nothing.
+ */
+function refusedOn(pair, budget, share) {
+	const over = (k, pct) => Number.isSafeInteger(budget[k]) && BigInt(pair[k]) * 100n > BigInt(pct) * BigInt(budget[k]);
+	const host = { memMiB: over("memMiB", 100), cpuCenti: over("cpuCenti", 100) };
+	if (host.memMiB || host.cpuCenti) return { memMiB: host.memMiB ? "host" : null, cpuCenti: host.cpuCenti ? "host" : null };
+	if (share === null || share === undefined) return null;
+	const part = { memMiB: over("memMiB", share), cpuCenti: over("cpuCenti", share) };
+	return part.memMiB || part.cpuCenti ? { memMiB: part.memMiB ? "share" : null, cpuCenti: part.cpuCenti ? "share" : null } : null;
+}
+
+/**
+ * THE ONE RULE for offering an apply call (DES-SIZE-SUGGESTIONS): a call is offered exactly when admission would
+ * accept the suggested job, the pair `{ memMiB, cpuCenti }` (each dimension the suggested size, or the current one where
+ * nothing is suggested). Doctor passes its one host's budget, the panel and the insights page the live hosts' budgets.
+ * Only a host that published an integer budget in some dimension is judged: with every budget `off` or unknown,
+ * admission refuses nothing, so the call is offered. The call is withheld when EVERY judged host refuses the pair (for
+ * doctor: its host refuses it). Returns null (offer the call) or the refusal, `{ memMiB, cpuCenti }`, each `host`
+ * (above every judged host's budget), `share` (above the project's `hostShare` of every judged host's budget) or null
+ * (not refused by every judged host in that dimension: then the pair as a whole is what no host admits).
+ */
+export function sizeRefusal(pair, budgets, share = null) {
+	const judged = (Array.isArray(budgets) ? budgets : []).filter((b) => b !== null && typeof b === "object" && (Number.isSafeInteger(b.memMiB) || Number.isSafeInteger(b.cpuCenti)));
+	if (judged.length === 0) return null;
+	const each = judged.map((b) => refusedOn(pair, b, share));
+	if (each.some((r) => r === null)) return null;
+	const dim = (k) => (each.every((r) => r[k] !== null) ? (each.every((r) => r[k] === "host") ? "host" : "share") : null);
+	return { memMiB: dim("memMiB"), cpuCenti: dim("cpuCenti") };
+}
+
+/**
+ * A refusal (`sizeRefusal`) in words, naming the dimension that does not fit: `memory 6g is above this host's budget
+ * (4g)`, `its 4 CPUs are above its hostShare (40%) of this host's budget (3.2 CPUs)`. A dimension the suggestion changes
+ * is named by its new size, one it keeps by "its". With `budget` (doctor's one host) the words are that host's and name
+ * its limit; without it (the panel) they speak of every live host.
+ */
+export function refusalWords(refusal, suggestion, share = null, budget = null) {
+	if (refusal === null || refusal === undefined) return "";
+	const where = budget === null ? "every live host's budget" : "this host's budget";
+	const m = suggestion?.memory ?? {};
+	const c = suggestion?.cpu ?? {};
+	const mem = m.suggested ?? m.current;
+	const cpus = c.suggested ?? c.current;
+	const limit = (k, kind, text) => (budget === null || !Number.isSafeInteger(budget[k]) ? "" : ` (${text(kind === "share" ? Math.floor((budget[k] * share) / 100) : budget[k])})`);
+	const above = (k, kind, text) => `above ${kind === "share" ? `its hostShare (${share}%) of ${where}` : where}${limit(k, kind, text)}`;
+	const parts = [];
+	if (refusal.memMiB) parts.push(`${m.suggested ? "memory" : "its memory"} ${formatMemory(mem)} is ${above("memMiB", refusal.memMiB, formatMemory)}`);
+	if (refusal.cpuCenti) parts.push(`${c.suggested ? "" : "its "}${cpusText(cpus)} ${cpus === 100 ? "is" : "are"} ${above("cpuCenti", refusal.cpuCenti, cpusText)}`);
+	return parts.length > 0 ? parts.join(" and ") : `memory ${formatMemory(mem)} with ${cpusText(cpus)} fits no live host's budget`;
+}
+
+/**
  * The suggestion for one project. Pure: no I/O, no clock read (`now` is injected, millis or a Date).
  *
  * `records` is any list of run records (other projects' are skipped), `current` the project's size now (`{ memMiB,

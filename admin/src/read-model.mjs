@@ -49,7 +49,7 @@ import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { resolveJobSize } from "@edgehero/pi-dispatch/job-size";
 import { projectBudgetRow, publishedBudget } from "@edgehero/pi-dispatch/host-budget";
-import { peakSeries, suggestSize, suggestionCall, suggestionEvidence } from "@edgehero/pi-dispatch/size-suggest";
+import { peakSeries, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "@edgehero/pi-dispatch/size-suggest";
 import { readSizingRecords } from "@edgehero/pi-dispatch/size-records";
 import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { hostsIn, mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
@@ -2219,8 +2219,9 @@ export function scanRunRecords({ logsDir, sinceMs, nowMs = Date.now(), fs = node
  *
  * `hostBudgets` are the live hosts' published budgets (`hostBudgetsOf`), and each project's raise is capped over them,
  * every host judged on its OWN pair (`suggestSize`'s `hosts`), each budget at the project's `hostShare` of it where its
- * row has one; a suggestion still above every host's offer carries no call (`call` null); null when no budget was read here (the edit preview), so a
- * raise offers no call. Returns `{ projects: { [id]: suggestion }, skipped }`, or `{ unreachable }` when the logs
+ * row has one; a call is offered exactly when admission would accept the suggested pair (`sizeRefusal`, the rule doctor
+ * uses: withheld only when every live host that published an integer budget refuses it, `refusal` then says how);
+ * `hostBudgets` is null when no budget was read here (the edit preview), so a raise offers no call. Returns `{ projects: { [id]: suggestion }, skipped }`, or `{ unreachable }` when the logs
  * directory is unreadable. With `withSeries`, each also carries `series`, the same runs' peaks oldest first
  * (`peakSeries`), for the insights chart. A project whose size the worker would refuse is left out. Nothing here
  * applies anything.
@@ -2238,10 +2239,13 @@ export function readSizeSuggestions({ logsDir, projectIds = [], limits = [], env
       continue;
     }
     // the project's hostShare caps each host's budget at its share (a job above it is refused there), as doctor's does
-    const s = suggestSize({ project: id, records, current, hosts: Array.isArray(hostBudgets) ? hostBudgets : null, hostShare: projectBudgetRow(limits, id).hostShare, now: nowMs });
-    // a suggestion still larger than any live host offers carries no call: applying it would trade a refusal for the same one
-    const never = s.memory.overBudget || s.cpu.overBudget;
-    projects[id] = { ...s, call: never ? null : suggestionCall(s, limits), words: suggestionEvidence(s), ...(withSeries ? { series: peakSeries({ project: id, records, now: nowMs }) } : {}) };
+    const share = projectBudgetRow(limits, id).hostShare;
+    const s = suggestSize({ project: id, records, current, hosts: Array.isArray(hostBudgets) ? hostBudgets : null, hostShare: share, now: nowMs });
+    // THE ONE RULE doctor uses too (`sizeRefusal`): the call is withheld exactly when every live host that published an
+    // integer budget would refuse the suggested pair for ever; with no such host, admission refuses nothing, so it is offered.
+    const call = suggestionCall(s, limits);
+    const refusal = call === null ? null : sizeRefusal({ memMiB: s.memory.suggested ?? current.memMiB, cpuCenti: s.cpu.suggested ?? current.cpuCenti }, hostBudgets, share);
+    projects[id] = { ...s, call: refusal === null ? call : null, refusal, words: { ...suggestionEvidence(s), refusal: refusalWords(refusal, s, share) }, ...(withSeries ? { series: peakSeries({ project: id, records, now: nowMs }) } : {}) };
   }
   return { projects, skipped: read.skipped };
 }

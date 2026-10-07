@@ -92,7 +92,7 @@ test("a lowering still above what this host offers is a warning that says a job 
 	const big = limitsOf([{ scope: "project:web", memory: "16g" }]);
 	const [over] = checksOf({ limits: big, records: runs(10, { memMiB: 16384, peakMiB: 6000 }), budget: { memMiB: 4096, cpuCenti: 700 } });
 	assert.deepEqual([over.ok, over.warn], [false, true]);
-	assert.match(over.label, /suggest memory 7680m \(oversized: p95 peak 6000m, largest 6000m, over 10 runs\), but memory 7680m is above 4g, the largest size this host offers, so a job of it would never fit this host$/);
+	assert.match(over.label, /suggest memory 7680m \(oversized: p95 peak 6000m, largest 6000m, over 10 runs\), but memory 7680m is above this host's budget \(4g\), so a job of it would never fit this host$/);
 	assert.equal(over.fix, "no call is offered: a job of that size would never fit this host");
 	const cpus = limitsOf([{ scope: "project:web", cpus: 8 }]);
 	const [cpuFits] = checksOf({ limits: cpus, records: runs(10, { cpuCenti: 800, peakMiB: 4000, cores: 2 }), budget: { memMiB: 65536, cpuCenti: 250 } });
@@ -100,7 +100,7 @@ test("a lowering still above what this host offers is a warning that says a job 
 	const [cpuOver] = checksOf({ limits: cpus, records: runs(10, { cpuCenti: 800, peakMiB: 4000, cores: 2 }), budget: { memMiB: 65536, cpuCenti: 200 } });
 	assert.deepEqual([cpuOver.ok, cpuOver.warn], [false, true]);
 	// the cap is named with its unit, never a bare "(2)"
-	assert.match(cpuOver.label, /suggest 2\.5 CPUs \(underused: .*\), but 2\.5 CPUs are above 2 CPUs, the most this host offers, so a job of it would never fit this host$/);
+	assert.match(cpuOver.label, /suggest 2\.5 CPUs \(underused: .*\), but 2\.5 CPUs are above this host's budget \(2 CPUs\), so a job of it would never fit this host$/);
 	assert.doesNotMatch(cpuOver.fix, /dispatch_limit/);
 	// a lowering that fits is a fact line, with the call
 	const [low] = checksOf({ limits: big, records: runs(10, { memMiB: 16384, peakMiB: 1000 }), budget: { memMiB: 65536, cpuCenti: 700 } });
@@ -153,8 +153,8 @@ test("a line whose suggestion would never fit the share or the host never carrie
 	const [both] = checksOf({ limits: limitsOf([{ scope: "project:web", memory: "4g", cpus: 8 }]), records: [rec({ cpuCenti: 800, reason: "oom-killed", peakMiB: 4096, cores: 2 }), ...runs(10, { cpuCenti: 800, peakMiB: 1000, cores: 2 }).map((r, i) => ({ ...r, jobId: `c${i}` }))], budget: { memMiB: 4096, cpuCenti: 200 } });
 	assert.equal(both.fix, "no larger memory is offered: no larger size fits this host; no call is offered: a job of that size would never fit this host");
 	// the share is named where it is what binds
-	assert.match(over[0].label, /, but that is above its hostShare \(50% of this host's budget\), so a job of it would never fit this host$/);
-	assert.match(over[1].label, /, but memory 7680m is above 4g, the largest size its hostShare \(25% of this host's budget\) allows, so/);
+	assert.match(over[0].label, /, but its 6 CPUs are above its hostShare \(50%\) of this host's budget \(4 CPUs\), so a job of it would never fit this host$/);
+	assert.match(over[1].label, /, but memory 7680m is above its hostShare \(25%\) of this host's budget \(4g\), so/);
 	// the raise held at the share is no such line: it carries the call for the share's own size, 8g of the 16g
 	assert.match(lines[0].fix, /^apply it in the admin panel with dispatch_limit_edit \{"index":0,"memory":"8g"\}/);
 });
@@ -180,4 +180,21 @@ test("no projects, no lines; a project's line reads only its own runs", () => {
 	assert.deepEqual(sizeSuggestionChecks({ projects: [], records: runs(20), nowMs: NOW }), []);
 	const [line] = sizeSuggestionChecks({ projects: projects("api"), limits: [], env: {}, records: runs(20, { project: "web", reason: "oom-killed" }), nowMs: NOW });
 	assert.match(line.label, /^project api: size 4g, 2 CPUs: not enough runs/);
+});
+
+test("the apply call is offered exactly when this host's admission would accept the suggested pair", () => {
+	// a memory lowering while the CPUs it keeps are above the whole budget: admission refuses the pair, so no call,
+	// and the line names the CPUs, the dimension that does not fit, not the memory it suggests
+	const [cpuOver] = checksOf({ limits: limitsOf([{ scope: "project:web", memory: "4g", cpus: 10 }]), records: runs(10, { cpuCenti: 1000, peakMiB: 500, cores: 9.5 }), budget: { memMiB: 16384, cpuCenti: 800 } });
+	assert.deepEqual([cpuOver.ok, cpuOver.warn], [false, true]);
+	assert.match(cpuOver.label, /suggest memory 768m \(oversized: .*\), but its 10 CPUs are above this host's budget \(8 CPUs\), so a job of it would never fit this host$/);
+	assert.equal(cpuOver.fix, "no call is offered: a job of that size would never fit this host");
+	// the budget off or unknown in both dimensions: admission refuses nothing, so a lowering is offered even when it is
+	// above the runtime's own memory, which is noted beside the call
+	const big = limitsOf([{ scope: "project:web", memory: "64g", cpus: 2 }]);
+	for (const budget of [{ memMiB: Infinity, cpuCenti: Infinity }, { memMiB: null, cpuCenti: null }, null]) {
+		const [low] = checksOf({ limits: big, records: runs(10, { memMiB: 65536, peakMiB: 36000 }), budget, total: { memMiB: 32768, cpuCenti: 800 } });
+		assert.match(low.label, /suggest memory 44g \(oversized: .*\) \(note: memory 44g is above 32g, this host's own memory; its budget is off or unknown, so the worker admits it\)$/, JSON.stringify(budget));
+		assert.equal(low.fix, 'apply it in the admin panel with dispatch_limit_edit {"index":0,"memory":"44g"} (an operator confirms it; nothing applies a size by itself)', JSON.stringify(budget));
+	}
 });
