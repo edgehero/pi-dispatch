@@ -250,7 +250,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 
 		// The limits snapshot, the project and the size, read here, right after the pause gate and ABOVE the wait gate, so
-		// the never-fits check below can refuse a size before a job waits (issue #596, gate round 1 of phase 2, P2G1-L6).
+		// the never-fits check below can refuse a size before a job waits (issue #596, gate round 1 of phase 2).
 		const limits = scopedLimits();
 		// The job's project (issue #499, INT-PROJECTS-FILE-CONTRACT), resolved ONCE here from one read of the projects ref,
 		// beside the limits snapshot and for its reason: the gate, the ledger and the record agree for this attempt,
@@ -268,7 +268,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const size = resolveJobSize({ project, limits, env: jobSizeEnv });
 
 		// THE NEVER-FITS CHECK (issue #596, phase 2, DES-HOST-BUDGET), right after the size and ABOVE the wait gate (gate
-		// round 1, P2G1-L6): a size that can never start here is known now, and a job must not hold for a day on a wait and
+		// round 1): a size that can never start here is known now, and a job must not hold for a day on a wait and
 		// THEN be told so (the wait gate's own determinate-refusals-then-holds rule). Nothing is held yet, so nothing is
 		// given back.
 		//
@@ -278,10 +278,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// both sizes; the forge comment names neither (an issue author can act on neither). Two such jobs: one on THIS
 		// HOST'S OWN QUEUE (`pi-jobs@<name>`), and EVERY job on a worker with no host queue (`multiHost` false, no
 		// `PI_WORKER_NAME`): there the shared queue is this host's alone in all but name, since no other host that
-		// declared a fleet drains it, and deferring a never-fits job there (gate round 2 of phase 2, P2G2-1) re-asked it
+		// declared a fleet drains it, and deferring a never-fits job there (gate round 2 of phase 2) re-asked it
 		// every 60 s forever with no record, which is the silent no-op this project refuses.
 		//
-		// A job on the SHARED queue of a MULTI-HOST worker is NEVER refused for its size (P2G1-L2), local or forge: another
+		// A job on the SHARED queue of a MULTI-HOST worker is NEVER refused for its size, local or forge: another
 		// host draining the queue may have a larger budget, or give the project a larger share of it. It is deferred for
 		// `NEVER_FITS_RECHECK_MS` with a named line carrying both sizes, and doctor names a project that fits no live
 		// host. There used to be a fleet refusal after two registry reads agreed that no live host fits, and the registry
@@ -666,8 +666,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// (`host-budget.mjs` `sweep`; the boot reaper is the backstop). The count slots OUTSIDE the budget (the scope, the
 		// project and the endpoint slots, and the host slot when there is no budget) still go back: they bound starts, and
 		// the 30-minute bound already ended this job. The `PI_CONCURRENCY` slot does NOT: with a budget the count is the
-		// budget's third dimension (P2G1-L3), so an orphan, like a seeded survivor, holds one job slot until its container
-		// is gone (gate round 2 of phase 2, P2G2-5).
+		// budget's third dimension, so an orphan, like a seeded survivor, holds one job slot until its container
+		// is gone (gate round 2 of phase 2).
 		//
 		// The in-process halves go back synchronously, before the first await, so a caller that cannot await (the setup
 		// guard) still frees every local slot before it rethrows; the fleet halves are release-if-mine and awaited where
@@ -705,7 +705,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 			return Promise.all([endpointsReleased, scopesReleased]);
 		};
-		// With a host budget the count is the budget's own third dimension (issue #596, gate round 1 of phase 2, P2G1-L3),
+		// With a host budget the count is the budget's own third dimension (issue #596, gate round 1 of phase 2),
 		// judged LAST with the memory and the CPU, so a waiting job's hold keeps a job slot too. A host slot taken here, first,
 		// deferred a big shared-queue job at the slot while every small that ended was replaced at once from the host queue,
 		// and a job deferred here never reached the budget, so it held nothing and never ran while the flood lasted.
@@ -911,8 +911,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// Skipped when the settings are unreadable or invalid: that job is refused or retried below without a container.
 		//
 		// The gate is told the job's VENUE (the name it names, null for the default) and the container NAME this pickup
-		// will use (gate round 2 of phase 2): an unread boot listing blocks only its own venue's jobs (P2G2-2), and a
-		// seeded survivor or orphan whose container carries this name defers the job `running-here` (P2G2-3), since its
+		// will use (gate round 2 of phase 2): an unread boot listing blocks only its own venue's jobs, and a
+		// seeded survivor or orphan whose container carries this name defers the job `running-here`, since its
 		// `docker run` would create a container of that very name, which the sweep would take for the survivor. A name the
 		// venue cannot build is null here; the registry's refusal below records that job.
 		if (hostBudget && !settingsThrew && !settings?.invalid) {
@@ -1452,7 +1452,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	};
 	return async function processor(job, token, signal) {
 		if (!hostBudget) return pickup(job, token, signal, { budgetDeferred: false });
-		// The pickup's TICKET (P2G1-L1): the ledger entry this pickup takes carries it, and only this pickup's release or
+		// The pickup's TICKET: the ledger entry this pickup takes carries it, and only this pickup's release or
 		// orphan can act on that entry, so a second pickup of the same job id (a stalled scheduled job handed back while
 		// its first attempt still runs here) can never give back the first's hold.
 		const budgetState = { budgetDeferred: false, ticket: hostBudget.enter(job.id) };
@@ -1481,7 +1481,7 @@ export const CANCEL_STOP_BOUND_MS = 1_000;
 /**
  * The forge comments for the two never-fits refusals (issue #596, phase 2). GENERIC on purpose: never the size, the
  * budget or the project, which are operator configuration an issue author can act on none of. The worker log, the run
- * record and doctor name both sizes. There is no fleet refusal (gate round 1 of phase 2, P2G1-L2): a job on the shared
+ * record and doctor name both sizes. There is no fleet refusal (gate round 1 of phase 2): a job on the shared
  * queue waits for a host it fits on.
  */
 export const SIZE_REFUSAL_COMMENTS = Object.freeze({
@@ -1549,7 +1549,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	// `hostBudgetOptions` is start.mjs's (the settings, the default size, the facts reader, the orphan check); a bare
 	// wiring passes none and keeps today's behaviour. The tick re-reads the facts, verifies stale holds and sweeps
 	// orphans, off every job path, unref'd and cleared on stop like the registry's beat.
-	// The live `PI_CONCURRENCY` is the budget's third dimension (P2G1-L3), so with a budget the host slot above is not taken.
+	// The live `PI_CONCURRENCY` is the budget's third dimension, so with a budget the host slot above is not taken.
 	const hostBudget = hostBudgetOptions ? makeHostBudget({ scopedLimits, countLimit: () => liveConcurrency(), ...hostBudgetOptions }) : null;
 	let budgetTick = null;
 	if (hostBudget) {
@@ -1577,7 +1577,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			getSettings,
 			// Issue #596, phase 2: the ONE host budget. `multiHost` is whether this worker declared a fleet (a host queue):
 			// without one it declares no fleet and no other host is there to wait for, so a size that never fits here is refused rather than
-			// deferred for a host that does not exist (gate round 2 of phase 2, P2G2-1).
+			// deferred for a host that does not exist (gate round 2 of phase 2).
 			hostBudget,
 			multiHost: hostQueue !== null,
 			// Late-bound over EVERY worker: an overlay concurrency change re-binds the live slot count at the

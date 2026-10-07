@@ -2007,7 +2007,7 @@ test("issue #596, phase 2: a never-fits refusal's host budget is REBUILT into th
 	assert.equal(buildRecord({ job, result: { outcome: "completed" } }).hostBudget, null);
 	assert.deepEqual(recordedHostBudget({ memMiB: 1.5, cpuCenti: -1, hostShare: "50" }), { memMiB: null, cpuCenti: null, hostShare: null });
 	for (const bad of [null, undefined, [], "x", 7]) assert.equal(recordedHostBudget(bad), null);
-	// P2G1-C5: a dimension switched off is recorded as "off", never as the null that means unknown.
+	// a dimension switched off is recorded as "off", never as the null that means unknown.
 	assert.deepEqual(recordedHostBudget({ memMiB: 32768, cpuCenti: Infinity, hostShare: 50 }), { memMiB: 32768, cpuCenti: "off", hostShare: 50 });
 	assert.deepEqual(recordedHostBudget({ memMiB: "off", cpuCenti: null, hostShare: null }), { memMiB: "off", cpuCenti: null, hostShare: null });
 	assert.deepEqual(recordedHostBudget({ memMiB: "on", cpuCenti: -Infinity, hostShare: Infinity }), { memMiB: null, cpuCenti: null, hostShare: null }, "only Infinity and the word itself are off");

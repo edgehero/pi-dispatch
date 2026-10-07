@@ -12161,7 +12161,7 @@ test("doctor names the default job size, the --cpus ceiling this runtime gives e
 	assert.match(jobSizeChecks({ PI_JOB_MEMORY: "1536m", PI_JOB_CPUS: "0.5" })[0].label, /^Job size: 1536m of memory .* weight of 0\.5 CPUs, per job \(PI_JOB_MEMORY and PI_JOB_CPUS;/);
 	assert.match(jobSizeChecks({}, { daemon: facts({ hostCpus: 2 }) })[1].label, /at most 2 of this runtime's 2 CPUs/, "a host under four CPUs keeps none back");
 	assert.equal(jobSizeChecks({}, {}).length, 1, "no venue named, no ceiling line");
-	// The ceiling UNKNOWN is a warning, per venue (P1G1-C1): a job then runs with no --cpus at all.
+	// The ceiling UNKNOWN is a warning, per venue: a job then runs with no --cpus at all.
 	for (const [label, opts, want] of [
 		["docker not read", { daemon: null }, /^local: `docker info` gave no answer that says its CPU count \(not read\), so the CPU ceiling is unknown and a job that runs gets no --cpus/],
 		["docker unreadable", { daemon: { answered: false, reason: "unparseable", transient: false } }, /^local: `docker info` gave no answer that says its CPU count \(unparseable\)/],
@@ -12224,7 +12224,7 @@ test("issue #596, phase 2: with this host's registry row carrying its ledger, do
 	assert.ok(!none.some((c) => /Host budget ledger/.test(c.label)), "a row without the ledger: no listing, no line");
 });
 
-test("issue #596, P2G1-L4: a worker whose boot listing of left-over job containers is unread admits no job, and doctor warns so", async () => {
+test("issue #596, a worker whose boot listing of left-over job containers is unread admits no job, and doctor warns so", async () => {
 	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 	const plan = { ...EGRESS_OK, "docker info": 0, "docker image": 0, "docker ps --filter name=pi-job- --format": { code: 0, output: "" } };
 	const seams = (row) => collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini1", tz, ...row }] }) });
@@ -12232,7 +12232,7 @@ test("issue #596, P2G1-L4: a worker whose boot listing of left-over job containe
 	const line = unread.find((c) => /host_budget_seed_unread/.test(c.label));
 	assert.ok(line && line.ok === false && line.warn === true, "a warning");
 	assert.match(line.label, /^this host's worker admits NO job: it could not list the job containers left from before it started/);
-	// P2G2-2: per venue. The row names the unread venues; doctor names them and says the others' jobs still run.
+	// per venue. The row names the unread venues; doctor names them and says the others' jobs still run.
 	const podmanOnly = (await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({ budgetSeed: "unlisted:podman" }))).find((c) => /host_budget_seed_unread/.test(c.label));
 	assert.match(podmanOnly.label, /^this host's worker admits NO job on the podman venue \(the other venues' jobs still run\): it could not list/);
 	assert.match(podmanOnly.fix, /`podman ps -a`/);

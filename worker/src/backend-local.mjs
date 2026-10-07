@@ -403,7 +403,7 @@ export function isJobNamespace(name) {
 }
 
 /**
- * The states in which a job container runs nothing and never will again (gate round 1 of phase 2, P2G1-L5): Docker's
+ * The states in which a job container runs nothing and never will again (gate round 1 of phase 2): Docker's
  * `exited` and `dead`, Podman's `exited` and `stopped`. Such a container uses no memory and no CPU, yet `ps -a` lists
  * it (an `--rm` whose removal failed), so counting it as running kept an orphan's hold until a worker restart.
  */
@@ -453,7 +453,7 @@ export function makeContainerGone({ exec = execReaperBounded, binOf = () => "doc
 }
 
 /**
- * The job containers a venue still lists (gate round 1 of phase 2, P2G1-L4), for the host budget's boot seed: `ps -a`
+ * The job containers a venue still lists (gate round 1 of phase 2), for the host budget's boot seed: `ps -a`
  * by the job namespace, each with its state and its two size labels, as `[{ name, memMiB, cpuCenti }]` (a label absent
  * or not a positive integer is null). A container in a state that runs nothing (`CONTAINER_GONE_STATES`) is left out:
  * it holds nothing. One not yet started is kept, so the sweep removes it before its room is given back. THROWS when

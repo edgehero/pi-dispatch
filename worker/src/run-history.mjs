@@ -734,7 +734,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 /**
  * A refusal's host budget as a record carries it: `{ memMiB, cpuCenti, hostShare }`, else null. A budget is a safe
  * integer, `"off"` (the budget's `Infinity`, or the word itself) or null (unknown); the share a safe integer or null.
- * `"off"` rather than null for a switched-off dimension (gate round 1 of phase 2, P2G1-C5): null already means unknown,
+ * `"off"` rather than null for a switched-off dimension (gate round 1 of phase 2): null already means unknown,
  * and a record that cannot tell "not limited" from "not known" names neither.
  */
 export function recordedHostBudget(value) {

@@ -54,7 +54,7 @@ export const BUDGET_RECHECK_MS = 9_000;
 
 /**
  * How long a job on the SHARED queue whose size can never fit THIS host waits before another pickup asks again (gate
- * round 1 of phase 2, P2G1-L2). Longer than every re-check above, because the answer is not "soon" but "on another
+ * round 1 of phase 2). Longer than every re-check above, because the answer is not "soon" but "on another
  * host": the job goes back to the shared queue for a host it fits on. It is never refused for the fleet: a registry
  * row is absent while its host restarts and a timed-out read drops a row, so "no live host fits" is not a verdict the
  * registry can give. Doctor names a project that fits no live host instead.
@@ -66,7 +66,7 @@ export const HOLD_VERIFY_AFTER_MS = 15_000;
 /** A hold that cannot be checked (Valkey does not answer) is dropped once its job has been away this long. */
 export const HOLD_DROP_ON_ERROR_MS = 120_000;
 /**
- * How long ONE queue read of a hold's job (`getState`) may take (gate round 1 of phase 2, P2G1-C1). The worker's client
+ * How long ONE queue read of a hold's job (`getState`) may take (gate round 1 of phase 2). The worker's client
  * is built with `maxRetriesPerRequest: null`, so a command against an unreachable server queues forever rather than
  * rejecting: unbounded, one hung read held the whole verify, the 120 s drop never came, and every later tick piled up
  * behind it. A read past this bound is an unanswered read, the error branch.
@@ -311,7 +311,7 @@ export function rankHolds(waiters, ledger, minJobsOf = () => 0) {
  * order; a job that holds no hold has every hold above it. The share is judged first, so a job its own project's share
  * stops is not reported as waiting for the budget (and so does not hold room it could not use).
  *
- * THE COUNT is the third dimension (gate round 1 of phase 2, P2G1-L3): every running job, the ask and every hold above
+ * THE COUNT is the third dimension (gate round 1 of phase 2): every running job, the ask and every hold above
  * it is ONE, against `budget.count` (the live `PI_CONCURRENCY`; null or absent is no count bound). It was a separate
  * host slot taken BEFORE this gate, and that starved a big job: a full host slot deferred it at the slot, so its hold
  * was suspended, and every small job that ended was replaced at once by the next one from the host queue. Inside the
@@ -359,7 +359,7 @@ export function publishedBudget(row) {
  * label (one started by a worker from before the labels): the larger of the default size and every project row's size,
  * in each dimension, and never more than the budget (`budget`, `{ memMiB, cpuCenti }`, each capped only when it is an
  * integer). Pessimistic on purpose: a guess too small lets the next job overcommit the host, a guess too large only
- * delays one until the sweep sees the container gone. CAPPED (gate round 2 of phase 2, P2G2-4): a project row larger
+ * delays one until the sweep sees the container gone. CAPPED (gate round 2 of phase 2): a project row larger
  * than the budget (a size that never fits) would otherwise count a survivor as more than the whole host, which no
  * container here could hold and which the ledger's sums then carried into doctor and the registry.
  */
@@ -408,7 +408,7 @@ function bounded(promise, ms) {
  *                 their own readers); read by `refresh`, never by `gate`
  *   scopedLimits  () => the live limits snapshot, for the holds' `minJobs` and the shares when no pickup snapshot is given
  *   countLimit    () => the live `PI_CONCURRENCY` (an integer), the budget's third dimension (`admit`); an answer that
- *                 is not an integer is no bound for that gate. REQUIRED (gate round 2 of phase 2, P2G2-6): a default of
+ *                 is not an integer is no bound for that gate. REQUIRED (gate round 2 of phase 2): a default of
  *                 "no bound" let a wiring that forgot it drop the count silently, so a missing one throws here
  *   containerGone async (name, venue) => true (the runtime says it is gone), false (it runs), null (could not ask)
  *   survivors     the job containers each blessed venue still lists after the boot reaper, each `{ name, venue, memMiB,
@@ -420,7 +420,7 @@ function bounded(promise, ms) {
  *                 CPU reserve (`cpu-reserve.mjs`) keeps the jobs' parent cgroup's quota at the budget from here, so a
  *                 slow `systemctl` or helper container delays no refresh, no gate and no pickup
  *
- * ONE PICKUP, ONE TICKET (gate round 1 of phase 2, P2G1-L1). The same job id can reach the gate twice on one host: a
+ * ONE PICKUP, ONE TICKET (gate round 1 of phase 2). The same job id can reach the gate twice on one host: a
  * scheduled job whose lock lapsed while its first attempt still runs is moved back to wait by BullMQ's stall check and
  * picked up again here, and its record does not exist yet. The ledger is keyed by job id, so the second attempt used to
  * overwrite the first's entry and its release then freed the hold of a container that still ran. Now `enter` hands each
@@ -428,7 +428,7 @@ function bounded(promise, ms) {
  * their own ticket took, and the gate DEFERS a job whose id the ledger already holds (`running-here`, running or orphan)
  * without making it a waiter: what that id promised is still in use until its own pickup gives it back.
  *
- * SEEDED AT BOOT (P2G1-L4). The ledger lives in process memory, so a worker that restarts starts empty while a job
+ * SEEDED AT BOOT. The ledger lives in process memory, so a worker that restarts starts empty while a job
  * container the boot reaper could not remove may still run. `survivors` lists what remains on every blessed venue and
  * each is seeded as an ORPHAN from its `pi.dispatch.mem` and `pi.dispatch.cpu` labels (`pessimisticSize` without
  * them, capped at the budget, so the first refresh is awaited before the first listing); the sweep gives each back once
@@ -436,12 +436,12 @@ function bounded(promise, ms) {
  * (`unseeded`, fail closed, said once per streak and venue as `host_budget_seed_unread`), and every tick asks again: an
  * empty ledger beside containers nobody counted is the overcommit the budget exists to refuse.
  *
- * PER VENUE (gate round 2 of phase 2, P2G2-2). One listing for the whole host made a venue that cannot be listed stop
+ * PER VENUE (gate round 2 of phase 2). One listing for the whole host made a venue that cannot be listed stop
  * every OTHER venue's jobs too: `PI_BACKENDS=local,podman` with Podman absent or down answered `unseeded` for every
  * docker job, forever. A job is told its venue (`gate`'s `venue`, the default when it names none), and only its own
  * venue's unread listing stops it. A job whose venue is not known (null with no `defaultVenue`) is stopped by any.
  *
- * A SURVIVOR'S NAME IS TAKEN (P2G2-3). A seeded survivor is keyed `container:<name>`, not by a job id, so the id check
+ * A SURVIVOR'S NAME IS TAKEN. A seeded survivor is keyed `container:<name>`, not by a job id, so the id check
  * alone admitted the job whose container that is (`pi-job-<id>`, retried here after a restart), and its `docker run`
  * then created a container the sweep took for the survivor and removed. The gate now defers `running-here` any job
  * whose container name an orphan carries, and the sweep never asks about a name a live entry carries.
@@ -572,7 +572,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 
 	/**
 	 * Gives back an orphan's hold once the runtime says its container is gone. NEVER asks about a name a live (admitted,
-	 * not orphaned) entry carries (P2G2-3): the runtime's answer about that name is the live job's container, and asking
+	 * not orphaned) entry carries: the runtime's answer about that name is the live job's container, and asking
 	 * removes one not yet started. The gate keeps that from arising; this is the sweep not relying on it.
 	 */
 	const sweep = async () => {
@@ -592,7 +592,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		}
 	};
 
-	// ONE IN FLIGHT PER PIECE (P2G1-C1): a tick that finds a piece still running from an earlier tick skips that piece
+	// ONE IN FLIGHT PER PIECE: a tick that finds a piece still running from an earlier tick skips that piece
 	// rather than starting a second, and the pieces never wait on one another, so a slow facts read or queue read cannot
 	// pile ticks up behind it or keep the sweep from giving an orphan's room back.
 	const running = new Map();
@@ -605,7 +605,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		running.set(key, p);
 		return p;
 	};
-	// The first refresh BEFORE the first listing: an unlabelled survivor's size is capped at the budget (P2G2-4).
+	// The first refresh BEFORE the first listing: an unlabelled survivor's size is capped at the budget.
 	const ready = refresh().then((first) => once("seed", seed).then(() => first));
 
 	return {

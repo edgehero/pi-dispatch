@@ -162,7 +162,7 @@ test("a size that can never fit this host is REFUSED before anything is spent wh
 	assert.equal(h.seen.comments[0], mod.SIZE_REFUSAL_COMMENTS["job-size-exceeds-host"]);
 	for (const text of Object.values(mod.SIZE_REFUSAL_COMMENTS)) assert.doesNotMatch(text, /[0-9]|shop/, "a forge comment names no size, no budget and no project");
 	assert.deepEqual(b.waiting(), [], "a refused job is no waiter");
-	// The same size on the SHARED queue, local or forge, is never refused (P2G1-L2): another host may fit it.
+	// The same size on the SHARED queue, local or forge, is never refused: another host may fit it.
 	for (const j of [localJob("big-shared"), ghJob("big-forge")]) {
 		await assert.rejects(() => h.processor(j.job, "tok", signal()), (e) => e.name === "DelayedError");
 		assert.deepEqual(j.moves, [{ ts: NOW + NEVER_FITS_RECHECK_MS, tok: "tok" }]);
@@ -179,13 +179,13 @@ test("a size over its project's hostShare of the budget is refused as job-size-e
 	assert.deepEqual(result.hostBudget, { memMiB: 36864, cpuCenti: 800, hostShare: 50 });
 	assert.equal(h.seen.started, 0);
 	// The share is a share of THIS host's budget: on the shared queue a larger host may give the project room, so the
-	// job waits, exactly as an over-budget one does (P2G1-L2).
+	// job waits, exactly as an over-budget one does.
 	const shared = ghJob("s2");
 	await assert.rejects(() => h.processor(shared.job, "tok", signal()), (e) => e.name === "DelayedError");
 	assert.equal(h.seen.logs.at(-1).fields.misfit, "share");
 });
 
-test("a job on the SHARED queue too big for this host is NEVER refused: deferred with both sizes named, whatever the registry says (P2G1-L2)", { skip }, async () => {
+test("a job on the SHARED queue too big for this host is NEVER refused: deferred with both sizes named, whatever the registry says", { skip }, async () => {
 	const clock = { t: NOW };
 	const { b } = await budgetOf({ clock });
 	const h = harness({ hostBudget: b, clock, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" }, extra: { multiHost: true } });
@@ -204,7 +204,7 @@ test("a job on the SHARED queue too big for this host is NEVER refused: deferred
 	assert.equal("job-size-exceeds-fleet" in mod.SIZE_REFUSAL_COMMENTS, false, "the fleet refusal is gone");
 });
 
-test("a worker with NO host queue (no PI_WORKER_NAME) REFUSES a never-fits job on the shared queue, local or forge, recorded and logged with both sizes (P2G2-1)", { skip }, async () => {
+test("a worker with NO host queue (no PI_WORKER_NAME) REFUSES a never-fits job on the shared queue, local or forge, recorded and logged with both sizes", { skip }, async () => {
 	const { b } = await budgetOf();
 	const limits = limitsOf([{ scope: "project:shop", memory: "20g", cpus: 2, hostShare: 50 }]);
 	// The default wiring: `multiHost` false, as createWorker passes it without a host queue.
@@ -232,7 +232,7 @@ test("a worker with NO host queue (no PI_WORKER_NAME) REFUSES a never-fits job o
 	assert.match(src, /if \(!multiHost \|\| \(job\.queueName \?\? QUEUE\) !== QUEUE\) \{/);
 });
 
-test("the processor tells the gate the job's VENUE and its container NAME: an unread venue stops only its jobs (P2G2-2), and a survivor carrying the job's name defers it running-here (P2G2-3)", { skip }, async () => {
+test("the processor tells the gate the job's VENUE and its container NAME: an unread venue stops only its jobs, and a survivor carrying the job's name defers it running-here", { skip }, async () => {
 	let podman = () => {
 		throw new Error("podman down");
 	};
@@ -265,7 +265,7 @@ test("the processor tells the gate the job's VENUE and its container NAME: an un
 	assert.equal(named.seen.started, 1, "past the gate: a name the venue cannot build is no name to check");
 });
 
-test("the never-fits check is ABOVE the wait gate: a waiting job is refused (or deferred) for its size before it waits (P2G1-L6)", { skip }, async () => {
+test("the never-fits check is ABOVE the wait gate: a waiting job is refused (or deferred) for its size before it waits", { skip }, async () => {
 	const { b } = await budgetOf();
 	let waitReads = 0;
 	const h = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" }, extra: { multiHost: true, waitState: new Proxy({}, { get: () => async () => (waitReads++, null) }) } });
@@ -279,7 +279,7 @@ test("the never-fits check is ABOVE the wait gate: a waiting job is refused (or 
 	assert.equal(waitReads, 0, "the wait gate never ran for either");
 });
 
-test("ONE PICKUP, ONE TICKET (P2G1-L1): a second pickup of a job id still running here is deferred running-here and frees nothing of the first", { skip }, async () => {
+test("ONE PICKUP, ONE TICKET: a second pickup of a job id still running here is deferred running-here and frees nothing of the first", { skip }, async () => {
 	const { b } = await budgetOf({ env: { PI_HOST_MEMORY_BUDGET: "48g", PI_HOST_CPU_BUDGET: "8" } });
 	const h = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "20g", PI_JOB_CPUS: "2" }, extra: { settledRecord: async () => null } });
 	const id = "repeat:nightly:1759752000000";
@@ -306,7 +306,7 @@ test("ONE PICKUP, ONE TICKET (P2G1-L1): a second pickup of a job id still runnin
 	assert.equal(b.entries().length, 0);
 });
 
-test("the job COUNT is judged in the budget gate, so a big shared-queue job's hold keeps a slot against a host-queue flood (P2G1-L3)", { skip }, async () => {
+test("the job COUNT is judged in the budget gate, so a big shared-queue job's hold keeps a slot against a host-queue flood", { skip }, async () => {
 	const clock = { t: NOW };
 	const { b } = await budgetOf({ clock, count: 3, env: { PI_HOST_MEMORY_BUDGET: "40g", PI_HOST_CPU_BUDGET: "16" } });
 	const limits = limitsOf([{ scope: "project:big", memory: "20g", cpus: 2 }]);
@@ -405,7 +405,7 @@ test("BY SHAPE: every hold is given back through the ONE releaseAllHolds, and no
 	const drains = (outside.match(/\b(?:inFlight|endpointSlots)\.release\(/g) ?? []).length;
 	assert.equal(drains, 2, "inFlight.release in the scope drain and endpointSlots.release in the endpoint drain, nowhere else");
 	// Every exit calls it: the scope deferral, the endpoint deferral, the budget deferral, the setup guard and the finally
-	// (with the orphan flag). The never-fits check is above the wait gate and every hold (P2G1-L6): it holds nothing.
+	// (with the orphan flag). The never-fits check is above the wait gate and every hold: it holds nothing.
 	assert.equal((outside.match(/releaseAllHolds\(/g) ?? []).length, 5, "five calls; a new exit must be counted here");
 	assert.match(outside, /await releaseAllHolds\(\{ orphan: stopDidNotTake \}\);/);
 });
@@ -429,6 +429,6 @@ test("the two never-fits reasons are the record contract's own tokens, each with
 	assert.ok(enumLine, "the record's reason enum line");
 	const tokens = enumLine.slice(enumLine.indexOf("<fixed enum:") + "<fixed enum:".length, enumLine.indexOf(">")).split("|");
 	assert.deepEqual(Object.keys(mod.SIZE_REFUSAL_COMMENTS), ["job-size-exceeds-host", "job-size-exceeds-share"]);
-	assert.equal(tokens.includes("job-size-exceeds-fleet"), false, "no longer emitted, so no longer in the contract (P2G1-L2)");
+	assert.equal(tokens.includes("job-size-exceeds-fleet"), false, "no longer emitted, so no longer in the contract");
 	for (const reason of Object.keys(mod.SIZE_REFUSAL_COMMENTS)) assert.ok(tokens.includes(reason), `${reason} is in the record's reason enum`);
 });

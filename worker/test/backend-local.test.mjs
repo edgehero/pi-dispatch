@@ -976,7 +976,7 @@ test("issue #596, phase 2: makeContainerGone says gone when no container of exac
 		stdout = `pi-job-7\t${state}\n`;
 		assert.equal(await gone("pi-job-7", null), false, `${state}: not proven gone`);
 	}
-	// P2G1-L5: a container that runs nothing is gone, though `ps -a` lists it (an --rm whose removal failed).
+	// a container that runs nothing is gone, though `ps -a` lists it (an --rm whose removal failed).
 	for (const state of ["exited", "dead", "stopped", "Exited"]) {
 		stdout = `pi-job-7\t${state}\n`;
 		assert.equal(await gone("pi-job-7", null), true, `${state}: holds nothing`);
@@ -999,7 +999,7 @@ test("issue #596, phase 2: makeContainerGone says gone when no container of exac
 	assert.equal(await gone(null, null), null);
 });
 
-test("issue #596, P2G1-L4: makeJobContainerLister lists every job container still there with its size labels, and throws when the runtime does not answer", async () => {
+test("issue #596, makeJobContainerLister lists every job container still there with its size labels, and throws when the runtime does not answer", async () => {
 	const { makeJobContainerLister } = await import("../src/backend-local.mjs");
 	const asked = [];
 	let out = "";
