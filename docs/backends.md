@@ -161,7 +161,8 @@ ones adapters get wrong:
   `ps -a` no longer lists it or lists it as `exited`, `dead` or `stopped` (one still `created` is removed first), so a
   venue's container names and its `{{.State}}` words must stay exact. When the worker starts, it lists the venue's job
   containers left after its reaper (`ps -a` with `{{.State}}` and the two size labels) and counts each until it is
-  gone; while that listing fails, it admits no job. The size is the job's
+  gone; while that listing fails, it admits no job on that venue (the other venues' jobs still run). A venue whose
+  binary is not installed, or whose job user is refused, holds no container and counts as none. The size is the job's
   project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` ([job sizes](scoped-limits.md#job-sizes-version-3)). Where
   Docker reports `SwapLimit` or `CPUShares` false, it drops that flag: doctor warns, and the worker logs
   `size_bound_unenforced` for each job. Where the runtime gives no CPU count, jobs run with no `--cpus` and doctor

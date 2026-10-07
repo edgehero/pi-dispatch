@@ -12232,7 +12232,15 @@ test("issue #596, P2G1-L4: a worker whose boot listing of left-over job containe
 	const line = unread.find((c) => /host_budget_seed_unread/.test(c.label));
 	assert.ok(line && line.ok === false && line.warn === true, "a warning");
 	assert.match(line.label, /^this host's worker admits NO job: it could not list the job containers left from before it started/);
-	for (const seed of ["listed", "", undefined]) {
+	// P2G2-2: per venue. The row names the unread venues; doctor names them and says the others' jobs still run.
+	const podmanOnly = (await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({ budgetSeed: "unlisted:podman" }))).find((c) => /host_budget_seed_unread/.test(c.label));
+	assert.match(podmanOnly.label, /^this host's worker admits NO job on the podman venue \(the other venues' jobs still run\): it could not list/);
+	assert.match(podmanOnly.fix, /`podman ps -a`/);
+	assert.doesNotMatch(podmanOnly.fix, /docker/);
+	const both = (await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({ budgetSeed: "unlisted:local,podman" }))).find((c) => /host_budget_seed_unread/.test(c.label));
+	assert.match(both.label, /admits NO job on the local and podman venues /);
+	assert.match(both.fix, /`docker ps -a`, `podman ps -a`/);
+	for (const seed of ["listed", "", undefined, "unlistedx"]) {
 		const quiet = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({ budgetSeed: seed }));
 		assert.ok(!quiet.some((c) => /host_budget_seed_unread/.test(c.label)), `budgetSeed ${seed}: nothing said`);
 	}

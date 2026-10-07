@@ -30,8 +30,8 @@
  * A JOB WHOSE STOP FAILED keeps its hold (`orphan`): the container may still be running and still be using what its
  * size promised. The hold is given back only when the runtime confirms the container is gone (`sweep`, on the tick). A
  * worker that restarts kills every job container it can (the boot reaper), then SEEDS the ledger with every one still
- * listed (`survivors`), so a container the reaper could not remove is still counted; until that listing is read, the
- * gate admits nothing.
+ * listed (`survivors`), so a container the reaper could not remove is still counted; until a venue's listing is read,
+ * the gate admits nothing on that venue.
  */
 
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "./job-size.mjs";
@@ -357,10 +357,13 @@ export function publishedBudget(row) {
 /**
  * The largest size any running job here could have been started at, for a surviving job container that carries no size
  * label (one started by a worker from before the labels): the larger of the default size and every project row's size,
- * in each dimension. Pessimistic on purpose: a guess too small lets the next job overcommit the host, a guess too large
- * only delays one until the sweep sees the container gone.
+ * in each dimension, and never more than the budget (`budget`, `{ memMiB, cpuCenti }`, each capped only when it is an
+ * integer). Pessimistic on purpose: a guess too small lets the next job overcommit the host, a guess too large only
+ * delays one until the sweep sees the container gone. CAPPED (gate round 2 of phase 2, P2G2-4): a project row larger
+ * than the budget (a size that never fits) would otherwise count a survivor as more than the whole host, which no
+ * container here could hold and which the ledger's sums then carried into doctor and the registry.
  */
-export function pessimisticSize(limits, jobDefault) {
+export function pessimisticSize(limits, jobDefault, budget = {}) {
 	let memMiB = jobDefault.memMiB;
 	let cpuCenti = jobDefault.cpuCenti;
 	for (const row of Array.isArray(limits) ? limits : []) {
@@ -376,7 +379,8 @@ export function pessimisticSize(limits, jobDefault) {
 			// as above
 		}
 	}
-	return { memMiB, cpuCenti };
+	const cap = (value, limit) => (Number.isSafeInteger(limit) && limit > 0 ? Math.min(value, limit) : value);
+	return { memMiB: cap(memMiB, budget?.memMiB), cpuCenti: cap(cpuCenti, budget?.cpuCenti) };
 }
 
 /**
@@ -403,11 +407,15 @@ function bounded(promise, ms) {
  *   readFacts     async () => `{ memTotalMiB, hostCpus, userMemMiB, userCpuCenti }`, the runtime's answers (cached by
  *                 their own readers); read by `refresh`, never by `gate`
  *   scopedLimits  () => the live limits snapshot, for the holds' `minJobs` and the shares when no pickup snapshot is given
- *   countLimit    () => the live `PI_CONCURRENCY` (an integer), the budget's third dimension (`admit`); null is no bound
+ *   countLimit    () => the live `PI_CONCURRENCY` (an integer), the budget's third dimension (`admit`); an answer that
+ *                 is not an integer is no bound for that gate. REQUIRED (gate round 2 of phase 2, P2G2-6): a default of
+ *                 "no bound" let a wiring that forgot it drop the count silently, so a missing one throws here
  *   containerGone async (name, venue) => true (the runtime says it is gone), false (it runs), null (could not ask)
- *   survivors     async () => `[{ name, venue, memMiB, cpuCenti }]`, the job containers every blessed venue still lists
- *                 after the boot reaper (a size label absent is null); THROWS when a venue cannot be listed. Null for a
- *                 wiring without one (nothing to seed)
+ *   survivors     the job containers each blessed venue still lists after the boot reaper, each `{ name, venue, memMiB,
+ *                 cpuCenti }` (a size label absent is null): an OBJECT of one async lister per venue name (`{ local,
+ *                 podman }`), each THROWING when its venue cannot be listed, or one async function for the whole host.
+ *                 Null for a wiring without one (nothing to seed)
+ *   defaultVenue  the venue a job that names none runs on (`config.defaultBackend`), for the per-venue seed
  *   onRefresh     (budget, facts) => anything, after every refresh, NOT awaited and never allowed to throw into it: the
  *                 CPU reserve (`cpu-reserve.mjs`) keeps the jobs' parent cgroup's quota at the budget from here, so a
  *                 slow `systemctl` or helper container delays no refresh, no gate and no pickup
@@ -423,23 +431,45 @@ function bounded(promise, ms) {
  * SEEDED AT BOOT (P2G1-L4). The ledger lives in process memory, so a worker that restarts starts empty while a job
  * container the boot reaper could not remove may still run. `survivors` lists what remains on every blessed venue and
  * each is seeded as an ORPHAN from its `pi.dispatch.mem` and `pi.dispatch.cpu` labels (`pessimisticSize` without
- * them); the sweep gives each back once the runtime says it is gone. Until that listing has been read once the gate
- * ADMITS NOTHING (`unseeded`, fail closed, said once per streak as `host_budget_seed_unread`), and every tick asks again:
- * an empty ledger beside containers nobody counted is the overcommit the budget exists to refuse.
+ * them, capped at the budget, so the first refresh is awaited before the first listing); the sweep gives each back once
+ * the runtime says it is gone. Until a venue's listing has been read once the gate ADMITS NOTHING ON THAT VENUE
+ * (`unseeded`, fail closed, said once per streak and venue as `host_budget_seed_unread`), and every tick asks again: an
+ * empty ledger beside containers nobody counted is the overcommit the budget exists to refuse.
+ *
+ * PER VENUE (gate round 2 of phase 2, P2G2-2). One listing for the whole host made a venue that cannot be listed stop
+ * every OTHER venue's jobs too: `PI_BACKENDS=local,podman` with Podman absent or down answered `unseeded` for every
+ * docker job, forever. A job is told its venue (`gate`'s `venue`, the default when it names none), and only its own
+ * venue's unread listing stops it. A job whose venue is not known (null with no `defaultVenue`) is stopped by any.
+ *
+ * A SURVIVOR'S NAME IS TAKEN (P2G2-3). A seeded survivor is keyed `container:<name>`, not by a job id, so the id check
+ * alone admitted the job whose container that is (`pi-job-<id>`, retried here after a restart), and its `docker run`
+ * then created a container the sweep took for the survivor and removed. The gate now defers `running-here` any job
+ * whose container name an orphan carries, and the sweep never asks about a name a live entry carries.
  */
-export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti: 200 }, readFacts = async () => ({}), scopedLimits = () => [], countLimit = () => null, containerGone = async () => null, survivors = null, onRefresh = () => {}, now = () => Date.now(), log = () => {}, stateReadBoundMs = HOLD_STATE_READ_BOUND_MS }) {
+export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti: 200 }, readFacts = async () => ({}), scopedLimits = () => [], countLimit, containerGone = async () => null, survivors = null, defaultVenue = null, onRefresh = () => {}, now = () => Date.now(), log = () => {}, stateReadBoundMs = HOLD_STATE_READ_BOUND_MS }) {
+	if (typeof countLimit !== "function") throw new TypeError("makeHostBudget: countLimit is required (the live PI_CONCURRENCY, the budget's third dimension)");
 	let budget = { memMiB: null, cpuCenti: null };
 	let detail = null;
 	let unknownSaid = "";
-	/** jobId (or `container:<name>` for a seeded survivor) -> { id, project, memMiB, cpuCenti, at, ticket, orphan: null | { name, venue, since } } */
+	/** jobId (or `container:<name>` for a seeded survivor) -> { id, project, memMiB, cpuCenti, at, ticket, name, orphan: null | { name, venue, since } } */
 	const ledger = new Map();
 	/** jobId -> { id, project, memMiB, cpuCenti, firstAt, lastAt, checkedAt, suspended, state } */
 	const waiters = new Map();
 	/** jobId -> how many of this host's pickups are handling it right now, so a hold of an `active` job is not mistaken for elsewhere. */
 	const handling = new Map();
 	let tickets = 0;
-	let seeded = typeof survivors !== "function";
-	let seedSaid = false;
+	// The venues whose boot listing is not read yet, each with its lister: `*` for a single whole-host listing.
+	const WHOLE_HOST = "*";
+	const listers = new Map(typeof survivors === "function" ? [[WHOLE_HOST, survivors]] : survivors && typeof survivors === "object" ? Object.entries(survivors).filter(([, fn]) => typeof fn === "function") : []);
+	const unseeded = new Set(listers.keys());
+	const seedSaid = new Set();
+	/** Whether a job on `venue` (null: the default) must wait for an unread listing. */
+	const blockedBySeed = (venue) => {
+		if (unseeded.size === 0) return false;
+		if (unseeded.has(WHOLE_HOST)) return true;
+		const v = venue ?? defaultVenue;
+		return v === null || v === undefined ? true : unseeded.has(v);
+	};
 	const rulesOf = (limits) => ({
 		shareOf: (p) => projectBudgetRow(limits, p).hostShare,
 		minJobsOf: (p) => projectBudgetRow(limits, p).minJobs,
@@ -478,34 +508,36 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		return budget;
 	};
 
-	const seed = async () => {
-		if (seeded) return true;
+	/** Reads every venue's listing still unread, each on its own: one venue that cannot be listed leaves the others read. */
+	const seedVenue = async (venue) => {
 		let listed;
 		try {
-			listed = await survivors();
+			listed = await listers.get(venue)();
 			if (!Array.isArray(listed)) throw new Error("not a listing");
 		} catch {
-			if (!seedSaid) {
-				seedSaid = true;
-				log("host_budget_seed_unread", { reason: "the job containers left from before this worker started could not be listed, so no job is admitted until they are" });
+			if (!seedSaid.has(venue)) {
+				seedSaid.add(venue);
+				log("host_budget_seed_unread", { venue: venue === WHOLE_HOST ? null : venue, reason: "the job containers left from before this worker started could not be listed, so no job on this venue is admitted until they are" });
 			}
-			return false;
+			return;
 		}
-		if (seeded) return true;
-		const guess = pessimisticSize(scopedLimits(), jobDefault);
+		const guess = pessimisticSize(scopedLimits(), jobDefault, budget);
 		const t = now();
 		for (const c of listed) {
 			if (typeof c?.name !== "string" || c.name === "") continue;
 			const id = `container:${c.name}`;
 			const labelled = Number.isSafeInteger(c.memMiB) && c.memMiB > 0 && Number.isSafeInteger(c.cpuCenti) && c.cpuCenti > 0;
 			const size = labelled ? { memMiB: c.memMiB, cpuCenti: c.cpuCenti } : guess;
-			ledger.set(id, { id, project: null, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket: null, orphan: { name: c.name, venue: c.venue ?? null, since: t } });
+			ledger.set(id, { id, project: null, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket: null, name: c.name, orphan: { name: c.name, venue: c.venue ?? null, since: t } });
 			log("host_budget_seeded", { memMiB: size.memMiB, cpuCenti: size.cpuCenti, labelled });
 		}
-		seeded = true;
-		if (seedSaid) log("host_budget_seed_read", { seeded: listed.length });
-		seedSaid = false;
-		return true;
+		unseeded.delete(venue);
+		if (seedSaid.has(venue)) log("host_budget_seed_read", { venue: venue === WHOLE_HOST ? null : venue, seeded: listed.length });
+		seedSaid.delete(venue);
+	};
+	const seed = async () => {
+		await Promise.all([...unseeded].map(seedVenue));
+		return unseeded.size === 0;
 	};
 	const holdsNow = (limits) => rankHolds(waiters.values(), [...ledger.values()], rulesOf(limits).minJobsOf);
 
@@ -538,10 +570,15 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		}
 	};
 
-	/** Gives back an orphan's hold once the runtime says its container is gone. */
+	/**
+	 * Gives back an orphan's hold once the runtime says its container is gone. NEVER asks about a name a live (admitted,
+	 * not orphaned) entry carries (P2G2-3): the runtime's answer about that name is the live job's container, and asking
+	 * removes one not yet started. The gate keeps that from arising; this is the sweep not relying on it.
+	 */
 	const sweep = async () => {
 		for (const entry of [...ledger.values()]) {
 			if (!entry.orphan) continue;
+			if (typeof entry.orphan.name === "string" && [...ledger.values()].some((e) => !e.orphan && e.name === entry.orphan.name)) continue;
 			let gone = null;
 			try {
 				gone = await containerGone(entry.orphan.name, entry.orphan.venue);
@@ -568,7 +605,8 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		running.set(key, p);
 		return p;
 	};
-	const ready = Promise.all([refresh(), once("seed", seed)]).then(([first]) => first);
+	// The first refresh BEFORE the first listing: an unlabelled survivor's size is capped at the budget (P2G2-4).
+	const ready = refresh().then((first) => once("seed", seed).then(() => first));
 
 	return {
 		ready,
@@ -593,12 +631,14 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		},
 		/**
 		 * THE GATE, synchronous: `{ admitted: true }` with the hold taken under `ticket`, or `{ admitted: false, why }`:
-		 * `unseeded` (the boot listing is not read yet) and `running-here` (the ledger already holds this id) make no
-		 * waiter; `budget` and `share` keep (or make) the job a waiter. `getState` is the job's own, kept for `verify`.
+		 * `unseeded` (the boot listing of the job's `venue` is not read yet) and `running-here` (the ledger already holds
+		 * this id, or an orphan carries the container `name` this pickup will use) make no waiter; `budget` and `share`
+		 * keep (or make) the job a waiter. `getState` is the job's own, kept for `verify`.
 		 */
-		gate({ id, ticket = null, project = null, size, getState = null, limits = scopedLimits() }) {
-			if (!seeded) return { admitted: false, why: "unseeded", rank: -1 };
+		gate({ id, ticket = null, project = null, size, venue = null, name = null, getState = null, limits = scopedLimits() }) {
+			if (blockedBySeed(venue)) return { admitted: false, why: "unseeded", rank: -1 };
 			if (ledger.has(id)) return { admitted: false, why: "running-here", rank: -1 };
+			if (name !== null && [...ledger.values()].some((e) => e.orphan?.name === name)) return { admitted: false, why: "running-here", rank: -1 };
 			const t = now();
 			const was = waiters.get(id);
 			const ask = { id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, firstAt: was?.firstAt ?? t };
@@ -611,7 +651,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 			const verdict = admit({ budget: { ...budget, count: countNow() }, ledger: [...ledger.values()], holds, ask, shareOf: rules.shareOf });
 			if (verdict.ok) {
 				waiters.delete(id);
-				ledger.set(id, { id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket, orphan: null });
+				ledger.set(id, { id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket, name, orphan: null });
 				return { admitted: true };
 			}
 			// A share-stopped job is a waiter that holds nothing: the budget is not its obstacle.
@@ -647,15 +687,16 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		},
 		verify,
 		sweep,
-		/** Reads the boot listing again while it has not been read (`unseeded`). True once it has. */
-		seed,
+		/** Reads each venue's boot listing again while it has not been read (`unseeded`), one read in flight with the tick's. True once every one has. */
+		seed: () => once("seed", seed).then(() => unseeded.size === 0),
 		/** One tick: facts, the boot listing while unread, the stale holds and the orphans, each on its own. Never throws. */
 		tick() {
 			return Promise.all([once("refresh", refresh), once("seed", seed), once("verify", verify), once("sweep", sweep)]).then(() => undefined);
 		},
 		/**
 		 * What the registry row and doctor show: the budget, what runs (orphans included), what the holds keep, and counts.
-		 * Integers only, and `seeded` (whether the boot listing has been read).
+		 * Integers only, `seeded` (whether every venue's boot listing has been read) and `unseeded` (the venues whose has
+		 * not, sorted; `*` for a whole-host listing).
 		 */
 		snapshot(limits = scopedLimits()) {
 			const entries = [...ledger.values()];
@@ -673,7 +714,8 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 				orphans: entries.filter((e) => e.orphan).length,
 				holds: holds.length,
 				waiters: waiters.size,
-				seeded,
+				seeded: unseeded.size === 0,
+				unseeded: [...unseeded].sort(),
 			};
 		},
 		/** Test and doctor seams: copies, never the live maps. */

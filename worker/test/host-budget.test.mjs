@@ -28,6 +28,9 @@ import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { HOST_BEAT_MS } from "../src/host-registry.mjs";
 import { memoryMiB, parseDaemonFacts } from "../src/daemon-facts.mjs";
 
+/** No count bound: `countLimit` is required (P2G2-6), and these tests judge memory and CPU alone. */
+const NO_COUNT = () => null;
+
 const DEFAULT = { memMiB: 4096, cpuCenti: 200 };
 const AUTO = hostBudgetSettings({}, DEFAULT);
 const settingsOf = (env) => hostBudgetSettings(env, DEFAULT);
@@ -254,7 +257,7 @@ test("the gate: a hold is taken synchronously, release is idempotent, and a job 
 	assert.equal(b.release("never"), false);
 	assert.deepEqual(b.gate({ id: "b", project: "p", size: { memMiB: 8192, cpuCenti: 100 } }), { admitted: true });
 	assert.equal(b.waiting().length, 0, "admitted: no longer a waiter");
-	assert.deepEqual(b.snapshot(), { memMiB: 36864, cpuCenti: 800, usedMemMiB: 8192, usedCpuCenti: 100, heldMemMiB: 0, heldCpuCenti: 0, running: 1, orphans: 0, holds: 0, waiters: 0, seeded: true });
+	assert.deepEqual(b.snapshot(), { memMiB: 36864, cpuCenti: 800, usedMemMiB: 8192, usedCpuCenti: 100, heldMemMiB: 0, heldCpuCenti: 0, running: 1, orphans: 0, holds: 0, waiters: 0, seeded: true, unseeded: [] });
 	// A job its own project's share stops is a waiter that HOLDS NOTHING: the budget is not its obstacle.
 	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:q", memory: "1g", cpus: 1, hostShare: 10 }] }), "sl.json");
 	b.gate({ id: "q1", project: "q", size: { memMiB: 1024, cpuCenti: 50 }, limits });
@@ -398,7 +401,7 @@ test("SEEDED AT BOOT (P2G1-L4): the surviving job containers are orphans from th
 	let gone = false;
 	const logs = [];
 	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:ml", memory: "24g", cpus: 6 }, { scope: "acme/web", concurrent: 2 }] }), "sl.json");
-	const b = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 }, scopedLimits: () => limits, survivors: async () => answer(), containerGone: async () => gone, log: (event, fields) => logs.push({ event, fields }) });
+	const b = makeHostBudget({ countLimit: NO_COUNT, settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 }, scopedLimits: () => limits, survivors: async () => answer(), containerGone: async () => gone, log: (event, fields) => logs.push({ event, fields }) });
 	await b.ready;
 	assert.equal(b.snapshot().seeded, false);
 	assert.deepEqual(b.gate({ id: "j", project: null, size: { memMiB: 1024, cpuCenti: 25 } }), { admitted: false, why: "unseeded", rank: -1 }, "fail closed");
@@ -427,12 +430,12 @@ test("SEEDED AT BOOT (P2G1-L4): the surviving job containers are orphans from th
 	assert.equal(b.entries().length, 0, "the sweep gives each back once the runtime says it is gone");
 	assert.equal(b.gate({ id: "j", project: null, size: { memMiB: 9216, cpuCenti: 100 } }).admitted, true);
 	// No lister wired: nothing to seed, admitted from the start.
-	const plain = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 } });
+	const plain = makeHostBudget({ countLimit: NO_COUNT, settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 } });
 	await plain.ready;
 	assert.equal(plain.snapshot().seeded, true);
 	// A listing that is not an array is not a listing.
 	const oddLogs = [];
-	const odd = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 }, survivors: async () => null, log: (event) => oddLogs.push(event) });
+	const odd = makeHostBudget({ countLimit: NO_COUNT, settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 }, survivors: async () => null, log: (event) => oddLogs.push(event) });
 	await odd.ready;
 	assert.equal(odd.snapshot().seeded, false);
 	assert.deepEqual(oddLogs.filter((e) => e.startsWith("host_budget_seed")), ["host_budget_seed_unread"], "and said, as an unread listing is");
@@ -443,7 +446,7 @@ test("SEEDED AT BOOT (P2G1-L4): the surviving job containers are orphans from th
 test("verify bounds every queue read (P2G1-C1): a read that never settles is the error branch, and the hold is dropped at 120 s", async () => {
 	const clock = { t: 0 };
 	const logs = [];
-	const b = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, now: () => clock.t, log: (event, fields) => logs.push({ event, fields }), stateReadBoundMs: 5 });
+	const b = makeHostBudget({ countLimit: NO_COUNT, settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, now: () => clock.t, log: (event, fields) => logs.push({ event, fields }), stateReadBoundMs: 5 });
 	await b.ready;
 	b.gate({ id: "run", project: null, size: { memMiB: 36864, cpuCenti: 100 } });
 	let reads = 0;
@@ -460,7 +463,7 @@ test("verify bounds every queue read (P2G1-C1): a read that never settles is the
 
 test("verify judges the 120 s drop at the clock AFTER the bounded read, since the read itself takes time (P2G1-C1)", async () => {
 	const clock = { t: 0 };
-	const b = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, now: () => clock.t, stateReadBoundMs: 5 });
+	const b = makeHostBudget({ countLimit: NO_COUNT, settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, now: () => clock.t, stateReadBoundMs: 5 });
 	await b.ready;
 	b.gate({ id: "run", project: null, size: { memMiB: 36864, cpuCenti: 100 } });
 	// The read hangs until its bound, and the clock passes the drop line while it does.
@@ -475,7 +478,7 @@ test("tick: one of each piece in flight, and the sweep never waits on a verify, 
 	let factsReads = 0;
 	let releaseFacts;
 	let goneAsks = 0;
-	const b = makeHostBudget({
+	const b = makeHostBudget({ countLimit: NO_COUNT,
 		settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }),
 		jobDefault: { memMiB: 512, cpuCenti: 25 },
 		now: () => clock.t,
@@ -733,7 +736,7 @@ test("issue #596, phase 2: onRefresh gets every refreshed budget and its facts, 
 	const facts = { memTotalMiB: 16384, hostCpus: 4, reserveVenues: [{ venue: "podman", facts: { rootless: true } }] };
 	let release;
 	const slow = new Promise((r) => (release = r));
-	const budget = makeHostBudget({ settings: AUTO, jobDefault: DEFAULT, readFacts: async () => facts, onRefresh: (b, f) => {
+	const budget = makeHostBudget({ countLimit: NO_COUNT, settings: AUTO, jobDefault: DEFAULT, readFacts: async () => facts, onRefresh: (b, f) => {
 		seen.push([b, f]);
 		return slow;
 	} });
@@ -746,8 +749,131 @@ test("issue #596, phase 2: onRefresh gets every refreshed budget and its facts, 
 	for (const onRefresh of [() => {
 		throw new Error("sync");
 	}, () => Promise.reject(new Error("async"))]) {
-		const b = makeHostBudget({ settings: AUTO, jobDefault: DEFAULT, readFacts: async () => facts, onRefresh });
+		const b = makeHostBudget({ countLimit: NO_COUNT, settings: AUTO, jobDefault: DEFAULT, readFacts: async () => facts, onRefresh });
 		assert.deepEqual(await b.ready, { memMiB: 14746, cpuCenti: 300 });
 		assert.deepEqual(await b.refresh(), { memMiB: 14746, cpuCenti: 300 });
 	}
+});
+
+test("countLimit is REQUIRED (P2G2-6): a wiring that forgets it is refused at construction, never run without a count bound", () => {
+	assert.throws(() => makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: DEFAULT }), /countLimit is required/);
+	assert.throws(() => makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: DEFAULT, countLimit: 3 }), /countLimit is required/, "a number is not the live reader");
+});
+
+test("SEEDED PER VENUE (P2G2-2): an unread venue stops only its own jobs, the default venue stands for a job that names none", async () => {
+	let podman = () => {
+		throw new Error("podman: command not answering");
+	};
+	const logs = [];
+	const b = makeHostBudget({
+		settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }),
+		jobDefault: { memMiB: 512, cpuCenti: 25 },
+		countLimit: NO_COUNT,
+		survivors: { local: async () => [], podman: async () => podman() },
+		defaultVenue: "local",
+		log: (event, fields) => logs.push({ event, fields }),
+	});
+	await b.ready;
+	const size = { memMiB: 1024, cpuCenti: 25 };
+	assert.deepEqual(b.gate({ id: "p", size, venue: "podman" }), { admitted: false, why: "unseeded", rank: -1 }, "podman's own job waits");
+	assert.deepEqual(b.gate({ id: "l", size, venue: "local" }), { admitted: true }, "a docker job runs beside an unread podman");
+	assert.deepEqual(b.gate({ id: "d", size }), { admitted: true }, "a job naming no venue is the default venue's");
+	assert.deepEqual(b.snapshot().unseeded, ["podman"]);
+	assert.equal(b.snapshot().seeded, false);
+	assert.deepEqual(logs.filter((l) => l.event === "host_budget_seed_unread").map((l) => l.fields.venue), ["podman"], "named, once");
+	await b.tick();
+	assert.equal(logs.filter((l) => l.event === "host_budget_seed_unread").length, 1, "once per streak");
+	podman = () => [{ name: "pi-job-old", venue: { backend: "podman" }, memMiB: 2048, cpuCenti: 50 }];
+	await b.tick();
+	assert.deepEqual(b.snapshot().unseeded, []);
+	assert.equal(b.snapshot().seeded, true);
+	assert.deepEqual(logs.find((l) => l.event === "host_budget_seed_read").fields, { venue: "podman", seeded: 1 });
+	assert.deepEqual(b.gate({ id: "p", size, venue: "podman" }), { admitted: true });
+	assert.equal(b.entries().find((e) => e.id === "container:pi-job-old").memMiB, 2048);
+	// Without a default venue a job that names none cannot be placed, so ANY unread venue stops it.
+	const blind = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, countLimit: NO_COUNT, survivors: { local: async () => [], podman: async () => podman() } });
+	podman = () => {
+		throw new Error("x");
+	};
+	await blind.ready;
+	assert.equal(blind.gate({ id: "n", size }).why, "unseeded");
+	assert.equal(blind.gate({ id: "m", size, venue: "local" }).admitted, true);
+	// A whole-host function still stops every venue while it is unread.
+	const whole = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, countLimit: NO_COUNT, survivors: async () => podman(), defaultVenue: "local" });
+	await whole.ready;
+	assert.equal(whole.gate({ id: "w", size, venue: "local" }).why, "unseeded");
+	assert.deepEqual(whole.snapshot().unseeded, ["*"]);
+	// A direct `seed` and the tick's share ONE read in flight: a venue is never listed (and seeded) twice at once.
+	let calls = 0;
+	let answer;
+	const once = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, countLimit: NO_COUNT, survivors: { local: () => (calls++, calls === 1 ? Promise.reject(new Error("x")) : new Promise((r) => (answer = r))) }, defaultVenue: "local" });
+	await once.ready;
+	const ticked = once.tick();
+	const direct = once.seed();
+	await new Promise((r) => setImmediate(r));
+	answer([]);
+	assert.deepEqual(await Promise.all([ticked, direct]), [undefined, true]);
+	assert.equal(calls, 2, "the boot read, then ONE re-read for both callers");
+});
+
+test("A SURVIVOR'S NAME IS TAKEN (P2G2-3): the job whose container a seeded survivor carries waits running-here, and the sweep never asks about a live job's name", async () => {
+	const asked = [];
+	let gone = false;
+	let podman = () => {
+		throw new Error("down");
+	};
+	const b = makeHostBudget({
+		settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }),
+		jobDefault: { memMiB: 512, cpuCenti: 25 },
+		countLimit: NO_COUNT,
+		survivors: { local: async () => [{ name: "pi-job-X", venue: { backend: "local" }, memMiB: 1024, cpuCenti: 50 }], podman: async () => podman() },
+		defaultVenue: "local",
+		containerGone: async (name) => (asked.push(name), gone),
+	});
+	await b.ready;
+	const size = { memMiB: 512, cpuCenti: 25 };
+	assert.deepEqual(b.gate({ id: "X", ticket: b.enter("X"), size, name: "pi-job-X" }), { admitted: false, why: "running-here", rank: -1 }, "its old container still holds the name");
+	assert.equal(b.waiting().length, 0, "and no waiter");
+	assert.deepEqual(b.gate({ id: "Y", ticket: b.enter("Y"), size, name: "pi-job-Y" }), { admitted: true }, "another name is admitted");
+	gone = true;
+	await b.sweep();
+	assert.deepEqual(asked, ["pi-job-X"]);
+	const tx = b.enter("X");
+	assert.deepEqual(b.gate({ id: "X", ticket: tx, size, name: "pi-job-X" }), { admitted: true }, "once the survivor is gone, the job runs");
+	// A podman listing read only now names a container the live local job X also carries: the sweep must not ask about
+	// it (asking removes a container not yet started, which may be the live job's own).
+	podman = () => [{ name: "pi-job-X", venue: { backend: "podman" }, memMiB: 1024, cpuCenti: 50 }];
+	await b.seed();
+	asked.length = 0;
+	await b.sweep();
+	assert.deepEqual(asked, [], "a name a live entry carries is never asked about");
+	assert.ok(b.entries().some((e) => e.id === "container:pi-job-X"), "and its room stays held");
+	assert.equal(b.release("X", { ticket: tx }), true);
+	await b.sweep();
+	assert.deepEqual(asked, ["pi-job-X"], "asked once the live job is gone");
+	assert.equal(b.entries().length, 1, "Y alone");
+	// An orphan whose name is not known is not "a live job's name" just because a live entry has none either.
+	const ta = b.enter("A");
+	b.gate({ id: "A", ticket: ta, size });
+	const tn = b.enter("N");
+	b.gate({ id: "N", ticket: tn, size });
+	b.orphan("N", { name: null, ticket: tn });
+	asked.length = 0;
+	await b.sweep();
+	assert.deepEqual(asked, [null], "asked (the runtime's answer decides), not skipped forever");
+});
+
+test("an unlabelled survivor's guessed size is CAPPED at the budget (P2G2-4)", async () => {
+	assert.deepEqual(pessimisticSize([{ scope: "project:giant", memory: "128g", cpus: 64 }], { memMiB: 4096, cpuCenti: 200 }, { memMiB: 65536, cpuCenti: 1600 }), { memMiB: 65536, cpuCenti: 1600 });
+	assert.deepEqual(pessimisticSize([{ scope: "project:giant", memory: "128g", cpus: 64 }], { memMiB: 4096, cpuCenti: 200 }, { memMiB: Infinity, cpuCenti: null }), { memMiB: 131072, cpuCenti: 6400 }, "an off or unknown budget caps nothing");
+	assert.deepEqual(pessimisticSize([{ scope: "project:a", memory: "8g", cpus: 2 }], { memMiB: 4096, cpuCenti: 200 }, { memMiB: 65536, cpuCenti: 1600 }), { memMiB: 8192, cpuCenti: 200 }, "below the budget, unchanged");
+	// Seeded after the first refresh, so the cap is the budget in force, also with an auto budget read from facts.
+	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:giant", memory: "128g", cpus: 64 }] }), "sl.json");
+	// The facts answer AFTER the listing would (a timer against a microtask), so a seed that did not wait for the first
+	// refresh would size the survivor against no budget at all.
+	const b = makeHostBudget({ settings: settingsOf({}), jobDefault: DEFAULT, readFacts: () => new Promise((resolve) => setTimeout(() => resolve({ memTotalMiB: 32768, hostCpus: 8 }), 5)), scopedLimits: () => limits, countLimit: NO_COUNT, survivors: { local: async () => [{ name: "pi-job-old", memMiB: null, cpuCenti: null }] }, defaultVenue: "local" });
+	await b.ready;
+	const budget = b.current();
+	assert.deepEqual(b.entries().map((e) => [e.memMiB, e.cpuCenti]), [[budget.memMiB, budget.cpuCenti]], "the whole budget, never more");
+	assert.ok(b.snapshot().usedMemMiB <= budget.memMiB);
 });
