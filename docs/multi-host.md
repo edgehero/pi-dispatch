@@ -260,11 +260,15 @@ Who sets the quota depends on the container runtime:
   sudo systemctl set-property pidispatch.slice CPUQuota=300%
   ```
 
-`pi-dispatch doctor` says per runtime whether the quota is in place, and warns "no host CPU reserve across jobs" with
-the fix when it is not. Jobs still run then, inside the parent but without the quota (the worker logs
-`cpu_reserve_fail_open` with the reason). With `PI_HOST_CPU_BUDGET=off` no quota is set, and the worker removes one
-it set before. Where rootless Podman uses the cgroupfs manager instead of systemd, jobs run without the parent and
-each job's CPU weight is capped at the default: the proxy and Valkey then get a fair share of the CPU, not a reserve.
+On rootless Podman, Docker Desktop and Docker's cgroupfs driver, and Docker with systemd on this host, `pi-dispatch
+doctor` reads the quota back and warns "no host CPU reserve across jobs" with the command when it is missing or
+differs from the budget. On rootful Podman, rootless Docker and a Docker daemon on another machine nothing can read
+it from here, so doctor's warning stays even after you ran the command, and the worker logs `cpu_reserve_fail_open`
+with the status `unmanaged`. On a cgroup v1 host no quota is kept. Jobs run in every case, inside the parent. With
+`PI_HOST_CPU_BUDGET=off` the worker clears the quota only where it sets it itself (rootless Podman, Docker's
+cgroupfs driver); one set with `sudo` stays until you clear it with `sudo systemctl set-property pidispatch.slice
+CPUQuota=`. Where rootless Podman uses the cgroupfs manager instead of systemd, jobs run without the parent and each
+job's CPU weight is capped at the default: the proxy and Valkey then get a fair share of the CPU, not a reserve.
 
 There is no memory limit across all jobs, on purpose: when a group of containers runs out of memory together, the
 kernel kills the largest job in the group, not the one that grew (measured). The budget's admission keeps the jobs'

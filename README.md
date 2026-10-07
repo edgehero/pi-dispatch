@@ -292,8 +292,8 @@ and the history, where `r` reverts to an earlier row:
 ### More than one machine
 
 Several machines can share one queue, one budget and one panel once each worker has a name
-(`PI_WORKER_NAME`). Each machine keeps its own memory and CPU budget for its jobs, and a job waits for a machine
-its size fits on ([`docs/sizing.md`](docs/sizing.md)). Do not share the sandbox directory between them
+(`PI_WORKER_NAME`). Each machine keeps its own memory and CPU budget for its jobs, and a job on the shared queue waits
+for a machine its size fits on ([`docs/sizing.md`](docs/sizing.md)). Do not share the sandbox directory between them
 ([`docs/multi-host.md`](docs/multi-host.md) says why).
 
 ## Flows: the custom prompt a trigger runs
