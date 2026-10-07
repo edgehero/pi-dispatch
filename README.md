@@ -36,6 +36,10 @@ What you get:
   dollar total per day, week or month with a floor per project, and a portfolio manager flow can move money
   between projects inside it with no keypress. Every move is logged and can be reverted
   ([`docs/projects.md`](docs/projects.md), [`docs/allocation.md`](docs/allocation.md)).
+- **A size per project, inside a budget per machine.** Each project's jobs get the memory and CPUs its row sets
+  (4 GB and 2 CPUs by default). A job starts only when its size fits beside what already runs on that machine, and
+  room is kept for a waiting big job, so a stream of small ones cannot starve it. `pi-dispatch doctor` and the panel
+  suggest sizes from what the runs used, and you apply them ([`docs/sizing.md`](docs/sizing.md)).
 - **Model allow lists.** A trigger's `run.models`, or `PI_ALLOWED_MODELS` for the whole deployment, names the
   models a job may use. The job is stopped before it calls any other model
   ([`docs/triggers.md`](docs/triggers.md)).
@@ -288,7 +292,8 @@ and the history, where `r` reverts to an earlier row:
 ### More than one machine
 
 Several machines can share one queue, one budget and one panel once each worker has a name
-(`PI_WORKER_NAME`). Do not share the sandbox directory between them
+(`PI_WORKER_NAME`). Each machine keeps its own memory and CPU budget for its jobs, and a job waits for a machine
+its size fits on ([`docs/sizing.md`](docs/sizing.md)). Do not share the sandbox directory between them
 ([`docs/multi-host.md`](docs/multi-host.md) says why).
 
 ## Flows: the custom prompt a trigger runs

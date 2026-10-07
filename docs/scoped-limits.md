@@ -210,7 +210,8 @@ Things to know before you add a model row:
 ### Job sizes (version 3)
 
 A `project:<id>` row can also say how big each of the project's job containers is. Heavy projects get more
-memory, light ones less.
+memory, light ones less. This section is the reference for the four fields; [sizing jobs](sizing.md) walks through
+measuring, setting sizes and the host budget, with a worked example.
 
 ```json
 {

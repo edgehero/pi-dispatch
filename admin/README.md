@@ -161,6 +161,11 @@ One command puts a live terminal view over the whole deployment:
   no switch: one job per folder at a time (it lives in the worker process, and one worker per container
   daemon is the supported shape), because two agents editing one working tree race each other with no
   gate and no undo.
+- **Job sizes.** A project row can set the memory and CPUs of its jobs, and how much of a machine they may hold
+  (`hostShare`) or keep room for (`minJobs`). The PROJECTS view (`j`) shows each project's size, the p95 of its
+  runs' memory peaks and cores used, a suggested size and the exact `dispatch_limit_edit` call that applies it.
+  `dispatch_limit_add` and `dispatch_limit_edit` take the four fields behind your confirm, and nothing applies a
+  size by itself ([`docs/sizing.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/sizing.md)).
 - **Dollar windows.** With dollar caps set, the panel shows each window's spend and holds against its cap,
   and what the run records settled ([`docs/costs.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/costs.md)).
 - **Projects.** `j` shows each project with its members and this month's spend, and `Enter` on one filters

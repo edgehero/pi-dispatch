@@ -175,6 +175,8 @@ for the whole deployment, not per host.
 
 ## The host budget
 
+How to choose sizes and read what doctor says about them, with a worked example, is in [sizing jobs](sizing.md).
+
 `PI_CONCURRENCY` counts jobs, and a count cannot tell a 20g job from a 2g one. So each worker also keeps a
 **budget** of memory and CPU for its jobs, and starts a job only when its size (its project's `memory` and `cpus`,
 see [job sizes](scoped-limits.md#job-sizes-version-3)) fits beside the sizes of the jobs already running on that
