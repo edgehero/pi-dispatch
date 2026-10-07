@@ -14,8 +14,9 @@ const NOW = Date.parse("2026-10-01T12:00:00.000Z");
 const MIN = 60 * 1000;
 const DAY = 24 * 60 * MIN;
 
+// a measured run: `resources` and `size` both present, as every record a suggestion can read carries
 function rec({ i = 0, project = "web", ago = i + 1 } = {}) {
-	return { jobId: `job-${project}-${i}`, project, endedAt: new Date(NOW - ago * MIN).toISOString() };
+	return { jobId: `job-${project}-${i}`, project, endedAt: new Date(NOW - ago * MIN).toISOString(), resources: { memPeak: 1 }, size: { memMiB: 1024, cpuCenti: 100 } };
 }
 function writer(dir) {
 	return (name, body, ageMs = 0) => {
@@ -82,4 +83,20 @@ test("only the newest 50 per project are kept, by endedAt", () => {
 	const web = got.filter((r) => r.project === "web").map((r) => Number(r.jobId.split("-").at(-1))).sort((a, b) => a - b);
 	assert.deepEqual(web, Array.from({ length: 50 }, (_, i) => i), "the 50 that ended last");
 	assert.equal(got.filter((r) => r.project === "api").length, 3);
+});
+
+test("a record with no measurements never counts toward the 50: refusals cannot crowd out the evidence", () => {
+	const dir = tempDir("pi-sizing-refused-");
+	const write = writer(dir);
+	// twelve older measured runs, then fifty newer refusals (no container started, so no `resources`)
+	for (let i = 0; i < 12; i++) write(`m${i}.json`, JSON.stringify(rec({ i, project: "web", ago: 100 + i })));
+	for (let i = 0; i < 50; i++) {
+		const { resources, ...refused } = rec({ i: 100 + i, project: "web", ago: i + 1 });
+		write(`r${i}.json`, JSON.stringify({ ...refused, reason: "budget-exceeded" }));
+	}
+	const got = readSizingRecords(dir, { nowMs: NOW }).records;
+	assert.deepEqual(got.map((r) => Number(r.jobId.split("-").at(-1))).sort((a, b) => a - b), Array.from({ length: 12 }, (_, i) => i));
+	// each half of the pair is needed, and each must be an object: a null, an array or a number is no measurement
+	const one = (r) => readSizingRecords("/logs", { nowMs: NOW, fs: { readdirSync: () => ["x.json"], statSync: () => ({ isFile: () => true, mtimeMs: NOW, size: 10 }), readFileSync: () => Buffer.from(JSON.stringify(r)) } }).records.length;
+	assert.deepEqual([one(rec()), one({ ...rec(), size: undefined }), one({ ...rec(), resources: null }), one({ ...rec(), resources: [] }), one({ ...rec(), size: 5 })], [1, 0, 0, 0, 0]);
 });

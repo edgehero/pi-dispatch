@@ -276,13 +276,16 @@ call it names.
 
 - **Where you see it.** `pi-dispatch doctor` prints one line per project. The panel's PROJECTS view (`j`) shows each
   project's size, the p95 of its runs' memory peaks and cores used, the suggestion, and the exact call that applies it
-  (wrapped onto as many lines as it needs, never cut). When you edit a project row's `memory` or `cpus` with
-  `dispatch_limit_edit`, its confirm shows the project's peaks and what they suggest. The
-  [insights page](insights.md#what-each-run-records-about-resources) draws each run's peak against its size.
+  (wrapped onto as many lines as it needs, never cut and never broken inside a quoted value; join the lines before
+  running it, as the line under it says). When you edit a project row's `memory` or `cpus` with `dispatch_limit_edit`,
+  its confirm shows the project's peaks and what they suggest. The [insights
+  page](insights.md#what-each-run-records-about-resources) draws each run's peak against its size.
 - **What it reads.** The project's runs of the last 30 days, at most the newest 50, that recorded both what they used
-  (`resources`) and what they were given (`size`). Runs from before those fields are ignored, and so is a record file
-  larger than 256 KiB (doctor and the panel say how many they skipped). In each of memory and CPUs, the runs given at
-  least the current size decide, so a raise you just made is not asked for again by the run that caused it.
+  (`resources`) and what they were given (`size`). Runs from before those fields are ignored, and so are refusals (a
+  job refused before its container started records neither, and never pushes a measured run out of the 50), and so is
+  a record file larger than 256 KiB (doctor and the panel say how many they skipped). In each of memory and CPUs, the
+  runs given at least the current size decide, so a raise you just made is not asked for again by the run that caused
+  it.
 - **Memory is raised only after an OOM kill.** A run that ended `oom-killed` at the current size or larger suggests
   1.5x the larger of the size and the largest size in the window that was killed. One step per kill: the run that
   caused a raise does not count once the raise is applied.
@@ -301,14 +304,17 @@ call it names.
   was held back more than 25% of its time, the line says so as a fact about the host, with no call. A run's time is
   counted from pickup, clone included, so cores used read a little low.
 - **What this host offers caps every suggestion.** A raise never goes past this host's budget in that dimension
-  (`PI_HOST_MEMORY_BUDGET`), or, where the budget is `off` or not yet known, past the host's own memory. Where the
-  runs ask for more, the suggestion is that cap and says "this project's runs need more than this host offers".
-  Where the size already is the cap, doctor warns "already at the largest size this host offers" and offers no call.
-  Where nothing about the host is known, a raise offers no call at all. Nothing ever suggests growing the host's
-  budget: that budget is what the host promised every other project. The panel and the insights page cap per live
-  host, each judged on its own pair of budgets (a host with lots of memory and too few CPUs for the project does not
-  count), and the edit's confirm reads no budget and says so. Doctor also warns when a suggestion is above the
-  project's `hostShare` of this host's budget.
+  (`PI_HOST_MEMORY_BUDGET`), or the project's `hostShare` of it when its row has one (50% of a 10g budget caps it at
+  5g, the most a job of it may take here), or, where the budget is `off` or not yet known, past the host's own memory.
+  Where the runs ask for more, the suggestion is that cap and says "this project's runs need more than this host
+  offers". Where the size already is the cap, doctor warns "already at the largest size this host offers" (or "already
+  above" it, naming the cap, when the size was set larger) and offers no call. Where nothing about the host is known,
+  a raise offers no call at all; the panel says whether no budget was read, no live host's budget holds the project's
+  size, or every live host's budget is off. Nothing ever suggests growing the host's budget: that budget is what the
+  host promised every other project. The panel and the insights page cap per live host, each judged on its own pair of
+  budgets (a host with lots of memory and too few CPUs for the project does not count), and the edit's confirm reads
+  no budget and says so. A suggestion that would still never fit (a lowering of a size already above the cap, or one
+  whose other dimension is above the project's `hostShare`) is a warning and offers no call, on every surface.
 - **When the scoped-limits file does not load,** doctor prints no size lines, only "size suggestions: off until the
   scoped-limits file loads": a size read without the file would be the default, not the project's.
 - **The call.** `dispatch_limit_edit {"index":1,"memory":"6g"}` changes the project's row (the index is its place in

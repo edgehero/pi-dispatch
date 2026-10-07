@@ -1074,19 +1074,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-SIZE-SUGGESTIONS
 
-- **Statement**: The operator shall be told, per project, what job size its recent runs suggest (issue #596, phase
-  3): its memory and CPUs now, the p95 of what its runs used, and either "fits", "not enough runs", or a suggested
-  size with its reason and the exact `dispatch_limit_edit` call (`dispatch_limit_add` when the project has no row)
-  that applies it. Memory is raised ONLY after a run the worker confirmed `oom-killed`; a peak at the limit, or a
-  throttled CPU, is shown as a fact with no call, because neither says a larger size would help. CPUs are only ever
-  lowered. No suggestion goes past what the host offers (its budget, or its own memory and CPU count where the budget
-  is off or unknown), none advises growing a host's budget, and a lowering never goes below what the window's
-  heaviest run used, nor below what an OOM in the window asked for. It is shown by doctor (one line per project, a
-  warning for a raise, for a size already at the largest the host offers, and for a size above the host or the
-  project's `hostShare`), in the panel's PROJECTS view (the call wrapped, never cut), in the `dispatch_limit_edit`
-  confirm when a size field of a project row is edited, and on the insights page, which also draws each run's peak
-  memory over time against its size, and each live host's budget and use. A suggestion is NEVER applied by anything
-  but that call, confirmed by the operator.
+- **Statement**: The operator shall be told, per project, what job size its recent runs suggest (issue #596, phase 3):
+  its memory and CPUs now, the p95 of what its runs used, and either "fits", "not enough runs", or a suggested size
+  with its reason and the exact `dispatch_limit_edit` call (`dispatch_limit_add` when the project has no row) that
+  applies it. Memory is raised ONLY after a run the worker confirmed `oom-killed`; a peak at the limit, or a throttled
+  CPU, is shown as a fact with no call, because neither says a larger size would help. CPUs are only ever lowered. No
+  suggestion goes past what the host offers the project (its budget, at the project's `hostShare` of it where the row
+  has one, or its own memory and CPU count where the budget is off or unknown), none advises growing a host's budget,
+  and a lowering never goes below what the window's heaviest run used, nor below what an OOM in the window asked for.
+  It is shown by doctor (one line per project, a warning for a raise, for a size already at the largest the host
+  offers, and for a size above the host or the project's `hostShare`, which offers no call), in the panel's
+  PROJECTS view (the call wrapped, never cut and never broken inside a JSON string, with a line saying to join it), in
+  the `dispatch_limit_edit` confirm when a size field of a project row is edited, and on the insights page, which also
+  draws each run's peak memory over time against its size, and each live host's budget and use. A suggestion is NEVER
+  applied by anything but that call, confirmed by the operator.
 - **Why**: Decision 1 of the issue was to measure first; sizes per project are only as good as the operator's guess
   without the measurement read back. The measurements come from inside the jobs' containers, so they may inform a
   decision and may never make one, and a rule that a job's own I/O or the host's CPU ceiling can trigger would walk a
@@ -1095,7 +1096,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   with the fix `dispatch_limit_edit {"index":<its row>,"memory":"6g"}` and the panel shows the same call; with a 5g
   budget the call is `"memory":"5g"` and the line says the runs need more than this host offers; with a 4g budget it
   warns "already at the largest size this host offers" with no call; with no budget and no known host memory it names
-  no call. Given fifty runs that all peaked at their limit with no OOM, then no raise. Given ten runs throttled 90%,
+  no call. Given the same project with a `hostShare` of 50 on a 10g budget, then the call is `"memory":"5g"`, never a
+  size above the share, and given a suggestion that would still never fit, then no line carries a call. Given fifty
+  refusals newer than twelve measured runs, then the suggestion reads the twelve. Given live hosts whose budgets were
+  read but none holds the project's CPUs, or all `off`, then the panel says so and not that no budget was read. Given
+  fifty runs that all peaked at their limit with no OOM, then no raise. Given ten runs throttled 90%,
   then no CPU raise, and a fact line naming the host's CPU ceiling. Given 10 runs of a 5g project whose p95 and
   largest peak are 3g, then the suggestion is 4g (1.25 x 3g is 0.75 x 5g); one byte more and it fits. Given 48 runs
   at 300m and 2 at 6000m at 8g, then no suggestion below 7.5g; given an OOM at 2g, a raise to 3g and 49 runs at
@@ -3333,6 +3338,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-07 | Issue #596, phase 3, review gate round 2. **`REQ-SIZE-SUGGESTIONS` CORRECTED**: no suggestion goes past the project's `hostShare` of a host's budget (it was capped at the whole budget, then flagged, while still offering the call); a suggestion that would never fit offers no call; refusals no longer crowd measured runs out of the window; the panel says why a raise has no cap; the panel's call never breaks inside a JSON string. The acceptance gains those cases. Checked and UNCHANGED: `REQ-HOST-BUDGET`, `REQ-SCOPED-LIMITS`, `REQ-INSIGHTS-HTML-EXPORT`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 1. **`REQ-SIZE-SUGGESTIONS` CORRECTED** on two measured facts: page cache alone drives a peak to the limit with no OOM, and a job's throttling is the same at any CPU share because `--cpus` is the host's ceiling. Memory now raises only after a confirmed `oom-killed` run (the at-limit raise is removed; pressure at the limit is a fact with no call), CPUs only lower (the throttled raise is removed; throttling is a fact about the host's CPU ceiling), every suggestion is capped at what the host offers and never advises growing a budget, a lowering never goes below the window's heaviest run nor what an OOM in it asked for, the panel wraps the call instead of cutting it, and doctor says suggestions are off while the scoped-limits file does not load. The acceptance is rewritten around those cases (the cap, the page-cache and throttle non-raises, the deflation and flip-flop floors, the 256 KiB cap). Checked and UNCHANGED: `REQ-HOST-BUDGET` (the budget is what the cap reads), `REQ-SCOPED-LIMITS`, `REQ-INSIGHTS-HTML-EXPORT`. |
 | 2026-10-07 | Issue #596, phase 3 (size suggestions). **NEW `REQ-SIZE-SUGGESTIONS`**: per project, doctor, the panel's PROJECTS view, the `dispatch_limit_edit` confirm of a size field and the insights page show the size, the p95 of what its runs used, and "fits", "not enough runs" or a suggested size with its reason and the exact call that applies it; the insights page draws each run's peak against its size and each live host's budget and use; nothing applies a suggestion but that call, confirmed. Checked and UNCHANGED: `REQ-HOST-BUDGET` (the budget a suggestion is flagged against), `REQ-SCOPED-LIMITS` (the call is its existing tool), `REQ-INSIGHTS-HTML-EXPORT` (a section is added under its existing posture: self-contained, deterministic, allowlisted). |
 | 2026-10-07 | Issue #596, phase 2, the last review round. **`REQ-HOST-BUDGET` WORDING CORRECTED**: a worker without `PI_WORKER_NAME` "never waits for another host, even one it would fit", where the text said "there is no other host to wait for", which is false when peers share its Valkey; the rule itself is UNCHANGED, and doctor names `PI_WORKER_NAME` as the fix when it sees peers. Checked and UNCHANGED: `REQ-HOST-REGISTRY`, `REQ-JOB-SIZE`. |

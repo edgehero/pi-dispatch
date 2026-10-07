@@ -1373,13 +1373,15 @@ function dollarsLegendHtml() {
 
 // ---- job sizes (issue #596, phase 3, DES-SIZE-SUGGESTIONS) ----
 // The reasons the worker's `suggestSize` gives, restated (this module loads nothing from the worker) and pinned to
-// worker/src/size-suggest.mjs's MEMORY_REASONS, CPU_REASONS, MEMORY_HELD and SIZE_FACTS by size-suggest.test.mjs.
+// worker/src/size-suggest.mjs's MEMORY_REASONS, CPU_REASONS, MEMORY_HELD, SIZE_FACTS and MEMORY_CAP_MISSING by
+// size-suggest.test.mjs.
 // Anything else is dropped, and a dimension without a known reason draws no suggestion: toward silence, never an
 // invented one. A held raise or a fact outside its list is dropped the same way.
 export const INSIGHTS_MEMORY_REASONS = Object.freeze(["oom-killed", "not-enough-runs", "oversized", "fits"]);
 export const INSIGHTS_CPU_REASONS = Object.freeze(["not-enough-runs", "underused", "fits"]);
 export const INSIGHTS_MEMORY_HELD = Object.freeze(["cap", "largest", "no-cap"]);
 export const INSIGHTS_SIZE_FACTS = Object.freeze(["pressure", "ceiling"]);
+export const INSIGHTS_CAP_MISSING = Object.freeze(["unread", "none-holds", "off"]);
 // The two admin calls a suggestion may name, digits, ids and JSON punctuation only (`suggestionCall`).
 const SIZING_CALL = /^dispatch_limit_(?:edit|add) \{[a-z0-9":,.{}:-]{1,160}\}$/;
 const SIZING_POINTS_MAX = 50;
@@ -1425,7 +1427,9 @@ function normSizingDim(v, reasons) {
   const held = INSIGHTS_MEMORY_HELD.includes(v.held) ? v.held : null;
   const fact = INSIGHTS_SIZE_FACTS.includes(v.fact) ? v.fact : null;
   const wanted = sizeInt(v.wanted);
-  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, overBudget: v.overBudget === true, held, fact, wanted: wanted === 0 ? null : wanted, samples: sizeInt(e.samples) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti), pressured: sizeInt(e.pressured) ?? 0, throttledPct: sizeInt(e.throttledPct) };
+  const capMissing = INSIGHTS_CAP_MISSING.includes(v.capMissing) ? v.capMissing : null;
+  const cap = sizeInt(v.cap);
+  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, overBudget: v.overBudget === true, held, fact, wanted: wanted === 0 ? null : wanted, capMissing, cap: cap === 0 ? null : cap, samples: sizeInt(e.samples) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti), pressured: sizeInt(e.pressured) ?? 0, throttledPct: sizeInt(e.throttledPct) };
 }
 
 /**
@@ -1507,10 +1511,13 @@ export function sizeCoresText(cpuCenti) {
   return `${sizeCpuText(cpuCenti)} core${cpuCenti === 100 ? "" : "s"}`;
 }
 
+export const SIZING_NO_CAP_WORDS = Object.freeze({ unread: "no host budget read", "none-holds": "no live host's budget holds this size", off: "every live host's budget is off" });
+
 function sizingWhat(dim, unit) {
   if (dim.suggested !== null) return `suggest ${unit(dim.suggested)} (${dim.reason}${dim.held === "cap" ? ", the most a live host offers" : ""}${dim.overBudget ? ", larger than any live host offers" : ""})`;
-  if (dim.held === "largest") return `stays (${dim.reason}, already the largest size a live host offers)`;
-  if (dim.held === "no-cap" && dim.wanted !== null) return `wants ${unit(dim.wanted)} (${dim.reason}, no host budget read: no call)`;
+  if (dim.held === "largest") return `stays (${dim.reason}, ${dim.cap !== null && dim.current > dim.cap ? "already above the most a live host offers" : "already the largest size a live host offers"})`;
+  // the three ways no cap is known, worded apart (the panel's words, held equal by a test); an unknown one reads as unread
+  if (dim.held === "no-cap" && dim.wanted !== null) return `wants ${unit(dim.wanted)} (${dim.reason}, ${SIZING_NO_CAP_WORDS[dim.capMissing ?? "unread"]}: no call)`;
   return dim.reason === "not-enough-runs" ? `not enough runs (${dim.samples})` : dim.reason;
 }
 

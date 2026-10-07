@@ -158,11 +158,11 @@ the memory part of it (below).
   project's current size at the right edge. A dot on the line is a run that reached its limit, which page cache alone
   does (a red dot is a kill). A peak above its size is drawn at the size.
 - **The suggestion** above each chart, and the exact call that applies it. These are the same runs and the same rules
-  as `pi-dispatch doctor` and the panel's PROJECTS view use
-  ([choosing a size from the runs](scoped-limits.md#choosing-a-size-from-the-runs)). A raise is capped at what a live
-  host offers, each host judged on its own pair of memory and CPU budgets; a suggestion larger than any host offers
-  says so. A memory-pressure or CPU-ceiling fact shows below the call, as information. Nothing on this page changes a
-  size.
+  as `pi-dispatch doctor` and the panel's PROJECTS view use ([choosing a size from the
+  runs](scoped-limits.md#choosing-a-size-from-the-runs)). A raise is capped at what a live host offers the project
+  (its `hostShare` of a budget, where its row has one), each host judged on its own pair of memory and CPU budgets; a
+  suggestion larger than any host offers says so and shows no call. A memory-pressure or CPU-ceiling fact shows below
+  the call, as information. Nothing on this page changes a size.
 - Only this host's run records are read for the sizes. A run another host recorded is counted only on a shared
   `PI_LOGS_DIR`.
 
