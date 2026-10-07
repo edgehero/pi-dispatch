@@ -122,7 +122,7 @@ test("the panel's edit dialogs carry a row's size, which they do not prompt for,
   assert.equal(read(path).version, 3);
 });
 
-test("the admin's size-field tables are the worker's SIZE_LIMIT_FIELDS, in its order, so no copy can drift (P1G1-C2)", async () => {
+test("the admin's size-field tables are the worker's SIZE_LIMIT_FIELDS, in its order, so no copy can drift", async () => {
   const { SIZE_LIMIT_FIELDS } = await import("@edgehero/pi-dispatch/scoped-limits");
   assert.deepEqual(Object.keys(indexMod.SIZE_FIELD_SCHEMAS), [...SIZE_LIMIT_FIELDS], "both tools' schemas spread this one table");
   assert.deepEqual(Object.keys(indexMod.SIZE_FIELD_RIDES), [...SIZE_LIMIT_FIELDS], "the builder rides each field by this one table");

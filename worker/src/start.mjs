@@ -614,7 +614,7 @@ export async function startWorker(
 		readCgroupFile: readCgroupFileFn = (path) => readFileSync(path, "utf8"),
 		// Issue #596, phase 2: whether an orphaned job container is gone, per venue's CLI.
 		containerGone: containerGoneFn = null,
-		// Issue #596, gate round 1 of phase 2 (P2G1-L4): the job containers a venue's CLI still lists after the boot reaper,
+		// Issue #596, gate round 1 of phase 2: the job containers a venue's CLI still lists after the boot reaper,
 		// with their size labels, `(bin) => async () => [{ name, memMiB, cpuCenti }]`, throwing when the CLI does not answer.
 		listJobContainers: listJobContainersFn = (bin) => makeJobContainerLister({ bin }),
 		// `home` (issue #354) is the account whose rootless Podman runs the podman venue's jobs: its own mounts.conf and
@@ -1686,9 +1686,9 @@ export async function startWorker(
 		budgetRunning: () => snapshotField("running"),
 		budgetHolds: () => snapshotField("holds"),
 		budgetOrphans: () => snapshotField("orphans"),
-		// P2G1-L4: whether the boot listing of the job containers left from before this worker started has been read
+		// whether the boot listing of the job containers left from before this worker started has been read
 		// (`listed`); until a venue's is, the worker admits no job on it (`unlisted:<venue>[,<venue>]`, gate round 2 of
-		// phase 2, P2G2-2), and doctor names the venues. "" before the worker exists.
+		// phase 2), and doctor names the venues. "" before the worker exists.
 		budgetSeed: () => {
 			const snap = worker?.hostBudget?.snapshot?.();
 			if (typeof snap?.seeded !== "boolean") return "";
@@ -2016,8 +2016,8 @@ export async function startWorker(
 			readFacts: readHostFacts,
 			onRefresh: syncCpuReserve,
 			containerGone: containerGoneFn ?? makeContainerGone({ binOf: (venue) => (resolveBackendName(venue ?? {}, config.defaultBackend) === PODMAN_BACKEND ? "podman" : "docker") }),
-			// P2G1-L4: AFTER the boot reaper (above), every blessed venue's remaining job containers, seeded into the ledger
-			// as orphans from their size labels. PER VENUE (gate round 2 of phase 2, P2G2-2): a venue that cannot be listed
+			// AFTER the boot reaper (above), every blessed venue's remaining job containers, seeded into the ledger
+			// as orphans from their size labels. PER VENUE (gate round 2 of phase 2): a venue that cannot be listed
 			// stops only its own jobs until a tick reads it, because a container nobody counted is an overcommit, while the
 			// other venue's jobs run. A venue that holds no container by construction counts as none rather than as unread:
 			// its binary is absent (ENOENT, nothing of it can run), or its boot job-user decision is `unmappable` (every

@@ -277,7 +277,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 					throw Object.assign(new Error("absent"), { code: "ENOENT" });
 				}),
 			makePodmanReaper: makePodmanReaper ?? (() => async () => ({ reaped: true })),
-			// Issue #596, P2G1-L4: never this machine's containers. Nothing left from a previous worker unless a test says so.
+			// Issue #596, never this machine's containers. Nothing left from a previous worker unless a test says so.
 			listJobContainers: listJobContainers ?? (() => async () => []),
 			makePodmanBackend: podmanBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
@@ -4670,9 +4670,9 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	assert.deepEqual(facts.reserveVenues.map((v) => [v.venue, v.endpointLocal, v.facts.hostCpus]), [["local", endpoint.local === true, 8]]);
 	assert.equal(typeof opts.onRefresh, "function");
 	assert.equal(typeof opts.containerGone, "function");
-	assert.equal("fleetHosts" in captured, false, "no registry read decides a job's size any more (P2G1-L2)");
-	// P2G1-L4: the boot listing of every blessed venue's remaining job containers, each named with its venue. PER VENUE
-	// (P2G2-2): one lister per blessed venue, and the default venue named, so an unread venue stops only its own jobs.
+	assert.equal("fleetHosts" in captured, false, "no registry read decides a job's size any more");
+	// the boot listing of every blessed venue's remaining job containers, each named with its venue. PER VENUE
+	//: one lister per blessed venue, and the default venue named, so an unread venue stops only its own jobs.
 	assert.deepEqual(Object.keys(opts.survivors), ["local"], "local is the only blessed venue here");
 	assert.equal(opts.defaultVenue, "local");
 	assert.deepEqual(await opts.survivors.local(), [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50, venue: { backend: "local" } }]);
@@ -4690,13 +4690,13 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	for (const key of ["budgetMemMiB", "budgetCpuCenti", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "budgetRunning", "budgetHolds", "budgetOrphans", "budgetSeed"]) {
 		assert.equal(typeof published[key], "function", `${key} is a thunk, re-read every beat`);
 	}
-	// P2G1-L4: the boot listing's state, read at every beat.
+	// the boot listing's state, read at every beat.
 	assert.equal(published.budgetSeed(), "unlisted:local", "the unread venues, named");
 	snap.seeded = true;
 	assert.equal(published.budgetSeed(), "listed");
 });
 
-test("issue #596, P2G2-2: each blessed venue is listed on its own, and a venue whose job user is unmappable counts as holding none", { skip }, async () => {
+test("issue #596, each blessed venue is listed on its own, and a venue whose job user is unmappable counts as holding none", { skip }, async () => {
 	const failing = (bin) => async () => {
 		throw Object.assign(new Error(`${bin} does not answer`), { code: 125 });
 	};

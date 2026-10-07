@@ -2429,8 +2429,8 @@ export async function collectChecks(shellVars, seams) {
 	// Issue #596, phase 2: this host's own row, when its worker runs and publishes one. Its host budget ledger is held
 	// against the size labels of the job containers each venue's runtime lists, read only when the row carries the ledger.
 	const selfRow = (fleet.hosts ?? []).find((h) => printable(h.name) === workerNameOf(declaredWorkerName)) ?? null;
-	// P2G1-L4: a worker that has not read its boot listing of the job containers left from before it started admits nothing
-	// on that venue. Per venue since gate round 2 of phase 2 (P2G2-2): `unlisted:<venue>[,<venue>]`, each a backend name;
+	// a worker that has not read its boot listing of the job containers left from before it started admits nothing
+	// on that venue. Per venue since gate round 2 of phase 2: `unlisted:<venue>[,<venue>]`, each a backend name;
 	// a bare `unlisted` (a worker of this round's first draft) is the whole host.
 	const seedField = typeof selfRow?.budgetSeed === "string" ? selfRow.budgetSeed : "";
 	if (seedField === "unlisted" || seedField.startsWith("unlisted:")) {
@@ -7674,12 +7674,12 @@ export function projectSizes(limits, env) {
 export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} } = {}) {
 	if (view.error) return [{ ok: false, label: `host budget does not parse: ${view.error}, so the worker REFUSES TO START`, fix: "set PI_HOST_MEMORY_BUDGET and PI_HOST_CPU_BUDGET to auto, off or a value such as 64g or 12, and PI_HOST_RESERVE_MEMORY and PI_HOST_RESERVE_CPUS to auto or a value (or unset all four for auto), then re-run doctor" }];
 	const { memMiB, cpuCenti, detail, settings } = view;
-	// P2G2-1: a worker without PI_WORKER_NAME drains no host queue and declares no fleet, so it refuses every never-fits job.
+	// a worker without PI_WORKER_NAME drains no host queue and declares no fleet, so it refuses every never-fits job.
 	const multiHost = Boolean(env?.PI_WORKER_NAME);
 	const memWhy = settings.memory.mode === "off" ? "off: PI_HOST_MEMORY_BUDGET" : settings.memory.mode === "value" ? "PI_HOST_MEMORY_BUDGET" : detail.memTotalMiB === null ? "auto" : `auto: ${formatMemory(detail.memTotalMiB)} here, ${formatMemory(detail.memReserveMiB)} kept for the host${detail.memFloored ? ", raised to one job of the default size" : ""}`;
 	const cpuWhy = settings.cpus.mode === "off" ? "off: PI_HOST_CPU_BUDGET" : settings.cpus.mode === "value" ? "PI_HOST_CPU_BUDGET" : detail.cpuTotalCenti === null ? "auto" : `auto: ${formatCpus(detail.cpuTotalCenti)} here, ${formatCpus(detail.cpuReserveCenti)} kept for the host${detail.cpuFloored ? ", raised to one job of the default size" : ""}`;
 	const checks = [{ ok: true, label: `Host budget: memory ${budgetMemShown(memMiB)} (${memWhy}), CPUs ${budgetCpuShown(cpuCenti)} (${cpuWhy}); a job starts only when its size fits beside what already runs on this host` }];
-	// P2G1-L7: the CPU half is a reservation in the budget's arithmetic and a weight at the runtime, and an operator
+	// the CPU half is a reservation in the budget's arithmetic and a weight at the runtime, and an operator
 	// sizing a project by "it only needs the cores when it is busy" must know the budget does not see it that way.
 	if (cpuCenti !== Infinity) checks.push({ ok: true, label: "The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host" });
 	const unknown = [memMiB === null ? "memory" : null, cpuCenti === null ? "CPU count" : null].filter(Boolean);
@@ -7800,7 +7800,7 @@ export function budgetLedgerChecks(selfRow, containers) {
 	} else {
 		checks.push({ ok: false, warn: true, label: `Host budget ledger holds ${usedMem === 0 ? "0" : formatMemory(usedMem)} and ${formatCpus(usedCpu)} CPUs, while the running job containers are labelled ${mem === 0 ? "0" : formatMemory(mem)} and ${formatCpus(cpu)} CPUs`, fix: "re-run doctor: a job starting or ending between the two reads differs for a moment. A difference that stays is a container the worker does not count, or one whose stop failed (it keeps its hold until the runtime says it is gone)" });
 	}
-	// P2G2-4: NAMED, so an operator can find each one (`pi-job-<id>`, a job id and never payload text). A worker that
+	// NAMED, so an operator can find each one (`pi-job-<id>`, a job id and never payload text). A worker that
 	// started beside one counts it at the largest size a project row or the default could have started it at, capped
 	// at the budget, so the ledger line above differs while it runs.
 	if (unlabelled > 0) {

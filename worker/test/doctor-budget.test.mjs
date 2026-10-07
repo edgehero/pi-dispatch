@@ -15,7 +15,7 @@ test("the budget line names each half and where it comes from, and says which of
 	assert.deepEqual([view.memMiB, view.cpuCenti], [29492, 700]);
 	assert.deepEqual(labels(hostBudgetChecks(view, { concurrency: 3 })), [
 		"ok: Host budget: memory 29492m (auto: 32g here, 3276m kept for the host), CPUs 7 (auto: 8 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
-		// P2G1-L7: the CPU half is a reservation in the arithmetic and a weight at the runtime.
+		// the CPU half is a reservation in the arithmetic and a weight at the runtime.
 		"ok: The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 		// min(29492 / 4096, 700 / 200) = min(7, 3) = 3 default jobs: equal to PI_CONCURRENCY, which binds first.
 		"ok: PI_CONCURRENCY (3) binds first: the budget holds 3 jobs of the default size (4g, 2 CPUs) at once",
@@ -68,7 +68,7 @@ test("project sizes: a size the budget can never hold, a size over its share, an
 	]);
 	assert.deepEqual(projectSizes(limits, {}).map((p) => p.id), ["huge", "greedy", "many", "ok"], "a project row without a size runs at the default and is not listed");
 	const lines = labels(hostBudgetChecks(view, { limits, env: { PI_WORKER_NAME: "mini1" } }));
-	// P2G2-1: a worker without PI_WORKER_NAME declares no fleet, so it refuses every never-fits job, on whatever queue.
+	// a worker without PI_WORKER_NAME declares no fleet, so it refuses every never-fits job, on whatever queue.
 	assert.deepEqual(labels(hostBudgetChecks(view, { limits })).slice(3, 5), [
 		"warn: project huge: its job size (40g, 2 CPUs) is larger than this host's budget (32g, 8 CPUs), so every job of it is refused before anything is spent (job-size-exceeds-host): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for",
 		"warn: project greedy: its job size (20g, 2 CPUs) is larger than its hostShare (50%) of this host's budget, so every job of it is refused before anything is spent (job-size-exceeds-share): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for",
@@ -122,7 +122,7 @@ test("the ledger against the labels: equal is a green line, a difference and an 
 	assert.deepEqual(budgetLedgerChecks({ usedMemMiB: "" }, listed), [], "a row without the ledger: nothing to hold against");
 	assert.equal(budgetLedgerChecks({ usedMemMiB: "6144", usedCpuCenti: "250" }, listed.slice(0, 2))[0].warn, true, "the CPU half alone differing is a difference");
 	assert.deepEqual(labels(budgetLedgerChecks({ usedMemMiB: "0", usedCpuCenti: "0" }, [])), ["ok: Host budget ledger matches the running job containers (0 running, 0 and 0 CPUs)"]);
-	// P2G2-4: each unlabelled container is NAMED (five at most, then a count), and a half-labelled one is unlabelled.
+	// each unlabelled container is NAMED (five at most, then a count), and a half-labelled one is unlabelled.
 	const seven = Array.from({ length: 7 }, (_, i) => ({ name: `pi-job-u${i}`, memMiB: i === 0 ? 1024 : null, cpuCenti: null }));
 	assert.match(labels(budgetLedgerChecks({ usedMemMiB: "0", usedCpuCenti: "0" }, seven))[1], /^warn: 7 running job containers carry no size label \(pi-job-u0, pi-job-u1, pi-job-u2, pi-job-u3, pi-job-u4 and 2 more\), so the ledger cannot be checked against them /);
 });

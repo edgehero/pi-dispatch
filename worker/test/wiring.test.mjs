@@ -1112,7 +1112,7 @@ test("issue #596, phase 2: createWorker builds ONE host budget, ticks it off the
 		assert.ok(worker.hostBudget, "built, with a single queue too");
 		await worker.hostBudget.ready;
 		assert.deepEqual(worker.hostBudget.current(), { memMiB: 16384 - 1638, cpuCenti: 300 });
-		// P2G1-L3: the job count is the budget's third dimension, against the worker's live concurrency (1 here).
+		// the job count is the budget's third dimension, against the worker's live concurrency (1 here).
 		assert.equal(worker.hostBudget.gate({ id: "a", size: { memMiB: 512, cpuCenti: 25 } }).admitted, true);
 		assert.equal(worker.hostBudget.gate({ id: "b", size: { memMiB: 512, cpuCenti: 25 } }).why, "budget", "memory and CPU are free; the count is not");
 		worker.hostBudget.release("a");

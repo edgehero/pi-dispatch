@@ -28,7 +28,7 @@ import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { HOST_BEAT_MS } from "../src/host-registry.mjs";
 import { memoryMiB, parseDaemonFacts } from "../src/daemon-facts.mjs";
 
-/** No count bound: `countLimit` is required (P2G2-6), and these tests judge memory and CPU alone. */
+/** No count bound: `countLimit` is required, and these tests judge memory and CPU alone. */
 const NO_COUNT = () => null;
 
 const DEFAULT = { memMiB: 4096, cpuCenti: 200 };
@@ -201,7 +201,7 @@ test("admit: what runs plus the ask plus every hold ranked above it, in BOTH mem
 	assert.deepEqual(admit({ budget: { memMiB: Infinity, cpuCenti: null }, ledger, holds, ask: { id: "n", project: null, memMiB: 1e6, cpuCenti: 1e6 } }), { ok: true });
 });
 
-test("admit: the job COUNT is the third dimension: every running job, the ask and every hold above it is one (P2G1-L3)", () => {
+test("admit: the job COUNT is the third dimension: every running job, the ask and every hold above it is one", () => {
 	const budget = { memMiB: 65536, cpuCenti: 1600, count: 3 };
 	const ledger = [run("a", null, 1024, 25), run("b", null, 1024, 25)];
 	const holds = [w("big", "big", 20480, 200, 1)];
@@ -326,7 +326,7 @@ test("suspend keeps a waiter's age and stops its hold counting; forget drops it"
 	assert.equal(b.waiting().length, 0);
 });
 
-test("ONE PICKUP, ONE TICKET (P2G1-L1, C3): a job id the ledger holds is deferred running-here, and only its own ticket gives it back", async () => {
+test("ONE PICKUP, ONE TICKET: a job id the ledger holds is deferred running-here, and only its own ticket gives it back", async () => {
 	const { b } = budgetWith();
 	await b.ready;
 	const first = b.enter("repeat");
@@ -369,7 +369,7 @@ test("a job being handled by two pickups at once is still handled after one of t
 	assert.deepEqual(b.waiting(), [], "no pickup handles it: active elsewhere, dropped");
 });
 
-test("the count dimension in the gate: the live limit is read per gate, and the oldest waiter's hold keeps a job slot (P2G1-L3)", async () => {
+test("the count dimension in the gate: the live limit is read per gate, and the oldest waiter's hold keeps a job slot", async () => {
 	let limit = 2;
 	const clock = { t: 0 };
 	const logs = [];
@@ -394,7 +394,7 @@ test("the count dimension in the gate: the live limit is read per gate, and the 
 	assert.equal(throwing.gate({ id: "a", project: null, size: small }).admitted, true, "a count that cannot be read is no count bound (the memory and CPU still are)");
 });
 
-test("SEEDED AT BOOT (P2G1-L4): the surviving job containers are orphans from their labels; unlisted, nothing is admitted", async () => {
+test("SEEDED AT BOOT: the surviving job containers are orphans from their labels; unlisted, nothing is admitted", async () => {
 	let answer = () => {
 		throw new Error("daemon down");
 	};
@@ -443,7 +443,7 @@ test("SEEDED AT BOOT (P2G1-L4): the surviving job containers are orphans from th
 	assert.deepEqual(pessimisticSize([{ scope: "project:x", memory: "2g", cpus: 8 }, { scope: "acme/web", memory: "99g" }], { memMiB: 4096, cpuCenti: 200 }), { memMiB: 4096, cpuCenti: 800 }, "only project rows size a job");
 });
 
-test("verify bounds every queue read (P2G1-C1): a read that never settles is the error branch, and the hold is dropped at 120 s", async () => {
+test("verify bounds every queue read: a read that never settles is the error branch, and the hold is dropped at 120 s", async () => {
 	const clock = { t: 0 };
 	const logs = [];
 	const b = makeHostBudget({ countLimit: NO_COUNT, settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, now: () => clock.t, log: (event, fields) => logs.push({ event, fields }), stateReadBoundMs: 5 });
@@ -461,7 +461,7 @@ test("verify bounds every queue read (P2G1-C1): a read that never settles is the
 	assert.deepEqual(logs.filter((l) => l.event === "host_budget_hold_dropped").map((l) => l.fields.because), ["unverifiable"]);
 });
 
-test("verify judges the 120 s drop at the clock AFTER the bounded read, since the read itself takes time (P2G1-C1)", async () => {
+test("verify judges the 120 s drop at the clock AFTER the bounded read, since the read itself takes time", async () => {
 	const clock = { t: 0 };
 	const b = makeHostBudget({ countLimit: NO_COUNT, settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, now: () => clock.t, stateReadBoundMs: 5 });
 	await b.ready;
@@ -473,7 +473,7 @@ test("verify judges the 120 s drop at the clock AFTER the bounded read, since th
 	assert.deepEqual(b.waiting(), [], "away 120 s by the time the read gave up: dropped now, not a tick later");
 });
 
-test("tick: one of each piece in flight, and the sweep never waits on a verify, a facts read or a boot listing (P2G1-C1)", async () => {
+test("tick: one of each piece in flight, and the sweep never waits on a verify, a facts read or a boot listing", async () => {
 	const clock = { t: 0 };
 	let factsReads = 0;
 	let releaseFacts;
@@ -534,7 +534,7 @@ test("PROPERTY: after any sequence of gate, release, orphan, sweep, suspend, for
 		const rand = prng(seed);
 		const clock = { t: 0 };
 		let goneAnswer = false;
-		// The count dimension (P2G1-L3): from 1 to 6 jobs, or none, per seed.
+		// The count dimension: from 1 to 6 jobs, or none, per seed.
 		const count = seed % 7 === 0 ? null : 1 + (seed % 6);
 		const { b } = budgetWith({ clock, limits, gone: async () => goneAnswer, count });
 		await b.ready;
@@ -598,7 +598,7 @@ test("PROPERTY: release is idempotent: a second release of any id changes nothin
 test("PROPERTY: the head waiter is admitted within as many releases as there were jobs running when it became the head, with and without a count", async () => {
 	// No minJobs, so the head is the tier 2 hold, the oldest waiter. Each step either a fresh job asks (asking FIRST,
 	// the adversarial order) or one running job ends and every waiter asks again, oldest first. Seeds above 60 add the
-	// count dimension (P2G1-L3), 2 to 4 jobs: the head's hold keeps a count slot as well, so the bound is unchanged.
+	// count dimension, 2 to 4 jobs: the head's hold keeps a count slot as well, so the bound is unchanged.
 	for (let seed = 1; seed <= 120; seed++) {
 		const rand = prng(5000 + seed);
 		const clock = { t: 0 };
@@ -755,12 +755,12 @@ test("issue #596, phase 2: onRefresh gets every refreshed budget and its facts, 
 	}
 });
 
-test("countLimit is REQUIRED (P2G2-6): a wiring that forgets it is refused at construction, never run without a count bound", () => {
+test("countLimit is REQUIRED: a wiring that forgets it is refused at construction, never run without a count bound", () => {
 	assert.throws(() => makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: DEFAULT }), /countLimit is required/);
 	assert.throws(() => makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: DEFAULT, countLimit: 3 }), /countLimit is required/, "a number is not the live reader");
 });
 
-test("SEEDED PER VENUE (P2G2-2): an unread venue stops only its own jobs, the default venue stands for a job that names none", async () => {
+test("SEEDED PER VENUE: an unread venue stops only its own jobs, the default venue stands for a job that names none", async () => {
 	let podman = () => {
 		throw new Error("podman: command not answering");
 	};
@@ -816,7 +816,7 @@ test("SEEDED PER VENUE (P2G2-2): an unread venue stops only its own jobs, the de
 	assert.equal(calls, 2, "the boot read, then ONE re-read for both callers");
 });
 
-test("A SURVIVOR'S NAME IS TAKEN (P2G2-3): the job whose container a seeded survivor carries waits running-here, and the sweep never asks about a live job's name", async () => {
+test("A SURVIVOR'S NAME IS TAKEN: the job whose container a seeded survivor carries waits running-here, and the sweep never asks about a live job's name", async () => {
 	const asked = [];
 	let gone = false;
 	let podman = () => {
@@ -863,7 +863,7 @@ test("A SURVIVOR'S NAME IS TAKEN (P2G2-3): the job whose container a seeded surv
 	assert.deepEqual(asked, [null], "asked (the runtime's answer decides), not skipped forever");
 });
 
-test("an unlabelled survivor's guessed size is CAPPED at the budget (P2G2-4)", async () => {
+test("an unlabelled survivor's guessed size is CAPPED at the budget", async () => {
 	assert.deepEqual(pessimisticSize([{ scope: "project:giant", memory: "128g", cpus: 64 }], { memMiB: 4096, cpuCenti: 200 }, { memMiB: 65536, cpuCenti: 1600 }), { memMiB: 65536, cpuCenti: 1600 });
 	assert.deepEqual(pessimisticSize([{ scope: "project:giant", memory: "128g", cpus: 64 }], { memMiB: 4096, cpuCenti: 200 }, { memMiB: Infinity, cpuCenti: null }), { memMiB: 131072, cpuCenti: 6400 }, "an off or unknown budget caps nothing");
 	assert.deepEqual(pessimisticSize([{ scope: "project:a", memory: "8g", cpus: 2 }], { memMiB: 4096, cpuCenti: 200 }, { memMiB: 65536, cpuCenti: 1600 }), { memMiB: 8192, cpuCenti: 200 }, "below the budget, unchanged");
