@@ -4671,8 +4671,8 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	assert.equal(typeof opts.onRefresh, "function");
 	assert.equal(typeof opts.containerGone, "function");
 	assert.equal("fleetHosts" in captured, false, "no registry read decides a job's size any more");
-	// the boot listing of every blessed venue's remaining job containers, each named with its venue. PER VENUE
-	//: one lister per blessed venue, and the default venue named, so an unread venue stops only its own jobs.
+	// The boot listing of every blessed venue's remaining job containers, each named with its venue, has one lister per
+	// blessed venue and names the default venue, so an unread venue stops only its own jobs.
 	assert.deepEqual(Object.keys(opts.survivors), ["local"], "local is the only blessed venue here");
 	assert.equal(opts.defaultVenue, "local");
 	assert.deepEqual(await opts.survivors.local(), [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50, venue: { backend: "local" } }]);
@@ -4707,6 +4707,11 @@ test("issue #596, each blessed venue is listed on its own, and a venue whose job
 	assert.deepEqual(Object.keys(opts.survivors).sort(), ["local", "podman"]);
 	assert.deepEqual(await opts.survivors.podman(), [], "unmappable: none");
 	await assert.rejects(() => opts.survivors.local(), /docker does not answer/, "local's decision maps a user: unread");
+	// An unmappable cause decided from one unreadable answer is re-decided per job and can clear, so the venue stays
+	// unread: podman's info that no rule reads, and local's daemon facts that no rule reads.
+	const unreadable = await runStart({ env: { PI_BACKENDS: "local,podman" }, readPodmanInfo: PODMAN_INFO({}, { answer: { answered: false, reason: "unparseable", transient: false } }), readDaemonFacts: async () => ({ answered: false, reason: "unparseable", transient: false }), jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), listJobContainers: failing });
+	await assert.rejects(() => unreadable.captured.hostBudget.survivors.podman(), /podman does not answer/, "podman-unreadable: unread");
+	await assert.rejects(() => unreadable.captured.hostBudget.survivors.local(), /docker does not answer/, "runtime-unreadable: unread");
 });
 
 test("issue #596, phase 2: the CPU reserve plan reads a systemd daemon's slice only where the endpoint is observed on this host", { skip }, async () => {

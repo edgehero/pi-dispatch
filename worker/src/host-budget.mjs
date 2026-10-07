@@ -494,6 +494,9 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		const next = computeHostBudget(settings, facts, jobDefault);
 		budget = { memMiB: next.memMiB, cpuCenti: next.cpuCenti };
 		detail = next.detail;
+		for (const entry of ledger.values()) {
+			if (entry.guess) Object.assign(entry, pessimisticSize([], entry.guess, budget));
+		}
 		const unknown = [budget.memMiB === null ? "memory" : null, budget.cpuCenti === null ? "cpus" : null].filter(Boolean).join(",");
 		if (unknown !== unknownSaid) {
 			unknownSaid = unknown;
@@ -521,14 +524,16 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 			}
 			return;
 		}
-		const guess = pessimisticSize(scopedLimits(), jobDefault, budget);
+		// The guess is kept uncapped on the entry and capped at the budget in force, here and again on every refresh, so
+		// the order of the first refresh and the first listing does not decide the size.
+		const guess = pessimisticSize(scopedLimits(), jobDefault);
 		const t = now();
 		for (const c of listed) {
 			if (typeof c?.name !== "string" || c.name === "") continue;
 			const id = `container:${c.name}`;
 			const labelled = Number.isSafeInteger(c.memMiB) && c.memMiB > 0 && Number.isSafeInteger(c.cpuCenti) && c.cpuCenti > 0;
-			const size = labelled ? { memMiB: c.memMiB, cpuCenti: c.cpuCenti } : guess;
-			ledger.set(id, { id, project: null, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket: null, name: c.name, orphan: { name: c.name, venue: c.venue ?? null, since: t } });
+			const size = labelled ? { memMiB: c.memMiB, cpuCenti: c.cpuCenti } : pessimisticSize([], guess, budget);
+			ledger.set(id, { id, project: null, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket: null, name: c.name, orphan: { name: c.name, venue: c.venue ?? null, since: t }, guess: labelled ? null : guess });
 			log("host_budget_seeded", { memMiB: size.memMiB, cpuCenti: size.cpuCenti, labelled });
 		}
 		unseeded.delete(venue);
@@ -605,7 +610,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		running.set(key, p);
 		return p;
 	};
-	// The first refresh BEFORE the first listing: an unlabelled survivor's size is capped at the budget.
+	// The first refresh BEFORE the first listing (the tick may still list first; a guessed size is re-capped either way).
 	const ready = refresh().then((first) => once("seed", seed).then(() => first));
 
 	return {

@@ -2020,16 +2020,18 @@ export async function startWorker(
 			// as orphans from their size labels. PER VENUE (gate round 2 of phase 2): a venue that cannot be listed
 			// stops only its own jobs until a tick reads it, because a container nobody counted is an overcommit, while the
 			// other venue's jobs run. A venue that holds no container by construction counts as none rather than as unread:
-			// its binary is absent (ENOENT, nothing of it can run), or its boot job-user decision is `unmappable` (every
-			// job on it is refused before a container, so this worker starts none there).
+			// its binary is absent (ENOENT, nothing of it can run), or its boot job-user decision is `unmappable` for a
+			// cause that refuses a boot (the venue's boot-refusing set: every job on it is refused before a container, so this
+			// worker starts none there). A cause decided from one unreadable answer is re-decided per job and can clear, so
+			// it leaves the venue unread.
 			survivors: Object.fromEntries(
-				[...(localBlessed ? [[DEFAULT_BACKEND, "docker", bootDecision]] : []), ...(podmanBlessed ? [[PODMAN_BACKEND, "podman", bootPodmanDecision]] : [])].map(([backend, bin, decision]) => [
+				[...(localBlessed ? [[DEFAULT_BACKEND, "docker", bootDecision, BOOT_REFUSING_JOB_USER_CAUSES]] : []), ...(podmanBlessed ? [[PODMAN_BACKEND, "podman", bootPodmanDecision, PODMAN_BOOT_REFUSING_CAUSES]] : [])].map(([backend, bin, decision, stable]) => [
 					backend,
 					async () => {
 						try {
 							return (await listJobContainersFn(bin)()).map((c) => ({ ...c, venue: { backend } }));
 						} catch (error) {
-							if (error?.code === "ENOENT" || decision?.mode === "unmappable") return [];
+							if (error?.code === "ENOENT" || (decision?.mode === "unmappable" && stable.has(decision.cause))) return [];
 							throw error;
 						}
 					},

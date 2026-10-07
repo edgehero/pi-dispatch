@@ -5286,6 +5286,24 @@ test("doctor's stat probe follows SYMLINKS, exactly as the gate's does", async (
 const fleetSeams = (hosts, extra = {}) =>
 	collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts }), ...extra });
 
+test("a never-fits project on a worker with no PI_WORKER_NAME: alone there is no other host; beside peers it declares no fleet", async () => {
+	const dir = tempDir("pi-budget-peers-");
+	const file = join(dir, "scoped-limits.json");
+	writeFileSync(file, JSON.stringify({ version: 3, limits: [{ scope: "project:huge", memory: "40g", cpus: 2 }] }));
+	const env = { VALKEY_URL: "redis://x", PI_SCOPED_LIMITS_FILE: file, PI_HOST_MEMORY_BUDGET: "32g", PI_HOST_CPU_BUDGET: "8" };
+	const huge = (checks) => checks.filter((c) => /^project huge: /.test(c.label ?? ""));
+	const alone = huge(await collectChecks(env, fleetSeams([])));
+	assert.equal(alone.length, 1);
+	assert.match(alone[0].label, /there is no other host to wait for$/);
+	const beside = await collectChecks(env, fleetSeams([{ name: "big", tz: "UTC" }]));
+	assert.equal(huge(beside).length, 1);
+	assert.match(huge(beside)[0].label, /\(job-size-exceeds-host\): this worker declares no fleet \(no PI_WORKER_NAME\), so it refuses jobs a bigger peer could run$/);
+	assert.match(huge(beside)[0].fix, /, or set PI_WORKER_NAME on this worker so a job of it on the shared queue waits for a peer it fits on$/);
+	// Said in its own place among the host budget lines, never moved after the registry's.
+	const at = (label) => beside.findIndex((c) => label.test(c.label ?? ""));
+	assert.ok(at(/^Host budget: /) < at(/^project huge: /) && at(/^project huge: /) < at(/^Fleet: /));
+});
+
 test("with no peers, doctor says nothing about a fleet at all", async () => {
 	const checks = await collectChecks({ VALKEY_URL: "redis://x" }, fleetSeams([]));
 	assert.equal(checks.filter((c) => /Fleet|host routing|timezone|digest differs/i.test(c.label)).length, 0, "a single-host deployment's output is byte-identical");
