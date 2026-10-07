@@ -8,8 +8,8 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { stripAnsi } from "../src/style.mjs";
 import { hostBudgetsOf, readSizeSuggestions } from "../src/read-model.mjs";
 import { PAGE_THEME } from "../src/graph-html.mjs";
-import { INSIGHTS_CPU_REASONS, INSIGHTS_MEMORY_HELD, INSIGHTS_MEMORY_REASONS, INSIGHTS_SIZE_FACTS, buildInsightsHtml, layoutSizingChart, sizeCoresText, sizeCpuText, sizeMemText } from "../src/insights-html.mjs";
-import { CPU_REASONS, MEMORY_HELD, MEMORY_REASONS, SIZE_FACTS, coresText } from "@edgehero/pi-dispatch/size-suggest";
+import { INSIGHTS_CAP_MISSING, INSIGHTS_CPU_REASONS, INSIGHTS_MEMORY_HELD, SIZING_NO_CAP_WORDS, INSIGHTS_MEMORY_REASONS, INSIGHTS_SIZE_FACTS, buildInsightsHtml, layoutSizingChart, sizeCoresText, sizeCpuText, sizeMemText } from "../src/insights-html.mjs";
+import { CPU_REASONS, MEMORY_CAP_MISSING, MEMORY_HELD, MEMORY_REASONS, SIZE_FACTS, coresText } from "@edgehero/pi-dispatch/size-suggest";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
 
@@ -136,8 +136,9 @@ test("the PROJECTS view shows each project's size, p95 peaks and verdict, then t
   assert.match(out, /^ops .*\n4g, 2 CPUs · p95 3000m, 1\.5 cores · fits\nthe median run was held back 50% of its time by this host's\nCPU ceiling/m);
   assert.match(out, /^new .*\n4g, 2 CPUs · p95 1g, 1 core · not enough runs \(1 of 10\)\n\/srv\/new$/m);
   // a lowering still larger than any live host offers (judged on the host's own pair: its 7 CPUs hold the 3.75 the
-  // lowering leaves, so its 5g is the memory cap) says so, under its call; only that project
-  assert.match(out, /^big .*\n16g, 8 CPUs · p95 6000m, 3 cores · suggest\nmemory 7680m \(oversized\); CPUs 3\.75 \(underused\)\ndispatch_limit_edit \{"index":1,"memory":"7680m","cpus":3\.75\}\nlarger than any live host offers/m);
+  // lowering leaves, so its 5g is the memory cap) says so, and carries NO call: it would never fit; only that project
+  assert.match(out, /^big .*\n16g, 8 CPUs · p95 6000m, 3 cores · suggest\nmemory 7680m \(oversized\); CPUs 3\.75 \(underused\)\nlarger than any live host offers/m);
+  assert.doesNotMatch(out, /"index":1/, "no call for a size that never fits");
   assert.equal(lines.filter((l) => /larger than any live host offers/.test(l)).length, 1);
   assert.doesNotMatch(out, /raise|budget first/i, "never advises growing a host");
   assert.doesNotMatch(out, /over 256 KiB/, "nothing skipped, nothing said");
@@ -151,45 +152,83 @@ test("the PROJECTS view shows each project's size, p95 peaks and verdict, then t
   assert.match(none, /^4g, 2 CPUs · p95 4g, 1 core · suggest\nmemory wants 6g \(oom-killed, no host budget read: no call\)\ngithub:acme\/web$/m);
 });
 
-test("the PROJECTS view wraps the suggestion and the exact call onto continuation lines, never clipped, at 140, 80 and 60 columns", async () => {
-  // a row's edit, and a row-less project's add (its JSON alone is wider than the narrow frame, so it breaks at commas)
+/** True when `text` ends outside every JSON string (an even count of unescaped quotes). */
+const outsideString = (text) => (text.replace(/\\./g, "").match(/"/g) ?? []).length % 2 === 0;
+
+test("the PROJECTS view wraps the exact call so it pastes: never clipped, never broken inside a JSON string, at 140, 80, 60 and 47 columns", async () => {
+  // a row's edit, a row-less project's add, and the longest project id there is (its scope string alone is 43 columns,
+  // the narrowest frame's whole inner width: the indent gives way rather than the string breaking)
   const calls = [
-    ["16g, 8 CPUs", 'dispatch_limit_edit {"index":1,"memory":"7680m","cpus":3.75}', /^larger than/],
-    ["p95 1000m, 0.3 cores", 'dispatch_limit_add {"scope":"project:wide","memory":"1280m","cpus":0.5}', /^\/srv\/wide/],
-    // a field wider than the narrow frame on its own (the longest project id there is): cut at a column, still whole
-    ["p95 1000m, 0.4 cores", 'dispatch_limit_add {"scope":"project:a-project-whose-id-is-32-chars-x","memory":"1280m","cpus":0.5}', /^\/srv\/long/, true],
+    ["p95 4g, 1 core", 'dispatch_limit_edit {"index":0,"memory":"5g"}'],
+    ["p95 1000m, 0.3 cores", 'dispatch_limit_add {"scope":"project:wide","memory":"1280m","cpus":0.5}'],
+    ["p95 1000m, 0.4 cores", 'dispatch_limit_add {"scope":"project:a-project-whose-id-is-32-chars-x","memory":"1280m","cpus":0.5}'],
   ];
   let wrapped = 0;
-  let midJson = 0;
-  for (const width of [140, 80, 60]) {
+  for (const width of [140, 80, 60, 47]) {
     const { lines } = await projectsAt(width);
     for (const l of lines) assert.ok(l.length <= width, `${width}: a row past the frame: ${l}`);
-    const clipped = lines.filter((l) => l.includes("…"));
-    assert.deepEqual(clipped.filter((l) => !/spend this month|sizes: p95/.test(l)), [], `${width}: no size line is clipped`);
-    for (const [marker, call, end, cut = false] of calls) {
+    const inner = lines[0].trim().length - 4;
+    for (const [marker, call] of calls) {
       const at = lines.findIndex((l) => l.includes(marker));
       const body = lines.slice(at + 1).map(content);
       const from = body.findIndex((l) => l.startsWith("dispatch_limit_"));
-      const to = body.findIndex((l, i) => i > from && end.test(l));
+      const to = body.findIndex((l, i) => i > from && /^join the lines before running it$|^\/srv\/|^github:/.test(l));
       const frags = body.slice(from, to);
-      assert.equal(frags.join("").replace(/\s/g, ""), call.replace(/\s/g, ""), `${width}: the call reads whole`);
-      // the room a call line has: the frame's inner width less the six-column indent
-      const room = lines[0].trim().length - 4 - 6;
-      if (call.length <= room) assert.equal(frags.length, 1, `${width}: one line where it fits`);
-      else {
-        assert.ok(frags.length >= 2, `${width}: wrapped onto continuation lines`);
-        wrapped++;
+      assert.equal(frags.join(""), call, `${width}: the call reads whole, joined with nothing between`);
+      for (const f of frags) assert.ok(f.length <= inner, `${width}: a call line past the frame: ${f}`);
+      // every break is outside a string: each line but the last ends outside one, on a piece boundary
+      for (const f of frags.slice(0, -1)) assert.match(f, /[,{:]$|^dispatch_limit_(?:edit|add)$/, `${width}: ${f}`);
+      // between a key and its value only where a whole key and value (with its comma) is wider than the frame
+      const widestField = Math.max(...call.slice(call.indexOf("{") + 1).split(",").map((x) => x.length + 1));
+      if (widestField <= inner) assert.deepEqual(frags.filter((f) => f.endsWith(":")), [], `${width}: a key split from its value with room for both`);
+      let seen = "";
+      for (const f of frags) {
+        seen += f;
+        assert.ok(outsideString(seen), `${width}: a break inside a JSON string after: ${f}`);
       }
-      for (const f of frags) assert.ok(f.length <= room, `${width}: a call line past its room: ${f}`);
-      if (cut) continue;
-      // broken after a comma (or the space), never inside a field, wherever a comma gives room
-      for (const f of frags.slice(0, -1)) assert.match(f, /[,{]$|dispatch_limit_(?:edit|add)$/, `${width}: ${f}`);
-      for (const f of frags.slice(1)) assert.match(f, /^[{"]/, `${width}: a continuation starts a field: ${f}`);
-      if (frags.slice(0, -1).some((f) => f.endsWith(","))) midJson++;
+      // a call on more than one line is followed by the note to join them, and only then
+      if (frags.length > 1) {
+        wrapped++;
+        assert.equal(body[to], "join the lines before running it", `${width}: the join note under ${call}`);
+      } else assert.notEqual(body[to], "join the lines before running it", `${width}: no note under a one-line call`);
     }
   }
-  assert.ok(midJson >= 1, "some call's JSON itself broke across lines");
-  assert.ok(wrapped >= 1, "the narrowest frame wraps the call");
+  assert.ok(wrapped >= 4, "the narrow frames wrap the calls");
+});
+
+test("callPieces breaks only outside a JSON string, after a colon only when asked; an escaped quote does not end a string", async () => {
+  const { callPieces } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
+  assert.deepEqual(callPieces('dispatch_limit_edit {"index":0,"memory":"5g"}'), ["dispatch_limit_edit ", "{", '"index":0,', '"memory":"5g"}']);
+  assert.deepEqual(callPieces('x {"a":"b,c:{d","e":1}', true), ["x ", "{", '"a":', '"b,c:{d",', '"e":', "1}"]);
+  assert.deepEqual(callPieces('x {"a":"q\\",{","b":2}'), ["x ", "{", '"a":"q\\",{",', '"b":2}']);
+});
+
+test("the PROJECTS view says why a raise has no cap (none read, none holds the size, every budget off) and when a size is above the cap", async () => {
+  const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: SNAP.scopedLimits.limits }), "sl.json");
+  const logsDir = logsWith([rec({ reason: "oom-killed", peakMiB: 4096 })]);
+  const shopWith = async (hostBudgets) => {
+    const shop = readSizeSuggestions({ logsDir, projectIds: ["shop"], limits, hostBudgets, nowMs: NOW }).projects.shop;
+    const base = sizingInfo();
+    const out = (await projectsAt(140, { ...base, projects: { ...base.projects, shop } })).lines.map(content).join("\n");
+    // the verdict, its wrapped continuation lines joined back with the space they broke at
+    return out.match(/^4g, 2 CPUs · p95 4g, 1 core · suggest\n([^]*?)\ngithub:acme\/web$/m)?.[1].replace(/\n/g, " ");
+  };
+  assert.equal(await shopWith([]), `memory wants 6g (oom-killed, ${SIZING_NO_CAP_WORDS.unread}: no call)`);
+  assert.equal(await shopWith([{ memMiB: 16384, cpuCenti: 100 }]), `memory wants 6g (oom-killed, ${SIZING_NO_CAP_WORDS["none-holds"]}: no call)`);
+  assert.equal(await shopWith([{ memMiB: Infinity, cpuCenti: Infinity }]), `memory wants 6g (oom-killed, ${SIZING_NO_CAP_WORDS.off}: no call)`);
+  assert.deepEqual(Object.values(SIZING_NO_CAP_WORDS), ["no host budget read", "no live host's budget holds this size", "every live host's budget is off"]);
+  // a host whose budget is below the size already set: the size is above what it offers, not at it
+  assert.equal(await shopWith([{ memMiB: 2048, cpuCenti: 800 }]), "memory stays (oom-killed, already above the most a live host offers)");
+  assert.equal(await shopWith([{ memMiB: 4096, cpuCenti: 800 }]), "memory stays (oom-killed, already the largest size a live host offers)");
+});
+
+test("readSizeSuggestions caps a raise at the project's hostShare of each live host's budget", () => {
+  const logsDir = logsWith([rec({ reason: "oom-killed", peakMiB: 4096 })]);
+  const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:shop", memory: "4g", hostShare: 50 }] }), "sl.json");
+  const res = readSizeSuggestions({ logsDir, projectIds: ["shop"], limits, hostBudgets: [{ memMiB: 10240, cpuCenti: 800 }], nowMs: NOW });
+  assert.deepEqual([res.projects.shop.memory.suggested, res.projects.shop.memory.held, res.projects.shop.call], [5120, "cap", 'dispatch_limit_edit {"index":0,"memory":"5g"}']);
+  const whole = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:shop", memory: "4g" }] }), "sl.json");
+  assert.equal(readSizeSuggestions({ logsDir, projectIds: ["shop"], limits: whole, hostBudgets: [{ memMiB: 10240, cpuCenti: 800 }], nowMs: NOW }).projects.shop.call, 'dispatch_limit_edit {"index":0,"memory":"6g"}');
 });
 
 test("the PROJECTS view says when the sizes could not be read, and draws no size line then", async () => {
@@ -268,6 +307,8 @@ test("the insights page restates the worker's reasons and spellings, held equal 
   assert.deepEqual(INSIGHTS_CPU_REASONS, CPU_REASONS);
   assert.deepEqual(INSIGHTS_MEMORY_HELD, MEMORY_HELD);
   assert.deepEqual(INSIGHTS_SIZE_FACTS, SIZE_FACTS);
+  assert.deepEqual(INSIGHTS_CAP_MISSING, MEMORY_CAP_MISSING);
+  assert.deepEqual(Object.keys(SIZING_NO_CAP_WORDS), MEMORY_CAP_MISSING);
   for (let c = 25; c <= 25600; c += 25) assert.equal(sizeCoresText(c), coresText(c));
   for (let mib = 512; mib <= 70000; mib += 37) assert.equal(sizeMemText(mib), formatMemory(mib));
   for (let c = 25; c <= 25600; c += 7) assert.equal(sizeCpuText(c), formatCpus(c));
@@ -343,6 +384,14 @@ test("the insights page draws a job sizes section: the hosts' budgets in use, ea
   assert.match(held("cap", { suggested: 5120 }), /memory: suggest 5g \(oom-killed, the most a live host offers\)/);
   assert.match(held("largest", { suggested: null }), /memory: stays \(oom-killed, already the largest size a live host offers\)/);
   assert.match(held("no-cap", { suggested: null }), /memory: wants 6g \(oom-killed, no host budget read: no call\)/);
+  // why no cap is known, worded apart: budgets that WERE read are never called unread
+  assert.match(held("no-cap", { suggested: null, capMissing: "unread" }), /memory: wants 6g \(oom-killed, no host budget read: no call\)/);
+  assert.match(held("no-cap", { suggested: null, capMissing: "none-holds" }), /memory: wants 6g \(oom-killed, no live host&#39;s budget holds this size: no call\)/);
+  assert.match(held("no-cap", { suggested: null, capMissing: "off" }), /memory: wants 6g \(oom-killed, every live host&#39;s budget is off: no call\)/);
+  assert.match(held("no-cap", { suggested: null, capMissing: "made-up" }), /no host budget read: no call/, "an unknown reason reads as unread");
+  // a size above the cap is above it, not at it
+  assert.match(held("largest", { suggested: null, cap: 2048 }), /memory: stays \(oom-killed, already above the most a live host offers\)/);
+  assert.match(held("largest", { suggested: null, cap: 4096 }), /memory: stays \(oom-killed, already the largest size a live host offers\)/);
   assert.match(held("made-up", { suggested: null }), /memory: oom-killed ·/, "an unknown held is dropped");
   const facts = sizingPayload();
   facts.projects.shop.memory = { ...facts.projects.shop.memory, fact: "pressure", evidence: { samples: 10, p95MiB: 4096, pressured: 3 } };

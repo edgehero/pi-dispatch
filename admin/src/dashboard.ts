@@ -2353,39 +2353,92 @@ function budgetShown(sizing: any): string {
 }
 
 /**
- * Plain text that must reach the operator WHOLE (an exact call), wrapped onto continuation lines of at most `width`
- * columns: broken after a comma or a space where it can be, and only where one token is wider than the line, at a
- * column (`wrapColumns`). Never clipped: a clipped call is a different call, or none.
+ * An exact call cut into the pieces it may be broken between: after the space that ends the tool's name, and after a
+ * `{` or `,` OUTSIDE a JSON string (so before a key), and with `colon` also after a `:` outside one (between a key and
+ * its value, for a panel too narrow for a whole `"scope":"project:<id>",`). Never inside a string: a scope broken mid-string and pasted back with the
+ * line break (or the panel's indent) in it is a different scope, while whitespace between JSON tokens is still the
+ * same JSON. An escaped quote inside a string does not end it.
  */
-function wrapWhole(text: string, width: number, styler: any): string[] {
-  const w = Math.max(1, Math.trunc(width) || 1);
-  const lines: string[] = [];
+export function callPieces(text: string, colon = false): string[] {
+  const pieces: string[] = [];
   let cur = "";
-  for (const token of String(text ?? "").split(/(?<=[, ])/)) {
-    if (styler.visibleLen(cur + token) <= w) {
-      cur += token;
+  let inString = false;
+  let escaped = false;
+  for (const ch of String(text ?? "")) {
+    cur += ch;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
       continue;
     }
-    if (cur) lines.push(cur);
-    cur = "";
-    if (styler.visibleLen(token) <= w) cur = token;
-    else {
-      const parts = wrapColumns(token, w, styler);
-      cur = parts.pop() ?? "";
-      lines.push(...parts);
+    if (ch === '"') inString = true;
+    else if (ch === " " || ch === "{" || ch === "," || (colon && ch === ":")) {
+      pieces.push(cur);
+      cur = "";
     }
   }
-  if (cur) lines.push(cur);
-  return lines;
+  if (cur) pieces.push(cur);
+  return pieces;
 }
+
+/**
+ * An exact call as lines of the PROJECTS view, each at most `iw` columns with its indent: never clipped (a clipped
+ * call is a different call, or none) and never broken inside a JSON string (`callPieces`). The indent gives way
+ * before a string would have to break: it is the usual six columns where the widest piece fits beside it, and less
+ * (down to none) where it does not. Only a piece wider than the whole line (a panel narrower than any scope) is cut
+ * at a column, as the last resort that still keeps every character on screen. A call on more than one line is
+ * followed by one dim line saying to join them, since a terminal copies the breaks too.
+ */
+function callLines(text: string, iw: number, styler: any, indentMax: number): string[] {
+  const w = Math.max(1, Math.trunc(iw) || 1);
+  const loose = callPieces(text);
+  const pieces = loose.some((p) => styler.visibleLen(p) > w) ? callPieces(text, true) : loose;
+  const widest = Math.max(0, ...pieces.map((p) => styler.visibleLen(p)));
+  const indent = " ".repeat(Math.max(0, Math.min(indentMax, w - widest)));
+  const room = Math.max(1, w - indent.length);
+  const rows: string[] = [];
+  let cur = "";
+  for (const piece of pieces) {
+    if (styler.visibleLen(cur + piece) <= room) {
+      cur += piece;
+      continue;
+    }
+    if (cur) rows.push(cur);
+    cur = "";
+    if (styler.visibleLen(piece) <= room) cur = piece;
+    else {
+      const parts = wrapColumns(piece, room, styler);
+      cur = parts.pop() ?? "";
+      rows.push(...parts);
+    }
+  }
+  if (cur) rows.push(cur);
+  const out = rows.map((r) => fitLine(`${indent}${styler.fg("accent", r)}`, w, styler));
+  if (rows.length > 1) for (const l of wrapColumns(CALL_JOIN_NOTE, Math.max(1, w - indentMax), styler)) out.push(fitLine(`${" ".repeat(indentMax)}${styler.fg("dim", l)}`, w, styler));
+  return out;
+}
+
+/** The note under a call that took more than one line. */
+export const CALL_JOIN_NOTE = "join the lines before running it";
 
 /** One dimension's verdict in the PROJECTS view: a suggestion, a held raise, or null (fits / not enough runs). */
 function sizingVerdict(dim: any, name: string, shown: (v: number) => string): string | null {
   if (dim.suggested) return `${name} ${shown(dim.suggested)} (${dim.reason}${dim.held === "cap" ? ", the most a live host offers" : ""})`;
-  if (dim.held === "largest") return `${name} stays (${dim.reason}, already the largest size a live host offers)`;
-  if (dim.held === "no-cap") return `${name} wants ${shown(dim.wanted)} (${dim.reason}, no host budget read: no call)`;
+  if (dim.held === "largest") return `${name} stays (${dim.reason}, ${Number.isSafeInteger(dim.cap) && dim.current > dim.cap ? "already above the most a live host offers" : "already the largest size a live host offers"})`;
+  if (dim.held === "no-cap") return `${name} wants ${shown(dim.wanted)} (${dim.reason}, ${NO_CAP_WORDS[dim.capMissing] ?? NO_CAP_WORDS.unread}: no call)`;
   return null;
 }
+
+/**
+ * Why a raise has no cap across the live hosts (`suggestSize`'s `capMissing`), worded apart: "no budget read" said of a
+ * fleet whose budgets WERE read sends the operator looking for a registry fault that is not there.
+ */
+const NO_CAP_WORDS: Record<string, string> = {
+  unread: "no host budget read",
+  "none-holds": "no live host's budget holds this size",
+  off: "every live host's budget is off",
+};
 
 /**
  * A project's size lines in the PROJECTS view (issue #596, phase 3, DES-SIZE-SUGGESTIONS): its size, its runs' peaks
@@ -2418,7 +2471,7 @@ function sizingLines(sizing: any, id: string, iw: number, styler: any): string[]
   const out = [fitLine(`    ${styler.fg("muted", size)} · ${styler.fg("text", peaks)}${fits ? ` · ${styler.fg(headTone, headText)}` : ""}`, iw, styler)];
   if (!fits) push(wrapColumns(headText, sub, styler), headTone);
   if (verdicts.length > 0) push(wrapColumns(verdicts.join("; "), sub, styler), tone);
-  if (typeof s.call === "string") push(wrapWhole(cellOf(s.call), sub, styler), "accent");
+  if (typeof s.call === "string") out.push(...callLines(cellOf(s.call), iw, styler, indent.length));
   if (over) push(wrapColumns("larger than any live host offers: a job of it would wait for a host that never comes", sub, styler), "error");
   for (const fact of [s.words?.memoryFact, s.words?.cpuFact]) if (typeof fact === "string" && fact !== "") push(wrapColumns(cellOf(fact), sub, styler), "dim");
   return out;

@@ -532,22 +532,33 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     is the record's pickup-to-end span, which includes the clone, so cores read slightly low; the 0.4 threshold leaves
     that margin. Where the median run was throttled more than 25% of its wall time, a FACT line says it ran into the
     host's CPU ceiling (the host's CPU budget, not the job's size), with no call.
-  - **Every suggestion is capped at what the host offers.** A raise never passes the cap: this host's budget per
-    dimension, or where that is `off` or unknown the host's memory and CPU count the runtime reports (doctor knows
-    both). Where the cap binds, the suggestion IS the cap and says the project's runs need more than this host offers;
-    where the size already is the cap (or the largest size there is), it warns "already at the largest size this host
-    offers" and names no call; where no cap is known, a raise names no call at all, only what the runs ask for. No
-    surface ever advises growing a host's budget. The panel and the insights page cap per live host, each judged on its
-    OWN pair of budgets against the size the other dimension will have (`fleetCap`): the CPUs are decided first (no
-    cap bends a lowering), then the memory against the hosts that hold those CPUs. The `dispatch_limit_edit` preview
-    reads no budget (it would put a registry read inside a confirm) and says the budget was not checked. A LOWERING
-    still above the cap (a size already larger than the host) is flagged; doctor also flags a suggestion above the
-    project's `hostShare` of the budget.
+  - **Every suggestion is capped at what the host offers the project.** A raise never passes the cap: this host's
+    budget per dimension, taken at the project's `hostShare` of it where the row has one (floor(budget x hostShare /
+    100), the largest size the worker admits under the share: a cap at the whole budget offered a call to a size the
+    share refuses), or where the budget is `off` or unknown the host's memory and CPU count the runtime reports
+    (doctor knows both; a share of no number refuses nothing). Where the cap binds, the suggestion IS the cap and says
+    the project's runs need more than this host offers; where the size already is the cap (or the largest size there
+    is), it warns "already at the largest size this host offers", or "already above" it with the cap named when the
+    size was set above it, and names no call; where no cap is known, a raise names no call at all, only what the runs
+    ask for, and across live hosts says which of three it is: no budget read, no live host's budget holds the size in
+    the other dimension, or every live host's budget is `off`. No surface ever advises growing a host's budget. The
+    panel and the insights page cap per live host, each judged on its OWN pair of budgets against the size the other
+    dimension will have (`fleetCap`): the CPUs are decided first (no cap bends a lowering), then the memory against
+    the hosts that hold those CPUs. The `dispatch_limit_edit` preview reads no budget (it would put a registry read
+    inside a confirm) and says the budget was not checked. A LOWERING still above the cap (a size already larger than
+    the host) is flagged, and so is a pair whose dimension left at its size is above the project's `hostShare`; a
+    flagged suggestion carries NO call on any surface, since applying it trades one refusal for the same refusal. The
+    panel prints a call that does not fit its frame on as many lines as it needs, broken only outside a JSON string
+    (after the tool's name, a `{` or a `,`, and after a `:` only where a whole key and value is wider than the frame),
+    with its indent giving way before a string would break, and one dim line under it: "join the lines before running
+    it".
   - **One bounded read per render** (`worker/src/size-records.mjs`, shared by doctor and the admin): files by mtime
-    within the window plus a day, at most 256 KiB each (larger is skipped and counted, and the count is shown), the
-    newest 50 per project, read once for every project of a doctor run, a PROJECTS view or an insights render. Doctor
-    prints no size line when the scoped-limits file does not load, one line saying suggestions are off until it does:
-    a size read without the file is the default, and the call would add a row the project already has.
+    within the window plus a day, at most 256 KiB each (larger is skipped and counted, and the count is shown), only
+    records with an object `resources` and a `size`, and of those the newest 50 per project (the filter BEFORE the
+    cut, or fifty refusals written before any container started crowd every measured run out), read once for every
+    project of a doctor run, a PROJECTS view or an insights render. Doctor prints no size line when the scoped-limits
+    file does not load, one line saying suggestions are off until it does: a size read without the file is the
+    default, and the call would add a row the project already has.
   - **Every boundary in integers** (BigInt where a product can pass 2^53): "exactly 10%" and "exactly 0.75x" land on the
     side the rule says, on every host, and the tests pin each boundary from both sides.
   - **The numbers are untrusted.** `resources` is produced inside the job's container, so the function judges every
@@ -578,7 +589,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     could never help and ratcheted to the ceiling.
   - *Flagging, not capping, against the budget* (the first version): an uncapped raise with the budget off or unknown
     was unflagged at any size, and its fix told the operator to raise the host's budget, which is what the host
-    promised other projects. *The largest budget per dimension across hosts*: a pair no host has.
+    promised other projects. *The largest budget per dimension across hosts*: a pair no host has. *Capping at the
+    whole budget for a project with a `hostShare`* (round 1): the line then said the size would never fit the share
+    and still offered the call that applies it.
+  - *Wrapping the call at any column*, or at spaces only: a JSON string broken across lines does not paste back as the
+    same call. *Printing the call outside the frame*: the panel draws every view inside one box, so there is no
+    unboxed line to print it on; the dim join line says what a terminal copy needs.
   - *Trusting the record's validation*: the record's rebuild nulls a malformed block at write time, but the file is
     read back later from a directory and a Valkey mirror the job's own account may reach.
   - *A float comparison at the boundaries*: 0.75x and 1% are not exact in binary, so the same records could flip a
@@ -8898,3 +8914,4 @@ a tunnel.
 | 2026-10-07 | Issue #596, phase 2, review gate round 3. **`DES-HOST-BUDGET` CORRECTED** in two sentences. (1) Round 2's "a venue whose boot job-user decision is `unmappable` counts as holding no container" held only for the causes that refuse a boot (`BOOT_REFUSING_JOB_USER_CAUSES`, `PODMAN_BOOT_REFUSING_CAUSES`): `runtime-unreadable` and `podman-unreadable` describe one unreadable answer, are decided again per job, and can clear, after which that venue would run jobs beside survivors nobody counted. Those venues now stay unread while their listing fails. (2) An unlabelled survivor's guessed size was capped at the budget only when the first refresh ran before the first listing, and the tick can list first; the guess is now kept uncapped on the entry and capped at the budget in force on every refresh. Checked and UNCHANGED: `DES-CONCURRENCY-3`, `DES-HOST-REGISTRY`, `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, and the constitution. |
 | 2026-10-07 | Issue #596, phase 3 (size suggestions). **NEW `DES-SIZE-SUGGESTIONS`**: one pure function (`worker/src/size-suggest.mjs`) suggests a project's memory and CPUs from its runs of the last 30 days or 50 runs, only those carrying `resources` and `size` and given at least the current size; memory raises on an OOM (the larger of 1.5x and 1.25x the p95) or on more than 10% of the runs at 90% of their limit (1.5x), says "not enough runs" under 10, and lowers to 1.25x the p95 when that is at most 0.75x the size, rounded up to 256m, 512m or 1g steps from 512m; CPUs raise by 50% when the median run is throttled over 25% of its wall time and lower to 1.25x the p95 cores when those are below 0.4x the size, in 0.25 steps; every boundary in integers; every record judged again as untrusted (non-integers ignored, values clamped to the container's bounds). Doctor, the PROJECTS view, the `dispatch_limit_edit` preview and the insights page call it, each naming the exact call that applies it, and nothing applies it. A separate entry, not an amendment of `DES-HOST-BUDGET`: that entry decides admission from operator files, this one advice from job-produced numbers. Checked and UNCHANGED: `DES-HOST-BUDGET` (the suggestion is flagged against the budget, never admitted by it), `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-CONCURRENCY-3`, `DES-HOST-REGISTRY` (its budget fields gain readers, no writer). |
 | 2026-10-07 | Issue #596, phase 3, review gate round 1. **`DES-SIZE-SUGGESTIONS` CORRECTED** on two measured facts and five repros. (1) Page cache alone drives `memory.peak` to exactly the limit with no OOM kill (a 512m container reading 1.2 GB of files), so the at-limit raise walked an I/O-heavy project up to the budget: memory now RAISES ONLY on a confirmed OOM, to 1.5x the larger of the size and the largest OOM-killed size in the window, and pressure at the limit (`memFullUsec` above 1% of the wall) is a fact line with no call. (2) A job's throttled time is the same at 1024 and 4096 shares because `--cpus` is the host's ceiling, so the throttled raise could never help and ratcheted: CPUs now only lower, and throttling over 25% is a fact line about the host's CPU budget. (3) A lowering ignored an OOM at a smaller size (3g after an OOM at 2g lowered to 1280m, which OOMs again) and the p95 dropped the two heavy runs of fifty (8g lowered to 1g under runs at 6000m): a lowering now never goes below 1.25x the window's largest peak, 1.5x its largest OOM-killed size, nor 512m, and CPUs never below 1.25x the busiest run. (4) Raises were uncapped, unflagged with the budget off, advised raising the host's budget, and the panel judged against the per-dimension maximum across hosts: every raise is now capped at this host's budget (or its own total where the budget is off or unknown, and no call where neither is known), says when the runs need more than the host offers or the size already is the largest it offers, never advises growing a budget, and the panel and insights page judge each host on its own pair. (5) Record reading was unbounded and repeated: one shared reader with an mtime prefilter, a 256 KiB cap per file (skipped files counted) and the newest 50 per project, once per render. Doctor prints no size line when the scoped-limits file does not load. The rejected list gains the refuted rules. Checked and UNCHANGED: `DES-HOST-BUDGET` (it is what the cap reads, nothing in it changes), `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-CONCURRENCY-3`, `DES-HOST-REGISTRY`. |
+| 2026-10-07 | Issue #596, phase 3, review gate round 2. **`DES-SIZE-SUGGESTIONS` CORRECTED**: (1) a raise is capped at the project's `hostShare` of each integer budget, floor(budget x hostShare / 100), in doctor and across live hosts alike; it was capped at the whole budget, so doctor said a size would never fit the share and still offered the call that applies it. A flagged suggestion (a lowering still above the cap, or a pair whose other dimension is above the share) now carries no call on any surface. (2) The record reader drops records without an object `resources` and a `size` BEFORE it keeps the newest 50 per project; fifty refusals had crowded every measured run out. (3) A raise with no cap across live hosts says which of three it is (no budget read, none holds the size, every budget off); all three read "no host budget read". (4) The panel breaks a call only outside a JSON string, lets its indent give way before a string would break, and adds a dim "join the lines before running it" under a wrapped call. (5) A size above the cap is said to be above it, and the CPU over-cap text names its unit. The rejected list gains the whole-budget cap and the column wrap. Checked and UNCHANGED: `DES-HOST-BUDGET` (`largestFit` is the share rule the cap restates), `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-CONCURRENCY-3`, `DES-HOST-REGISTRY`. |

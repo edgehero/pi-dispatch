@@ -46,10 +46,13 @@
  * The wall time is the record's pickup-to-end span, which includes the clone, so cores used read slightly LOW.
  *
  * THE CAP. A raise never goes past `cap` (this host's budget per dimension, or where that is off or unknown the host's
- * memory and CPU count; `hostCap`, `fleetCap`). Where the cap binds the suggestion is the cap and says the project's
- * runs need more than this host offers; where the size already is the cap or the largest size there is, it suggests
- * nothing and says so; where no cap is known, a raise offers no call at all, only the fact. Nothing here ever advises
- * growing a host's budget: the budget is what the host promised everyone else.
+ * memory and CPU count; `hostCap`, `fleetCap`). A project with a `hostShare` is capped at its SHARE of each integer
+ * budget, floor(budget x hostShare / 100), since the worker refuses a job above it (`job-size-exceeds-share`): a cap
+ * at the whole budget would offer a call to a size this project could never run at. Where the cap binds the
+ * suggestion is the cap and says the project's runs need more than this host offers; where the size already is the
+ * cap or the largest size there is, it suggests nothing and says so; where no cap is known, a raise offers no call at
+ * all, only the fact, and `capMissing` says why (`MEMORY_CAP_MISSING`). Nothing here ever advises growing a host's
+ * budget: the budget is what the host promised everyone else.
  *
  * Every boundary is decided in integers (BigInt where a product can pass 2^53), so "exactly 0.75x" and "exactly 1%"
  * land on the side the rule says, on every host.
@@ -80,6 +83,13 @@ export const CPU_REASONS = Object.freeze(["not-enough-runs", "underused", "fits"
  * `largest` (the size already is the cap or the largest size there is), `no-cap` (no cap is known: no call at all).
  */
 export const MEMORY_HELD = Object.freeze(["cap", "largest", "no-cap"]);
+/**
+ * Why no cap is known, where a raise is held `no-cap` across live hosts (`hosts`): `unread` (no live host's budget in
+ * this dimension was read as a number, and not every one is `off`: none published, or none read here), `none-holds` (budgets were read, but no live host's
+ * budget holds the project's size in the other dimension), `off` (every live host's budget is `off` in this dimension,
+ * so the panel cannot know how much it holds). Null for a single host's cap (doctor), whose own words say why.
+ */
+export const MEMORY_CAP_MISSING = Object.freeze(["unread", "none-holds", "off"]);
 /** The facts a suggestion may carry with no call: memory `pressure`, CPU `ceiling`. */
 export const SIZE_FACTS = Object.freeze(["pressure", "ceiling"]);
 
@@ -234,28 +244,44 @@ export function peakSeries({ project, records = [], now }) {
 }
 
 const capDim = (v) => (Number.isSafeInteger(v) && v > 0 ? v : null);
+const isShare = (share) => Number.isSafeInteger(share) && share > 0 && share <= 100;
+/**
+ * A budget dimension as a project with `share` may use it: floor(budget x share / 100) for an integer budget (the
+ * worker's own `largestFit`; a job above it is refused), the budget itself without a share, and `off` or unknown as
+ * they are (a share of no number refuses nothing).
+ */
+const shareOf = (budget, share) => (Number.isSafeInteger(budget) && isShare(share) ? Math.floor((budget * share) / 100) : budget);
 
 /**
- * The cap of one host (doctor's): per dimension its budget where that is a number, else (budget `off` or unknown) the
- * host's own total (`{ memMiB, cpuCenti }`, the runtime's memory and CPU count), else null: no cap known.
+ * The cap of one host (doctor's): per dimension its budget where that is a number (the project's `share` of it when the
+ * project has a `hostShare`), else (budget `off` or unknown) the host's own total (`{ memMiB, cpuCenti }`, the
+ * runtime's memory and CPU count), else null: no cap known.
  */
-export function hostCap(budget, total) {
-	return { memMiB: capDim(budget?.memMiB) ?? capDim(total?.memMiB), cpuCenti: capDim(budget?.cpuCenti) ?? capDim(total?.cpuCenti) };
+export function hostCap(budget, total, share = null) {
+	return { memMiB: capDim(shareOf(budget?.memMiB, share)) ?? capDim(total?.memMiB), cpuCenti: capDim(shareOf(budget?.cpuCenti, share)) ?? capDim(total?.cpuCenti) };
 }
 
 /**
  * The cap across live hosts (the panel's and the insights page's), judged per host on its OWN pair of budgets: in each
  * dimension, the largest budget of a host whose OTHER dimension holds the project's current size (`off` and unknown
- * hold anything). A host that publishes `off` or nothing in a dimension gives no number there (the panel cannot read
+ * hold anything), each budget taken as the project's `share` of it where the project has a `hostShare`. A host that publishes `off` or nothing in a dimension gives no number there (the panel cannot read
  * a host's memory or CPU count), so where no host gives one the cap is null and a raise offers no call. The largest
  * per dimension across DIFFERENT hosts would be a pair no host has.
  */
-export function fleetCap(budgets, current) {
+export function fleetCap(budgets, current, share = null) {
+	const { memMiB, cpuCenti } = fleetCapWhy(budgets, current, share);
+	return { memMiB: memMiB.cap, cpuCenti: cpuCenti.cap };
+}
+
+/** `fleetCap` with, per dimension, why no cap is known: `{ memMiB: { cap, missing }, cpuCenti: { cap, missing } }`. */
+function fleetCapWhy(budgets, current, share) {
 	const list = (Array.isArray(budgets) ? budgets : []).filter((b) => b !== null && typeof b === "object");
-	const holds = (v, need) => !Number.isSafeInteger(v) || v >= need;
+	const holds = (v, need) => !Number.isSafeInteger(v) || shareOf(v, share) >= need;
 	const best = (key, other, need) => {
-		const known = list.filter((b) => holds(b[other], need)).map((b) => capDim(b[key])).filter((v) => v !== null);
-		return known.length === 0 ? null : Math.max(...known);
+		const known = list.filter((b) => holds(b[other], need)).map((b) => capDim(shareOf(b[key], share))).filter((v) => v !== null);
+		if (known.length > 0) return { cap: Math.max(...known), missing: null };
+		if (list.some((b) => capDim(b[key]) !== null)) return { cap: null, missing: "none-holds" };
+		return { cap: null, missing: list.length > 0 && list.every((b) => b[key] === Infinity) ? "off" : "unread" };
 	};
 	return { memMiB: best("memMiB", "cpuCenti", current?.cpuCenti), cpuCenti: best("cpuCenti", "memMiB", current?.memMiB) };
 }
@@ -266,15 +292,17 @@ export function fleetCap(budgets, current) {
  * `records` is any list of run records (other projects' are skipped), `current` the project's size now (`{ memMiB,
  * cpuCenti }`, `resolveJobSize`'s answer), `cap` the largest size a raise may reach on ONE host (`{ memMiB, cpuCenti }`,
  * each an integer or null for unknown; `hostCap`), or instead `hosts`, the live hosts' budget pairs (`fleetCap` judges
- * them per host, against the size the other dimension will have).
+ * them per host, against the size the other dimension will have), and `hostShare` the project's row's share (an
+ * integer percent, or null), which caps each integer budget at floor(budget x hostShare / 100) on the `hosts` path (on
+ * the `cap` path the caller passes `hostCap(budget, total, hostShare)`).
  *
  * Returns `{ project, runs, memory, cpu }`: `runs` the records read (after the window), and per dimension `{ current,
  * suggested, reason, evidence, fact, held, wanted, overBudget }`, where `suggested` is null when the size should stay,
  * `reason` one of `MEMORY_REASONS` / `CPU_REASONS`, `fact` one of `SIZE_FACTS` or null, `held` one of `MEMORY_HELD` or
- * null, `wanted` the raise before the cap (null for no raise), and `overBudget` true when a suggested LOWERING is still
+ * null, `cap` the cap the dimension was judged against (null for none known), `capMissing` one of `MEMORY_CAP_MISSING` where a `hosts` raise is held `no-cap` (else null), `wanted` the raise before the cap (null for no raise), and `overBudget` true when a suggested LOWERING is still
  * above the cap (a size already larger than the host). NEVER throws on records.
  */
-export function suggestSize({ project, records = [], current, cap = null, hosts = null, now }) {
+export function suggestSize({ project, records = [], current, cap = null, hosts = null, hostShare = null, now }) {
 	const nowMs = now instanceof Date ? now.getTime() : now;
 	if (!Number.isFinite(nowMs)) throw new TypeError("suggestSize needs `now` (millis or a Date)");
 	if (recordedJobSize({ ...current, source: "project" }) === null) throw new TypeError("suggestSize needs the current size ({ memMiB, cpuCenti })");
@@ -282,13 +310,16 @@ export function suggestSize({ project, records = [], current, cap = null, hosts 
 	// With `hosts`, each dimension's cap is judged per host against the size the OTHER dimension will have: the CPUs are
 	// decided first (they have no raise, so no cap bends them), then the memory against the hosts that hold those CPUs,
 	// then the CPUs' flag against the hosts that hold that memory.
-	const capOf = (other) => (Array.isArray(hosts) ? fleetCap(hosts, other) : cap);
+	const fleet = Array.isArray(hosts);
+	const capOf = (other) => (fleet ? fleetCapWhy(hosts, other, hostShare) : { memMiB: { cap: cap?.memMiB, missing: null }, cpuCenti: { cap: cap?.cpuCenti, missing: null } });
 	const cpu = suggestCpus(runs, current.cpuCenti);
-	const memCap = capDim(capOf({ memMiB: current.memMiB, cpuCenti: cpu.suggested ?? current.cpuCenti })?.memMiB);
+	const memWhy = capOf({ memMiB: current.memMiB, cpuCenti: cpu.suggested ?? current.cpuCenti }).memMiB;
+	const memCap = capDim(memWhy.cap);
 	const memory = suggestMemory(runs, current.memMiB, memCap);
-	const cpuCap = capDim(capOf({ memMiB: memory.suggested ?? current.memMiB, cpuCenti: current.cpuCenti })?.cpuCenti);
+	const cpuCap = capDim(capOf({ memMiB: memory.suggested ?? current.memMiB, cpuCenti: current.cpuCenti }).cpuCenti.cap);
 	const above = (dim, c) => dim.suggested !== null && c !== null && dim.suggested > c;
-	return { project, runs: runs.length, memory: { ...memory, overBudget: above(memory, memCap) }, cpu: { ...cpu, overBudget: above(cpu, cpuCap) } };
+	const capMissing = memory.held === "no-cap" ? memWhy.missing : null;
+	return { project, runs: runs.length, memory: { ...memory, cap: memCap, capMissing, overBudget: above(memory, memCap) }, cpu: { ...cpu, cap: cpuCap, capMissing: null, overBudget: above(cpu, cpuCap) } };
 }
 
 /**
@@ -341,7 +372,8 @@ export function suggestionEvidence(suggestion) {
 	const wanted = Number.isSafeInteger(m.wanted) ? formatMemory(m.wanted) : "";
 	const heldWords = {
 		cap: `this project's runs need more than this host offers: they ask for ${wanted}, the largest here is ${formatMemory(m.suggested ?? 0)}`,
-		largest: "already at the largest size this host offers",
+		// a size ABOVE the cap (set by hand, or a hostShare lowered since) is not "at" the largest: say which it is
+		largest: Number.isSafeInteger(m.cap) && m.current > m.cap ? `already above the largest size this host offers (${formatMemory(m.cap)})` : "already at the largest size this host offers",
 		"no-cap": `they ask for ${wanted}, but the largest size this host offers is not known here, so no call is offered`,
 	};
 	return {

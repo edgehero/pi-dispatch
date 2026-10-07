@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { RECORD_CLOCK_SKEW_MS } from "../src/run-history.mjs";
 import {
 	CPU_REASONS,
+	MEMORY_CAP_MISSING,
 	MEMORY_HELD,
 	MEMORY_REASONS,
 	SIZE_FACTS,
@@ -106,8 +107,8 @@ test("a CPU size rounds UP to a 0.25 step, never below 0.25 nor above the ceilin
 
 test("memory: fewer than 10 runs is not enough, exactly 10 decides", () => {
 	const ev = (samples) => ({ samples, p95MiB: 3072, maxPeakMiB: 3072, ooms: 0, largestOomMiB: null, pressured: 0 });
-	assert.deepEqual(mem(runs(9, { peakMiB: 3072 })), { current: 4096, suggested: null, reason: "not-enough-runs", evidence: ev(9), ...NO });
-	assert.deepEqual(mem(runs(10, { peakMiB: 3072 })), { current: 4096, suggested: null, reason: "fits", evidence: ev(10), ...NO });
+	assert.deepEqual(mem(runs(9, { peakMiB: 3072 })), { current: 4096, suggested: null, reason: "not-enough-runs", evidence: ev(9), ...NO, cap: ROOMY.memMiB, capMissing: null });
+	assert.deepEqual(mem(runs(10, { peakMiB: 3072 })), { current: 4096, suggested: null, reason: "fits", evidence: ev(10), ...NO, cap: ROOMY.memMiB, capMissing: null });
 	assert.equal(mem([]).reason, "not-enough-runs");
 	assert.deepEqual([mem([]).evidence.p95MiB, mem([]).evidence.maxPeakMiB], [null, null]);
 });
@@ -162,7 +163,7 @@ test("an OOM is the record's reason, never its outcome alone: another policy ref
 
 test("memory: an OOM raises ONE step, to 1.5x the larger of the size and the largest OOM-killed size in the window", () => {
 	const oom = rec({ i: 0, reason: "oom-killed", peakMiB: 4096 });
-	assert.deepEqual(mem([oom]), { current: 4096, suggested: 6144, reason: "oom-killed", evidence: { samples: 1, p95MiB: 4096, maxPeakMiB: 4096, ooms: 1, largestOomMiB: 4096, pressured: 0 }, fact: null, held: null, wanted: 6144, overBudget: false });
+	assert.deepEqual(mem([oom]), { current: 4096, suggested: 6144, reason: "oom-killed", evidence: { samples: 1, p95MiB: 4096, maxPeakMiB: 4096, ooms: 1, largestOomMiB: 4096, pressured: 0 }, fact: null, held: null, wanted: 6144, cap: ROOMY.memMiB, capMissing: null, overBudget: false });
 	// an OOM at a LARGER size than now (a lowering that went too far): 1.5x of that size, 8g -> 12g
 	assert.equal(mem([rec({ i: 0, memMiB: 8192, reason: "oom-killed", peakMiB: 8192 })]).suggested, 12288);
 	// the p95 asks for nothing: heavy runs at 8g beside an OOM at 4g still raise to 6g, not 1.25x their 7g
@@ -277,8 +278,8 @@ test("memory: a lowering never goes below the 512m floor, and one that would rou
 
 test("CPU: fewer than 10 runs is not enough, exactly 10 decides", () => {
 	const ev = (samples) => ({ samples, p95CoresCenti: 150, maxCoresCenti: 150, throttledPct: 0 });
-	assert.deepEqual(cpu(runs(9, { cores: 1.5 })), { current: 200, suggested: null, reason: "not-enough-runs", evidence: ev(9), ...NO });
-	assert.deepEqual(cpu(runs(10, { cores: 1.5 })), { current: 200, suggested: null, reason: "fits", evidence: ev(10), ...NO });
+	assert.deepEqual(cpu(runs(9, { cores: 1.5 })), { current: 200, suggested: null, reason: "not-enough-runs", evidence: ev(9), ...NO, cap: ROOMY.cpuCenti, capMissing: null });
+	assert.deepEqual(cpu(runs(10, { cores: 1.5 })), { current: 200, suggested: null, reason: "fits", evidence: ev(10), ...NO, cap: ROOMY.cpuCenti, capMissing: null });
 	// even fully throttled: nine runs decide nothing for CPU, and carry no fact
 	assert.deepEqual([cpu(runs(9, { cores: 2, throttle: 1 })).reason, cpu(runs(9, { cores: 2, throttle: 1 })).fact], ["not-enough-runs", null]);
 });
@@ -433,6 +434,54 @@ test("hostCap: this host's budget per dimension, else (off or unknown) its own t
 	for (const [budget, total, want] of table) assert.deepEqual(hostCap(budget, total), want, JSON.stringify([budget, total]));
 });
 
+test("hostCap and fleetCap: a project with a hostShare is capped at floor(budget x share / 100), never the whole budget", () => {
+	// the worker refuses a job above the share (job-size-exceeds-share), so a raise capped at the whole budget would
+	// offer a call to a size this project never runs at
+	const table = [
+		[{ memMiB: 16384, cpuCenti: 800 }, null, 50, { memMiB: 8192, cpuCenti: 400 }],
+		[{ memMiB: 10241, cpuCenti: 701 }, null, 50, { memMiB: 5120, cpuCenti: 350 }], // floored, never rounded past
+		[{ memMiB: 16384, cpuCenti: 800 }, null, 100, { memMiB: 16384, cpuCenti: 800 }],
+		[{ memMiB: 16384, cpuCenti: 800 }, null, null, { memMiB: 16384, cpuCenti: 800 }],
+		// a share of an off or unknown budget refuses nothing: the runtime's own total caps it, whole
+		[{ memMiB: Infinity, cpuCenti: null }, { memMiB: 16384, cpuCenti: 800 }, 50, { memMiB: 16384, cpuCenti: 800 }],
+	];
+	for (const [budget, total, share, want] of table) assert.deepEqual(hostCap(budget, total, share), want, JSON.stringify([budget, total, share]));
+	const cur = { memMiB: 4096, cpuCenti: 200 };
+	assert.deepEqual(fleetCap([{ memMiB: 16384, cpuCenti: 800 }], cur, 50), { memMiB: 8192, cpuCenti: 400 });
+	// the other dimension is judged at the share too: 50% of 3 CPUs is 1.5, which does not hold a 2-CPU job
+	assert.deepEqual(fleetCap([{ memMiB: 32768, cpuCenti: 300 }, { memMiB: 8192, cpuCenti: 800 }], cur, 50), { memMiB: 4096, cpuCenti: 400 });
+	assert.deepEqual(fleetCap([{ memMiB: 32768, cpuCenti: 300 }, { memMiB: 8192, cpuCenti: 800 }], cur), { memMiB: 32768, cpuCenti: 800 });
+	// and suggestSize threads it: an OOM at 6g wants 9g, 50% of 16g is 8g, so the raise is held at 8g on either path
+	const oom = [rec({ memMiB: 6144, reason: "oom-killed", peakMiB: 6144 })];
+	const six = { memMiB: 6144, cpuCenti: 200 };
+	const viaHosts = suggestSize({ project: "web", records: oom, current: six, hosts: [{ memMiB: 16384, cpuCenti: 800 }], hostShare: 50, now: NOW }).memory;
+	const viaCap = suggestSize({ project: "web", records: oom, current: six, cap: hostCap({ memMiB: 16384, cpuCenti: 800 }, null, 50), now: NOW }).memory;
+	for (const m of [viaHosts, viaCap]) assert.deepEqual([m.suggested, m.held, m.wanted, m.cap, m.overBudget], [8192, "cap", 9216, 8192, false]);
+	assert.equal(suggestSize({ project: "web", records: oom, current: six, hosts: [{ memMiB: 16384, cpuCenti: 800 }], now: NOW }).memory.suggested, 9216);
+});
+
+test("a raise with no cap across live hosts says why: none read, none holds the size, or every budget off", () => {
+	assert.deepEqual(MEMORY_CAP_MISSING, ["unread", "none-holds", "off"]);
+	const oom = [rec({ reason: "oom-killed", peakMiB: 4096 })];
+	const why = (hosts, hostShare = null) => {
+		const s = suggestSize({ project: "web", records: oom, current: CURRENT, hosts, hostShare, now: NOW });
+		return [s.memory.held, s.memory.capMissing, s.cpu.capMissing];
+	};
+	assert.deepEqual(why([]), ["no-cap", "unread", null]);
+	assert.deepEqual(why([{ memMiB: null, cpuCenti: null }]), ["no-cap", "unread", null]);
+	assert.deepEqual(why([{ memMiB: Infinity, cpuCenti: 800 }, { memMiB: Infinity, cpuCenti: Infinity }]), ["no-cap", "off", null]);
+	// off and unknown mixed: not EVERY budget is off, so it was not read as a number
+	assert.deepEqual(why([{ memMiB: Infinity, cpuCenti: 800 }, { memMiB: null, cpuCenti: 800 }]), ["no-cap", "unread", null]);
+	// budgets read, but no host's CPUs hold this 2-CPU job (one has 1 CPU, one has 3 of which a 50% share is 1.5)
+	assert.deepEqual(why([{ memMiB: 16384, cpuCenti: 100 }]), ["no-cap", "none-holds", null]);
+	assert.deepEqual(why([{ memMiB: 16384, cpuCenti: 300 }], 50), ["no-cap", "none-holds", null]);
+	// a cap found: nothing missing; and a single host's cap (doctor) never says why, its own words do
+	assert.deepEqual(why([{ memMiB: 16384, cpuCenti: 800 }]), [null, null, null]);
+	assert.equal(suggestSize({ project: "web", records: oom, current: CURRENT, cap: null, now: NOW }).memory.capMissing, null);
+	// no raise, no reason: a project that fits says nothing about a cap, even with none read
+	assert.equal(suggestSize({ project: "web", records: runs(10, { peakMiB: 3072 }), current: CURRENT, hosts: [], now: NOW }).memory.capMissing, null);
+});
+
 test("fleetCap: each host judged on its OWN pair, never the largest per dimension across hosts", () => {
 	const cur = { memMiB: 4096, cpuCenti: 200 };
 	const table = [
@@ -480,6 +529,8 @@ test("the words: singular one core and one CPU, held raises as what the host off
 	assert.equal(suggestionEvidence(suggest(oom)).memory, "1 run ended oom-killed (the largest size killed 4g)");
 	assert.equal(suggestionEvidence(suggest(oom, { cap: { memMiB: 5120 } })).memoryHeld, "this project's runs need more than this host offers: they ask for 6g, the largest here is 5g");
 	assert.equal(suggestionEvidence(suggest(oom, { cap: { memMiB: 4096 } })).memoryHeld, "already at the largest size this host offers");
+	// a size ABOVE the cap is not "at" it: the words say which, and name the cap
+	assert.equal(suggestionEvidence(suggest(oom, { cap: { memMiB: 2048 } })).memoryHeld, "already above the largest size this host offers (2g)");
 	assert.equal(suggestionEvidence(suggest(oom, { cap: null })).memoryHeld, "they ask for 6g, but the largest size this host offers is not known here, so no call is offered");
 	const pressed = suggestionEvidence(suggest(runs(10, { memPeak: 4096 * MIB, full: 0.5, cores: 2, throttle: 0.9 })));
 	assert.equal(pressed.memoryFact, "10 of 10 runs reached the memory limit while stalled for memory more than 1% of their time");

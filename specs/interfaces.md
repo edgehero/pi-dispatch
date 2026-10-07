@@ -4894,8 +4894,9 @@ validator rather than a second copy of it.
   whatever the rebuild above did: a field that is not a safe non-negative integer is ignored, a peak above the
   record's own `size` is read at it, and a record without both blocks is no evidence. Its file reader
   (`worker/src/size-records.mjs`, shared by doctor and the admin) opens only files whose mtime is within the window
-  plus a day, skips and counts a file over 256 KiB, and keeps the newest 50 records per project. It writes nothing to
-  any record.
+  plus a day, skips and counts a file over 256 KiB, drops a record without an object `resources` and a `size` (a
+  refusal before any container started), and only THEN keeps the newest 50 records per project, so refusals never
+  crowd measured runs out of the window. It writes nothing to any record.
   **`hostBudget` (issue #596, phase 2) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL
   position** after `size`: on the two never-fits refusals (`job-size-exceeds-host`, `job-size-exceeds-share`) the
   host budget the size was judged against, in MiB and hundredths of a CPU, and the project's `hostShare` (null without
@@ -7289,11 +7290,12 @@ abstains.
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
 carries no configuration and no authority: nothing here is an instruction to anybody.
 
-**The budget fields' readers** (issue #596): doctor (each host's budget, use and largest fitting project size), and since
-phase 3 the admin panel's PROJECTS view and the insights page, which
-cap a size suggestion's raise at what a live host offers, each host judged on its OWN pair of budgets (never the
-largest per field across hosts, a pair no host has), and show each host's budget and use (`DES-SIZE-SUGGESTIONS`). Each reader parses a field itself (`publishedBudget`): an integer as text, `off`, or
-anything else unknown.
+**The budget fields' readers** (issue #596): doctor (each host's budget, use and largest fitting project size), and
+since phase 3 the admin panel's PROJECTS view and the insights page, which cap a size suggestion's raise at what a
+live host offers the project, each host judged on its OWN pair of budgets (never the largest per field across hosts,
+a pair no host has) and each integer budget taken at the project's `hostShare` of it where its row has one, and show
+each host's budget and use (`DES-SIZE-SUGGESTIONS`). Each reader parses a field itself (`publishedBudget`): an
+integer as text, `off`, or anything else unknown.
 
 **THE CONTENT RULE**: names, integers and digests. Never a path, never a URL with credentials, never a
 repository name, never operator free text. This is `targetFor`'s `local:<basename>` discipline applied to
@@ -7852,3 +7854,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-07 | Issue #596, phase 2, the last review round. **`INT-RUN-HISTORY-FILE-CONTRACT` WORDING CORRECTED**: a worker without `PI_WORKER_NAME` refuses a never-fits size because it "never waits for another host, even one it would fit"; the text said "there is no other host to wait for", which is false when peers share its Valkey. The recorded reasons and the rule are UNCHANGED. |
 | 2026-10-07 | Issue #596, phase 3 (size suggestions). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED** with its new readers: the size suggestion (`DES-SIZE-SUGGESTIONS`) reads `resources`, `size`, `project`, `startedAt`, `endedAt` and `reason`, judges each record again as untrusted, and writes nothing; the record's shape is UNCHANGED. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: the admin panel's PROJECTS view and the insights page read `budgetMemMiB`, `budgetCpuCenti`, `usedMemMiB` and `usedCpuCenti` (the view flags a suggestion above the largest published budget; the page shows each host's budget and use); the fields are UNCHANGED. No new file or wire shape: the suggestion is an in-process value of the worker package (`@edgehero/pi-dispatch/size-suggest`, and `./host-budget` is exported for `publishedBudget`). Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT` (a suggestion is applied only through its existing tools), `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT` (no new setting). |
 | 2026-10-07 | Issue #596, phase 3, review gate round 1. **`INT-HOST-REGISTRY-CONTRACT` CORRECTED**, the readers paragraph: the PROJECTS view and the insights page no longer flag a suggestion against the largest budget per field across hosts (a pair no host has, so a size fitting one host's memory and another's CPUs passed); they cap a raise per host on that host's own pair of `budgetMemMiB` and `budgetCpuCenti`. The fields are UNCHANGED. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the readers paragraph: the suggestion also reads `memFullUsec` (a fact line, no call), only `reason` `oom-killed` raises memory, and its one file reader (`worker/src/size-records.mjs`, exported as `@edgehero/pi-dispatch/size-records` for the admin) opens a file only within the window plus a day by mtime, skips and counts one over 256 KiB, and keeps the newest 50 records per project; the record's shape is UNCHANGED. Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT`. |
+| 2026-10-07 | Issue #596, phase 3, review gate round 2. **`INT-HOST-REGISTRY-CONTRACT` CORRECTED**, the readers paragraph (rewrapped): the PROJECTS view and the insights page cap a raise at the project's `hostShare` of each integer budget, floor(budget x hostShare / 100), not at the whole budget, since the worker refuses a job above the share. The fields are UNCHANGED. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**, the readers paragraph: the file reader drops a record without an object `resources` and a `size` BEFORE it keeps the newest 50 per project; it kept the newest 50 first, so fifty refusals crowded every measured run out. The record's shape is UNCHANGED. Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT`. |

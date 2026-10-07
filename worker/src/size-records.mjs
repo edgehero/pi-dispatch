@@ -8,7 +8,10 @@
  *   - a SIZE CAP per file (`SIZING_RECORD_MAX_BYTES`, 256 KiB): a larger file is skipped and COUNTED, never parsed. A
  *     run record is a few KiB; the cap keeps a hand-placed or corrupted giant from costing a render its memory, and
  *     the count says it happened rather than leaving a silent hole;
- *   - the NEWEST `SUGGEST_WINDOW_RUNS` per project are kept (by `endedAt`), since no suggestion reads more.
+ *   - only a record that carries measurements (an object `resources` and a `size`) is kept, and of those the NEWEST
+ *     `SUGGEST_WINDOW_RUNS` per project (by `endedAt`), since no suggestion reads more. The filter runs BEFORE the
+ *     cut: a run refused before its container started (a budget or policy refusal) writes a record with neither, and
+ *     cut first, fifty such refusals would crowd every measured run out of the window.
  *
  * Never throws: an absent directory holds no records; another unreadable one is `unreachable` (doctor reads that as
  * none, the panel says it).
@@ -24,11 +27,13 @@ export const SIZING_RECORD_MAX_BYTES = 256 * 1024;
 export const SIZING_MTIME_DAYS = SUGGEST_WINDOW_DAYS + 1;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
 /**
  * `{ records, skipped, unreachable }`: the parsed records (at most SUGGEST_WINDOW_RUNS per project, newest first by
- * `endedAt`; a record with no string `project` or no readable `endedAt` is dropped, since no suggestion could read it),
- * how many files were skipped for their size, and null or a reason when the directory itself could not be listed.
+ * `endedAt`; a record with no string `project`, no readable `endedAt`, no object `resources` or no `size` is dropped,
+ * since no suggestion could read it), how many files were skipped for their size, and null or a reason when the
+ * directory itself could not be listed.
  * `fs` is `{ readdirSync, statSync, readFileSync }`.
  */
 export function readSizingRecords(logsDir, { nowMs, fs = { readdirSync, readFileSync, statSync } } = {}) {
@@ -59,6 +64,7 @@ export function readSizingRecords(logsDir, { nowMs, fs = { readdirSync, readFile
 			const record = JSON.parse(buf.toString("utf8"));
 			const at = typeof record?.endedAt === "string" ? Date.parse(record.endedAt) : NaN;
 			if (typeof record?.project !== "string" || !Number.isFinite(at)) continue;
+			if (!isObject(record.resources) || !isObject(record.size)) continue; // no measurements: never counts toward the 50
 			if (!byProject.has(record.project)) byProject.set(record.project, []);
 			byProject.get(record.project).push({ at, record });
 		} catch {

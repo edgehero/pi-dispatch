@@ -48,7 +48,7 @@ import { parseConnection, makeRedisClient, killSwitchValkeyUrls, urlShown, useVa
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { resolveJobSize } from "@edgehero/pi-dispatch/job-size";
-import { publishedBudget } from "@edgehero/pi-dispatch/host-budget";
+import { projectBudgetRow, publishedBudget } from "@edgehero/pi-dispatch/host-budget";
 import { peakSeries, suggestSize, suggestionCall, suggestionEvidence } from "@edgehero/pi-dispatch/size-suggest";
 import { readSizingRecords } from "@edgehero/pi-dispatch/size-records";
 import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
@@ -2214,11 +2214,12 @@ export function scanRunRecords({ logsDir, sinceMs, nowMs = Date.now(), fs = node
  * `dispatch_limit_edit` preview and the insights page: per project id, the worker's own `suggestSize` over this host's
  * run records, with the exact call that applies it (`suggestionCall`) and its evidence in words. The records are read
  * ONCE for every project, by the worker's own bounded reader (`readSizingRecords`: an mtime prefilter, a 256 KiB cap
- * per file, the newest 50 per project), the one doctor uses. `limits` are the parsed scoped-limits rows (a project's
- * size and its row index come from them), `env` the deployment's settings (`PI_JOB_MEMORY`, `PI_JOB_CPUS`).
+ * per file, the newest 50 measured runs per project), the one doctor uses. `limits` are the parsed scoped-limits rows
+ * (a project's size and its row index come from them), `env` the deployment's settings (`PI_JOB_MEMORY`, `PI_JOB_CPUS`).
  *
  * `hostBudgets` are the live hosts' published budgets (`hostBudgetsOf`), and each project's raise is capped over them,
- * every host judged on its OWN pair (`suggestSize`'s `hosts`); null when no budget was read here (the edit preview), so a
+ * every host judged on its OWN pair (`suggestSize`'s `hosts`), each budget at the project's `hostShare` of it where its
+ * row has one; a suggestion still above every host's offer carries no call (`call` null); null when no budget was read here (the edit preview), so a
  * raise offers no call. Returns `{ projects: { [id]: suggestion }, skipped }`, or `{ unreachable }` when the logs
  * directory is unreadable. With `withSeries`, each also carries `series`, the same runs' peaks oldest first
  * (`peakSeries`), for the insights chart. A project whose size the worker would refuse is left out. Nothing here
@@ -2236,8 +2237,11 @@ export function readSizeSuggestions({ logsDir, projectIds = [], limits = [], env
     } catch {
       continue;
     }
-    const s = suggestSize({ project: id, records, current, hosts: Array.isArray(hostBudgets) ? hostBudgets : null, now: nowMs });
-    projects[id] = { ...s, call: suggestionCall(s, limits), words: suggestionEvidence(s), ...(withSeries ? { series: peakSeries({ project: id, records, now: nowMs }) } : {}) };
+    // the project's hostShare caps each host's budget at its share (a job above it is refused there), as doctor's does
+    const s = suggestSize({ project: id, records, current, hosts: Array.isArray(hostBudgets) ? hostBudgets : null, hostShare: projectBudgetRow(limits, id).hostShare, now: nowMs });
+    // a suggestion still larger than any live host offers carries no call: applying it would trade a refusal for the same one
+    const never = s.memory.overBudget || s.cpu.overBudget;
+    projects[id] = { ...s, call: never ? null : suggestionCall(s, limits), words: suggestionEvidence(s), ...(withSeries ? { series: peakSeries({ project: id, records, now: nowMs }) } : {}) };
   }
   return { projects, skipped: read.skipped };
 }

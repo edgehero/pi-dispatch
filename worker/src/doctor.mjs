@@ -7802,19 +7802,23 @@ export function fleetBudgetChecks(rows, { limits = [], env = {} } = {}) {
  * runs", or a suggestion naming the exact `dispatch_limit_edit` call (`dispatch_limit_add` for a project with no row)
  * that applies it. A RAISE is a warning with the call as its fix; a lowering is a fact line carrying the call.
  *
- * Every raise is CAPPED at what this host offers (`hostCap`: its budget per dimension, or with the budget off or unknown
- * the runtime's memory and CPU count, `total`): where the cap binds the line says the project's runs need more than
+ * Every raise is CAPPED at what this host offers the project (`hostCap`: its budget per dimension, the project's
+ * `hostShare` of it where the row has one, or with the budget off or unknown the runtime's memory and CPU count, `total`): where the cap binds the line says the project's runs need more than
  * this host offers, and where the size already is the cap it says so and offers no call. Nothing here advises growing
- * the host's budget: that budget is what the host promised every other project. A suggestion above the project's own
- * `hostShare` of the budget is flagged too: such a job would be refused here. Facts (memory pressure at the limit, the
+ * the host's budget: that budget is what the host promised every other project. A suggestion that would still never
+ * fit (a lowering of a size above the cap, or a pair whose other dimension is above the share) is flagged, and carries
+ * NO call: applying it would trade one refusal for the same refusal. Facts (memory pressure at the limit, the
  * host's CPU ceiling) ride along as information, with no call. Nothing here applies a size: the numbers come from
  * inside the jobs' containers, and an operator confirms the call.
  */
 export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, records = [], budget = null, total = null, nowMs }) {
 	const checks = [];
-	const cap = hostCap(budget, total);
 	for (const project of Array.isArray(projects) ? projects : []) {
 		const id = project?.id;
+		// the project's hostShare of an integer budget: a job above it is refused here (`job-size-exceeds-share`), so a
+		// raise is capped at the share, never at the whole budget, or the line would offer a call to a size that never runs.
+		const share = projectBudgetRow(limits, id).hostShare;
+		const cap = hostCap(budget, total, share);
 		let current;
 		try {
 			current = resolveJobSize({ project: id, limits, env });
@@ -7838,21 +7842,25 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		if (s.memory.suggested) parts.push(`memory ${formatMemory(s.memory.suggested)} (${s.memory.reason}: ${words.memory}${s.memory.held === "cap" ? `; ${words.memoryHeld}` : ""})`);
 		if (s.cpu.suggested) parts.push(`${cpusText(s.cpu.suggested)} (${s.cpu.reason}: ${words.cpu})`);
 		const heldText = held ? `${words.memory}; ${words.memoryHeld}` : "";
-		const over = [s.memory.overBudget ? `memory ${formatMemory(s.memory.suggested)} is above the largest size this host offers (${formatMemory(cap.memMiB)})` : null, s.cpu.overBudget ? `${cpusText(s.cpu.suggested)} are above the most this host offers (${formatCpus(cap.cpuCenti)})` : null].filter(Boolean);
-		// the project's hostShare of an integer budget: a size above it is refused here (`job-size-exceeds-share`).
-		const share = projectBudgetRow(limits, id).hostShare;
+		// the share caps only an integer budget; with the budget off or unknown the cap is the runtime's own total
+		const offers = (dim) => (share !== null && Number.isSafeInteger(budget?.[dim]) ? `its hostShare (${share}% of this host's budget) allows` : "this host offers");
+		const over = [s.memory.overBudget ? `memory ${formatMemory(s.memory.suggested)} is above ${formatMemory(cap.memMiB)}, the largest size ${offers("memMiB")}` : null, s.cpu.overBudget ? `${cpusText(s.cpu.suggested)} are above ${cpusText(cap.cpuCenti)}, the most ${offers("cpuCenti")}` : null].filter(Boolean);
+		// the pair as a whole against the share: the dimension NOT suggested keeps the current size, which may be above it.
 		const pair = { memMiB: s.memory.suggested ?? current.memMiB, cpuCenti: s.cpu.suggested ?? current.cpuCenti };
 		const overShare = over.length === 0 && call !== null && share !== null && budget !== null && neverFits(pair, budget, share) === "share";
 		if (overShare) over.push(`that is above its hostShare (${share}% of this host's budget)`);
 		const raise = (s.memory.suggested ?? 0) > current.memMiB || (s.cpu.suggested ?? 0) > current.cpuCenti;
 		const suggests = parts.length > 0 ? `its runs in the last ${SUGGEST_WINDOW_DAYS} days suggest ${parts.join(" and ")}` : "";
 		const label = `project ${id}: size ${size}; ${[heldText ? `in the last ${SUGGEST_WINDOW_DAYS} days ${heldText}` : "", suggests].filter(Boolean).join("; ")}${over.length > 0 ? `, but ${over.join(" and ")}, so a job of it would never fit this host` : ""}${factTail}`;
-		const apply = call === null ? "" : `apply it in the admin panel with ${call} (an operator confirms it; nothing applies a size by itself)`;
+		// a size that would never fit is never offered as a call: applying it would turn a refusal into the same refusal.
+		const apply = call === null ? "" : over.length > 0 ? "" : `apply it in the admin panel with ${call} (an operator confirms it; nothing applies a size by itself)`;
+		const never = over.length > 0 ? "no call is offered: a job of that size would never fit this host" : "";
 		if (held) {
-			const none = s.memory.held === "largest" ? "no larger memory is offered: no larger size fits this host" : "no memory call is offered while the largest size this host offers is unknown (its budget is off or unknown and its runtime's memory was not read)";
-			checks.push({ ok: false, warn: true, label, fix: apply ? `${none}; for the rest, ${apply}` : none });
+			const above = Number.isSafeInteger(s.memory.cap) && current.memMiB > s.memory.cap;
+			const none = s.memory.held === "largest" ? (above ? "no larger memory is offered: the size is already above what this host offers" : "no larger memory is offered: no larger size fits this host") : "no memory call is offered while the largest size this host offers is unknown (its budget is off or unknown and its runtime's memory was not read)";
+			checks.push({ ok: false, warn: true, label, fix: apply ? `${none}; for the rest, ${apply}` : never ? `${none}; ${never}` : none });
 		} else if (raise || over.length > 0) {
-			checks.push({ ok: false, warn: true, label, fix: apply });
+			checks.push({ ok: false, warn: true, label, fix: apply || never });
 		} else {
 			checks.push({ ok: true, label: `${label}; ${apply.replace(/ \(an operator confirms it; nothing applies a size by itself\)$/, "")}` });
 		}
