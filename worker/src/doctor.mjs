@@ -97,6 +97,7 @@ import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } f
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM } from "./container-spec.mjs";
 import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDefaults, resolveJobSize } from "./job-size.mjs";
+import { SUGGEST_WINDOW_DAYS, suggestSize, suggestionCall, suggestionEvidence } from "./size-suggest.mjs";
 import { CGROUP_PARENT, cgroupParentFor, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -277,6 +278,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// Issue #458 (PR #463 round 2): the clock the keeper's age is judged on, epoch ms. Its own name, not `now`: `--live`
 		// pairs `now` with `delay`, and a clock that does not advance without its `delay` would never reach a deadline.
 		wallClock = Date.now,
+		// Issue #596, phase 3: the run records the size suggestions read, `(nowMs) => records`. A seam so a test decides
+		// the runs; absent, the logs directory's records of the window are read (`readSizingRecords`).
+		readRunRecords,
 		// Issue #448: `systemctl show podman.service`, read only where the local daemon is rootful Podman on this host. A seam
 		// so a test decides what the unit says; absent, it spawns systemctl through `spawn`, as the docker reads do.
 		readPodmanService,
@@ -378,7 +382,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -1843,6 +1847,14 @@ export async function collectChecks(shellVars, seams) {
 	const budgetChecksAt = checks.length;
 	const budgetChecksHere = hostBudgetChecks(budgetView, budgetChecksArgs);
 	checks.push(...budgetChecksHere);
+	// Issue #596, phase 3: one line per project with its size and what its recent runs suggest, judged against this host's
+	// budget. The records are read only when there is a project to suggest for.
+	const sizingProjects = readProjectFacts(env, fileExists).projects;
+	if (sizingProjects.length > 0 && !budgetView.error) {
+		const nowMs = (typeof seams.wallClock === "function" ? seams.wallClock : Date.now)();
+		const records = typeof seams.readRunRecords === "function" ? seams.readRunRecords(nowMs) : readSizingRecords(logsDirPath(env, home), { nowMs });
+		checks.push(...sizeSuggestionChecks({ projects: sizingProjects, limits: budgetChecksArgs.limits, env, records, budget: { memMiB: budgetView.memMiB, cpuCenti: budgetView.cpuCenti }, nowMs }));
+	}
 	// Issue #596, phase 2: the aggregate CPU reserve per venue, read (never written) the way the worker reads it.
 	if (!budgetView.error) {
 		const reserveReads = await doctorCpuReserve({
@@ -7771,6 +7783,77 @@ export function fleetBudgetChecks(rows, { limits = [], env = {} } = {}) {
 }
 
 /** The `ps` that lists this runtime's job containers with their two size labels (issue #596, phase 2). */
+/**
+ * The run records a size suggestion reads (issue #596, phase 3): every `*.json` in the logs directory written in the
+ * suggestion's window (by the file's mtime, the time the worker wrote it, plus a day for skew), parsed, junk skipped.
+ * The mtime filter keeps a keep-forever logs directory (PI_LOG_RETENTION_DAYS=0) from being read whole. Never throws:
+ * an absent or unreadable directory holds no records, and the line then says there are not enough runs.
+ */
+export function readSizingRecords(logsDir, { nowMs, fs = { readdirSync, readFileSync, statSync } } = {}) {
+	const since = nowMs - (SUGGEST_WINDOW_DAYS + 1) * 24 * 60 * 60 * 1000;
+	let names;
+	try {
+		names = fs.readdirSync(logsDir);
+	} catch {
+		return [];
+	}
+	const records = [];
+	for (const name of names) {
+		if (!name.endsWith(".json")) continue;
+		try {
+			const path = join(logsDir, name);
+			if (fs.statSync(path).mtimeMs < since) continue;
+			records.push(JSON.parse(fs.readFileSync(path, "utf8")));
+		} catch {
+			// unparseable, or reaped between the listing and the read
+		}
+	}
+	return records;
+}
+
+/**
+ * One line per project in projects.json with its job size and what its recent runs suggest (issue #596, phase 3,
+ * DES-SIZE-SUGGESTIONS), from the one pure `suggestSize` the panel and the insights page also call: "fits", "not enough
+ * runs", or a suggestion naming the exact `dispatch_limit_edit` call (`dispatch_limit_add` for a project with no row)
+ * that applies it. A RAISE is a warning with the call as its fix; a lowering is a fact line carrying the call. A
+ * suggestion above this host's budget is a warning that says so. Nothing here applies a size: the numbers come from
+ * inside the jobs' containers, and an operator confirms the call.
+ */
+export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, records = [], budget = null, nowMs }) {
+	const checks = [];
+	for (const project of Array.isArray(projects) ? projects : []) {
+		const id = project?.id;
+		let current;
+		try {
+			current = resolveJobSize({ project: id, limits, env });
+		} catch {
+			continue; // a refused PI_JOB_MEMORY or PI_JOB_CPUS fails the size lines above; the worker does not start
+		}
+		const s = suggestSize({ project: id, records, current, budget, now: nowMs });
+		const words = suggestionEvidence(s);
+		const size = `${formatMemory(current.memMiB)}, ${formatCpus(current.cpuCenti)} CPUs`;
+		const call = suggestionCall(s, limits);
+		if (call === null) {
+			const both = s.memory.reason === "not-enough-runs" && s.cpu.reason === "not-enough-runs";
+			const why = both ? `not enough runs to suggest a size yet (${words.memory} in the last ${SUGGEST_WINDOW_DAYS} days)` : `fits its runs (memory: ${s.memory.reason === "fits" ? words.memory : `${s.memory.reason}, ${words.memory}`}; CPUs: ${s.cpu.reason === "fits" ? words.cpu : `${s.cpu.reason}, ${words.cpu}`})`;
+			checks.push({ ok: true, label: `project ${id}: size ${size}${both ? ": " : " "}${why}` });
+			continue;
+		}
+		const parts = [];
+		if (s.memory.suggested) parts.push(`memory ${formatMemory(s.memory.suggested)} (${s.memory.reason}: ${words.memory})`);
+		if (s.cpu.suggested) parts.push(`${formatCpus(s.cpu.suggested)} CPUs (${s.cpu.reason}: ${words.cpu})`);
+		const over = [s.memory.overBudget ? `memory ${formatMemory(s.memory.suggested)} is above this host's budget (${formatMemory(budget.memMiB)})` : null, s.cpu.overBudget ? `${formatCpus(s.cpu.suggested)} CPUs are above this host's budget (${formatCpus(budget.cpuCenti)})` : null].filter(Boolean);
+		const raise = (s.memory.suggested ?? 0) > current.memMiB || (s.cpu.suggested ?? 0) > current.cpuCenti;
+		const label = `project ${id}: size ${size}; its runs in the last ${SUGGEST_WINDOW_DAYS} days suggest ${parts.join(" and ")}${over.length > 0 ? `, but ${over.join(" and ")}, so a job of it would never fit this host` : ""}`;
+		if (raise || over.length > 0) {
+			checks.push({ ok: false, warn: true, label, fix: `${over.length > 0 ? "raise this host's budget first, then " : ""}apply it in the admin panel with ${call} (an operator confirms it; nothing applies a size by itself)` });
+		} else {
+			checks.push({ ok: true, label: `${label}; apply it in the admin panel with ${call}` });
+		}
+	}
+	return checks;
+}
+
 export const SIZE_LABEL_PS_ARGS = Object.freeze(["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", `{{.Names}}\t{{.Label "${SIZE_LABEL_MEM}"}}\t{{.Label "${SIZE_LABEL_CPU}"}}`]);
 
 /**

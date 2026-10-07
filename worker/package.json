@@ -64,6 +64,8 @@
 		"./backend-registry": "./src/backend-registry.mjs",
 		"./container-spec": "./src/container-spec.mjs",
 		"./job-size": "./src/job-size.mjs",
+		"./size-suggest": "./src/size-suggest.mjs",
+		"./host-budget": "./src/host-budget.mjs",
 		"./backend-conformance": "./src/backend-conformance.mjs",
 		"./live-probes": "./src/live-probes.mjs",
 		"./triggers": "./src/triggers.mjs",
