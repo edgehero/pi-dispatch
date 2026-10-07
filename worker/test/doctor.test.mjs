@@ -8112,6 +8112,7 @@ const MIXED_PIN = {
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve, read with this fixture's systemctl, which answers nothing.
 			"⚠ podman: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (unparseable)",
@@ -8186,6 +8187,7 @@ const MIXED_PIN = {
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve, read with this fixture's systemctl, which answers nothing.
 			"⚠ podman: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (unparseable)",
@@ -8251,6 +8253,7 @@ const MIXED_PIN = {
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve, read with this fixture's systemctl, which answers nothing.
 			"⚠ podman: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (unparseable)",
@@ -8313,6 +8316,7 @@ const MIXED_PIN = {
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve, read with this fixture's systemctl, which answers nothing.
 			"⚠ podman: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (unparseable)",
@@ -10233,6 +10237,7 @@ const DOCKER_CANARY_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
 			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
@@ -10315,6 +10320,7 @@ const DOCKER_CANARY_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
 			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
@@ -10403,6 +10409,7 @@ const DOCKER_CANARY_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
 			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
@@ -10495,6 +10502,7 @@ const DOCKER_CANARY_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
 			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
@@ -10587,6 +10595,7 @@ const DOCKER_CANARY_PIN = {
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+			"✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
 			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
 			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
@@ -12213,4 +12222,20 @@ test("issue #596, phase 2: with this host's registry row carrying its ledger, do
 	assert.ok(differ.some((c) => c.warn && /^Host budget ledger holds 0 and 0 CPUs, while the running job containers are labelled 4g and 2 CPUs/.test(c.label)));
 	const none = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({}));
 	assert.ok(!none.some((c) => /Host budget ledger/.test(c.label)), "a row without the ledger: no listing, no line");
+});
+
+test("issue #596, P2G1-L4: a worker whose boot listing of left-over job containers is unread admits no job, and doctor warns so", async () => {
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image": 0, "docker ps --filter name=pi-job- --format": { code: 0, output: "" } };
+	const seams = (row) => collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini1", tz, ...row }] }) });
+	const unread = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({ budgetSeed: "unlisted" }));
+	const line = unread.find((c) => /host_budget_seed_unread/.test(c.label));
+	assert.ok(line && line.ok === false && line.warn === true, "a warning");
+	assert.match(line.label, /^this host's worker admits NO job: it could not list the job containers left from before it started/);
+	for (const seed of ["listed", "", undefined]) {
+		const quiet = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, seams({ budgetSeed: seed }));
+		assert.ok(!quiet.some((c) => /host_budget_seed_unread/.test(c.label)), `budgetSeed ${seed}: nothing said`);
+	}
+	const peer = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini1", tz }, { name: "other", tz, budgetSeed: "unlisted" }] }) }));
+	assert.ok(!peer.some((c) => /host_budget_seed_unread/.test(c.label)), "only this host's own row speaks for this host");
 });

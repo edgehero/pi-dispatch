@@ -178,8 +178,12 @@ for the whole deployment, not per host.
 `PI_CONCURRENCY` counts jobs, and a count cannot tell a 20g job from a 2g one. So each worker also keeps a
 **budget** of memory and CPU for its jobs, and starts a job only when its size (its project's `memory` and `cpus`,
 see [job sizes](scoped-limits.md#job-sizes-version-3)) fits beside the sizes of the jobs already running on that
-machine, in both memory and CPU. `PI_CONCURRENCY` still caps the number of jobs; whichever is reached first applies,
-and `pi-dispatch doctor` says which. A job that does not fit yet waits and starts once room frees.
+machine, in both memory and CPU. `PI_CONCURRENCY` still caps the number of jobs, counted in the same budget, so the
+room kept for a waiting job includes a job slot; whichever is reached first applies, and `pi-dispatch doctor` says
+which. A job that does not fit yet waits and starts once room frees.
+
+A job's `cpus` count as CPU set aside for it, although the runtime only uses them as a weight (a busy job may use idle
+cores beyond them). So a job's `cpus` must fit in the CPU budget beside what already runs, even on an idle machine.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -205,14 +209,24 @@ core the moment it frees. A waiting job that something else is holding back (a f
 pause window) keeps its place in line but keeps no room. A job that stops coming back (finished elsewhere, removed)
 loses its place after a check of the queue.
 
-**A size that can never fit is refused before anything is spent.** A job larger than this machine's budget is refused
-`job-size-exceeds-host`; one larger than its project's `hostShare` of the budget, `job-size-exceeds-share`. A forge
-job waits instead, for a machine it fits on, and is refused `job-size-exceeds-fleet` only when two looks at the host
-registry, at least 30 seconds apart, both show that no running worker's budget can hold it. The worker log and the run
-record name the job's size and the budget; the forge comment names neither.
+**A size that can never fit this machine.** A job on this machine's own queue (`pi-jobs@<name>`: its folders, its
+wait checks) can run nowhere else, so one larger than the budget is refused before anything is spent,
+`job-size-exceeds-host`, and one larger than its project's `hostShare` of the budget, `job-size-exceeds-share`. That
+happens before the job waits on any condition. A job on the shared queue is never refused for its size: another
+machine may have the room. It is put back for 60 seconds (`job_size_never_fits_here_deferred` in the log, with both
+sizes) and picked up again by whichever worker asks first. `pi-dispatch doctor` warns about a project that fits on no
+running worker; such a job waits until one is started (or the size is lowered). The worker log and the run record name
+the job's size and the budget; the forge comment names neither.
 
-**A container that would not stop keeps its room** until the runtime says it is gone, so a job past its time limit
-whose stop failed cannot make room for another while it may still be running. The next start of the worker removes it.
+Two things that follow. A job too big for some machines may be picked up by those a few times before one it fits on
+gets it. And a job that fits several busy machines keeps room on each of them while it waits, though it runs on only
+one; that room is given back within a minute of it starting elsewhere.
+
+**A container that would not stop keeps its room** until the runtime says it is gone (or lists it as exited), so a
+job past its time limit whose stop failed cannot make room for another while it may still be running. When the worker
+starts, it removes every job container it can and then counts any that are still there at the size on their labels
+until they are gone. If it cannot list them (the container runtime does not answer), it starts no job until it can,
+and `pi-dispatch doctor` says so.
 
 Every job container carries its size as two labels, `pi.dispatch.mem` (MiB) and `pi.dispatch.cpu` (hundredths of a
 CPU), and every job's `--cpus` is the CPU budget, so no single job can use the reserve.

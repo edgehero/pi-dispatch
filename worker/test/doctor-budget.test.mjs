@@ -15,10 +15,14 @@ test("the budget line names each half and where it comes from, and says which of
 	assert.deepEqual([view.memMiB, view.cpuCenti], [29492, 700]);
 	assert.deepEqual(labels(hostBudgetChecks(view, { concurrency: 3 })), [
 		"ok: Host budget: memory 29492m (auto: 32g here, 3276m kept for the host), CPUs 7 (auto: 8 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
+		// P2G1-L7: the CPU half is a reservation in the arithmetic and a weight at the runtime.
+		"ok: The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 		// min(29492 / 4096, 700 / 200) = min(7, 3) = 3 default jobs: equal to PI_CONCURRENCY, which binds first.
 		"ok: PI_CONCURRENCY (3) binds first: the budget holds 3 jobs of the default size (4g, 2 CPUs) at once",
 	]);
-	assert.match(labels(hostBudgetChecks(view, { concurrency: 4 }))[1], /^ok: The host budget binds first: it holds 3 jobs of the default size \(4g, 2 CPUs\) at once, fewer than PI_CONCURRENCY \(4\)/);
+	assert.match(labels(hostBudgetChecks(view, { concurrency: 4 }))[2], /^ok: The host budget binds first: it holds 3 jobs of the default size \(4g, 2 CPUs\) at once, fewer than PI_CONCURRENCY \(4\)/);
+	const cpuOff = labels(hostBudgetChecks(doctorHostBudget({ PI_HOST_CPU_BUDGET: "off" }, { daemon: DOCKER() })));
+	assert.equal(cpuOff.some((l) => l.includes("as CPU reserved")), false, "with the CPU budget off nothing counts CPUs, so nothing is said");
 	const set = doctorHostBudget({ PI_HOST_MEMORY_BUDGET: "off", PI_HOST_CPU_BUDGET: "12" }, { daemon: DOCKER() });
 	assert.match(labels(hostBudgetChecks(set))[0], /memory off \(off: PI_HOST_MEMORY_BUDGET\), CPUs 12 \(PI_HOST_CPU_BUDGET\)/);
 	const floored = doctorHostBudget({}, { daemon: DOCKER({ memTotalMiB: 4096, hostCpus: 1 }) });
@@ -27,8 +31,9 @@ test("the budget line names each half and where it comes from, and says which of
 
 test("an unknown budget is a warning naming host_budget_unknown, and a setting that does not parse FAILS: the worker refuses to start", () => {
 	const unknown = hostBudgetChecks(doctorHostBudget({}, { daemon: { answered: false, reason: "timeout" } }));
-	assert.deepEqual(labels(unknown).slice(0, 3), [
+	assert.deepEqual(labels(unknown).slice(0, 4), [
 		"ok: Host budget: memory unknown (auto), CPUs unknown (auto); a job starts only when its size fits beside what already runs on this host",
+		"ok: The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host",
 		"warn: host budget: the runtime gave no memory or CPU count, so a worker holds no job back on either until it does (host_budget_unknown)",
 		"ok: PI_CONCURRENCY (3) is the only bound on how many jobs run at once here: the budget is not known yet",
 	]);
@@ -63,9 +68,9 @@ test("project sizes: a size the budget can never hold, a size over its share, an
 	]);
 	assert.deepEqual(projectSizes(limits, {}).map((p) => p.id), ["huge", "greedy", "many", "ok"], "a project row without a size runs at the default and is not listed");
 	const lines = labels(hostBudgetChecks(view, { limits }));
-	assert.deepEqual(lines.slice(2), [
-		"warn: project huge: its job size (40g, 2 CPUs) is larger than this host's budget (32g, 8 CPUs), so its jobs are refused here before anything is spent (job-size-exceeds-host); a forge job waits for a host it fits on",
-		"warn: project greedy: its job size (20g, 2 CPUs) is larger than its hostShare (50%) of this host's budget, so its jobs are refused here before anything is spent (job-size-exceeds-share)",
+	assert.deepEqual(lines.slice(3), [
+		"warn: project huge: its job size (40g, 2 CPUs) is larger than this host's budget (32g, 8 CPUs), so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-host), and one on the shared queue waits for a host it fits on",
+		"warn: project greedy: its job size (20g, 2 CPUs) is larger than its hostShare (50%) of this host's budget, so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-share), and one on the shared queue waits for a host it fits on",
 		// 2 x 8g = 16g > 40% of 32g (12.8g): the minimum cannot all run here.
 		"warn: project many: minJobs 2 of its size (8g, 2 CPUs) is more than its hostShare (40%) of this host's budget, so this host can never keep room for all of them at once",
 		// many 16g/4 + ok 6g/3 = 22g and 7 CPUs: inside 32g and 8. Raise ok's minimum and the sum is over.
@@ -89,7 +94,7 @@ test("the fleet: a line per host with a budget, the projects each fits on, and a
 		"ok: Host big: budget 64g and 15 CPUs, in use 0 and 0 CPUs; largest project size that fits: 20g, 4 CPUs (heavy)",
 		"ok: Project heavy (20g, 4 CPUs) fits on: big",
 		"ok: Project light (2g, 1 CPUs) fits on: mini1, big",
-		"warn: Project giant (128g, 4 CPUs) fits on no live host's budget, so its forge jobs are refused before anything is spent (job-size-exceeds-fleet)",
+		"warn: Project giant (128g, 4 CPUs) fits on no live host's budget, so its jobs on the shared queue wait (they are never refused for it) until a host it fits on is live",
 	]);
 	assert.deepEqual(fleetBudgetChecks([{ name: "old" }], { limits }), [], "no host publishes a budget: nothing said");
 	const tight = labels(fleetBudgetChecks([{ name: "small", budgetMemMiB: "4096", budgetCpuCenti: "800" }], { limits: limitsOf([{ scope: "project:light", memory: "2g", cpus: 1, minJobs: 3 }]) }));

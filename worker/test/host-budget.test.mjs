@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	BUDGET_RECHECK_MS,
-	FLEET_NO_FIT_CONFIRM_MS,
 	HOLD_DROP_ON_ERROR_MS,
+	HOLD_STATE_READ_BOUND_MS,
 	HOLD_VERIFY_AFTER_MS,
 	NEVER_FITS_RECHECK_MS,
 	RESERVE_MEMORY_MAX_MIB,
@@ -11,13 +11,13 @@ import {
 	admit,
 	budgetField,
 	computeHostBudget,
-	fleetFit,
 	hostBudgetSettings,
 	largestFit,
 	makeHostBudget,
 	neverFits,
 	parseCpuMax,
 	parseMemoryMax,
+	pessimisticSize,
 	projectBudgetRow,
 	publishedBudget,
 	rankHolds,
@@ -198,22 +198,28 @@ test("admit: what runs plus the ask plus every hold ranked above it, in BOTH mem
 	assert.deepEqual(admit({ budget: { memMiB: Infinity, cpuCenti: null }, ledger, holds, ask: { id: "n", project: null, memMiB: 1e6, cpuCenti: 1e6 } }), { ok: true });
 });
 
-test("neverFits and the fleet: host, then share; a fleet answers none only when every live row publishes a budget and none fits", () => {
+test("admit: the job COUNT is the third dimension: every running job, the ask and every hold above it is one (P2G1-L3)", () => {
+	const budget = { memMiB: 65536, cpuCenti: 1600, count: 3 };
+	const ledger = [run("a", null, 1024, 25), run("b", null, 1024, 25)];
+	const holds = [w("big", "big", 20480, 200, 1)];
+	// Memory and CPU are plentiful; 2 running + the ask + the hold above it = 4 > 3.
+	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "n", project: null, memMiB: 1024, cpuCenti: 25 } }), { ok: false, why: "budget" });
+	// The hold itself has nothing above it: 2 + 1 = 3.
+	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "big", project: "big", memMiB: 20480, cpuCenti: 200 } }), { ok: true });
+	// Exactly at the count is admitted; one over is not; no count is no bound.
+	assert.deepEqual(admit({ budget: { ...budget, count: 4 }, ledger, holds, ask: { id: "n", project: null, memMiB: 1024, cpuCenti: 25 } }), { ok: true });
+	assert.deepEqual(admit({ budget: { ...budget, count: null }, ledger: [...ledger, run("c", null, 1, 1), run("d", null, 1, 1)], holds, ask: { id: "n", project: null, memMiB: 1, cpuCenti: 1 } }), { ok: true });
+	// hostShare is a share of memory and CPU only: a project at half the count is not share-stopped by it.
+	assert.deepEqual(admit({ budget: { ...budget, count: 2 }, ledger: [run("p1", "p", 1024, 25)], holds: [], ask: { id: "p2", project: "p", memMiB: 1024, cpuCenti: 25 }, shareOf: () => 50 }), { ok: true });
+});
+
+test("neverFits: host, then share; an off or unknown budget never refuses; the registry's budget fields", () => {
 	const budget = { memMiB: 16384, cpuCenti: 400 };
 	assert.equal(neverFits({ memMiB: 20480, cpuCenti: 400 }, budget), "host");
 	assert.equal(neverFits({ memMiB: 8192, cpuCenti: 500 }, budget), "host");
 	assert.equal(neverFits({ memMiB: 12288, cpuCenti: 200 }, budget, 50), "share");
 	assert.equal(neverFits({ memMiB: 8192, cpuCenti: 200 }, budget, 50), null);
 	assert.equal(neverFits({ memMiB: 1e6, cpuCenti: 1e6 }, { memMiB: null, cpuCenti: Infinity }), null);
-	const row = (name, mem, cpu) => ({ name, budgetMemMiB: mem, budgetCpuCenti: cpu });
-	const big = { memMiB: 20480, cpuCenti: 400 };
-	assert.equal(fleetFit(big, null, [row("a", "16384", "400"), row("b", "32768", "800")], "a"), "fits");
-	assert.equal(fleetFit(big, null, [row("a", "16384", "400"), row("b", "16384", "800")], "a"), "none");
-	assert.equal(fleetFit(big, null, [row("a", "16384", "400"), row("b", "", "800")], "a"), "unknown", "a row without a budget may fit");
-	assert.equal(fleetFit(big, null, [row("b", "16384", "400")], "a"), "unknown", "no row for this host: the read proves nothing");
-	assert.equal(fleetFit(big, null, [row("a", "off", "off")], "a"), "fits");
-	assert.equal(fleetFit(big, 50, [row("a", "40960", "800")], "a"), "fits", "20g is exactly half of 40g");
-	assert.equal(fleetFit(big, 50, [row("a", "40959", "800")], "a"), "none", "the share binds on every host");
 	assert.deepEqual([budgetField(Infinity), budgetField(null), budgetField(4096)], ["off", "", "4096"]);
 	assert.deepEqual(publishedBudget({ budgetMemMiB: "off", budgetCpuCenti: "x" }), { memMiB: Infinity, cpuCenti: null });
 	assert.deepEqual(largestFit({ memMiB: 32768, cpuCenti: 800 }, 25), { memMiB: 8192, cpuCenti: 200 });
@@ -229,9 +235,9 @@ test("projectBudgetRow reads a project row's hostShare and minJobs from a parsed
 // ---------------------------------------------------------------------------------------------------------------------
 // The stateful budget.
 
-function budgetWith({ facts = { memTotalMiB: 36864, hostCpus: 9 }, limits = [], clock = { t: 1_000_000 }, gone = async () => null, settings = settingsOf({ PI_HOST_RESERVE_MEMORY: "0", PI_HOST_RESERVE_CPUS: "1" }) } = {}) {
+function budgetWith({ facts = { memTotalMiB: 36864, hostCpus: 9 }, limits = [], clock = { t: 1_000_000 }, gone = async () => null, settings = settingsOf({ PI_HOST_RESERVE_MEMORY: "0", PI_HOST_RESERVE_CPUS: "1" }), count = null } = {}) {
 	const logs = [];
-	const b = makeHostBudget({ settings, jobDefault: { memMiB: 512, cpuCenti: 25 }, readFacts: async () => facts, scopedLimits: () => limits, containerGone: gone, now: () => clock.t, log: (event, fields) => logs.push({ event, fields }) });
+	const b = makeHostBudget({ settings, jobDefault: { memMiB: 512, cpuCenti: 25 }, readFacts: async () => facts, scopedLimits: () => limits, countLimit: () => count, containerGone: gone, now: () => clock.t, log: (event, fields) => logs.push({ event, fields }) });
 	return { b, logs, clock };
 }
 
@@ -248,7 +254,7 @@ test("the gate: a hold is taken synchronously, release is idempotent, and a job 
 	assert.equal(b.release("never"), false);
 	assert.deepEqual(b.gate({ id: "b", project: "p", size: { memMiB: 8192, cpuCenti: 100 } }), { admitted: true });
 	assert.equal(b.waiting().length, 0, "admitted: no longer a waiter");
-	assert.deepEqual(b.snapshot(), { memMiB: 36864, cpuCenti: 800, usedMemMiB: 8192, usedCpuCenti: 100, heldMemMiB: 0, heldCpuCenti: 0, running: 1, orphans: 0, holds: 0, waiters: 0 });
+	assert.deepEqual(b.snapshot(), { memMiB: 36864, cpuCenti: 800, usedMemMiB: 8192, usedCpuCenti: 100, heldMemMiB: 0, heldCpuCenti: 0, running: 1, orphans: 0, holds: 0, waiters: 0, seeded: true });
 	// A job its own project's share stops is a waiter that HOLDS NOTHING: the budget is not its obstacle.
 	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:q", memory: "1g", cpus: 1, hostShare: 10 }] }), "sl.json");
 	b.gate({ id: "q1", project: "q", size: { memMiB: 1024, cpuCenti: 50 }, limits });
@@ -317,6 +323,185 @@ test("suspend keeps a waiter's age and stops its hold counting; forget drops it"
 	assert.equal(b.waiting().length, 0);
 });
 
+test("ONE PICKUP, ONE TICKET (P2G1-L1, C3): a job id the ledger holds is deferred running-here, and only its own ticket gives it back", async () => {
+	const { b } = budgetWith();
+	await b.ready;
+	const first = b.enter("repeat");
+	assert.deepEqual(b.gate({ id: "repeat", ticket: first, project: null, size: { memMiB: 20480, cpuCenti: 200 } }), { admitted: true });
+	// The stalled scheduled job handed back while attempt 1 still runs: a second pickup of the same id.
+	const second = b.enter("repeat");
+	assert.notEqual(second, first);
+	assert.deepEqual(b.gate({ id: "repeat", ticket: second, project: null, size: { memMiB: 20480, cpuCenti: 200 } }), { admitted: false, why: "running-here", rank: -1 });
+	assert.equal(b.waiting().length, 0, "running-here makes no waiter: it holds nothing");
+	assert.equal(b.release("repeat", { ticket: second }), false, "attempt 2 gives back nothing of attempt 1's hold");
+	assert.equal(b.orphan("repeat", { name: "pi-job-repeat", ticket: second }), false, "nor orphans it");
+	assert.equal(b.release("repeat"), false, "nor does a release with no ticket");
+	assert.equal(b.snapshot().usedMemMiB, 20480, "attempt 1 still holds its room");
+	b.leave("repeat");
+	assert.equal(b.release("repeat", { ticket: first }), true, "attempt 1's own release gives it back");
+	b.leave("repeat");
+	// C3: an ORPHAN's id is deferred too, and its entry is never overwritten.
+	const t = b.enter("o");
+	b.gate({ id: "o", ticket: t, project: null, size: { memMiB: 8192, cpuCenti: 100 } });
+	assert.equal(b.orphan("o", { name: "pi-job-o", ticket: t }), true);
+	assert.equal(b.gate({ id: "o", ticket: b.enter("o"), project: null, size: { memMiB: 1024, cpuCenti: 25 } }).why, "running-here");
+	assert.equal(b.entries().find((e) => e.id === "o").orphan.name, "pi-job-o", "the orphan entry is untouched");
+});
+
+test("a job being handled by two pickups at once is still handled after one of them leaves (verify does not mistake it for elsewhere)", async () => {
+	const clock = { t: 0 };
+	const { b } = budgetWith({ clock });
+	await b.ready;
+	b.gate({ id: "run", project: null, size: { memMiB: 36864, cpuCenti: 100 } });
+	b.gate({ id: "w", project: null, size: { memMiB: 1024, cpuCenti: 25 }, getState: async () => "active" });
+	b.enter("w");
+	b.enter("w");
+	b.leave("w");
+	clock.t = HOLD_VERIFY_AFTER_MS;
+	await b.verify();
+	assert.deepEqual(b.waiting().map((x) => x.id), ["w"], "one pickup still handles it: active HERE, kept");
+	b.leave("w");
+	clock.t = 2 * HOLD_VERIFY_AFTER_MS;
+	await b.verify();
+	assert.deepEqual(b.waiting(), [], "no pickup handles it: active elsewhere, dropped");
+});
+
+test("the count dimension in the gate: the live limit is read per gate, and the oldest waiter's hold keeps a job slot (P2G1-L3)", async () => {
+	let limit = 2;
+	const clock = { t: 0 };
+	const logs = [];
+	const b = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, countLimit: () => limit, now: () => clock.t, log: (event, fields) => logs.push({ event, fields }) });
+	await b.ready;
+	const small = { memMiB: 1024, cpuCenti: 25 };
+	assert.equal(b.gate({ id: "s1", project: null, size: small }).admitted, true);
+	assert.equal(b.gate({ id: "s2", project: null, size: small }).admitted, true);
+	clock.t = 1;
+	assert.deepEqual(b.gate({ id: "big", project: null, size: { memMiB: 20480, cpuCenti: 200 } }), { admitted: false, why: "budget", rank: 0 }, "the count binds, not the memory");
+	b.release("s1");
+	clock.t = 2;
+	assert.equal(b.gate({ id: "s3", project: null, size: small }).admitted, false, "the freed slot is the head waiter's");
+	assert.equal(b.gate({ id: "big", project: null, size: { memMiB: 20480, cpuCenti: 200 } }).admitted, true);
+	limit = 4;
+	assert.equal(b.gate({ id: "s3", project: null, size: small }).admitted, true, "a raised PI_CONCURRENCY applies at the next gate");
+	limit = () => {};
+	const throwing = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, countLimit: () => {
+		throw new Error("x");
+	} });
+	await throwing.ready;
+	assert.equal(throwing.gate({ id: "a", project: null, size: small }).admitted, true, "a count that cannot be read is no count bound (the memory and CPU still are)");
+});
+
+test("SEEDED AT BOOT (P2G1-L4): the surviving job containers are orphans from their labels; unlisted, nothing is admitted", async () => {
+	let answer = () => {
+		throw new Error("daemon down");
+	};
+	let gone = false;
+	const logs = [];
+	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:ml", memory: "24g", cpus: 6 }, { scope: "acme/web", concurrent: 2 }] }), "sl.json");
+	const b = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 }, scopedLimits: () => limits, survivors: async () => answer(), containerGone: async () => gone, log: (event, fields) => logs.push({ event, fields }) });
+	await b.ready;
+	assert.equal(b.snapshot().seeded, false);
+	assert.deepEqual(b.gate({ id: "j", project: null, size: { memMiB: 1024, cpuCenti: 25 } }), { admitted: false, why: "unseeded", rank: -1 }, "fail closed");
+	assert.equal(b.waiting().length, 0, "and no waiter");
+	assert.equal(logs.filter((l) => l.event === "host_budget_seed_unread").length, 1);
+	await b.tick();
+	assert.equal(logs.filter((l) => l.event === "host_budget_seed_unread").length, 1, "said once per streak");
+	answer = () => [
+		{ name: "pi-job-a", venue: { backend: "local" }, memMiB: 8192, cpuCenti: 200 },
+		{ name: "pi-job-old", venue: { backend: "podman" }, memMiB: null, cpuCenti: null },
+		{ name: "pi-job-half", venue: { backend: "local" }, memMiB: 2048, cpuCenti: null },
+	];
+	await b.tick();
+	assert.equal(b.snapshot().seeded, true);
+	assert.ok(logs.some((l) => l.event === "host_budget_seed_read"));
+	const entries = b.entries();
+	assert.deepEqual(entries.map((e) => [e.id, e.memMiB, e.cpuCenti, e.orphan.name, e.orphan.venue.backend]), [
+		["container:pi-job-a", 8192, 200, "pi-job-a", "local"],
+		["container:pi-job-old", 24576, 600, "pi-job-old", "podman"],
+		["container:pi-job-half", 24576, 600, "pi-job-half", "local"],
+	], "labelled as labelled; unlabelled (or half labelled) at the largest size any project could have started it at");
+	assert.equal(b.gate({ id: "j", project: null, size: { memMiB: 9216, cpuCenti: 100 } }).admitted, false, "8g + 24g + 24g seeded + 9g > 64g");
+	b.forget("j");
+	gone = true;
+	await b.tick();
+	assert.equal(b.entries().length, 0, "the sweep gives each back once the runtime says it is gone");
+	assert.equal(b.gate({ id: "j", project: null, size: { memMiB: 9216, cpuCenti: 100 } }).admitted, true);
+	// No lister wired: nothing to seed, admitted from the start.
+	const plain = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 } });
+	await plain.ready;
+	assert.equal(plain.snapshot().seeded, true);
+	// A listing that is not an array is not a listing.
+	const oddLogs = [];
+	const odd = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), jobDefault: { memMiB: 4096, cpuCenti: 200 }, survivors: async () => null, log: (event) => oddLogs.push(event) });
+	await odd.ready;
+	assert.equal(odd.snapshot().seeded, false);
+	assert.deepEqual(oddLogs.filter((e) => e.startsWith("host_budget_seed")), ["host_budget_seed_unread"], "and said, as an unread listing is");
+	assert.deepEqual(pessimisticSize([], { memMiB: 4096, cpuCenti: 200 }), { memMiB: 4096, cpuCenti: 200 });
+	assert.deepEqual(pessimisticSize([{ scope: "project:x", memory: "2g", cpus: 8 }, { scope: "acme/web", memory: "99g" }], { memMiB: 4096, cpuCenti: 200 }), { memMiB: 4096, cpuCenti: 800 }, "only project rows size a job");
+});
+
+test("verify bounds every queue read (P2G1-C1): a read that never settles is the error branch, and the hold is dropped at 120 s", async () => {
+	const clock = { t: 0 };
+	const logs = [];
+	const b = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, now: () => clock.t, log: (event, fields) => logs.push({ event, fields }), stateReadBoundMs: 5 });
+	await b.ready;
+	b.gate({ id: "run", project: null, size: { memMiB: 36864, cpuCenti: 100 } });
+	let reads = 0;
+	b.gate({ id: "hung", project: null, size: { memMiB: 1024, cpuCenti: 25 }, getState: () => (reads++, new Promise(() => {})) });
+	clock.t = HOLD_VERIFY_AFTER_MS;
+	await b.verify();
+	assert.equal(reads, 1, "it was asked");
+	assert.equal(b.waiting().length, 1, "an unanswered read before 120 s keeps the hold");
+	clock.t = HOLD_DROP_ON_ERROR_MS;
+	await b.verify();
+	assert.deepEqual(b.waiting(), [], "the verify RETURNED and dropped it");
+	assert.deepEqual(logs.filter((l) => l.event === "host_budget_hold_dropped").map((l) => l.fields.because), ["unverifiable"]);
+});
+
+test("verify judges the 120 s drop at the clock AFTER the bounded read, since the read itself takes time (P2G1-C1)", async () => {
+	const clock = { t: 0 };
+	const b = makeHostBudget({ settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }), jobDefault: { memMiB: 512, cpuCenti: 25 }, now: () => clock.t, stateReadBoundMs: 5 });
+	await b.ready;
+	b.gate({ id: "run", project: null, size: { memMiB: 36864, cpuCenti: 100 } });
+	// The read hangs until its bound, and the clock passes the drop line while it does.
+	b.gate({ id: "slow", project: null, size: { memMiB: 1024, cpuCenti: 25 }, getState: () => ((clock.t = HOLD_DROP_ON_ERROR_MS), new Promise(() => {})) });
+	clock.t = HOLD_DROP_ON_ERROR_MS - 1;
+	await b.verify();
+	assert.deepEqual(b.waiting(), [], "away 120 s by the time the read gave up: dropped now, not a tick later");
+});
+
+test("tick: one of each piece in flight, and the sweep never waits on a verify, a facts read or a boot listing (P2G1-C1)", async () => {
+	const clock = { t: 0 };
+	let factsReads = 0;
+	let releaseFacts;
+	let goneAsks = 0;
+	const b = makeHostBudget({
+		settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "8" }),
+		jobDefault: { memMiB: 512, cpuCenti: 25 },
+		now: () => clock.t,
+		readFacts: () => (factsReads++, factsReads === 1 ? Promise.resolve({}) : new Promise((r) => (releaseFacts = r))),
+		containerGone: async () => (goneAsks++, true),
+		stateReadBoundMs: 200,
+	});
+	await b.ready;
+	const t = b.enter("o");
+	b.gate({ id: "o", ticket: t, project: null, size: { memMiB: 30000, cpuCenti: 100 } });
+	b.orphan("o", { name: "pi-job-o", ticket: t });
+	let stateReads = 0;
+	b.gate({ id: "w", project: null, size: { memMiB: 8192, cpuCenti: 25 }, getState: () => (stateReads++, new Promise(() => {})) });
+	clock.t = HOLD_VERIFY_AFTER_MS;
+	const first = b.tick();
+	const second = b.tick();
+	for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+	assert.equal(stateReads, 1, "the second tick did not start a second verify while the first still waits");
+	assert.equal(factsReads, 2, "nor a second facts read");
+	assert.equal(goneAsks, 1, "the sweep ran beside the hung verify");
+	assert.equal(b.entries().some((e) => e.id === "o"), false, "and gave the orphan's room back");
+	releaseFacts({});
+	void first;
+	void second;
+});
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Properties, seeded and deterministic.
 
@@ -340,13 +525,15 @@ const SIZES = [
 	{ memMiB: 4096, cpuCenti: 50 },
 ];
 
-test("PROPERTY: after any sequence of gate, release, orphan, sweep, suspend, forget and verify, the sum held never exceeds the budget", async () => {
+test("PROPERTY: after any sequence of gate, release, orphan, sweep, suspend, forget and verify, the sum held never exceeds the budget in memory, CPU and count", async () => {
 	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:p0", memory: "2g", cpus: 1, minJobs: 2, hostShare: 60 }, { scope: "project:p1", memory: "8g", cpus: 2, minJobs: 1 }] }), "sl.json");
 	for (let seed = 1; seed <= 60; seed++) {
 		const rand = prng(seed);
 		const clock = { t: 0 };
 		let goneAnswer = false;
-		const { b } = budgetWith({ clock, limits, gone: async () => goneAnswer });
+		// The count dimension (P2G1-L3): from 1 to 6 jobs, or none, per seed.
+		const count = seed % 7 === 0 ? null : 1 + (seed % 6);
+		const { b } = budgetWith({ clock, limits, gone: async () => goneAnswer, count });
 		await b.ready;
 		const budget = b.current();
 		let next = 0;
@@ -376,6 +563,7 @@ test("PROPERTY: after any sequence of gate, release, orphan, sweep, suspend, for
 			}
 			const used = b.entries().reduce((s, e) => ({ memMiB: s.memMiB + e.memMiB, cpuCenti: s.cpuCenti + e.cpuCenti }), { memMiB: 0, cpuCenti: 0 });
 			assert.ok(used.memMiB <= budget.memMiB && used.cpuCenti <= budget.cpuCenti, `seed ${seed} step ${step}: ${JSON.stringify(used)} over ${JSON.stringify(budget)}`);
+			assert.ok(count === null || b.entries().length <= count, `seed ${seed} step ${step}: ${b.entries().length} jobs over a count of ${count}`);
 			// The project with hostShare 60 never holds more than 60% of either dimension.
 			const p0 = b.entries().filter((e) => e.project === "p0").reduce((s, e) => ({ memMiB: s.memMiB + e.memMiB, cpuCenti: s.cpuCenti + e.cpuCenti }), { memMiB: 0, cpuCenti: 0 });
 			assert.ok(p0.memMiB * 100 <= 60 * budget.memMiB && p0.cpuCenti * 100 <= 60 * budget.cpuCenti, `seed ${seed} step ${step}: p0 over its share`);
@@ -404,13 +592,14 @@ test("PROPERTY: release is idempotent: a second release of any id changes nothin
 	}
 });
 
-test("PROPERTY: the head waiter is admitted within as many releases as there were jobs running when it became the head", async () => {
+test("PROPERTY: the head waiter is admitted within as many releases as there were jobs running when it became the head, with and without a count", async () => {
 	// No minJobs, so the head is the tier 2 hold, the oldest waiter. Each step either a fresh job asks (asking FIRST,
-	// the adversarial order) or one running job ends and every waiter asks again, oldest first.
-	for (let seed = 1; seed <= 60; seed++) {
+	// the adversarial order) or one running job ends and every waiter asks again, oldest first. Seeds above 60 add the
+	// count dimension (P2G1-L3), 2 to 4 jobs: the head's hold keeps a count slot as well, so the bound is unchanged.
+	for (let seed = 1; seed <= 120; seed++) {
 		const rand = prng(5000 + seed);
 		const clock = { t: 0 };
-		const { b } = budgetWith({ clock });
+		const { b } = budgetWith({ clock, count: seed > 60 ? 2 + (seed % 3) : null });
 		await b.ready;
 		let next = 0;
 		const running = new Set();
@@ -533,9 +722,9 @@ test("SCENARIO: light jobs alone flood without starving one another, and the bud
 	assert.deepEqual(maxUsed, { memMiB: 8 * 2048, cpuCenti: 800 });
 });
 
-test("the cadences: a fleet no-fit must stand across two host beats, and every re-check differs from the others", () => {
-	assert.ok(FLEET_NO_FIT_CONFIRM_MS >= 2 * HOST_BEAT_MS);
-	assert.ok(NEVER_FITS_RECHECK_MS > FLEET_NO_FIT_CONFIRM_MS, "the second read of a deferred job always comes after the confirm window");
+test("the cadences: a never-fits deferral outlasts a host beat and the budget's own re-check, and every re-check differs from the others", () => {
+	assert.ok(NEVER_FITS_RECHECK_MS > HOST_BEAT_MS && NEVER_FITS_RECHECK_MS > BUDGET_RECHECK_MS);
+	assert.ok(HOLD_STATE_READ_BOUND_MS < HOLD_DROP_ON_ERROR_MS, "a bounded read leaves the 120 s drop reachable");
 	assert.ok(HOLD_VERIFY_AFTER_MS > BUDGET_RECHECK_MS, "a waiter that is still asking is never verified");
 });
 

@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -131,6 +131,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 		// wrap spells `Promise.resolve(worker?.stop?.())` precisely so a synchronous double cannot
 		// TypeError over the boot's real error, and this double must not hide that spelling's job.
 		return {
+			// Issue #596: the budget the registry beat's thunks read, when a test hands one in.
+			...(workerHostBudget ? { hostBudget: workerHostBudget } : {}),
 			on(evt, fn) {
 				registered[evt] = fn;
 			},
@@ -275,6 +277,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 					throw Object.assign(new Error("absent"), { code: "ENOENT" });
 				}),
 			makePodmanReaper: makePodmanReaper ?? (() => async () => ({ reaped: true })),
+			// Issue #596, P2G1-L4: never this machine's containers. Nothing left from a previous worker unless a test says so.
+			listJobContainers: listJobContainers ?? (() => async () => []),
 			makePodmanBackend: podmanBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(listRunningSandboxes ? { listRunningSandboxes } : {}),
@@ -4640,13 +4644,17 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	const endpoint = { local: true, context: "default", endpoint: "unix:///run/pd-test/docker.sock", reason: null, transient: false };
 	const { makeHostRegistry } = await import("../src/host-registry.mjs");
 	let published = null;
+	const listed = [];
+	const snap = { seeded: false };
 	const { captured } = await runStart({
+		workerHostBudget: { snapshot: () => ({ ...snap }), current: () => ({ memMiB: null, cpuCenti: null }) },
 		env: { PI_HOST_MEMORY_BUDGET: "auto", PI_HOST_CPU_BUDGET: "6", PI_JOB_MEMORY: "2g" },
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 		makeHost: () => fakeHost(),
 		readDaemonFacts: DOCKER_FACTS({ hostCpus: 8, memTotalMiB: 16384 }),
 		jobUserIdentity: { ...LINUX_ID(1001), stat: () => ({ uid: 0, gid: 2375 }) },
 		resolveDockerEndpoint: async () => endpoint,
+		listJobContainers: (bin) => async () => (listed.push(bin), [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50 }]),
 		makeHostRegistry: (args) => {
 			const real = makeHostRegistry(args);
 			return { ...real, start: (fields, opts) => ((published = fields), real.start(fields, opts)) };
@@ -4661,11 +4669,18 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	assert.deepEqual(facts.reserveVenues.map((v) => [v.venue, v.endpointLocal, v.facts.hostCpus]), [["local", endpoint.local === true, 8]]);
 	assert.equal(typeof opts.onRefresh, "function");
 	assert.equal(typeof opts.containerGone, "function");
-	assert.equal(typeof captured.fleetHosts, "function");
+	assert.equal("fleetHosts" in captured, false, "no registry read decides a job's size any more (P2G1-L2)");
+	// P2G1-L4: the boot listing of every blessed venue's remaining job containers, each named with its venue.
+	assert.deepEqual(await opts.survivors(), [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50, venue: { backend: "local" } }]);
+	assert.deepEqual(listed, ["docker"], "local is the only blessed venue here");
 	assert.equal(captured.deps.hostBudget, undefined, "beside the other worker-wide inputs, never in deps");
-	for (const key of ["budgetMemMiB", "budgetCpuCenti", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "budgetRunning", "budgetHolds", "budgetOrphans"]) {
+	for (const key of ["budgetMemMiB", "budgetCpuCenti", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "budgetRunning", "budgetHolds", "budgetOrphans", "budgetSeed"]) {
 		assert.equal(typeof published[key], "function", `${key} is a thunk, re-read every beat`);
 	}
+	// P2G1-L4: the boot listing's state, read at every beat.
+	assert.equal(published.budgetSeed(), "unlisted");
+	snap.seeded = true;
+	assert.equal(published.budgetSeed(), "listed");
 });
 
 test("issue #596, phase 2: the CPU reserve plan reads a systemd daemon's slice only where the endpoint is observed on this host", { skip }, async () => {

@@ -9,7 +9,8 @@
  * WHY A LEDGER AND NOT A COUNT. `PI_CONCURRENCY` counts containers, and a count cannot tell one 20g job from five 2g
  * ones. The budget sums the SIZE each running job was started at (`memMiB`, `cpuCenti`, integers, so a sum is exact),
  * keyed by job id, so a release is idempotent: the job that took a hold gives back exactly what it took, once, whatever
- * the limits file says by then. `PI_CONCURRENCY` stays an upper bound on the count; whichever binds first, binds.
+ * the limits file says by then. `PI_CONCURRENCY` stays an upper bound on the count, and it is judged HERE as the
+ * budget's third dimension (one per job, `admit`), so a hold keeps a job slot too; whichever binds first, binds.
  *
  * WHY HOLDS. A deferred job goes to the back of the delayed set, so a 20g job behind a stream of 2g jobs would wait
  * forever: every time 2g frees, a 2g job takes it. A HOLD is room the budget keeps for a waiting job while it is away:
@@ -27,11 +28,13 @@
  * OFF the decision (`refresh`, on the tick), never inside it.
  *
  * A JOB WHOSE STOP FAILED keeps its hold (`orphan`): the container may still be running and still be using what its
- * size promised. The hold is given back only when the runtime confirms the container is gone (`sweep`, on the tick); the
- * boot reaper, which kills every job container before a worker drains, is the backstop for a worker that restarts.
+ * size promised. The hold is given back only when the runtime confirms the container is gone (`sweep`, on the tick). A
+ * worker that restarts kills every job container it can (the boot reaper), then SEEDS the ledger with every one still
+ * listed (`survivors`), so a container the reaper could not remove is still counted; until that listing is read, the
+ * gate admits nothing.
  */
 
-import { formatCpus, formatMemory } from "./job-size.mjs";
+import { formatCpus, formatMemory, parseCpus, parseMemory } from "./job-size.mjs";
 
 /** The four settings, env only for this release (never the settings overlay: a budget must not move under running jobs). */
 export const HOST_BUDGET_KEYS = Object.freeze({
@@ -50,22 +53,25 @@ export const HOST_BUDGET_KEYS = Object.freeze({
 export const BUDGET_RECHECK_MS = 9_000;
 
 /**
- * How long a forge job too big for THIS host waits before another pickup asks again. Longer than every re-check above,
- * because the answer is not "soon" but "on another host": the job goes back to the shared queue for a host it fits on.
+ * How long a job on the SHARED queue whose size can never fit THIS host waits before another pickup asks again (gate
+ * round 1 of phase 2, P2G1-L2). Longer than every re-check above, because the answer is not "soon" but "on another
+ * host": the job goes back to the shared queue for a host it fits on. It is never refused for the fleet: a registry
+ * row is absent while its host restarts and a timed-out read drops a row, so "no live host fits" is not a verdict the
+ * registry can give. Doctor names a project that fits no live host instead.
  */
 export const NEVER_FITS_RECHECK_MS = 60_000;
-
-/**
- * How long a "no live host can fit this" read must stand before a forge job is refused `job-size-exceeds-fleet`: two
- * reads at least this far apart. Two host beats (`HOST_BEAT_MS`, 15 s), so a peer whose row was missing from one read
- * (a restart, a deleted keyspace) has beaten again before the second: the registry can delay a refusal, never invent one.
- */
-export const FLEET_NO_FIT_CONFIRM_MS = 30_000;
 
 /** A hold whose job has not been back for this long is checked against the queue. */
 export const HOLD_VERIFY_AFTER_MS = 15_000;
 /** A hold that cannot be checked (Valkey does not answer) is dropped once its job has been away this long. */
 export const HOLD_DROP_ON_ERROR_MS = 120_000;
+/**
+ * How long ONE queue read of a hold's job (`getState`) may take (gate round 1 of phase 2, P2G1-C1). The worker's client
+ * is built with `maxRetriesPerRequest: null`, so a command against an unreachable server queues forever rather than
+ * rejecting: unbounded, one hung read held the whole verify, the 120 s drop never came, and every later tick piled up
+ * behind it. A read past this bound is an unanswered read, the error branch.
+ */
+export const HOLD_STATE_READ_BOUND_MS = 5_000;
 /** How often the budget re-reads its facts, verifies stale holds and sweeps orphans. Off every job path. */
 export const HOST_BUDGET_TICK_MS = 5_000;
 
@@ -301,9 +307,16 @@ export function rankHolds(waiters, ledger, minJobsOf = () => 0) {
 /**
  * THE ADMISSION RULE (PURE): may `ask` (`{ id, project, memMiB, cpuCenti }`) start now? `{ ok: true }`, or `{ ok: false,
  * why }` with `why` `share` (its project would hold more than its `hostShare` of the budget) or `budget` (what runs, plus
- * `ask`, plus every hold ranked above it, does not fit in memory or in CPU). `holds` is `rankHolds`' order; a job that
- * holds no hold has every hold above it. The share is judged first, so a job its own project's share stops is not
- * reported as waiting for the budget (and so does not hold room it could not use).
+ * `ask`, plus every hold ranked above it, does not fit in memory, in CPU or in the job COUNT). `holds` is `rankHolds`'
+ * order; a job that holds no hold has every hold above it. The share is judged first, so a job its own project's share
+ * stops is not reported as waiting for the budget (and so does not hold room it could not use).
+ *
+ * THE COUNT is the third dimension (gate round 1 of phase 2, P2G1-L3): every running job, the ask and every hold above
+ * it is ONE, against `budget.count` (the live `PI_CONCURRENCY`; null or absent is no count bound). It was a separate
+ * host slot taken BEFORE this gate, and that starved a big job: a full host slot deferred it at the slot, so its hold
+ * was suspended, and every small job that ended was replaced at once by the next one from the host queue. Inside the
+ * budget the oldest waiter's hold keeps a count slot as well as its memory and CPU, so the next free slot is its own.
+ * `hostShare` does not apply to the count: it is a share of the machine's memory and CPU, not of its job slots.
  */
 export function admit({ budget, ledger, holds, ask, shareOf = () => null }) {
 	const share = ask.project ? shareOf(ask.project) : null;
@@ -312,8 +325,10 @@ export function admit({ budget, ledger, holds, ask, shareOf = () => null }) {
 		if (!withinShare(mine.memMiB + ask.memMiB, budget.memMiB, share) || !withinShare(mine.cpuCenti + ask.cpuCenti, budget.cpuCenti, share)) return { ok: false, why: "share" };
 	}
 	const rank = holds.findIndex((h) => h.id === ask.id);
-	const need = sumOf([...ledger, ask, ...(rank === -1 ? holds : holds.slice(0, rank))]);
-	if (!fits(need.memMiB, budget.memMiB) || !fits(need.cpuCenti, budget.cpuCenti)) return { ok: false, why: "budget" };
+	const counted = [...ledger, ask, ...(rank === -1 ? holds : holds.slice(0, rank))];
+	const need = sumOf(counted);
+	const count = Number.isSafeInteger(budget.count) ? budget.count : null;
+	if (!fits(need.memMiB, budget.memMiB) || !fits(need.cpuCenti, budget.cpuCenti) || !fits(counted.length, count)) return { ok: false, why: "budget" };
 	return { ok: true };
 }
 
@@ -340,24 +355,43 @@ export function publishedBudget(row) {
 }
 
 /**
- * Whether ANY live host can fit a size (PURE), from one registry read (`readLiveHosts`' rows, this host's own included):
- * `fits` when a host's published budget (and the project's share of it) fits it, `none` when every row publishes a
- * budget in both dimensions and none fits, else `unknown` (no row for this host, or a row without a budget: a worker
- * from before the budget, or one whose facts are not read yet). Only `none` may refuse, and only twice in a row
- * (`FLEET_NO_FIT_CONFIRM_MS`).
+ * The largest size any running job here could have been started at, for a surviving job container that carries no size
+ * label (one started by a worker from before the labels): the larger of the default size and every project row's size,
+ * in each dimension. Pessimistic on purpose: a guess too small lets the next job overcommit the host, a guess too large
+ * only delays one until the sweep sees the container gone.
  */
-export function fleetFit(size, share, rows, self) {
-	if (!Array.isArray(rows) || !rows.some((r) => r?.name === self)) return "unknown";
-	let unknown = false;
-	for (const row of rows) {
-		const budget = publishedBudget(row);
-		if (budget.memMiB === null || budget.cpuCenti === null) {
-			unknown = true;
-			continue;
+export function pessimisticSize(limits, jobDefault) {
+	let memMiB = jobDefault.memMiB;
+	let cpuCenti = jobDefault.cpuCenti;
+	for (const row of Array.isArray(limits) ? limits : []) {
+		if (typeof row?.scope !== "string" || !row.scope.startsWith(PROJECT_ROW_PREFIX)) continue;
+		try {
+			if (typeof row.memory === "string") memMiB = Math.max(memMiB, parseMemory(row.memory));
+		} catch {
+			// a row the loader refused never reaches here; a bad one is no size
 		}
-		if (neverFits(size, budget, share) === null) return "fits";
+		try {
+			if (row.cpus !== null && row.cpus !== undefined) cpuCenti = Math.max(cpuCenti, parseCpus(row.cpus));
+		} catch {
+			// as above
+		}
 	}
-	return unknown ? "unknown" : "none";
+	return { memMiB, cpuCenti };
+}
+
+/**
+ * `promise`'s answer, or a rejection once `ms` have passed; the timer is cleared when the answer comes. NOT unref'd: the
+ * wait it bounds is the tick's own, and an unref'd timer beside a read that never settles leaves the event loop with
+ * nothing to run, so the verify would never return (the shutdown path exits the process either way).
+ */
+function bounded(promise, ms) {
+	let timer;
+	return Promise.race([
+		Promise.resolve(promise).finally(() => clearTimeout(timer)),
+		new Promise((_resolve, reject) => {
+			timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms);
+		}),
+	]);
 }
 
 /**
@@ -369,25 +403,56 @@ export function fleetFit(size, share, rows, self) {
  *   readFacts     async () => `{ memTotalMiB, hostCpus, userMemMiB, userCpuCenti }`, the runtime's answers (cached by
  *                 their own readers); read by `refresh`, never by `gate`
  *   scopedLimits  () => the live limits snapshot, for the holds' `minJobs` and the shares when no pickup snapshot is given
+ *   countLimit    () => the live `PI_CONCURRENCY` (an integer), the budget's third dimension (`admit`); null is no bound
  *   containerGone async (name, venue) => true (the runtime says it is gone), false (it runs), null (could not ask)
+ *   survivors     async () => `[{ name, venue, memMiB, cpuCenti }]`, the job containers every blessed venue still lists
+ *                 after the boot reaper (a size label absent is null); THROWS when a venue cannot be listed. Null for a
+ *                 wiring without one (nothing to seed)
  *   onRefresh     (budget, facts) => anything, after every refresh, NOT awaited and never allowed to throw into it: the
  *                 CPU reserve (`cpu-reserve.mjs`) keeps the jobs' parent cgroup's quota at the budget from here, so a
  *                 slow `systemctl` or helper container delays no refresh, no gate and no pickup
+ *
+ * ONE PICKUP, ONE TICKET (gate round 1 of phase 2, P2G1-L1). The same job id can reach the gate twice on one host: a
+ * scheduled job whose lock lapsed while its first attempt still runs is moved back to wait by BullMQ's stall check and
+ * picked up again here, and its record does not exist yet. The ledger is keyed by job id, so the second attempt used to
+ * overwrite the first's entry and its release then freed the hold of a container that still ran. Now `enter` hands each
+ * pickup a ticket, the entry carries the ticket of the pickup that took it, `release` and `orphan` act only on the entry
+ * their own ticket took, and the gate DEFERS a job whose id the ledger already holds (`running-here`, running or orphan)
+ * without making it a waiter: what that id promised is still in use until its own pickup gives it back.
+ *
+ * SEEDED AT BOOT (P2G1-L4). The ledger lives in process memory, so a worker that restarts starts empty while a job
+ * container the boot reaper could not remove may still run. `survivors` lists what remains on every blessed venue and
+ * each is seeded as an ORPHAN from its `pi.dispatch.mem` and `pi.dispatch.cpu` labels (`pessimisticSize` without
+ * them); the sweep gives each back once the runtime says it is gone. Until that listing has been read once the gate
+ * ADMITS NOTHING (`unseeded`, fail closed, said once per streak as `host_budget_seed_unread`), and every tick asks again:
+ * an empty ledger beside containers nobody counted is the overcommit the budget exists to refuse.
  */
-export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti: 200 }, readFacts = async () => ({}), scopedLimits = () => [], containerGone = async () => null, onRefresh = () => {}, now = () => Date.now(), log = () => {} }) {
+export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti: 200 }, readFacts = async () => ({}), scopedLimits = () => [], countLimit = () => null, containerGone = async () => null, survivors = null, onRefresh = () => {}, now = () => Date.now(), log = () => {}, stateReadBoundMs = HOLD_STATE_READ_BOUND_MS }) {
 	let budget = { memMiB: null, cpuCenti: null };
 	let detail = null;
 	let unknownSaid = "";
-	/** jobId -> { id, project, memMiB, cpuCenti, at, orphan: null | { name, venue, since } } */
+	/** jobId (or `container:<name>` for a seeded survivor) -> { id, project, memMiB, cpuCenti, at, ticket, orphan: null | { name, venue, since } } */
 	const ledger = new Map();
 	/** jobId -> { id, project, memMiB, cpuCenti, firstAt, lastAt, checkedAt, suspended, state } */
 	const waiters = new Map();
-	/** The jobs this host's processors are handling right now, so a hold of an `active` job is not mistaken for elsewhere. */
-	const handling = new Set();
+	/** jobId -> how many of this host's pickups are handling it right now, so a hold of an `active` job is not mistaken for elsewhere. */
+	const handling = new Map();
+	let tickets = 0;
+	let seeded = typeof survivors !== "function";
+	let seedSaid = false;
 	const rulesOf = (limits) => ({
 		shareOf: (p) => projectBudgetRow(limits, p).hostShare,
 		minJobsOf: (p) => projectBudgetRow(limits, p).minJobs,
 	});
+	const countNow = () => {
+		let limit = null;
+		try {
+			limit = countLimit();
+		} catch {
+			limit = null;
+		}
+		return Number.isSafeInteger(limit) && limit >= 0 ? limit : null;
+	};
 
 	const refresh = async () => {
 		let facts = {};
@@ -412,9 +477,98 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		}
 		return budget;
 	};
-	const ready = refresh();
 
+	const seed = async () => {
+		if (seeded) return true;
+		let listed;
+		try {
+			listed = await survivors();
+			if (!Array.isArray(listed)) throw new Error("not a listing");
+		} catch {
+			if (!seedSaid) {
+				seedSaid = true;
+				log("host_budget_seed_unread", { reason: "the job containers left from before this worker started could not be listed, so no job is admitted until they are" });
+			}
+			return false;
+		}
+		if (seeded) return true;
+		const guess = pessimisticSize(scopedLimits(), jobDefault);
+		const t = now();
+		for (const c of listed) {
+			if (typeof c?.name !== "string" || c.name === "") continue;
+			const id = `container:${c.name}`;
+			const labelled = Number.isSafeInteger(c.memMiB) && c.memMiB > 0 && Number.isSafeInteger(c.cpuCenti) && c.cpuCenti > 0;
+			const size = labelled ? { memMiB: c.memMiB, cpuCenti: c.cpuCenti } : guess;
+			ledger.set(id, { id, project: null, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket: null, orphan: { name: c.name, venue: c.venue ?? null, since: t } });
+			log("host_budget_seeded", { memMiB: size.memMiB, cpuCenti: size.cpuCenti, labelled });
+		}
+		seeded = true;
+		if (seedSaid) log("host_budget_seed_read", { seeded: listed.length });
+		seedSaid = false;
+		return true;
+	};
 	const holdsNow = (limits) => rankHolds(waiters.values(), [...ledger.values()], rulesOf(limits).minJobsOf);
+
+	/** Drops the holds of waiters whose job is not coming back (see the header). Every queue read is bounded. */
+	const verify = async () => {
+		const t = now();
+		for (const w of [...waiters.values()]) {
+			if (t - Math.max(w.lastAt, w.checkedAt) < HOLD_VERIFY_AFTER_MS) continue;
+			let state;
+			try {
+				if (typeof w.state !== "function") throw new Error("no state reader");
+				state = await bounded(w.state(), stateReadBoundMs);
+			} catch {
+				// Judged at the clock NOW, not at the tick's start: a bounded read still took its time.
+				if (now() - w.lastAt >= HOLD_DROP_ON_ERROR_MS && waiters.get(w.id) === w) {
+					waiters.delete(w.id);
+					log("host_budget_hold_dropped", { jobId: w.id, because: "unverifiable" });
+				}
+				continue;
+			}
+			// The waiter may have come back (or been replaced) while the state was read: only the one read is judged.
+			if (waiters.get(w.id) !== w) continue;
+			const gone = state === "completed" || state === "failed" || state === "unknown" || (state === "active" && !handling.has(w.id));
+			if (gone) {
+				waiters.delete(w.id);
+				log("host_budget_hold_dropped", { jobId: w.id, because: state === "active" ? "active-elsewhere" : state });
+			} else {
+				waiters.set(w.id, { ...w, checkedAt: t });
+			}
+		}
+	};
+
+	/** Gives back an orphan's hold once the runtime says its container is gone. */
+	const sweep = async () => {
+		for (const entry of [...ledger.values()]) {
+			if (!entry.orphan) continue;
+			let gone = null;
+			try {
+				gone = await containerGone(entry.orphan.name, entry.orphan.venue);
+			} catch {
+				gone = null;
+			}
+			if (gone === true && ledger.get(entry.id) === entry) {
+				ledger.delete(entry.id);
+				log("host_budget_orphan_released", { jobId: entry.id, heldForMs: now() - entry.orphan.since });
+			}
+		}
+	};
+
+	// ONE IN FLIGHT PER PIECE (P2G1-C1): a tick that finds a piece still running from an earlier tick skips that piece
+	// rather than starting a second, and the pieces never wait on one another, so a slow facts read or queue read cannot
+	// pile ticks up behind it or keep the sweep from giving an orphan's room back.
+	const running = new Map();
+	const once = (key, fn) => {
+		if (running.has(key)) return running.get(key);
+		const p = Promise.resolve()
+			.then(fn)
+			.catch(() => {})
+			.finally(() => running.delete(key));
+		running.set(key, p);
+		return p;
+	};
+	const ready = Promise.all([refresh(), once("seed", seed)]).then(([first]) => first);
 
 	return {
 		ready,
@@ -426,14 +580,25 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		neverFits: (size, project, limits = scopedLimits()) => neverFits(size, budget, project ? rulesOf(limits).shareOf(project) : null),
 		/** The project's `hostShare` in the given snapshot, for a refusal's record. */
 		shareOf: (project, limits = scopedLimits()) => (project ? rulesOf(limits).shareOf(project) : null),
-		/** Marks a job as inside one of this host's processors (`enter`) or no longer (`leave`). */
-		enter: (id) => handling.add(id),
-		leave: (id) => handling.delete(id),
+		/** Marks a job as inside one of this host's processors (`enter`, which hands the pickup its TICKET) or no longer (`leave`). */
+		enter(id) {
+			handling.set(id, (handling.get(id) ?? 0) + 1);
+			tickets += 1;
+			return tickets;
+		},
+		leave(id) {
+			const n = (handling.get(id) ?? 0) - 1;
+			if (n > 0) handling.set(id, n);
+			else handling.delete(id);
+		},
 		/**
-		 * THE GATE, synchronous: `{ admitted: true }` with the hold taken, or `{ admitted: false, why }` with the job kept
-		 * (or made) a waiter. `getState` is the job's own `getState`, kept for `verify`.
+		 * THE GATE, synchronous: `{ admitted: true }` with the hold taken under `ticket`, or `{ admitted: false, why }`:
+		 * `unseeded` (the boot listing is not read yet) and `running-here` (the ledger already holds this id) make no
+		 * waiter; `budget` and `share` keep (or make) the job a waiter. `getState` is the job's own, kept for `verify`.
 		 */
-		gate({ id, project = null, size, getState = null, limits = scopedLimits() }) {
+		gate({ id, ticket = null, project = null, size, getState = null, limits = scopedLimits() }) {
+			if (!seeded) return { admitted: false, why: "unseeded", rank: -1 };
+			if (ledger.has(id)) return { admitted: false, why: "running-here", rank: -1 };
 			const t = now();
 			const was = waiters.get(id);
 			const ask = { id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, firstAt: was?.firstAt ?? t };
@@ -443,10 +608,10 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 			const candidates = new Map(waiters);
 			candidates.set(id, { ...ask, suspended: false });
 			const holds = rankHolds(candidates.values(), [...ledger.values()], rules.minJobsOf);
-			const verdict = admit({ budget, ledger: [...ledger.values()], holds, ask, shareOf: rules.shareOf });
+			const verdict = admit({ budget: { ...budget, count: countNow() }, ledger: [...ledger.values()], holds, ask, shareOf: rules.shareOf });
 			if (verdict.ok) {
 				waiters.delete(id);
-				ledger.set(id, { id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, orphan: null });
+				ledger.set(id, { id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket, orphan: null });
 				return { admitted: true };
 			}
 			// A share-stopped job is a waiter that holds nothing: the budget is not its obstacle.
@@ -462,73 +627,35 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		forget(id) {
 			waiters.delete(id);
 		},
-		/** Gives back a running job's hold. IDEMPOTENT: true only the first time, and never for an orphan. */
-		release(id) {
+		/**
+		 * Gives back a running job's hold. IDEMPOTENT: true only the first time, never for an orphan, and only for the
+		 * entry this pickup's `ticket` took (another pickup of the same id gives back nothing of it).
+		 */
+		release(id, { ticket = null } = {}) {
 			const entry = ledger.get(id);
-			if (!entry || entry.orphan) return false;
+			if (!entry || entry.orphan || entry.ticket !== ticket) return false;
 			ledger.delete(id);
 			return true;
 		},
 		/** The job's container may outlive it (its stop did not take): the hold stays until `sweep` sees the container gone. */
-		orphan(id, { name = null, venue = null } = {}) {
+		orphan(id, { name = null, venue = null, ticket = null } = {}) {
 			const entry = ledger.get(id);
-			if (!entry || entry.orphan) return false;
+			if (!entry || entry.orphan || entry.ticket !== ticket) return false;
 			ledger.set(id, { ...entry, orphan: { name, venue, since: now() } });
 			log("host_budget_orphan", { jobId: id, memMiB: entry.memMiB, cpuCenti: entry.cpuCenti });
 			return true;
 		},
-		/** Drops the holds of waiters whose job is not coming back (see the header). */
-		async verify() {
-			const t = now();
-			for (const w of [...waiters.values()]) {
-				if (t - Math.max(w.lastAt, w.checkedAt) < HOLD_VERIFY_AFTER_MS) continue;
-				let state;
-				try {
-					if (typeof w.state !== "function") throw new Error("no state reader");
-					state = await w.state();
-				} catch {
-					if (t - w.lastAt >= HOLD_DROP_ON_ERROR_MS && waiters.get(w.id) === w) {
-						waiters.delete(w.id);
-						log("host_budget_hold_dropped", { jobId: w.id, because: "unverifiable" });
-					}
-					continue;
-				}
-				// The waiter may have come back (or been replaced) while the state was read: only the one read is judged.
-				if (waiters.get(w.id) !== w) continue;
-				const gone = state === "completed" || state === "failed" || state === "unknown" || (state === "active" && !handling.has(w.id));
-				if (gone) {
-					waiters.delete(w.id);
-					log("host_budget_hold_dropped", { jobId: w.id, because: state === "active" ? "active-elsewhere" : state });
-				} else {
-					waiters.set(w.id, { ...w, checkedAt: t });
-				}
-			}
-		},
-		/** Gives back an orphan's hold once the runtime says its container is gone. */
-		async sweep() {
-			for (const entry of [...ledger.values()]) {
-				if (!entry.orphan) continue;
-				let gone = null;
-				try {
-					gone = await containerGone(entry.orphan.name, entry.orphan.venue);
-				} catch {
-					gone = null;
-				}
-				if (gone === true && ledger.get(entry.id) === entry) {
-					ledger.delete(entry.id);
-					log("host_budget_orphan_released", { jobId: entry.id, heldForMs: now() - entry.orphan.since });
-				}
-			}
-		},
-		/** One tick: facts, then the stale holds, then the orphans. Never throws. */
-		async tick() {
-			await refresh().catch(() => {});
-			await this.verify().catch(() => {});
-			await this.sweep().catch(() => {});
+		verify,
+		sweep,
+		/** Reads the boot listing again while it has not been read (`unseeded`). True once it has. */
+		seed,
+		/** One tick: facts, the boot listing while unread, the stale holds and the orphans, each on its own. Never throws. */
+		tick() {
+			return Promise.all([once("refresh", refresh), once("seed", seed), once("verify", verify), once("sweep", sweep)]).then(() => undefined);
 		},
 		/**
 		 * What the registry row and doctor show: the budget, what runs (orphans included), what the holds keep, and counts.
-		 * Integers only.
+		 * Integers only, and `seeded` (whether the boot listing has been read).
 		 */
 		snapshot(limits = scopedLimits()) {
 			const entries = [...ledger.values()];
@@ -546,6 +673,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 				orphans: entries.filter((e) => e.orphan).length,
 				holds: holds.length,
 				waiters: waiters.size,
+				seeded,
 			};
 		},
 		/** Test and doctor seams: copies, never the live maps. */

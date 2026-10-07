@@ -286,10 +286,20 @@ test("sync where only root may set it: read, never written, the state says unset
 	assert.equal(logs[0][0], "cpu_reserve_fail_open");
 	assert.match(logs[0][1].failOpen, /no quota held across them/);
 	const g = fakeRun([{ code: 0, stdout: "2s" }]);
-	const other = makeCpuReserve({ run: g.run, image: "i", now: () => 0 });
+	const otherLogs = [];
+	const other = makeCpuReserve({ run: g.run, image: "i", now: () => 0, log: (e, x) => otherLogs.push([e, x]) });
 	await other.sync({ cpuCenti: 300, plans: [SYSTEM] });
 	assert.equal(other.states()[0].status, "differs");
 	assert.equal(other.states()[0].quotaCenti, 200);
+	// A quota IS held there, the wrong one: never "no quota held".
+	assert.equal(otherLogs[0][1].failOpen, "jobs run under the parent held to a quota of 2 CPUs, not the CPU budget of 3: jobs together are capped there, and the reserve kept is not the one configured");
+	// The executing review's case: the budget turned off while the operator's quota of 3 CPUs is still set.
+	const offLogs = [];
+	const off = makeCpuReserve({ run: fakeRun([{ code: 0, stdout: "3s" }]).run, image: "i", now: () => 0, log: (e, x) => offLogs.push([e, x]) });
+	await off.sync({ cpuCenti: Infinity, plans: [SYSTEM] });
+	assert.deepEqual([off.states()[0].status, off.states()[0].wantCenti, off.states()[0].quotaCenti], ["differs", null, 300]);
+	assert.equal(offLogs[0][0], "cpu_reserve_fail_open");
+	assert.equal(offLogs[0][1].failOpen, "the CPU budget is off, but the parent still holds a quota of 3 CPUs, so jobs together are still capped to it until it is cleared");
 	const h = fakeRun([{ code: 1 }]);
 	const third = makeCpuReserve({ run: h.run, image: "i", now: () => 0 });
 	await third.sync({ cpuCenti: 300, plans: [SYSTEM] });

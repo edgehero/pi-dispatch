@@ -79,7 +79,8 @@ export const SCOPED_LIMITS_VERSION = 3;
  *   - `cpus`: their CPU weight (`0.5`, `2`; `parseCpus`), stored as a number;
  *   - `hostShare`: the most of a host's job budget the project's running jobs may hold together, as a whole PERCENTAGE
  *     from 1 to 100 (`50` is half). ENFORCED by each host's budget (`host-budget.mjs`): a job that would take the
- *     project past it waits, and a size above it is refused there (`job-size-exceeds-share`);
+ *     project past it waits, and a size above it is refused there for a job on that host's own queue
+ *     (`job-size-exceeds-share`; on the shared queue it waits for a host whose share fits it);
  *   - `minJobs`: how many of the project's jobs a host should make room for before it admits other projects' jobs, a
  *     soft minimum. ENFORCED by the host budget's tier 1 holds (`host-budget.mjs` `rankHolds`).
  * A version 1 or 2 file that carries one is refused naming version 3, for the version 2 reason: a 3.1.0 worker drops
