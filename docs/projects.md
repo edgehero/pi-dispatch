@@ -125,7 +125,7 @@ Caps live in [`scoped-limits.json`](scoped-limits.md#project-rows), never in thi
 - A project row needs `"version": 2` in `scoped-limits.json`, even with counts only. The panel and the tools write it.
 - The same row can set the size of every member's job container: `"memory": "8g"` and `"cpus": 4` (file version
   3). Without it a job gets `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`). See
-  [job sizes](scoped-limits.md#job-sizes-version-3).
+  [job sizes](scoped-limits.md#job-sizes-version-3), and [sizing jobs](sizing.md) for how to choose one.
 
 The row's id must be a project here. A row naming a missing project stops the worker from starting, and a live
 edit that would leave one is kept out (the worker logs `scoped_limits_reload_invalid` or `projects_reload_invalid`,

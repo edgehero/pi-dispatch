@@ -1251,6 +1251,8 @@ own folder is never relabelled and needs the `semanage fcontext` label from the 
 
 ### The CPU reserve on this venue
 
+How to choose sizes and a budget is in [sizing jobs](sizing.md); this section is what differs on this venue.
+
 Every job gets the size its project sets (see [job sizes](scoped-limits.md#job-sizes-version-3)) and a `--cpus`
 ceiling of the host's CPU budget ([the host budget](multi-host.md#the-host-budget)), which on this venue also takes
 a `cpu.max` or `memory.max` set on the account's systemd user service into account. The ceiling bounds one job; what

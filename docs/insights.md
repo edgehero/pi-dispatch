@@ -146,7 +146,8 @@ the memory part of it (below).
   retries. A job where only a child process was killed keeps its own outcome, and `oomKills` above 0 shows it.
 - Each job runs at its size: its project's `memory` and `cpus`, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default
   4 GB and 2 CPUs). Every record says which in `size` (`memMiB`, `cpuCenti` in hundredths of a CPU, and `source`:
-  `project`, `env` or `default`). Compare `memPeak` with it to choose a size ([job sizes](scoped-limits.md#job-sizes-version-3)).
+  `project`, `env` or `default`). Compare `memPeak` with it to choose a size ([job sizes](scoped-limits.md#job-sizes-version-3),
+  and [sizing jobs](sizing.md) for the whole path).
 - Disk I/O, disk space and network are not measured or isolated.
 
 ### The job sizes section

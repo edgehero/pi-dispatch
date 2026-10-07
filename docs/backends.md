@@ -150,9 +150,9 @@ ones adapters get wrong:
   runs under the one parent cgroup `pidispatch.slice` (`--cgroup-parent`), whose CPU quota is the CPU budget, so all
   jobs together keep the reserve ([the CPU reserve across all jobs](multi-host.md#the-cpu-reserve-across-all-jobs)).
   The egress proxy and Valkey never run under it. Who sets that quota depends on the venue: the worker itself on
-  rootless Podman (`systemctl --user`) and on Docker Desktop (a short helper container that writes `cpu.max`, written
-  again after a Docker Desktop restart), the operator once as root on Docker with systemd and on rootful Podman
-  (doctor prints the command). A quota that is not in place never stops a job: doctor warns "no host CPU reserve
+  rootless Podman (`systemctl --user`) and on Docker's `cgroupfs` driver, Docker Desktop included (a short helper
+  container that writes `cpu.max`, written again after a Docker Desktop restart), the operator once as root on Docker
+  with systemd and on rootful Podman, and as the daemon's account on rootless Docker (doctor prints the command). A quota that is not in place never stops a job: doctor warns "no host CPU reserve
   across jobs" and the worker logs `cpu_reserve_fail_open`. There is no memory limit across jobs (the kernel would
   kill the largest job, not the one that grew); the budget's admission bounds memory. Both builders emit the same
   flags. A venue's `info` gives the budget's `auto` its memory
@@ -167,7 +167,8 @@ ones adapters get wrong:
   Docker reports `SwapLimit` or `CPUShares` false, it drops that flag: doctor warns, and the worker logs
   `size_bound_unenforced` for each job. Where the runtime gives no CPU count, jobs run with no `--cpus` and doctor
   warns. On Docker Desktop, after you give the VM fewer CPUs the first job loses one attempt (refunded and retried)
-  and the worker logs `cpu_ceiling_stale`; the next pickup reads the new count.
+  and the worker logs `cpu_ceiling_stale`; the next pickup reads the new count. How to choose sizes and a budget,
+  and what is not isolated (disk I/O, disk space, network bandwidth), is in [sizing jobs](sizing.md).
 - **`local`'s `nonRoot` and `localFolders` depend on which uid the job runs as** (issue #341). On macOS, Windows
   and Docker Desktop the image's own `USER` runs. On a daemon that enforces bind-mount ownership (native Linux
   Docker, rootful Podman) the worker runs the job as its own uid with `--user` and `HOME=/home/pi`, because
