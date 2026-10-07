@@ -9,42 +9,49 @@
  * WHAT IT READS. Run records (INT-RUN-HISTORY-FILE-CONTRACT) of the project, from the last `SUGGEST_WINDOW_DAYS`
  * days, newest first, at most `SUGGEST_WINDOW_RUNS` of them, and only those that carry BOTH `resources` (what the
  * container used, issue #596 phase 0) and `size` (what it was given, phase 1). A record from before either is ignored,
- * never guessed: a run with no size cannot say whether its peak was cut off, and a run with no measurement says
- * nothing.
+ * never guessed.
  *
  * THE NUMBERS ARE UNTRUSTED. `resources` is produced inside the job's container, which runs code the job controls, so
- * every number is judged again here whatever the worker judged when it wrote the record (a record is a file anyone with
- * the account can edit, and a mirrored one came over Valkey): a field that is not a safe non-negative integer is
- * IGNORED (that record leaves that dimension), and a value past what the container could hold is CLAMPED to it. A
- * peak above the record's own memory limit reads as AT the limit, which is what a job may honestly reach anyway, so
- * inflating a peak buys a job nothing it could not take by allocating. And the suggestion is NEVER applied by anything:
- * every surface names the `dispatch_limit_edit` call, and an operator confirms it.
+ * every number is judged again here whatever the worker judged when it wrote the record: a field that is not a safe
+ * non-negative integer is IGNORED (that record leaves that dimension), and a value past what the container could hold
+ * is CLAMPED to it. The suggestion is NEVER applied by anything: every surface names the call, and an operator confirms.
  *
- * WHICH RUNS COUNT FOR A DIMENSION: only those given at least the CURRENT size in it. A run at a smaller size that was
- * cut off says the OLD size was too small, which is no longer the question; counted, an OOM from before a raise would
- * ask for the raise again (1.5x of the new size) until it aged out of the window. A run at a larger size counts: its
- * peak below its limit is a true measurement, which is what a lowering needs.
+ * TWO MEASURED FACTS SHAPE THE RULES (the review gate of this phase, in the lab):
+ *   - page cache alone drives `memory.peak` to exactly the limit with no OOM kill (a 512m container reading 1.2 GB of
+ *     files peaked at 512m, oom_kill 0). A peak AT the limit therefore says nothing about need, so it never raises:
+ *     an earlier rule that raised on it walked an I/O-heavy project up step by step to the budget. Only a confirmed
+ *     OOM (the record's reason `oom-killed`, which the WORKER decides, not the job) raises memory.
+ *   - a job's throttled time is the same at 1024 and 4096 CPU shares, because `--cpus` is the host's CPU ceiling for
+ *     every job, not the job's size (the size is its weight). Raising a job's cpus never reduces its throttling, so
+ *     throttling never raises CPUs; it is shown as a fact about the host.
+ *
+ * WHICH RUNS COUNT: in each dimension the runs given at least the CURRENT size decide (a run at a smaller size that
+ * was cut off says the old size was too small, which is no longer the question). The floors of a lowering read EVERY
+ * run of the window, whatever its size: a lowering must never undo a raise an OOM caused, nor drop below what the
+ * heaviest run used.
  *
  * MEMORY, in this order (the first that applies decides):
- *   1. an `oom-killed` run: raise to the larger of 1.5x the current size and 1.25x the p95 peak;
- *   2. more than 10% of the runs at 90% or more of their own limit: raise to 1.5x the current size. `memory.peak`
- *      counts page cache, which the kernel reclaims at the limit, so a peak AT the limit is a run that was cut off,
- *      never a true need; erring high is the safe direction;
- *   3. fewer than `SUGGEST_MIN_SAMPLES` runs: not enough runs;
- *   4. the target 1.25x the p95 peak at most 0.75x the current size: lower to the target;
- *   5. otherwise it fits.
- *   Rules 1 and 2 need no minimum: an OOM, or a run cut off, is a fact about the current size by itself.
- *   A size is rounded UP to a step: 256m up to 2g, 512m up to 8g, then 1g; never below the 512m floor.
- * CPUs (no event decides them alone, so the minimum comes first):
- *   1. fewer than `SUGGEST_MIN_SAMPLES` runs: not enough runs;
- *   2. the p50 run throttled more than 25% of its wall time: raise by 50%;
- *   3. the p95 cores used (CPU time over wall time) below 0.4x the current cpus: lower to 1.25x that p95;
+ *   1. an `oom-killed` run at the current size or larger: raise to 1.5x the larger of the current size and the
+ *      largest size in the window that was OOM-killed (one step; that run no longer counts once the raise is applied);
+ *   2. fewer than `SUGGEST_MIN_SAMPLES` runs: not enough runs;
+ *   3. the target 1.25x the p95 peak at most 0.75x the current size: lower to it, but never below 1.25x the window's
+ *      largest peak (peak / 0.8), 1.5x the largest OOM-killed size in the window, nor the 512m floor;
  *   4. otherwise it fits.
- *   A CPU size is rounded UP to a 0.25 step, never below 0.25.
- * The wall time is the record's pickup-to-end span (`startedAt` to `endedAt`), which includes the clone before the
- * container starts, so cores used read slightly LOW; the 0.4 threshold keeps a margin for that.
+ *   A FACT (no call) rides along when runs at the limit were also under real memory pressure (`memFullUsec` above 1%
+ *   of the wall time): information, never an instruction.
+ *   A size is rounded UP to a step: 256m up to 2g, 512m up to 8g, then 1g.
+ * CPUs: fewer than `SUGGEST_MIN_SAMPLES` runs is not enough runs; the p95 cores used (CPU time over wall time) below
+ * 0.4x the current cpus lowers to 1.25x that p95, never below 1.25x the window's largest cores used, nor 0.25;
+ * otherwise it fits. A FACT (no call) rides along when the median run was throttled more than 25% of its wall time.
+ * The wall time is the record's pickup-to-end span, which includes the clone, so cores used read slightly LOW.
  *
- * Every boundary is decided in integers (BigInt where a product can pass 2^53), so "exactly 10%" and "exactly 0.75x"
+ * THE CAP. A raise never goes past `cap` (this host's budget per dimension, or where that is off or unknown the host's
+ * memory and CPU count; `hostCap`, `fleetCap`). Where the cap binds the suggestion is the cap and says the project's
+ * runs need more than this host offers; where the size already is the cap or the largest size there is, it suggests
+ * nothing and says so; where no cap is known, a raise offers no call at all, only the fact. Nothing here ever advises
+ * growing a host's budget: the budget is what the host promised everyone else.
+ *
+ * Every boundary is decided in integers (BigInt where a product can pass 2^53), so "exactly 0.75x" and "exactly 1%"
  * land on the side the rule says, on every host.
  */
 
@@ -54,7 +61,7 @@ import { JOB_CPUS_CEILING_CENTI, JOB_CPUS_FLOOR_CENTI, JOB_MEMORY_CEILING_MIB, J
 export const SUGGEST_WINDOW_DAYS = 30;
 /** How many runs a suggestion reads at most, newest first: 50. The window is whichever of the two is fewer runs. */
 export const SUGGEST_WINDOW_RUNS = 50;
-/** Fewer runs than this in a dimension and only an OOM or a cut-off run decides it. */
+/** Fewer runs than this in a dimension and only an OOM decides it. */
 export const SUGGEST_MIN_SAMPLES = 10;
 /**
  * How far a record's `endedAt` may lie past `now` and still count: 5 minutes, ordinary skew between hosts. A copy of
@@ -65,9 +72,16 @@ export const SUGGEST_CLOCK_SKEW_MS = 5 * 60 * 1000;
 export const SUGGEST_MAX_WALL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Why a memory suggestion is what it is. */
-export const MEMORY_REASONS = Object.freeze(["oom-killed", "at-limit", "not-enough-runs", "oversized", "fits"]);
-/** Why a CPU suggestion is what it is. */
-export const CPU_REASONS = Object.freeze(["throttled", "not-enough-runs", "underused", "fits"]);
+export const MEMORY_REASONS = Object.freeze(["oom-killed", "not-enough-runs", "oversized", "fits"]);
+/** Why a CPU suggestion is what it is. There is no raise: see the header. */
+export const CPU_REASONS = Object.freeze(["not-enough-runs", "underused", "fits"]);
+/**
+ * Why a memory raise suggests less than it wanted, or nothing: `cap` (the cap bound; the suggestion IS the cap),
+ * `largest` (the size already is the cap or the largest size there is), `no-cap` (no cap is known: no call at all).
+ */
+export const MEMORY_HELD = Object.freeze(["cap", "largest", "no-cap"]);
+/** The facts a suggestion may carry with no call: memory `pressure`, CPU `ceiling`. */
+export const SIZE_FACTS = Object.freeze(["pressure", "ceiling"]);
 
 const MIB = 1024 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -94,9 +108,10 @@ const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
 
 /**
  * One record as a suggestion reads it, or null when it is not evidence: `{ at, size, memPeak, oom, wallUsec, cpuUsec,
- * throttledUsec }`. `memPeak` (bytes, clamped to the record's own limit) is null when absent or not a count;
- * `wallUsec`, `cpuUsec` and `throttledUsec` are null unless all three can be read (CPU time clamped to the CPU ceiling
- * over the wall time, throttled time to the wall time).
+ * throttledUsec, memFullUsec }`. `memPeak` (bytes, clamped to the record's own limit) is null when absent or not a
+ * count; `wallUsec` is null unless the span is readable; `cpuUsec` and `throttledUsec` are null unless both can be read
+ * with a wall time (CPU time clamped to the CPU ceiling over the wall, throttled time to the wall); `memFullUsec` is
+ * null unless it can be read with a wall time.
  */
 function evidenceOf(record, project, nowMs) {
 	if (record === null || typeof record !== "object" || Array.isArray(record)) return null;
@@ -110,67 +125,89 @@ function evidenceOf(record, project, nowMs) {
 	const memPeak = isCount(r.memPeak) ? Math.min(r.memPeak, limitBytes) : null;
 	const start = typeof record.startedAt === "string" ? Date.parse(record.startedAt) : NaN;
 	const wallMs = Number.isFinite(start) ? at - start : NaN;
-	let cpu = { wallUsec: null, cpuUsec: null, throttledUsec: null };
-	if (Number.isSafeInteger(wallMs) && wallMs > 0 && wallMs <= SUGGEST_MAX_WALL_MS && isCount(r.cpuUsec) && isCount(r.throttledUsec)) {
-		const wallUsec = wallMs * 1000;
+	const wallUsec = Number.isSafeInteger(wallMs) && wallMs > 0 && wallMs <= SUGGEST_MAX_WALL_MS ? wallMs * 1000 : null;
+	let cpu = { cpuUsec: null, throttledUsec: null };
+	if (wallUsec !== null && isCount(r.cpuUsec) && isCount(r.throttledUsec)) {
 		const cpuCap = (wallUsec * JOB_CPUS_CEILING_CENTI) / 100;
-		cpu = { wallUsec, cpuUsec: Math.min(r.cpuUsec, cpuCap), throttledUsec: Math.min(r.throttledUsec, wallUsec) };
+		cpu = { cpuUsec: Math.min(r.cpuUsec, cpuCap), throttledUsec: Math.min(r.throttledUsec, wallUsec) };
 	}
-	if (memPeak === null && cpu.wallUsec === null) return null;
-	return { at, size, memPeak, oom: record.reason === "oom-killed", ...cpu };
+	// unclamped: it is only ever compared (exactly, in BigInt) with 1% of the wall, and a stall past the wall is above it
+	const memFullUsec = wallUsec !== null && isCount(r.memFullUsec) ? r.memFullUsec : null;
+	if (memPeak === null && cpu.cpuUsec === null) return null;
+	return { at, size, memPeak, oom: record.reason === "oom-killed", wallUsec, ...cpu, memFullUsec };
 }
 
 /** a x b > c x d, exactly. */
 const productAbove = (a, b, c, d) => BigInt(a) * BigInt(b) > BigInt(c) * BigInt(d);
+/** 1.25 x bytes in MiB, rounded up: ceil(5 x bytes / (4 x MiB)). Equally, bytes / 0.8. */
+const quarterMoreMiB = (bytes) => Math.ceil((5 * bytes) / (4 * MIB));
+/** 1.25 x the cores of a CPU sample, in hundredths, rounded up: ceil(cpuUsec x 125 / wall). */
+const quarterMoreCenti = (e) => Number((BigInt(e.cpuUsec) * 125n + BigInt(e.wallUsec) - 1n) / BigInt(e.wallUsec));
 
-function suggestMemory(runs, current) {
-	const relevant = runs.filter((e) => e.memPeak !== null && e.size.memMiB >= current);
+/** A raise held to the cap: `{ suggested, held }`. `wanted` is already rounded and at most the largest size. */
+function heldToCap(wanted, current, cap) {
+	if (wanted <= current) return { suggested: null, held: "largest" }; // the largest size there is
+	if (!Number.isSafeInteger(cap)) return { suggested: null, held: "no-cap" };
+	if (cap <= current) return { suggested: null, held: "largest" };
+	if (wanted > cap) return { suggested: cap, held: "cap" };
+	return { suggested: wanted, held: null };
+}
+
+function suggestMemory(runs, current, cap) {
+	const measured = runs.filter((e) => e.memPeak !== null);
+	const relevant = measured.filter((e) => e.size.memMiB >= current);
 	const samples = relevant.length;
-	const peaks = relevant.map((e) => e.memPeak).sort((a, b) => a - b);
-	const p95 = samples > 0 ? rank(peaks, 95) : null;
+	const p95 = samples > 0 ? rank(relevant.map((e) => e.memPeak).sort((a, b) => a - b), 95) : null;
 	const ooms = relevant.filter((e) => e.oom).length;
-	// at the limit: 90% or more of the run's own limit, in integers (peak x 10 >= limit x 9).
-	const atLimit = relevant.filter((e) => !productAbove(e.size.memMiB * MIB, 9, e.memPeak, 10)).length;
-	const evidence = { samples, p95MiB: p95 === null ? null : Math.ceil(p95 / MIB), ooms, atLimit, atLimitPct: samples > 0 ? Math.round((atLimit * 100) / samples) : 0 };
-	// 1.25 x p95 in MiB, rounded up: ceil(5 x p95 / (4 x MiB)).
-	const target = p95 === null ? null : Math.ceil((5 * p95) / (4 * MIB));
-	const half = Math.ceil((current * 3) / 2);
-	const out = (reason, suggested) => ({ current, suggested: suggested === null || suggested === current ? null : suggested, reason, evidence });
-	if (ooms > 0) return out("oom-killed", roundMemoryUp(Math.max(half, target ?? 0)));
-	// more than 10%: atLimit x 10 > samples.
-	if (atLimit * 10 > samples) return out("at-limit", roundMemoryUp(half));
+	const maxPeak = measured.length > 0 ? Math.max(...measured.map((e) => e.memPeak)) : null;
+	const oomSizes = measured.filter((e) => e.oom).map((e) => e.size.memMiB);
+	const largestOom = oomSizes.length > 0 ? Math.max(...oomSizes) : null;
+	// at the limit (90% of it or more: peak x 10 >= limit x 9) AND stalled for memory more than 1% of the wall.
+	const pressured = relevant.filter((e) => !productAbove(e.size.memMiB * MIB, 9, e.memPeak, 10) && e.memFullUsec !== null && productAbove(e.memFullUsec, 100, e.wallUsec, 1)).length;
+	const evidence = { samples, p95MiB: p95 === null ? null : Math.ceil(p95 / MIB), maxPeakMiB: maxPeak === null ? null : Math.ceil(maxPeak / MIB), ooms, largestOomMiB: largestOom, pressured };
+	const fact = pressured > 0 ? "pressure" : null;
+	const out = (reason, suggested, more = {}) => ({ current, suggested: suggested === null || suggested === current ? null : suggested, reason, evidence, fact, held: null, wanted: null, ...more });
+	if (ooms > 0) {
+		const wanted = roundMemoryUp(Math.ceil((Math.max(current, largestOom) * 3) / 2));
+		const { suggested, held } = heldToCap(wanted, current, cap);
+		return out("oom-killed", suggested, { held, wanted });
+	}
 	if (samples < SUGGEST_MIN_SAMPLES) return out("not-enough-runs", null);
 	// lower only when 1.25 x p95 <= 0.75 x current, that is 5 x p95 <= 3 x current (in bytes).
 	if (!productAbove(5, p95, 3, current * MIB)) {
-		const lower = roundMemoryUp(target);
+		const floor = Math.max(roundMemoryUp(quarterMoreMiB(maxPeak)), largestOom === null ? 0 : roundMemoryUp(Math.ceil((largestOom * 3) / 2)));
+		const lower = Math.max(roundMemoryUp(quarterMoreMiB(p95)), floor);
 		return lower < current ? out("oversized", lower) : out("fits", null);
 	}
 	return out("fits", null);
 }
 
 function suggestCpus(runs, current) {
-	const relevant = runs.filter((e) => e.wallUsec !== null && e.size.cpuCenti >= current);
+	const measured = runs.filter((e) => e.cpuUsec !== null);
+	const relevant = measured.filter((e) => e.size.cpuCenti >= current);
 	const samples = relevant.length;
 	// ordered by the exact fraction, never a float: a/b < c/d  <=>  a x d < c x b.
 	const byFraction = (num) => (x, y) => (productAbove(num(y), x.wallUsec, num(x), y.wallUsec) ? -1 : productAbove(num(x), y.wallUsec, num(y), x.wallUsec) ? 1 : 0);
 	const throttle = samples > 0 ? rank([...relevant].sort(byFraction((e) => e.throttledUsec)), 50) : null;
 	const busy = samples > 0 ? rank([...relevant].sort(byFraction((e) => e.cpuUsec)), 95) : null;
+	const busiest = measured.length > 0 ? [...measured].sort(byFraction((e) => e.cpuUsec)).at(-1) : null;
+	const coresOf = (e) => (e === null ? null : Math.ceil((e.cpuUsec * 100) / e.wallUsec));
 	const evidence = {
 		samples,
-		p95CoresCenti: busy === null ? null : Math.ceil((busy.cpuUsec * 100) / busy.wallUsec),
+		p95CoresCenti: coresOf(busy),
+		maxCoresCenti: coresOf(busiest),
 		throttledPct: throttle === null ? null : Math.round((throttle.throttledUsec * 100) / throttle.wallUsec),
 	};
-	const out = (reason, suggested) => ({ current, suggested: suggested === null || suggested === current ? null : suggested, reason, evidence });
+	const out = (reason, suggested, fact = null) => ({ current, suggested: suggested === null || suggested === current ? null : suggested, reason, evidence, fact, held: null, wanted: null });
 	if (samples < SUGGEST_MIN_SAMPLES) return out("not-enough-runs", null);
-	// throttled more than 25% of the wall time: throttled x 4 > wall.
-	if (productAbove(throttle.throttledUsec, 4, throttle.wallUsec, 1)) return out("throttled", roundCpusUp((current * 3) / 2));
+	// throttled more than 25% of the wall time (throttled x 4 > wall): a fact about the host's ceiling, never a call.
+	const fact = productAbove(throttle.throttledUsec, 4, throttle.wallUsec, 1) ? "ceiling" : null;
 	// p95 cores below 0.4 x cpus: cpuUsec / wall < 0.4 x current / 100, that is cpuUsec x 1000 < 4 x current x wall.
 	if (productAbove(4 * current, busy.wallUsec, busy.cpuUsec, 1000)) {
-		// 1.25 x the p95 cores, in hundredths: ceil(cpuUsec x 125 / wall).
-		const lower = roundCpusUp(Number((BigInt(busy.cpuUsec) * 125n + BigInt(busy.wallUsec) - 1n) / BigInt(busy.wallUsec)));
-		return lower < current ? out("underused", lower) : out("fits", null);
+		const lower = Math.max(roundCpusUp(quarterMoreCenti(busy)), roundCpusUp(quarterMoreCenti(busiest)));
+		return lower < current ? out("underused", lower, fact) : out("fits", null, fact);
 	}
-	return out("fits", null);
+	return out("fits", null, fact);
 }
 
 /** The runs a suggestion reads, judged: the project's evidence in the window, newest first, at most SUGGEST_WINDOW_RUNS. */
@@ -196,34 +233,62 @@ export function peakSeries({ project, records = [], now }) {
 		.map((e) => ({ at: e.at, peakMiB: Math.ceil(e.memPeak / MIB), sizeMiB: e.size.memMiB, oom: e.oom }));
 }
 
-/** Whether a size is above a budget dimension: only an integer budget can be exceeded (`off`, Infinity and unknown cannot). */
-const aboveBudget = (size, budget) => size !== null && Number.isSafeInteger(budget) && size > budget;
+const capDim = (v) => (Number.isSafeInteger(v) && v > 0 ? v : null);
+
+/**
+ * The cap of one host (doctor's): per dimension its budget where that is a number, else (budget `off` or unknown) the
+ * host's own total (`{ memMiB, cpuCenti }`, the runtime's memory and CPU count), else null: no cap known.
+ */
+export function hostCap(budget, total) {
+	return { memMiB: capDim(budget?.memMiB) ?? capDim(total?.memMiB), cpuCenti: capDim(budget?.cpuCenti) ?? capDim(total?.cpuCenti) };
+}
+
+/**
+ * The cap across live hosts (the panel's and the insights page's), judged per host on its OWN pair of budgets: in each
+ * dimension, the largest budget of a host whose OTHER dimension holds the project's current size (`off` and unknown
+ * hold anything). A host that publishes `off` or nothing in a dimension gives no number there (the panel cannot read
+ * a host's memory or CPU count), so where no host gives one the cap is null and a raise offers no call. The largest
+ * per dimension across DIFFERENT hosts would be a pair no host has.
+ */
+export function fleetCap(budgets, current) {
+	const list = (Array.isArray(budgets) ? budgets : []).filter((b) => b !== null && typeof b === "object");
+	const holds = (v, need) => !Number.isSafeInteger(v) || v >= need;
+	const best = (key, other, need) => {
+		const known = list.filter((b) => holds(b[other], need)).map((b) => capDim(b[key])).filter((v) => v !== null);
+		return known.length === 0 ? null : Math.max(...known);
+	};
+	return { memMiB: best("memMiB", "cpuCenti", current?.cpuCenti), cpuCenti: best("cpuCenti", "memMiB", current?.memMiB) };
+}
 
 /**
  * The suggestion for one project. Pure: no I/O, no clock read (`now` is injected, millis or a Date).
  *
  * `records` is any list of run records (other projects' are skipped), `current` the project's size now (`{ memMiB,
- * cpuCenti }`, `resolveJobSize`'s answer), `budget` the host budget it is judged against (`{ memMiB, cpuCenti }`, each an
- * integer, Infinity for off, or null for unknown; null for none known).
+ * cpuCenti }`, `resolveJobSize`'s answer), `cap` the largest size a raise may reach on ONE host (`{ memMiB, cpuCenti }`,
+ * each an integer or null for unknown; `hostCap`), or instead `hosts`, the live hosts' budget pairs (`fleetCap` judges
+ * them per host, against the size the other dimension will have).
  *
  * Returns `{ project, runs, memory, cpu }`: `runs` the records read (after the window), and per dimension `{ current,
- * suggested, reason, evidence, overBudget }`, where `suggested` is null when the size should stay (`fits`, `not-enough-runs`,
- * or a raise already at the largest size), `reason` one of `MEMORY_REASONS` / `CPU_REASONS`, and `overBudget` true when
- * the suggested size is above that budget dimension (a job of it would never fit this host). NEVER throws on records.
+ * suggested, reason, evidence, fact, held, wanted, overBudget }`, where `suggested` is null when the size should stay,
+ * `reason` one of `MEMORY_REASONS` / `CPU_REASONS`, `fact` one of `SIZE_FACTS` or null, `held` one of `MEMORY_HELD` or
+ * null, `wanted` the raise before the cap (null for no raise), and `overBudget` true when a suggested LOWERING is still
+ * above the cap (a size already larger than the host). NEVER throws on records.
  */
-export function suggestSize({ project, records = [], current, budget = null, now }) {
+export function suggestSize({ project, records = [], current, cap = null, hosts = null, now }) {
 	const nowMs = now instanceof Date ? now.getTime() : now;
 	if (!Number.isFinite(nowMs)) throw new TypeError("suggestSize needs `now` (millis or a Date)");
 	if (recordedJobSize({ ...current, source: "project" }) === null) throw new TypeError("suggestSize needs the current size ({ memMiB, cpuCenti })");
 	const runs = windowRuns(project, records, nowMs);
-	const memory = suggestMemory(runs, current.memMiB);
+	// With `hosts`, each dimension's cap is judged per host against the size the OTHER dimension will have: the CPUs are
+	// decided first (they have no raise, so no cap bends them), then the memory against the hosts that hold those CPUs,
+	// then the CPUs' flag against the hosts that hold that memory.
+	const capOf = (other) => (Array.isArray(hosts) ? fleetCap(hosts, other) : cap);
 	const cpu = suggestCpus(runs, current.cpuCenti);
-	return {
-		project,
-		runs: runs.length,
-		memory: { ...memory, overBudget: aboveBudget(memory.suggested, budget?.memMiB) },
-		cpu: { ...cpu, overBudget: aboveBudget(cpu.suggested, budget?.cpuCenti) },
-	};
+	const memCap = capDim(capOf({ memMiB: current.memMiB, cpuCenti: cpu.suggested ?? current.cpuCenti })?.memMiB);
+	const memory = suggestMemory(runs, current.memMiB, memCap);
+	const cpuCap = capDim(capOf({ memMiB: memory.suggested ?? current.memMiB, cpuCenti: current.cpuCenti })?.cpuCenti);
+	const above = (dim, c) => dim.suggested !== null && c !== null && dim.suggested > c;
+	return { project, runs: runs.length, memory: { ...memory, overBudget: above(memory, memCap) }, cpu: { ...cpu, overBudget: above(cpu, cpuCap) } };
 }
 
 /**
@@ -243,26 +308,47 @@ export function suggestionCall(suggestion, limits = []) {
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+/** Cores in words: `1 core`, `0.5 cores`, `2 cores`. */
+export const coresText = (centi) => `${formatCpus(centi)} core${centi === 100 ? "" : "s"}`;
+/** CPUs in words: `1 CPU`, `0.5 CPUs`, `2 CPUs`. */
+export const cpusText = (centi) => `${formatCpus(centi)} CPU${centi === 100 ? "" : "s"}`;
 
 /**
- * The evidence of one dimension's suggestion in words, for doctor, the panel and the insights page alike: `{ memory,
- * cpu }`, each a short clause such as `2 runs ended oom-killed` or `p95 peak 2560m over 24 runs`. Ids and numbers only.
+ * The evidence of a suggestion in words, for doctor, the panel and the insights page alike: `{ memory, cpu, memoryHeld,
+ * memoryFact, cpuFact }`, each a short clause (empty when it does not apply), such as `2 runs ended oom-killed (the
+ * largest size killed 4g)` or `p95 peak 2560m, largest 3g, over 24 runs`. Ids and numbers only. A fact is worded as
+ * information and a held raise as what the host offers: none of them is an instruction, and none advises growing a
+ * host's budget.
  */
 export function suggestionEvidence(suggestion) {
-	const m = suggestion?.memory?.evidence ?? {};
-	const c = suggestion?.cpu?.evidence ?? {};
+	const m = suggestion?.memory ?? {};
+	const c = suggestion?.cpu ?? {};
+	const me = m.evidence ?? {};
+	const ce = c.evidence ?? {};
+	const peaks = `p95 peak ${formatMemory(me.p95MiB ?? 0)}, largest ${formatMemory(me.maxPeakMiB ?? 0)}, over ${plural(me.samples, "run")}`;
+	const cores = `p95 ${coresText(ce.p95CoresCenti ?? 0)} used, largest ${coresText(ce.maxCoresCenti ?? 0)}, over ${plural(ce.samples, "run")}`;
 	const memWords = {
-		"oom-killed": `${plural(m.ooms, "run")} ended oom-killed`,
-		"at-limit": `${m.atLimit} of ${plural(m.samples, "run")} peaked at 90% of their memory or more`,
-		"not-enough-runs": `${m.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements it needs`,
-		oversized: `p95 peak ${formatMemory(m.p95MiB ?? 0)} over ${plural(m.samples, "run")}`,
-		fits: `p95 peak ${formatMemory(m.p95MiB ?? 0)} over ${plural(m.samples, "run")}`,
+		"oom-killed": `${plural(me.ooms, "run")} ended oom-killed (the largest size killed ${formatMemory(me.largestOomMiB ?? 0)})`,
+		"not-enough-runs": `${me.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements it needs`,
+		oversized: peaks,
+		fits: peaks,
 	};
 	const cpuWords = {
-		throttled: `the median run held back ${c.throttledPct}% of its time`,
-		"not-enough-runs": `${c.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements it needs`,
-		underused: `p95 ${formatCpus(c.p95CoresCenti ?? 0)} cores used over ${plural(c.samples, "run")}`,
-		fits: `p95 ${formatCpus(c.p95CoresCenti ?? 0)} cores used over ${plural(c.samples, "run")}`,
+		"not-enough-runs": `${ce.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements it needs`,
+		underused: cores,
+		fits: cores,
 	};
-	return { memory: memWords[suggestion?.memory?.reason] ?? "", cpu: cpuWords[suggestion?.cpu?.reason] ?? "" };
+	const wanted = Number.isSafeInteger(m.wanted) ? formatMemory(m.wanted) : "";
+	const heldWords = {
+		cap: `this project's runs need more than this host offers: they ask for ${wanted}, the largest here is ${formatMemory(m.suggested ?? 0)}`,
+		largest: "already at the largest size this host offers",
+		"no-cap": `they ask for ${wanted}, but the largest size this host offers is not known here, so no call is offered`,
+	};
+	return {
+		memory: memWords[m.reason] ?? "",
+		cpu: cpuWords[c.reason] ?? "",
+		memoryHeld: heldWords[m.held] ?? "",
+		memoryFact: m.fact === "pressure" ? `${me.pressured} of ${plural(me.samples, "run")} reached the memory limit while stalled for memory more than 1% of their time` : "",
+		cpuFact: c.fact === "ceiling" ? `the median run was held back ${ce.throttledPct}% of its time by this host's CPU ceiling (its CPU budget, shared by every job), which a job's cpus do not change` : "",
+	};
 }

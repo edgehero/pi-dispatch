@@ -1373,10 +1373,13 @@ function dollarsLegendHtml() {
 
 // ---- job sizes (issue #596, phase 3, DES-SIZE-SUGGESTIONS) ----
 // The reasons the worker's `suggestSize` gives, restated (this module loads nothing from the worker) and pinned to
-// worker/src/size-suggest.mjs's MEMORY_REASONS and CPU_REASONS by insights-html.test.mjs. Anything else is dropped,
-// and a dimension without a known reason draws no suggestion: toward silence, never an invented one.
-export const INSIGHTS_MEMORY_REASONS = Object.freeze(["oom-killed", "at-limit", "not-enough-runs", "oversized", "fits"]);
-export const INSIGHTS_CPU_REASONS = Object.freeze(["throttled", "not-enough-runs", "underused", "fits"]);
+// worker/src/size-suggest.mjs's MEMORY_REASONS, CPU_REASONS, MEMORY_HELD and SIZE_FACTS by size-suggest.test.mjs.
+// Anything else is dropped, and a dimension without a known reason draws no suggestion: toward silence, never an
+// invented one. A held raise or a fact outside its list is dropped the same way.
+export const INSIGHTS_MEMORY_REASONS = Object.freeze(["oom-killed", "not-enough-runs", "oversized", "fits"]);
+export const INSIGHTS_CPU_REASONS = Object.freeze(["not-enough-runs", "underused", "fits"]);
+export const INSIGHTS_MEMORY_HELD = Object.freeze(["cap", "largest", "no-cap"]);
+export const INSIGHTS_SIZE_FACTS = Object.freeze(["pressure", "ceiling"]);
 // The two admin calls a suggestion may name, digits, ids and JSON punctuation only (`suggestionCall`).
 const SIZING_CALL = /^dispatch_limit_(?:edit|add) \{[a-z0-9":,.{}:-]{1,160}\}$/;
 const SIZING_POINTS_MAX = 50;
@@ -1419,7 +1422,10 @@ function normSizingDim(v, reasons) {
   if (current === null || current === 0) return null;
   const suggested = sizeInt(v.suggested);
   const e = v.evidence !== null && typeof v.evidence === "object" ? v.evidence : {};
-  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, overBudget: v.overBudget === true, samples: sizeInt(e.samples) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti) };
+  const held = INSIGHTS_MEMORY_HELD.includes(v.held) ? v.held : null;
+  const fact = INSIGHTS_SIZE_FACTS.includes(v.fact) ? v.fact : null;
+  const wanted = sizeInt(v.wanted);
+  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, overBudget: v.overBudget === true, held, fact, wanted: wanted === 0 ? null : wanted, samples: sizeInt(e.samples) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti), pressured: sizeInt(e.pressured) ?? 0, throttledPct: sizeInt(e.throttledPct) };
 }
 
 /**
@@ -1496,9 +1502,24 @@ export function layoutSizingChart(series, { nowMs, windowDays = 30, currentMiB, 
   return { plot, points, steps, yTicks, xLabels, scaleMax, width: w, height: h };
 }
 
+/** Cores in words, singular for exactly one (the worker's `coresText`, restated and held equal by the tests). */
+export function sizeCoresText(cpuCenti) {
+  return `${sizeCpuText(cpuCenti)} core${cpuCenti === 100 ? "" : "s"}`;
+}
+
 function sizingWhat(dim, unit) {
-  if (dim.suggested !== null) return `suggest ${unit(dim.suggested)} (${dim.reason}${dim.overBudget ? ", above every host's budget" : ""})`;
+  if (dim.suggested !== null) return `suggest ${unit(dim.suggested)} (${dim.reason}${dim.held === "cap" ? ", the most a live host offers" : ""}${dim.overBudget ? ", larger than any live host offers" : ""})`;
+  if (dim.held === "largest") return `stays (${dim.reason}, already the largest size a live host offers)`;
+  if (dim.held === "no-cap" && dim.wanted !== null) return `wants ${unit(dim.wanted)} (${dim.reason}, no host budget read: no call)`;
   return dim.reason === "not-enough-runs" ? `not enough runs (${dim.samples})` : dim.reason;
+}
+
+/** The facts a suggestion carries, as information with no call, rebuilt here from the numbers alone. */
+function sizingFacts(m, c) {
+  const facts = [];
+  if (m.fact === "pressure") facts.push(`${m.pressured} of ${m.samples} runs reached the memory limit while stalled for memory`);
+  if (c.fact === "ceiling" && c.throttledPct !== null) facts.push(`the median run was held back ${c.throttledPct}% of its time by its host's CPU ceiling, which a job's cpus do not change`);
+  return facts;
 }
 
 function sizingSectionHtml(ns, tips, nowMs) {
@@ -1519,9 +1540,10 @@ function sizingSectionHtml(ns, tips, nowMs) {
   const panels = ns.projects.map((pr) => {
     const m = pr.memory;
     const c = pr.cpu;
-    const head = `<h3><span class="pid">${escapeHtml(pr.id)}</span> <span class="dim">size ${escapeHtml(sizeMemText(m.current))}, ${escapeHtml(sizeCpuText(c.current))} CPUs · p95 ${escapeHtml(m.p95MiB === null ? "-" : sizeMemText(m.p95MiB))}, ${escapeHtml(c.p95CoresCenti === null ? "-" : sizeCpuText(c.p95CoresCenti))} cores</span></h3>`;
+    const head = `<h3><span class="pid">${escapeHtml(pr.id)}</span> <span class="dim">size ${escapeHtml(sizeMemText(m.current))}, ${escapeHtml(sizeCpuText(c.current))} CPU${c.current === 100 ? "" : "s"} · p95 ${escapeHtml(m.p95MiB === null ? "-" : sizeMemText(m.p95MiB))}, ${escapeHtml(c.p95CoresCenti === null ? "-" : sizeCoresText(c.p95CoresCenti))}</span></h3>`;
     const verdict = `<div class="small">memory: ${escapeHtml(sizingWhat(m, sizeMemText))} · CPUs: ${escapeHtml(sizingWhat(c, sizeCpuText))}</div>`;
     const call = pr.call === null ? "" : `<div class="small"><code>${escapeHtml(pr.call)}</code></div>`;
+    const facts = sizingFacts(m, c).map((f) => `<div class="dim small">${escapeHtml(f)}</div>`).join("");
     const lay = layoutSizingChart(pr.series, { nowMs, windowDays: ns.windowDays, currentMiB: m.current });
     const svg = [`<svg width="${fmt(lay.width)}" height="${fmt(lay.height)}" role="img" aria-label="peak memory against size · ${escapeHtml(pr.id)}">`];
     svg.push(axisFrame(lay.plot, lay.yTicks));
@@ -1536,7 +1558,7 @@ function sizingSectionHtml(ns, tips, nowMs) {
     if (lay.points.length === 0) svg.push(`<text x="${fmt(lay.plot.x + lay.plot.w / 2)}" y="${fmt(lay.plot.y + lay.plot.h / 2)}" text-anchor="middle" font-size="11" fill="${PAGE_THEME.dim}">no measured runs in the window</text>`);
     for (const xl of lay.xLabels) svg.push(`<text x="${fmt(xl.x)}" y="${fmt(lay.plot.y + lay.plot.h + 12)}" text-anchor="middle" font-size="8" fill="${PAGE_THEME.dim}">${escapeHtml(xl.label)}</text>`);
     svg.push("</svg>");
-    return `<div class="bl">${head}${verdict}${call}${svg.join("")}</div>`;
+    return `<div class="bl">${head}${verdict}${call}${facts}${svg.join("")}</div>`;
   });
   parts.push(`<div id="sizes">${panels.join("")}</div>`);
   return parts.join("");
