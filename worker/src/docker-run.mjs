@@ -22,7 +22,7 @@
 export { containerSpec, CONTAINER_GLOBAL_PI_DIR, CONTAINER_SESSION_DIR, CONTAINER_SESSION_FILE } from "./container-spec.mjs";
 import { isAbsolute, relative } from "node:path";
 import { SIZE_LABEL_CPU, SIZE_LABEL_MEM, assertCidFile, assertJobUser, containerSpec } from "./container-spec.mjs";
-import { CPU_SHARES_MAX, CPU_SHARES_MIN } from "./job-size.mjs";
+import { CGROUP_PARENT, CPU_SHARES_MAX, CPU_SHARES_MIN } from "./job-size.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
 export const ISOLATION_FLAGS = [
@@ -147,6 +147,8 @@ export const DOCKER_EXTRA_FORBIDDEN = [
 	"--ulimit",
 	"--sysctl",
 	"--group-add",
+	// Issue #596, phase 2: the parent every job shares, whose quota keeps the host's CPU reserve across all jobs. A second
+	// `--cgroup-parent` would win last and run the job outside it, beyond the quota and back beside the proxy's weight.
 	"--cgroup-parent",
 	"--device-cgroup-rule",
 	"--gpus",
@@ -264,6 +266,10 @@ function argsFromSpec(spec, { userns }) {
 	assertJobUser(spec.user);
 	assertCidFile(spec.cidFile);
 	assertSizing(spec);
+	// A hand-built spec may only name the one parent, or none (`undefined` is a spec from before the field: none).
+	if (spec.cgroupParent !== undefined && spec.cgroupParent !== null && spec.cgroupParent !== CGROUP_PARENT) {
+		throw new Error(`docker run: refusing a spec whose cgroup parent is not ${CGROUP_PARENT}: ${JSON.stringify(spec.cgroupParent)}`);
+	}
 
 	// `--network` sits HERE, beside --memory and --cpus, and deliberately NOT inside ISOLATION_FLAGS.
 	// That array is the LITERAL, value-free, unconditional set, and two separate places assert every member
@@ -281,11 +287,15 @@ function argsFromSpec(spec, { userns }) {
 	const args = ["run", `--name=${spec.name}`, ...ISOLATION_FLAGS, `--memory=${spec.memory}`, `--memory-swap=${spec.memorySwap}`];
 	if (spec.cpus !== null) args.push(`--cpus=${spec.cpus}`);
 	args.push(`--cpu-shares=${spec.cpuShares}`, `--shm-size=${spec.shmSize}`);
-	// THE SEAM FOR THE AGGREGATE CPU RESERVE (issue #596, phase 2, P1G1-L1). `--cpus` above bounds ONE job; what keeps
-	// the host's reserve free across ALL of them is a parent cgroup with its own quota that every job container is
-	// started under (`--cgroup-parent=<slice>` here on Docker, the rootless Podman equivalent on the podman venue), with
-	// the job weights scaled so the egress proxy and Valkey are not starved. It is measured per venue before it is
-	// built, so nothing is emitted here yet; `--cgroup-parent` is refused in `dockerExtra` so nothing else can put one.
+	// THE AGGREGATE CPU RESERVE (issue #596, phase 2). `--cpus` above bounds ONE job; what keeps the host's reserve free
+	// across ALL of them is the one parent cgroup every job container is started under, whose quota is the host's CPU
+	// budget (`cpu-reserve.mjs` says who sets it per venue). Emitted on every container this builder makes, docker and
+	// podman alike, quota or not: inside the parent a job's weight competes only with sibling jobs, so even an unset
+	// quota keeps a large job from starving the egress proxy and Valkey, which are NOT built here and never carry it.
+	// A missing parent is created silently by the runtime, so the flag never fails a run (measured on all five venues).
+	// Absent only where the runtime cannot take one (`cgroupParentFor`), and then the spec's shares are capped instead.
+	// `--cgroup-parent` is refused in `dockerExtra`, in both spellings, so nothing else can move a job out of it.
+	if (spec.cgroupParent !== null && spec.cgroupParent !== undefined) args.push(`--cgroup-parent=${spec.cgroupParent}`);
 	// Issue #596, phase 2: the size labels (`SIZE_LABEL_MEM`, `SIZE_LABEL_CPU`), integers from the validated size.
 	for (const [key, value] of Object.entries(spec.labels ?? {})) args.push(`--label=${key}=${value}`);
 	if (spec.network) args.push(`--network=${spec.network}`);

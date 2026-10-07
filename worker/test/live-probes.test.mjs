@@ -1586,3 +1586,22 @@ test("issue #596, phase 2 (carried from phase 1's gate round 3): a fractional ce
 	assert.equal(expectedBounds({ memMiB: 4096, cpuCenti: 200 }, 8).cpuMax, "700000 100000");
 	assert.equal(expectedBounds({ memMiB: 4096, cpuCenti: 200 }).cpuMax, "max 100000");
 });
+
+test("issue #596, phase 2: the reading container's cgroup parent is read back from the runtime's record, the process's own cgroup and the parent's quota", async () => {
+	const docker = fakeDocker();
+	const run = async (args) => (args[0] === "inspect" && String(args[1]).includes("CgroupParent") ? { code: 0, stdout: "pidispatch.slice|4243\n", stderr: "" } : docker.run(args));
+	const files = { "/proc/4243/cgroup": "0::/pidispatch.slice/docker-x.scope\n", "/sys/fs/cgroup/pidispatch.slice/cpu.max": "300000 100000\n" };
+	const fs = { ...nodeFs, readFileSync: (p, enc) => (Object.hasOwn(files, p) ? files[p] : nodeFs.readFileSync(p, enc)) };
+	const held = await runLiveProbes(probeArgs(docker, { run, fs, cpuBudgetCenti: 300 }));
+	assert.equal(held.cgroupParent.ok, true);
+	assert.equal(held.cgroupParent.warn, undefined);
+	assert.equal(held.cgroupParent.quota, 300);
+	assert.ok(docker.calls.some((a) => a[0] === "run" && a.includes("--cgroup-parent=pidispatch.slice")), "the probe carries the parent a job does");
+	// A venue that runs jobs without the parent: the probe carries none, and none recorded is the expected answer.
+	const bare = fakeDocker();
+	const none = async (args) => (args[0] === "inspect" && String(args[1]).includes("CgroupParent") ? { code: 0, stdout: "|4243\n", stderr: "" } : bare.run(args));
+	const parentless = await runLiveProbes(probeArgs(bare, { run: none, fs, cgroupParent: null }));
+	assert.equal(parentless.cgroupParent.ok, true);
+	assert.match(parentless.cgroupParent.detail, /without the pidispatch\.slice parent/);
+	assert.equal(bare.calls.some((a) => a.some((x) => String(x).startsWith("--cgroup-parent"))), false);
+});

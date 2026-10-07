@@ -1249,6 +1249,32 @@ On an SELinux host the retained job directory and the retained clone carry `:Z`,
 `selinuxEnabled` as a job's are, so the shell reads them under `container_file_t` the way the job did; a local run's
 own folder is never relabelled and needs the `semanage fcontext` label from the SELinux section.
 
+### The CPU reserve on this venue
+
+Every job gets the size its project sets (see [job sizes](scoped-limits.md#job-sizes-version-3)) and a `--cpus`
+ceiling of the host's CPU budget ([the host budget](multi-host.md#the-host-budget)), which on this venue also takes
+a `cpu.max` or `memory.max` set on the account's systemd user service into account. The ceiling bounds one job; what
+holds all of them together to the budget is the parent cgroup every job, sandbox and doctor probe runs under,
+`pidispatch.slice`, which on this venue sits under the account's user manager
+(`/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/pidispatch.slice`). The worker sets its quota itself,
+when it starts and whenever the budget changes, with no root:
+
+```sh
+systemctl --user set-property pidispatch.slice CPUQuota=300%
+systemctl --user show -P CPUQuotaPerSecUSec pidispatch.slice   # 3s
+```
+
+It is kept in `~/.config/systemd/user.control/` and survives a reboot (measured on Podman 4.9.3 and 5.8.1). It needs
+the `cpu` controller delegated to the user manager, which this venue already requires (step 3). `pi-dispatch doctor`
+reads it back and warns "no host CPU reserve across jobs" when it is missing or differs from the budget;
+`pi-dispatch doctor --live` reads a probe container's own cgroup and finds it under the parent, with the parent's
+`cpu.max`. With `PI_HOST_CPU_BUDGET=off` the worker clears the quota (`CPUQuota=`). Where Podman uses the `cgroupfs`
+cgroup manager instead of `systemd`, jobs run without the parent and each job's CPU weight is capped at
+`--cpu-shares=1024`, so the egress proxy gets a fair share of the CPU, not a reserve; doctor says so. Inside the parent
+the job sizes still order the jobs under contention; on Fedora's kernel 6.19 the split between sizes is smaller than
+the sizes (1:1.3:1.8 for 1:2:4, measured rootless), the order holds. Fedora also applies systemd-oomd's per-slice
+defaults to every user slice, the parent included; the worker sets no memory limit on it.
+
 ### What the venue does not do yet
 
 - **The compose file is docker-only**, and the setup wizard explains rather than runs its receiver answer on this
@@ -1261,11 +1287,6 @@ own folder is never relabelled and needs the `semanage fcontext` label from the 
   A name conflict and an absent image are 125 and refunded as never started (measured: `already in use`, and
   `<ref>: image not known`).
 - **`podman machine`** (macOS, Windows) is refused as `podman-platform`, since nothing about it was measured.
-- **The CPU ceiling ignores the account's own limit.** Every job gets the size its project sets (see
-  [job sizes](scoped-limits.md#job-sizes-version-3)) and a `--cpus` ceiling of the host's CPU count from `podman info`,
-  minus one core when it has four or more. The ceiling bounds a single job, not all of them together. A `cpu.max` or
-  `memory.max` set on the account's systemd user service (`max` on every host measured) is not read yet; the host
-  budget of a later release takes the smaller of the two.
 
 ## Property table
 

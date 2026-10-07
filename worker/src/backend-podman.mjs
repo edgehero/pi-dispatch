@@ -34,6 +34,7 @@ import { JOB_NAME_PREFIX, execDockerBounded, jobContainerName, makeReaper, makeS
 import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_NETWORK_HELPER_KEYS, PODMAN_WIDENING_KEYS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
+import { cgroupParentFor } from "./cpu-reserve.mjs";
 import { DEFAULT_EGRESS_PROXY, makeEgressPreflight } from "./egress.mjs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
@@ -1123,7 +1124,9 @@ export function makePodmanBackend(opts = {}) {
 		forgeHosts,
 		neverStartedExits: PODMAN_NEVER_STARTED_EXITS,
 		bin: "podman",
-		buildArgs: buildPodmanRunArgs,
+		// Issue #596, phase 2: every job under the one parent cgroup (`CGROUP_PARENT`), except where Podman reports a cgroup
+		// manager other than systemd (`cgroupParentFor` says why), from the SAME `podman info` this job was admitted on.
+		buildArgs: (opts) => buildPodmanRunArgs({ ...opts, cgroupParent: cgroupParentFor({ podman: true, cgroupManager: info.peek?.()?.info?.cgroupManager ?? null }) }),
 		// Issue #452, gate round 4: the teardown's detach gate uses the `podman info` this venue admitted jobs on, never a
 		// read of its own; before any answered read it falls back to one. A refused teardown is logged with its token.
 		teardownRuntime: () => {

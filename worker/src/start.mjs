@@ -26,6 +26,7 @@ import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
 import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
+import { makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS, STALLED_FAILED_REASON } from "./index.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
@@ -52,7 +53,7 @@ import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { endpointShown, makeContainerGone, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
+import { endpointShown, execDockerBounded, makeContainerGone, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
@@ -577,6 +578,7 @@ export async function startWorker(
 		makeAuth = makeGitHubAuth,
 		makeHost = makeGitHubHost,
 		createWorkerFn = createWorker,
+		makeCpuReserve: makeCpuReserveFn = makeCpuReserve,
 		makeReaper: makeReaperFn = makeReaper,
 		makeBackendRegistry: makeBackendRegistryFn = makeBackendRegistry,
 		// Additional backend bundles, in registration order after `local` (which is built only while blessed,
@@ -911,17 +913,24 @@ export async function startWorker(
 	// two cached readers above: each blessed venue's memory and CPU count, the SMALLER where both answered (two venues on
 	// one host share it; a desktop VM is the smaller), and on rootless Podman the user service's own `memory.max` and
 	// `cpu.max` beside them. A venue that did not answer adds nothing, so the budget is unknown only when none did.
+	// The same reads also say how each venue manages cgroups (`reserveVenues`), from which the CPU reserve keeps the jobs'
+	// parent cgroup's quota at the budget (`cpu-reserve.mjs`, on every refresh, off every job path).
 	const readHostFacts = async () => {
 		const views = [];
+		const reserveVenues = [];
 		let user = {};
 		if (localBlessed && budgetEndpoint) {
 			const read = await resolveJobUser(budgetEndpoint).catch(() => null);
-			if (read?.daemon?.answered === true) views.push(read.daemon.facts);
+			if (read?.daemon?.answered === true) {
+				views.push(read.daemon.facts);
+				reserveVenues.push({ venue: DEFAULT_BACKEND, facts: read.daemon.facts, endpointLocal: budgetEndpoint.endpoint?.local === true });
+			}
 		}
 		if (podmanInfo) {
 			const read = await podmanInfo().catch(() => null);
 			if (read?.answered === true) {
 				views.push(read.info);
+				reserveVenues.push({ venue: PODMAN_BACKEND, facts: read.info, endpointLocal: read.info?.serviceIsRemote === false });
 				if (read.info?.rootless === true) user = readUserServiceLimits({ uid: jobUserIdentity.euid, readFile: readCgroupFileFn });
 			}
 		}
@@ -929,8 +938,12 @@ export async function startWorker(
 			const known = views.map((v) => v?.[key]).filter((v) => Number.isSafeInteger(v));
 			return known.length > 0 ? Math.min(...known) : null;
 		};
-		return { memTotalMiB: least("memTotalMiB"), hostCpus: least("hostCpus"), ...user };
+		return { memTotalMiB: least("memTotalMiB"), hostCpus: least("hostCpus"), ...user, reserveVenues };
 	};
+	// Issue #596, phase 2: the aggregate CPU reserve. One per worker; the helper container (Docker's cgroupfs driver) runs
+	// the job image this worker already pins, with `--pull=never`, never an image fetched for it.
+	const cpuReserve = makeCpuReserveFn({ run: (bin, args, { timeoutMs }) => execDockerBounded(args, { bin, timeoutMs }), image: config.jobImage, now, log });
+	const syncCpuReserve = (budget, facts) => cpuReserve.sync({ cpuCenti: budget.cpuCenti, plans: (facts?.reserveVenues ?? []).map((v) => reservePlan({ ...v, platform: jobUserIdentity.platform })) });
 	const bootPodmanRead = podmanInfo
 		? await settleWithin(
 				Promise.resolve()
@@ -1990,6 +2003,7 @@ export async function startWorker(
 			settings: config.hostBudget,
 			jobDefault: { memMiB: config.jobSize.memMiB, cpuCenti: config.jobSize.cpuCenti },
 			readFacts: readHostFacts,
+			onRefresh: syncCpuReserve,
 			containerGone: containerGoneFn ?? makeContainerGone({ binOf: (venue) => (resolveBackendName(venue ?? {}, config.defaultBackend) === PODMAN_BACKEND ? "podman" : "docker") }),
 			now,
 			log,

@@ -77,6 +77,9 @@ const { egressArmed, egressCanaryNetwork, egressCanaryProbe, egressProxyName, ne
 const { makeDetachGate } = await load("worker/src/netns-keeper.mjs");
 const { NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper } = await load("worker/src/podman-stack.mjs");
 const { runLiveProbes } = await load("worker/src/live-probes.mjs");
+const { cgroupParentFor, makeCpuReserve, readQuota, reservePlan, writeQuota } = await load("worker/src/cpu-reserve.mjs");
+const { computeHostBudget, hostBudgetSettings, readUserServiceLimits } = await load("worker/src/host-budget.mjs");
+const { jobSizeDefaults } = await load("worker/src/job-size.mjs");
 
 const refuse = (why) => {
 	console.error(`podman-conformance: ${why}`);
@@ -288,6 +291,31 @@ async function liveNetnsSeen() {
 	return { ran: true, ok: true, detail: `found ${seen.helpers.map((h) => `${h.kind} (pid ${h.pid})`).join(", ")}, running with none of the options that widen a job` };
 }
 
+/**
+ * Issue #596, phase 2: the aggregate CPU reserve, by the worker's OWN code. The budget is computed as the worker computes
+ * it from this `podman info` and this account's user service (the env's settings, `auto` by default), the venue's plan
+ * says how its quota is kept, and the worker's reserve keeps it: on rootless Podman `systemctl --user set-property
+ * pidispatch.slice CPUQuota=<budget*100>%` through this account's user manager, then read back. The read-back below then
+ * finds the probe container under that parent with that quota. A quota this account had before is put back afterwards
+ * (none is cleared), so a run on a real worker account leaves its user manager as it found it.
+ */
+const systemctl = (args, { timeoutMs }) => liveRunVia(spawn, { bin: "systemctl" })(args, { timeoutMs });
+const runFor = (bin, args, opts) => (bin === "systemctl" ? systemctl(args, opts) : liveRunVia(spawn, { bin })(args, opts));
+const jobDefault = (() => {
+	const d = jobSizeDefaults(process.env);
+	return { memMiB: d.memMiB, cpuCenti: d.cpuCenti };
+})();
+const budget = computeHostBudget(hostBudgetSettings(process.env, jobDefault), { memTotalMiB: read.info?.memTotalMiB ?? null, hostCpus: read.info?.hostCpus ?? null, ...readUserServiceLimits({ uid: euid, readFile: (path) => nodeFs.readFileSync(path, "utf8") }) }, jobDefault);
+const reservePlanHere = reservePlan({ venue: PODMAN_BACKEND, facts: read.info, endpointLocal: read.info?.serviceIsRemote === false, platform: process.platform });
+const quotaBefore = reservePlanHere.method ? await readQuota(reservePlanHere, { run: runFor, image }) : { ok: false, reason: reservePlanHere.why ?? "no-method" };
+let reserveState = null;
+async function applyReserve() {
+	const reserve = makeCpuReserve({ run: runFor, image, log: (event, fields) => console.log(`cpu reserve: ${event} ${JSON.stringify(fields)}`) });
+	await reserve.sync({ cpuCenti: budget.cpuCenti, plans: [reservePlanHere] });
+	reserveState = reserve.states()[0] ?? null;
+}
+let parentRead = null;
+
 let ranAs = null;
 /** The harness's `readBack`: the live probes, run as `doctor --live` runs them on this venue, with the verdict ARRAY. */
 async function readBack() {
@@ -323,10 +351,14 @@ async function readBack() {
 		// Issue #596: the `--cpus` ceiling a job on this venue gets, from the same `podman info`, so the read-back proves
 		// `cpu.max` as well as the swap bound and the weight. The size is the built-in default, as doctor's with no setting.
 		hostCpus: read.info?.hostCpus ?? null,
+		// Issue #596, phase 2: the parent a job on this venue runs under, and the budget its quota must read back as.
+		cgroupParent: cgroupParentFor({ podman: true, cgroupManager: read.info?.cgroupManager ?? null }),
+		cpuBudgetCenti: budget.cpuCenti,
 	});
 	for (const note of result.notes ?? []) console.error(`podman-conformance: ${note}`);
 	if (!result.ran) throw new Error(`the live probes did not run: ${result.reason}`);
 	ranAs = result.ranAs;
+	parentRead = result.cgroupParent ?? null;
 	return result.verdicts;
 }
 
@@ -455,10 +487,13 @@ try {
 	} catch (err) {
 		netns = { ran: false, ok: false, detail: `did not finish: ${err?.message ?? err}` };
 	}
+	await applyReserve();
 	report = await runBackendConformance(backend, { probe, withBrokenEnumeration, readBack });
 	// LAST, see `staleCanarySweep`.
 	sweepCase = venueRefused ? null : await staleCanarySweep();
 } finally {
+	// The account's quota as it was: cleared where there was none, left where the worker's own value was already set.
+	if (reserveState && quotaBefore.ok && quotaBefore.cpuCenti !== (reserveState.wantCenti ?? null)) await writeQuota(reservePlanHere, quotaBefore.cpuCenti, { run: runFor, image });
 	await podman(["rmi", "-f", probeImage]);
 	nodeFs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -493,6 +528,14 @@ if (sweepCase) {
 const userHeld = ranAs === euid;
 console.log(`  ${(userHeld ? "PASS" : "FAIL").padEnd(8)} job user: PID 1 ran as ${ranAs ?? "an unread uid"}, this account is ${euid}`);
 if (!userHeld) failures.push(`the job user: PID 1 ran as ${ranAs ?? "an unread uid"}, not ${euid}`);
+// Issue #596, phase 2: the jobs' parent cgroup and its quota, applied by the worker's own reserve and read back off the
+// probe container. Strict like the rest: a quota not held, or a placement not read, FAILS (this venue's user manager
+// delegates cpu, so the worker can always set it here; a runner without one already fails the bounds observation).
+const reserveHeld = reserveState?.status === "held";
+const parentHeld = parentRead?.ok === true && parentRead.warn !== true;
+console.log(`  ${(reserveHeld && parentHeld ? "PASS" : "FAIL").padEnd(8)} cpu reserve: the worker's reserve ${reserveHeld ? `held ${budget.cpuCenti / 100} CPUs on pidispatch.slice` : `did not hold (${reserveState?.status ?? "not run"}, ${reserveState?.reason ?? "no reason"})`}; read back: ${parentRead?.detail ?? "not read"}`);
+if (!reserveHeld) failures.push(`cpu reserve: the quota was not held (${reserveState?.status ?? "not run"}, ${reserveState?.reason ?? "no reason"})`);
+if (!parentHeld) failures.push(`cpu reserve: ${parentRead?.detail ?? "the probe's cgroup parent was not read back"}`);
 // Issue #458. Egress off is a skip, not a pass: there is then no teardown under a proxy to read.
 console.log(`  ${(!teardowns.ok ? "FAIL" : teardowns.ran ? "PASS" : "SKIP").padEnd(8)} egress after ${TEARDOWN_RUNS} job teardowns: ${teardowns.detail}`);
 if (!teardowns.ok) failures.push(`egress after ${TEARDOWN_RUNS} job teardowns: ${teardowns.detail}`);

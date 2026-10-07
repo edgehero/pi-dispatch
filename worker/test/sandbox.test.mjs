@@ -267,7 +267,8 @@ test("held means a venue with a LAUNCHER, by name, never by `remote: false` (#27
 	assert.equal(SANDBOX_LAUNCHERS.podman.bin, "podman");
 	assert.equal(SANDBOX_LAUNCHERS.podman.build, buildPodmanRunArgs);
 	const podmanSrc = readFileSync(new URL("../src/backend-podman.mjs", import.meta.url), "utf8");
-	assert.match(podmanSrc, /bin: "podman",\n\t\tbuildArgs: buildPodmanRunArgs,/, "the job bundle pairs the same two");
+	// Issue #596, phase 2: the bundle wraps the builder only to name the jobs' parent cgroup from its own `podman info`.
+	assert.match(podmanSrc, /bin: "podman",\n(?:\t\t\/\/[^\n]*\n)*\t\tbuildArgs: \(opts\) => buildPodmanRunArgs\(\{ \.\.\.opts, cgroupParent: cgroupParentFor\(/, "the job bundle pairs the same two");
 	assert.equal(sandboxLauncher("toString"), null);
 	assert.equal(sandboxLauncher(null), null);
 });
@@ -414,6 +415,18 @@ test("openSandbox reopens a run at its RECORDED size, a run from before sizes at
 	const withCpus = Object.defineProperty({ user: null, home: null }, "hostCpus", { value: 14, enumerable: false });
 	await openSandbox({ ...session, ...openable({ size: { memMiB: 2048, cpuCenti: 100, source: "env" } }), resolveJobUser: async () => withCpus, egress: { armed: false }, launch });
 	assert.deepEqual(sized(launchedWith), ["--memory=2g", "--memory-swap=2g", "--cpus=13", "--cpu-shares=1024", "--shm-size=1g"]);
+});
+
+test("issue #596, phase 2: openSandbox launches without the parent, shares capped, when the job-user answer says the venue runs jobs without it", async () => {
+	let launchedWith = null;
+	const launch = async ({ args }) => ((launchedWith = args), { code: 0 });
+	const parentless = Object.defineProperty({ user: null, home: null }, "cgroupParent", { value: null, enumerable: false });
+	await openSandbox({ ...session, ...openable({ size: { memMiB: 2048, cpuCenti: 400, source: "env" } }), resolveJobUser: async () => parentless, egress: { armed: false }, launch });
+	assert.equal(launchedWith.some((a) => a.startsWith("--cgroup-parent")), false);
+	assert.ok(launchedWith.includes("--cpu-shares=1024"));
+	await openSandbox({ ...session, ...openable({ size: { memMiB: 2048, cpuCenti: 400, source: "env" } }), resolveJobUser: async () => ({ user: null, home: null }), egress: { armed: false }, launch });
+	assert.ok(launchedWith.includes("--cgroup-parent=pidispatch.slice"));
+	assert.ok(launchedWith.includes("--cpu-shares=4096"));
 });
 
 test("the sandbox's job-user decision carries the runtime's CPU count beside its answer, without changing the answer's shape (#596)", async () => {
@@ -1144,11 +1157,11 @@ test("the LOCAL sandbox argv is byte-identical to the one before issue #429 (pin
 	// swap equal to memory, the weight of 2 CPUs and no `--cpus` ceiling where no runtime CPU count is known; its phase 2
 	// added the two size labels every container carries (`pi.dispatch.mem`, `pi.dispatch.cpu`).
 	const full = { image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/s/gh-1/workspace", jobDir: "/s/gh-1", term: "xterm-256color", idleSeconds: 1800, user: "1234:1234", home: "/home/pi", relabel: true, workspaceOwned: true, network: "pi-sandbox-gh-1-net", egressEnv: { HTTPS_PROXY: "http://p:3128" } };
-	const expected = ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g", "--label=pi.dispatch.mem=4096", "--label=pi.dispatch.cpu=200", "--network=pi-sandbox-gh-1-net", "--user=1234:1234", "-i", "-t", "--entrypoint", "bash", "-e", "TERM=xterm-256color", "-e", "TMOUT=1800", "-e", "HOME=/home/pi", "-e", "HTTPS_PROXY=http://p:3128", "-v", "/s/gh-1:/job:ro,Z", "-v", "/s/gh-1/workspace:/workspace:Z", "pi-job:pinned"];
+	const expected = ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g", "--cgroup-parent=pidispatch.slice", "--label=pi.dispatch.mem=4096", "--label=pi.dispatch.cpu=200", "--network=pi-sandbox-gh-1-net", "--user=1234:1234", "-i", "-t", "--entrypoint", "bash", "-e", "TERM=xterm-256color", "-e", "TMOUT=1800", "-e", "HOME=/home/pi", "-e", "HTTPS_PROXY=http://p:3128", "-v", "/s/gh-1:/job:ro,Z", "-v", "/s/gh-1/workspace:/workspace:Z", "pi-job:pinned"];
 	assert.deepEqual(buildSandboxRunArgs(full), expected);
 	assert.deepEqual(buildSandboxRunArgs({ ...full, venue: "local" }), expected, "naming the venue changes nothing");
 	const published = { image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/w", jobDir: "/j", publish: ["-p", "127.0.0.1:3000:3000"] };
-	assert.deepEqual(buildSandboxRunArgs(published), ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g", "--label=pi.dispatch.mem=4096", "--label=pi.dispatch.cpu=200", "-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000", "-v", "/j:/job:ro", "-v", "/w:/workspace", "pi-job:pinned"]);
+	assert.deepEqual(buildSandboxRunArgs(published), ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g", "--cgroup-parent=pidispatch.slice", "--label=pi.dispatch.mem=4096", "--label=pi.dispatch.cpu=200", "-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000", "-v", "/j:/job:ro", "-v", "/w:/workspace", "pi-job:pinned"]);
 });
 
 const podmanShape = { venue: "podman", image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/s/gh-1/workspace", jobDir: "/s/gh-1", term: "xterm", idleSeconds: 1800, user: "1234:1234", home: "/home/pi", workspaceOwned: true };
@@ -1700,6 +1713,13 @@ describe("decideSandboxJobUser on the podman venue (#429)", () => {
 		assert.deepEqual(await decideSandboxJobUser({ ...base, readInfo: answered({ selinux: false }), manifest: stamped }), { user: "1234:1234", home: "/home/pi" });
 		// No stamp: this process's ids, as `local` decides a run from before the stamp.
 		assert.deepEqual(await decideSandboxJobUser({ ...base, manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi", relabel: true });
+	});
+
+	test("issue #596, phase 2: on a cgroup manager other than systemd the session runs without the jobs' parent, said beside the answer without changing its shape", async () => {
+		const parentless = await decideSandboxJobUser({ ...base, readInfo: answered({ cgroupManager: "cgroupfs" }), manifest: stamped });
+		assert.deepEqual(parentless, { user: "1234:1234", home: "/home/pi", relabel: true });
+		assert.equal(parentless.cgroupParent, null);
+		assert.equal("cgroupParent" in (await decideSandboxJobUser({ ...base, manifest: stamped })), false);
 	});
 
 	test("refused for what a podman JOB is refused for: rootful, remote, no podman", async () => {
@@ -2813,4 +2833,16 @@ test("the leftover-network refusal on podman says to start the keeper BEFORE its
 	assert.ok(keeperAt > 0 && keeperAt < loopAt, left.message);
 	assert.match(left.message, /podman ps --filter name=\^pi-dispatch-netns-keeper\$/);
 	assert.match(left.message, /systemctl --user restart pi-dispatch-netns-keeper-network\.service pi-dispatch-netns-keeper\.service/);
+});
+
+test("issue #596, phase 2: a sandbox shares the jobs' parent cgroup, and on a venue that runs jobs without it, so does the session (shares capped)", () => {
+	const base = { image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/w", jobDir: "/j", size: { memMiB: 4096, cpuCenti: 400 } };
+	const docker = buildSandboxRunArgs(base);
+	assert.deepEqual(docker.filter((a) => a.startsWith("--cgroup-parent")), ["--cgroup-parent=pidispatch.slice"]);
+	const podman = buildSandboxRunArgs({ ...base, venue: "podman", user: "1234:1234", home: "/home/pi" });
+	assert.deepEqual(podman.filter((a) => a.startsWith("--cgroup-parent")), ["--cgroup-parent=pidispatch.slice"]);
+	const parentless = buildSandboxRunArgs({ ...base, venue: "podman", user: "1234:1234", home: "/home/pi", cgroupParent: null });
+	assert.equal(parentless.some((a) => a.startsWith("--cgroup-parent")), false);
+	assert.ok(parentless.includes("--cpu-shares=1024"));
+	assert.ok(podman.includes("--cpu-shares=4096"));
 });

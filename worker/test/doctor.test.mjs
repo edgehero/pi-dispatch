@@ -5871,6 +5871,28 @@ test("doctor --live builds its probes at the deployment's job size with the daem
 	assert.match(text(), /✓ local: any one job may use at most 13 of this runtime's 14 CPUs/);
 });
 
+test("issue #596, phase 2: doctor --live reads the probe's parent cgroup and its quota against the CPU budget doctor computed", async () => {
+	const env = { ...liveEnv(), PI_HOST_CPU_BUDGET: "4" };
+	const { out, text } = capture();
+	const files = { "/proc/4242/cgroup": "0::/pidispatch.slice/docker-abc.scope\n", "/sys/fs/cgroup/pidispatch.slice/cpu.max": "400000 100000\n" };
+	const fs = { ...liveFsAs(1001), readFileSync: (p, enc) => (Object.hasOwn(files, p) ? files[p] : liveFs.readFileSync(p, enc)) };
+	const facts = JSON.stringify({ ...JSON.parse(ROOTFUL_INFO), NCPU: 14, SwapLimit: true });
+	const plan = { ...liveOk(), ...infoPlan(facts), "docker inspect --format={{.HostConfig.CgroupParent}}|{{.State.Pid}}": { code: 0, output: "pidispatch.slice|4242\n" }, ...green };
+	await runDoctor(env, { ...ghDeps(out, plan, []), live: true, ...instantClock(), liveFs: fs, jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
+	assert.match(text(), /✓ read back on local: cgroup parent holds \(the container's cgroup is under \/pidispatch\.slice, which has a quota of 4 CPUs \(400000 100000\), the host's CPU budget, so all jobs together keep the reserve\)/);
+});
+
+test("issue #596, phase 2: doctor --live on podman builds its probe as the venue's jobs are, without the parent where Podman's cgroup manager is not systemd", async () => {
+	for (const [manager, parented] of [["systemd", true], ["cgroupfs", false]]) {
+		const calls = [];
+		await podmanLiveChecks(liveEnv({ PI_EGRESS: "0", PI_BACKENDS: "podman" }), podmanEgressSeams({}, calls), podmanEgressFacts({ armed: false }, { info: { rootless: true, serviceIsRemote: false, selinux: false, cgroupManager: manager } }));
+		const probe = calls.find((c) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-live-probe"));
+		assert.ok(probe, manager);
+		assert.equal(probe.args.includes("--cgroup-parent=pidispatch.slice"), parented, manager);
+		assert.equal(probe.args.includes("--cpu-shares=2048"), parented, `${manager}: a parentless job's weight is capped`);
+	}
+});
+
 test("doctor --live renders a failed read-back as a hard failure with the declared word beside the observed", async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk({ uid: "0" }), ...green }), live: true, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
@@ -8091,6 +8113,9 @@ const MIXED_PIN = {
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve, read with this fixture's systemctl, which answers nothing.
+			"⚠ podman: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (unparseable)",
+			"    → the worker sets it when it starts; start or restart it, or run as the worker's account: `systemctl --user set-property pidispatch.slice CPUQuota=300%`",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8162,6 +8187,9 @@ const MIXED_PIN = {
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve, read with this fixture's systemctl, which answers nothing.
+			"⚠ podman: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (unparseable)",
+			"    → the worker sets it when it starts; start or restart it, or run as the worker's account: `systemctl --user set-property pidispatch.slice CPUQuota=300%`",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
 			"✓ podman: cgroup v2 controllers are delegated to this account (cpuset, cpu, io, memory, pids), so a job's pid, memory and cpu bounds are applied",
 			"✓ podman: SELinux does not confine containers here, so nothing a job mounts is relabelled",
@@ -8224,6 +8252,9 @@ const MIXED_PIN = {
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve, read with this fixture's systemctl, which answers nothing.
+			"⚠ podman: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (unparseable)",
+			"    → the worker sets it when it starts; start or restart it, or run as the worker's account: `systemctl --user set-property pidispatch.slice CPUQuota=300%`",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -8283,6 +8314,9 @@ const MIXED_PIN = {
 			"✓ podman: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve, read with this fixture's systemctl, which answers nothing.
+			"⚠ podman: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (unparseable)",
+			"    → the worker sets it when it starts; start or restart it, or run as the worker's account: `systemctl --user set-property pidispatch.slice CPUQuota=300%`",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
 			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
@@ -9527,6 +9561,7 @@ const podmanProbeArgv = (slug, url, script = egressCanaryScript(url)) => [
 	"--memory-swap=4g",
 	"--cpu-shares=2048",
 	"--shm-size=1g",
+	"--cgroup-parent=pidispatch.slice",
 	"--label=pi.dispatch.mem=4096",
 	"--label=pi.dispatch.cpu=200",
 	"--network=pi-dispatch-egress-doctor-1",
@@ -10156,7 +10191,7 @@ const dockerCanaryPinRun = async (scenario, t = null) => {
 const DOCKER_CANARY_PIN = {
 	green: {
 		code: 0,
-		total: 51,
+		total: 52, // issue #596, phase 2: +1, the probe's cgroup parent inspect
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -10199,6 +10234,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
+			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
+			"    → make `docker info` report its CgroupDriver, then re-run doctor",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10227,6 +10265,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
+			// Issue #596, phase 2: this fixture's docker does not answer the parent inspect, which is said, never passed.
+			"⚠ read back on local: cgroup parent: not read back: docker inspect did not answer",
+			"    → see the CPU reserve lines above for what keeps the host's reserve on this venue",
 			"✓ read back on local: limits of this read-back -- every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint; it ran as the image's own user, decided for this shell (uid 1001), and the worker service may run as another account; it wrote to a fixture folder, not to any folder of yours; it read back PI_JOB_IMAGE only; ephemeral ran two short-lived containers under one name, not two real jobs; jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs; secretsCustody and credentialTransit are not container properties",
 			"",
 			"doctor: ready. Start the worker with `pi-dispatch worker`.",
@@ -10235,7 +10276,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	stale: {
 		code: 0,
-		total: 49,
+		total: 50, // issue #596, phase 2: +1, the probe's cgroup parent inspect
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -10275,6 +10316,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
+			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
+			"    → make `docker info` report its CgroupDriver, then re-run doctor",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10304,6 +10348,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
+			// Issue #596, phase 2: this fixture's docker does not answer the parent inspect, which is said, never passed.
+			"⚠ read back on local: cgroup parent: not read back: docker inspect did not answer",
+			"    → see the CPU reserve lines above for what keeps the host's reserve on this venue",
 			"✓ read back on local: limits of this read-back -- every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint; it ran as the image's own user, decided for this shell (uid 1001), and the worker service may run as another account; it wrote to a fixture folder, not to any folder of yours; it read back PI_JOB_IMAGE only; ephemeral ran two short-lived containers under one name, not two real jobs; jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs; secretsCustody and credentialTransit are not container properties",
 			"",
 			"doctor: ready. Start the worker with `pi-dispatch worker`.",
@@ -10312,7 +10359,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	unfinished: {
 		code: 0,
-		total: 52,
+		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -10357,6 +10404,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
+			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
+			"    → make `docker info` report its CgroupDriver, then re-run doctor",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10386,6 +10436,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
+			// Issue #596, phase 2: this fixture's docker does not answer the parent inspect, which is said, never passed.
+			"⚠ read back on local: cgroup parent: not read back: docker inspect did not answer",
+			"    → see the CPU reserve lines above for what keeps the host's reserve on this venue",
 			"✓ read back on local: limits of this read-back -- every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint; it ran as the image's own user, decided for this shell (uid 1001), and the worker service may run as another account; it wrote to a fixture folder, not to any folder of yours; it read back PI_JOB_IMAGE only; ephemeral ran two short-lived containers under one name, not two real jobs; jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs; secretsCustody and credentialTransit are not container properties",
 			"",
 			"doctor: ready. Start the worker with `pi-dispatch worker`.",
@@ -10394,7 +10447,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	hung: {
 		code: 0,
-		total: 52,
+		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect
 		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
 		// default SIGTERM), which is `runCmdCapture`'s. The step runner would send SIGKILL.
 		killsBeforeBound: [],
@@ -10443,6 +10496,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
+			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
+			"    → make `docker info` report its CgroupDriver, then re-run doctor",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10472,6 +10528,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
+			// Issue #596, phase 2: this fixture's docker does not answer the parent inspect, which is said, never passed.
+			"⚠ read back on local: cgroup parent: not read back: docker inspect did not answer",
+			"    → see the CPU reserve lines above for what keeps the host's reserve on this venue",
 			"✓ read back on local: limits of this read-back -- every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint; it ran as the image's own user, decided for this shell (uid 1001), and the worker service may run as another account; it wrote to a fixture folder, not to any folder of yours; it read back PI_JOB_IMAGE only; ephemeral ran two short-lived containers under one name, not two real jobs; jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs; secretsCustody and credentialTransit are not container properties",
 			"",
 			"doctor: ready. Start the worker with `pi-dispatch worker`.",
@@ -10480,7 +10539,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	enoent: {
 		code: 0,
-		total: 52,
+		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect
 		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
 		// A probe that never launched is never killed.
 		killsBeforeBound: null,
@@ -10529,6 +10588,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
 			"✓ The host budget binds first: it holds 1 job of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (3); bigger sizes fit fewer",
+			// Issue #596, phase 2: the aggregate CPU reserve. This fixture's `docker info` names no CgroupDriver.
+			"⚠ local: no host CPU reserve across jobs: every job runs under pidispatch.slice, but the runtime did not say which cgroup driver it uses",
+			"    → make `docker info` report its CgroupDriver, then re-run doctor",
 			"✓ local: the daemon is Docker Engine 27.5.1",
 			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
@@ -10558,6 +10620,9 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
+			// Issue #596, phase 2: this fixture's docker does not answer the parent inspect, which is said, never passed.
+			"⚠ read back on local: cgroup parent: not read back: docker inspect did not answer",
+			"    → see the CPU reserve lines above for what keeps the host's reserve on this venue",
 			"✓ read back on local: limits of this read-back -- every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint; it ran as the image's own user, decided for this shell (uid 1001), and the worker service may run as another account; it wrote to a fixture folder, not to any folder of yours; it read back PI_JOB_IMAGE only; ephemeral ran two short-lived containers under one name, not two real jobs; jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs; secretsCustody and credentialTransit are not container properties",
 			"",
 			"doctor: ready. Start the worker with `pi-dispatch worker`.",

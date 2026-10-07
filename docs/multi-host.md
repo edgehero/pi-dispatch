@@ -215,8 +215,45 @@ record name the job's size and the budget; the forge comment names neither.
 whose stop failed cannot make room for another while it may still be running. The next start of the worker removes it.
 
 Every job container carries its size as two labels, `pi.dispatch.mem` (MiB) and `pi.dispatch.cpu` (hundredths of a
-CPU), and every job's `--cpus` is the CPU budget, so no single job can use the reserve. Several busy jobs together can
-still use every core: a reserve that holds across all jobs is not built yet.
+CPU), and every job's `--cpus` is the CPU budget, so no single job can use the reserve.
+
+### The CPU reserve across all jobs
+
+`--cpus` bounds one job at a time: several busy jobs together could still use every core. So every job container
+(and every sandbox and doctor probe) runs inside one parent cgroup, `pidispatch.slice`, whose CPU quota is the CPU
+budget. All jobs together then stay inside the budget, and the reserve stays free for the egress proxy, Valkey, the
+worker and the rest of the host. Measured on Docker Desktop, Docker 29 on Ubuntu and Podman 4.9 and 5.8: three busy
+jobs used 3.00 to 3.06 of 4 cores (12.95 to 13.02 of 14), and a busy program outside kept its core.
+
+The parent helps even before it has a quota: a job's CPU weight then only competes with other jobs, so a large job can
+no longer starve the egress proxy or Valkey. Inside the parent the weights still order the jobs (on Fedora's kernel
+6.19 the ratio between sizes is smaller than the weights, the order holds).
+
+Who sets the quota depends on the container runtime:
+
+- **Rootless Podman**: the worker, when it starts and whenever the budget changes, through your account's own systemd
+  user manager: `systemctl --user set-property pidispatch.slice CPUQuota=<budget x 100>%`. It survives a reboot.
+- **Docker Desktop** (Docker's cgroupfs driver): the worker, when it starts, through a short helper container of the
+  job image (no network, no capabilities, only the parent's own cgroup directory mounted) that writes the quota into
+  the Docker Desktop VM. A Docker Desktop restart drops it; the worker checks it every ten minutes and writes it again.
+- **Docker on a Linux host with systemd, and rootful Podman**: only root can set it. Run this once, as root, with your
+  budget in place of 3 CPUs (it survives reboots); `pi-dispatch doctor` prints the exact command with your budget:
+
+  ```sh
+  sudo systemctl set-property pidispatch.slice CPUQuota=300%
+  ```
+
+`pi-dispatch doctor` says per runtime whether the quota is in place, and warns "no host CPU reserve across jobs" with
+the fix when it is not. Jobs still run then, inside the parent but without the quota (the worker logs
+`cpu_reserve_fail_open` with the reason). With `PI_HOST_CPU_BUDGET=off` no quota is set, and the worker removes one
+it set before. Where rootless Podman uses the cgroupfs manager instead of systemd, jobs run without the parent and
+each job's CPU weight is capped at the default: the proxy and Valkey then get a fair share of the CPU, not a reserve.
+
+There is no memory limit across all jobs, on purpose: when a group of containers runs out of memory together, the
+kernel kills the largest job in the group, not the one that grew (measured). The budget's admission keeps the jobs'
+memory sizes inside the budget instead. If you want a last backstop anyway, set it yourself on the parent at the
+host's memory minus a reserve (for example `sudo systemctl set-property pidispatch.slice MemoryMax=28G
+MemorySwapMax=0`), knowing that it kills the largest job.
 
 ## The traps
 

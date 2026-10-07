@@ -52,7 +52,7 @@ test("the facts read is one bounded `docker info --format={{json .}}`", () => {
 });
 
 test("parseDaemonFacts reads the Docker shape: OS, rootless and userns markers, pid and memory bounds, never CPU", () => {
-	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1", hostCpus: null, memTotalMiB: null, swapLimit: null, cpuShares: null });
+	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1", hostCpus: null, memTotalMiB: null, swapLimit: null, cpuShares: null, cgroupDriver: null, cgroupVersion: null });
 	assert.equal(facts("dockerRootless").rootless, true);
 	assert.deepEqual(facts("dockerRootless").bounds, { pids: false, memory: false });
 	assert.equal(facts("dockerRemap").userns, true);
@@ -65,7 +65,7 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	assert.equal(facts("podmanCompatRootful").podman, true);
 	assert.equal(facts("podmanCompatRootful").bounds, null, "Podman hard-codes PidsLimit and derives MemoryLimit from the root controllers");
 	assert.equal(facts("podmanCompatRootless").rootless, true);
-	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, selinux: null, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null, hostCpus: null, memTotalMiB: null }, "the trimmed shim fixture carries no version");
+	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, selinux: null, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null, hostCpus: null, memTotalMiB: null, cgroupDriver: null, cgroupVersion: null }, "the trimmed shim fixture carries no version");
 	assert.equal(facts("shimRootless").remoteSocketPath, "/run/user/1234/podman/podman.sock");
 	// Only a unix path is kept, because only a unix path is ever statted.
 	for (const remote of ["ssh://core:hunter2@10.0.0.5:22/run/podman/podman.sock", "tcp://127.0.0.1:8080", "unix://relative", "run/podman.sock", ""]) {
@@ -74,6 +74,21 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	}
 	assert.equal(facts("desktop").podman, false);
 	assert.equal(facts("dockerRootful").podman, false);
+});
+
+test("parseDaemonFacts reads the cgroup driver and version both shapes report, which decide how the jobs' parent gets its quota (issue #596, phase 2)", () => {
+	// Measured: Docker Desktop 27.4 says `CgroupDriver` cgroupfs, Ubuntu's docker 29.1.3 systemd, both `CgroupVersion` "2".
+	const docker = (over) => parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, ...over })).facts;
+	assert.equal(docker({ CgroupDriver: "cgroupfs", CgroupVersion: "2" }).cgroupDriver, "cgroupfs");
+	assert.equal(docker({ CgroupDriver: "systemd", CgroupVersion: "2" }).cgroupVersion, "v2");
+	assert.equal(docker({ CgroupVersion: "1" }).cgroupVersion, "v1");
+	for (const bad of ["", "Systemd", "sys temd", 2, null, "x".repeat(40)]) assert.equal(docker({ CgroupDriver: bad }).cgroupDriver, null, String(bad));
+	for (const bad of ["3", "v", 2, "", null]) assert.equal(docker({ CgroupVersion: bad }).cgroupVersion, null, String(bad));
+	// Podman's own shape (podman-docker): `host.cgroupManager` and `host.cgroupVersion` "v2".
+	const shim = (over) => parseDaemonFacts(JSON.stringify({ host: { ...BODY.shimRootful.host, ...over } })).facts;
+	assert.equal(shim({ cgroupManager: "systemd", cgroupVersion: "v2" }).cgroupDriver, "systemd");
+	assert.equal(shim({ cgroupManager: "systemd", cgroupVersion: "v2" }).cgroupVersion, "v2");
+	assert.equal(shim({ cgroupManager: "CGROUPFS" }).cgroupDriver, null);
 });
 
 test("parseDaemonFacts reads the runtime's CPU count and Docker's SwapLimit, and nothing malformed (issue #596)", () => {

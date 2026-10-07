@@ -25,7 +25,7 @@
  * re-typing the path.
  */
 
-import { DEFAULT_JOB_SIZE, containerSizing } from "./job-size.mjs";
+import { CGROUP_PARENT, DEFAULT_JOB_SIZE, PARENTLESS_SHARES_MAX, containerSizing } from "./job-size.mjs";
 
 /**
  * Where the operator's global pi overlay lands INSIDE the container (REQ-GLOBAL-PI-OVERLAY). Exported
@@ -141,6 +141,11 @@ export function assertUserns(userns) {
  * @param cpuBudgetCenti the host's CPU budget in hundredths (`host-budget.mjs`), or null when it is off or unknown. With
  *                   one, `cpus` is the budget capped at the runtime's count (`cpuCeilingCenti`), so no job can use the
  *                   CPUs `auto` reserved for the host; without, the phase 1 ceiling stands.
+ * @param cgroupParent the parent cgroup the container is started under (issue #596, phase 2): `CGROUP_PARENT` (the
+ *                   default, for every container this builder makes) or null where the runtime cannot take one
+ *                   (`cgroupParentFor`). Every job shares the parent, whose quota is the host's CPU budget, so the
+ *                   reserve holds across ALL jobs; with null the job's `cpuShares` are capped at `PARENTLESS_SHARES_MAX`
+ *                   so no job outweighs the egress proxy and Valkey. Anything else is refused.
  * @param network    the per-job egress network this container joins (REQ-EGRESS-ALLOWLIST); null = the
  *                   docker default bridge, which is what every job did before that requirement existed
  * @param user       "<uid>:<gid>" the job runs as (issue #341), or null for the image's own USER. Portable: it says WHO
@@ -168,6 +173,7 @@ export function containerSpec({
 	size = DEFAULT_JOB_SIZE,
 	hostCpus = null,
 	cpuBudgetCenti = null,
+	cgroupParent = CGROUP_PARENT,
 	network = null,
 	user = null,
 	userns = null,
@@ -184,6 +190,7 @@ export function containerSpec({
 	if (!workspace) throw new Error("docker run: workspace mount is required");
 	// Throws on a size outside the floors and ceilings, before any field is built (issue #596).
 	const sizing = containerSizing(size, hostCpus, cpuBudgetCenti);
+	if (cgroupParent !== CGROUP_PARENT && cgroupParent !== null) throw new Error(`docker run: refusing a cgroup parent other than ${CGROUP_PARENT} or none: ${JSON.stringify(cgroupParent)}`);
 	// Booleans, strictly: a truthy string from a caller that forwarded an option bag must not re-own host directories.
 	if (typeof relabel !== "boolean") throw new Error(`docker run: relabel must be a boolean; got ${typeof relabel}`);
 	if (typeof workspaceOwned !== "boolean") throw new Error(`docker run: workspaceOwned must be a boolean; got ${typeof workspaceOwned}`);
@@ -232,8 +239,11 @@ export function containerSpec({
 		memory: sizing.memory,
 		memorySwap: sizing.memorySwap,
 		cpus: sizing.cpus,
-		cpuShares: sizing.cpuShares,
+		// Without the parent (issue #596, phase 2) a job's weight would compete with the proxy's and Valkey's directly, so it
+		// is capped at their default weight; under the parent it competes only with sibling jobs and orders them.
+		cpuShares: cgroupParent === null ? Math.min(sizing.cpuShares, PARENTLESS_SHARES_MAX) : sizing.cpuShares,
 		shmSize: sizing.shmSize,
+		cgroupParent,
 		// Issue #596, phase 2: the size the job was started at, as two labels on the container, so doctor can hold the host
 		// budget's ledger against what actually runs (`pi.dispatch.mem` in MiB, `pi.dispatch.cpu` in hundredths). Integers
 		// from the validated size, never anything a job or an operator writes as text.

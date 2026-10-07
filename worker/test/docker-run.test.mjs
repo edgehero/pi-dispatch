@@ -175,7 +175,13 @@ test("nothing in worker/src but the builder spells a docker --user flag", () => 
 	// emits. A second place emitting it is a second, unvalidated path to uid 0.
 	const dir = new URL("../src/", import.meta.url);
 	const hits = readdirSync(dir).filter((f) => f.endsWith(".mjs") && f !== "docker-run.mjs").filter((f) => readFileSync(new URL(f, dir), "utf8").includes("--user="));
-	assert.deepEqual(hits, []);
+	// ONE named exception (issue #596, phase 2): the CPU reserve's one-shot helper writes the jobs' parent cgroup's
+	// `cpu.max` on Docker Desktop, which needs uid 0 even with every capability dropped (measured). It runs no job code and
+	// mounts nothing but that one cgroup directory; its exact argv is pinned in cpu-reserve.test.mjs, and here it may
+	// spell uid 0 in exactly one place and no other user at all.
+	assert.deepEqual(hits, ["cpu-reserve.mjs"]);
+	const helper = readFileSync(new URL("cpu-reserve.mjs", dir), "utf8");
+	assert.deepEqual(helper.match(/--user=[^"`\s]*/g), ["--user=0:0"]);
 });
 
 test("refuses to build without image / name / workspace", () => {
@@ -542,6 +548,7 @@ test("the podman argv, literally: --userns=keep-id immediately after --user=, th
 		"--cpus=3",
 		"--cpu-shares=512",
 		"--shm-size=512m",
+		"--cgroup-parent=pidispatch.slice",
 		"--label=pi.dispatch.mem=1024",
 		"--label=pi.dispatch.cpu=50",
 		"--network=pi-job-1-net",
@@ -639,11 +646,70 @@ test("issue #596, phase 2: every job container carries its size as two labels, a
 	assert.deepEqual(spec.labels, { "pi.dispatch.mem": "1536", "pi.dispatch.cpu": "50" });
 	const args = dockerArgsFromSpec(spec);
 	assert.deepEqual(args.filter((a) => a.startsWith("--label=") || a.startsWith("--cpus=")), ["--cpus=3.5", "--label=pi.dispatch.mem=1536", "--label=pi.dispatch.cpu=50"]);
-	assert.equal(args.indexOf("--label=pi.dispatch.mem=1536"), args.indexOf("--shm-size=768m") + 1, "right after the size flags, before the network");
+	assert.equal(args.indexOf("--label=pi.dispatch.mem=1536"), args.indexOf("--shm-size=768m") + 2, "right after the size flags and the parent, before the network");
 	// The podman argv is built by the same function, so it carries them too.
 	assert.ok(buildPodmanRunArgs({ image: "i", name: "pi-job-1", workspace: "/w", user: "1234:1234", size: { memMiB: 1536, cpuCenti: 50 } }).includes("--label=pi.dispatch.cpu=50"));
 	for (const flag of ["--label", "-l", "--label-file"]) {
 		assert.ok(DOCKER_EXTRA_FORBIDDEN.includes(flag), `${flag} must be denied`);
 		assert.throws(() => buildDockerRunArgs({ image: "i", name: "n", workspace: "/w", extraFlags: [flag, "pi.dispatch.mem=1"] }), /supersede the isolation boundary/, flag);
 	}
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Issue #596, phase 2: the parent cgroup every job shares (the aggregate CPU reserve, `cpu-reserve.mjs`).
+
+test("issue #596, phase 2: every docker and podman job argv carries --cgroup-parent=pidispatch.slice exactly once, right after the size flags", () => {
+	const job = { image: "i", name: "pi-job-1", workspace: "/w", size: { memMiB: 1536, cpuCenti: 50 } };
+	const docker = buildDockerRunArgs(job);
+	const podman = buildPodmanRunArgs({ ...job, user: "1234:1234" });
+	for (const args of [docker, podman]) {
+		assert.deepEqual(args.filter((a) => a.startsWith("--cgroup-parent")), ["--cgroup-parent=pidispatch.slice"]);
+		assert.equal(args.indexOf("--cgroup-parent=pidispatch.slice"), args.indexOf("--shm-size=768m") + 1);
+	}
+	// The literal, not the constant: a constant-derived test is blind to a change IN the value, and a dash would nest.
+	assert.equal(containerSpec(job).cgroupParent, "pidispatch.slice");
+	assert.ok(!containerSpec(job).cgroupParent.includes("-"));
+	// The parent leaves the job's own weight alone: under it a weight orders sibling jobs only.
+	assert.ok(docker.includes("--cpu-shares=512"));
+	assert.ok(buildDockerRunArgs({ ...job, size: { memMiB: 1536, cpuCenti: 25600 } }).includes("--cpu-shares=262144"));
+});
+
+test("issue #596, phase 2: without the parent the flag is absent and the job's shares are capped at 1024, and nothing else may be named", () => {
+	const job = { image: "i", name: "pi-job-1", workspace: "/w", size: { memMiB: 4096, cpuCenti: 400 } };
+	const spec = containerSpec({ ...job, cgroupParent: null });
+	assert.equal(spec.cgroupParent, null);
+	assert.equal(spec.cpuShares, 1024);
+	const args = dockerArgsFromSpec(spec);
+	assert.equal(args.some((a) => a.startsWith("--cgroup-parent")), false);
+	assert.ok(args.includes("--cpu-shares=1024"));
+	// A size below the cap keeps its own weight: the cap only lowers.
+	assert.equal(containerSpec({ ...job, size: { memMiB: 4096, cpuCenti: 50 }, cgroupParent: null }).cpuShares, 512);
+	assert.equal(containerSpec({ ...job, cgroupParent: "pidispatch.slice" }).cpuShares, 4096);
+	for (const bad of ["pd-jobs.slice", "", "user.slice", "/pidispatch.slice", 0]) {
+		assert.throws(() => containerSpec({ ...job, cgroupParent: bad }), /refusing a cgroup parent/, JSON.stringify(bad));
+		assert.throws(() => dockerArgsFromSpec({ ...containerSpec(job), cgroupParent: bad }), /refusing a spec whose cgroup parent/, JSON.stringify(bad));
+	}
+	// A hand-built spec from before the field asked for no parent.
+	const { cgroupParent: _p, ...legacy } = containerSpec(job);
+	assert.equal(dockerArgsFromSpec(legacy).some((a) => a.startsWith("--cgroup-parent")), false);
+});
+
+test("issue #596, phase 2: --cgroup-parent is refused in dockerExtra in both spellings", () => {
+	assert.ok(DOCKER_EXTRA_FORBIDDEN.includes("--cgroup-parent"));
+	for (const extra of [["--cgroup-parent=other.slice"], ["--cgroup-parent", "other.slice"], ["--cgroup-parent=pidispatch.slice"]]) {
+		assert.throws(() => buildDockerRunArgs({ image: "i", name: "n", workspace: "/w", extraFlags: extra }), /supersede the isolation boundary/, JSON.stringify(extra));
+		assert.throws(() => buildPodmanRunArgs({ image: "i", name: "n", workspace: "/w", user: "1234:1234", extraFlags: extra }), /supersede the isolation boundary/, JSON.stringify(extra));
+	}
+});
+
+test("issue #596, phase 2: only the job builder and the reserve's helper spell --cgroup-parent; the egress proxy, Valkey and the deploy units never carry it", async () => {
+	const dir = new URL("../src/", import.meta.url);
+	const hits = readdirSync(dir).filter((f) => f.endsWith(".mjs")).filter((f) => readFileSync(new URL(f, dir), "utf8").includes("--cgroup-parent="));
+	assert.deepEqual(hits.sort(), ["cpu-reserve.mjs", "docker-run.mjs"]);
+	const { valkeyDockerRunArgs, valkeyOwnerCheckArgs } = await import("../src/valkey-auth.mjs");
+	for (const args of [valkeyDockerRunArgs({}), valkeyOwnerCheckArgs("/srv/d")]) assert.equal(args.some((a) => String(a).includes("cgroup")), false);
+	const deploy = new URL("../../deploy/", import.meta.url);
+	for (const f of readdirSync(deploy)) assert.equal(/cgroup.?parent|pidispatch\.slice/i.test(readFileSync(new URL(f, deploy), "utf8")), false, f);
+	// up.mjs runs the proxy from a literal argv; it names no parent.
+	assert.equal(readFileSync(new URL("up.mjs", dir), "utf8").includes("cgroup"), false);
 });
