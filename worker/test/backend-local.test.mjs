@@ -15,7 +15,7 @@ test("container-spec.mjs is a LEAF -- it imports nothing but job-size.mjs, which
 	// Issue #596 added ONE edge, to the job's size, and only because that module is a leaf too: the transitive set stays
 	// these two files.
 	const src = readFileSync(new URL("../src/container-spec.mjs", import.meta.url), "utf8");
-	assert.deepEqual(src.match(/^import\s.*$/gm), ['import { DEFAULT_JOB_SIZE, containerSizing } from "./job-size.mjs";'], "container-spec.mjs must import only job-size.mjs");
+	assert.deepEqual(src.match(/^import\s.*$/gm), ['import { CGROUP_PARENT, DEFAULT_JOB_SIZE, PARENTLESS_SHARES_MAX, containerSizing } from "./job-size.mjs";'], "container-spec.mjs must import only job-size.mjs");
 	assert.equal(/require\(/.test(src), false);
 	const size = readFileSync(new URL("../src/job-size.mjs", import.meta.url), "utf8");
 	assert.equal(/^import\s/m.test(size), false, "job-size.mjs must import nothing");

@@ -538,3 +538,27 @@ test("the cadences: a fleet no-fit must stand across two host beats, and every r
 	assert.ok(NEVER_FITS_RECHECK_MS > FLEET_NO_FIT_CONFIRM_MS, "the second read of a deferred job always comes after the confirm window");
 	assert.ok(HOLD_VERIFY_AFTER_MS > BUDGET_RECHECK_MS, "a waiter that is still asking is never verified");
 });
+
+test("issue #596, phase 2: onRefresh gets every refreshed budget and its facts, unawaited, and a hook that throws or rejects breaks nothing", async () => {
+	const seen = [];
+	const facts = { memTotalMiB: 16384, hostCpus: 4, reserveVenues: [{ venue: "podman", facts: { rootless: true } }] };
+	let release;
+	const slow = new Promise((r) => (release = r));
+	const budget = makeHostBudget({ settings: AUTO, jobDefault: DEFAULT, readFacts: async () => facts, onRefresh: (b, f) => {
+		seen.push([b, f]);
+		return slow;
+	} });
+	// Resolves while the hook's promise is still pending: the refresh never waits for the reserve.
+	await budget.ready;
+	assert.deepEqual(seen, [[{ memMiB: 14746, cpuCenti: 300 }, facts]]);
+	seen[0][0].cpuCenti = 1;
+	assert.equal(budget.current().cpuCenti, 300, "the hook gets a copy, never the live budget");
+	release();
+	for (const onRefresh of [() => {
+		throw new Error("sync");
+	}, () => Promise.reject(new Error("async"))]) {
+		const b = makeHostBudget({ settings: AUTO, jobDefault: DEFAULT, readFacts: async () => facts, onRefresh });
+		assert.deepEqual(await b.ready, { memMiB: 14746, cpuCenti: 300 });
+		assert.deepEqual(await b.refresh(), { memMiB: 14746, cpuCenti: 300 });
+	}
+});

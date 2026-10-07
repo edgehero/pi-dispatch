@@ -1310,6 +1310,17 @@ test("the podman venue's job teardown uses the `podman info` it admitted jobs on
 	assert.equal(typeof made.log, "function");
 });
 
+test("issue #596, phase 2: a podman job runs under pidispatch.slice from the info it was admitted on, and without it (shares capped) where Podman's cgroup manager is not systemd", { skip }, async () => {
+	for (const [manager, parent, shares] of [["systemd", "--cgroup-parent=pidispatch.slice", "--cpu-shares=4096"], ["cgroupfs", null, "--cpu-shares=1024"]]) {
+		let made = null;
+		const b = mod.makePodmanBackend({ image: "pi-job:x", readInfo: async () => answered({ cgroupManager: manager }), platform: "linux", euid: 1234, egid: 1234, fs: clean(), home: HOME, env: {}, onOutput: () => {}, log: () => {}, makeRunContainer: (o) => ((made = o), async () => ({ code: 0 })) });
+		await b.observationPreflight({ id: "j", kind: "local" });
+		const args = made.buildArgs({ image: "pi-job:x", name: "pi-job-1", workspace: "/w", user: "1234:1234", size: { memMiB: 4096, cpuCenti: 400 } });
+		assert.deepEqual(args.filter((a) => a.startsWith("--cgroup-parent")), parent ? [parent] : [], manager);
+		assert.ok(args.includes(shares), manager);
+	}
+});
+
 test("the remedy resets the rootless network only for the keys that shape it; a per-container key runs the next job once gone (#448)", { skip }, async () => {
 	const { PODMAN_NETWORK_HELPER_KEYS } = await import("../src/backends.mjs");
 	assert.deepEqual([...PODMAN_NETWORK_HELPER_KEYS], ["pasta_options", "network_cmd_options", "env", "helper_binaries_dir", "network_cmd_path"]);

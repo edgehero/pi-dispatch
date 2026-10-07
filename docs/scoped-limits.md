@@ -233,8 +233,10 @@ memory, light ones less.
   proportion only on older container runtimes (runc 1.1, crun 1.14: sizes 3:1 got about 3:1, measured); current
   ones compress it (runc 1.5, crun 1.27: sizes 3:1 got about 2.4:1). When the host is idle, any job may use the
   idle cores. No single job may use more than the host's CPU budget (by default the host's cores minus one, when it
-  has four or more; see [the host budget](multi-host.md#the-host-budget)). That bound is per job: several busy jobs
-  together can still use every core. A reserve that holds across all jobs is not built yet.
+  has four or more; see [the host budget](multi-host.md#the-host-budget)). That bound is per job; what keeps the
+  reserve free across all jobs together is the parent cgroup they share
+  ([the CPU reserve across all jobs](multi-host.md#the-cpu-reserve-across-all-jobs)), inside which the weights still
+  order the jobs.
 - A row may set only a size, only one of the two, or a size beside its caps. A field the row does not set comes
   from `PI_JOB_MEMORY` and `PI_JOB_CPUS` in `.env`, which default to `4g` and `2`. A bad value there stops the
   worker at boot with the reason.

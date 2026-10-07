@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -244,6 +244,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeAuth,
 			makeHost,
 			createWorkerFn,
+			...(makeCpuReserve ? { makeCpuReserve } : {}),
 			makeReaper: reaper,
 			makeLogSink: logSink,
 			makeRecordWriter: recordWriter,
@@ -4654,12 +4655,33 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	const opts = captured.hostBudget;
 	assert.deepEqual(opts.settings, { memory: { mode: "auto" }, cpus: { mode: "value", cpuCenti: 600 }, reserveMemory: { mode: "auto" }, reserveCpus: { mode: "auto" } });
 	assert.deepEqual(opts.jobDefault, { memMiB: 2048, cpuCenti: 200 }, "auto never falls below one job of the DEPLOYMENT's default size");
-	assert.deepEqual(await opts.readFacts(), { memTotalMiB: 16384, hostCpus: 8 }, "the local venue's cached facts read");
+	const facts = await opts.readFacts();
+	assert.deepEqual({ ...facts, reserveVenues: undefined }, { memTotalMiB: 16384, hostCpus: 8, reserveVenues: undefined }, "the local venue's cached facts read");
+	// Issue #596, phase 2: the same read names the venue for the CPU reserve, with the endpoint's observed locality.
+	assert.deepEqual(facts.reserveVenues.map((v) => [v.venue, v.endpointLocal, v.facts.hostCpus]), [["local", endpoint.local === true, 8]]);
+	assert.equal(typeof opts.onRefresh, "function");
 	assert.equal(typeof opts.containerGone, "function");
 	assert.equal(typeof captured.fleetHosts, "function");
 	assert.equal(captured.deps.hostBudget, undefined, "beside the other worker-wide inputs, never in deps");
 	for (const key of ["budgetMemMiB", "budgetCpuCenti", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "budgetRunning", "budgetHolds", "budgetOrphans"]) {
 		assert.equal(typeof published[key], "function", `${key} is a thunk, re-read every beat`);
+	}
+});
+
+test("issue #596, phase 2: the CPU reserve plan reads a systemd daemon's slice only where the endpoint is observed on this host", { skip }, async () => {
+	for (const [local, method] of [[true, "system-systemd"], [false, null]]) {
+		const endpoint = { local, context: "x", endpoint: local ? "unix:///run/pd-test/docker.sock" : "tcp://10.1.2.3:2375", reason: null, transient: false };
+		const syncs = [];
+		const { captured } = await runStart({
+			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+			makeHost: () => fakeHost(),
+			readDaemonFacts: DOCKER_FACTS({ hostCpus: 8, memTotalMiB: 16384, cgroupDriver: "systemd", cgroupVersion: "v2" }),
+			jobUserIdentity: { ...LINUX_ID(1001), stat: () => ({ uid: 0, gid: 2375 }) },
+			resolveDockerEndpoint: async () => endpoint,
+			makeCpuReserve: () => ({ sync: async (x) => (syncs.push(x), true), states: () => [] }),
+		});
+		await captured.hostBudget.onRefresh({ memMiB: 1, cpuCenti: 700 }, await captured.hostBudget.readFacts());
+		assert.deepEqual(syncs[0].plans.map((p) => [p.venue, p.method]), [["local", method]], String(local));
 	}
 });
 
@@ -4684,5 +4706,39 @@ test("issue #596, phase 2: on rootless Podman the budget's facts carry the user 
 			return files[path];
 		},
 	});
-	assert.deepEqual(await captured.hostBudget.readFacts(), { memTotalMiB: 16384, hostCpus: 4, userMemMiB: 8192, userCpuCenti: 250 });
+	const facts = await captured.hostBudget.readFacts();
+	assert.deepEqual({ ...facts, reserveVenues: undefined }, { memTotalMiB: 16384, hostCpus: 4, userMemMiB: 8192, userCpuCenti: 250, reserveVenues: undefined });
+	assert.deepEqual(facts.reserveVenues.map((v) => [v.venue, v.endpointLocal]), [["podman", true]]);
+});
+
+test("issue #596, phase 2: every budget refresh keeps the jobs' parent cgroup's quota through the worker's one CPU reserve, with each venue's plan and the job image as the helper", { skip }, async () => {
+	const made = [];
+	const syncs = [];
+	const { captured } = await runStart({
+		env: { PI_BACKENDS: "podman", PI_JOB_IMAGE: "pi-job:ci" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		jobUserIdentity: PODMAN_ID,
+		observationFs: PODMAN_FILES,
+		makePodmanReaper: () => async () => ({ reaped: true }),
+		bootImage: { ok: true, image: "pi-job:ci", imageDigest: "sha256:pod", piVersion: "0.80.7", capabilities: ["anyUid"] },
+		readPodmanInfo: PODMAN_INFO({ hostCpus: 4, memTotalMiB: 16384 }),
+		readCgroupFile: () => {
+			throw Object.assign(new Error("absent"), { code: "ENOENT" });
+		},
+		makeCpuReserve: (args) => {
+			made.push(args);
+			return { sync: async (x) => (syncs.push(x), true), states: () => [] };
+		},
+	});
+	assert.equal(made.length, 1, "one reserve per worker");
+	assert.equal(made[0].image, "pi-job:ci");
+	assert.equal(typeof made[0].run, "function");
+	await captured.hostBudget.onRefresh({ memMiB: 14746, cpuCenti: 300 }, await captured.hostBudget.readFacts());
+	assert.equal(syncs.length, 1);
+	assert.equal(syncs[0].cpuCenti, 300);
+	assert.deepEqual(syncs[0].plans, [{ venue: "podman", parent: true, method: "user-systemd", why: null }]);
+	// No facts (the runtime did not answer): no venue, nothing to keep.
+	await captured.hostBudget.onRefresh({ memMiB: null, cpuCenti: null }, {});
+	assert.deepEqual(syncs[1], { cpuCenti: null, plans: [] });
 });

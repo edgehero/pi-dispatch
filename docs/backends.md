@@ -146,8 +146,16 @@ ones adapters get wrong:
   swap beyond it), `--cpu-shares` for its CPU weight, `--shm-size` at most half its memory, one `--cpus` ceiling
   on each job (the host's CPU budget, by default the runtime's CPU count minus one core when it has four or more),
   and two labels with its size (`pi.dispatch.mem`, `pi.dispatch.cpu`) that doctor holds the
-  [host budget](multi-host.md#the-host-budget) against. The ceiling bounds a single job: several busy jobs together
-  can still use every core. Both builders emit the same flags. A venue's `info` gives the budget's `auto` its memory
+  [host budget](multi-host.md#the-host-budget) against. The ceiling bounds a single job; every job container also
+  runs under the one parent cgroup `pidispatch.slice` (`--cgroup-parent`), whose CPU quota is the CPU budget, so all
+  jobs together keep the reserve ([the CPU reserve across all jobs](multi-host.md#the-cpu-reserve-across-all-jobs)).
+  The egress proxy and Valkey never run under it. Who sets that quota depends on the venue: the worker itself on
+  rootless Podman (`systemctl --user`) and on Docker Desktop (a short helper container that writes `cpu.max`, written
+  again after a Docker Desktop restart), the operator once as root on Docker with systemd and on rootful Podman
+  (doctor prints the command). A quota that is not in place never stops a job: doctor warns "no host CPU reserve
+  across jobs" and the worker logs `cpu_reserve_fail_open`. There is no memory limit across jobs (the kernel would
+  kill the largest job, not the one that grew); the budget's admission bounds memory. Both builders emit the same
+  flags. A venue's `info` gives the budget's `auto` its memory
   and CPU count; a venue that gives neither leaves the budget unknown, and the worker then holds no job back on it
   and says so (`host_budget_unknown`). A container whose stop fails keeps its room in the budget until the venue's own
   `ps -a` no longer lists it, so a venue's container names must stay exact. The size is the job's

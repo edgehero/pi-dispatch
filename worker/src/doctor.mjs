@@ -97,6 +97,7 @@ import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } f
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM } from "./container-spec.mjs";
 import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDefaults, resolveJobSize } from "./job-size.mjs";
+import { CGROUP_PARENT, cgroupParentFor, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
@@ -1838,9 +1839,24 @@ export async function collectChecks(shellVars, seams) {
 	checks.push(...jobSizeChecks(env, { daemon: localUsed ? (daemon ?? null) : undefined, podman: podman?.observed?.read !== undefined && podman?.observed?.read !== null ? podman.observed.read : undefined, cpuBudgetCenti: Number.isSafeInteger(budgetView.cpuCenti) ? budgetView.cpuCenti : null }));
 	const concurrencyHere = /^[1-9][0-9]{0,5}$/.test(String(env.PI_CONCURRENCY ?? "").trim()) ? Number(String(env.PI_CONCURRENCY).trim()) : 3;
 	checks.push(...hostBudgetChecks(budgetView, { concurrency: concurrencyHere, limits: scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], env }));
+	// Issue #596, phase 2: the aggregate CPU reserve per venue, read (never written) the way the worker reads it.
+	if (!budgetView.error) {
+		const reserveReads = await doctorCpuReserve({
+			daemon: localUsed ? (daemon ?? null) : undefined,
+			podman: podman?.observed?.read ?? undefined,
+			endpointLocal: endpoint?.local === true,
+			platform: seams.jobUserIdentity?.platform ?? seams.platform ?? process.platform,
+			run: (bin, args, { timeoutMs }) => dockerRunVia(spawn, timeoutMs, { bin })(args),
+			image: jobImage,
+			imagePresent: imageCode === 0,
+		});
+		checks.push(...cpuReserveChecks(reserveReads, budgetView.cpuCenti));
+	}
 	checks.push(...jobUser.checks);
 	if (podman) checks.push(...podman.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
+	// Issue #596, phase 2: the CPU budget the parent's quota is read back against by `--live`.
+	if (facts) facts.cpuBudgetCenti = budgetView.cpuCenti ?? null;
 	// Issue #355: the same answer, kept for `--live`, which decides from it whether its probes' own mounts carry `:Z`.
 	if (facts) facts.daemon = jobUser.daemon;
 	// Issue #354: which read-backs `--live` runs, and the podman venue's facts for its own.
@@ -7514,6 +7530,97 @@ export function doctorHostBudget(env, { daemon = undefined, podman = undefined, 
 	return { settings, jobDefault, facts, ...computeHostBudget(settings, facts, jobDefault) };
 }
 
+/**
+ * The aggregate CPU reserve's reads for doctor (issue #596, phase 2): per venue this deployment runs, its `reservePlan`
+ * from the same facts the size lines use and, where a method exists, the parent's quota read the way the worker reads it
+ * (`readQuota`: `systemctl show`, or on Docker's cgroupfs driver a read-only one-shot helper of the job image, run only
+ * when that image is present). Doctor never WRITES a quota; the worker does at boot where it may.
+ * `run(bin, args, { timeoutMs })` resolves `{ code, stdout, error }`.
+ */
+export async function doctorCpuReserve({ daemon = undefined, podman = undefined, endpointLocal = false, platform = process.platform, run, image, imagePresent = false }) {
+	const venues = [];
+	if (daemon !== undefined && daemon?.answered === true) venues.push({ venue: "local", facts: daemon.facts, endpointLocal });
+	if (podman !== undefined && podman?.answered === true) venues.push({ venue: "podman", facts: podman.info, endpointLocal: podman.info?.serviceIsRemote === false });
+	const out = [];
+	for (const v of venues) {
+		const plan = reservePlan({ ...v, platform });
+		let read = null;
+		if (plan.parent && plan.method === "helper" && !imagePresent) read = { ok: false, reason: "job-image-absent" };
+		else if (plan.parent && plan.method) read = await readQuota(plan, { run, image });
+		out.push({ plan, read, cgroupManager: v.facts?.cgroupDriver ?? v.facts?.cgroupManager ?? null });
+	}
+	return out;
+}
+
+/** What each method means for an operator, said once per held line. */
+const RESERVE_METHOD_SAID = Object.freeze({
+	"user-systemd": "set by the worker through this account's systemd user manager when it starts, and kept across reboots",
+	helper: "written by the worker when it starts through a one-shot helper container of the job image; a Docker Desktop restart drops it and the worker writes it again within ten minutes",
+	"system-systemd": "set by the operator with systemctl, and kept across reboots",
+});
+
+/** Why a venue keeps no quota, said in the warning, with the fix beside it. `N` is the budget's percentage. */
+function reserveUnmanaged(why, want) {
+	const pct = want === null ? "CPUQuota=" : `CPUQuota=${want}%`;
+	const table = {
+		"cgroup-v1": ["the host runs cgroup v1, where the worker keeps no quota (every venue measured is cgroup v2)", `move the host to cgroup v2, or set the parent's quota yourself: \`sudo systemctl set-property ${CGROUP_PARENT} ${pct}\``],
+		"remote-daemon": ["the Docker daemon uses the systemd driver and is not observed on this host, so its slice cannot be read from here", `on the daemon's host, run once as root: \`sudo systemctl set-property ${CGROUP_PARENT} ${pct}\``],
+		"rootless-docker": ["rootless Docker's slice is its own account's, which the worker does not manage", `as the daemon's account: \`systemctl --user set-property ${CGROUP_PARENT} ${pct}\``],
+		"driver-unknown": ["the runtime did not say which cgroup driver it uses", "make `docker info` report its CgroupDriver, then re-run doctor"],
+		"podman-rootful-remote": ["this Podman is rootful or remote, whose slice the worker does not manage", `on Podman's host, run once as root: \`sudo systemctl set-property ${CGROUP_PARENT} ${pct}\``],
+	};
+	return table[why] ?? ["the worker keeps no quota on this venue", `set it yourself: \`sudo systemctl set-property ${CGROUP_PARENT} ${pct}\``];
+}
+
+/**
+ * The CPU reserve lines (issue #596, phase 2): per venue, whether every job runs under the one parent cgroup and whether
+ * its quota is the host's CPU budget, so all jobs TOGETHER leave the reserve free. WARNINGS, never failures: without the
+ * quota jobs still share the parent (which already keeps a large job from starving the egress proxy and Valkey), and on
+ * a systemd host only root can set it, so the line prints the one command. `reads` is `doctorCpuReserve`'s answer and
+ * `cpuCenti` the budget doctor computed (an integer, `Infinity` for off, null for unknown).
+ */
+export function cpuReserveChecks(reads, cpuCenti) {
+	const checks = [];
+	for (const { plan, read, cgroupManager } of reads) {
+		const v = plan.venue;
+		if (!plan.parent) {
+			checks.push({ ok: false, warn: true, label: `${v}: jobs run without the ${CGROUP_PARENT} parent cgroup (Podman uses the ${cgroupManager ?? "unknown"} cgroup manager here), so each job's CPU weight is capped at 1024: the egress proxy and Valkey get a fair share of the CPU, not a reserve`, fix: "run the worker as a systemd user service with linger on, so Podman uses the systemd cgroup manager, then re-run doctor" });
+			continue;
+		}
+		if (cpuCenti === null || cpuCenti === undefined) {
+			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs yet: the CPU budget is unknown, so no quota is kept on ${CGROUP_PARENT} until it is (jobs still share the parent)`, fix: "see the host budget line above" });
+			continue;
+		}
+		const want = cpuCenti === Infinity ? null : cpuCenti;
+		const pct = want === null ? "none" : `${formatCpus(want)} CPUs`;
+		if (!plan.method) {
+			const [why, fix] = reserveUnmanaged(plan.why, want);
+			if (want === null) checks.push({ ok: true, label: `${v}: the CPU budget is off (PI_HOST_CPU_BUDGET=off), so no quota is set on ${CGROUP_PARENT}; ${why}` });
+			else checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs: every job runs under ${CGROUP_PARENT}, but ${why}`, fix });
+			continue;
+		}
+		const fixFor = (target) =>
+			plan.method === "system-systemd"
+				? `run once, as root (persistent across reboots): \`${operatorQuotaCommand(target)}\``
+				: plan.method === "user-systemd"
+					? `the worker sets it when it starts; start or restart it, or run as the worker's account: \`${userQuotaCommand(target)}\``
+					: "the worker writes it when it starts and re-checks it every ten minutes; start or restart the worker";
+		if (!read?.ok) {
+			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs could be confirmed: the quota of ${CGROUP_PARENT} was not readable (${read?.reason ?? "not read"})`, fix: fixFor(want) });
+			continue;
+		}
+		const has = read.cpuCenti === null ? "no CPU quota" : `a quota of ${formatCpus(read.cpuCenti)} CPUs`;
+		if (read.cpuCenti === want) {
+			if (want === null) checks.push({ ok: true, label: `${v}: the CPU budget is off (PI_HOST_CPU_BUDGET=off), so no quota is set on ${CGROUP_PARENT}: jobs share the parent and together may use every core` });
+			else checks.push({ ok: true, label: `${v}: every job runs under ${CGROUP_PARENT}, whose quota is ${pct}, the host's CPU budget, so all jobs together leave the reserve free (${RESERVE_METHOD_SAID[plan.method]})` });
+			continue;
+		}
+		if (want === null) checks.push({ ok: false, warn: true, label: `${v}: the CPU budget is off, but ${CGROUP_PARENT} still has ${has}, so jobs together are held to it`, fix: fixFor(null) });
+		else checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs: ${CGROUP_PARENT} has ${has}, not the CPU budget of ${pct}`, fix: fixFor(want) });
+	}
+	return checks;
+}
+
 /** A memory budget or size for a line: `28g`, `7936m`, `off`, or `unknown`. */
 function budgetMemShown(memMiB) {
 	return memMiB === Infinity ? "off" : Number.isSafeInteger(memMiB) ? formatMemory(memMiB) : "unknown";
@@ -8656,6 +8763,8 @@ export async function liveChecks(env, seams, facts) {
 		// probe is built at the size a job gets and reads back memory, swap, weight and ceiling against it.
 		size: doctorJobSize(env),
 		hostCpus: facts.daemon?.answered ? (facts.daemon.facts?.hostCpus ?? null) : null,
+		// Issue #596, phase 2: the parent's quota is read back against the CPU budget doctor computed above.
+		cpuBudgetCenti: facts.cpuBudgetCenti ?? null,
 		endpoint: facts.endpoint,
 		// Asked again right before the first probe command, through the same resolver as the collection's read.
 		resolveEndpoint: makeDockerEndpointResolver({ run: dockerRunVia(spawn) }),
@@ -8734,6 +8843,14 @@ function readBackChecks({ venue, bin, result, user, ids, relabel, facts, userFix
 			return { ok: false, label: `${prefix}: ${v.property} does NOT hold -- declared ${declared}, observed: ${v.detail}`, fix };
 		}),
 	);
+	// Issue #596, phase 2: where the runtime put the probe (the jobs' parent cgroup) and, where readable, the parent's
+	// quota against the CPU budget. A line of its own: the reserve is not one of the declared properties.
+	const parent = result.cgroupParent;
+	if (parent) {
+		if (!parent.ok && !parent.warn) checks.push({ ok: false, label: `${prefix}: cgroup parent does NOT hold -- ${parent.detail}`, fix: `the worker builds every job under the ${CGROUP_PARENT} parent (--cgroup-parent); a runtime that records another parent or places the container elsewhere keeps no CPU reserve across jobs: check the runtime's cgroup driver (\`${bin} info\`) and re-run \`pi-dispatch doctor --live\`` });
+		else if (parent.warn) checks.push({ ok: false, warn: true, label: `${prefix}: cgroup parent: ${parent.detail}`, fix: "see the CPU reserve lines above for what keeps the host's reserve on this venue" });
+		else checks.push({ ok: true, label: `${prefix}: cgroup parent holds (${parent.detail})` });
+	}
 	checks.push(...noteChecks());
 	// What a green read-back does NOT mean, on a line of its own so a row of ✓ is never read as more than it is.
 	// Each sentence says only what DID happen: a probe that was not read back has its own line above saying why, and
@@ -8800,6 +8917,10 @@ export async function podmanLiveChecks(env, seams, facts) {
 		// Issue #596: as the docker read-back, from this account's own `podman info`.
 		size: doctorJobSize(env),
 		hostCpus: podman.info?.hostCpus ?? null,
+		// Issue #596, phase 2: the parent as this venue's jobs get it (none where Podman's cgroup manager is not systemd),
+		// and its quota against the CPU budget doctor computed above.
+		cgroupParent: cgroupParentFor({ podman: true, cgroupManager: podman.info?.cgroupManager ?? null }),
+		cpuBudgetCenti: facts.cpuBudgetCenti ?? null,
 		endpoint: podman.info,
 		resolveEndpoint: async () => {
 			const again = await readInfo();

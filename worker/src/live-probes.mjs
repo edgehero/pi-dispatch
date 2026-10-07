@@ -29,7 +29,8 @@
 
 import { READ_BACK_BY_A_LIVE_PROBE } from "./backend-conformance.mjs";
 import { containerSpec, memoryBytes } from "./container-spec.mjs";
-import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
+import { CGROUP_PARENT, DEFAULT_JOB_SIZE } from "./job-size.mjs";
+import { cpuMaxLine, parseCpuMaxRead } from "./cpu-reserve.mjs";
 import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkEndpoints, networkNameFor, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate } from "./netns-keeper.mjs";
@@ -116,8 +117,11 @@ export function liveFixture(root) {
 //
 // `size` and `hostCpus` (issue #596) are a job's too: the deployment's default size and the `--cpus` ceiling of this
 // runtime's own CPU count, so the probe is bounded exactly as a job without a project size is, and reads that back.
-function probeOptions({ image, name, fixture, user = null, relabel = false, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
-	return { image, name, env: {}, network: "none", user, relabel: relabel === true, workspaceOwned: true, size, hostCpus, ...fixture };
+//
+// `cgroupParent` (issue #596, phase 2) is a job's too: the jobs' parent cgroup, or null where this venue runs jobs without
+// it (`cgroupParentFor`), so the probe sits where a job sits and `cgroupParentVerdict` reads that back.
+function probeOptions({ image, name, fixture, user = null, relabel = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cgroupParent = CGROUP_PARENT }) {
+	return { image, name, env: {}, network: "none", user, relabel: relabel === true, workspaceOwned: true, size, hostCpus, cgroupParent, ...fixture };
 }
 
 // `buildArgs` (issue #354) is the RUNTIME's job builder, never a second one: each probe below is built by whichever
@@ -125,32 +129,32 @@ function probeOptions({ image, name, fixture, user = null, relabel = false, size
 // The default is docker's, so every argv here is byte-for-byte what it was.
 
 /** The probe container's argv: the job builder's, detached, with `sleep <derived seconds>` as its whole program. */
-export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
-	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
+export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null, cgroupParent = CGROUP_PARENT }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus, cgroupParent }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
 }
 
 /**
  * The pinning probe's argv: the job builder's, detached, against an image this host does not have. Detached so a
  * container that WAS created prints the ID it is removed by; with `--pull=never` in the builder none should be.
  */
-export function pinningProbeRunArgs({ name, nonce, fixture, user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
-	return buildArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user, relabel, size, hostCpus }), extraFlags: ["-d"] });
+export function pinningProbeRunArgs({ name, nonce, fixture, user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null, cgroupParent = CGROUP_PARENT }) {
+	return buildArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user, relabel, size, hostCpus, cgroupParent }), extraFlags: ["-d"] });
 }
 
 /**
  * One ephemeral run's argv (issue #344): the job builder's, detached, running EPHEMERAL_SCRIPT with the nonce and the
  * run's number. The same NAME both times, because "a job id run twice" is the question.
  */
-export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
-	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
+export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null, cgroupParent = CGROUP_PARENT }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus, cgroupParent }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
 }
 
 /**
  * One peer's argv (issue #344): the job builder's, detached, on its OWN job network, running PEER_SCRIPT, which answers
  * every connection with the nonce for `seconds`. Built with `network` set exactly as a job with egress armed is.
  */
-export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
-	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
+export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs, size = DEFAULT_JOB_SIZE, hostCpus = null, cgroupParent = CGROUP_PARENT }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel, size, hostCpus, cgroupParent }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
 }
 
 /**
@@ -275,8 +279,8 @@ export function expectedMemoryBytes(memory = containerSpec({ image: "i", name: "
  * `{ pidsLimit, memoryBytes, cpuShares, cpuMax }`, `cpuMax` being the `cpu.max` line `--cpus` writes (`<quota> 100000`,
  * or `max 100000` with no ceiling).
  */
-export function expectedBounds(size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null) {
-	const spec = containerSpec({ image: "i", name: "n", workspace: "/w", size, hostCpus, cpuBudgetCenti });
+export function expectedBounds(size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, cgroupParent = CGROUP_PARENT) {
+	const spec = containerSpec({ image: "i", name: "n", workspace: "/w", size, hostCpus, cpuBudgetCenti, cgroupParent });
 	// ROUNDED (issue #596, gate round 3 of phase 1): under a CPU budget the ceiling may be fractional (`3.3`), and
 	// `3.3 * 100000` is 329999.99999999994 in floating point, while the runtime writes the integer quota 330000.
 	return { pidsLimit: expectedPidsLimit(), memoryBytes: memoryBytes(spec.memory), cpuShares: spec.cpuShares, cpuMax: spec.cpus === null ? "max 100000" : `${Math.round(Number(spec.cpus) * 100000)} 100000` };
@@ -668,6 +672,60 @@ export function peerTargetsOf(inspectOutput, { network, name }) {
 }
 
 /**
+ * WHERE THE RUNTIME PUT A JOB-BUILT CONTAINER (issue #596, phase 2, INT-LIVE-PROBE-CONTRACT): `{ ok, warn?, detail,
+ * placed, quota }`, from `<bin> inspect --format={{.HostConfig.CgroupParent}}|{{.State.Pid}}` and this host's own files.
+ *
+ * Three readings, each as far as this host can see. The runtime's RECORD of the parent must be the one the argv named
+ * (`expected`; none where the venue runs jobs without it). The process's own cgroup (`/proc/<pid>/cgroup`, cgroup v2's
+ * `0::<path>`) must lie under `/<parent>/`, which proves the placement rather than the flag: readable for a local Linux
+ * daemon and rootless Podman, not for a daemon in a VM (Docker Desktop), where the record alone is said as such. The
+ * container cannot see any of this itself (a private cgroup namespace shows it `0::/`, measured). Then the parent's
+ * `cpu.max`, where readable, against the CPU budget (`cpuBudgetCenti`: an integer, `Infinity` for off, null not
+ * checked): a quota that is not the budget is a WARNING, "no host CPU reserve across jobs", never a failure of the
+ * placement, because on a systemd host only the operator can set it.
+ */
+export function cgroupParentVerdict({ inspected, expected = CGROUP_PARENT, cpuBudgetCenti = null, readFile = () => {
+	throw new Error("no reader");
+}, bin = "docker" }) {
+	const out = (ok, detail, extra = {}) => ({ ok, detail, placed: null, quota: undefined, ...extra });
+	if (inspected?.code !== 0) return out(false, `not read back: ${bin} inspect did not answer`, { warn: true });
+	const [recorded = "", pidText = ""] = String(inspected.stdout ?? "").trim().split("|");
+	if (expected === null) {
+		if (recorded.includes(CGROUP_PARENT)) return out(false, `the runtime recorded the parent ${recorded} for a venue that runs jobs without one`);
+		return out(true, `this venue runs jobs without the ${CGROUP_PARENT} parent (Podman's cgroup manager is not systemd), so their CPU weight is capped at 1024: the egress proxy and Valkey get a fair share of the CPU, not a reserve`, { warn: true });
+	}
+	// The bare name, or a path ending in it (a runtime may record where the slice resolved); the process's own cgroup
+	// below is the proof either way.
+	if (recorded.replace(/^\//, "") !== expected && !recorded.endsWith(`/${expected}`)) return out(false, `the runtime recorded the parent ${JSON.stringify(recorded)}, not ${expected}, so this container is outside the jobs' CPU reserve`);
+	let cgroupText = null;
+	if (/^[1-9][0-9]{0,9}$/.test(pidText)) {
+		try {
+			cgroupText = readFile(`/proc/${pidText}/cgroup`);
+		} catch {
+			cgroupText = null;
+		}
+	}
+	const path = cgroupText === null ? null : (/^0::(\/\S*)$/m.exec(String(cgroupText))?.[1] ?? null);
+	if (path === null) return out(true, `the runtime recorded the parent ${expected}; the container's own cgroup is not readable from this host (its process runs in the runtime's VM or another namespace), so the placement and the parent's quota were not read here`, { warn: true });
+	const at = path.indexOf(`/${expected}/`);
+	if (at === -1) return out(false, `the runtime recorded the parent ${expected}, but the container's cgroup is ${path}, not under it`);
+	const parentDir = `/sys/fs/cgroup${path.slice(0, at + expected.length + 1)}`;
+	let quota;
+	try {
+		quota = parseCpuMaxRead(readFile(`${parentDir}/cpu.max`));
+	} catch {
+		quota = null;
+	}
+	const placed = path.slice(0, at + expected.length + 1);
+	if (quota === null) return out(true, `the container's cgroup is under ${placed}; the parent's cpu.max is not readable here`, { warn: true, placed });
+	const shown = quota.cpuCenti === null ? "no quota" : `a quota of ${quota.cpuCenti / 100} CPUs (${cpuMaxLine(quota.cpuCenti)})`;
+	if (cpuBudgetCenti === null || cpuBudgetCenti === undefined) return out(true, `the container's cgroup is under ${placed}, which has ${shown}`, { placed, quota: quota.cpuCenti });
+	const want = cpuBudgetCenti === Infinity ? null : cpuBudgetCenti;
+	if (quota.cpuCenti === want) return out(true, `the container's cgroup is under ${placed}, which has ${want === null ? "no quota, as the CPU budget is off" : `${shown}, the host's CPU budget, so all jobs together keep the reserve`}`, { placed, quota: quota.cpuCenti });
+	return out(true, `the container's cgroup is under ${placed}, which has ${shown}, not ${want === null ? "none (the CPU budget is off)" : `the CPU budget of ${want / 100}`}: no host CPU reserve across jobs`, { warn: true, placed, quota: quota.cpuCenti });
+}
+
+/**
  * The whole sequence. Returns `{ ran, reason, verdicts, notes, swept, ranAs }`: `ran` false with a `reason` when nothing
  * was read back; the verdicts in READ_BACK_BY_A_LIVE_PROBE's order otherwise; `notes` for a teardown that failed, on
  * either path; `swept` for what an interrupted earlier run left and this one removed, on either path too.
@@ -719,6 +777,10 @@ export async function runLiveProbes({
 	// `--cpus` ceiling; the isolation verdict reads both back.
 	size = DEFAULT_JOB_SIZE,
 	hostCpus = null,
+	// Issue #596, phase 2: the parent cgroup a job on this venue runs under (null: none, `cgroupParentFor`) and the CPU
+	// budget its quota should be (an integer in hundredths, `Infinity` for off, null or absent: not checked).
+	cgroupParent = CGROUP_PARENT,
+	cpuBudgetCenti = null,
 }) {
 	const notRun = (reason) => ({ ran: false, reason, verdicts: [], notes: [], swept: [] });
 	const notLocal = notRun(`this shell's ${bin} CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run`);
@@ -823,7 +885,7 @@ export async function runLiveProbes({
 		}
 
 		// --- the reading container: mounts, status, writes ---
-		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs, size, hostCpus }));
+		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs, size, hostCpus, cgroupParent }));
 		const probeId = reading.entry.id;
 		if (reading.result?.code !== 0 || probeId === null) {
 			// The runtime's own words, when it printed any (issue #453, gate round 1): "did not start" alone left the operator
@@ -832,7 +894,7 @@ export async function runLiveProbes({
 			return { ran: false, reason: `the probe container did not start${said ? ` (${bin} said: ${said})` : ""}, so nothing was read back`, verdicts: [], notes, swept };
 		}
 
-		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user, relabel, size, hostCpus })).mounts;
+		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user, relabel, size, hostCpus, cgroupParent })).mounts;
 		const inspected = await step(["inspect", "--format={{json .Mounts}}", probeId]);
 		// Issue #345: the mount table as the container itself sees it, by a constant `cat`, for what `.Mounts` does not list.
 		const mountinfo = await step(["exec", probeId, "cat", "/proc/self/mountinfo"]);
@@ -840,8 +902,12 @@ export async function runLiveProbes({
 
 		const statusRun = await step(["exec", probeId, "sh", "-c", STATUS_SCRIPT]);
 		const status = statusRun?.code === 0 ? parseStatus(statusRun.stdout) : null;
-		const isolation = status ? isolationVerdict(status, expectedBounds(size, hostCpus)) : notReadBack("isolation", "the status probe did not run in the container");
+		const isolation = status ? isolationVerdict(status, expectedBounds(size, hostCpus, null, cgroupParent)) : notReadBack("isolation", "the status probe did not run in the container");
 		const nonRoot = status ? nonRootVerdict(status) : notReadBack("nonRoot", "the status probe did not run in the container");
+		// Issue #596, phase 2: where the runtime put the container (its record, and the process's own cgroup where this host
+		// can read it) and, where readable, the parent's quota. Its own line, not one of the declared properties.
+		const placed = await step(["inspect", "--format={{.HostConfig.CgroupParent}}|{{.State.Pid}}", probeId]);
+		const parentRead = cgroupParentVerdict({ inspected: placed, expected: cgroupParent, cpuBudgetCenti, readFile: (path) => fs.readFileSync(path, "utf8"), bin });
 
 		const written = await step(["exec", probeId, "sh", "-c", WRITE_SCRIPT, "sh", nonce]);
 		const readBack = (dir) => {
@@ -866,7 +932,7 @@ export async function runLiveProbes({
 		await release(reading.entry);
 
 		// --- the pinning container: an image this host does not have ---
-		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user, relabel, buildArgs, size, hostCpus }));
+		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user, relabel, buildArgs, size, hostCpus, cgroupParent }));
 		const after = await step(["image", "inspect", absentImageRef(nonce)]);
 		const stillAbsent = after?.code === 0 ? false : typeof after?.code === "number" ? true : null;
 		const imagePinning = imagePinningVerdict({ code: pinning.result?.code, output: `${pinning.result?.stdout ?? ""}${pinning.result?.stderr ?? ""}`, stillAbsent, bin });
@@ -874,7 +940,7 @@ export async function runLiveProbes({
 
 		// --- the ephemeral pair (issue #344): one name, two runs, each waited on until it is gone ---
 		const runEphemeral = async (n) => {
-			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user, relabel, buildArgs, size, hostCpus }));
+			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user, relabel, buildArgs, size, hostCpus, cgroupParent }));
 			const started = result?.code === 0 && entry.id !== null;
 			// A HELD NAME is the daemon refusing the create for the name, in its own words (measured: Docker "Conflict. ...
 			// is already in use", Podman "that name is already in use"). Not a listed container: after the first run was
@@ -923,7 +989,7 @@ export async function runLiveProbes({
 						} catch {
 							break;
 						}
-						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs, size, hostCpus }));
+						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs, size, hostCpus, cgroupParent }));
 						peers.push(entry);
 						if (result?.code !== 0 || entry.id === null) break;
 						ids[key] = entry.id;
@@ -960,7 +1026,7 @@ export async function runLiveProbes({
 		const byProperty = { isolation, ephemeral, mountSet, egress: egressVerdict(egress ?? {}), jobToJobIsolation, imagePinning, nonRoot, localFolders };
 		// The uid PID 1 actually ran as, for doctor's job-user line: the decision it was given, read back.
 		const ranAs = Array.isArray(status?.uids) && /^\d+$/.test(status.uids[1] ?? "") ? Number(status.uids[1]) : null;
-		return { ran: true, verdicts: READ_BACK_BY_A_LIVE_PROBE.map((p) => byProperty[p]), notes, swept, ranAs };
+		return { ran: true, verdicts: READ_BACK_BY_A_LIVE_PROBE.map((p) => byProperty[p]), notes, swept, ranAs, cgroupParent: parentRead };
 	} finally {
 		for (const entry of owned) await release(entry);
 		for (const entry of networks) await dropNetwork(entry);

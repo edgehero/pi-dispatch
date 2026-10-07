@@ -350,6 +350,28 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     before a worker drains, is the backstop across a restart. Every COUNT slot still goes back at the 30-minute bound.
   - **CPU ceiling**: every job's `--cpus` is the CPU budget, capped at the runtime's count (Docker refuses more), so no
     single job can use the reserve; with the budget off or unknown the phase 1 ceiling stands.
+  - **The aggregate CPU reserve** (`worker/src/cpu-reserve.mjs`): every container the job builder makes is started
+    under ONE parent cgroup, `--cgroup-parent=pidispatch.slice` (a dash-free name: a dash nests), whose CPU quota is
+    the CPU budget, so all jobs TOGETHER leave the reserve free, which `--cpus` alone cannot (the lab, all five venues:
+    three busy jobs held 3.00 to 3.06 of 4 cores and 12.95 to 13.02 of 14, a busy neighbour outside kept its core).
+    The flag is ALWAYS on, quota or not: a missing parent is created silently with no quota (every venue, exit 0), and
+    inside it a job's weight competes only with sibling jobs while the parent competes with the egress proxy, Valkey
+    and the host's services as one group of weight 100, so a job of weight 10000 no longer starves them (measured:
+    0.01 of a core without the parent, 0.98 to 1.00 inside a weight-100 parent with no quota). The parent's weight is
+    left at the default 100 (host services win over busy jobs; an idle host still gives jobs the whole budget, and the
+    reserve comes from the quota either way). Per-job `--cpu-shares` are kept: they still order the jobs inside the
+    parent (exact on Docker Desktop and Ubuntu, compressed on Fedora's kernel 6.19 under throttling, measured). WHO
+    keeps the quota is per venue, on every budget refresh, never on a job path, every command bounded at 15 s:
+    rootless Podman, the worker itself (`systemctl --user set-property pidispatch.slice CPUQuota=<budget x 100>%`,
+    persistent, then read back); Docker's cgroupfs driver (Docker Desktop), the worker through a one-shot uid 0
+    helper container of the pinned job image with every capability dropped and only the parent's own directory
+    mounted, re-read every ten minutes (the facts' cadence) because a Docker Desktop restart drops it; Docker's systemd
+    driver and rootful Podman, the operator once as root (`sudo systemctl set-property pidispatch.slice
+    CPUQuota=<budget x 100>%`, which doctor prints), the worker only reading `CPUQuotaPerSecUSec`. `off` wants no
+    quota and the worker clears what it set. Every failure FAILS OPEN and is named (`cpu_reserve_fail_open`), and
+    doctor warns "no host CPU reserve across jobs" with the fix. Where Podman's cgroup manager is not systemd no parent
+    is passed (libpod would build the path from the hierarchy's root, which a rootless account cannot create; source)
+    and every job's shares are capped at 1024: a fair share for the proxy and Valkey, not a reserve.
   - **Fleet and doctor**: the registry row publishes the budget, what runs and what the holds keep, integers; doctor
     shows the budget and which of it and `PI_CONCURRENCY` binds first, warns for project sizes and minimums a host
     cannot hold, lists per host its budget, use and largest fitting project size and per project the hosts it fits
@@ -374,15 +396,34 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     exactly the promise the budget makes to every other job.
   - *Reading the facts inside the gate*: an await between the read and the take is a window two pickups share.
   - *An aggregate CPU reserve by `--cpus` alone*: per-container quotas do not sum (measured, phase 1: two busy jobs
-    with `--cpus=3` on 4 cores used 4.06). The reserve across all jobs is a parent cgroup with its own quota, being
-    measured per venue; `docker-run.mjs` marks where its `--cgroup-parent` goes, and nothing emits one yet.
+    with `--cpus=3` on 4 cores used 4.06).
+  - *Per-job quotas sized so they sum to the budget* (budget divided by the running jobs, re-set as jobs come and
+    go): a lone job on an idle host would be capped at a fraction of cores nobody else wants, every start and stop
+    would rewrite every running container's quota (a race with the runtime), and a job started between two rewrites
+    would still overshoot. One parent quota is exact, work-conserving inside the budget, and set once.
+  - *Writing `cpu.max` straight into the systemd slice* on a systemd host (as root, or as the docker group through a
+    bind mount of `/sys/fs/cgroup`): it takes effect, but any `systemctl daemon-reload`, which every package upgrade
+    runs, resets it to `max` (measured, docker and rootful Podman), so the reserve would vanish silently. The operator's
+    one `set-property` is persistent and survives reboots (measured).
+  - *A weight scale* (mapping job shares into a band below the proxy's weight): it orders nothing the parent does not
+    already contain, and a scale cannot give a reserve, only a share that shrinks as jobs are added (measured: six
+    jobs at weight 100 left a proxy-like container 0.57 of a core). Kept only as the parentless fallback's cap.
+  - *An aggregate `memory.max` on the parent*: measured, the kernel then picks the victim by size within the parent,
+    and it killed the innocent 300 MiB job while the job that grew lived. The ledger's admission stays the memory
+    bound; an aggregate memory limit is an operator-only backstop (host memory minus a reserve, documented as "the
+    kernel kills the largest job"), never set by the worker.
+  - *Raising the parent's weight to 10000*: jobs would then take the whole budget even against busy host services;
+    the reserve core is kept either way, so the default 100 (host services first) is the safer default.
 - **Residuals**: the budget bounds SIZES, not use: a job may still use idle CPU beyond its weight up to the ceiling,
-  and memory inside its own `--memory`. The aggregate CPU reserve and a weight clamp that keeps the egress proxy and
-  Valkey served (a share of 262144 maps to `cpu.weight` 10000 against their 100) are the parent cgroup's, pending the
-  lab. A hold verified as waiting may still sit in a full `PI_CONCURRENCY` wait list for as long as the slots stay busy.
+  and memory inside its own `--memory`. On a systemd host the reserve across jobs holds only once the operator ran
+  the one `set-property` (doctor says so until then), and on Docker Desktop it is missing between a Docker Desktop
+  restart and the worker's next re-check (at most ten minutes, or a worker restart). Two venues on one host (local
+  and podman both blessed) have two parents, each at the budget, so their jobs together may use up to twice it; the
+  ledger still bounds their sizes together. A hold verified as waiting may still sit in a full `PI_CONCURRENCY` wait
+  list for as long as the slots stay busy.
 - **Traces to**: `REQ-HOST-BUDGET`, `DES-CONCURRENCY-3`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-HOST-REGISTRY`,
   `INT-HOST-REGISTRY-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-BUDGET-BEFORE-TOKENS`,
-  `CONST-RETRY-INFRA-ONLY`
+  `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-LIVE-PROBE-CONTRACT`
 
 ## DES-CRON-VIA-BULLMQ-SCHEDULER
 
@@ -5111,17 +5152,19 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   each worker publishes `limitsVersion` so doctor can name one that predates it, judged on the version the file
   DECLARES (an older build refuses by that number, size or not) (rejected: a
   version number compared against a release, which this branch's own unreleased builds would fail).
-  **Known phase 2 items, found by the phase 1 gate and NOT handled by phase 1** (the CPU half of a size):
+  **Phase 2 items, found by the phase 1 gate and now handled by phase 2** (the CPU half of a size):
   - the `--cpus` ceiling (the runtime's CPU count minus one core at four or more) is a PER-CONTAINER quota, and
     quotas do not sum: two busy jobs on a 4-core cpuset with `--cpus=3` used 4.06 cores (measured). So it bounds
-    any single job and keeps no core free across jobs. The aggregate reserve is a parent cgroup for all job
-    containers (a docker `--cgroup-parent` slice with a `CPUQuota`, and the rootless Podman equivalent), to be
-    lab-measured on every venue (rejected for phase 1: shrinking each job's `--cpus` to fit, which is the hard cap
-    the issue decided against);
+    any single job and keeps no core free across jobs. The aggregate reserve is the one parent cgroup every job
+    container runs under, `pidispatch.slice`, whose quota is the host's CPU budget (`DES-HOST-BUDGET`, the aggregate
+    CPU reserve; lab-measured on all five venues) (rejected for phase 1: shrinking each job's `--cpus` to fit, which
+    is the hard cap the issue decided against);
   - `--cpu-shares` up to 262144 is `cpu.weight` 10000 on a current runtime, against 100 for the egress proxy,
-    Valkey and the host's services, which carry no share, so large jobs can starve them under contention. Phase 2
-    needs a weight scale that keeps those served (rejected for phase 1: clamping a job's share near 100, which
-    would flatten the order between job sizes that the share exists for).
+    Valkey and the host's services, which carry no share, so large jobs could starve them under contention. Closed by
+    the same parent, not by a weight scale: inside it a job's weight competes only with sibling jobs, and the parent
+    competes as one group of weight 100 (measured); only a job run without the parent has its share capped at 1024
+    (rejected for phase 1 and still rejected: clamping every job's share near 100, which would flatten the order
+    between job sizes that the share exists for).
 - **Why a file and not the overlay**: the deferral gate runs ABOVE the per-job settings read, so
   gate-read config must come from a watched mutable ref; and `KNOWN_KEYS` is a flat scalar list whose
   one map-shaped resident (`secretProfiles`) is deliberately model-unreachable — the opposite of the
@@ -8420,6 +8463,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-10-07 | Issue #596, phase 2 (the aggregate CPU reserve). **`DES-HOST-BUDGET` AMENDED**: a new piece, the aggregate CPU reserve (`cpu-reserve.mjs`): every container the job builder makes runs under one parent cgroup, `--cgroup-parent=pidispatch.slice` (dash-free: a dash nests), always on (a missing parent is created silently and already keeps a large job's weight off the egress proxy and Valkey, measured), whose CPU quota is the CPU budget so all jobs together leave the reserve free (measured on all five lab venues); the parent's weight stays the default 100 and per-job shares still order jobs inside it (compressed on Fedora 6.19, noted); who keeps the quota is per venue (rootless Podman: the worker's own `systemctl --user set-property`, persistent, read back; Docker's cgroupfs driver: a one-shot uid 0 helper of the pinned job image with every capability dropped and only the parent's directory mounted, re-read every ten minutes since a Docker Desktop restart drops it; systemd Docker and rootful Podman: the operator's one root command, which doctor prints, the worker only reading it); `off` clears it; every failure fails open and is named; Podman on a non-systemd cgroup manager runs jobs without the parent and caps their shares at 1024. New rejected alternatives, with reasons: per-job quotas that sum to the budget, writing `cpu.max` into the systemd slice (a daemon-reload resets it, measured), a weight scale, an aggregate `memory.max` (the kernel kills the largest job, measured; an operator-only backstop), and a parent weight of 10000. The residuals now name what remains (the operator command on a systemd host, the restart window on Docker Desktop, two venues on one host). The rejected-alternative line that said the parent was lab-pending is corrected. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` CORRECTED**: its "known phase 2 items, NOT handled by phase 1" now say how phase 2 handled both (the parent's quota; the parent's grouping in place of a weight scale). Checked and UNCHANGED: `DES-CONCURRENCY-3` (the count and the ledger are untouched), `DES-HOST-REGISTRY` (nothing new is published), `DES-PODMAN-NATIVE-ROOTLESS-BACKEND` (the same builder carries the flag; the venue's user manager, which it already requires, is what sets the quota), `DES-SANDBOX-IS-A-FRESH-CONTAINER` (a session joins the parent as its venue's jobs do), `DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR` (no aggregate memory limit, so no new OOM source). |
 | 2026-10-06 | Issue #596, phase 2 (the host budget). **NEW `DES-HOST-BUDGET`**: one process-memory ledger per worker of the sizes its running jobs started at, keyed by job id (release idempotent, integers), admitting a job only when it fits the host's memory AND CPU budget beside what runs and every hold ranked above it, with its project inside its `hostShare`; the budget `auto` (the runtime's own numbers, on rootless Podman also the user service's `memory.max` and `cpu.max`, minus a reserve, never below one default job), a value or `off`, env only; holds in two tiers (each project below its `minJobs`, then the oldest waiter), suspended while another gate defers the job and verified by `getState` after 15 s (dropped on a Valkey error after 120 s); the budget gate LAST, the waiter bookkeeping in one wrapper and every release through one `releaseAllHolds` (bolted); never-fits sizes refused before spend, a forge job refused for the fleet only after two registry reads 30 s apart; a container whose stop did not take keeps its hold as an orphan until the runtime says it is gone; every job's `--cpus` is the CPU budget; the registry publishes the ledger and doctor holds it against the containers' size labels. Rejected, with reasons: size classes, memory-only admission, BullMQ priorities, refusing a full host, a one-read fleet refusal, freeing an orphan at the 30-minute bound, reading facts inside the gate, and an aggregate CPU reserve by `--cpus` alone (the parent cgroup is lab-pending, and its seam is marked in the argv builder). **`DES-CONCURRENCY-3` AMENDED**: a third axis, the host budget; `PI_CONCURRENCY` stays an upper bound and doctor says which binds; the RAM reasoning is superseded by per-project sizes. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: `hostShare` and `minJobs` are enforced, and the per-host checks that phase 1 deferred are doctor warnings, not load refusals, because one file serves hosts of different sizes. Checked and UNCHANGED: `DES-HOST-REGISTRY` (rows still describe their own host; the new fields are integers), `DES-FLEET-LEASES-FOR-SHARED-BOUNDS` (the budget is per host and holds no fleet claim), `DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR`, `DES-PODMAN-NATIVE-ROOTLESS-BACKEND` (the same argv builder carries the labels; the user service's limits it named as phase 2's are now read), `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` (the facts it reads are also the budget's, and a kept answer is no longer served past 24 h, carried from phase 1's gate). |
 | 2026-08-30 | Issue #57, the shared-bounds slice. **NEW `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`**: the two ceilings that describe a DEPLOYMENT rather than a process gain a fleet-wide layer beneath the unchanged in-process one. The entry's substance is what it owes `OQ-008` and this file's own refusal of Redis-held in-flight counts, and the two halves answer it differently. The check lease claims no container at all -- a subprocess this process spawned, bounded by a configured timeout, holding no folder and spending nothing -- so all three properties that made the container count wrong invert, and its TTL is derived rather than guessed. The scope claim really is for a container, so the refusal lands, and the answer is the boot reaper: it establishes that this host holds no containers, so deleting a claim that names this host is the same source of truth writing down what it just established. That argument has a PRECONDITION and the precondition is checked -- `makeReaper` catches its own `docker ps` failure, and on that path nothing was enumerated, so the sweep is skipped rather than freeing slots for containers that may still be running on a machine that would then be joined by another. Local scopes deliberately never claim, because the key would be a hash of a path string and `/srv/site` on two machines is usually two different repositories. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: its rejection of Redis in-flight counters is NARROWED rather than reversed, and the narrowing is stated in the Rejected list itself so a reader meets it where the refusal is. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the one-worker-per-daemon invariant and the process-memory argument for the folder mutex are untouched. **Code evidence**: worker/src/fleet-lease.mjs -> makeFleetLease, makeScopeClaimSweeper; worker/src/index.mjs -> makeProcessor (the check and scope arms); worker/src/start.mjs -> startWorker, makeReaper. |
 | 2026-08-30 | Issue #57, the placement slice. **`DES-CONCURRENCY-3` AMENDED**: `PI_CONCURRENCY` is restored as a bound on the MACHINE. A worker that drains a host-affine queue as well as the shared one runs two BullMQ Workers, and BullMQ's concurrency is per Worker, so two at 3 would run six containers and break the RAM and provider-throttle reasoning this entry rests on. An in-process semaphore at the pickup gate caps the sum, deferring the excess at the scope gate's cadence -- and process memory is still the CORRECT store for this entry's own unchanged reason, since it counts this host's containers and the boot reaper clears survivors before draining. The one-worker-per-docker-daemon invariant is untouched; multi-host means one worker per host, never two per daemon. **`DES-CRON-VIA-BULLMQ-SCHEDULER` AMENDED**: a host's schedulers live on its own queue, which makes the orphan prune correct by construction rather than by agreement. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked, and the check is the interesting one**: the folder mutex stays an in-process count, and ROUTING is what keeps it complete across hosts -- a local folder exists on exactly one machine, so only that machine's worker ever runs jobs for it. Affinity preserves the mutex rather than being bolted beside it. The residual is a folder present on two hosts through a shared mount, which the registry can detect and nothing yet does. **`DES-WORKER-ON-HOST` UNCHANGED, checked**: the worker is still a host process shelling out to a local docker, and every bind mount is still a path on its own filesystem -- which is precisely why placement is a routing problem rather than a scheduling one. **Code evidence**: worker/src/index.mjs -> createWorker, makeProcessor; worker/src/queue.mjs -> hostQueueName; worker/src/schedules.mjs -> loadSchedules, servedSchedules. |

@@ -370,8 +370,11 @@ export function fleetFit(size, share, rows, self) {
  *                 their own readers); read by `refresh`, never by `gate`
  *   scopedLimits  () => the live limits snapshot, for the holds' `minJobs` and the shares when no pickup snapshot is given
  *   containerGone async (name, venue) => true (the runtime says it is gone), false (it runs), null (could not ask)
+ *   onRefresh     (budget, facts) => anything, after every refresh, NOT awaited and never allowed to throw into it: the
+ *                 CPU reserve (`cpu-reserve.mjs`) keeps the jobs' parent cgroup's quota at the budget from here, so a
+ *                 slow `systemctl` or helper container delays no refresh, no gate and no pickup
  */
-export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti: 200 }, readFacts = async () => ({}), scopedLimits = () => [], containerGone = async () => null, now = () => Date.now(), log = () => {} }) {
+export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti: 200 }, readFacts = async () => ({}), scopedLimits = () => [], containerGone = async () => null, onRefresh = () => {}, now = () => Date.now(), log = () => {} }) {
 	let budget = { memMiB: null, cpuCenti: null };
 	let detail = null;
 	let unknownSaid = "";
@@ -401,6 +404,11 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 			unknownSaid = unknown;
 			if (unknown !== "") log("host_budget_unknown", { unknown, reason: "the runtime gave no memory or CPU count, so no job is held back on it" });
 			else log("host_budget", { memMiB: budgetField(budget.memMiB), cpuCenti: budgetField(budget.cpuCenti), memFloored: detail.memFloored, cpuFloored: detail.cpuFloored });
+		}
+		try {
+			Promise.resolve(onRefresh({ ...budget }, facts)).catch(() => {});
+		} catch {
+			// a hook that throws synchronously is the hook's own failure, never the budget's
 		}
 		return budget;
 	};

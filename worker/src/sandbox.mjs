@@ -9,6 +9,7 @@ import { DEFAULT_BACKEND, PODMAN_BACKEND, UNATTRIBUTED_BACKEND, parseBackendFloo
 import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildDockerRunArgs, buildPodmanRunArgs, insideDir } from "./docker-run.mjs";
+import { CGROUP_PARENT, cgroupParentFor } from "./cpu-reserve.mjs";
 import { DEFAULT_JOB_SIZE, recordedJobSize } from "./job-size.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
@@ -156,7 +157,7 @@ function inPortRange(n) {
  * @param relabel      true where the job's own mounts carried `:Z` (issue #355), so the retained ones do again
  * @param workspaceOwned true when `workspace` is the retained clone (the worker's own), false for an operator's folder
  */
-export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null, relabel = false, workspaceOwned = false, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null, relabel = false, workspaceOwned = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cgroupParent = CGROUP_PARENT }) {
 	// Thrown, not defaulted to docker: a caller naming a venue this file has no launcher for is assembling a session
 	// in a runtime nobody chose, which is the one mistake the table exists to make impossible.
 	const launcher = sandboxLauncher(venue);
@@ -198,6 +199,9 @@ export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, work
 		// weight the job had, and the same `--cpus` ceiling from this CLI's own runtime read.
 		size,
 		hostCpus,
+		// Issue #596, phase 2: the jobs' parent cgroup, as a job on this venue gets it (none where Podman's cgroup manager
+		// is not systemd, `cgroupParentFor`), so a session shares the host's CPU reserve with the jobs.
+		cgroupParent,
 		// The terminal's two variables, and neither is a credential. TERM so the shell renders; TMOUT so a
 		// forgotten session closes itself. HOME beside `--user` and the proxy variables below are the rest.
 		// `buildDockerRunArgs` skips undefined, so an unset TERM or a disabled idle timeout emits nothing rather than
@@ -1145,6 +1149,7 @@ export async function openSandbox({
 		relabel: jobUser?.relabel === true,
 		size,
 		hostCpus: jobUser?.hostCpus ?? null,
+		cgroupParent: jobUser?.cgroupParent === null ? null : CGROUP_PARENT,
 		// By containment, the rule `rebaseWorkspace` already moves the retained clone by: a workspace inside the retained
 		// job dir is the worker's own clone, one outside it is the operator's folder. Not by the manifest's `kind`, so a run
 		// retained before a preparer moved its clone is still judged by where the files actually are.
@@ -1504,8 +1509,11 @@ async function decideLocalSandboxJobUser({
  * non-enumerable, so the answer's shape, which callers compare and print, is what it always was, while `openSandbox`'s
  * teardown hands it to the detach gate and reads the daemon nothing more.
  */
-function withRuntime(answer, runtime, hostCpus = null) {
+function withRuntime(answer, runtime, hostCpus = null, cgroupParent = CGROUP_PARENT) {
 	if (runtime !== undefined) Object.defineProperty(answer, "runtime", { value: runtime, enumerable: false });
+	// Issue #596, phase 2: whether the session runs under the jobs' parent cgroup (`cgroupParentFor`), non-enumerable for
+	// `runtime`'s reason. Set only when it is none, so every other answer is what it always was.
+	if (cgroupParent === null) Object.defineProperty(answer, "cgroupParent", { value: null, enumerable: false });
 	// Issue #596: the runtime's CPU count from the same read, for the session's `--cpus` ceiling. Non-enumerable for
 	// `runtime`'s reason: the answer's shape stays what it always was.
 	if (Number.isSafeInteger(hostCpus)) Object.defineProperty(answer, "hostCpus", { value: hostCpus, enumerable: false });
@@ -1603,7 +1611,7 @@ async function decidePodmanSandboxJobUser({
 	if (chosen.unavailable) return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${chosen.reason}); is podman answering \`podman info\` as this account?` };
 	// `relabel` on podman is `podman info`'s SELinux fact, the rule a podman job's own mounts follow (issue #355).
 	// `runtime` (issue #452, gate round 4): the same read, for the session teardown's detach gate, so it reads nothing again.
-	return withRuntime({ user: chosen.user, home: chosen.home, ...(chosen.relabel === true ? { relabel: true } : {}) }, { podman: true, rootless: info.info?.rootless ?? null, version: info.info?.version ?? null }, info.info?.hostCpus ?? null);
+	return withRuntime({ user: chosen.user, home: chosen.home, ...(chosen.relabel === true ? { relabel: true } : {}) }, { podman: true, rootless: info.info?.rootless ?? null, version: info.info?.version ?? null }, info.info?.hostCpus ?? null, cgroupParentFor({ podman: true, cgroupManager: info.info?.cgroupManager ?? null }));
 }
 
 /**

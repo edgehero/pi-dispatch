@@ -82,6 +82,10 @@ export function parseDaemonFacts(output) {
 				hostCpus: cpuCount(body.host.cpus),
 				// Issue #596, phase 2: the memory the runtime's host has, in MiB, for the host budget's `auto` (`host-budget.mjs`).
 				memTotalMiB: memoryMiB(body.host.memTotal),
+				// Issue #596, phase 2: how this runtime manages cgroups, which decides how the jobs' parent cgroup gets its
+				// quota (`cpu-reserve.mjs` `reservePlan`). Podman's own words: `host.cgroupManager`, `host.cgroupVersion`.
+				cgroupDriver: cgroupWord(body.host.cgroupManager),
+				cgroupVersion: cgroupVersionOf(body.host.cgroupVersion),
 			} };
 		}
 		if (typeof body.ServerVersion === "string" && body.ServerVersion !== "" && (typeof body.OperatingSystem === "string" || Array.isArray(body.SecurityOptions))) {
@@ -116,6 +120,10 @@ export function parseDaemonFacts(output) {
 				// Issue #596: whether the daemon can set a CPU weight (`CPUShares`). Where it is false, Docker drops
 				// `--cpu-shares` with a client warning and the job has no weight. null on Podman and when absent, as above.
 				cpuShares: podman || typeof body.CPUShares !== "boolean" ? null : body.CPUShares,
+				// Issue #596, phase 2: `CgroupDriver` (`cgroupfs` on Docker Desktop, `systemd` on a systemd host, measured) and
+				// `CgroupVersion` (`2`), which decide how the jobs' parent cgroup gets its quota (`cpu-reserve.mjs`).
+				cgroupDriver: cgroupWord(body.CgroupDriver),
+				cgroupVersion: cgroupVersionOf(body.CgroupVersion),
 			} };
 		}
 	}
@@ -129,6 +137,17 @@ export function parseDaemonFacts(output) {
  */
 export function displayVersion(value) {
 	return typeof value === "string" && /^[0-9A-Za-z.+~_-]{1,40}$/.test(value) ? value : null;
+}
+
+/** A cgroup driver or manager's name: a short lower-case word, else null (no fact). */
+function cgroupWord(value) {
+	return typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(value) ? value : null;
+}
+
+/** A cgroup version as `v1` or `v2`, from Docker's `2` or Podman's `v2`, else null. */
+function cgroupVersionOf(value) {
+	const text = typeof value === "string" ? value : "";
+	return /^v?[12]$/.test(text) ? `v${text.replace(/^v/, "")}` : null;
 }
 
 /** A runtime's CPU count: a whole number from 1 to 4096, else null (no fact rather than a guess). */

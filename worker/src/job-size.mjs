@@ -24,8 +24,8 @@
  *   - `--cpus=<host ceiling>`: the host's CPU budget, else its CPU count minus a reserve (`cpuCeilingCenti`), the same for every job. It
  *     bounds ONE job: no single job can use more than the ceiling. It does not keep a core free across jobs, because
  *     each container's quota is its own and they do not sum (measured: two busy jobs on a 4-core cpuset with
- *     `--cpus=3` used 4.06 cores between them). A reserve that holds across every job is a parent cgroup's quota,
- *     measured per venue before it is built. It is not the job's size either, which would be the hard cap decision 2
+ *     `--cpus=3` used 4.06 cores between them). The reserve across every job is the quota of the one parent cgroup
+ *     they all run under (`CGROUP_PARENT`, `cpu-reserve.mjs`). It is not the job's size either, which would be the hard cap decision 2
  *     rejected; the host budget bounds the jobs' SIZES together, not their use.
  *     Absent when the runtime did not say how many CPUs it has (see `hostCpuCeiling`).
  *
@@ -37,10 +37,13 @@
  * default job's 79 is below their 100. That is the right direction (the proxy serves every job), and no such container
  * competes with jobs for long, so the flag is passed as is rather than scaled per runtime version.
  *
- * THE OTHER DIRECTION IS OPEN, and it is a known item of the host budget's aggregate reserve: a large size outweighs everything without a share. At
- * `cpus` 256 the share is 262144, which a current runtime maps to `cpu.weight` 10000 against the 100 of the egress
- * proxy, Valkey and the host's own services, so under contention such jobs can starve them. A weight scale that keeps
- * those served belongs with the parent cgroup reserve, which is not built yet.
+ * THE OTHER DIRECTION is closed by the parent cgroup, not by a weight scale (issue #596, phase 2). At `cpus` 256 the
+ * share is 262144, which a current runtime maps to `cpu.weight` 10000 against the 100 of the egress proxy, Valkey and the
+ * host's own services; with no parent such jobs left a proxy-like container 0.01 of a core (measured). Every job runs
+ * under `CGROUP_PARENT`, where a job's weight competes only with its sibling jobs and the parent competes as ONE group of
+ * weight 100, so the shares are kept as they are and still order the jobs (on Fedora's kernel 6.19 the ratio is
+ * compressed under the parent's throttling, the order holds). Only a job run WITHOUT the parent has its shares capped,
+ * at `PARENTLESS_SHARES_MAX`.
  */
 
 /** The smallest memory a job may be given: 512 MiB. The runner, pi and a shell need about 200 MB before any tool runs. */
@@ -54,6 +57,19 @@ export const JOB_CPUS_CEILING_CENTI = 256 * 100;
 /** The valid range of `--cpu-shares` on cgroup v2 (runc and crun clamp to it; 2 is the kernel's cgroup v1 minimum). */
 export const CPU_SHARES_MIN = 2;
 export const CPU_SHARES_MAX = 262144;
+/**
+ * The one parent cgroup every job container is started under (issue #596, phase 2): a slice name with NO dash, because
+ * a dash nests (`pd-jobs.slice` lands in `/pd.slice/pd-jobs.slice/`, measured on docker and podman). Its quota is the
+ * host's CPU budget; `cpu-reserve.mjs` says who sets it on which venue and why it is always on the argv.
+ */
+export const CGROUP_PARENT = "pidispatch.slice";
+
+/**
+ * The `--cpu-shares` cap for a job that runs WITHOUT the parent (`cpu-reserve.mjs` `cgroupParentFor`): 1024 is weight
+ * 100 on current runtimes (39 on old ones), the egress proxy's and Valkey's default, so no job outweighs them. A FAIR
+ * share, not a reserve: six busy jobs at 1024 left a proxy-like container 0.57 of a core, one seventh (measured).
+ */
+export const PARENTLESS_SHARES_MAX = 1024;
 /** `/dev/shm`'s ceiling, the `--shm-size=1g` every job had before sizes. */
 export const SHM_CEILING_MIB = 1024;
 
@@ -132,7 +148,7 @@ export function shmMiBOf(memMiB) {
 /**
  * The CPUs any ONE job may use at most, `--cpus`: the host's count minus the reserve (one CPU when the host has four
  * or more, else none), or null when the count is unknown. Per container: several busy jobs together can still use
- * every core, the reserved one included, until a parent cgroup puts them under one quota.
+ * every core, the reserved one included, unless the parent cgroup they share holds its quota (`cpu-reserve.mjs`).
  *
  * `hostCpus` is the RUNTIME's own count (`docker info`'s `NCPU`, `podman info`'s `host.cpus`), never the worker's
  * `os.availableParallelism()`: on Docker Desktop the daemon runs in a VM with its own count, and Docker refuses a
