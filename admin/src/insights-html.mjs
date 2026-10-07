@@ -1371,6 +1371,177 @@ function dollarsLegendHtml() {
   return `<div id="dollars">${rows.join("")}</div>`;
 }
 
+// ---- job sizes (issue #596, phase 3, DES-SIZE-SUGGESTIONS) ----
+// The reasons the worker's `suggestSize` gives, restated (this module loads nothing from the worker) and pinned to
+// worker/src/size-suggest.mjs's MEMORY_REASONS and CPU_REASONS by insights-html.test.mjs. Anything else is dropped,
+// and a dimension without a known reason draws no suggestion: toward silence, never an invented one.
+export const INSIGHTS_MEMORY_REASONS = Object.freeze(["oom-killed", "at-limit", "not-enough-runs", "oversized", "fits"]);
+export const INSIGHTS_CPU_REASONS = Object.freeze(["throttled", "not-enough-runs", "underused", "fits"]);
+// The two admin calls a suggestion may name, digits, ids and JSON punctuation only (`suggestionCall`).
+const SIZING_CALL = /^dispatch_limit_(?:edit|add) \{[a-z0-9":,.{}:-]{1,160}\}$/;
+const SIZING_POINTS_MAX = 50;
+const SIZING_HOSTS_MAX = 20;
+const SIZING_HOST_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+const SIZING_W = 452;
+const SIZING_H = 120;
+const SIZING_ML = 46;
+const SIZING_MR = 8;
+const SIZING_MT = 12;
+const SIZING_MB = 16;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A memory size as the worker spells it (`formatMemory`): `<n>g` when whole gigabytes, else `<n>m`. Restated, and
+ * held equal to the worker's over a range by insights-html.test.mjs.
+ */
+export function sizeMemText(memMiB) {
+  return memMiB % 1024 === 0 ? `${memMiB / 1024}g` : `${memMiB}m`;
+}
+/** A CPU size as the worker spells it (`formatCpus`), from hundredths. Restated and held equal the same way. */
+export function sizeCpuText(cpuCenti) {
+  const whole = Math.floor(cpuCenti / 100);
+  const fraction = String(cpuCenti % 100).padStart(2, "0").replace(/0+$/, "");
+  return fraction === "" ? String(whole) : `${whole}.${fraction}`;
+}
+
+function sizeInt(v) {
+  return Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
+
+/** A registry budget field: an integer as text, `off`, or anything else unknown (null). */
+function regField(v) {
+  return v === "off" ? "off" : typeof v === "string" && /^[0-9]{1,15}$/.test(v) ? Number(v) : null;
+}
+
+function normSizingDim(v, reasons) {
+  if (v === null || typeof v !== "object" || !reasons.includes(v.reason)) return null;
+  const current = sizeInt(v.current);
+  if (current === null || current === 0) return null;
+  const suggested = sizeInt(v.suggested);
+  const e = v.evidence !== null && typeof v.evidence === "object" ? v.evidence : {};
+  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, overBudget: v.overBudget === true, samples: sizeInt(e.samples) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti) };
+}
+
+/**
+ * The job-size slice, allowlisted: hosts (name, budget and use per dimension), and per project its memory and CPU
+ * suggestion, the call that applies it, and its peak series (at most SIZING_POINTS_MAX points, each a finite instant,
+ * a peak and a size in MiB). Null for a payload without the slice (no section), `{ unreachable }` for a read that failed.
+ */
+function normSizing(v) {
+  if (v === null || v === undefined || typeof v !== "object") return null;
+  if (typeof v.unreachable === "string") return { unreachable: clip(escapeInterpreted(v.unreachable), 120) };
+  const hostsIn = v.hosts !== null && typeof v.hosts === "object" ? v.hosts : {};
+  const hosts = typeof hostsIn.unreachable === "string"
+    ? { unreachable: clip(escapeInterpreted(hostsIn.unreachable), 120) }
+    : {
+        rows: (Array.isArray(hostsIn.rows) ? hostsIn.rows : [])
+          .filter((h) => h !== null && typeof h === "object" && typeof h.name === "string" && SIZING_HOST_NAME.test(h.name))
+          .slice(0, SIZING_HOSTS_MAX)
+          .map((h) => ({ name: h.name, budgetMemMiB: regField(h.budgetMemMiB), budgetCpuCenti: regField(h.budgetCpuCenti), usedMemMiB: regField(h.usedMemMiB), usedCpuCenti: regField(h.usedCpuCenti) }))
+          .sort((a, b) => cmpStr(a.name, b.name)),
+      };
+  const projects = [];
+  const src = v.projects !== null && typeof v.projects === "object" && !Array.isArray(v.projects) ? v.projects : {};
+  for (const id of Object.keys(src).sort(cmpStr)) {
+    if (!PROJECT_ID.test(id)) continue;
+    const p = src[id];
+    if (p === null || typeof p !== "object") continue;
+    const memory = normSizingDim(p.memory, INSIGHTS_MEMORY_REASONS);
+    const cpu = normSizingDim(p.cpu, INSIGHTS_CPU_REASONS);
+    if (memory === null || cpu === null) continue;
+    const series = (Array.isArray(p.series) ? p.series : [])
+      .filter((pt) => pt !== null && typeof pt === "object" && Number.isFinite(pt.at) && Math.abs(pt.at) <= 8.64e15 && sizeInt(pt.peakMiB) !== null && sizeInt(pt.sizeMiB) !== null && pt.sizeMiB > 0)
+      .slice(-SIZING_POINTS_MAX)
+      .map((pt) => ({ at: pt.at, peakMiB: Math.min(pt.peakMiB, pt.sizeMiB), sizeMiB: pt.sizeMiB, oom: pt.oom === true }));
+    const call = typeof p.call === "string" && SIZING_CALL.test(p.call) ? p.call : null;
+    projects.push({ id, memory, cpu, series, call });
+  }
+  const windowDays = Number.isInteger(v.windowDays) && v.windowDays > 0 && v.windowDays <= 366 ? v.windowDays : 30;
+  return { hosts, projects, windowDays };
+}
+
+/**
+ * Pure geometry for one project's peak-against-size chart, exported so its invariants (points inside the plot, x in
+ * time order over the fixed window, the size line a step through each run's size and on to the current size at the
+ * right edge) are testable as numbers. The y scale is a nice step over the largest peak or size, so the size line is
+ * always inside the plot. The x axis is the window ending at `nowMs`, so an idle week is a visible gap, not compressed.
+ */
+export function layoutSizingChart(series, { nowMs, windowDays = 30, currentMiB, width, height } = {}) {
+  const w = Number.isFinite(width) && width > 100 ? width : SIZING_W;
+  const h = Number.isFinite(height) && height > 40 ? height : SIZING_H;
+  const plot = { x: SIZING_ML, y: SIZING_MT, w: w - SIZING_ML - SIZING_MR, h: h - SIZING_MT - SIZING_MB };
+  const end = Number.isFinite(nowMs) ? nowMs : 0;
+  const start = end - windowDays * DAY_MS;
+  const pts = (Array.isArray(series) ? series : []).filter((pt) => pt.at >= start && pt.at <= end);
+  let max = Number.isSafeInteger(currentMiB) ? currentMiB : 0;
+  for (const pt of pts) max = Math.max(max, pt.peakMiB, pt.sizeMiB);
+  const step = niceStep(max / 4);
+  const scaleMax = step * 4;
+  const xOf = (at) => plot.x + ((at - start) / (end - start)) * plot.w;
+  const yOf = (mib) => plot.y + plot.h - (scaleMax > 0 ? (Math.min(mib, scaleMax) / scaleMax) * plot.h : 0);
+  const points = pts.map((pt) => ({ x: xOf(pt.at), y: yOf(pt.peakMiB), at: pt.at, peakMiB: pt.peakMiB, sizeMiB: pt.sizeMiB, oom: pt.oom }));
+  // the size line: each run's size from its own instant on, then the current size to the right edge.
+  const steps = [];
+  let x = plot.x;
+  let size = pts.length > 0 ? pts[0].sizeMiB : currentMiB;
+  for (const pt of points) {
+    steps.push({ x1: x, x2: pt.x, y: yOf(size) });
+    x = pt.x;
+    size = pt.sizeMiB;
+  }
+  steps.push({ x1: x, x2: x === plot.x + plot.w ? x : plot.x + plot.w, y: yOf(size) });
+  if (Number.isSafeInteger(currentMiB) && currentMiB !== size) steps.push({ x1: plot.x + plot.w, x2: plot.x + plot.w, y: yOf(currentMiB), from: yOf(size) });
+  const yTicks = scaleMax > 0 ? [2, 4].map((k) => ({ y: plot.y + plot.h - (k / 4) * plot.h, label: sizeMemText(step * k) })) : [];
+  const xLabels = [0, 1, 2, 3].map((k) => ({ x: plot.x + (k / 3) * plot.w, label: utcDateStr(start + (k / 3) * (end - start)).slice(5) }));
+  return { plot, points, steps, yTicks, xLabels, scaleMax, width: w, height: h };
+}
+
+function sizingWhat(dim, unit) {
+  if (dim.suggested !== null) return `suggest ${unit(dim.suggested)} (${dim.reason}${dim.overBudget ? ", above every host's budget" : ""})`;
+  return dim.reason === "not-enough-runs" ? `not enough runs (${dim.samples})` : dim.reason;
+}
+
+function sizingSectionHtml(ns, tips, nowMs) {
+  if (ns.unreachable) return `<div class="dim">job sizes not read: ${escapeHtml(ns.unreachable)}</div>`;
+  const parts = [];
+  const shown = (v, text) => (v === "off" ? "off" : v === null ? "unknown" : text(v));
+  if (ns.hosts.unreachable) parts.push(`<div class="dim small">host budgets not read: ${escapeHtml(ns.hosts.unreachable)}</div>`);
+  else if (ns.hosts.rows.length === 0) parts.push('<div class="dim small">no live host publishes a budget</div>');
+  else {
+    const rows = ns.hosts.rows.map((h) => `<div><span class="pid">${escapeHtml(h.name)}</span> budget ${escapeHtml(shown(h.budgetMemMiB, sizeMemText))}, ${escapeHtml(shown(h.budgetCpuCenti, sizeCpuText))} CPUs · in use ${escapeHtml(shown(h.usedMemMiB, sizeMemText))}, ${escapeHtml(shown(h.usedCpuCenti, sizeCpuText))} CPUs</div>`);
+    parts.push(`<div class="small">${rows.join("")}</div>`);
+  }
+  if (ns.projects.length === 0) {
+    parts.push('<div class="dim">no project to size</div>');
+    return parts.join("");
+  }
+  parts.push(`<div class="dim small">peak memory of each run (the runs a suggestion reads: the last ${fmt(ns.windowDays)} days, at most 50) against its size; measured inside the jobs, so advisory; a suggestion applies only by its call, confirmed</div>`);
+  const panels = ns.projects.map((pr) => {
+    const m = pr.memory;
+    const c = pr.cpu;
+    const head = `<h3><span class="pid">${escapeHtml(pr.id)}</span> <span class="dim">size ${escapeHtml(sizeMemText(m.current))}, ${escapeHtml(sizeCpuText(c.current))} CPUs · p95 ${escapeHtml(m.p95MiB === null ? "-" : sizeMemText(m.p95MiB))}, ${escapeHtml(c.p95CoresCenti === null ? "-" : sizeCpuText(c.p95CoresCenti))} cores</span></h3>`;
+    const verdict = `<div class="small">memory: ${escapeHtml(sizingWhat(m, sizeMemText))} · CPUs: ${escapeHtml(sizingWhat(c, sizeCpuText))}</div>`;
+    const call = pr.call === null ? "" : `<div class="small"><code>${escapeHtml(pr.call)}</code></div>`;
+    const lay = layoutSizingChart(pr.series, { nowMs, windowDays: ns.windowDays, currentMiB: m.current });
+    const svg = [`<svg width="${fmt(lay.width)}" height="${fmt(lay.height)}" role="img" aria-label="peak memory against size · ${escapeHtml(pr.id)}">`];
+    svg.push(axisFrame(lay.plot, lay.yTicks));
+    for (const st of lay.steps) {
+      if (st.from !== undefined) svg.push(`<line x1="${fmt(st.x1)}" y1="${fmt(st.from)}" x2="${fmt(st.x2)}" y2="${fmt(st.y)}" stroke="${PAGE_THEME.dim}" stroke-width="1.5"/>`);
+      else svg.push(`<line x1="${fmt(st.x1)}" y1="${fmt(st.y)}" x2="${fmt(st.x2)}" y2="${fmt(st.y)}" stroke="${PAGE_THEME.dim}" stroke-width="1.5"/>`);
+    }
+    for (const pt of lay.points) {
+      const idx = tips.push(`${new Date(pt.at).toISOString().slice(0, 16).replace("T", " ")} UTC · peak ${sizeMemText(pt.peakMiB)} of ${sizeMemText(pt.sizeMiB)}${pt.oom ? " · oom-killed" : ""}`) - 1;
+      svg.push(`<circle data-tip="${fmt(idx)}" cx="${fmt(pt.x)}" cy="${fmt(pt.y)}" r="2.5" fill="${pt.oom ? PAGE_THEME.danger : PAGE_THEME.accent}"/>`);
+    }
+    if (lay.points.length === 0) svg.push(`<text x="${fmt(lay.plot.x + lay.plot.w / 2)}" y="${fmt(lay.plot.y + lay.plot.h / 2)}" text-anchor="middle" font-size="11" fill="${PAGE_THEME.dim}">no measured runs in the window</text>`);
+    for (const xl of lay.xLabels) svg.push(`<text x="${fmt(xl.x)}" y="${fmt(lay.plot.y + lay.plot.h + 12)}" text-anchor="middle" font-size="8" fill="${PAGE_THEME.dim}">${escapeHtml(xl.label)}</text>`);
+    svg.push("</svg>");
+    return `<div class="bl">${head}${verdict}${call}${svg.join("")}</div>`;
+  });
+  parts.push(`<div id="sizes">${panels.join("")}</div>`);
+  return parts.join("");
+}
+
 function utcDateStr(ms) {
   // toISOString throws outside the representable range, and a junk payload must not be able to
   // reach a throw through a date field.
@@ -1436,7 +1607,7 @@ h3{font-size:12px;color:${PAGE_THEME.dim};margin:0 0 4px}
 .badge{font-weight:700;font-size:11px}
 .badge.good{color:${PAGE_THEME.green}}
 .badge.bad{color:${PAGE_THEME.amber}}
-#grid,#flows{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+#grid,#flows,#sizes{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 #budget{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:10px 12px;font-size:12px;max-width:820px}
 #budget .row{display:flex;align-items:center;gap:8px;margin:3px 0}
 #budget .row span{white-space:nowrap}
@@ -1622,6 +1793,15 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     names = new Map(); // a hostile getter in a junk payload: the bars still render, without names
   }
   if (na !== null) bodyParts.push(`<section><h2>budget split</h2>${splitSectionHtml(na, tips, names, windowLabel)}</section>`);
+  // Issue #596, phase 3: each project's peak memory against its size, and the hosts' budgets. Its own try, like the
+  // slices above: a hostile sizing slice takes nothing else down. No section for a payload without it.
+  let ns;
+  try {
+    ns = normSizing(p.sizing);
+  } catch {
+    ns = null;
+  }
+  if (ns !== null) bodyParts.push(`<section><h2>job sizes</h2>${sizingSectionHtml(ns, tips, scene.nowMs)}</section>`);
   if (nf !== null) {
     if (nf.plans.length > 0) bodyParts.push(`<section><h2>plans</h2>${planCardsHtml(nf.plans)}</section>`);
     bodyParts.push(`<section><h2>daily spend</h2>${dailyChartHtml(nf.daily, tips)}${cumulativeHtml(nf.daily, tips)}</section>`);

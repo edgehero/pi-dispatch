@@ -70,6 +70,9 @@ import {
   readPauseWindows,
   readScopedLimits,
   readScopedBudget,
+  readSizeSuggestions,
+  largestHostBudget,
+  readHosts,
   readDollarWindows,
   readHeldJobs,
   cancelHeldJob,
@@ -129,6 +132,7 @@ import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REV
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
+import { SUGGEST_WINDOW_DAYS } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
@@ -1184,7 +1188,7 @@ function registerTools(pi: ExtensionAPI): void {
       refuseLimitsWrite({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate, envelope });
       const result = await confirmedWrite(
         ctx,
-        { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}` },
+        { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}${Object.keys(size).length > 0 ? sizingNote(paths, merged.scope, Date.now()) : ""}` },
         () => {
           const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope, mutate });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
@@ -2593,6 +2597,20 @@ export async function assembleAllocationView(paths: any, counts: any, { fullPath
   };
 }
 
+/**
+ * The insights page's job sizes (issue #596, phase 3): each live host's budget and what its jobs hold now (the registry
+ * rows), and per project its size, the peaks its suggestion reads (oldest first) and the suggestion, judged against the
+ * largest budget any live host publishes. The page draws peak against size over the window; ids, integers and fixed
+ * words only. `hosts` is `{ unreachable }` when the registry could not be read, and the suggestions are then unflagged.
+ */
+export async function assembleSizingView(paths: any, nowMs: number, { readHostsFn = readHosts }: { readHostsFn?: any } = {}): Promise<any> {
+  const read: any = await readHostsFn({ url: paths.valkeyUrl });
+  const rows: any[] = Array.isArray(read?.hosts) ? read.hosts : [];
+  const hosts = read?.unreachable ? { unreachable: String(read.unreachable) } : { rows: rows.map((h: any) => ({ name: h?.name, budgetMemMiB: h?.budgetMemMiB, budgetCpuCenti: h?.budgetCpuCenti, usedMemMiB: h?.usedMemMiB, usedCpuCenti: h?.usedCpuCenti })) };
+  const sizing = projectSizing(paths, { budget: largestHostBudget(rows), nowMs, withSeries: true });
+  return { hosts, ...sizing, windowDays: SUGGEST_WINDOW_DAYS };
+}
+
 async function assembleInsights(paths: any, window: string, fullPaths = false): Promise<any> {
   const graph = await assembleGraph(paths);
   const costs = assembleCosts(paths, window);
@@ -2602,7 +2620,8 @@ async function assembleInsights(paths: any, window: string, fullPaths = false): 
   if (costs?.unreachable) {
     // The split too, for the budget's reason; its counts are the records', so here they were not made.
     const allocation = await assembleAllocationView(paths, null, { fullPaths });
-    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null, budget, allocation };
+    const sizing = await assembleSizingView(paths, Date.now());
+    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null, budget, allocation, sizing };
   }
   const fold = costs?.fold ?? null;
   // Re-fold the spend map at the requested window so badge and table agree. assembleCosts already
@@ -2622,7 +2641,8 @@ async function assembleInsights(paths: any, window: string, fullPaths = false): 
   const pv: any = readProjects({ projectsPath: paths.projectsFile });
   const projects = Array.isArray(pv?.projects) ? pv.projects.map((x: any) => ({ id: x.id, name: x.name })) : [];
   const allocation = await assembleAllocationView(paths, splitCounts(records), { fullPaths });
-  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget, projects, allocation };
+  const sizing = await assembleSizingView(paths, nowMs);
+  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget, projects, allocation, sizing };
 }
 
 /**
@@ -2749,9 +2769,12 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
         sandboxInfo: ({ jobId }: { jobId: string }) => readSandboxInfo(paths, jobId),
         // The PROJECTS view's spend (issue #499 part C): this month's fold by the project each record carries, read once
         // when the view opens. The records scan lives here with the other fs reads; the panel gets the fold arm only.
-        projectsInfo: () => {
+        // Issue #596, phase 3: with each project's size suggestion beside its spend, judged against the largest budget a
+        // live host publishes (the registry rows the panel's own tick read).
+        projectsInfo: ({ hosts }: any = {}) => {
           const c: any = assembleCosts(paths, "mtd");
-          return c?.unreachable ? { unreachable: String(c.unreachable) } : { byProject: c?.fold?.byProject ?? [] };
+          const sizing = projectSizing(paths, { budget: largestHostBudget(hosts), nowMs: Date.now() });
+          return c?.unreachable ? { unreachable: String(c.unreachable), sizing } : { byProject: c?.fold?.byProject ?? [], sizing };
         },
         launchSandbox: ({ jobId }: { jobId: string }) => openSandboxSession(paths, jobId),
         // The ALLOCATION view (issue #504 part C, key `b`): the envelope and the split, read here where the Valkey and the
@@ -3167,6 +3190,43 @@ export async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Not
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;
   const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
   notify?.(res.ok ? `scoped limit #${index + 1} updated (${liveOr(res)}): ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
+}
+
+/**
+ * The projects' size suggestions (issue #596, phase 3, DES-SIZE-SUGGESTIONS) for the PROJECTS view, the edit preview and
+ * the insights page: the worker's own `suggestSize` over this host's run records, judged against `budget` (null for none
+ * known). `projectIds` defaults to every project in the projects file. `{ projects, budget }`, or `{ unreachable }` when
+ * the records or the scoped-limits file cannot be read: a size resolved without the file would be the default, which
+ * is not the project's.
+ */
+export function projectSizing(paths: any, { budget = null, projectIds = null, nowMs, withSeries = false }: { budget?: any; projectIds?: string[] | null; nowMs: number; withSeries?: boolean }): any {
+  const sl: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+  if (sl?.invalid) return { unreachable: "the scoped-limits file does not load" };
+  const limits: any[] = Array.isArray(sl?.limits) ? sl.limits : [];
+  const pv: any = readProjects({ projectsPath: paths.projectsFile });
+  const ids = projectIds ?? (Array.isArray(pv?.projects) ? pv.projects.map((p: any) => p.id) : []);
+  const res: any = readSizeSuggestions({ logsDir: paths.logsDir, projectIds: ids, limits, env: deploymentEnv(), budget, nowMs, withSeries });
+  return res.unreachable ? { unreachable: String(res.unreachable) } : { projects: res.projects, budget };
+}
+
+/**
+ * The lines `dispatch_limit_edit`'s confirm adds when it changes a size field of a `project:<id>` row (issue #596,
+ * phase 3): the project's size now, its runs' peaks (p95 memory, p95 cores) and what they suggest, so the operator
+ * approves a size against what the jobs used. Empty for any other row. Advisory: the numbers come from inside the jobs'
+ * containers, and the edit is what the operator confirms, not the suggestion.
+ */
+export function sizingNote(paths: any, scope: any, nowMs: number): string {
+  if (typeof scope !== "string" || !scope.startsWith("project:")) return "";
+  const id = scope.slice("project:".length);
+  const sizing = projectSizing(paths, { projectIds: [id], nowMs });
+  if (sizing.unreachable) return `\nThe project's runs could not be read (${sizing.unreachable}).`;
+  const s = sizing.projects?.[id];
+  if (!s) return "";
+  const m = s.memory;
+  const c = s.cpu;
+  const peaks = `p95 peak ${m.evidence.p95MiB === null ? "none" : formatMemory(m.evidence.p95MiB)} over ${m.evidence.samples} runs, p95 ${c.evidence.p95CoresCenti === null ? "none" : formatCpus(c.evidence.p95CoresCenti)} cores used over ${c.evidence.samples} runs`;
+  const said = (dim: any, words: string, shown: (v: number) => string) => (dim.suggested ? `${shown(dim.suggested)} (${dim.reason}: ${words})` : dim.reason === "not-enough-runs" ? "not enough runs" : "fits");
+  return `\nProject ${id}'s runs (the last ${SUGGEST_WINDOW_DAYS} days, measured inside the jobs, so advisory): size now ${formatMemory(m.current)}, ${formatCpus(c.current)} CPUs; ${peaks}. They suggest memory ${said(m, s.words.memory, formatMemory)}, CPUs ${said(c, s.words.cpu, formatCpus)}.`;
 }
 
 /**

@@ -31,6 +31,8 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
+import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS } from "@edgehero/pi-dispatch/size-suggest";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
@@ -291,6 +293,9 @@ export function createDashboardDeps(
   // whole surface exists to prevent. We keep what we last saw and mark the snapshot degraded instead.
   let lastNames: string[] = [queue.name];
   let fleetDegraded: string | null = null;
+  // The registry rows last read (issue #596, phase 3): each live host's published budget and what its jobs hold, for
+  // the PROJECTS view's size suggestions and its budget line. Kept like `lastNames` on an unreachable registry.
+  let lastHosts: any[] = [];
 
   const fleetQueues = async () => {
     const fleet: any = await readLiveHostsFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((err: any) => ({
@@ -301,6 +306,7 @@ export function createDashboardDeps(
     } else {
       fleetDegraded = null;
       lastNames = fleetQueueNames(fleet.hosts);
+      lastHosts = fleet.hosts;
     }
     for (const name of lastNames) {
       if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
@@ -451,6 +457,9 @@ export function createDashboardDeps(
         scopedBudget,
         dollars,
         queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
+        // Issue #596, phase 3: each live host's budget and use, as the registry publishes them (integers as text, `off`,
+        // or "" while unknown). Read by the PROJECTS view; nothing here judges them.
+        hostBudgets: lastHosts.map((h: any) => ({ name: h?.name, budgetMemMiB: h?.budgetMemMiB, budgetCpuCenti: h?.budgetCpuCenti, usedMemMiB: h?.usedMemMiB, usedCpuCenti: h?.usedCpuCenti })),
         budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
         schedulers: mapSchedulers(schedulerList, Date.now()),
         // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so
@@ -1209,7 +1218,7 @@ export function makeDashboard({
       if (data === "j" || data === "J") {
         projectsSelected = 0;
         try {
-          projectsInfo = typeof deps?.projectsInfo === "function" ? deps.projectsInfo() : null;
+          projectsInfo = typeof deps?.projectsInfo === "function" ? deps.projectsInfo({ hosts: Array.isArray(snapshot?.hostBudgets) ? snapshot.hostBudgets : [] }) : null;
         } catch (err: any) {
           projectsInfo = { unreachable: err?.message ?? String(err) };
         }
@@ -2336,6 +2345,39 @@ function projectRowNote(l: any, projects: any): { text: string; missing: boolean
   return { text: `${n} member${n === 1 ? "" : "s"}`, missing: false };
 }
 
+/** The budget the PROJECTS view's suggestions are flagged against: the largest any live host publishes, per dimension. */
+function budgetShown(budget: any): string {
+  if (!budget) return "no host publishes a budget";
+  const mem = budget.memMiB === Infinity ? "off" : Number.isSafeInteger(budget.memMiB) ? formatMemory(budget.memMiB) : "unknown";
+  const cpu = budget.cpuCenti === Infinity ? "off" : Number.isSafeInteger(budget.cpuCenti) ? formatCpus(budget.cpuCenti) : "unknown";
+  return `largest host budget ${mem}, ${cpu} CPUs`;
+}
+
+/**
+ * A project's size lines in the PROJECTS view (issue #596, phase 3, DES-SIZE-SUGGESTIONS): its size, its runs' peaks
+ * (p95 memory, p95 cores) and what they suggest, from the worker's own `suggestSize` (index.ts reads the records), then
+ * the EXACT `dispatch_limit_edit` call that applies it, on its own line. Never applied from here: the call is what an
+ * operator (or their agent) runs, and its confirm is the decision. Every cell is digits, fixed words and the project id.
+ */
+function sizingLines(sizing: any, id: string, iw: number, styler: any): string[] {
+  const s = sizing?.projects?.[id];
+  if (!s) return [];
+  const m = s.memory;
+  const c = s.cpu;
+  const size = `${formatMemory(m.current)}, ${formatCpus(c.current)} CPUs`;
+  const peaks = `p95 ${m.evidence?.p95MiB === null || m.evidence?.p95MiB === undefined ? "-" : formatMemory(m.evidence.p95MiB)}, ${c.evidence?.p95CoresCenti === null || c.evidence?.p95CoresCenti === undefined ? "-" : formatCpus(c.evidence.p95CoresCenti)} cores`;
+  const parts: string[] = [];
+  if (m.suggested) parts.push(`${formatMemory(m.suggested)} (${m.reason})`);
+  if (c.suggested) parts.push(`${formatCpus(c.suggested)} CPUs (${c.reason})`);
+  const enough = m.reason !== "not-enough-runs" || c.reason !== "not-enough-runs";
+  const over = m.overBudget || c.overBudget;
+  const verdict = parts.length > 0 ? styler.fg(over ? "error" : "warning", `suggest ${parts.join(", ")}`) : styler.fg("dim", enough ? "fits" : `not enough runs (${m.evidence?.samples ?? 0} of ${SUGGEST_MIN_SAMPLES})`);
+  const out = [fitLine(`    ${styler.fg("muted", size)} · ${styler.fg("text", peaks)} · ${verdict}`, iw, styler)];
+  if (typeof s.call === "string") out.push(fitLine(`    ${styler.fg("accent", cellOf(s.call))}`, iw, styler));
+  if (over) out.push(fitLine(`    ${styler.fg("error", "above every host's budget: raise one first")}`, iw, styler));
+  return out;
+}
+
 /**
  * The PROJECTS view's selectable rows: each project in the file, then each id the month's records carry that the file
  * no longer defines (a deleted or renamed project, or every id when the file does not load: PR #569's lab), marked
@@ -2376,6 +2418,8 @@ function projectsView(snapshot: any, info: any, selected: number, runProject: an
     for (const r of info.byProject) spend.set(r?.key ?? null, r);
     lines.push(styler.cell("spend this month, by the project each run recorded", iw, { color: "dim" }));
   } else lines.push(styler.cell("spend not read (no records scan wired)", iw, { color: "dim" }));
+  if (info?.sizing?.unreachable) lines.push(styler.cell(`sizes unreadable (${cellOf(info.sizing.unreachable)})`, iw, { color: "error" }));
+  else if (info?.sizing) lines.push(styler.cell(`sizes: p95 of ${SUGGEST_WINDOW_DAYS} days' runs · ${budgetShown(info.sizing.budget)}`, iw, { color: "dim" }));
   const rows = projectRows(snapshot, info);
   rows.forEach((row: any, i: number) => {
     const cursor = i === selected ? styler.fg("accent", "›") : " ";
@@ -2394,6 +2438,7 @@ function projectsView(snapshot: any, info: any, selected: number, runProject: an
     const n = Array.isArray(p.members) ? p.members.length : 0;
     const name = typeof p.name === "string" && p.name !== "" ? styler.fg("dim", ` · ${escapeInterpreted(p.name)}`) : "";
     lines.push(fitLine(`${cursor} ${styler.fg("accent", cellOf(p.id))}  ${styler.fg("muted", `${n} member${n === 1 ? "" : "s"}`)}  ${styler.fg("text", money)}${filtering}${name}`, iw, styler));
+    for (const l of sizingLines(info?.sizing, p.id, iw, styler)) lines.push(l);
     for (const m of Array.isArray(p.members) ? p.members : []) lines.push(fitLine(`    ${styler.fg("dim", cellOf(escapeInterpreted(String(m))))}`, iw, styler));
   });
   return { title, lines };
