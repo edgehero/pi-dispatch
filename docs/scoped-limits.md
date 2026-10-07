@@ -275,34 +275,48 @@ pi-dispatch suggests a size for each project from what its recent runs used. It 
 call it names.
 
 - **Where you see it.** `pi-dispatch doctor` prints one line per project. The panel's PROJECTS view (`j`) shows each
-  project's size, the p95 of its runs' memory peaks and cores used, the suggestion, and the exact call that applies it.
-  When you edit a project row's `memory` or `cpus` with `dispatch_limit_edit`, its confirm shows the project's peaks
-  and what they suggest. The [insights page](insights.md#what-each-run-records-about-resources) draws each run's
-  peak against its size.
+  project's size, the p95 of its runs' memory peaks and cores used, the suggestion, and the exact call that applies it
+  (wrapped onto as many lines as it needs, never cut). When you edit a project row's `memory` or `cpus` with
+  `dispatch_limit_edit`, its confirm shows the project's peaks and what they suggest. The
+  [insights page](insights.md#what-each-run-records-about-resources) draws each run's peak against its size.
 - **What it reads.** The project's runs of the last 30 days, at most the newest 50, that recorded both what they used
-  (`resources`) and what they were given (`size`). Runs from before those fields are ignored. In each of memory and
-  CPUs, only runs given at least the current size count, so a raise you just made is not asked for again by the runs
-  that caused it.
-- **Memory.** The first rule that applies decides:
-  1. a run that ended `oom-killed`: raise to the larger of 1.5x the size and 1.25x the p95 peak;
-  2. more than 10% of the runs peaked at 90% of their memory or more: raise to 1.5x. A peak counts the page cache,
-     which the kernel gives back at the limit, so a run at the limit was cut off, not measured;
-  3. fewer than 10 runs: not enough runs;
-  4. 1.25x the p95 peak is at most 0.75x the size: lower to 1.25x the p95 peak;
-  5. otherwise the size fits.
-  A suggestion is rounded up: to 256m steps up to 2g, 512m steps up to 8g, then whole gigabytes, and never below 512m.
-- **CPUs.** With at least 10 runs: when the median run was held back by its CPU limit for more than 25% of its time,
-  raise by 50%; when the p95 of the cores used is below 0.4x the size, lower to 1.25x that p95; otherwise it fits.
-  Steps of 0.25, never below 0.25. A run's time is counted from pickup, clone included, so cores used read a little
-  low.
-- **The budget.** Doctor warns when a suggestion is larger than this host's budget: a job of that size would never
-  fit here. The panel and the insights page say so when it is larger than every live host's budget.
+  (`resources`) and what they were given (`size`). Runs from before those fields are ignored, and so is a record file
+  larger than 256 KiB (doctor and the panel say how many they skipped). In each of memory and CPUs, the runs given at
+  least the current size decide, so a raise you just made is not asked for again by the run that caused it.
+- **Memory is raised only after an OOM kill.** A run that ended `oom-killed` at the current size or larger suggests
+  1.5x the larger of the size and the largest size in the window that was killed. One step per kill: the run that
+  caused a raise does not count once the raise is applied.
+- **A peak at the limit raises nothing.** `memory.peak` counts the page cache, and a job that only reads files fills
+  it up to its limit with no harm (measured: a 512m container reading 1.2 GB of files peaked at exactly 512m, with no
+  OOM kill). When runs at the limit were also stalled for memory (the kernel's memory pressure, above 1% of their
+  time), the line says so as a fact. It is information, with no call.
+- **Memory is lowered** with at least 10 runs when 1.25x the p95 peak is at most 0.75x the size, to that, but never
+  below 1.25x the largest peak in the window, nor 1.5x the largest size in the window that was killed, nor 512m. So
+  two heavy runs among fifty still hold the size up, and a size an OOM caused is not lowered back to it.
+  Sizes are rounded up: to 256m steps up to 2g, 512m steps up to 8g, then whole gigabytes.
+- **CPUs are only ever lowered.** With at least 10 runs, when the p95 of the cores used is below 0.4x the size, to
+  1.25x that p95, but never below 1.25x the busiest run in the window, nor 0.25. Steps of 0.25. A job's `--cpus` is
+  this host's CPU ceiling, the same for every job, and its size is only its weight, so a job held back by the ceiling
+  is held back the same at any size (measured: the same throttled time at 1024 and 4096 shares). When the median run
+  was held back more than 25% of its time, the line says so as a fact about the host, with no call. A run's time is
+  counted from pickup, clone included, so cores used read a little low.
+- **What this host offers caps every suggestion.** A raise never goes past this host's budget in that dimension
+  (`PI_HOST_MEMORY_BUDGET`), or, where the budget is `off` or not yet known, past the host's own memory. Where the
+  runs ask for more, the suggestion is that cap and says "this project's runs need more than this host offers".
+  Where the size already is the cap, doctor warns "already at the largest size this host offers" and offers no call.
+  Where nothing about the host is known, a raise offers no call at all. Nothing ever suggests growing the host's
+  budget: that budget is what the host promised every other project. The panel and the insights page cap per live
+  host, each judged on its own pair of budgets (a host with lots of memory and too few CPUs for the project does not
+  count), and the edit's confirm reads no budget and says so. Doctor also warns when a suggestion is above the
+  project's `hostShare` of this host's budget.
+- **When the scoped-limits file does not load,** doctor prints no size lines, only "size suggestions: off until the
+  scoped-limits file loads": a size read without the file would be the default, not the project's.
 - **The call.** `dispatch_limit_edit {"index":1,"memory":"6g"}` changes the project's row (the index is its place in
   this file); a project with no row gets `dispatch_limit_add {"scope":"project:shop","memory":"6g"}`. Either one asks
   you to confirm before it writes.
 - **Why it is only a suggestion.** The numbers are measured inside the job's container, which runs code the job
-  controls, so a job can make them up. Values that cannot be real are clamped or ignored, and a made-up peak can only
-  ask for as much as the job could take by using it. You decide.
+  controls, so a job can make them up. Values that cannot be real are clamped or ignored, a raise needs a kill the
+  worker confirmed, and no suggestion passes what the host offers. You decide.
 
 ## How it works
 
