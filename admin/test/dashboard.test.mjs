@@ -2921,6 +2921,14 @@ test("schedulers are read across the fleet, or TRIGGERS shows zero while cron ru
   await deps.dispose();
 });
 
+test("issue #596, phase 3: the snapshot carries each live host's budget and use, for the PROJECTS view's suggestions", async () => {
+  const v = fakePanelValkey({ hosts: [{ name: "mini1", routes: "true", budgetMemMiB: "8192", budgetCpuCenti: "700", usedMemMiB: "4096", usedCpuCenti: "200", fpUsd: "x" }] });
+  const deps = createDashboardDeps(panelPaths, v.deps);
+  const snap = await deps.fetchSnapshot();
+  assert.deepEqual(snap.hostBudgets, [{ name: "mini1", budgetMemMiB: "8192", budgetCpuCenti: "700", usedMemMiB: "4096", usedCpuCenti: "200" }], "the four budget fields and the name, nothing else");
+  await deps.dispose();
+});
+
 /**
  * Render the same component twice with the PAINT clock moved between, and hand back both frames.
  *

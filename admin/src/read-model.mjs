@@ -47,6 +47,9 @@ import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch
 import { parseConnection, makeRedisClient, killSwitchValkeyUrls, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
+import { resolveJobSize } from "@edgehero/pi-dispatch/job-size";
+import { publishedBudget } from "@edgehero/pi-dispatch/host-budget";
+import { SUGGEST_WINDOW_DAYS, peakSeries, suggestSize, suggestionCall, suggestionEvidence } from "@edgehero/pi-dispatch/size-suggest";
 import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { hostsIn, mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
@@ -2203,6 +2206,49 @@ export function scanRunRecords({ logsDir, sinceMs, nowMs = Date.now(), fs = node
     records.push(record);
   }
   return records;
+}
+
+/**
+ * The size suggestions of the given projects (issue #596, phase 3, DES-SIZE-SUGGESTIONS), for the PROJECTS view, the
+ * `dispatch_limit_edit` preview and the insights page: per project id, the worker's own `suggestSize` over this host's
+ * run records of the window (`scanRunRecords`), with the exact call that applies it (`suggestionCall`) and its evidence
+ * in words. `limits` are the parsed scoped-limits rows (a project's size and its row index come from them), `env` the
+ * deployment's settings (`PI_JOB_MEMORY`, `PI_JOB_CPUS`), `budget` what a suggestion is flagged against (null for
+ * none known). Returns `{ projects: { [id]: suggestion } }`, or `{ unreachable }` when the logs directory is
+ * unreadable. With `withSeries`, each also carries `series`, the same runs' peaks oldest first (`peakSeries`), for the
+ * insights chart. A project whose size the worker would refuse is left out. Nothing here applies anything.
+ */
+export function readSizeSuggestions({ logsDir, projectIds = [], limits = [], env = {}, budget = null, nowMs, withSeries = false, fs = nodeFs }) {
+  const records = scanRunRecords({ logsDir, sinceMs: nowMs - SUGGEST_WINDOW_DAYS * 24 * 60 * 60 * 1000, nowMs, fs });
+  if (!Array.isArray(records)) return { unreachable: records.unreachable };
+  const projects = {};
+  for (const id of projectIds) {
+    let current;
+    try {
+      current = resolveJobSize({ project: id, limits, env });
+    } catch {
+      continue;
+    }
+    const s = suggestSize({ project: id, records, current, budget, now: nowMs });
+    projects[id] = { ...s, call: suggestionCall(s, limits), words: suggestionEvidence(s), ...(withSeries ? { series: peakSeries({ project: id, records, now: nowMs }) } : {}) };
+  }
+  return { projects };
+}
+
+/**
+ * The largest budget any live host publishes, per dimension (`{ memMiB, cpuCenti }`, an integer, Infinity for off, or
+ * null), from registry rows (`readLiveHosts`). A suggestion above it fits NO host; one below it may still fit only a
+ * host whose other dimension is smaller, which the doctor of that host says. Null when no host publishes a budget.
+ */
+export function largestHostBudget(hosts) {
+  const budgets = (Array.isArray(hosts) ? hosts : []).map((h) => publishedBudget(h));
+  const top = (key) => {
+    const known = budgets.map((b) => b[key]).filter((v) => v !== null);
+    return known.length === 0 ? null : Math.max(...known);
+  };
+  const memMiB = top("memMiB");
+  const cpuCenti = top("cpuCenti");
+  return memMiB === null && cpuCenti === null ? null : { memMiB, cpuCenti };
 }
 
 /** Read one run record by (raw) job id via its sanitized filename, or `null` when absent/unreadable. */
