@@ -2435,7 +2435,7 @@ function sizingVerdict(dim: any, name: string, shown: (v: number) => string): st
  * fleet whose budgets WERE read sends the operator looking for a registry fault that is not there.
  */
 const NO_CAP_WORDS: Record<string, string> = {
-  unread: "no host budget read",
+  unread: "no host budget read as a number",
   "none-holds": "no live host's budget holds this size",
   off: "every live host's budget is off",
 };
@@ -2457,7 +2457,8 @@ function sizingLines(sizing: any, id: string, iw: number, styler: any): string[]
   const peaks = `p95 ${m.evidence?.p95MiB === null || m.evidence?.p95MiB === undefined ? "-" : formatMemory(m.evidence.p95MiB)}, ${c.evidence?.p95CoresCenti === null || c.evidence?.p95CoresCenti === undefined ? "-" : coresText(c.evidence.p95CoresCenti)}`;
   const verdicts = [sizingVerdict(m, "memory", formatMemory), sizingVerdict(c, "CPUs", formatCpus)].filter((v): v is string => v !== null);
   const enough = m.reason !== "not-enough-runs" || c.reason !== "not-enough-runs";
-  const over = m.overBudget === true || c.overBudget === true;
+  // the worker's one rule (`sizeRefusal`): no call exactly when every live host with an integer budget refuses the pair
+  const over = s.refusal !== null && s.refusal !== undefined;
   const tone = over ? "error" : "warning";
   const headText = verdicts.length > 0 ? "suggest" : enough ? "fits" : `not enough runs (${m.evidence?.samples ?? 0} of ${SUGGEST_MIN_SAMPLES})`;
   const headTone = verdicts.length > 0 ? tone : "dim";
@@ -2472,7 +2473,7 @@ function sizingLines(sizing: any, id: string, iw: number, styler: any): string[]
   if (!fits) push(wrapColumns(headText, sub, styler), headTone);
   if (verdicts.length > 0) push(wrapColumns(verdicts.join("; "), sub, styler), tone);
   if (typeof s.call === "string") out.push(...callLines(cellOf(s.call), iw, styler, indent.length));
-  if (over) push(wrapColumns("larger than any live host offers: a job of it would wait for a host that never comes", sub, styler), "error");
+  if (over) push(wrapColumns(`no live host admits it (${cellOf(s.words?.refusal ?? "")}): a job of it would wait for a host that never comes`, sub, styler), "error");
   for (const fact of [s.words?.memoryFact, s.words?.cpuFact]) if (typeof fact === "string" && fact !== "") push(wrapColumns(cellOf(fact), sub, styler), "dim");
   return out;
 }

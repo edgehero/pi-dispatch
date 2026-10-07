@@ -1382,6 +1382,9 @@ export const INSIGHTS_CPU_REASONS = Object.freeze(["not-enough-runs", "underused
 export const INSIGHTS_MEMORY_HELD = Object.freeze(["cap", "largest", "no-cap"]);
 export const INSIGHTS_SIZE_FACTS = Object.freeze(["pressure", "ceiling"]);
 export const INSIGHTS_CAP_MISSING = Object.freeze(["unread", "none-holds", "off"]);
+// How every live host refuses a dimension of a withheld pair (the worker's `sizeRefusal`): above its budget, or above
+// the project's hostShare of it. Anything else names no dimension.
+const SIZING_REFUSAL_KINDS = Object.freeze(["host", "share"]);
 // The two admin calls a suggestion may name, digits, ids and JSON punctuation only (`suggestionCall`).
 const SIZING_CALL = /^dispatch_limit_(?:edit|add) \{[a-z0-9":,.{}:-]{1,160}\}$/;
 const SIZING_POINTS_MAX = 50;
@@ -1429,7 +1432,7 @@ function normSizingDim(v, reasons) {
   const wanted = sizeInt(v.wanted);
   const capMissing = INSIGHTS_CAP_MISSING.includes(v.capMissing) ? v.capMissing : null;
   const cap = sizeInt(v.cap);
-  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, overBudget: v.overBudget === true, held, fact, wanted: wanted === 0 ? null : wanted, capMissing, cap: cap === 0 ? null : cap, samples: sizeInt(e.samples) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti), pressured: sizeInt(e.pressured) ?? 0, throttledPct: sizeInt(e.throttledPct) };
+  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, held, fact, wanted: wanted === 0 ? null : wanted, capMissing, cap: cap === 0 ? null : cap, samples: sizeInt(e.samples) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti), pressured: sizeInt(e.pressured) ?? 0, throttledPct: sizeInt(e.throttledPct) };
 }
 
 /**
@@ -1464,7 +1467,10 @@ function normSizing(v) {
       .slice(-SIZING_POINTS_MAX)
       .map((pt) => ({ at: pt.at, peakMiB: Math.min(pt.peakMiB, pt.sizeMiB), sizeMiB: pt.sizeMiB, oom: pt.oom === true }));
     const call = typeof p.call === "string" && SIZING_CALL.test(p.call) ? p.call : null;
-    projects.push({ id, memory, cpu, series, call });
+    const r = p.refusal !== null && typeof p.refusal === "object" ? p.refusal : null;
+    const kind = (k) => (SIZING_REFUSAL_KINDS.includes(r?.[k]) ? r[k] : null);
+    const refusal = r === null ? null : { memMiB: kind("memMiB"), cpuCenti: kind("cpuCenti") };
+    projects.push({ id, memory, cpu, series, call, refusal });
   }
   const windowDays = Number.isInteger(v.windowDays) && v.windowDays > 0 && v.windowDays <= 366 ? v.windowDays : 30;
   return { hosts, projects, windowDays };
@@ -1511,14 +1517,25 @@ export function sizeCoresText(cpuCenti) {
   return `${sizeCpuText(cpuCenti)} core${cpuCenti === 100 ? "" : "s"}`;
 }
 
-export const SIZING_NO_CAP_WORDS = Object.freeze({ unread: "no host budget read", "none-holds": "no live host's budget holds this size", off: "every live host's budget is off" });
+export const SIZING_NO_CAP_WORDS = Object.freeze({ unread: "no host budget read as a number", "none-holds": "no live host's budget holds this size", off: "every live host's budget is off" });
 
 function sizingWhat(dim, unit) {
-  if (dim.suggested !== null) return `suggest ${unit(dim.suggested)} (${dim.reason}${dim.held === "cap" ? ", the most a live host offers" : ""}${dim.overBudget ? ", larger than any live host offers" : ""})`;
+  if (dim.suggested !== null) return `suggest ${unit(dim.suggested)} (${dim.reason}${dim.held === "cap" ? ", the most a live host offers" : ""})`;
   if (dim.held === "largest") return `stays (${dim.reason}, ${dim.cap !== null && dim.current > dim.cap ? "already above the most a live host offers" : "already the largest size a live host offers"})`;
   // the three ways no cap is known, worded apart (the panel's words, held equal by a test); an unknown one reads as unread
   if (dim.held === "no-cap" && dim.wanted !== null) return `wants ${unit(dim.wanted)} (${dim.reason}, ${SIZING_NO_CAP_WORDS[dim.capMissing ?? "unread"]}: no call)`;
   return dim.reason === "not-enough-runs" ? `not enough runs (${dim.samples})` : dim.reason;
+}
+
+/** A withheld pair's refusal in words, naming each dimension every live host refuses (the worker's `refusalWords`, restated). */
+function sizingRefusalText(r, m, c) {
+  const where = (kind) => (kind === "share" ? "its hostShare of every live host's budget" : "every live host's budget");
+  const mem = m.suggested ?? m.current;
+  const cpus = c.suggested ?? c.current;
+  const parts = [];
+  if (r.memMiB) parts.push(`${m.suggested !== null ? "memory" : "its memory"} ${sizeMemText(mem)} is above ${where(r.memMiB)}`);
+  if (r.cpuCenti) parts.push(`${c.suggested !== null ? "" : "its "}${sizeCpuText(cpus)} CPU${cpus === 100 ? " is" : "s are"} above ${where(r.cpuCenti)}`);
+  return parts.length > 0 ? parts.join(" and ") : `memory ${sizeMemText(mem)} with ${sizeCpuText(cpus)} CPU${cpus === 100 ? "" : "s"} fits no live host's budget`;
 }
 
 /** The facts a suggestion carries, as information with no call, rebuilt here from the numbers alone. */
@@ -1550,6 +1567,7 @@ function sizingSectionHtml(ns, tips, nowMs) {
     const head = `<h3><span class="pid">${escapeHtml(pr.id)}</span> <span class="dim">size ${escapeHtml(sizeMemText(m.current))}, ${escapeHtml(sizeCpuText(c.current))} CPU${c.current === 100 ? "" : "s"} · p95 ${escapeHtml(m.p95MiB === null ? "-" : sizeMemText(m.p95MiB))}, ${escapeHtml(c.p95CoresCenti === null ? "-" : sizeCoresText(c.p95CoresCenti))}</span></h3>`;
     const verdict = `<div class="small">memory: ${escapeHtml(sizingWhat(m, sizeMemText))} · CPUs: ${escapeHtml(sizingWhat(c, sizeCpuText))}</div>`;
     const call = pr.call === null ? "" : `<div class="small"><code>${escapeHtml(pr.call)}</code></div>`;
+    const refused = pr.refusal === null ? "" : `<div class="small">no call: no live host admits it (${escapeHtml(sizingRefusalText(pr.refusal, m, c))})</div>`;
     const facts = sizingFacts(m, c).map((f) => `<div class="dim small">${escapeHtml(f)}</div>`).join("");
     const lay = layoutSizingChart(pr.series, { nowMs, windowDays: ns.windowDays, currentMiB: m.current });
     const svg = [`<svg width="${fmt(lay.width)}" height="${fmt(lay.height)}" role="img" aria-label="peak memory against size · ${escapeHtml(pr.id)}">`];
@@ -1565,7 +1583,7 @@ function sizingSectionHtml(ns, tips, nowMs) {
     if (lay.points.length === 0) svg.push(`<text x="${fmt(lay.plot.x + lay.plot.w / 2)}" y="${fmt(lay.plot.y + lay.plot.h / 2)}" text-anchor="middle" font-size="11" fill="${PAGE_THEME.dim}">no measured runs in the window</text>`);
     for (const xl of lay.xLabels) svg.push(`<text x="${fmt(xl.x)}" y="${fmt(lay.plot.y + lay.plot.h + 12)}" text-anchor="middle" font-size="8" fill="${PAGE_THEME.dim}">${escapeHtml(xl.label)}</text>`);
     svg.push("</svg>");
-    return `<div class="bl">${head}${verdict}${call}${facts}${svg.join("")}</div>`;
+    return `<div class="bl">${head}${verdict}${call}${refused}${facts}${svg.join("")}</div>`;
   });
   parts.push(`<div id="sizes">${panels.join("")}</div>`);
   return parts.join("");

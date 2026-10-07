@@ -309,12 +309,18 @@ call it names.
   Where the runs ask for more, the suggestion is that cap and says "this project's runs need more than this host
   offers". Where the size already is the cap, doctor warns "already at the largest size this host offers" (or "already
   above" it, naming the cap, when the size was set larger) and offers no call. Where nothing about the host is known,
-  a raise offers no call at all; the panel says whether no budget was read, no live host's budget holds the project's
+  a raise offers no call at all; the panel says whether no host budget was read as a number, no live host's budget holds the project's
   size, or every live host's budget is off. Nothing ever suggests growing the host's budget: that budget is what the
   host promised every other project. The panel and the insights page cap per live host, each judged on its own pair of
   budgets (a host with lots of memory and too few CPUs for the project does not count), and the edit's confirm reads
-  no budget and says so. A suggestion that would still never fit (a lowering of a size already above the cap, or one
-  whose other dimension is above the project's `hostShare`) is a warning and offers no call, on every surface.
+  no budget and says so.
+- **One rule decides whether a call is offered: exactly when the worker would admit the suggested job.** The job is
+  the size the call would leave (the suggested memory and CPUs, or the current ones where nothing is suggested).
+  Doctor offers no call when this host's budget is a number and the job is above it, or above the project's
+  `hostShare` of it; with the budget `off` or unknown the worker refuses nothing, so the call is offered, and a size
+  above the host's own memory is noted beside it. The panel and the insights page offer no call only when every live
+  host that publishes a numeric budget would refuse the job. Where no call is offered, the line names what does not
+  fit, for example "its 4 CPUs are above its hostShare (40%) of this host's budget (3.2 CPUs)".
 - **When the scoped-limits file does not load,** doctor prints no size lines, only "size suggestions: off until the
   scoped-limits file loads": a size read without the file would be the default, not the project's.
 - **The call.** `dispatch_limit_edit {"index":1,"memory":"6g"}` changes the project's row (the index is its place in

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RECORD_CLOCK_SKEW_MS } from "../src/run-history.mjs";
+import { neverFits } from "../src/host-budget.mjs";
 import {
 	CPU_REASONS,
 	MEMORY_CAP_MISSING,
@@ -13,7 +14,9 @@ import {
 	SUGGEST_WINDOW_DAYS,
 	SUGGEST_WINDOW_RUNS,
 	peakSeries,
+	refusalWords,
 	roundCpusUp,
+	sizeRefusal,
 	coresText,
 	cpusText,
 	fleetCap,
@@ -562,4 +565,52 @@ test("with hosts, each dimension is capped per host against the size the OTHER d
 	assert.equal(suggestSize({ project: "web", records: oom, current: CURRENT, hosts: [{ memMiB: Infinity, cpuCenti: Infinity }], now: NOW }).memory.held, "no-cap");
 	// `hosts` wins over `cap` when both are given (one caller passes one of them)
 	assert.equal(suggestSize({ project: "web", records: oom, current: CURRENT, cap: ROOMY, hosts: [], now: NOW }).memory.held, "no-cap");
+});
+
+test("sizeRefusal judges one host exactly as admission's neverFits does, dimension by dimension", () => {
+	const vals = [null, Infinity, 0, 1, 99, 100, 101, 199, 200, 201, 400];
+	const shares = [null, 1, 33, 50, 100];
+	let refused = 0;
+	for (const memB of vals) for (const cpuB of vals) for (const share of shares) for (const mem of [1, 50, 100, 101, 200, 401]) for (const cpu of [1, 50, 100, 101, 200, 401]) {
+		const budget = { memMiB: memB, cpuCenti: cpuB };
+		const pair = { memMiB: mem, cpuCenti: cpu };
+		const why = neverFits(pair, budget, share);
+		const r = sizeRefusal(pair, [budget], share);
+		assert.equal(r !== null, why !== null, JSON.stringify({ budget, pair, share }));
+		if (r === null) continue;
+		refused++;
+		// the kind is admission's: a dimension above the whole budget is "host", else above the share is "share"
+		assert.ok([r.memMiB, r.cpuCenti].includes(why), JSON.stringify({ budget, pair, share, r }));
+		assert.equal(r.memMiB === "host", Number.isSafeInteger(memB) && mem > memB);
+		assert.equal(r.cpuCenti === "host", Number.isSafeInteger(cpuB) && cpu > cpuB);
+	}
+	assert.ok(refused > 1000, "the grid exercises refusals");
+});
+
+test("sizeRefusal over the live hosts: withheld only when every host with an integer budget refuses the pair", () => {
+	const pair = { memMiB: 4096, cpuCenti: 400 };
+	// no host, or every budget off or unknown: admission refuses nothing, so the call is offered
+	for (const hosts of [null, [], [null], [{ memMiB: null, cpuCenti: null }], [{ memMiB: Infinity, cpuCenti: Infinity }], [{ memMiB: Infinity, cpuCenti: null }, { memMiB: null, cpuCenti: Infinity }]]) assert.equal(sizeRefusal(pair, hosts, 10), null, JSON.stringify(hosts));
+	// a host that admits it, even beside hosts that refuse it
+	assert.equal(sizeRefusal(pair, [{ memMiB: 2048, cpuCenti: 800 }, { memMiB: 8192, cpuCenti: 800 }]), null);
+	// a host that is off in one dimension and holds the other is judged, and admits it
+	assert.equal(sizeRefusal(pair, [{ memMiB: 2048, cpuCenti: 800 }, { memMiB: Infinity, cpuCenti: 400 }]), null);
+	// every judged host refuses: per dimension, how every one of them refuses it
+	assert.deepEqual(sizeRefusal(pair, [{ memMiB: 16384, cpuCenti: 800 }], 40), { memMiB: null, cpuCenti: "share" });
+	assert.deepEqual(sizeRefusal(pair, [{ memMiB: 16384, cpuCenti: 300 }, { memMiB: 16384, cpuCenti: 800 }], 40), { memMiB: null, cpuCenti: "share" }, "above one host and above the other's share is above the share of both");
+	assert.deepEqual(sizeRefusal(pair, [{ memMiB: 2048, cpuCenti: 300 }, { memMiB: 16384, cpuCenti: 300 }]), { memMiB: null, cpuCenti: "host" });
+	assert.deepEqual(sizeRefusal(pair, [{ memMiB: 2048, cpuCenti: 800 }, { memMiB: 16384, cpuCenti: 300 }]), { memMiB: null, cpuCenti: null }, "no dimension every host refuses: the pair as a whole");
+	// an off or unknown host beside them changes nothing: it publishes no number to judge
+	assert.deepEqual(sizeRefusal(pair, [{ memMiB: 16384, cpuCenti: 800 }, { memMiB: null, cpuCenti: null }, { memMiB: Infinity, cpuCenti: Infinity }], 40), { memMiB: null, cpuCenti: "share" });
+});
+
+test("refusalWords names the dimension that does not fit, by its new size or as the one it keeps", () => {
+	const s = (mem, cpu) => ({ memory: { current: 4096, suggested: mem }, cpu: { current: 400, suggested: cpu } });
+	const host = { memMiB: 16384, cpuCenti: 800 };
+	assert.equal(refusalWords(null, s(768, null)), "");
+	assert.equal(refusalWords({ memMiB: null, cpuCenti: "share" }, s(768, null), 40, host), "its 4 CPUs are above its hostShare (40%) of this host's budget (3.2 CPUs)");
+	assert.equal(refusalWords({ memMiB: "host", cpuCenti: null }, s(6144, null), null, { memMiB: 4096, cpuCenti: 800 }), "memory 6g is above this host's budget (4g)");
+	assert.equal(refusalWords({ memMiB: "host", cpuCenti: "host" }, s(null, 100), null, { memMiB: 2048, cpuCenti: 50 }), "its memory 4g is above this host's budget (2g) and 1 CPU is above this host's budget (0.5 CPUs)");
+	assert.equal(refusalWords({ memMiB: null, cpuCenti: "share" }, s(768, null), 40), "its 4 CPUs are above its hostShare (40%) of every live host's budget");
+	assert.equal(refusalWords({ memMiB: null, cpuCenti: null }, s(768, null)), "memory 768m with 4 CPUs fits no live host's budget");
 });

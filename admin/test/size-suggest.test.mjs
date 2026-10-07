@@ -9,9 +9,10 @@ import { stripAnsi } from "../src/style.mjs";
 import { hostBudgetsOf, readSizeSuggestions } from "../src/read-model.mjs";
 import { PAGE_THEME } from "../src/graph-html.mjs";
 import { INSIGHTS_CAP_MISSING, INSIGHTS_CPU_REASONS, INSIGHTS_MEMORY_HELD, SIZING_NO_CAP_WORDS, INSIGHTS_MEMORY_REASONS, INSIGHTS_SIZE_FACTS, buildInsightsHtml, layoutSizingChart, sizeCoresText, sizeCpuText, sizeMemText } from "../src/insights-html.mjs";
-import { CPU_REASONS, MEMORY_CAP_MISSING, MEMORY_HELD, MEMORY_REASONS, SIZE_FACTS, coresText } from "@edgehero/pi-dispatch/size-suggest";
+import { CPU_REASONS, MEMORY_CAP_MISSING, MEMORY_HELD, MEMORY_REASONS, SIZE_FACTS, coresText, hostCap, suggestSize } from "@edgehero/pi-dispatch/size-suggest";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
+import { sizeSuggestionChecks } from "../../worker/src/doctor.mjs";
 
 /**
  * Issue #596, phase 3 (DES-SIZE-SUGGESTIONS): the admin's size suggestion surfaces. The reader over the run records,
@@ -135,11 +136,11 @@ test("the PROJECTS view shows each project's size, p95 peaks and verdict, then t
   assert.match(out, /^(?:› )?shop .*\n4g, 2 CPUs · p95 4g, 1 core · suggest\nmemory 5g \(oom-killed, the most a live host offers\)\ndispatch_limit_edit \{"index":0,"memory":"5g"\}\ngithub:acme\/web$/m);
   assert.match(out, /^ops .*\n4g, 2 CPUs · p95 3000m, 1\.5 cores · fits\nthe median run was held back 50% of its time by this host's\nCPU ceiling/m);
   assert.match(out, /^new .*\n4g, 2 CPUs · p95 1g, 1 core · not enough runs \(1 of 10\)\n\/srv\/new$/m);
-  // a lowering still larger than any live host offers (judged on the host's own pair: its 7 CPUs hold the 3.75 the
-  // lowering leaves, so its 5g is the memory cap) says so, and carries NO call: it would never fit; only that project
-  assert.match(out, /^big .*\n16g, 8 CPUs · p95 6000m, 3 cores · suggest\nmemory 7680m \(oversized\); CPUs 3\.75 \(underused\)\nlarger than any live host offers/m);
+  // a lowering every live host would still refuse (its 7 CPUs hold the 3.75 the lowering leaves, its 5g budget does
+  // not hold 7680m) names the dimension that does not fit, and carries NO call: it would never fit; only that project
+  assert.match(out, /^big .*\n16g, 8 CPUs · p95 6000m, 3 cores · suggest\nmemory 7680m \(oversized\); CPUs 3\.75 \(underused\)\nno live host admits it \(memory 7680m is above every live\nhost's budget\)/m);
   assert.doesNotMatch(out, /"index":1/, "no call for a size that never fits");
-  assert.equal(lines.filter((l) => /larger than any live host offers/.test(l)).length, 1);
+  assert.equal(lines.filter((l) => /no live host admits it/.test(l)).length, 1);
   assert.doesNotMatch(out, /raise|budget first/i, "never advises growing a host");
   assert.doesNotMatch(out, /over 256 KiB/, "nothing skipped, nothing said");
   const skipped = (await projectsAt(140, { ...sizingInfo(), skipped: 2 })).lines.map(content).join("\n");
@@ -149,7 +150,7 @@ test("the PROJECTS view shows each project's size, p95 peaks and verdict, then t
   const shop = readSizeSuggestions({ logsDir: logsWith([rec({ reason: "oom-killed", peakMiB: 4096 })]), projectIds: ["shop"], limits: parseScopedLimits(JSON.stringify({ version: 3, limits: SNAP.scopedLimits.limits }), "sl.json"), hostBudgets: [], nowMs: NOW });
   const none = (await projectsAt(140, { ...bare, projects: { ...bare.projects, shop: shop.projects.shop } })).lines.map(content).join("\n");
   assert.match(none, /^sizes: p95 of 30 days' runs · no host budget read$/m);
-  assert.match(none, /^4g, 2 CPUs · p95 4g, 1 core · suggest\nmemory wants 6g \(oom-killed, no host budget read: no call\)\ngithub:acme\/web$/m);
+  assert.match(none, /^4g, 2 CPUs · p95 4g, 1 core · suggest\nmemory wants 6g \(oom-killed, no host budget read as a\nnumber: no call\)\ngithub:acme\/web$/m);
 });
 
 /** True when `text` ends outside every JSON string (an even count of unescaped quotes). */
@@ -216,7 +217,7 @@ test("the PROJECTS view says why a raise has no cap (none read, none holds the s
   assert.equal(await shopWith([]), `memory wants 6g (oom-killed, ${SIZING_NO_CAP_WORDS.unread}: no call)`);
   assert.equal(await shopWith([{ memMiB: 16384, cpuCenti: 100 }]), `memory wants 6g (oom-killed, ${SIZING_NO_CAP_WORDS["none-holds"]}: no call)`);
   assert.equal(await shopWith([{ memMiB: Infinity, cpuCenti: Infinity }]), `memory wants 6g (oom-killed, ${SIZING_NO_CAP_WORDS.off}: no call)`);
-  assert.deepEqual(Object.values(SIZING_NO_CAP_WORDS), ["no host budget read", "no live host's budget holds this size", "every live host's budget is off"]);
+  assert.deepEqual(Object.values(SIZING_NO_CAP_WORDS), ["no host budget read as a number", "no live host's budget holds this size", "every live host's budget is off"]);
   // a host whose budget is below the size already set: the size is above what it offers, not at it
   assert.equal(await shopWith([{ memMiB: 2048, cpuCenti: 800 }]), "memory stays (oom-killed, already above the most a live host offers)");
   assert.equal(await shopWith([{ memMiB: 4096, cpuCenti: 800 }]), "memory stays (oom-killed, already the largest size a live host offers)");
@@ -373,8 +374,12 @@ test("the insights page draws a job sizes section: the hosts' budgets in use, ea
   ok.projects.shop.series = [{ at: NOW - MIN, peakMiB: 1000, sizeMiB: 4096 }];
   assert.ok(buildInsightsHtml({ sizing: ok }, { now: NOW }).includes(`r="2.5" fill="${PAGE_THEME.accent}"`));
   const over = sizingPayload();
-  over.projects.shop.memory.overBudget = true;
-  assert.match(buildInsightsHtml({ sizing: over }, { now: NOW }), /memory: suggest 6g \(oom-killed, larger than any live host offers\)/);
+  over.projects.shop.call = null;
+  over.projects.shop.refusal = { memMiB: null, cpuCenti: "share" };
+  assert.match(buildInsightsHtml({ sizing: over }, { now: NOW }), /<div class="small">no call: no live host admits it \(its 2 CPUs are above its hostShare of every live host&#39;s budget\)<\/div>/);
+  over.projects.shop.refusal = { memMiB: "host", cpuCenti: "made-up" };
+  assert.match(buildInsightsHtml({ sizing: over }, { now: NOW }), /no live host admits it \(memory 6g is above every live host&#39;s budget\)/, "an unknown kind names no dimension");
+  assert.doesNotMatch(buildInsightsHtml({ sizing: sizingPayload() }, { now: NOW }), /no live host admits/);
   // a held raise says what the hosts offer, never "raise the budget"; a fact is information below the call
   const held = (h, more = {}) => {
     const p = sizingPayload();
@@ -383,12 +388,12 @@ test("the insights page draws a job sizes section: the hosts' budgets in use, ea
   };
   assert.match(held("cap", { suggested: 5120 }), /memory: suggest 5g \(oom-killed, the most a live host offers\)/);
   assert.match(held("largest", { suggested: null }), /memory: stays \(oom-killed, already the largest size a live host offers\)/);
-  assert.match(held("no-cap", { suggested: null }), /memory: wants 6g \(oom-killed, no host budget read: no call\)/);
+  assert.match(held("no-cap", { suggested: null }), /memory: wants 6g \(oom-killed, no host budget read as a number: no call\)/);
   // why no cap is known, worded apart: budgets that WERE read are never called unread
-  assert.match(held("no-cap", { suggested: null, capMissing: "unread" }), /memory: wants 6g \(oom-killed, no host budget read: no call\)/);
+  assert.match(held("no-cap", { suggested: null, capMissing: "unread" }), /memory: wants 6g \(oom-killed, no host budget read as a number: no call\)/);
   assert.match(held("no-cap", { suggested: null, capMissing: "none-holds" }), /memory: wants 6g \(oom-killed, no live host&#39;s budget holds this size: no call\)/);
   assert.match(held("no-cap", { suggested: null, capMissing: "off" }), /memory: wants 6g \(oom-killed, every live host&#39;s budget is off: no call\)/);
-  assert.match(held("no-cap", { suggested: null, capMissing: "made-up" }), /no host budget read: no call/, "an unknown reason reads as unread");
+  assert.match(held("no-cap", { suggested: null, capMissing: "made-up" }), /no host budget read as a number: no call/, "an unknown reason reads as unread");
   // a size above the cap is above it, not at it
   assert.match(held("largest", { suggested: null, cap: 2048 }), /memory: stays \(oom-killed, already above the most a live host offers\)/);
   assert.match(held("largest", { suggested: null, cap: 4096 }), /memory: stays \(oom-killed, already the largest size a live host offers\)/);
@@ -438,4 +443,54 @@ test("assembleSizingView reads the registry through its seam and caps a raise pe
   // the real reader on an unparseable URL degrades at once, without a connection
   const real = await indexMod.assembleSizingView(paths, NOW);
   assert.ok(typeof real.hosts.unreachable === "string");
+});
+
+test("the panel withholds the call when every live host refuses the pair, even in the dimension it does not suggest", async () => {
+  // a memory lowering whose 4 CPUs stay above the project's 40% share of the one host's 8 CPUs: admission refuses it
+  const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:shop", memory: "4g", cpus: 4, hostShare: 40 }] }), "sl.json");
+  const logsDir = logsWith(Array.from({ length: 10 }, (_, i) => rec({ i, cpuCenti: 400, peakMiB: 500, cores: 3.9 })));
+  const judged = (hostBudgets) => readSizeSuggestions({ logsDir, projectIds: ["shop"], limits, hostBudgets, nowMs: NOW }).projects.shop;
+  const one = judged([{ memMiB: 16384, cpuCenti: 800 }]);
+  assert.deepEqual([one.memory.suggested, one.call, one.refusal], [768, null, { memMiB: null, cpuCenti: "share" }]);
+  assert.equal(one.words.refusal, "its 4 CPUs are above its hostShare (40%) of every live host's budget");
+  // the PROJECTS view says so in the error tone, though neither suggested dimension is above any cap
+  assert.deepEqual([one.memory.overBudget, one.cpu.overBudget], [false, false]);
+  const base = sizingInfo();
+  const view = (await projectsAt(140, { ...base, projects: { ...base.projects, shop: one } })).lines.map(content).join("\n");
+  assert.match(view, /^4g, 4 CPUs · p95 500m, 3\.9 cores · suggest\nmemory 768m \(oversized\)\nno live host admits it \(its 4 CPUs are above its hostShare\n\(40%\) of every live host's budget\): a job of it would wait\nfor a host that never comes\ngithub:acme\/web$/m);
+  // a second host whose share holds 4 CPUs admits it, and so does a fleet with no integer budget: the call is offered
+  for (const hosts of [[{ memMiB: 16384, cpuCenti: 800 }, { memMiB: 16384, cpuCenti: 1600 }], [{ memMiB: Infinity, cpuCenti: Infinity }], [], null]) {
+    const s = judged(hosts);
+    assert.deepEqual([s.call, s.refusal], ['dispatch_limit_edit {"index":0,"memory":"768m"}', null], JSON.stringify(hosts));
+  }
+});
+
+test("doctor and the panel offer the call for exactly the same pairs (one rule, one helper)", () => {
+  const cases = [];
+  for (const [memory, cpus, peakMiB, cores, reason] of [["4g", 4, 500, 3.9, null], ["4g", 10, 500, 9.5, null], ["16g", 2, 6000, 1, null], ["4g", 2, 4096, 1, "oom-killed"], ["4g", 8, 1000, 0.5, null], ["2g", 1, 1800, 0.9, null]]) {
+    for (const hostShare of [null, 25, 40, 100]) {
+      for (const budget of [{ memMiB: 16384, cpuCenti: 800 }, { memMiB: 4096, cpuCenti: 800 }, { memMiB: 16384, cpuCenti: 300 }, { memMiB: Infinity, cpuCenti: 800 }, { memMiB: Infinity, cpuCenti: Infinity }, { memMiB: null, cpuCenti: null }]) cases.push({ memory, cpus, peakMiB, cores, reason, hostShare, budget });
+    }
+  }
+  let withheld = 0;
+  let offered = 0;
+  for (const c of cases) {
+    const row = { scope: "project:shop", memory: c.memory, cpus: c.cpus, ...(c.hostShare === null ? {} : { hostShare: c.hostShare }) };
+    const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [row] }), "sl.json");
+    const memMiB = parseInt(c.memory, 10) * 1024;
+    const records = c.reason ? [rec({ memMiB, cpuCenti: c.cpus * 100, peakMiB: c.peakMiB, reason: c.reason })] : Array.from({ length: 10 }, (_, i) => rec({ i, memMiB, cpuCenti: c.cpus * 100, peakMiB: c.peakMiB, cores: c.cores }));
+    const panel = readSizeSuggestions({ logsDir: logsWith(records), projectIds: ["shop"], limits, hostBudgets: [c.budget], nowMs: NOW }).projects.shop;
+    const [line] = sizeSuggestionChecks({ projects: [{ id: "shop" }], limits, env: {}, records, budget: c.budget, total: { memMiB: 65536, cpuCenti: 3200 }, nowMs: NOW });
+    const doctorCall = /dispatch_limit_\w+ \{[^}]*\}/.exec(`${line.label} ${line.fix ?? ""}`)?.[0] ?? null;
+    const doctorWithholds = /would never fit this host/.test(line.label);
+    // the panel's cap has no runtime totals, so it may suggest a different size; wherever the two suggest the same
+    // pair, the one rule must give the same answer on both surfaces
+    const mine = suggestSize({ project: "shop", records, current: { memMiB, cpuCenti: c.cpus * 100 }, cap: hostCap(c.budget, { memMiB: 65536, cpuCenti: 3200 }, c.hostShare), now: NOW });
+    if (mine.memory.suggested !== panel.memory.suggested || mine.cpu.suggested !== panel.cpu.suggested) continue;
+    assert.equal(panel.refusal !== null, doctorWithholds, `${JSON.stringify(c)}: ${line.label} -> ${line.fix}`);
+    assert.equal(doctorCall, panel.call, `${JSON.stringify(c)}: ${line.label} -> ${line.fix}`);
+    if (doctorWithholds) withheld++;
+    else if (panel.call !== null) offered++;
+  }
+  assert.ok(withheld >= 10 && offered >= 10, `both sides exercised: ${withheld} withheld, ${offered} offered`);
 });
