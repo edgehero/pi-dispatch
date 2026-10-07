@@ -12242,6 +12242,49 @@ test("issue #596, phase 2: with this host's registry row carrying its ledger, do
 	assert.ok(!none.some((c) => /Host budget ledger/.test(c.label)), "a row without the ledger: no listing, no line");
 });
 
+test("issue #596, phase 3: doctor reads the runs only when a project exists, at its injected wall clock, and says one line per project", async () => {
+	const dir = tempDir("pi-sizing-wiring-");
+	const projectsFile = join(dir, "projects.json");
+	writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }] }));
+	const limitsFile = join(dir, "scoped-limits.json");
+	writeFileSync(limitsFile, JSON.stringify({ version: 3, limits: [{ scope: "project:web", memory: "4g" }] }));
+	const at = Date.parse("2026-10-01T12:00:00.000Z");
+	const oom = { project: "web", reason: "oom-killed", startedAt: "2026-10-01T11:00:00.000Z", endedAt: "2026-10-01T11:10:00.000Z", resources: { memPeak: 4096 * 1024 * 1024 }, size: { memMiB: 4096, cpuCenti: 200, source: "project" } };
+	const asked = [];
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image": 0 };
+	const env = { VALKEY_URL: "redis://x", PI_PROJECTS_FILE: projectsFile, PI_SCOPED_LIMITS_FILE: limitsFile, PI_HOST_MEMORY_BUDGET: "5g" };
+	const checks = await collectChecks(env, collectSeams(plan, { nodeVersion: "22.19.0", wallClock: () => at, readRunRecords: (nowMs) => (asked.push(nowMs), [oom]) }));
+	assert.deepEqual(asked, [at]);
+	const line = checks.find((c) => /^project web: size 4g, 2 CPUs/.test(c.label));
+	assert.deepEqual([line?.ok, line?.warn], [false, true], JSON.stringify(line));
+	assert.match(line.fix, /dispatch_limit_edit \{"index":0,"memory":"6g"\}/);
+	assert.match(line.label, /but memory 6g is above this host's budget \(5g\)/, "judged against this host's budget");
+	// an hour past the window's end, the same record is out of it
+	const later = await collectChecks(env, collectSeams(plan, { nodeVersion: "22.19.0", wallClock: () => at + 31 * 24 * 3600 * 1000, readRunRecords: () => [oom] }));
+	assert.match(later.find((c) => /^project web:/.test(c.label)).label, /not enough runs/);
+	// no projects file: no read and no line
+	const none = [];
+	const quiet = await collectChecks({ VALKEY_URL: "redis://x" }, collectSeams(plan, { nodeVersion: "22.19.0", readRunRecords: () => (none.push(1), []) }));
+	assert.deepEqual([none.length, quiet.some((c) => /^project /.test(c.label))], [0, false]);
+	// the real reader reads PI_LOGS_DIR when the seam is absent
+	const logs = join(dir, "logs");
+	mkdirSync(logs);
+	writeFileSync(join(logs, "j1.json"), JSON.stringify(oom));
+	const real = await collectChecks({ ...env, PI_LOGS_DIR: logs }, collectSeams(plan, { nodeVersion: "22.19.0", wallClock: () => at, readRunRecords: undefined }));
+	assert.match(real.find((c) => /^project web:/.test(c.label)).label, /oom-killed/);
+});
+
+test("issue #596, phase 3: runDoctor hands its readRunRecords seam on, and prints the project's line with its fix", async () => {
+	const dir = tempDir("pi-sizing-run-");
+	const projectsFile = join(dir, "projects.json");
+	writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }] }));
+	const at = Date.parse("2026-10-01T12:00:00.000Z");
+	const oom = { project: "web", reason: "oom-killed", startedAt: "2026-10-01T11:00:00.000Z", endedAt: "2026-10-01T11:10:00.000Z", resources: { memPeak: 4096 * 1024 * 1024 }, size: { memMiB: 4096, cpuCenti: 200, source: "default" } };
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), PI_PROJECTS_FILE: projectsFile }), { ...imgDeps(out, green), wallClock: () => at, readRunRecords: () => [oom] });
+	assert.match(text(), /⚠ project web: size 4g, 2 CPUs; its runs in the last 30 days suggest memory 6g \(oom-killed: 1 run ended oom-killed\)\n {4}→ apply it in the admin panel with dispatch_limit_add \{"scope":"project:web","memory":"6g"\}/);
+});
+
 test("issue #596, a worker whose boot listing of left-over job containers is unread admits no job, and doctor warns so", async () => {
 	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 	const plan = { ...EGRESS_OK, "docker info": 0, "docker image": 0, "docker ps --filter name=pi-job- --format": { code: 0, output: "" } };
