@@ -2429,6 +2429,10 @@ export async function collectChecks(shellVars, seams) {
 	// Issue #596, phase 2: this host's own row, when its worker runs and publishes one. Its host budget ledger is held
 	// against the size labels of the job containers each venue's runtime lists, read only when the row carries the ledger.
 	const selfRow = (fleet.hosts ?? []).find((h) => printable(h.name) === workerNameOf(declaredWorkerName)) ?? null;
+	// P2G1-L4: a worker that has not read its boot listing of the job containers left from before it started admits nothing.
+	if (selfRow?.budgetSeed === "unlisted") {
+		checks.push({ ok: false, warn: true, label: "this host's worker admits NO job: it could not list the job containers left from before it started, so it cannot count what they hold (host_budget_seed_unread)", fix: "make the runtime answer for the worker's account (`docker ps -a`, `podman ps -a`); the worker asks again every few seconds and starts admitting once it reads the listing" });
+	}
 	if (selfRow && typeof selfRow.usedMemMiB === "string" && selfRow.usedMemMiB !== "") {
 		const listed = [];
 		let listedAll = true;
@@ -7653,7 +7657,7 @@ export function projectSizes(limits, env) {
 /**
  * The host budget lines (issue #596, phase 2): the budget and where each half comes from, which of it and
  * `PI_CONCURRENCY` binds first, and WARNINGS for what the budget will refuse or cannot keep: a project size larger than
- * the budget (`job-size-exceeds-host`) or than its `hostShare` of it (`job-size-exceeds-share`), a project whose
+ * the budget (`job-size-exceeds-host` on this host's own queue) or than its `hostShare` of it (`job-size-exceeds-share`), a project whose
  * `minJobs` times its size is more than its `hostShare` of the budget, and all projects' minimums together above the
  * budget. Warnings, never failures: the budget is per host, and on a fleet a forge job waits for a host it fits on. A
  * setting that does not parse is a FAILURE, because the worker refuses to start on it.
@@ -7664,6 +7668,9 @@ export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} 
 	const memWhy = settings.memory.mode === "off" ? "off: PI_HOST_MEMORY_BUDGET" : settings.memory.mode === "value" ? "PI_HOST_MEMORY_BUDGET" : detail.memTotalMiB === null ? "auto" : `auto: ${formatMemory(detail.memTotalMiB)} here, ${formatMemory(detail.memReserveMiB)} kept for the host${detail.memFloored ? ", raised to one job of the default size" : ""}`;
 	const cpuWhy = settings.cpus.mode === "off" ? "off: PI_HOST_CPU_BUDGET" : settings.cpus.mode === "value" ? "PI_HOST_CPU_BUDGET" : detail.cpuTotalCenti === null ? "auto" : `auto: ${formatCpus(detail.cpuTotalCenti)} here, ${formatCpus(detail.cpuReserveCenti)} kept for the host${detail.cpuFloored ? ", raised to one job of the default size" : ""}`;
 	const checks = [{ ok: true, label: `Host budget: memory ${budgetMemShown(memMiB)} (${memWhy}), CPUs ${budgetCpuShown(cpuCenti)} (${cpuWhy}); a job starts only when its size fits beside what already runs on this host` }];
+	// P2G1-L7: the CPU half is a reservation in the budget's arithmetic and a weight at the runtime, and an operator
+	// sizing a project by "it only needs the cores when it is busy" must know the budget does not see it that way.
+	if (cpuCenti !== Infinity) checks.push({ ok: true, label: "The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host" });
 	const unknown = [memMiB === null ? "memory" : null, cpuCenti === null ? "CPU count" : null].filter(Boolean);
 	if (unknown.length > 0) {
 		checks.push({ ok: false, warn: true, label: `host budget: the runtime gave no ${unknown.join(" or ")}, so a worker holds no job back on ${unknown.length === 2 ? "either" : "it"} until it does (host_budget_unknown)`, fix: "make the runtime's info answer for the worker's account (`docker info`, `podman info`), or set PI_HOST_MEMORY_BUDGET and PI_HOST_CPU_BUDGET to values, then re-run doctor" });
@@ -7682,9 +7689,9 @@ export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} 
 		const shown = `${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs`;
 		const misfit = neverFits(p.size, budget, p.hostShare);
 		if (misfit === "host") {
-			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so its jobs are refused here before anything is spent (job-size-exceeds-host); a forge job waits for a host it fits on`, fix: `lower project:${p.id}'s memory or cpus in scoped-limits.json, or raise this host's budget` });
+			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-host), and one on the shared queue waits for a host it fits on`, fix: `lower project:${p.id}'s memory or cpus in scoped-limits.json, or raise this host's budget` });
 		} else if (misfit === "share") {
-			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than its hostShare (${p.hostShare}%) of this host's budget, so its jobs are refused here before anything is spent (job-size-exceeds-share)`, fix: `raise project:${p.id}'s hostShare or lower its size in scoped-limits.json` });
+			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than its hostShare (${p.hostShare}%) of this host's budget, so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-share), and one on the shared queue waits for a host it fits on`, fix: `raise project:${p.id}'s hostShare or lower its size in scoped-limits.json` });
 		}
 		if (p.minJobs > 0) {
 			minMem += p.minJobs * p.size.memMiB;
@@ -7707,8 +7714,9 @@ export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} 
 /**
  * The fleet's budgets (issue #596, phase 2), from the registry rows (this host's own included): one line per host that
  * publishes a budget (its budget, what its jobs hold, what its holds keep, and the largest project size that fits it),
- * one line per sized project naming the hosts it fits on (a WARNING when none does: its forge jobs are refused
- * `job-size-exceeds-fleet` once two reads agree), and a WARNING per host whose budget is below the projects' minJobs
+ * one line per sized project naming the hosts it fits on (a WARNING when none does: its jobs on the shared queue wait,
+ * never refused, until a host it fits on is live; a host restarting is missing from the registry for that while), and a
+ * WARNING per host whose budget is below the projects' minJobs
  * together. Nothing when no host publishes a budget (workers from before it).
  */
 export function fleetBudgetChecks(rows, { limits = [], env = {} } = {}) {
@@ -7738,7 +7746,7 @@ export function fleetBudgetChecks(rows, { limits = [], env = {} } = {}) {
 	for (const p of sizes) {
 		const on = hosts.filter((h) => neverFits(p.size, h.budget, p.hostShare) === null).map((h) => h.name);
 		if (on.length > 0) checks.push({ ok: true, label: `Project ${p.id} (${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs) fits on: ${on.join(", ")}` });
-		else checks.push({ ok: false, warn: true, label: `Project ${p.id} (${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs) fits on no live host's budget, so its forge jobs are refused before anything is spent (job-size-exceeds-fleet)`, fix: `lower project:${p.id}'s size, or raise a host's budget` });
+		else checks.push({ ok: false, warn: true, label: `Project ${p.id} (${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs) fits on no live host's budget, so its jobs on the shared queue wait (they are never refused for it) until a host it fits on is live`, fix: `if a host it fits on is restarting, wait for it; else lower project:${p.id}'s size, or raise a host's budget` });
 	}
 	return checks;
 }

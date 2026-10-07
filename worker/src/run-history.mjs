@@ -724,17 +724,24 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// The host budget a never-fits refusal judged the size against (issue #596, phase 2, INT-RUN-HISTORY-FILE-CONTRACT):
 		// `{ memMiB, cpuCenti, hostShare }`, so the record names BOTH sizes where the forge comment names neither. Additive,
 		// nullable, an explicit literal REBUILT here (`recordedHostBudget`), TAIL position after `size` on the same
-		// contract. Integers or null (a budget that is off or unknown never refuses, so it is never here as anything else).
-		// Present only on the `job-size-exceeds-host`, `-share` and `-fleet` records; null on every other.
+		// contract. Each budget an integer, `"off"` for a dimension switched off, or null for one unknown (the OTHER dimension
+		// refused: an off or unknown dimension never refuses by itself); `hostShare` an integer or null. Present only on
+		// the `job-size-exceeds-host` and `-share` records; null on every other.
 		hostBudget: recordedHostBudget(source.hostBudget),
 	};
 }
 
-/** A refusal's host budget as a record carries it: `{ memMiB, cpuCenti, hostShare }`, each a safe integer or null, else null. */
+/**
+ * A refusal's host budget as a record carries it: `{ memMiB, cpuCenti, hostShare }`, else null. A budget is a safe
+ * integer, `"off"` (the budget's `Infinity`, or the word itself) or null (unknown); the share a safe integer or null.
+ * `"off"` rather than null for a switched-off dimension (gate round 1 of phase 2, P2G1-C5): null already means unknown,
+ * and a record that cannot tell "not limited" from "not known" names neither.
+ */
 export function recordedHostBudget(value) {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
 	const int = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
-	return { memMiB: int(value.memMiB), cpuCenti: int(value.cpuCenti), hostShare: int(value.hostShare) };
+	const budget = (v) => (v === Infinity || v === "off" ? "off" : int(v));
+	return { memMiB: budget(value.memMiB), cpuCenti: budget(value.cpuCenti), hostShare: int(value.hostShare) };
 }
 
 /** What became of a collected plan. */

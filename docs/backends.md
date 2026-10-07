@@ -158,7 +158,10 @@ ones adapters get wrong:
   flags. A venue's `info` gives the budget's `auto` its memory
   and CPU count; a venue that gives neither leaves the budget unknown, and the worker then holds no job back on it
   and says so (`host_budget_unknown`). A container whose stop fails keeps its room in the budget until the venue's own
-  `ps -a` no longer lists it, so a venue's container names must stay exact. The size is the job's
+  `ps -a` no longer lists it or lists it as `exited`, `dead` or `stopped` (one still `created` is removed first), so a
+  venue's container names and its `{{.State}}` words must stay exact. When the worker starts, it lists the venue's job
+  containers left after its reaper (`ps -a` with `{{.State}}` and the two size labels) and counts each until it is
+  gone; while that listing fails, it admits no job. The size is the job's
   project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS` ([job sizes](scoped-limits.md#job-sizes-version-3)). Where
   Docker reports `SwapLimit` or `CPUShares` false, it drops that flag: doctor warns, and the worker logs
   `size_bound_unenforced` for each job. Where the runtime gives no CPU count, jobs run with no `--cpus` and doctor

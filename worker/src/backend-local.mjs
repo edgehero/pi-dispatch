@@ -28,6 +28,7 @@ import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backend
 import { DEFAULT_EGRESS_PROXY, ENDPOINT_LISTED_STATES, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { makeDetachGate } from "./netns-keeper.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
+import { SIZE_LABEL_CPU, SIZE_LABEL_MEM } from "./container-spec.mjs";
 
 const execDocker = promisify(execFile);
 
@@ -402,22 +403,70 @@ export function isJobNamespace(name) {
 }
 
 /**
- * Whether a job container is GONE (issue #596, phase 2): `true` when the runtime lists no container of exactly that name
- * (running or stopped), `false` when it lists one, `null` when it could not be asked. The host budget keeps the hold of
- * a job whose stop did not take until this says `true` (`host-budget.mjs` `sweep`), so `null` keeps it: an
- * unanswered listing must never free room a running container may still use. `-a`, because a stopped container left by
- * `--rm` failing holds no CPU but is not yet proven gone, and the anchored name test, because `--filter name=` is a
- * SUBSTRING match (the reaper's measured reason).
+ * The states in which a job container runs nothing and never will again (gate round 1 of phase 2, P2G1-L5): Docker's
+ * `exited` and `dead`, Podman's `exited` and `stopped`. Such a container uses no memory and no CPU, yet `ps -a` lists
+ * it (an `--rm` whose removal failed), so counting it as running kept an orphan's hold until a worker restart.
+ */
+export const CONTAINER_GONE_STATES = Object.freeze(new Set(["exited", "dead", "stopped"]));
+/**
+ * The states in which a job container has not started yet: Docker's `created`, Podman's `created` and `configured`. NOT
+ * gone by itself: a `docker run` client still alive after its stop timed out may yet start it. So it is REMOVED
+ * (`rm -f`, exact name, our namespace only), and gone once the removal is answered.
+ */
+export const CONTAINER_UNSTARTED_STATES = Object.freeze(new Set(["created", "configured"]));
+
+/** `ps -a` lines of `{{.Names}}\t{{.State}}...`: `[{ name, state, rest }]`, only names in the job namespace, `rest` the later fields. */
+function psRows(stdout) {
+	return String(stdout ?? "")
+		.split("\n")
+		.map((line) => line.split("\t").map((f) => f.trim()))
+		.filter(([name, state]) => isJobNamespace(name) && typeof state === "string")
+		.map(([name, state, ...rest]) => ({ name, state: state.toLowerCase(), rest }));
+}
+
+/**
+ * Whether a job container is GONE (issue #596, phase 2): `true` when the runtime lists no container of exactly that name,
+ * or lists it in a state that runs nothing (`CONTAINER_GONE_STATES`), or lists it not yet started and removes it
+ * (`CONTAINER_UNSTARTED_STATES`); `false` when it lists one in any other state (running, paused, restarting, removing,
+ * one nothing here has measured); `null` when it could not be asked or the removal was not answered. The host budget
+ * keeps the hold of a job whose stop did not take until this says `true` (`host-budget.mjs` `sweep`), so `null` keeps
+ * it: an unanswered listing must never free room a running container may still use. `-a` with the STATE, because a
+ * stopped container is listed by `ps -a` and is gone in every sense the budget cares about, and the anchored name test,
+ * because `--filter name=` is a SUBSTRING match (the reaper's measured reason).
  */
 export function makeContainerGone({ exec = execReaperBounded, binOf = () => "docker" } = {}) {
 	return async (name, venue) => {
 		if (typeof name !== "string" || !isJobNamespace(name)) return null;
+		const bin = binOf(venue);
 		try {
-			const { stdout } = await exec(binOf(venue), ["ps", "-a", "--filter", `name=${name}`, "--format", "{{.Names}}"]);
-			return !String(stdout ?? "").split("\n").map((n) => n.trim()).includes(name);
+			const { stdout } = await exec(bin, ["ps", "-a", "--filter", `name=${name}`, "--format", "{{.Names}}\t{{.State}}"]);
+			const row = psRows(stdout).find((r) => r.name === name);
+			if (!row) return true;
+			if (CONTAINER_GONE_STATES.has(row.state)) return true;
+			if (!CONTAINER_UNSTARTED_STATES.has(row.state)) return false;
+			await exec(bin, ["rm", "-f", name]);
+			return true;
 		} catch {
 			return null;
 		}
+	};
+}
+
+/**
+ * The job containers a venue still lists (gate round 1 of phase 2, P2G1-L4), for the host budget's boot seed: `ps -a`
+ * by the job namespace, each with its state and its two size labels, as `[{ name, memMiB, cpuCenti }]` (a label absent
+ * or not a positive integer is null). A container in a state that runs nothing (`CONTAINER_GONE_STATES`) is left out:
+ * it holds nothing. One not yet started is kept, so the sweep removes it before its room is given back. THROWS when
+ * the runtime does not answer: the budget then admits nothing until a listing is read, because an empty ledger beside
+ * containers nobody counted is an overcommit.
+ */
+export function makeJobContainerLister({ exec = execReaperBounded, bin = "docker" } = {}) {
+	const int = (v) => (/^[1-9][0-9]{0,8}$/.test(v ?? "") ? Number(v) : null);
+	return async () => {
+		const { stdout } = await exec(bin, ["ps", "-a", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", `{{.Names}}\t{{.State}}\t{{.Label "${SIZE_LABEL_MEM}"}}\t{{.Label "${SIZE_LABEL_CPU}"}}`]);
+		return psRows(stdout)
+			.filter((r) => !CONTAINER_GONE_STATES.has(r.state))
+			.map((r) => ({ name: r.name, memMiB: int(r.rest[0]), cpuCenti: int(r.rest[1]) }));
 	};
 }
 

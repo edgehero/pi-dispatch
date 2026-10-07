@@ -952,20 +952,67 @@ test("the boot reaper's detach-gate read gets the gate's own bound, 15 s and 1 M
 	assert.deepEqual(got.map((o) => [o.timeout, o.maxBuffer]), [[15_000, 1024 * 1024], [30_000, 1024 * 1024]]);
 });
 
-test("issue #596, phase 2: makeContainerGone says gone only when the runtime lists no container of exactly that name", async () => {
+test("issue #596, phase 2: makeContainerGone says gone when no container of exactly that name runs: absent, exited, dead or stopped, or not started and removed", async () => {
 	const { makeContainerGone } = await import("../src/backend-local.mjs");
 	const asked = [];
 	let stdout = "";
 	let fail = false;
-	const gone = makeContainerGone({ exec: async (bin, args) => (asked.push([bin, ...args]), fail ? Promise.reject(new Error("daemon down")) : { stdout }), binOf: (venue) => (venue?.backend === "podman" ? "podman" : "docker") });
+	let rmFails = false;
+	const gone = makeContainerGone({
+		exec: async (bin, args) => {
+			asked.push([bin, ...args]);
+			if (fail || (rmFails && args[0] === "rm")) throw new Error("daemon down");
+			return { stdout: args[0] === "rm" ? "" : stdout };
+		},
+		binOf: (venue) => (venue?.backend === "podman" ? "podman" : "docker"),
+	});
 	assert.equal(await gone("pi-job-7", { backend: "podman" }), true);
-	assert.deepEqual(asked[0], ["podman", "ps", "-a", "--filter", "name=pi-job-7", "--format", "{{.Names}}"]);
-	stdout = "pi-job-70\nmy-pi-job-7\n";
+	assert.deepEqual(asked[0], ["podman", "ps", "-a", "--filter", "name=pi-job-7", "--format", "{{.Names}}\t{{.State}}"]);
+	stdout = "pi-job-70\trunning\nmy-pi-job-7\trunning\n";
 	assert.equal(await gone("pi-job-7", null), true, "a substring match is not the container");
-	stdout = "pi-job-70\npi-job-7\n";
+	stdout = "pi-job-70\texited\npi-job-7\trunning\n";
 	assert.equal(await gone("pi-job-7", null), false);
+	for (const state of ["paused", "restarting", "removing", "stopping", "something-new"]) {
+		stdout = `pi-job-7\t${state}\n`;
+		assert.equal(await gone("pi-job-7", null), false, `${state}: not proven gone`);
+	}
+	// P2G1-L5: a container that runs nothing is gone, though `ps -a` lists it (an --rm whose removal failed).
+	for (const state of ["exited", "dead", "stopped", "Exited"]) {
+		stdout = `pi-job-7\t${state}\n`;
+		assert.equal(await gone("pi-job-7", null), true, `${state}: holds nothing`);
+	}
+	// Not started yet: a docker run client still alive may start it, so it is REMOVED first, and gone once that answers.
+	asked.length = 0;
+	stdout = "pi-job-7\tcreated\n";
+	assert.equal(await gone("pi-job-7", null), true);
+	assert.deepEqual(asked.at(-1), ["docker", "rm", "-f", "pi-job-7"]);
+	stdout = "pi-job-7\tconfigured\n";
+	rmFails = true;
+	assert.equal(await gone("pi-job-7", { backend: "podman" }), null, "an unanswered removal keeps the hold");
+	assert.deepEqual(asked.at(-1), ["podman", "rm", "-f", "pi-job-7"]);
+	rmFails = false;
+	stdout = "pi-job-7\n";
+	assert.equal(await gone("pi-job-7", null), true, "a line without a state is not that container's row");
 	fail = true;
 	assert.equal(await gone("pi-job-7", null), null, "could not ask: the hold stays");
 	assert.equal(await gone("someone-else", null), null, "never asked about a name outside the job namespace");
 	assert.equal(await gone(null, null), null);
+});
+
+test("issue #596, P2G1-L4: makeJobContainerLister lists every job container still there with its size labels, and throws when the runtime does not answer", async () => {
+	const { makeJobContainerLister } = await import("../src/backend-local.mjs");
+	const asked = [];
+	let out = "";
+	const list = makeJobContainerLister({ bin: "podman", exec: async (bin, args) => (asked.push([bin, ...args]), out === null ? Promise.reject(new Error("down")) : { stdout: out }) });
+	out = ["pi-job-a\trunning\t8192\t200", "pi-job-b\tcreated\t\t", "pi-job-c\texited\t4096\t100", "pi-job-d\tpaused\t0\t1.5", "my-pi-job-e\trunning\t1\t1", "pi-job-f\tdead\t1\t1", "a warning line"].join("\n");
+	assert.deepEqual(await list(), [
+		{ name: "pi-job-a", memMiB: 8192, cpuCenti: 200 },
+		{ name: "pi-job-b", memMiB: null, cpuCenti: null },
+		{ name: "pi-job-d", memMiB: null, cpuCenti: null },
+	], "exited and dead hold nothing; a label that is not a positive integer is no label; only our namespace");
+	assert.deepEqual(asked[0], ["podman", "ps", "-a", "--filter", "name=pi-job-", "--format", '{{.Names}}\t{{.State}}\t{{.Label "pi.dispatch.mem"}}\t{{.Label "pi.dispatch.cpu"}}']);
+	out = "";
+	assert.deepEqual(await list(), []);
+	out = null;
+	await assert.rejects(list(), /down/, "unanswered is never an empty host");
 });

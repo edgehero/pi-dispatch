@@ -120,7 +120,9 @@ test("a record written BEFORE the pickup gate carries no project, so the record 
 	const { processor, seen } = harness({ ref });
 	const result = await processor(gh("j-1", "acme/web", { waitFor: [{ blocked: "x" }] }), "tok", new AbortController().signal);
 	assert.equal(result.reason, "wait-unreadable");
-	assert.equal(seen.reads, 0, "the wait gate refused before the pickup gate read anything");
+	// One read: the projects are resolved ABOVE the wait gate since issue #596's gate round 1 (P2G1-L6), so the never-fits
+	// check can refuse a size before a job waits; the wait gate's own refusal still records none.
+	assert.equal(seen.reads, 1, "one pickup read, above the wait gate");
 	assert.equal("project" in seen.records[0], false, "no project key: start.mjs resolves it from the live ref");
 });
 
@@ -164,8 +166,11 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 		.replace(/\/\*[\s\S]*?\*\//g, "")
 		.replace(/\/\/[^\n]*/g, "");
 	assert.deepEqual(code.match(/\brecordRun\b/g) ?? [], [], "no recordRun reference below the gate");
-	// Nine since issue #596 phase 2 added the never-fits refusal (`refuseSize`).
-	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 9, "exactly the 9 post-gate record paths use it; a new one must be counted here");
+	// Eight: the never-fits refusal moved ABOVE the wait gate (issue #596, P2G1-L6) and records the same pickup project
+	// and size by hand there (pinned below).
+	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 8, "exactly the 8 post-gate record paths use it; a new one must be counted here");
+	const above = src.slice(src.indexOf("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"), at);
+	assert.deepEqual(above.match(/recordRun\(\{ job, result, startedAt: at, endedAt: new Date\(\)\.toISOString\(\), project, size \}\)/g)?.length, 1, "the never-fits refusal carries the pickup project and size");
 });
 
 // Issue #596: the job's size is resolved at the same pickup, from the same limits snapshot and project, and reaches the

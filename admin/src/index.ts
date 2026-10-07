@@ -1045,8 +1045,9 @@ function registerTools(pi: ExtensionAPI): void {
       "(4g and 2). `hostShare` (a whole percentage, 1 to 100, of a host's job budget: the most the project's running " +
       "jobs may hold together on one host) and `minJobs` (an integer >= 1, needs memory or cpus on the row, at most its " +
       "concurrent: how many of its jobs a host keeps room for first) are enforced by each worker's host budget " +
-      "(PI_HOST_MEMORY_BUDGET, PI_HOST_CPU_BUDGET). A size larger than a host's budget, or than the project's hostShare " +
-      "of it, is refused before any spend (job-size-exceeds-host, -share, or -fleet when no host fits). A row may " +
+      "(PI_HOST_MEMORY_BUDGET, PI_HOST_CPU_BUDGET, which count a job's cpus as reserved CPU). A size larger than a " +
+      "host's budget, or than the project's hostShare of it, refuses a job on that host's own queue before any spend " +
+      "(job-size-exceeds-host, -share); a job on the shared queue waits for a host it fits on. A row may " +
       "carry a size and nothing else. The file stays " +
       "version 1 unless a row needs version 2, or 3 for a size field (a worker older than this one then refuses the " +
       "file, so upgrade every worker first). The operator MUST approve a confirm dialog showing the entry; refused " +

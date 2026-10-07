@@ -24,7 +24,7 @@ import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } 
 import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
-import { makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
+import { makeHostRegistry } from "./host-registry.mjs";
 import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
 import { makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
@@ -53,7 +53,7 @@ import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { endpointShown, execDockerBounded, makeContainerGone, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
+import { endpointShown, execDockerBounded, makeContainerGone, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
@@ -614,6 +614,9 @@ export async function startWorker(
 		readCgroupFile: readCgroupFileFn = (path) => readFileSync(path, "utf8"),
 		// Issue #596, phase 2: whether an orphaned job container is gone, per venue's CLI.
 		containerGone: containerGoneFn = null,
+		// Issue #596, gate round 1 of phase 2 (P2G1-L4): the job containers a venue's CLI still lists after the boot reaper,
+		// with their size labels, `(bin) => async () => [{ name, memMiB, cpuCenti }]`, throwing when the CLI does not answer.
+		listJobContainers: listJobContainersFn = (bin) => makeJobContainerLister({ bin }),
 		// `home` (issue #354) is the account whose rootless Podman runs the podman venue's jobs: its own mounts.conf and
 		// containers.conf are read from there. Absent in a test's identity, it falls to the observation's own default.
 		jobUserIdentity = { platform: process.platform, release: osRelease(), euid: process.geteuid?.(), egid: process.getegid?.(), home: homedir() },
@@ -1683,6 +1686,12 @@ export async function startWorker(
 		budgetRunning: () => snapshotField("running"),
 		budgetHolds: () => snapshotField("holds"),
 		budgetOrphans: () => snapshotField("orphans"),
+		// P2G1-L4: whether the boot listing of the job containers left from before this worker started has been read
+		// (`listed`); until it is, the worker admits no job (`unlisted`), and doctor says so. "" before the worker exists.
+		budgetSeed: () => {
+			const snap = worker?.hostBudget?.snapshot?.();
+			return typeof snap?.seeded === "boolean" ? (snap.seeded ? "listed" : "unlisted") : "";
+		},
 	});
 
 
@@ -2005,11 +2014,20 @@ export async function startWorker(
 			readFacts: readHostFacts,
 			onRefresh: syncCpuReserve,
 			containerGone: containerGoneFn ?? makeContainerGone({ binOf: (venue) => (resolveBackendName(venue ?? {}, config.defaultBackend) === PODMAN_BACKEND ? "podman" : "docker") }),
+			// P2G1-L4: AFTER the boot reaper (above), every blessed venue's remaining job containers, seeded into the ledger
+			// as orphans from their size labels. One venue that cannot be listed fails the whole listing: the budget then
+			// admits nothing until a tick reads it, because a container nobody counted is an overcommit.
+			survivors: async () => {
+				const venues = [...(localBlessed ? [[DEFAULT_BACKEND, "docker"]] : []), ...(podmanBlessed ? [[PODMAN_BACKEND, "podman"]] : [])];
+				const all = [];
+				for (const [backend, bin] of venues) {
+					for (const c of await listJobContainersFn(bin)()) all.push({ ...c, venue: { backend } });
+				}
+				return all;
+			},
 			now,
 			log,
 		},
-		// The registry read a forge job too big for this host asks before it is refused as too big for every host.
-		fleetHosts: () => readLiveHosts(redis),
 		// #227. The abort path's stop, resolved per job rather than hard-wired to docker. A container NAME is
 		// not enough to find the runtime holding it once there is more than one venue.
 		stopContainer: backends.stopContainer,

@@ -17,7 +17,7 @@ import { dollarWindowCaps } from "./dollar-budget.mjs";
 import { concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, projectDollarCapsFor, projectRowFor, rowScopeFor, scopedLedgers } from "./scoped-limits.mjs";
 import { memberScopeOf, projectOf } from "./projects.mjs";
 import { resolveJobSize } from "./job-size.mjs";
-import { BUDGET_RECHECK_MS, FLEET_NO_FIT_CONFIRM_MS, HOST_BUDGET_TICK_MS, NEVER_FITS_RECHECK_MS, fleetFit, makeHostBudget } from "./host-budget.mjs";
+import { BUDGET_RECHECK_MS, HOST_BUDGET_TICK_MS, NEVER_FITS_RECHECK_MS, makeHostBudget } from "./host-budget.mjs";
 import { governedDollars } from "./allocation.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -190,7 +190,7 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, fleetHosts = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -247,6 +247,64 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		if (until && until > nowMs + 1000) {
 			await job.moveToDelayed(until, token);
 			throw new DelayedError();
+		}
+
+		// The limits snapshot, the project and the size, read here, right after the pause gate and ABOVE the wait gate, so
+		// the never-fits check below can refuse a size before a job waits (issue #596, gate round 1 of phase 2, P2G1-L6).
+		const limits = scopedLimits();
+		// The job's project (issue #499, INT-PROJECTS-FILE-CONTRACT), resolved ONCE here from one read of the projects ref,
+		// beside the limits snapshot and for its reason: the gate, the ledger and the record agree for this attempt,
+		// whatever an operator does to projects.json mid-run. A retry or a deferral is a new pickup and resolves again.
+		// Every record from the never-fits check on carries it (the refusal there by hand, every one past the wait gate
+		// through `recordAfterGate`); the wait gate's refusals carry none and are resolved from the live ref (start.mjs).
+		// An id or null, never a name.
+		const pickupProjects = projects();
+		const project = projectOf(job.data, pickupProjects);
+		// THE JOB'S SIZE (issue #596, `job-size.mjs`), resolved ONCE here from the same limits snapshot and pickup project
+		// every gate below reads: the project row's memory and CPUs, else the deployment's PI_JOB_MEMORY and PI_JOB_CPUS
+		// (`jobSizeEnv`, validated at boot), else 4g and 2. It reaches the container as an ARGUMENT (runJob's `jobSize`,
+		// then `runContainer`'s `size`), never through `job.data`, so nothing queued can choose its own size, and every
+		// record below carries it beside the project.
+		const size = resolveJobSize({ project, limits, env: jobSizeEnv });
+
+		// THE NEVER-FITS CHECK (issue #596, phase 2, DES-HOST-BUDGET), right after the size and ABOVE the wait gate (gate
+		// round 1, P2G1-L6): a size that can never start here is known now, and a job must not hold for a day on a wait and
+		// THEN be told so (the wait gate's own determinate-refusals-then-holds rule). Nothing is held yet, so nothing is
+		// given back.
+		//
+		// A job on THIS HOST'S OWN QUEUE (`pi-jobs@<name>`) can run nowhere else, so a size larger than this host's budget,
+		// or than its project's `hostShare` of it, is a determinate POLICY refusal, RETURNED before anything is spent
+		// (CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY): `job-size-exceeds-host` or `job-size-exceeds-share`. The log
+		// line and the record name both sizes; the forge comment names neither (an issue author can act on neither).
+		//
+		// A job on the SHARED queue is NEVER refused for its size (P2G1-L2), local or forge: another host draining the
+		// queue may have a larger budget, or give the project a larger share of it. It is deferred for
+		// `NEVER_FITS_RECHECK_MS` with a named line carrying both sizes, and doctor names a project that fits no live
+		// host. There used to be a fleet refusal after two registry reads agreed that no live host fits, and the registry
+		// cannot carry that verdict: a host's row is deleted while it restarts (a clean stop) or expires after a crash, and a
+		// read whose HGETALL times out drops a row, so a job a restarting host would have run was refused for good.
+		if (hostBudget) {
+			await hostBudget.ready;
+			const misfit = hostBudget.neverFits(size, project, limits);
+			if (misfit !== null) {
+				const budgetNow = hostBudget.current();
+				const share = hostBudget.shareOf(project, limits);
+				const sizeFields = { memMiB: size.memMiB, cpuCenti: size.cpuCenti, budgetMemMiB: budgetNow.memMiB, budgetCpuCenti: budgetNow.cpuCenti, hostShare: share };
+				if ((job.queueName ?? QUEUE) !== QUEUE) {
+					const reason = `job-size-exceeds-${misfit}`;
+					deps?.log?.(reason.replaceAll("-", "_"), { jobId: job.id, project, ...sizeFields });
+					if (deps?.comment) await Promise.resolve(deps.comment(job.data, SIZE_REFUSAL_COMMENTS[reason])).catch(() => {});
+					const at = new Date(now()).toISOString();
+					const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false, hostBudget: { memMiB: budgetNow.memMiB, cpuCenti: budgetNow.cpuCenti, hostShare: share } };
+					// Above the wait gate, so through the recorder's own arguments rather than the bound one below it: the
+					// same pickup project and size, by hand once.
+					recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString(), project, size });
+					return result;
+				}
+				deps?.log?.("job_size_never_fits_here_deferred", { jobId: job.id, project, misfit, delayMs: NEVER_FITS_RECHECK_MS, ...sizeFields });
+				await job.moveToDelayed(nowMs + NEVER_FITS_RECHECK_MS, token);
+				throw new DelayedError();
+			}
 		}
 
 		// The wait gate (issue #230, REQ-WAIT-FOR). THIRD: after the pause gate, because a paused job must
@@ -635,12 +693,16 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 			if (budgetHeld) {
 				budgetHeld = false;
-				if (orphan) hostBudget.orphan(job.id, { name, venue });
-				else hostBudget.release(job.id);
+				if (orphan) hostBudget.orphan(job.id, { name, venue, ticket: budgetState.ticket });
+				else hostBudget.release(job.id, { ticket: budgetState.ticket });
 			}
 			return Promise.all([endpointsReleased, scopesReleased]);
 		};
-		if (hostBound) {
+		// With a host budget the count is the budget's own third dimension (issue #596, gate round 1 of phase 2, P2G1-L3),
+		// judged LAST with the memory and the CPU, so a waiting job's hold keeps a job slot too. A host slot taken here, first,
+		// deferred a big shared-queue job at the slot while every small that ended was replaced at once from the host queue,
+		// and a job deferred here never reached the budget, so it held nothing and never ran while the flood lasted.
+		if (hostBound && !hostBudget) {
 			if (!hostBound.slots.tryAcquire(HOST_SLOT_KEY, hostBound.limit())) {
 				deps?.log?.("host_busy_deferred", { jobId: job.id, delayMs: SCOPE_BUSY_RECHECK_MS });
 				await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
@@ -649,83 +711,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			hostHeld = true;
 		}
 
-		const limits = scopedLimits();
-		// The job's project (issue #499, INT-PROJECTS-FILE-CONTRACT), resolved ONCE here from one read of the projects ref,
-		// beside the limits snapshot and for its reason: the gate, the ledger and the record agree for this attempt,
-		// whatever an operator does to projects.json mid-run. A retry or a deferral is a new pickup and resolves again.
-		// Every record below this line carries it (through `recordAfterGate`); a record written before this gate carries
-		// none and is resolved from the live ref (start.mjs). An id or null, never a name.
-		const pickupProjects = projects();
-		const project = projectOf(job.data, pickupProjects);
 		// THE ONE RECORDER BELOW THE GATE, bound once, so the pickup project is a property of the path and not of each call
 		// site: every record from here on goes through it, and none can drop the field and fall back to the live ref in
 		// start.mjs, which would disagree with the pickup value exactly when projects.json was edited mid-run. A bolt in
 		// project-pickup.test.mjs refuses a bare `recordRun(` call below this line.
-		// THE JOB'S SIZE (issue #596, `job-size.mjs`), resolved ONCE here from the same limits snapshot and pickup project
-		// every gate below reads: the project row's memory and CPUs, else the deployment's PI_JOB_MEMORY and PI_JOB_CPUS
-		// (`jobSizeEnv`, validated at boot), else 4g and 2. It reaches the container as an ARGUMENT (runJob's `jobSize`,
-		// then `runContainer`'s `size`), never through `job.data`, so nothing queued can choose its own size, and every
-		// record below carries it beside the project.
-		const size = resolveJobSize({ project, limits, env: jobSizeEnv });
 		const recordAfterGate = (args) => recordRun({ ...args, project, size });
 
-		// THE NEVER-FITS CHECK (issue #596, phase 2, DES-HOST-BUDGET). A size larger than this host's budget, or than its
-		// project's `hostShare` of it, can never start here however long it waits, so it is a determinate policy refusal,
-		// RETURNED before anything is spent (CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY), right after the size is
-		// resolved: `job-size-exceeds-host` or `job-size-exceeds-share`. The log line and the record name both sizes; the
-		// forge comment names neither (an issue author can act on neither).
-		//
-		// A FORGE job on the SHARED queue may fit another host, so it is deferred for `NEVER_FITS_RECHECK_MS` instead, and
-		// refused (`job-size-exceeds-fleet`, or this host's own reason when the registry lists this host alone) only after
-		// TWO successful registry reads at least `FLEET_NO_FIT_CONFIRM_MS` apart that show no live host whose published
-		// budget fits it. A read that fails, a host row without a budget, or no row for this host is "unknown", which only
-		// defers: the registry can delay a refusal, never invent one. A local job, and any job on this host's own queue,
-		// can run nowhere else and is refused at once.
-		if (hostBudget) {
-			await hostBudget.ready;
-			const misfit = hostBudget.neverFits(size, project, limits);
-			if (misfit !== null) {
-				const budgetNow = hostBudget.current();
-				const share = hostBudget.shareOf(project, limits);
-				const sizeFields = { memMiB: size.memMiB, cpuCenti: size.cpuCenti, budgetMemMiB: budgetNow.memMiB, budgetCpuCenti: budgetNow.cpuCenti, hostShare: share };
-				const refuseSize = async (reason) => {
-					await releaseAllHolds();
-					deps?.log?.(reason.replaceAll("-", "_"), { jobId: job.id, project, ...sizeFields });
-					if (deps?.comment) await Promise.resolve(deps.comment(job.data, SIZE_REFUSAL_COMMENTS[reason])).catch(() => {});
-					const at = new Date(now()).toISOString();
-					const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false, hostBudget: { memMiB: budgetNow.memMiB, cpuCenti: budgetNow.cpuCenti, hostShare: share } };
-					recordAfterGate({ job, result, startedAt: at, endedAt: new Date().toISOString() });
-					return result;
-				};
-				const shared = job.data?.kind !== "local" && (job.queueName ?? QUEUE) === QUEUE;
-				if (!shared || typeof fleetHosts !== "function") return await refuseSize(`job-size-exceeds-${misfit}`);
-				let read;
-				try {
-					read = await fleetHosts();
-				} catch {
-					read = { unreachable: "registry read threw" };
-				}
-				const verdict = read?.unreachable ? "unknown" : fleetFit(size, share, read?.hosts ?? [], hostName);
-				const seenAt = Number.isFinite(job.data?.sizeNoFitAtMs) ? job.data.sizeNoFitAtMs : null;
-				if (verdict === "none" && seenAt !== null && nowMs - seenAt >= FLEET_NO_FIT_CONFIRM_MS) {
-					const alone = (read.hosts ?? []).every((h) => h?.name === hostName);
-					return await refuseSize(alone ? `job-size-exceeds-${misfit}` : "job-size-exceeds-fleet");
-				}
-				// The first "none" is remembered ON THE JOB (a deferral keeps its data, and the next pickup may be another
-				// host's); an answer that a host may fit forgets it, so two "none" reads must stand together with nothing
-				// between them saying otherwise. A read that failed says nothing either way and leaves it. A failed write only
-				// delays the refusal.
-				const mark = verdict === "none" ? (seenAt ?? nowMs) : read?.unreachable ? seenAt : null;
-				if (mark !== seenAt) {
-					const { sizeNoFitAtMs: _was, ...rest } = job.data ?? {};
-					await Promise.resolve(job.updateData?.(mark === null ? rest : { ...rest, sizeNoFitAtMs: mark })).catch(() => {});
-				}
-				await releaseAllHolds();
-				deps?.log?.("job_size_never_fits_here_deferred", { jobId: job.id, project, fleet: verdict, delayMs: NEVER_FITS_RECHECK_MS, ...sizeFields });
-				await job.moveToDelayed(nowMs + NEVER_FITS_RECHECK_MS, token);
-				throw new DelayedError();
-			}
-		}
 		// The MATCHED ROW's scope keys both the in-process slot and the fleet lease (issue #498), the same string
 		// `budgetCapsFor` hashes below and the boot sweeper hashes from the file: a qualified `github:acme/web` row holds
 		// GitHub jobs only, a bare `acme/web` row holds every forge's under the key it always had. With no row it is the
@@ -906,10 +897,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// when the budget is its only obstacle: a job a scope, its project's `concurrent` or an endpoint deferred never got
 		// here, so its hold (if it had one) is suspended rather than kept (`processor` above). Synchronous: the ledger is
 		// read, decided on and written with no await between, so two pickups on this host never both take the same room.
-		// A deferral, never a refusal: a full host is transient state (CONST-RETRY-INFRA-ONLY), and it is free.
+		// A deferral, never a refusal: a full host is transient state (CONST-RETRY-INFRA-ONLY), and it is free. Two whys make
+		// no waiter: `running-here` (the ledger already holds this job id: another pickup of it still runs here, or its
+		// container outlived it as an orphan) and `unseeded` (the job containers left from before this worker started are
+		// not listed yet, so nothing is admitted).
 		// Skipped when the settings are unreadable or invalid: that job is refused or retried below without a container.
 		if (hostBudget && !settingsThrew && !settings?.invalid) {
-			const verdict = hostBudget.gate({ id: job.id, project, size, getState: typeof job.getState === "function" ? () => job.getState() : null, limits });
+			const verdict = hostBudget.gate({ id: job.id, ticket: budgetState.ticket, project, size, getState: typeof job.getState === "function" ? () => job.getState() : null, limits });
 			if (!verdict.admitted) {
 				await releaseAllHolds();
 				budgetState.budgetDeferred = true;
@@ -1439,8 +1433,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	};
 	return async function processor(job, token, signal) {
 		if (!hostBudget) return pickup(job, token, signal, { budgetDeferred: false });
-		const budgetState = { budgetDeferred: false };
-		hostBudget.enter(job.id);
+		// The pickup's TICKET (P2G1-L1): the ledger entry this pickup takes carries it, and only this pickup's release or
+		// orphan can act on that entry, so a second pickup of the same job id (a stalled scheduled job handed back while
+		// its first attempt still runs here) can never give back the first's hold.
+		const budgetState = { budgetDeferred: false, ticket: hostBudget.enter(job.id) };
 		try {
 			const result = await pickup(job, token, signal, budgetState);
 			hostBudget.forget(job.id);
@@ -1464,14 +1460,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 export const CANCEL_STOP_BOUND_MS = 1_000;
 
 /**
- * The forge comments for the three never-fits refusals (issue #596, phase 2). GENERIC on purpose: never the size, the
+ * The forge comments for the two never-fits refusals (issue #596, phase 2). GENERIC on purpose: never the size, the
  * budget or the project, which are operator configuration an issue author can act on none of. The worker log, the run
- * record and doctor name both sizes.
+ * record and doctor name both sizes. There is no fleet refusal (gate round 1 of phase 2, P2G1-L2): a job on the shared
+ * queue waits for a host it fits on.
  */
 export const SIZE_REFUSAL_COMMENTS = Object.freeze({
 	"job-size-exceeds-host": "Refused: this job's size is larger than the worker host's job budget, so it could never start there. No container was started and nothing was spent. Ask the operator to lower this project's job size or raise the host budget. Not run.",
 	"job-size-exceeds-share": "Refused: this job's size is larger than the share of the worker host's job budget its project may use, so it could never start there. No container was started and nothing was spent. Ask the operator to lower this project's job size or raise its host share. Not run.",
-	"job-size-exceeds-fleet": "Refused: this job's size is larger than the job budget of every worker host, so it could never start anywhere. No container was started and nothing was spent. Ask the operator to lower this project's job size or raise a host's budget. Not run.",
 });
 
 /** The comment for a job the operator cancelled before it started, where it would have been held or retried (gate of PR #479). */
@@ -1502,7 +1498,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, fleetHosts = null }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1534,7 +1530,8 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	// `hostBudgetOptions` is start.mjs's (the settings, the default size, the facts reader, the orphan check); a bare
 	// wiring passes none and keeps today's behaviour. The tick re-reads the facts, verifies stale holds and sweeps
 	// orphans, off every job path, unref'd and cleared on stop like the registry's beat.
-	const hostBudget = hostBudgetOptions ? makeHostBudget({ scopedLimits, ...hostBudgetOptions }) : null;
+	// The live `PI_CONCURRENCY` is the budget's third dimension (P2G1-L3), so with a budget the host slot above is not taken.
+	const hostBudget = hostBudgetOptions ? makeHostBudget({ scopedLimits, countLimit: () => liveConcurrency(), ...hostBudgetOptions }) : null;
 	let budgetTick = null;
 	if (hostBudget) {
 		budgetTick = setInterval(() => void hostBudget.tick(), hostBudgetOptions.tickMs ?? HOST_BUDGET_TICK_MS);
@@ -1561,7 +1558,6 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			getSettings,
 			// Issue #596, phase 2: the ONE host budget, and the registry read the never-fits check asks of the fleet.
 			hostBudget,
-			fleetHosts,
 			// Late-bound over EVERY worker: an overlay concurrency change re-binds the live slot count at the
 			// next job start, and with two queues both have to move or the host bound and the queue bounds
 			// stop agreeing. Guarded so only an integer that actually differs touches the property.

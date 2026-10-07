@@ -268,6 +268,22 @@ export async function writeQuota(plan, cpuCenti, { run, image, bin = plan.venue 
  * on `system-systemd` the operator's command is the fix), `unreadable`, `unmanaged` (no method here, `why`),
  * `no-parent`, `budget-unknown`. Logged once per change: `cpu_reserve` when held, `cpu_reserve_fail_open` otherwise.
  */
+/**
+ * What a reserve that is not held MEANS for the jobs, one sentence per case. `differs` is two different truths, and the
+ * generic "no quota held" line was the opposite of one of them (the executing review of the aggregate reserve): a quota
+ * IS held there, the wrong one. With the budget off (`wantCenti` null) and the operator's quota still set, jobs together
+ * are capped to a budget the operator turned off, which is what doctor says too.
+ */
+export function failOpenSaid(state) {
+	if (state.status === "no-parent") return "jobs run without the parent, their CPU weight capped at 1024: a fair share for the proxy and Valkey, not a reserve";
+	if (state.status === "differs" && Number.isSafeInteger(state.quotaCenti)) {
+		const held = `${state.quotaCenti / 100} CPUs`;
+		if (state.wantCenti === null) return `the CPU budget is off, but the parent still holds a quota of ${held}, so jobs together are still capped to it until it is cleared`;
+		return `jobs run under the parent held to a quota of ${held}, not the CPU budget of ${state.wantCenti / 100}: jobs together are capped there, and the reserve kept is not the one configured`;
+	}
+	return "jobs run under the parent with no quota held across them: the proxy and Valkey are not starved, the host's CPU reserve is not kept";
+}
+
 export function makeCpuReserve({ run, image, now = () => Date.now(), log = () => {} }) {
 	const states = new Map();
 	const said = new Map();
@@ -280,7 +296,7 @@ export function makeCpuReserve({ run, image, now = () => Date.now(), log = () =>
 		said.set(venue, key);
 		const fields = { venue, method: state.method, status: state.status, wantCenti: state.wantCenti ?? "none", quotaCenti: state.quotaCenti === undefined ? "unread" : (state.quotaCenti ?? "none"), reason: state.reason ?? "" };
 		if (state.status === "held") log("cpu_reserve", fields);
-		else log("cpu_reserve_fail_open", { ...fields, failOpen: state.status === "no-parent" ? "jobs run without the parent, their CPU weight capped at 1024: a fair share for the proxy and Valkey, not a reserve" : "jobs run under the parent with no quota held across them: the proxy and Valkey are not starved, the host's CPU reserve is not kept" });
+		else log("cpu_reserve_fail_open", { ...fields, failOpen: failOpenSaid(state) });
 	};
 
 	const one = async (plan, cpuCenti) => {
