@@ -4887,6 +4887,12 @@ validator rather than a second copy of it.
   gate's own refusals and on every record before the field. Integers and
   a fixed word, so PII-free by construction. A retry or a deferred attempt is a NEW pickup: it resolves the size in
   force then, so two attempts of one job can record two sizes when the file was edited between them.
+  **Readers of `resources` and `size` (issue #596, phase 3)**: the size suggestion (`DES-SIZE-SUGGESTIONS`,
+  `worker/src/size-suggest.mjs`), which doctor, the admin panel and the insights page call, reads both off the records
+  of a project (`project`), with `startedAt` and `endedAt` for the wall time and `reason` for `oom-killed`. It reads a
+  record as UNTRUSTED whatever the rebuild above did: a field that is not a safe non-negative integer is ignored, a
+  peak above the record's own `size` is read at it, and a record without both blocks is no evidence. It writes
+  nothing to any record.
   **`hostBudget` (issue #596, phase 2) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL
   position** after `size`: on the two never-fits refusals (`job-size-exceeds-host`, `job-size-exceeds-share`) the
   host budget the size was judged against, in MiB and hundredths of a CPU, and the project's `hostShare` (null without
@@ -7280,6 +7286,12 @@ abstains.
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
 carries no configuration and no authority: nothing here is an instruction to anybody.
 
+**The budget fields' readers** (issue #596): doctor (each host's budget, use and largest fitting project size), and since
+phase 3 the admin panel's PROJECTS view and the insights page, which
+flag a size suggestion above the largest budget any live host publishes and show each host's budget and use
+(`DES-SIZE-SUGGESTIONS`). Each reader parses a field itself (`publishedBudget`): an integer as text, `off`, or
+anything else unknown.
+
 **THE CONTENT RULE**: names, integers and digests. Never a path, never a URL with credentials, never a
 repository name, never operator free text. This is `targetFor`'s `local:<basename>` discipline applied to
 a Valkey value, and it earns its strictness from the READER rather than the writer -- the panel is where
@@ -7835,3 +7847,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-07 | Issue #596, phase 2, review gate round 1. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: `job-size-exceeds-fleet` leaves the reason enum (never released; the fleet refusal is removed because the registry lists no restarting host), the two remaining never-fits reasons are given only to a job on the host's own queue and are decided above the wait gate, and `hostBudget` records `"off"` for a dimension switched off (it recorded null, which already means unknown, while its comment claimed an off dimension never appears). **`INT-HOST-REGISTRY-CONTRACT` CORRECTED**: the row gains `budgetSeed` (`listed` or `unlisted`, whether the worker has read its boot listing of left-over job containers), and NO job decision reads the host budget fields any more, so the falsification test holds unamended again; the amendment that admitted the fleet refusal is withdrawn. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the size labels also seed a restarted worker's ledger. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: a size over a project's `hostShare` is refused only on the host's own queue. The two phase 2 rows that sat at the top of this oldest-first table are moved to its end. Checked and UNCHANGED: `INT-CONFIG-OVERLAY-CONTRACT` (no new setting), `INT-SANDBOX-CONTRACT`, `INT-LIVE-PROBE-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`. |
 | 2026-10-07 | Issue #596, phase 2, review gate round 2. **`INT-HOST-REGISTRY-CONTRACT` CORRECTED**: `budgetSeed` is `listed`, or `unlisted:<venue>[,<venue>]` naming the venues whose boot listing is unread (a worker admits no job on those, and the others' jobs run); it was one `unlisted` for the whole host, which a blessed but absent Podman held forever. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: `job-size-exceeds-host` and `-share` are also recorded for a job on the shared queue of a worker without `PI_WORKER_NAME` (it declares no fleet, so there is no other host to wait for). **`INT-SCOPED-LIMITS-FILE-CONTRACT` CORRECTED**, the `hostShare` sentence, the same way. Checked and UNCHANGED: `INT-CONTAINER-RUNTIME-CONTRACT` (the size labels are read as before), `INT-CONFIG-OVERLAY-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`. |
 | 2026-10-07 | Issue #596, phase 2, the last review round. **`INT-RUN-HISTORY-FILE-CONTRACT` WORDING CORRECTED**: a worker without `PI_WORKER_NAME` refuses a never-fits size because it "never waits for another host, even one it would fit"; the text said "there is no other host to wait for", which is false when peers share its Valkey. The recorded reasons and the rule are UNCHANGED. |
+| 2026-10-07 | Issue #596, phase 3 (size suggestions). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED** with its new readers: the size suggestion (`DES-SIZE-SUGGESTIONS`) reads `resources`, `size`, `project`, `startedAt`, `endedAt` and `reason`, judges each record again as untrusted, and writes nothing; the record's shape is UNCHANGED. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: the admin panel's PROJECTS view and the insights page read `budgetMemMiB`, `budgetCpuCenti`, `usedMemMiB` and `usedCpuCenti` (the view flags a suggestion above the largest published budget; the page shows each host's budget and use); the fields are UNCHANGED. No new file or wire shape: the suggestion is an in-process value of the worker package (`@edgehero/pi-dispatch/size-suggest`, and `./host-budget` is exported for `publishedBudget`). Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT` (a suggestion is applied only through its existing tools), `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT` (no new setting). |

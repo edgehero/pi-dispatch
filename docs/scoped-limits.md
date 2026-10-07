@@ -269,6 +269,41 @@ memory, light ones less.
 
 What a size does not cover: disk I/O, disk space and the network are not limited per job.
 
+#### Choosing a size from the runs
+
+pi-dispatch suggests a size for each project from what its recent runs used. It never applies one: you do, with the
+call it names.
+
+- **Where you see it.** `pi-dispatch doctor` prints one line per project. The panel's PROJECTS view (`j`) shows each
+  project's size, the p95 of its runs' memory peaks and cores used, the suggestion, and the exact call that applies it.
+  When you edit a project row's `memory` or `cpus` with `dispatch_limit_edit`, its confirm shows the project's peaks
+  and what they suggest. The [insights page](insights.md#what-each-run-records-about-resources) draws each run's
+  peak against its size.
+- **What it reads.** The project's runs of the last 30 days, at most the newest 50, that recorded both what they used
+  (`resources`) and what they were given (`size`). Runs from before those fields are ignored. In each of memory and
+  CPUs, only runs given at least the current size count, so a raise you just made is not asked for again by the runs
+  that caused it.
+- **Memory.** The first rule that applies decides:
+  1. a run that ended `oom-killed`: raise to the larger of 1.5x the size and 1.25x the p95 peak;
+  2. more than 10% of the runs peaked at 90% of their memory or more: raise to 1.5x. A peak counts the page cache,
+     which the kernel gives back at the limit, so a run at the limit was cut off, not measured;
+  3. fewer than 10 runs: not enough runs;
+  4. 1.25x the p95 peak is at most 0.75x the size: lower to 1.25x the p95 peak;
+  5. otherwise the size fits.
+  A suggestion is rounded up: to 256m steps up to 2g, 512m steps up to 8g, then whole gigabytes, and never below 512m.
+- **CPUs.** With at least 10 runs: when the median run was held back by its CPU limit for more than 25% of its time,
+  raise by 50%; when the p95 of the cores used is below 0.4x the size, lower to 1.25x that p95; otherwise it fits.
+  Steps of 0.25, never below 0.25. A run's time is counted from pickup, clone included, so cores used read a little
+  low.
+- **The budget.** Doctor warns when a suggestion is larger than this host's budget: a job of that size would never
+  fit here. The panel and the insights page say so when it is larger than every live host's budget.
+- **The call.** `dispatch_limit_edit {"index":1,"memory":"6g"}` changes the project's row (the index is its place in
+  this file); a project with no row gets `dispatch_limit_add {"scope":"project:shop","memory":"6g"}`. Either one asks
+  you to confirm before it writes.
+- **Why it is only a suggestion.** The numbers are measured inside the job's container, which runs code the job
+  controls, so a job can make them up. Values that cannot be real are clamped or ignored, and a made-up peak can only
+  ask for as much as the job could take by using it. You decide.
+
 ## How it works
 
 A job's scoped windows reserve **first**: its repo or folder row, then its project row, then the global
