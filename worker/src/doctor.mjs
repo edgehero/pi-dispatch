@@ -1838,7 +1838,11 @@ export async function collectChecks(shellVars, seams) {
 	const budgetView = doctorHostBudget(env, { daemon: localUsed ? (daemon ?? null) : undefined, podman: podman?.observed?.read ?? undefined, readFile: (path) => (seams.observationFs ?? { readFileSync }).readFileSync(path, "utf8"), euid: seams.jobUserIdentity?.euid ?? null });
 	checks.push(...jobSizeChecks(env, { daemon: localUsed ? (daemon ?? null) : undefined, podman: podman?.observed?.read !== undefined && podman?.observed?.read !== null ? podman.observed.read : undefined, cpuBudgetCenti: Number.isSafeInteger(budgetView.cpuCenti) ? budgetView.cpuCenti : null }));
 	const concurrencyHere = /^[1-9][0-9]{0,5}$/.test(String(env.PI_CONCURRENCY ?? "").trim()) ? Number(String(env.PI_CONCURRENCY).trim()) : 3;
-	checks.push(...hostBudgetChecks(budgetView, { concurrency: concurrencyHere, limits: scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], env }));
+	// Said again once the registry is read (below), in this place, when a worker that declares no fleet has peers.
+	const budgetChecksArgs = { concurrency: concurrencyHere, limits: scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], env };
+	const budgetChecksAt = checks.length;
+	const budgetChecksHere = hostBudgetChecks(budgetView, budgetChecksArgs);
+	checks.push(...budgetChecksHere);
 	// Issue #596, phase 2: the aggregate CPU reserve per venue, read (never written) the way the worker reads it.
 	if (!budgetView.error) {
 		const reserveReads = await doctorCpuReserve({
@@ -2426,6 +2430,7 @@ export async function collectChecks(shellVars, seams) {
 	// Valkey doctor reads, a host row is another party's text, and a control byte in a name or zone must not reach the
 	// terminal. The registry's own charset already refuses them at the source; this is the reader not relying on it.
 	const peers = (fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name), tz: h.tz ? printable(h.tz) : h.tz })).filter((h) => h.name !== workerNameOf(declaredWorkerName));
+	if (!env.PI_WORKER_NAME && peers.length > 0) checks.splice(budgetChecksAt, budgetChecksHere.length, ...hostBudgetChecks(budgetView, { ...budgetChecksArgs, peers: true }));
 	// Issue #596, phase 2: this host's own row, when its worker runs and publishes one. Its host budget ledger is held
 	// against the size labels of the job containers each venue's runtime lists, read only when the row carries the ledger.
 	const selfRow = (fleet.hosts ?? []).find((h) => printable(h.name) === workerNameOf(declaredWorkerName)) ?? null;
@@ -7671,11 +7676,14 @@ export function projectSizes(limits, env) {
  * budget. Warnings, never failures: the budget is per host, and on a fleet a forge job waits for a host it fits on. A
  * setting that does not parse is a FAILURE, because the worker refuses to start on it.
  */
-export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} } = {}) {
+export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {}, peers = false } = {}) {
 	if (view.error) return [{ ok: false, label: `host budget does not parse: ${view.error}, so the worker REFUSES TO START`, fix: "set PI_HOST_MEMORY_BUDGET and PI_HOST_CPU_BUDGET to auto, off or a value such as 64g or 12, and PI_HOST_RESERVE_MEMORY and PI_HOST_RESERVE_CPUS to auto or a value (or unset all four for auto), then re-run doctor" }];
 	const { memMiB, cpuCenti, detail, settings } = view;
 	// a worker without PI_WORKER_NAME drains no host queue and declares no fleet, so it refuses every never-fits job.
 	const multiHost = Boolean(env?.PI_WORKER_NAME);
+	// Why such a worker refuses: alone, there is no other host; beside peers in the registry, it simply declares no fleet.
+	const noFleet = (code) => `every job of it is refused before anything is spent (${code}): ${peers ? "this worker declares no fleet (no PI_WORKER_NAME), so it refuses jobs a bigger peer could run" : "with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for"}`;
+	const nameFix = peers ? ", or set PI_WORKER_NAME on this worker so a job of it on the shared queue waits for a peer it fits on" : "";
 	const memWhy = settings.memory.mode === "off" ? "off: PI_HOST_MEMORY_BUDGET" : settings.memory.mode === "value" ? "PI_HOST_MEMORY_BUDGET" : detail.memTotalMiB === null ? "auto" : `auto: ${formatMemory(detail.memTotalMiB)} here, ${formatMemory(detail.memReserveMiB)} kept for the host${detail.memFloored ? ", raised to one job of the default size" : ""}`;
 	const cpuWhy = settings.cpus.mode === "off" ? "off: PI_HOST_CPU_BUDGET" : settings.cpus.mode === "value" ? "PI_HOST_CPU_BUDGET" : detail.cpuTotalCenti === null ? "auto" : `auto: ${formatCpus(detail.cpuTotalCenti)} here, ${formatCpus(detail.cpuReserveCenti)} kept for the host${detail.cpuFloored ? ", raised to one job of the default size" : ""}`;
 	const checks = [{ ok: true, label: `Host budget: memory ${budgetMemShown(memMiB)} (${memWhy}), CPUs ${budgetCpuShown(cpuCenti)} (${cpuWhy}); a job starts only when its size fits beside what already runs on this host` }];
@@ -7700,9 +7708,9 @@ export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {} 
 		const shown = `${formatMemory(p.size.memMiB)}, ${formatCpus(p.size.cpuCenti)} CPUs`;
 		const misfit = neverFits(p.size, budget, p.hostShare);
 		if (misfit === "host") {
-			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so ${multiHost ? "a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-host), and one on the shared queue waits for a host it fits on" : "every job of it is refused before anything is spent (job-size-exceeds-host): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for"}`, fix: `lower project:${p.id}'s memory or cpus in scoped-limits.json, or raise this host's budget` });
+			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so ${multiHost ? "a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-host), and one on the shared queue waits for a host it fits on" : noFleet("job-size-exceeds-host")}`, fix: `lower project:${p.id}'s memory or cpus in scoped-limits.json, or raise this host's budget${nameFix}` });
 		} else if (misfit === "share") {
-			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than its hostShare (${p.hostShare}%) of this host's budget, so ${multiHost ? "a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-share), and one on the shared queue waits for a host it fits on" : "every job of it is refused before anything is spent (job-size-exceeds-share): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for"}`, fix: `raise project:${p.id}'s hostShare or lower its size in scoped-limits.json` });
+			checks.push({ ok: false, warn: true, label: `project ${p.id}: its job size (${shown}) is larger than its hostShare (${p.hostShare}%) of this host's budget, so ${multiHost ? "a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-share), and one on the shared queue waits for a host it fits on" : noFleet("job-size-exceeds-share")}`, fix: `raise project:${p.id}'s hostShare or lower its size in scoped-limits.json${nameFix}` });
 		}
 		if (p.minJobs > 0) {
 			minMem += p.minJobs * p.size.memMiB;

@@ -877,3 +877,37 @@ test("an unlabelled survivor's guessed size is CAPPED at the budget", async () =
 	assert.deepEqual(b.entries().map((e) => [e.memMiB, e.cpuCenti]), [[budget.memMiB, budget.cpuCenti]], "the whole budget, never more");
 	assert.ok(b.snapshot().usedMemMiB <= budget.memMiB);
 });
+
+test("a guessed survivor seeded BEFORE the first refresh is capped by that refresh, and re-capped by every later one", async () => {
+	const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:giant", memory: "128g", cpus: 64 }] }), "sl.json");
+	let facts = { memTotalMiB: 32768, hostCpus: 8 };
+	let release;
+	const first = new Promise((resolve) => (release = resolve));
+	let reads = 0;
+	const readFacts = () => (++reads === 1 ? first.then(() => facts) : facts);
+	const b = makeHostBudget({ settings: settingsOf({}), jobDefault: DEFAULT, readFacts, scopedLimits: () => limits, countLimit: NO_COUNT, survivors: { local: async () => [{ name: "pi-job-old", memMiB: null, cpuCenti: null }, { name: "pi-job-new", memMiB: 1024, cpuCenti: 50 }] }, defaultVenue: "local" });
+	// The tick lists while the boot refresh still waits on the facts: no budget yet, so the guess is uncapped.
+	assert.equal(await b.seed(), true);
+	assert.deepEqual(b.entries().map((e) => [e.memMiB, e.cpuCenti]), [[131072, 6400], [1024, 50]]);
+	release();
+	const budget = await b.ready;
+	assert.ok(Number.isSafeInteger(budget.memMiB) && Number.isSafeInteger(budget.cpuCenti));
+	assert.deepEqual(b.entries().map((e) => [e.memMiB, e.cpuCenti]), [[budget.memMiB, budget.cpuCenti], [1024, 50]], "capped at the budget, the labelled one untouched");
+	assert.equal(b.snapshot().usedMemMiB, budget.memMiB + 1024);
+	// A smaller host, then a larger one: the cap follows the budget in force, never past the guess.
+	facts = { memTotalMiB: 16384, hostCpus: 4 };
+	const smaller = await b.refresh();
+	assert.deepEqual(b.entries()[0].memMiB, smaller.memMiB);
+	assert.deepEqual(b.entries()[0].cpuCenti, smaller.cpuCenti);
+	facts = { memTotalMiB: 262144, hostCpus: 128 };
+	await b.refresh();
+	assert.deepEqual(b.entries().map((e) => [e.memMiB, e.cpuCenti]), [[131072, 6400], [1024, 50]], "back to the guess itself");
+	// Seeded AFTER a refresh (capped at once), the entry still keeps the guess itself, so a larger budget uncaps it.
+	facts = { memTotalMiB: 32768, hostCpus: 8 };
+	const later = makeHostBudget({ settings: settingsOf({}), jobDefault: DEFAULT, readFacts: () => facts, scopedLimits: () => limits, countLimit: NO_COUNT, survivors: { local: async () => [{ name: "pi-job-old", memMiB: null, cpuCenti: null }] }, defaultVenue: "local" });
+	const capped = await later.ready;
+	assert.deepEqual(later.entries().map((e) => [e.memMiB, e.cpuCenti]), [[capped.memMiB, capped.cpuCenti]]);
+	facts = { memTotalMiB: 262144, hostCpus: 128 };
+	await later.refresh();
+	assert.deepEqual(later.entries().map((e) => [e.memMiB, e.cpuCenti]), [[131072, 6400]]);
+});

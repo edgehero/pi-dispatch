@@ -73,6 +73,17 @@ test("project sizes: a size the budget can never hold, a size over its share, an
 		"warn: project huge: its job size (40g, 2 CPUs) is larger than this host's budget (32g, 8 CPUs), so every job of it is refused before anything is spent (job-size-exceeds-host): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for",
 		"warn: project greedy: its job size (20g, 2 CPUs) is larger than its hostShare (50%) of this host's budget, so every job of it is refused before anything is spent (job-size-exceeds-share): with no PI_WORKER_NAME this host declares no fleet, so there is no other host to wait for",
 	]);
+	// Beside peers in the registry such a worker is not alone: it declares no fleet, and naming it is the fix.
+	const besidePeers = hostBudgetChecks(view, { limits, peers: true }).slice(3, 5);
+	assert.deepEqual(labels(besidePeers), [
+		"warn: project huge: its job size (40g, 2 CPUs) is larger than this host's budget (32g, 8 CPUs), so every job of it is refused before anything is spent (job-size-exceeds-host): this worker declares no fleet (no PI_WORKER_NAME), so it refuses jobs a bigger peer could run",
+		"warn: project greedy: its job size (20g, 2 CPUs) is larger than its hostShare (50%) of this host's budget, so every job of it is refused before anything is spent (job-size-exceeds-share): this worker declares no fleet (no PI_WORKER_NAME), so it refuses jobs a bigger peer could run",
+	]);
+	assert.deepEqual(besidePeers.map((c) => c.fix), [
+		"lower project:huge's memory or cpus in scoped-limits.json, or raise this host's budget, or set PI_WORKER_NAME on this worker so a job of it on the shared queue waits for a peer it fits on",
+		"raise project:greedy's hostShare or lower its size in scoped-limits.json, or set PI_WORKER_NAME on this worker so a job of it on the shared queue waits for a peer it fits on",
+	]);
+	assert.deepEqual(hostBudgetChecks(view, { limits }).slice(3, 5).map((c) => c.fix), ["lower project:huge's memory or cpus in scoped-limits.json, or raise this host's budget", "raise project:greedy's hostShare or lower its size in scoped-limits.json"], "alone: no name to set");
 	assert.deepEqual(lines.slice(3), [
 		"warn: project huge: its job size (40g, 2 CPUs) is larger than this host's budget (32g, 8 CPUs), so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-host), and one on the shared queue waits for a host it fits on",
 		"warn: project greedy: its job size (20g, 2 CPUs) is larger than its hostShare (50%) of this host's budget, so a job of it on this host's own queue is refused before anything is spent (job-size-exceeds-share), and one on the shared queue waits for a host it fits on",
