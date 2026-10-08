@@ -6,7 +6,7 @@ import { resolveBackendName } from "./backend-registry.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
 import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 import { isProjectId } from "./project-id.mjs";
-import { recordedJobSize } from "./job-size.mjs";
+import { HOST_CPUS_MAX, HOST_MEMORY_MAX_MIB, HOST_SLOTS_MAX, recordedJobSize } from "./job-size.mjs";
 import { waitArmed } from "./wait-for.mjs";
 import { scheduledForMillis } from "./repeat-slot.mjs";
 import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
@@ -834,8 +834,13 @@ const recordBudget = (v) => (v === Infinity || v === "off" ? "off" : recordInt(v
  */
 export function recordedCapacity(value) {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	// Each held to what a host can have (job-size.mjs `HOST_*_MAX`): past it a value is a fault, recorded as unknown.
+	const upTo = (max, read) => (v) => {
+		const n = read(v);
+		return typeof n === "number" && n > max ? null : n;
+	};
 	const positive = (v) => (Number.isSafeInteger(v) && v >= 1 ? v : null);
-	return { slots: positive(value.slots), memMiB: recordBudget(value.memMiB), cpuCenti: recordBudget(value.cpuCenti), cpus: positive(value.cpus) };
+	return { slots: upTo(HOST_SLOTS_MAX, positive)(value.slots), memMiB: upTo(HOST_MEMORY_MAX_MIB, recordBudget)(value.memMiB), cpuCenti: upTo(HOST_CPUS_MAX * 100, recordBudget)(value.cpuCenti), cpus: upTo(HOST_CPUS_MAX, positive)(value.cpus) };
 }
 
 /**

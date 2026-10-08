@@ -517,3 +517,26 @@ test("why a host's history is not here: a row that does not route is unnamed; on
 	// A row with no `routes` (it says nothing about the mirror) is not taken for a routing one.
 	assert.equal(report([], { live: [{ name: "odd" }], coverage: cov }).hosts[0].notShared, "unnamed");
 });
+
+test("a capacity past what any host can have: the writer records unknown, and the report counts such a record as unreadable", async () => {
+	const { HOST_CPUS_MAX, HOST_MEMORY_MAX_MIB, HOST_SLOTS_MAX, JOB_CPUS_FLOOR_CENTI } = await import("../src/job-size.mjs");
+	const { memoryMiB } = await import("../src/daemon-facts.mjs");
+	// the bounds are the runtime facts' own ceilings, and the slots as many of the smallest jobs as those CPUs hold
+	assert.equal(memoryMiB(HOST_MEMORY_MAX_MIB * 1048576), HOST_MEMORY_MAX_MIB);
+	assert.equal(memoryMiB((HOST_MEMORY_MAX_MIB + 1) * 1048576), null);
+	assert.equal(HOST_SLOTS_MAX, (HOST_CPUS_MAX * 100) / JOB_CPUS_FLOOR_CENTI);
+	const top = { slots: HOST_SLOTS_MAX, memMiB: HOST_MEMORY_MAX_MIB, cpuCenti: HOST_CPUS_MAX * 100, cpus: HOST_CPUS_MAX };
+	assert.deepEqual(recordedCapacity(top), top, "the most a host can have is a fact");
+	assert.deepEqual(recordedCapacity({ slots: 1e9, memMiB: HOST_MEMORY_MAX_MIB + 1, cpuCenti: HOST_CPUS_MAX * 100 + 1, cpus: HOST_CPUS_MAX + 1 }), { slots: null, memMiB: null, cpuCenti: null, cpus: null });
+	for (const over of [{ slots: HOST_SLOTS_MAX + 1 }, { cpus: HOST_CPUS_MAX + 1 }, { memMiB: HOST_MEMORY_MAX_MIB + 1 }, { cpuCenti: HOST_CPUS_MAX * 100 + 1 }]) {
+		const r = report([run("ok", 3, 2), run("bad", 2, 1, { capacity: { ...CAP, ...over } })]);
+		assert.equal(r.coverage.unreadable, 1, JSON.stringify(over));
+		assert.equal(r.hosts[0].capacity.slots, 2, "judged by the plausible record alone");
+		assert.equal(r.hosts[0].busyMs, H);
+	}
+	assert.equal(report([run("top", 2, 1, { capacity: top })]).hosts[0].capacity.slots, HOST_SLOTS_MAX);
+	// a live row's slot count past it is unknown, never the slot count a week is judged by
+	const live = [{ name: "a", concurrency: "1000000000", budgetMemMiB: String(HOST_MEMORY_MAX_MIB + 1), budgetCpuCenti: "off" }];
+	const fromRow = report([], { live }).hosts[0].capacity;
+	assert.deepEqual([fromRow.slots, fromRow.memMiB, fromRow.cpuCenti, fromRow.basis], [null, null, "off", "current"]);
+});

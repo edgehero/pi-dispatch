@@ -514,7 +514,7 @@ test("capacityViewOf: every headline number and caveat is the CLI's own text for
   const text = capacityText(report, { since: "7d" });
   assert.deepEqual(view.window, report.window);
   assert.equal(view.truncated, true);
-  assert.equal(view.coverage, text.trim().split("\n").at(-2), "the coverage line is the CLI's");
+  assert.equal(`Coverage: ${view.coverage.join("; ")}.`, text.trim().split("\n").at(-2), "the coverage clauses are the CLI's, one by one");
   assert.deepEqual(view.hosts.map((h) => h.name), ["laptop", "mini1", "mini2"]);
   const laptop = view.hosts[0];
   assert.equal(laptop.facts, undefined, "a host whose history is not here has no numbers");
@@ -561,7 +561,7 @@ test("assembleCapacityView: the page's window and instant reach the read, mtd fr
   assert.deepEqual(mod.INSIGHTS_CAPACITY_BUCKET_MS, { "7d": CH, "30d": 6 * CH, mtd: 6 * CH });
   // a read that fails says so; it is never a host with nothing to show
   assert.deepEqual(await mod.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => ({ error: "PI_LOG_RETENTION_DAYS must be a non-negative integer" }), env: {} }), { unreachable: "PI_LOG_RETENTION_DAYS must be a non-negative integer" });
-  assert.deepEqual(await mod.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => { throw new Error("EACCES"); }, env: {} }), { unreachable: "the run records could not be read (EACCES)" });
+  assert.deepEqual(await mod.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => { throw new Error("EACCES"); }, env: {} }), { unreachable: "the capacity report could not be read (EACCES)" });
 });
 
 test("the written page carries the capacity section for its window, read with the page's own instant", async () => {
@@ -572,4 +572,30 @@ test("the written page carries the capacity section for its window, read with th
   assert.ok(page.includes("<h2>capacity</h2>"));
   assert.ok(page.includes("month to date, from 2026-10-01 00:00 UTC to 2026-10-08 12:00 UTC"), "the window is the page's, ending at its instant");
   assert.ok(page.includes("Jobs only: a machine busy with other work reads as idle."));
+});
+
+test("assembleCapacityView: a report it cannot word degrades the section, and the month's first millisecond is no time yet", async () => {
+  const paths = cannedPaths();
+  for (const junk of [{ hosts: [null] }, { hosts: [{ name: "a", shared: true, coveredMs: 5 }] }, { hosts: [{ name: "a", shared: true, coveredMs: 5, capacity: {}, waits: { n: 0 }, projects: null }] }]) {
+    const view = await mod.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => ({ report: junk }), env: {} });
+    assert.match(view.unreachable, /^the capacity report could not be read/, JSON.stringify(junk));
+  }
+  for (const coverage of [null, 7]) {
+    const view = await mod.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => ({ report: { ...capReport(), coverage } }), env: {} });
+    assert.ok(Array.isArray(view.hosts) && Array.isArray(view.coverage), `a coverage of ${coverage} is worded as none`);
+  }
+  const first = Date.parse("2026-10-01T00:00:00.000Z");
+  let asked = 0;
+  const v = await mod.assembleCapacityView(paths, "mtd", first, { readCapacityFn: async () => (asked++, { report: capReport() }), env: {} });
+  assert.deepEqual(v, { noTime: true, fromMs: first });
+  assert.equal(asked, 0, "nothing to read");
+});
+
+test("capacityViewOf: a long list of hosts whose history is not here is summarised, and nothing after it is lost", () => {
+  const report = capReport();
+  report.coverage = { ...report.coverage, historyNotShared: Array.from({ length: 14 }, (_, i) => `h${String(i).padStart(2, "0")}-${"x".repeat(58)}`), withoutHost: 3, reason: "Valkey did not answer" };
+  const view = mod.capacityViewOf(report);
+  assert.equal(view.coverage[1], `14 hosts whose history is not here: ${report.coverage.historyNotShared.slice(0, mod.INSIGHTS_CAPACITY_NAMES_SHOWN).join(", ")} and 9 more`);
+  assert.ok(view.coverage.includes("3 without a host, not counted"));
+  assert.equal(view.coverage.at(-1), "Valkey did not answer");
 });

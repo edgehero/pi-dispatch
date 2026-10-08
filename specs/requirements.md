@@ -1125,18 +1125,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-CAPACITY-INSIGHTS
 
-- **Statement**: The operator shall be told, per host, how busy it is and was with this deployment's jobs (issue
-  #599): over a window of a day, a week or thirty days, the share of the time it ran at least one job and the share
-  it sat idle, how many jobs ran at once (average and peak) and how long every slot was taken, how much of its
-  memory and CPU budget its jobs were promised and how much CPU they used, how long jobs waited for a slot (p50 and
-  p95), and which projects used it. Phase 1 delivers the record fields that make this exact (`queuedAt`, `capacity`),
-  the report (`INT-CAPACITY-REPORT`) and `pi-dispatch capacity`; phase 2 counts the jobs running now (from the host
-  rows), and shows the same report as one doctor line per host and through the `dispatch_capacity` tool; phase 3
-  shows it in the panel's HOSTS view (`u`), each live host's slots, budget and running jobs now beside its last 7 days;
-  phase 4 shows it on the insights page, over the page's window. It is READ-ONLY: computing it writes no record, no key and no file, and
-  nothing decides on it. It is JOBS ONLY: no host load is sampled, so a machine busy with other work reads as idle,
-  and every surface says so. **History it cannot see is never shown as idle**: time before what its sources hold (a
-  run mirror at its cap, the log retention) and a live host whose runs it cannot read are reported as missing,
+- **Statement**: The operator shall be told, per host, how busy it is and was with this deployment's jobs (issue #599):
+  over a window of a day, a week or thirty days, the share of the time it ran at least one job and the share it sat
+  idle, how many jobs ran at once (average and peak) and how long every slot was taken, how much of its memory and CPU
+  budget its jobs were promised and how much CPU they used, how long jobs waited for a slot (p50 and p95), and which
+  projects used it. Phase 1 delivers the record fields that make this exact (`queuedAt`, `capacity`), the report
+  (`INT-CAPACITY-REPORT`) and `pi-dispatch capacity`; phase 2 counts the jobs running now (from the host rows), and
+  shows the same report as one doctor line per host and through the `dispatch_capacity` tool; phase 3 shows it in the
+  panel's HOSTS view (`u`), each live host's slots, budget and running jobs now beside its last 7 days; phase 4 shows
+  it on the insights page, over the page's window. It is READ-ONLY: computing it writes no record, no key and no file,
+  and nothing decides on it. It is JOBS ONLY: no host load is sampled, so a machine busy with other work reads as
+  idle, and every surface says so. **History it cannot see is never shown as idle**: time before what its sources hold
+  (a run mirror at its cap, the log retention) and a live host whose runs it cannot read are reported as missing,
   counted in neither busy nor idle, and named. It carries no secret and no PII: host names, project ids, numbers and
   fixed words only.
 - **Why**: without it, whether a machine is at its limit or mostly idle is answered by reading run records by hand.
@@ -1184,7 +1184,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   chart per host whose time axis ends at the page's instant; given time before a host's history starts or a host
   whose history is not here, then the chart hatches it as no data, never draws it as an idle stretch, and says why;
   given a truncated history, then the section says so; given a hostile host name it is dropped and counted, and any
-  other text is escaped; given a capacity slice that cannot be read, then only that section says so.
+  other text is escaped; given a capacity slice or a report that cannot be read, then only that section says so;
+  given more than twenty hosts, then the hosts with numbers are drawn first and those left out are counted by kind;
+  given a long list of hosts whose history is not here, then it is cut to five names and every other coverage clause
+  still shows; given the first millisecond of a month and `mtd`, then the section says there is no time in the window
+  yet; given a stretch with no data, then its tooltip says which kind (before the history starts, not here, a bucket
+  not readable, after the report was read). Given a record whose `capacity` says more than any host can have, then
+  it is counted as unreadable. Given a retry whose earlier attempt ran on another host, then each host's sentence is
+  true of it.
 - **Traces to**: `DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-DURABLE-RUN-HISTORY`, `OQ-039`
 
@@ -3419,6 +3426,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-08 | Issue #599, phase 4, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the Acceptance: a report the page cannot word degrades only its section; past twenty hosts the ones with numbers are drawn first and the rest counted by kind; a long list of hosts whose history is not here is cut to five names and no other coverage clause is lost; `mtd` at a month's first millisecond is no time yet, not a failed read; each stretch of no data says its kind; a record whose `capacity` says more than any host can have is unreadable; a retry whose earlier attempt ran elsewhere is worded truly on both hosts. The Statement is UNCHANGED (re-wrapped). **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: its degrades are total; a dead Valkey now reaches them, since the scheduler read is bounded. |
 | 2026-10-08 | Issue #599, phase 4. **`REQ-CAPACITY-INSIGHTS` AMENDED**: the Statement says phase 4 shows the report on the insights page over the page's window (it said a later phase); the Acceptance adds the page: each host's headline numbers in the words `pi-dispatch capacity` prints, `mtd` from the first instant of the month, a chart whose axis ends at the page's instant, missing history hatched as no data and never drawn as idle, truncation said, hostile names dropped and counted, and an unreadable slice confined to its section. **`REQ-INSIGHTS-HTML-EXPORT` AMENDED**, the Acceptance: the capacity section after the job sizes, the jobs-only sentence always shown, byte-identical for one report and instant. Its Statement and Scope are UNCHANGED, checked: no port, no tool, nothing new served. |
 | 2026-10-08 | Issue #599, phase 3, second corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance of the panel's HOSTS view: a history read that does not answer within 30 s is said to have not answered in time and `u` reads again, and a malformed budget value reads as unreadable, never as not known yet. The statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 3, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance of the panel's HOSTS view: its 7 days are labelled with the minute they were read and carry the CLI's caveats; `u` in the view reads them again, one read at a time (fifty Esc and `u` presses over a slow read start one); a row without a beat time reads `?` slots, as an unparseable list does; a budget a starting worker has not read is not known yet, not absent. It said the report was read once per opening and inert inside. The statement is UNCHANGED. |

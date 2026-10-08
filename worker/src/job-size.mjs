@@ -54,6 +54,16 @@ export const JOB_MEMORY_CEILING_MIB = 1024 * 1024;
 export const JOB_CPUS_FLOOR_CENTI = 25;
 /** The largest CPU size: 256, as hundredths, because round(256 x 1024) is 262144, the top of `--cpu-shares`. */
 export const JOB_CPUS_CEILING_CENTI = 256 * 100;
+/**
+ * The most a host can have, as a run record's `capacity` may say it (issue #599, phase 4's review): a value past these is
+ * not a host but a fault or a forgery, so the writer records it as unknown and the capacity report counts a record that
+ * says it as unreadable, rather than judging a week against "1 of 1000000000 slots". The CPUs and the memory are the
+ * ceilings the runtime facts are read to (daemon-facts.mjs `cpuCount`, `memoryMiB`); the slots are as many of the
+ * smallest jobs (`JOB_CPUS_FLOOR_CENTI`) as those CPUs hold.
+ */
+export const HOST_CPUS_MAX = 4096;
+export const HOST_MEMORY_MAX_MIB = 64 * 1024 * 1024;
+export const HOST_SLOTS_MAX = (HOST_CPUS_MAX * 100) / JOB_CPUS_FLOOR_CENTI;
 /** The valid range of `--cpu-shares` on cgroup v2 (runc and crun clamp to it; 2 is the kernel's cgroup v1 minimum). */
 export const CPU_SHARES_MIN = 2;
 export const CPU_SHARES_MAX = 262144;

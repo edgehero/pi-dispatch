@@ -240,7 +240,11 @@ export function basisNote(c) {
 export function hostCaveats(cov) {
 	const out = [];
 	if (cov.refusedBeforeSlot > 0) out.push(`${plural(cov.refusedBeforeSlot, "job")} refused before a slot`);
-	if (cov.retried > 0) out.push(`${plural(cov.retried, "retried run")}: ${plural(cov.earlier, "earlier attempt")} counted from the records the retries kept; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
+	// Two sentences, each true of THIS host (phase 4's review): an earlier attempt is counted on the host that ran it, which
+	// need not be the retry's, so "N retried runs: M earlier attempts counted" read 0 on the retry's host while the
+	// attempt was counted on another.
+	if (cov.retried > 0) out.push(`${plural(cov.retried, "retried run")}: ${cov.retried === 1 ? "its earlier attempts are" : "their earlier attempts are"} counted on the host that ran them, from the record the retry kept; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
+	if (cov.earlier > 0) out.push(`${plural(cov.earlier, "earlier attempt")} of a retried run counted here, from the record its retry kept`);
 	if (cov.live > 0) out.push(`${plural(cov.live, "job")} running now, counted as busy up to now (or the host's last beat)`);
 	if (cov.liveNotCounted > 0) out.push(`${cov.liveNotCounted} more running now ${cov.liveNotCounted === 1 ? "is" : "are"} not counted (not listed by its row, or its history is not shared), so busy time can be under-counted`);
 	if (cov.liveUnreadable > 0) out.push("its list of running jobs could not be read, so none of them is counted and how many run is unknown");
@@ -284,15 +288,24 @@ export function fleetRecordNotes(cov) {
 }
 
 /**
- * What the fleet's history covers, said plainly, ending with what this report cannot see: the CLI's last two lines, and the
- * insights page's coverage line.
+ * What the fleet's history covers, one clause each: where it comes from, the hosts whose history is not here, the records
+ * no host's numbers hold, the running jobs not counted or unknown, and why a source was not read. The CLI joins them into
+ * its coverage line (`coverageLines`); the insights page shows each on its own, so a long host list can never push the
+ * others out. `namesShown` cuts the host list to that many names and says how many more (the CLI names them all).
  */
-export function coverageLines(cov) {
+export function coverageNotes(cov, { namesShown = Infinity } = {}) {
 	const notes = [`history: ${cov.source === "local" ? "this host's files only" : cov.source === "mirror" ? "the run mirror" : cov.source === "mirror+local" ? "the run mirror and this host's files" : "the records given"}`];
-	if (cov.historyNotShared.length > 0) notes.push(`not shared here: ${cov.historyNotShared.join(", ")}`);
+	const names = cov.historyNotShared;
+	if (names.length > namesShown) notes.push(`${plural(names.length, "host")} whose history is not here: ${names.slice(0, namesShown).join(", ")} and ${names.length - namesShown} more`);
+	else if (names.length > 0) notes.push(`not shared here: ${names.join(", ")}`);
 	notes.push(...fleetRecordNotes(cov));
 	if (cov.liveUnreadable > 0) notes.push(`the running jobs of ${plural(cov.liveUnreadable, "host")} unreadable, not counted, so how many run now is unknown`);
 	if (cov.running !== null && cov.running > 0) notes.push(`${plural(cov.running, "job")} running now${cov.liveNotCounted > 0 ? `, ${cov.liveNotCounted} of them not counted until ${cov.liveNotCounted === 1 ? "it ends" : "they end"}` : ", counted up to now"}`);
 	if (cov.reason) notes.push(cov.reason);
-	return [`Coverage: ${notes.join("; ")}.`, "Jobs only: a machine busy with other work reads as idle."];
+	return notes;
+}
+
+/** The CLI's last two lines: what the fleet's history covers, and what this report cannot see. */
+export function coverageLines(cov) {
+	return [`Coverage: ${coverageNotes(cov).join("; ")}.`, "Jobs only: a machine busy with other work reads as idle."];
 }

@@ -191,7 +191,8 @@ Two more fields in every run record feed the capacity report (issue #599), which
   held a slot** (a size that never fits, a wait gate refusal), so the record itself says whether the run used a slot.
   A record from before this field has no `capacity` key at all; the report reads its reason first (a wait or size
   refusal never used a slot), then counts it as having used one when it lasted at least a second or reported
-  `resources`, and says how many it inferred each way.
+  `resources`, and says how many it inferred each way. A value no host can have (more than 16384 slots, 4096 CPUs or
+  64 TiB of memory) is written as null, and a record that says one anyway is counted as unreadable.
 - Both are numbers and fixed words, like the rest of the record.
 
 ### `pi-dispatch capacity`
@@ -228,7 +229,7 @@ reads the report when it opens and again on `u` ([what the panel shows](multi-ho
   said as not counted, and so is one on a host whose history is not shared. A row whose list of running jobs cannot be read is named, and the number running now is then unknown. A container whose stop did not take (an
   orphan) is named, but its time after the failed stop is in no record and is not counted as busy.
 - A retry replaces its earlier attempt's record, but carries that attempt's
-  slot time in `earlier`, so it is counted; only an attempt whose record could not be read is not, and the report says
+  slot time in `earlier`, so it is counted, on the host that ran that attempt; only an attempt whose record could not be read is not, and the report says
   how many runs were retries. A run whose first attempt stalled and was picked up again is counted too, and the report says the stalled
   pickup's own time is not. A stall of a later attempt is not counted at all: the run after it reads as an ordinary
   retry, and the stalled attempt's time is in no record. CPU used comes from `resources`, which the job's container
@@ -250,14 +251,18 @@ page is written, at the moment in its header stamp. Per host:
   gives its busy share, average, peak and full share. The time axis is the whole window and ends at the moment the page
   was written, so a quiet day is an empty stretch, never squeezed out.
 - **Hatched is no data.** Time before a host's history starts (the run mirror at its cap, the log retention), a host
-  whose history is not here (one without `PI_WORKER_NAME`, or a run mirror that was not read), and anything the page
-  could not read, are hatched in grey and counted as neither busy nor idle. Hovering the hatch says why. An empty
-  stretch with no hatch is a host that ran nothing then.
+  whose history is not here (one without `PI_WORKER_NAME`, or a run mirror that was not read), a bucket the page could
+  not read, and time after the report was read, are hatched in grey and counted as neither busy nor idle. Hovering
+  the hatch says which of these it is. An empty stretch with no hatch is a host that ran nothing then. The dates under
+  the chart mark UTC midnights.
 - **The caveats** the CLI prints, one per line: jobs refused before a slot, retries, jobs running now, and where the
   history comes from. A host whose history is not here says why, in the same sentence, and shows no busy share. A
   history the run mirror cut says "history truncated" with the moment it starts.
 
-Under the hosts, the coverage line the CLI ends with. **Jobs only: a machine busy with other work reads as idle.** The
+At most 20 hosts are drawn: the ones with numbers first, then those with no history here, then those whose history is
+not here, and the page says how many of each it left out. Under the hosts, the coverage the CLI ends its report with,
+one clause per line; a long list of hosts whose history is not here is cut to five names and a count. On the first
+moment of a month, `mtd` has no time in it yet, and the section says so. **Jobs only: a machine busy with other work reads as idle.** The
 page says so every time, because nothing here measures the machine itself. When the report cannot be read at all, the
 section says so and draws no number; the rest of the page is unaffected.
 
