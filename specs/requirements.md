@@ -1190,7 +1190,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   still shows; given the first millisecond of a month and `mtd`, then the section says there is no time in the window
   yet; given a stretch with no data, then its tooltip says which kind (before the history starts, not here, a bucket
   not readable, after the report was read). Given a record whose `capacity` says more than any host can have, then
-  it is counted as unreadable. Given a retry whose earlier attempt ran on another host, then each host's sentence is
+  that value is unknown and the run still counts as busy time, and the report counts such records. Given a retry whose earlier attempt ran on another host, then each host's sentence is
   true of it.
 - **Traces to**: `DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-DURABLE-RUN-HISTORY`, `OQ-039`
@@ -3426,6 +3426,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-08 | Issue #599, phase 4, second corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the Acceptance: a record whose `capacity` says more than any host can have keeps its busy time (that value is unknown, and such records are counted); it said the record was unreadable. The Statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 4, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the Acceptance: a report the page cannot word degrades only its section; past twenty hosts the ones with numbers are drawn first and the rest counted by kind; a long list of hosts whose history is not here is cut to five names and no other coverage clause is lost; `mtd` at a month's first millisecond is no time yet, not a failed read; each stretch of no data says its kind; a record whose `capacity` says more than any host can have is unreadable; a retry whose earlier attempt ran elsewhere is worded truly on both hosts. The Statement is UNCHANGED (re-wrapped). **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: its degrades are total; a dead Valkey now reaches them, since the scheduler read is bounded. |
 | 2026-10-08 | Issue #599, phase 4. **`REQ-CAPACITY-INSIGHTS` AMENDED**: the Statement says phase 4 shows the report on the insights page over the page's window (it said a later phase); the Acceptance adds the page: each host's headline numbers in the words `pi-dispatch capacity` prints, `mtd` from the first instant of the month, a chart whose axis ends at the page's instant, missing history hatched as no data and never drawn as idle, truncation said, hostile names dropped and counted, and an unreadable slice confined to its section. **`REQ-INSIGHTS-HTML-EXPORT` AMENDED**, the Acceptance: the capacity section after the job sizes, the jobs-only sentence always shown, byte-identical for one report and instant. Its Statement and Scope are UNCHANGED, checked: no port, no tool, nothing new served. |
 | 2026-10-08 | Issue #599, phase 3, second corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance of the panel's HOSTS view: a history read that does not answer within 30 s is said to have not answered in time and `u` reads again, and a malformed budget value reads as unreadable, never as not known yet. The statement is UNCHANGED. |

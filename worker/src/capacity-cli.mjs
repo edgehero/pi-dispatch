@@ -243,8 +243,8 @@ export function hostCaveats(cov) {
 	// Two sentences, each true of THIS host (phase 4's review): an earlier attempt is counted on the host that ran it, which
 	// need not be the retry's, so "N retried runs: M earlier attempts counted" read 0 on the retry's host while the
 	// attempt was counted on another.
-	if (cov.retried > 0) out.push(`${plural(cov.retried, "retried run")}: ${cov.retried === 1 ? "its earlier attempts are" : "their earlier attempts are"} counted on the host that ran them, from the record the retry kept; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
-	if (cov.earlier > 0) out.push(`${plural(cov.earlier, "earlier attempt")} of a retried run counted here, from the record its retry kept`);
+	if (cov.retried > 0) out.push(`${plural(cov.retried, "retried run")}: ${cov.retried === 1 ? "its earlier attempts are" : "their earlier attempts are"} counted on the host that ran them, where that host's history is here and covers them; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
+	if (cov.earlier > 0) out.push(cov.earlier === 1 ? "1 earlier attempt of a retried run counted here, from the record its retry kept" : `${cov.earlier} earlier attempts of retried runs counted here, from the records their retries kept`);
 	if (cov.live > 0) out.push(`${plural(cov.live, "job")} running now, counted as busy up to now (or the host's last beat)`);
 	if (cov.liveNotCounted > 0) out.push(`${cov.liveNotCounted} more running now ${cov.liveNotCounted === 1 ? "is" : "are"} not counted (not listed by its row, or its history is not shared), so busy time can be under-counted`);
 	if (cov.liveUnreadable > 0) out.push("its list of running jobs could not be read, so none of them is counted and how many run is unknown");
@@ -271,6 +271,7 @@ export function historyNotes(h) {
 	if (legacy > 0) notes.push(`${plural(legacy, "record")} from before capacity was recorded, inferred (${cov.legacyOccupied} held a slot, ${cov.legacyRefused} refused)`);
 	if (cov.withoutSize > 0) notes.push(`${cov.withoutSize} without a size (not in promised)`);
 	if (cov.withoutResources > 0) notes.push(`${cov.withoutResources} without a CPU measurement (not in CPU used)`);
+	if (cov.capacityOutOfRange > 0) notes.push(`${plural(cov.capacityOutOfRange, "record")} giving a capacity no host can have, that value read as unknown`);
 	if (cov.cpuClamped > 0) notes.push(`${cov.cpuClamped} reporting more CPU than the job could use, read at that most`);
 	return notes;
 }

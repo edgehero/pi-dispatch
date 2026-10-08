@@ -330,7 +330,7 @@ test("the caveats are the CLI's sentences: the slot basis, retries, stalls, refu
   const report = reportOf();
   const h = report.hosts.find((x) => x.name === "mini1");
   h.capacity = { ...h.capacity, basis: "current", changed: false };
-  Object.assign(h.coverage, { retried: 2, earlier: 1, stalledRepick: 1, refusedBeforeSlot: 3, legacyOccupied: 1, legacyRefused: 0 });
+  Object.assign(h.coverage, { capacityOutOfRange: 1, retried: 2, earlier: 1, stalledRepick: 1, refusedBeforeSlot: 3, legacyOccupied: 1, legacyRefused: 0 });
   Object.assign(report.coverage, { withoutHost: 2, earlierDropped: 1 });
   const cli = capacityText(report, { since: "7d" }).replace(/\s+/g, " ");
   const comp = await openHosts({ capacityInfo: async () => ({ report }) });
@@ -339,8 +339,9 @@ test("the caveats are the CLI's sentences: the slot basis, retries, stalls, refu
   for (const sentence of [
     "slots: current setting, no run recorded one",
     "3 jobs refused before a slot",
-    "2 retried runs: their earlier attempts are counted on the host that ran them, from the record the retry kept; an attempt whose record was not kept is not counted, so busy time can be under-counted",
+    "2 retried runs: their earlier attempts are counted on the host that ran them, where that host's history is here and covers them; an attempt whose record was not kept is not counted, so busy time can be under-counted",
     "1 earlier attempt of a retried run counted here, from the record its retry kept",
+    "1 record giving a capacity no host can have, that value read as unknown",
     "1 run was picked up again after a stall: the first pickup's time is not counted",
     "1 record from before capacity was recorded, inferred (1 held a slot, 0 refused)",
     "2 without a host, not counted",

@@ -111,7 +111,7 @@ export function occupancyOf(record) {
 	if (!isObject(record)) return null;
 	if ("capacity" in record) {
 		if (record.capacity === null) return { occupied: false, inferred: false };
-		return isObject(record.capacity) && !beyondAnyHost(record.capacity) ? { occupied: true, inferred: false } : null;
+		return isObject(record.capacity) ? { occupied: true, inferred: false } : null;
 	}
 	if (PRE_SLOT_REFUSAL_REASONS.includes(record.reason)) return { occupied: false, inferred: true };
 	const start = Date.parse(record.startedAt ?? "");
@@ -122,8 +122,9 @@ export function occupancyOf(record) {
 
 /**
  * Whether a `capacity` says more than any host can have (job-size.mjs `HOST_*_MAX`): more slots, CPUs, memory or CPU
- * budget. The writer never records such a value (it records unknown), so a record that says one is a fault or a
- * forgery, and is counted as unreadable rather than judging a host's week against it.
+ * budget. Such a field is read as unknown, exactly as the writer now records it, and the run still counts with its span,
+ * size and CPU: a worker from before the bound wrote a large `PI_CONCURRENCY` as it was, and dropping its runs would read
+ * a busy host as idle. Each such record is counted (`capacityOutOfRange`).
  */
 function beyondAnyHost(c) {
 	const over = (v, max) => typeof v === "number" && v > max;
@@ -137,9 +138,9 @@ function beyondAnyHost(c) {
  */
 export function capacityOf(value) {
 	if (!isObject(value)) return null;
-	const positive = (v) => (Number.isSafeInteger(v) && v >= 1 ? v : null);
-	const budget = (v) => (v === "off" ? "off" : isCount(v) ? v : null);
-	return { slots: positive(value.slots), memMiB: budget(value.memMiB), cpuCenti: budget(value.cpuCenti), cpus: positive(value.cpus) };
+	const positive = (max) => (v) => (Number.isSafeInteger(v) && v >= 1 && v <= max ? v : null);
+	const budget = (max) => (v) => (v === "off" ? "off" : isCount(v) && v <= max ? v : null);
+	return { slots: positive(HOST_SLOTS_MAX)(value.slots), memMiB: budget(HOST_MEMORY_MAX_MIB)(value.memMiB), cpuCenti: budget(HOST_CPUS_MAX * 100)(value.cpuCenti), cpus: positive(HOST_CPUS_MAX)(value.cpus) };
 }
 
 /** A live host row's capacity (host-registry.mjs strings): the slot count and both budgets; the CPU count is not published. */
@@ -191,7 +192,7 @@ function perMille(num, den) {
 /** The nearest-rank percentile of a sorted array: the value at rank ceil(p/100 x n). size-suggest's rule. */
 const rank = (sorted, pct) => sorted[Math.max(0, Math.ceil((pct * sorted.length) / 100) - 1)];
 
-const zeroCounts = () => ({ used: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0, earlier: 0, stalledRepick: 0, live: 0, liveNotCounted: 0, liveUnreadable: 0, orphans: 0 });
+const zeroCounts = () => ({ used: 0, capacityOutOfRange: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0, earlier: 0, stalledRepick: 0, live: 0, liveNotCounted: 0, liveUnreadable: 0, orphans: 0 });
 
 /**
  * A live row's running jobs: `{ jobs, notListed, unreadable }`, `jobs` the listed entries through live-jobs.mjs'
@@ -360,6 +361,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		// A pickup after a stall: the stalled pickup wrote no record (a crash or a lost lock), so its time is unknown.
 		const repick = record.stalledRepick === true;
 		if (repick) host.counts.stalledRepick++;
+		if (isObject(record.capacity) && beyondAnyHost(record.capacity)) host.counts.capacityOutOfRange++;
 		const recorded = capacityOf(record.capacity);
 		if (recorded !== null) host.recorded.push({ at: span.start, capacity: recorded });
 		const raw = record.resources?.cpuUsec;

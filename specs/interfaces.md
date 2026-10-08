@@ -5497,6 +5497,7 @@ validator rather than a second copy of it.
       "fromMs": <int>,                                                     // every covered host has history from here
       "truncated": <bool>,                                                 // some host's history was cut
       "used": <int>, "refusedBeforeSlot": <int>,                           // runs counted, refusals before a slot
+      "capacityOutOfRange": <int>,                                         // runs whose capacity said more than a host has
       "legacyOccupied": <int>, "legacyRefused": <int>,                     // older records, inferred each way
       "withoutSize": <int>, "withoutResources": <int>,                     // counted runs not in promised / CPU used
       "cpuClamped": <int>, "retried": <int>,                               // CPU read at its most; runs past attempt 1
@@ -5511,7 +5512,8 @@ validator rather than a second copy of it.
     "hosts": [ {                                                           // sorted by name
       "name": "<host>", "shared": <bool>, "notShared": "unnamed" | "unread" | null,  // why its history is not here
       "coverage": { "fromMs": <int>, "source": "local" | "mirror" | "mirror+local" | "records" | null, "truncated": <bool>,
-                    "used": <int>, "refusedBeforeSlot": <int>, "legacyOccupied": <int>, "legacyRefused": <int>,
+                    "used": <int>, "capacityOutOfRange": <int>, "refusedBeforeSlot": <int>, "legacyOccupied": <int>,
+                    "legacyRefused": <int>,
                     "withoutSize": <int>, "withoutResources": <int>, "cpuClamped": <int>, "retried": <int>,
                     "earlier": <int>, "stalledRepick": <int>, "live": <int>, "liveNotCounted": <int>,
                     "liveUnreadable": <int>, "orphans": <int> },
@@ -5593,8 +5595,11 @@ validator rather than a second copy of it.
 - **A record's `earlier` is judged again**: rebuilt by the writer's own rule (`recordedEarlier` in `run-earlier.mjs`:
   valid entries only, the newest 4), and an entry that overlaps the record's own span on the same host is dropped (one
   job cannot hold one host's slot twice at once). Every entry given and not counted is in `earlierDropped`.
-- **What is counted as unreadable**: a record whose `capacity` is neither an object nor null, or says more than any
-  host can have (the bounds above; the writer never records such a value), whose span cannot be read
+- **A capacity past what any host can have** (the bounds above, which a worker from before them could write, since
+  `PI_CONCURRENCY` has no upper bound): that field is read as unknown, as the writer now records it, and the run counts
+  with its span, size and CPU like any other; each such record is counted in `capacityOutOfRange`. A live row's slot
+  count or budget past them is unknown too, and its running jobs still count.
+- **What is counted as unreadable**: a record whose `capacity` is neither an object nor null, whose span cannot be read
   (see `DES-CAPACITY-FROM-RECORDS`), whose `host` is not a worker name (`WORKER_NAME_RE`) or whose `project` is neither
   null nor a project id. A record with no `host` is `withoutHost`. Neither is counted anywhere else.
 - **The CLI.** `pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]`; `--since`
@@ -8161,3 +8166,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-08 | Issue #599, phase 3, corrections. **`INT-CAPACITY-REPORT` AMENDED**: a host's `coverage.source` is `mirror+local` when both sources cover it (it named the earlier one, and the files on a tie, so a host the mirror also holds read as this host's files only); its `fromMs` is still the earlier start, the files' on a tie. The fleet's `coverage.source` is UNCHANGED. **`INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked**: the panel reads `beatAt` through `staleMs`, as before. |
 | 2026-10-08 | Issue #599, phase 4. **`INT-CAPACITY-REPORT` UNCHANGED, checked**: the insights page reads the report as `readCapacity` returns it, over the page's own start and bucket (`window.fromMs` is then the start of the page's window, the first instant of the month for `mtd`, and `window.bucketMs` an hour or six hours); no field is added or reworded, and the CLI's `--json` is byte for byte what it was. |
 | 2026-10-08 | Issue #599, phase 4, corrections. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a `capacity` value past what any host can have (more than 16384 slots, 4096 CPUs, a 409600 CPU budget or a 64 TiB memory budget, `job-size.mjs` `HOST_*_MAX`) is written as null, as an unreadable fact is. **`INT-CAPACITY-REPORT` AMENDED**: a record whose `capacity` says such a value is counted as `unreadable`, and a live row's slot count or budget past the bounds is unknown; the CLI's retry caveat says the earlier attempts are counted on the host that ran them, and a host that ran one says "N earlier attempts of a retried run counted here" (it said "N retried runs: 0 earlier attempts counted" on the retry's host while the attempt was counted on another). The report's fields are UNCHANGED. |
+| 2026-10-08 | Issue #599, phase 4, second corrections. **`INT-CAPACITY-REPORT` AMENDED**: a record whose `capacity` says more than any host can have is no longer unreadable: that field is read as unknown, the run counts with its span, size and CPU, and the record is counted in a new coverage count `capacityOutOfRange` (per host and fleet). It made a busy host whose worker predates the bound (a legal `PI_CONCURRENCY` of 20000) read as idle. The retry caveat says the earlier attempts are counted on the host that ran them "where that host's history is here and covers them", and a host that ran several says "N earlier attempts of retried runs counted here, from the records their retries kept". **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the writer's bound is as amended in the row above. |

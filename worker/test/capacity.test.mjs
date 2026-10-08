@@ -269,12 +269,12 @@ test("the report's frame: version, window, every coverage count, hosts sorted, a
 	const r = report([run("1", 2, 1, { host: "b" }), run("2", 2, 1)], { live: [{ name: "c", budgetRunning: "2" }, { name: "d", budgetRunning: "" }, { name: "e", budgetRunning: "1" }], coverage: { source: "mirror+local", reason: "why" } });
 	assert.equal(r.v, 1);
 	assert.deepEqual(r.window, { fromMs: NOW - DAY, toMs: NOW, bucketMs: H });
-	assert.deepEqual(Object.keys(r.coverage), ["source", "reason", "fromMs", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "liveUnreadable", "orphans", "unreadable", "withoutHost", "earlierDropped", "running", "historyNotShared"]);
+	assert.deepEqual(Object.keys(r.coverage), ["source", "reason", "fromMs", "truncated", "used", "capacityOutOfRange", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "liveUnreadable", "orphans", "unreadable", "withoutHost", "earlierDropped", "running", "historyNotShared"]);
 	assert.deepEqual([r.coverage.source, r.coverage.reason, r.coverage.running, r.coverage.liveNotCounted, r.coverage.withoutSize, r.coverage.withoutResources], ["mirror+local", "why", 3, 3, 2, 2], "a row from before `jobs` says how many run, and none of them is counted");
 	assert.deepEqual(r.hosts.map((h) => h.name), ["a", "b", "c", "d", "e"]);
 	assert.equal(report([]).coverage.running, null, "no live row says: unknown, not zero");
 	assert.deepEqual(Object.keys(r.hosts[0]), ["name", "shared", "notShared", "coverage", "capacity", "coveredMs", "missingMs", "busyMs", "idleMs", "fullMs", "peak", "avgMilli", "promisedMemPerMille", "promisedCpuPerMille", "usedCpuPerMille", "runs", "projects", "otherProjects", "waits", "buckets"]);
-	assert.deepEqual(Object.keys(r.hosts[0].coverage), ["fromMs", "source", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "liveUnreadable", "orphans"]);
+	assert.deepEqual(Object.keys(r.hosts[0].coverage), ["fromMs", "source", "truncated", "used", "capacityOutOfRange", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "liveUnreadable", "orphans"]);
 });
 
 test("a window or bucket the function cannot honour is the caller's mistake, refused", () => {
@@ -518,7 +518,7 @@ test("why a host's history is not here: a row that does not route is unnamed; on
 	assert.equal(report([], { live: [{ name: "odd" }], coverage: cov }).hosts[0].notShared, "unnamed");
 });
 
-test("a capacity past what any host can have: the writer records unknown, and the report counts such a record as unreadable", async () => {
+test("a capacity past what any host can have: the writer records unknown, and the reader reads that field as unknown and still counts the run", async () => {
 	const { HOST_CPUS_MAX, HOST_MEMORY_MAX_MIB, HOST_SLOTS_MAX, JOB_CPUS_FLOOR_CENTI } = await import("../src/job-size.mjs");
 	const { memoryMiB } = await import("../src/daemon-facts.mjs");
 	// the bounds are the runtime facts' own ceilings, and the slots as many of the smallest jobs as those CPUs hold
@@ -528,15 +528,20 @@ test("a capacity past what any host can have: the writer records unknown, and th
 	const top = { slots: HOST_SLOTS_MAX, memMiB: HOST_MEMORY_MAX_MIB, cpuCenti: HOST_CPUS_MAX * 100, cpus: HOST_CPUS_MAX };
 	assert.deepEqual(recordedCapacity(top), top, "the most a host can have is a fact");
 	assert.deepEqual(recordedCapacity({ slots: 1e9, memMiB: HOST_MEMORY_MAX_MIB + 1, cpuCenti: HOST_CPUS_MAX * 100 + 1, cpus: HOST_CPUS_MAX + 1 }), { slots: null, memMiB: null, cpuCenti: null, cpus: null });
-	for (const over of [{ slots: HOST_SLOTS_MAX + 1 }, { cpus: HOST_CPUS_MAX + 1 }, { memMiB: HOST_MEMORY_MAX_MIB + 1 }, { cpuCenti: HOST_CPUS_MAX * 100 + 1 }]) {
-		const r = report([run("ok", 3, 2), run("bad", 2, 1, { capacity: { ...CAP, ...over } })]);
-		assert.equal(r.coverage.unreadable, 1, JSON.stringify(over));
-		assert.equal(r.hosts[0].capacity.slots, 2, "judged by the plausible record alone");
-		assert.equal(r.hosts[0].busyMs, H);
+	for (const [over, field] of [[{ slots: HOST_SLOTS_MAX + 1 }, "slots"], [{ cpus: HOST_CPUS_MAX + 1 }, "cpus"], [{ memMiB: HOST_MEMORY_MAX_MIB + 1 }, "memMiB"], [{ cpuCenti: HOST_CPUS_MAX * 100 + 1 }, "cpuCenti"]]) {
+		// a run written by a worker from before the bound (a PI_CONCURRENCY of 20000 is legal) is still busy time
+		const r = report([run("big", 2, 1, { capacity: { ...CAP, ...over } })]);
+		const a = r.hosts[0];
+		assert.equal(r.coverage.unreadable, 0, JSON.stringify(over));
+		assert.deepEqual([a.busyMs, a.coverage.used, a.coverage.capacityOutOfRange], [H, 1, 1]);
+		assert.equal(a.capacity[field], null, `${field} read as unknown`);
+		for (const other of ["slots", "memMiB", "cpuCenti", "cpus"].filter((f) => f !== field)) assert.equal(a.capacity[other], CAP[other], `${other} kept when only ${field} is out of range`);
 	}
-	assert.equal(report([run("top", 2, 1, { capacity: top })]).hosts[0].capacity.slots, HOST_SLOTS_MAX);
-	// a live row's slot count past it is unknown, never the slot count a week is judged by
-	const live = [{ name: "a", concurrency: "1000000000", budgetMemMiB: String(HOST_MEMORY_MAX_MIB + 1), budgetCpuCenti: "off" }];
-	const fromRow = report([], { live }).hosts[0].capacity;
-	assert.deepEqual([fromRow.slots, fromRow.memMiB, fromRow.cpuCenti, fromRow.basis], [null, null, "off", "current"]);
+	assert.equal(report([run("top", 2, 1, { capacity: top })]).hosts[0].coverage.capacityOutOfRange, 0);
+	assert.equal(capacityOf({ slots: 20000, memMiB: 1, cpuCenti: "off", cpus: 2 }).slots, null);
+	// a live row's slot count past it is unknown; its running jobs still count
+	const live = [{ name: "a", concurrency: "20000", budgetMemMiB: String(HOST_MEMORY_MAX_MIB + 1), budgetCpuCenti: "off", staleMs: 0, jobs: JSON.stringify([{ id: "j1", p: "web", m: 1024, c: 100, at: NOW - H }]) }];
+	const fromRow = report([], { live }).hosts[0];
+	assert.deepEqual([fromRow.capacity.slots, fromRow.capacity.memMiB, fromRow.capacity.cpuCenti, fromRow.capacity.basis], [null, null, "off", "current"]);
+	assert.deepEqual([fromRow.busyMs, fromRow.coverage.live], [H, 1]);
 });
