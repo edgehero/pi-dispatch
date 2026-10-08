@@ -4921,23 +4921,36 @@ validator rather than a second copy of it.
   so the timestamp alone made a daily trigger read as a day of waiting. `opts.delay` is the add's and survives a
   `moveToDelayed` (a pause window, a scope or budget deferral) and a retry, so those count as waiting, which they are;
   measured against bullmq 5.80.4 on Valkey, including both scheduler kinds (`worker/test/queued-at.integration.test.mjs`).
-  Null for a job armed with `run.waitFor` (the wait its trigger asked for is not a wait for capacity) and when the
-  wrapper carries no finite timestamp. A number's rendering, so PII-free by construction. A retry keeps the first
-  add's moment, so its wait includes the earlier attempt and its backoff.
+  Null for a job armed with `run.waitFor` (the wait its trigger asked for is not a wait for capacity), for a RETRY
+  (`attemptsMade` above 0: the first add's moment is kept across attempts, so its wait would include the earlier
+  attempt and its run), and when the wrapper carries no finite timestamp. A number's rendering, so PII-free by
+  construction.
   **`capacity` (issue #599) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position** after
   `queuedAt`: what the host offered when the job was ADMITTED, set by the processor at the one point where `startedAt`
   is (after every gate, before the clone and the container) and carried by every record written after it. `slots` is
   the live `PI_CONCURRENCY`, `memMiB` and `cpuCenti` the host budget as `hostBudget` writes it (an integer, `"off"`, or
-  null where no budget is set or a dimension is unknown), and `cpus` the CPU count the OS reports
-  (`os.availableParallelism()`); a fact that cannot be read is null, never a failed job. **Null on every record written
+  null where no budget is set or a dimension is unknown), and `cpus` the host's CPU count as its container runtime
+  reports it (`docker info` `NCPU`, `podman info` `host.cpus`, from the host budget's own facts read), the worker's
+  `os.availableParallelism()` only when no venue answered (on Docker Desktop the worker sees the Mac's cores while every
+  job runs in the VM's); a fact that cannot be read is null, never a failed job. **Null on every record written
   before a slot was held**: the never-fits refusals, the wait gate's refusals and every record from before the field.
   So the key also answers "did this run hold a slot", which is what the capacity report reads it for
   (`DES-CAPACITY-FROM-RECORDS`). Integers and a fixed word, so PII-free by construction.
+  **The fleet copy (issue #57) and its horizon (issue #599).** Where a worker declares `PI_WORKER_NAME`, each record is
+  also written to Valkey after its file: `runs:rec:<sanitizedJobId>` holds the file's own bytes under a PX of the
+  writer's retention (at most 92 days), and `runs:index` is a ZSET of sanitized job id to the run's end (or start) in
+  millis, trimmed by every writer by its own retention and to 5,000 members, and rolled by PEXPIRE on every write.
+  Because every writer trims the SHARED index by its OWN retention, a reader cannot tell from its own settings what the
+  index still holds, so a writer whose trim removed anything records it in `runs:horizon`, a one-member ZSET (`trim`)
+  whose score is raised with `ZADD GT` and never lowered: the age trim's cutoff, or for the count trim the oldest score
+  that remains. It expires after 92 days, the deepest window any reader asks for. A reader treats nothing before the
+  horizon as history. A writer from before this field trims without recording one (`OQ-039`).
   **Readers of `queuedAt` and `capacity` (issue #599)**: the capacity report (`worker/src/capacity.mjs`,
   `INT-CAPACITY-REPORT`) reads them with `host`, `project`, `startedAt`, `endedAt`, `size` and `resources.cpuUsec`,
   judges every value again as untrusted, and writes nothing to any record. A record without the `capacity` key (from
-  before it) is inferred to have held a slot when its span is at least one second or it carries `resources`, and the
-  report counts each such inference.
+  before it) is inferred: a refusal the processor gives before a slot (a wait gate reason or a never-fits one) did not
+  hold one; otherwise it did when its span is at least one second or it carries `resources`. The report counts each
+  such inference, both ways.
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
   only the attempts that FINISHED before this one (it increments in `moveToFinished`/`moveToFailed`, bullmq 5.80.4),
@@ -5429,8 +5442,9 @@ validator rather than a second copy of it.
   exactly as before and `backend` names the default. Given a job the processor admitted, its record carries
   `capacity` with the slot count, budget and CPU count read at admission, whatever changed while it ran; given a
   never-fits or wait-gate refusal, `capacity` is null; given a cron job, `queuedAt` is its scheduled slot (the millis
-  in its `repeat:<id>:<millis>` id), not the moment the scheduler created it; given a job held on `run.waitFor`,
-  `queuedAt` is null.
+  in its `repeat:<id>:<millis>` id), not the moment the scheduler created it; given a job held on `run.waitFor`, or a
+  retry, `queuedAt` is null; given a Docker Desktop host, `capacity.cpus` is the VM's count. Given a writer whose
+  retention trims runs another host's longer retention kept, then `runs:horizon` holds the cutoff.
 
 ## INT-CAPACITY-REPORT
 
@@ -5443,26 +5457,31 @@ validator rather than a second copy of it.
   {
     "v": 1,
     "window": { "fromMs": <int>, "toMs": <int>, "bucketMs": <int> },     // the window asked for, and its bucket
-    "coverage": {
-      "source": "mirror" | "mirror+local" | "local",                       // where the records came from
+    "coverage": {                                                         // the fleet: every count is the hosts' sum
+      "source": "mirror" | "mirror+local" | "local" | "records",           // where the records came from
       "reason": "<sentence>" | null,                                       // why a source is missing, in words
-      "fromMs": <int>,                                                     // history starts here: earlier is MISSING
-      "truncated": <bool>,                                                 // the run mirror was at its cap
-      "used": <int>, "refusedBeforeSlot": <int>, "legacyInferred": <int>,  // records counted, refusals, inferences
+      "fromMs": <int>,                                                     // every covered host has history from here
+      "truncated": <bool>,                                                 // some host's history was cut
+      "used": <int>, "refusedBeforeSlot": <int>,                           // runs counted, refusals before a slot
+      "legacyOccupied": <int>, "legacyRefused": <int>,                     // older records, inferred each way
       "withoutSize": <int>, "withoutResources": <int>,                     // counted runs not in promised / CPU used
+      "cpuClamped": <int>, "retried": <int>,                               // CPU read at its most; runs past attempt 1
       "unreadable": <int>, "withoutHost": <int>,                           // records not counted, and why
       "running": <int> | null,                                             // jobs the live rows say run now (no record yet)
-      "historyNotShared": ["<host>", ...]                                  // live hosts whose runs this reader cannot see
+      "historyNotShared": ["<host>", ...]                                  // hosts no source here holds
     },
     "hosts": [ {                                                           // sorted by name
       "name": "<host>", "shared": <bool>,
+      "coverage": { "fromMs": <int>, "source": "local" | "mirror" | "records" | null, "truncated": <bool>,
+                    "used": <int>, "refusedBeforeSlot": <int>, "legacyOccupied": <int>, "legacyRefused": <int>,
+                    "withoutSize": <int>, "withoutResources": <int>, "cpuClamped": <int>, "retried": <int> },
       "capacity": { "slots": <int> | null, "memMiB": <int> | "off" | null, "cpuCenti": <int> | "off" | null,
                     "cpus": <int> | null, "basis": "recorded" | "current" | "unknown", "changed": <bool> },
       "coveredMs": <int>, "missingMs": <int>, "busyMs": <int>, "idleMs": <int>,  // busy + idle + missing = the window
       "fullMs": <int> | null,                                              // time with every slot taken
       "peak": <int>, "avgMilli": <int> | null,                             // most at once; average x 1000
       "promisedMemPerMille": <int> | null, "promisedCpuPerMille": <int> | null, "usedCpuPerMille": <int> | null,
-      "runs": <int>, "refused": <int>,
+      "runs": <int>,
       "projects": [ { "project": "<id>" | null, "runMs": <int>, "cpuMs": <int> } ],   // at most 5, by run time
       "otherProjects": { "count": <int>, "runMs": <int>, "cpuMs": <int> } | null,
       "waits": { "n": <int>, "p50Ms": <int> | null, "p95Ms": <int> | null },
@@ -5471,36 +5490,66 @@ validator rather than a second copy of it.
     } ]
   }
   ```
+- **Where each host's history starts** (`hosts[].coverage.fromMs`, judged per host). The reader
+  (`worker/src/capacity-records.mjs`) states what each source covers: this host's files (and every host's, on a shared
+  logs directory) from `PI_LOG_RETENTION_DAYS` on, and nothing when the directory is absent or unreadable; the run
+  mirror from the latest of the deepest window any writer keeps (92 days), the fleet horizon (`runs:horizon`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`), the oldest run at the 5,000 run cap when it ended inside the window, and the newest
+  run whose body expired while its index member stayed. A host is covered by the files when it is this host or its
+  runs are in them, and by the mirror when its live row says it routes (it declared `PI_WORKER_NAME`) or, with no live
+  row, when the mirror holds its runs; it starts at the earliest of the sources that cover it, and `source` names that
+  one. A host no source covers is `shared: false`, listed in `historyNotShared`, and missing for the whole window.
+  `truncated` is true when that start is past the window's start because the mirror was cut. A caller of
+  `computeCapacity` that describes no source (no `local` and no `mirror` in its coverage) gets every host covered from
+  its `coverage.fromMs`, `source` `"records"`.
 - **Meaning of the numbers.** `busyMs` is the time at least one job held a slot; `idleMs` the covered time with none;
-  `missingMs` the time this reader has no history for (before `coverage.fromMs`, or the whole window for a host in
-  `historyNotShared`), counted in neither. `fullMs` is the time at or above `capacity.slots`, null when the slot count
-  is unknown. `avgMilli` is the run time over the covered time (the average number of jobs at once, x 1000).
-  `promisedMemPerMille` is the jobs' memory sizes times their time over the memory budget times the covered time,
-  null without an integer budget; `promisedCpuPerMille` the same for CPU sizes, and `usedCpuPerMille` the measured CPU
-  time (each run's `cpuUsec` spread evenly over its wall and clamped to the most CPU a job can be given), both over the
-  CPU budget or, where that is `off` or unknown, every CPU of the machine (`cpus`), null when neither is known. A
-  share can pass 1000 (a budget lowered while jobs ran). `capacity` is the newest one a run in the window recorded
-  (`basis: "recorded"`, `changed` when runs recorded different ones), else the live registry row's slot count and
-  budget (`"current"`, `cpus` null since the row does not carry it), else all null (`"unknown"`). `waits` are
-  `startedAt - queuedAt` of the runs that started in the covered window, non-negative only, at nearest-rank p50 and
-  p95. `projects` ranks by run time (the sum of each run's time in the window, so two parallel runs count twice);
-  `cpuMs` is their measured CPU time. `buckets` split the window from its start, the last ending at the window's end.
+  `missingMs` the time before the host's history starts, counted in neither. The capacity a piece of time is judged by
+  is the one IN FORCE then: each admitted run recorded its host's, so it is a step function of the runs' starts (before
+  the first, the first). `fullMs` is the time at or above the slot count in force, null when no slot count is known.
+  `avgMilli` is the run time over the covered time (the average number of jobs at once, x 1000).
+  `promisedMemPerMille` is the jobs' memory sizes times their time over the memory budget in force times its time,
+  counting only time with an integer budget, null without any; `promisedCpuPerMille` the same for CPU sizes over the CPU
+  budget, or the host's CPUs where the budget is `off` or unknown. A promise above 1000 is a real over-commit (a budget
+  lowered while jobs ran). `usedCpuPerMille` is the measured CPU time over the HOST's CPUs (`capacity.cpus`, the
+  runtime's count): every job's `--cpus` is the whole CPU budget, so the jobs together can use more than the budget and
+  that use is real. Each run's `cpuUsec` is first clamped to what its job could use (its `--cpus`, the CPU budget
+  capped at the host's CPUs, over its whole wall; `cpuClamped` counts the runs it cut) and then spread evenly over its
+  wall. `capacity` is the newest one a run in the window recorded (`basis: "recorded"`, `changed` when runs recorded
+  different ones), else the live registry row's slot count and budget (`"current"`, `cpus` null since the row does not
+  carry it), else all null (`"unknown"`). `waits` are `startedAt - queuedAt` of FIRST attempts that started in the
+  covered window, non-negative only, at nearest-rank p50 and p95; a run past attempt 1 is counted in `retried`, because
+  its earlier attempts' slot time is in no record (the retry overwrote it), so busy time can be under-counted there.
+  `projects` ranks by run time (the sum of each run's time in the window, so two parallel runs count twice); `cpuMs` is
+  their measured CPU time. `buckets` split the window from its start, the last ending at the window's end. A run of no
+  length that started in the covered window is counted in `used` and its wait kept, with no busy time.
+- **What is counted as unreadable**: a record whose `capacity` is neither an object nor null, whose span cannot be read
+  (see `DES-CAPACITY-FROM-RECORDS`), whose `host` is not a worker name (`WORKER_NAME_RE`) or whose `project` is neither
+  null nor a project id. A record with no `host` is `withoutHost`. Neither is counted anywhere else.
 - **The CLI.** `pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]`; `--since`
   defaults to `7d`, and the bucket is an hour, six hours and a day for the three windows (`CAPACITY_WINDOWS`).
-  `--json` prints this object on one line; `--host` keeps that host's entry and refuses a name the report does not
-  have. It reads `VALKEY_URL` by the kill switch's rule and `PI_LOGS_DIR`, `PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME`
-  by the deployment's (`cliDeploymentEnv`), never `loadConfig`. Exit 0 with a report, also when Valkey is unreachable
-  or refused (the coverage says so); exit 1 for a usage error, an unknown host, or a shell and `.env` naming different
-  Valkeys without `--valkey-url`.
-- **Content rule.** Host names are the records' and the registry's (`PI_WORKER_NAME`'s charset), project ids are
-  charset-checked ids, and everything else is a number or a fixed word: no repository, folder, branch or payload text
-  reaches the report.
+  `--json` prints this object on one line; `--host` keeps that host's entry (with its own counts) and refuses a name the
+  report does not have. It reads `VALKEY_URL` by the kill switch's rule (`--valkey-url` names one) and `PI_LOGS_DIR`,
+  `PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME` by the deployment's (`cliDeploymentEnv`), never `loadConfig`. It writes
+  nothing: the registry is read with `prune: false`. The text output has every C0 and C1 control character removed.
+  Exit codes: **0** with a report, also when a Valkey taken from the shell or the `.env` refuses or does not answer (the
+  report then reads this host's files and its coverage says why); **1** for a usage error (an unknown flag or argument,
+  a `--since` it does not offer, a `--valkey-url` that is not a URL or carries a password), an unknown `--host`, a shell
+  and `.env` naming different Valkeys without `--valkey-url`, a deployment `.env` it cannot read or whose line it
+  cannot read as the service does, or that disagrees with this shell on one of the three keys above, a
+  `PI_LOG_RETENTION_DAYS` that is not a non-negative integer, and a Valkey NAMED with `--valkey-url` that refuses or
+  does not answer.
+- **Content rule.** Host names are worker names and project ids are charset-checked ids, both checked again here, and
+  everything else is a number or a fixed word: no repository, folder, branch or payload text reaches the report.
 - **Acceptance**: Given two runs on one host overlapping for an hour with two slots, then `fullMs` is that hour and
   `peak` 2; given two runs where one ends at the instant the next starts, then `peak` is 1; given a mirror at its cap
-  whose oldest run ended inside the window, then `truncated` is true, `fromMs` is that run's end, and the time before
-  it is in `missingMs`, never in `idleMs`; given a live host that does not mirror its runs, then it is listed in
-  `historyNotShared` and its whole window is missing; given a CPU budget `off`, then the CPU shares are over `cpus`;
-  given any input, then for every host `busyMs + idleMs + missingMs` equals the window.
+  whose oldest run ended inside the window, or a horizon inside it raised by a peer whose retention is shorter than this
+  reader's, then the mirrored hosts are `truncated`, their `coverage.fromMs` is that instant, and the time before it is
+  in `missingMs`, never in `idleMs`, while this host's own files still cover it to their retention; given a live host
+  that does not mirror its runs, then it is listed in `historyNotShared` and its whole window is missing; given a CPU
+  budget `off`, then the CPU promise is over `cpus`; given two jobs each using all of a 4 CPU budget on an 8 CPU host,
+  then CPU used is 100%; given a budget lowered for the last hour, then only that hour is judged by the lower one;
+  given a retried run, then it adds no wait and is counted in `retried`; given a host name with a control character,
+  then the record is unreadable; given any input, then for every host `busyMs + idleMs + missingMs` equals the window.
 
 ## INT-OUTBOX-CONTRACT
 
@@ -7957,3 +8006,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-07 | Issue #596, phase 3, review gate round 1. **`INT-HOST-REGISTRY-CONTRACT` CORRECTED**, the readers paragraph: the PROJECTS view and the insights page no longer flag a suggestion against the largest budget per field across hosts (a pair no host has, so a size fitting one host's memory and another's CPUs passed); they cap a raise per host on that host's own pair of `budgetMemMiB` and `budgetCpuCenti`. The fields are UNCHANGED. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the readers paragraph: the suggestion also reads `memFullUsec` (a fact line, no call), only `reason` `oom-killed` raises memory, and its one file reader (`worker/src/size-records.mjs`, exported as `@edgehero/pi-dispatch/size-records` for the admin) opens a file only within the window plus a day by mtime, skips and counts one over 256 KiB, and keeps the newest 50 records per project; the record's shape is UNCHANGED. Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 2. **`INT-HOST-REGISTRY-CONTRACT` CORRECTED**, the readers paragraph (rewrapped): the PROJECTS view and the insights page cap a raise at the project's `hostShare` of each integer budget, floor(budget x hostShare / 100), not at the whole budget, since the worker refuses a job above the share. The fields are UNCHANGED. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**, the readers paragraph: the file reader drops a record without an object `resources` and a `size` BEFORE it keeps the newest 50 per project; it kept the newest 50 first, so fifty refusals crowded every measured run out. The record's shape is UNCHANGED. Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT`. |
 | 2026-10-08 | Issue #599, phase 1 (capacity records). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED** with two tail fields after `hostBudget`: `queuedAt`, when the job became eligible (`job.timestamp` plus the `opts.delay` it was added with, measured against bullmq 5.80.4 on Valkey to survive `moveToDelayed`, a retry and both scheduler kinds; null for a `run.waitFor` hold), and `capacity`, what the host offered when the job was admitted (`{ slots, memMiB, cpuCenti, cpus }`, the live `PI_CONCURRENCY`, the budget as `hostBudget` writes it, the OS CPU count), set where `startedAt` is and null on every record before a slot. Readers and acceptance lines added. **NEW `INT-CAPACITY-REPORT`**: the report v1 (`computeCapacity`, `@edgehero/pi-dispatch/capacity`) and `pi-dispatch capacity [--since 24h\|7d\|30d] [--host <name>] [--json]`. Checked and UNCHANGED: `INT-HOST-REGISTRY-CONTRACT` (the report reads `concurrency`, `budgetMemMiB`, `budgetCpuCenti`, `budgetRunning` and `routes` as they are). |
+| 2026-10-08 | Issue #599, phase 1, corrections. **`INT-CAPACITY-REPORT` CORRECTED**: each host's history starts per host, at the earliest source that holds all its runs (this host's files to their retention, nothing when the directory is absent; the mirror to the latest of its 92 day depth, the new fleet horizon, the cap and an expired body), so a peer's shorter retention no longer reads as idle time; the counts are per host (`hosts[].coverage`), the fleet's their sum; `legacyInferred` is split into `legacyOccupied` and `legacyRefused`, and `cpuClamped` and `retried` are added; the per-host `refused` moved into the host's coverage; CPU used is over the host's CPUs, not the budget (each job's `--cpus` is the whole budget), each run's CPU time clamped to its job's `--cpus`; promises and "full" are judged against the capacity in force at each moment; a retried run adds no wait; hostile host and project strings are unreadable and the text output strips control characters; `--valkey-url` is documented, the exit codes are complete, and a NAMED Valkey that refuses or does not answer exits 1. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `queuedAt` is null on a retry; `capacity.cpus` is the container runtime's count; the fleet copy's keys are written down in the entry body (they were only in a revision row) with the new `runs:horizon`. **`INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked**: `readLiveHosts` gains a `prune: false` option for a reader that writes nothing; the keys and fields are unchanged. |

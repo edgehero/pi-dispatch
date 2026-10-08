@@ -396,3 +396,14 @@ test("a write that outlives the drain is SILENT, and cannot re-index the row it 
 		);
 	}
 });
+
+test("a reader that writes nothing (prune: false) skips a dead member and leaves it for the next pruning reader", async () => {
+	const redis = fakeRedis();
+	redis.sets.set(HOST_SET, new Set(["ghost"]));
+	const kept = await readLiveHosts(redis, { now: () => NOW, prune: false });
+	assert.deepEqual(kept.hosts, []);
+	assert.ok(!redis.calls.some((c) => c[0] === "srem"), "no SREM");
+	assert.ok(redis.sets.get(HOST_SET).has("ghost"));
+	await readLiveHosts(redis, { now: () => NOW });
+	assert.ok(!redis.sets.get(HOST_SET).has("ghost"), "the default still prunes");
+});

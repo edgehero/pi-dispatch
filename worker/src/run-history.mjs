@@ -736,8 +736,9 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// `getNextJobOpts`), so the timestamp alone made a daily trigger read as a day of waiting. `opts.delay` is the
 		// delay the job was ADDED with and survives a `moveToDelayed` (a pause, a deferral) and a retry, while `job.delay`
 		// is rewritten by both (measured against bullmq 5.80.4 on Valkey, worker/test/queued-at.integration.test.mjs), so
-		// a pause window and a retry's backoff count as waiting, which they are. Null for a job held on `run.waitFor`: a
-		// wait its trigger asked for is not a wait for capacity. An ISO string or null, a number's rendering, so PII-free.
+		// a pause window and a deferral count as waiting, which they are. Null for a job held on `run.waitFor` (a wait its
+		// trigger asked for is not a wait for capacity) and for a retry (its wait would include the earlier attempt). An
+		// ISO string or null, a number's rendering, so PII-free.
 		queuedAt: queuedAtOf(job),
 		// What this host offered when the job took its slot (issue #599, INT-RUN-HISTORY-FILE-CONTRACT): `{ slots, memMiB,
 		// cpuCenti, cpus }`, the live PI_CONCURRENCY, the host budget as `hostBudget` above maps it, and the CPUs the OS
@@ -751,11 +752,14 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 
 /**
  * When a job became eligible to run, as an ISO string, or null: `job.timestamp` plus the delay it was added with
- * (`opts.delay`, at least 0). Null for a job armed with `run.waitFor` (its wait is its trigger's own) and for any input
- * that is not a finite, representable instant.
+ * (`opts.delay`, at least 0). Null for a job armed with `run.waitFor` (its wait is its trigger's own), for a retry
+ * (`attemptsMade` above 0), and for any input that is not a finite, representable instant.
  */
 export function queuedAtOf(job) {
 	if (waitArmed(job?.data)) return null;
+	// A RETRY's wait would include its earlier attempt and that attempt's run (the add's moment is kept across attempts),
+	// so only a first attempt says how long the job waited for a slot. `attemptsMade` counts attempts finished before.
+	if (Number.isInteger(job?.attemptsMade) && job.attemptsMade > 0) return null;
 	const timestamp = job?.timestamp;
 	const delay = job?.opts?.delay ?? 0;
 	if (!Number.isSafeInteger(timestamp) || timestamp < 0 || typeof delay !== "number" || !Number.isFinite(delay)) return null;

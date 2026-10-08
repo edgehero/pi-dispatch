@@ -8,7 +8,8 @@ import { test } from "node:test";
  *
  *   - a `moveToDelayed` (a pause window, a budget or scope deferral) rewrites the job's `delay` field and leaves the
  *     `opts.delay` it was added with alone, so a deferral counts as waiting rather than resetting the wait;
- *   - a retry after a failed attempt keeps both the timestamp and `opts.delay`;
+ *   - a retry after a failed attempt keeps both the timestamp and `opts.delay`, which is why the record writes no
+ *     `queuedAt` for one: its wait would include the earlier attempt;
  *   - the job scheduler creates each next cron job when the previous one runs, stamped with that moment and delayed until
  *     its slot, so `timestamp + opts.delay` is the slot itself (the millis in its `repeat:<id>:<millis>` id), where the
  *     timestamp alone would read as one whole period of waiting.
@@ -53,7 +54,7 @@ async function teardown(queue, worker) {
 	await queue?.close().catch(() => {});
 }
 
-test("opts.delay survives a moveToDelayed and a retry, so queuedAt stays the moment the job became eligible", { skip }, async () => {
+test("opts.delay survives a moveToDelayed and a retry, so queuedAt stays the moment the job became eligible, and a retry records none", { skip }, async () => {
 	const { Queue, Worker, DelayedError, parseConnection, buildRecord } = await load();
 	const name = uniqueQueueName();
 	const queue = new Queue(name, { connection: parseConnection(url) });
@@ -85,7 +86,8 @@ test("opts.delay survives a moveToDelayed and a retry, so queuedAt stays the mom
 			for (const p of pickups) {
 				assert.equal(p.timestamp, job.timestamp, `${job.name}: the timestamp is the add's on every pickup`);
 				assert.equal(p.optsDelay, delay, `${job.name}: opts.delay is the add's on every pickup`);
-				assert.equal(p.queuedAt, new Date(job.timestamp + delay).toISOString(), `${job.name}: queuedAt is timestamp + the add's delay`);
+				// A retry records none (its wait would include the earlier attempt); every first attempt records the add's.
+				assert.equal(p.queuedAt, p.attempt > 0 ? null : new Date(job.timestamp + delay).toISOString(), `${job.name}: queuedAt is timestamp + the add's delay`);
 			}
 		}
 		assert.equal(seen.filter((s) => s.id === retried.id).at(-1).attempt, 1, "the second pickup of the retried job IS its retry");

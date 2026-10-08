@@ -719,8 +719,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			hostHeld = true;
 		}
 
-		// The host's capacity as the record carries it (issue #599). Read when the job is admitted, not here: the slot count
-		// and the budget are live settings, and the value a run is judged against is the one it started under.
+		// The host's capacity as the record carries it (issue #599). Read when the job is admitted, not here: the slot count,
+		// the budget and the runtime's CPU count are live, and the value a run is judged against is the one it started under.
 		const capacityNow = () => {
 			const read = (fn) => {
 				try {
@@ -730,7 +730,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				}
 			};
 			const budget = hostBudget ? read(() => hostBudget.current()) : null;
-			return { slots: read(concurrencyNow), memMiB: budget?.memMiB ?? null, cpuCenti: budget?.cpuCenti ?? null, cpus: read(cpus) };
+			// The CPUs are the RUNTIME's count where its facts were read (the budget's own read), the worker's only when
+			// they were not: on Docker Desktop the worker sees the Mac's cores while every job runs in the VM's.
+			const runtimeCpus = hostBudget ? read(() => hostBudget.hostCpus?.()) : null;
+			return { slots: read(concurrencyNow), memMiB: budget?.memMiB ?? null, cpuCenti: budget?.cpuCenti ?? null, cpus: Number.isSafeInteger(runtimeCpus) && runtimeCpus >= 1 ? runtimeCpus : read(cpus) };
 		};
 		// THE ONE RECORDER BELOW THE GATE, bound once, so the pickup project is a property of the path and not of each call
 		// site: every record from here on goes through it, and none can drop the field and fall back to the live ref in

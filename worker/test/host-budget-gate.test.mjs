@@ -468,3 +468,26 @@ test("capacity without a host budget names the slots and CPUs and leaves both bu
 	assert.equal((await ran).outcome, "completed");
 	assert.deepEqual(broken.seen.records.at(-1).capacity, { slots: 3, memMiB: null, cpuCenti: null, cpus: null });
 });
+
+test("capacity names the RUNTIME's CPU count from the budget's facts read, the worker's own only when no venue answered (#599)", { skip }, async () => {
+	const facts = { hostCpus: 6 };
+	const b = makeHostBudget({ settings: hostBudgetSettings({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "4" }, { memMiB: 512, cpuCenti: 25 }), jobDefault: { memMiB: 512, cpuCenti: 25 }, readFacts: async () => facts, countLimit: () => null, now: () => NOW });
+	await b.ready;
+	assert.equal(b.hostCpus(), 6);
+	const h = harness({ hostBudget: b, extra: { concurrencyNow: () => 2, cpus: () => 14 } });
+	const run = h.processor(ghJob("vm").job, "tok", signal());
+	await h.untilStarted(1);
+	h.releaseNext();
+	await run;
+	assert.deepEqual(h.seen.records.at(-1).capacity, { slots: 2, memMiB: 36864, cpuCenti: 400, cpus: 6 }, "the VM's 6, not the Mac's 14");
+
+	const silent = makeHostBudget({ settings: hostBudgetSettings({ PI_HOST_MEMORY_BUDGET: "36g", PI_HOST_CPU_BUDGET: "4" }, { memMiB: 512, cpuCenti: 25 }), jobDefault: { memMiB: 512, cpuCenti: 25 }, readFacts: async () => ({}), countLimit: () => null, now: () => NOW });
+	await silent.ready;
+	assert.equal(silent.hostCpus(), null);
+	const s2 = harness({ hostBudget: silent, extra: { concurrencyNow: () => 2, cpus: () => 14 } });
+	const r2 = s2.processor(ghJob("bare").job, "tok", signal());
+	await s2.untilStarted(1);
+	s2.releaseNext();
+	await r2;
+	assert.equal(s2.seen.records.at(-1).capacity.cpus, 14, "no venue answered: the worker's own count");
+});

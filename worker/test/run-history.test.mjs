@@ -2063,3 +2063,24 @@ test("a job held on run.waitFor records queuedAt null: a wait its trigger asked 
 	assert.equal(buildRecord({ job, result: { outcome: "completed" } }).queuedAt, null);
 	assert.equal(buildRecord({ job: { ...job, data: { ...job.data, waitFor: [] } }, result: { outcome: "completed" } }).queuedAt, "2026-08-30T11:00:00.000Z", "an empty list arms nothing");
 });
+
+test("a retry records queuedAt null: its wait would include the earlier attempt and its run (#599)", async () => {
+	const { queuedAtOf } = await import("../src/run-history.mjs");
+	const at = Date.parse("2026-08-30T11:00:00.000Z");
+	assert.equal(queuedAtOf({ timestamp: at, attemptsMade: 0, opts: {} }), "2026-08-30T11:00:00.000Z");
+	assert.equal(queuedAtOf({ timestamp: at, attemptsMade: 1, opts: {} }), null);
+	const job = { id: "gh-1", name: "github", attemptsMade: 2, timestamp: at, opts: { delay: 0 }, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
+	const rec = buildRecord({ job, result: { outcome: "completed" } });
+	assert.deepEqual([rec.attempt, rec.queuedAt], [3, null]);
+});
+
+test("the refusals before a slot that the capacity report reads are the processor's own reasons (#599)", async () => {
+	const { WAIT_REFUSAL_REASONS } = await import("../src/wait-for.mjs");
+	const { SIZE_REFUSAL_REASONS } = await import("../src/job-size.mjs");
+	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
+	const waits = new Set([...src.matchAll(/refuseWait\("([a-z-]+)"/g)].map((m) => m[1]));
+	assert.deepEqual([...WAIT_REFUSAL_REASONS].sort(), [...waits].sort(), "every wait gate refusal, and nothing else");
+	const sizes = src.slice(src.indexOf("export const SIZE_REFUSAL_COMMENTS"));
+	const sized = [...sizes.slice(0, sizes.indexOf("});")).matchAll(/^\t"([a-z-]+)":/gm)].map((m) => m[1]);
+	assert.deepEqual([...SIZE_REFUSAL_REASONS], sized);
+});

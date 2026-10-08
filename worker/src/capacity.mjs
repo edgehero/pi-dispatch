@@ -3,27 +3,39 @@
  * run records (INT-RUN-HISTORY-FILE-CONTRACT) and the live host rows, which the CLI (`pi-dispatch capacity`) calls and
  * every later surface will, so they can never disagree. The report is `INT-CAPACITY-REPORT`.
  *
- * A LEAF beside `size-suggest.mjs` and `job-size.mjs`, importing nothing else of this project's, for size-suggest's
- * reason: the admin bundle inlines it. That is why it reads a record's `capacity` itself (`capacityOf`) rather than
- * importing the writer's `recordedCapacity`; a test holds the two to the same answers.
+ * Pure: no clock, no filesystem, no Valkey. It imports only other pure modules of this project (the size and wait
+ * vocabularies, the worker-name and project-id rules), so the admin bundle can inline it. It reads a record's
+ * `capacity` itself (`capacityOf`) rather than importing the writer's `recordedCapacity`, which lives beside the record
+ * writer's filesystem code; a test holds the two to the same answers.
  *
  * JOBS ONLY. Busy means "a job of this deployment held a slot here", read from the records alone: no host load is
  * sampled, so a machine busy with other work reads as idle, and every surface says so.
  *
  * WHICH RECORDS HELD A SLOT (`occupancyOf`). A record written since #599 says it outright: `capacity` is an object on a
  * run the processor admitted and null on every refusal before a slot. An older record has no such key, and is
- * inferred: it held a slot when it ran at least `LEGACY_MIN_WALL_MS` or reported `resources` (a refusal before a slot
- * writes `startedAt` equal to `endedAt` and never has a container to measure). Each inference is counted, never hidden.
+ * inferred: a refusal reason the processor gives before a slot (the wait gate's, the never-fits pair) did not hold one;
+ * otherwise it did when it ran at least `LEGACY_MIN_WALL_MS` or reported `resources` (a container ran). Each inference is
+ * counted, both ways, never hidden.
  *
  * THE SPAN is the record's `startedAt` (set when the job was admitted, index.mjs) to its `endedAt`. A span that is not
  * readable, ends before it starts, runs longer than `SUGGEST_MAX_WALL_MS` or ends more than `SUGGEST_CLOCK_SKEW_MS` in
- * the future is not counted, and is counted as `unreadable`: the same bounds a size suggestion reads a wall time by.
+ * the future is not counted, and is counted as `unreadable`: the same bounds a size suggestion reads a wall time by. So
+ * is a record whose host is not a worker name or whose project is not a project id: neither can come from a worker,
+ * and both are printed to a terminal.
  *
- * MISSING HISTORY IS NEVER IDLE. A window that reaches back before what the sources hold (`coverage.fromMs`: a mirror at
- * its cap, the log retention) and a live host whose history is not shared here (an unnamed worker writes no mirror) is
- * MISSING time, counted in neither busy nor idle, so busy + idle + missing is the window for every host, and a
- * truncated history can never read as a quiet machine. A job running now has no record yet and is not in the history
- * until it ends; the coverage says how many the live rows count, where they say.
+ * MISSING HISTORY IS NEVER IDLE, and it is judged PER HOST. A host's history starts where the best source that holds
+ * ALL of its runs starts: this host's own files (and a peer's, on a shared logs directory) from the log retention on,
+ * and a named host's runs in the run mirror from the mirror's own start on (its window, its cap, and the fleet horizon
+ * every writer's trim raises). A host no source holds (a live worker with no `PI_WORKER_NAME`, seen from another host)
+ * is missing for the whole window. Missing time is counted in neither busy nor idle, so busy + idle + missing is the
+ * window for every host, and a truncated history can never read as a quiet machine. A job running now has no record
+ * yet and is not in the history until it ends.
+ *
+ * THE CAPACITY IN FORCE. Every admitted run recorded what its host offered when it started, so the host's capacity is a
+ * step function of time (each recorded value holds from its run's start until the next one; before the first, the first
+ * holds). Each piece of time is judged against the capacity in force then: the slot count for "full", the budget for
+ * what was promised, the host's CPUs for what was used. A share above 100% is then a real over-commit (a budget lowered
+ * while jobs ran), and is reported as one.
  *
  * INTEGER MATH. Every instant is a millisecond count from `Date.parse` (a safe integer), and every span, busy, idle and
  * full time is at most the window, so those stay Numbers. A sum of run time is NOT bounded by the window (it is the
@@ -32,8 +44,11 @@
  * a BigInt, and only the final per-mille ratios, rounded half up, come back as Numbers.
  */
 
-import { JOB_CPUS_CEILING_CENTI, recordedJobSize } from "./job-size.mjs";
+import { WORKER_NAME_RE } from "./config.mjs";
+import { JOB_CPUS_CEILING_CENTI, SIZE_REFUSAL_REASONS, recordedJobSize } from "./job-size.mjs";
+import { isProjectId } from "./project-id.mjs";
 import { SUGGEST_CLOCK_SKEW_MS, SUGGEST_MAX_WALL_MS } from "./size-suggest.mjs";
+import { WAIT_REFUSAL_REASONS } from "./wait-for.mjs";
 
 /** The report's version (`INT-CAPACITY-REPORT`). */
 export const CAPACITY_REPORT_VERSION = 1;
@@ -43,6 +58,8 @@ export const LEGACY_MIN_WALL_MS = 1000;
 export const CAPACITY_TOP_PROJECTS = 5;
 /** The most buckets one report splits its window into, so a caller's mistake cannot cost a render its memory. */
 export const CAPACITY_MAX_BUCKETS = 10_000;
+/** The refusal reasons the processor gives BEFORE a job holds a slot: a legacy record carrying one never held one. */
+export const PRE_SLOT_REFUSAL_REASONS = Object.freeze([...WAIT_REFUSAL_REASONS, ...SIZE_REFUSAL_REASONS]);
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -58,7 +75,9 @@ export const CAPACITY_WINDOWS = Object.freeze({
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
-const isHostName = (v) => typeof v === "string" && v !== "";
+/** A host name a worker can have written (config.mjs `WORKER_NAME_RE`, the rule `PI_WORKER_NAME` is held to). */
+const isHostName = (v) => typeof v === "string" && WORKER_NAME_RE.test(v);
+const UNKNOWN_CAPACITY = Object.freeze({ slots: null, memMiB: null, cpuCenti: null, cpus: null });
 
 /**
  * Whether a record held a slot: `{ occupied, inferred }`, or null when it cannot be told (a `capacity` that is neither
@@ -70,6 +89,7 @@ export function occupancyOf(record) {
 		if (record.capacity === null) return { occupied: false, inferred: false };
 		return isObject(record.capacity) ? { occupied: true, inferred: false } : null;
 	}
+	if (PRE_SLOT_REFUSAL_REASONS.includes(record.reason)) return { occupied: false, inferred: true };
 	const start = Date.parse(record.startedAt ?? "");
 	const end = Date.parse(record.endedAt ?? "");
 	const wall = Number.isFinite(start) && Number.isFinite(end) ? end - start : NaN;
@@ -77,8 +97,8 @@ export function occupancyOf(record) {
 }
 
 /**
- * A record's `capacity` as this report reads it, the writer's rule (run-history.mjs `recordedCapacity`) restated for the
- * leaf rule above: `{ slots, memMiB, cpuCenti, cpus }`, each a positive integer (a budget may be 0), `"off"` for a budget
+ * A record's `capacity` as this report reads it, the writer's rule (run-history.mjs `recordedCapacity`) restated (see
+ * the header): `{ slots, memMiB, cpuCenti, cpus }`, each a positive integer (a budget may be 0), `"off"` for a budget
  * switched off, or null; null for anything that is not an object.
  */
 export function capacityOf(value) {
@@ -97,6 +117,17 @@ function liveCapacityOf(row) {
 }
 
 const sameCapacity = (a, b) => a.slots === b.slots && a.memMiB === b.memMiB && a.cpuCenti === b.cpuCenti && a.cpus === b.cpus;
+const positiveInt = (v) => Number.isSafeInteger(v) && v > 0;
+/** What CPU promises are judged against: the CPU budget, or every CPU of the host where the budget is off or unknown. */
+const promiseCpuCenti = (c) => (positiveInt(c.cpuCenti) ? c.cpuCenti : positiveInt(c.cpus) ? c.cpus * 100 : null);
+/**
+ * The most CPU one job can use, in hundredths: its `--cpus` is the host's CPU budget (capped at the runtime's count),
+ * so the smaller of the two that are known, else the size ceiling.
+ */
+const jobCpuCeilingCenti = (c) => {
+	const known = [positiveInt(c.cpuCenti) ? c.cpuCenti : null, positiveInt(c.cpus) ? c.cpus * 100 : null].filter((v) => v !== null);
+	return known.length > 0 ? Math.min(...known) : JOB_CPUS_CEILING_CENTI;
+};
 
 /** A record's span `{ start, end, wallMs }` in millis, or null when it is not one this report counts (see the header). */
 function spanOf(record, nowMs) {
@@ -116,16 +147,47 @@ function perMille(num, den) {
 /** The nearest-rank percentile of a sorted array: the value at rank ceil(p/100 x n). size-suggest's rule. */
 const rank = (sorted, pct) => sorted[Math.max(0, Math.ceil((pct * sorted.length) / 100) - 1)];
 
+const zeroCounts = () => ({ used: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0 });
+
+/**
+ * Where each host's history starts: `Map<name, { fromMs, source, truncated } | null>`, null for a host no source holds.
+ * With no source described at all (`coverage.local` and `coverage.mirror` both undefined: a caller with records and
+ * nothing else), every host is covered from `coverage.fromMs` (else the window start).
+ */
+function hostCoverage(names, liveByName, coverage, windowStartMs, nowMs) {
+	const clamp = (ms) => Math.min(nowMs, Math.max(windowStartMs, Number.isSafeInteger(ms) ? ms : windowStartMs));
+	const out = new Map();
+	if (coverage.local === undefined && coverage.mirror === undefined) {
+		for (const name of names) out.set(name, { fromMs: clamp(coverage.fromMs), source: typeof coverage.source === "string" ? coverage.source : "records", truncated: coverage.truncated === true });
+		return out;
+	}
+	const localHosts = new Set(Array.isArray(coverage.localHosts) ? coverage.localHosts : []);
+	if (isHostName(coverage.localHost)) localHosts.add(coverage.localHost);
+	const mirrorHosts = new Set(Array.isArray(coverage.mirror?.hosts) ? coverage.mirror.hosts : []);
+	for (const name of names) {
+		const options = [];
+		if (isObject(coverage.local) && localHosts.has(name)) options.push({ fromMs: clamp(coverage.local.fromMs), source: "local", truncated: false });
+		const row = liveByName.get(name);
+		// A named host's runs are all in the mirror (its row says it routes), and so are those of a host with no live row
+		// whose runs the mirror holds; a live row that does NOT route is a worker without `PI_WORKER_NAME`, which mirrors none.
+		if (isObject(coverage.mirror) && (row ? row.routes === "true" : mirrorHosts.has(name))) options.push({ fromMs: clamp(coverage.mirror.fromMs), source: "mirror", truncated: coverage.mirror.truncated === true });
+		options.sort((a, b) => a.fromMs - b.fromMs);
+		out.set(name, options[0] ?? null);
+	}
+	return out;
+}
+
 /**
  * The capacity report (`INT-CAPACITY-REPORT`): `{ v, window, coverage, hosts }`.
  *
  * - `records`: run records, already merged (one per job id).
  * - `live`: the live host rows (`readLiveHosts`), `[]` when unknown. Each gives a host its CURRENT capacity where no
- *   record in the window recorded one, and says whether its history is shared.
+ *   record in the window recorded one, and says whether it mirrors its runs (`routes`).
  * - `windowStartMs`, `nowMs`: the window, integers; `bucketMs` splits it from its start (the last bucket ends at now).
- * - `coverage`: what the reader could see, `{ source, reason, fromMs, truncated, localHost, localHosts, mirrored }`
- *   (capacity-records.mjs). Time before `fromMs` is missing, never idle. A live host is NOT SHARED when it is neither
- *   this host, nor seen in the local files, nor a host that mirrors its runs (`routes`) to a mirror that was read.
+ * - `coverage`: what the reader could see (capacity-records.mjs): `{ source, reason, localHost, localHosts, local:
+ *   { fromMs } | null, mirror: { fromMs, truncated, hosts } | null }`, `local` null when this host's files could not be
+ *   read and `mirror` null when the mirror was not read. Without either key, every host is covered from
+ *   `coverage.fromMs`.
  *
  * Throws a RangeError on a window or bucket this function cannot honour: those are the caller's mistake, not data.
  */
@@ -135,91 +197,123 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 	const windowMs = nowMs - windowStartMs;
 	const bucketCount = Math.ceil(windowMs / bucketMs);
 	if (bucketCount > CAPACITY_MAX_BUCKETS) throw new RangeError(`at most ${CAPACITY_MAX_BUCKETS} buckets (got ${bucketCount})`);
-	const fromMs = Number.isSafeInteger(coverage.fromMs) ? Math.min(nowMs, Math.max(windowStartMs, coverage.fromMs)) : windowStartMs;
 
-	const liveRows = (Array.isArray(live) ? live : []).filter((row) => isHostName(row?.name));
-	const localHosts = new Set(Array.isArray(coverage.localHosts) ? coverage.localHosts.filter(isHostName) : []);
-	if (isHostName(coverage.localHost)) localHosts.add(coverage.localHost);
-	const notShared = new Set(liveRows.filter((row) => !localHosts.has(row.name) && !(coverage.mirrored === true && row.routes === "true")).map((row) => row.name));
+	const liveByName = new Map((Array.isArray(live) ? live : []).filter((row) => isHostName(row?.name)).map((row) => [row.name, row]));
+	let unreadable = 0;
+	let withoutHost = 0;
 
-	const counts = { used: 0, refusedBeforeSlot: 0, legacyInferred: 0, withoutSize: 0, withoutResources: 0, unreadable: 0, withoutHost: 0 };
-	const byHost = new Map();
-	const hostOf = (name) => {
-		if (!byHost.has(name)) byHost.set(name, { runs: [], recorded: [], waits: [], refused: 0 });
-		return byHost.get(name);
-	};
-
+	// PASS 1: every record judged once, so the hosts (and so each host's coverage) are known before anything is counted.
+	const judged = [];
 	for (const record of Array.isArray(records) ? records : []) {
 		const occupancy = occupancyOf(record);
-		if (occupancy === null) {
-			counts.unreadable++;
+		const project = record?.project ?? null;
+		if (occupancy === null || (project !== null && !isProjectId(project))) {
+			unreadable++;
 			continue;
 		}
-		const span = spanOf(record, nowMs);
+		if (record.host === null || record.host === undefined) {
+			withoutHost++;
+			continue;
+		}
+		if (!isHostName(record.host)) {
+			unreadable++;
+			continue;
+		}
+		judged.push({ record, occupancy, project, span: spanOf(record, nowMs) });
+	}
+	const names = new Set([...liveByName.keys()]);
+	for (const j of judged) names.add(j.record.host);
+	const covers = hostCoverage(names, liveByName, coverage, windowStartMs, nowMs);
+
+	const byHost = new Map();
+	const hostOf = (name) => {
+		if (!byHost.has(name)) byHost.set(name, { runs: [], recorded: [], waits: [], counts: zeroCounts() });
+		return byHost.get(name);
+	};
+	for (const name of names) if (liveByName.has(name)) hostOf(name);
+
+	// PASS 2: count each record against its host's own coverage.
+	for (const { record, occupancy, project, span } of judged) {
+		const cover = covers.get(record.host);
+		if (cover === null) continue; // that host's history is missing as a whole, not partly
+		const coveredFrom = cover.fromMs;
 		if (!occupancy.occupied) {
-			// A refusal is counted where it ENDED inside the window, the instant it happened; it took no slot time.
+			// A refusal is counted where it ENDED inside the covered window, the instant it happened; it took no slot time.
 			const end = Date.parse(record.endedAt ?? "");
-			if (Number.isFinite(end) && end >= windowStartMs && end <= nowMs + SUGGEST_CLOCK_SKEW_MS) {
+			if (Number.isFinite(end) && end >= coveredFrom && end <= nowMs + SUGGEST_CLOCK_SKEW_MS) {
+				const counts = hostOf(record.host).counts;
 				counts.refusedBeforeSlot++;
-				if (isHostName(record.host)) hostOf(record.host).refused++;
+				if (occupancy.inferred) counts.legacyRefused++;
 			}
 			continue;
 		}
 		if (span === null) {
-			counts.unreadable++;
+			unreadable++;
 			continue;
 		}
-		const start = Math.max(span.start, fromMs);
+		const start = Math.max(span.start, coveredFrom);
 		const end = Math.min(span.end, nowMs);
-		if (end <= start) continue; // outside the covered window
-		if (!isHostName(record.host)) {
-			counts.withoutHost++;
-			continue;
-		}
-		if (notShared.has(record.host)) continue; // that host's history is missing as a whole, not partly
-		counts.used++;
-		if (occupancy.inferred) counts.legacyInferred++;
-		const size = recordedJobSize(record.size);
-		if (size === null) counts.withoutSize++;
-		const raw = record.resources?.cpuUsec;
-		// Untrusted (produced inside the job's container): clamped to the most CPU a job can be given over its wall.
-		const cpuUsec = isCount(raw) && span.wallMs > 0 ? BigInt(Math.min(raw, (span.wallMs * 1000 * JOB_CPUS_CEILING_CENTI) / 100)) : null;
-		if (cpuUsec === null) counts.withoutResources++;
+		// Outside the covered window. A run of no length counts where it started (it held a slot for no time, and its wait
+		// is a wait like any other); one that ended exactly as the window began spent none of it.
+		if (end < start || (end === start && (span.start < coveredFrom || span.start > nowMs))) continue;
 		const host = hostOf(record.host);
-		host.runs.push({ start, end, wallMs: span.wallMs, size, cpuUsec, project: typeof record.project === "string" ? record.project : null });
+		host.counts.used++;
+		if (occupancy.inferred) host.counts.legacyOccupied++;
+		const size = recordedJobSize(record.size);
+		if (size === null) host.counts.withoutSize++;
+		const retry = Number.isInteger(record.attempt) && record.attempt > 1;
+		if (retry) host.counts.retried++;
 		const recorded = capacityOf(record.capacity);
 		if (recorded !== null) host.recorded.push({ at: span.start, capacity: recorded });
-		// The wait of a run that STARTED inside the covered window, and only a non-negative one (a clock between two hosts
-		// can put a queuedAt after its own start; that run says nothing about waiting).
+		const raw = record.resources?.cpuUsec;
+		host.runs.push({ start, end, span, size, rawCpuUsec: isCount(raw) && span.wallMs > 0 ? raw : null, recorded, project });
+		// The wait of a FIRST attempt that started inside the covered window, non-negative only: a retry's `queuedAt` is
+		// its first add's, so its wait would include the earlier attempt; a clock between two hosts can put a queuedAt
+		// after its own start, and that run says nothing about waiting.
 		const queued = typeof record.queuedAt === "string" ? Date.parse(record.queuedAt) : NaN;
-		if (Number.isFinite(queued) && span.start >= fromMs && span.start <= nowMs && span.start - queued >= 0) host.waits.push(span.start - queued);
+		if (!retry && Number.isFinite(queued) && span.start >= coveredFrom && span.start <= nowMs && span.start - queued >= 0) host.waits.push(span.start - queued);
 	}
-	for (const row of liveRows) hostOf(row.name);
 
 	const hosts = [];
+	const totals = zeroCounts();
+	const notShared = [];
 	for (const name of [...byHost.keys()].sort()) {
 		const h = byHost.get(name);
-		const shared = !notShared.has(name);
-		const coveredFrom = shared ? fromMs : nowMs;
+		const cover = covers.get(name) ?? null;
+		if (cover === null) notShared.push(name);
+		const coveredFrom = cover === null ? nowMs : cover.fromMs;
 		const coveredMs = nowMs - coveredFrom;
 		const missingMs = windowMs - coveredMs;
 
-		// The capacity this host is judged against: the newest one a run in the window recorded, else the live row's,
-		// else unknown. `changed` says the window saw more than one.
-		const newest = h.recorded.reduce((a, b) => (a === null || b.at > a.at ? b : a), null);
-		const changed = h.recorded.some((r) => newest !== null && !sameCapacity(r.capacity, newest.capacity));
-		const row = liveRows.find((r) => r.name === name);
-		const base = newest !== null ? newest.capacity : row ? liveCapacityOf(row) : { slots: null, memMiB: null, cpuCenti: null, cpus: null };
+		// THE CAPACITY IN FORCE, a step function from the runs' own records ordered by start; before the first, the first.
+		// With none recorded, the live row's (the current setting), else unknown.
+		const steps = [...h.recorded].sort((a, b) => a.at - b.at);
+		const row = liveByName.get(name);
+		const fallback = row ? liveCapacityOf(row) : UNKNOWN_CAPACITY;
+		const capAt = (t) => {
+			if (steps.length === 0) return fallback;
+			let found = steps[0].capacity;
+			for (const s of steps) {
+				if (s.at > t) break;
+				found = s.capacity;
+			}
+			return found;
+		};
+		// The instants inside the covered window where the capacity in force changes.
+		const changes = [];
+		for (let i = 1; i < steps.length; i++) {
+			if (steps[i].at > coveredFrom && steps[i].at < nowMs && !sameCapacity(steps[i].capacity, steps[i - 1].capacity)) changes.push(steps[i].at);
+		}
+		const newest = steps.at(-1) ?? null;
+		const base = newest !== null ? newest.capacity : fallback;
 		const basis = newest !== null ? "recorded" : row ? "current" : "unknown";
-		// CPU is judged against the CPU budget, or where that is off or unknown against every CPU of the machine.
-		const cpuDenom = Number.isSafeInteger(base.cpuCenti) && base.cpuCenti > 0 ? base.cpuCenti : base.cpus !== null ? base.cpus * 100 : null;
-		const memDenom = Number.isSafeInteger(base.memMiB) && base.memMiB > 0 ? base.memMiB : null;
+		const changed = steps.some((s) => !sameCapacity(s.capacity, base));
 
 		const buckets = [];
 		for (let i = 0; i < bucketCount; i++) {
 			const bStart = windowStartMs + i * bucketMs;
 			const bEnd = Math.min(nowMs, bStart + bucketMs);
-			buckets.push({ fromMs: bStart, coveredMs: Math.max(0, bEnd - Math.max(bStart, coveredFrom)), busyMs: 0, fullMs: 0, peak: 0, runMs: 0n });
+			buckets.push({ fromMs: bStart, coveredMs: Math.max(0, bEnd - Math.max(bStart, coveredFrom)), busyMs: 0, fullMs: 0, fullKnown: false, peak: 0, runMs: 0n });
 		}
 		// Calls fn(bucket, a, b) for each piece of [a, b) cut at the bucket edges.
 		const eachBucket = (a, b, fn) => {
@@ -232,27 +326,34 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			}
 		};
 
-		// THE SWEEP: every run's start and end in time order, ends before starts at one instant. Only a segment of positive
-		// length is counted, so a run that ends exactly when the next begins is one slot reused, never two at once,
-		// whatever the order of the two events; sorting the end first keeps the level itself true at that instant too.
+		// THE SWEEP: every run's start and end, and every change of capacity, in time order (ends, then changes, then
+		// starts, at one instant). Only a segment of positive length is counted, so a run that ends exactly when the next
+		// begins is one slot reused, never two at once, whatever the order of the two events; sorting the end first keeps
+		// the level itself true at that instant too. A segment's slot count is the one in force when it begins.
 		const events = [];
 		for (const r of h.runs) events.push([r.start, 1], [r.end, -1]);
+		for (const t of changes) events.push([t, 0]);
 		events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 		let level = 0;
 		let at = coveredFrom;
 		let busyMs = 0;
 		let fullMs = 0;
+		let fullKnown = false;
 		let peak = 0;
 		let runMs = 0n;
 		const segment = (a, b, n) => {
 			if (b <= a) return;
+			const slots = capAt(a).slots;
+			if (slots !== null) fullKnown = true;
+			const full = slots !== null && n >= slots;
 			if (n > 0) busyMs += b - a;
-			if (base.slots !== null && n >= base.slots) fullMs += b - a;
+			if (full) fullMs += b - a;
 			if (n > peak) peak = n;
 			runMs += BigInt(n) * BigInt(b - a);
 			eachBucket(a, b, (bucket, lo, hi) => {
 				if (n > 0) bucket.busyMs += hi - lo;
-				if (base.slots !== null && n >= base.slots) bucket.fullMs += hi - lo;
+				if (slots !== null) bucket.fullKnown = true;
+				if (full) bucket.fullMs += hi - lo;
 				if (n > bucket.peak) bucket.peak = n;
 				bucket.runMs += BigInt(n) * BigInt(hi - lo);
 			});
@@ -264,22 +365,55 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		}
 		segment(at, nowMs, level);
 
-		// What the runs were promised and what they used, each run weighted by the part of it inside the window. CPU used
-		// is spread evenly over the run's wall time: a record carries one total, not a profile.
-		let memMs = 0n;
-		let cpuCentiMs = 0n;
-		let cpuUsedUsec = 0n;
+		// What was promised and used, against the capacity IN FORCE piece by piece (the covered window cut at every change).
+		// A piece whose budget (or CPU count) is not a number adds to neither side of its share. CPU used is each run's
+		// measured CPU time spread evenly over its wall (a record carries one total, not a profile), clamped first to the
+		// most its job could use: its `--cpus` (the CPU budget, capped at the runtime's count) over its whole wall.
+		const pieces = [coveredFrom, ...changes, nowMs];
+		const forEachPiece = (a, b, fn) => {
+			for (let i = 0; i + 1 < pieces.length; i++) {
+				const lo = Math.max(a, pieces[i]);
+				const hi = Math.min(b, pieces[i + 1]);
+				if (hi > lo) fn(capAt(pieces[i]), BigInt(hi - lo));
+			}
+		};
+		let memDen = 0n;
+		let cpuPromiseDen = 0n;
+		let cpuUsedDen = 0n;
+		forEachPiece(coveredFrom, nowMs, (c, len) => {
+			if (positiveInt(c.memMiB)) memDen += BigInt(c.memMiB) * len;
+			const promise = promiseCpuCenti(c);
+			if (promise !== null) cpuPromiseDen += BigInt(promise) * len;
+			// microseconds of CPU the host had: CPUs x ms x 1000
+			if (positiveInt(c.cpus)) cpuUsedDen += BigInt(c.cpus) * len * 1000n;
+		});
+		let memNum = 0n;
+		let cpuPromiseNum = 0n;
+		let cpuUsedNum = 0n;
 		const projects = new Map();
 		for (const r of h.runs) {
-			const len = BigInt(r.end - r.start);
-			if (r.size !== null) {
-				memMs += BigInt(r.size.memMiB) * len;
-				cpuCentiMs += BigInt(r.size.cpuCenti) * len;
+			let cpuUsec = null;
+			if (r.rawCpuUsec !== null) {
+				const ceiling = jobCpuCeilingCenti(r.recorded ?? capAt(r.span.start));
+				const most = BigInt(ceiling) * BigInt(r.span.wallMs) * 10n; // hundredths x ms x 10 = microseconds
+				const reported = BigInt(r.rawCpuUsec);
+				if (reported > most) h.counts.cpuClamped++;
+				cpuUsec = reported > most ? most : reported;
+			} else {
+				h.counts.withoutResources++;
 			}
-			const used = r.cpuUsec !== null ? (r.cpuUsec * len) / BigInt(r.wallMs) : 0n;
-			cpuUsedUsec += used;
+			let used = 0n;
+			forEachPiece(r.start, r.end, (c, len) => {
+				if (r.size !== null && positiveInt(c.memMiB)) memNum += BigInt(r.size.memMiB) * len;
+				if (r.size !== null && promiseCpuCenti(c) !== null) cpuPromiseNum += BigInt(r.size.cpuCenti) * len;
+				if (cpuUsec !== null && r.span.wallMs > 0) {
+					const part = (cpuUsec * len) / BigInt(r.span.wallMs);
+					used += part;
+					if (positiveInt(c.cpus)) cpuUsedNum += part;
+				}
+			});
 			const p = projects.get(r.project) ?? { runMs: 0n, cpuUsec: 0n };
-			p.runMs += len;
+			p.runMs += BigInt(r.end - r.start);
 			p.cpuUsec += used;
 			projects.set(r.project, p);
 		}
@@ -288,47 +422,50 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		const rest = ranked.slice(CAPACITY_TOP_PROJECTS);
 		const other = rest.length === 0 ? null : { count: rest.length, runMs: Number(rest.reduce((s, [, p]) => s + p.runMs, 0n)), cpuMs: Number(rest.reduce((s, [, p]) => s + p.cpuUsec, 0n) / 1000n) };
 
+		for (const [k, v] of Object.entries(h.counts)) totals[k] += v;
 		const waits = [...h.waits].sort((a, b) => a - b);
-		const covered = BigInt(coveredMs);
 		hosts.push({
 			name,
-			shared,
+			shared: cover !== null,
+			coverage: { fromMs: coveredFrom, source: cover?.source ?? null, truncated: cover?.truncated === true && coveredFrom > windowStartMs, ...h.counts },
 			capacity: { ...base, basis, changed },
 			coveredMs,
 			missingMs,
 			busyMs,
 			idleMs: coveredMs - busyMs,
-			fullMs: base.slots !== null ? fullMs : null,
+			fullMs: fullKnown ? fullMs : null,
 			peak,
-			avgMilli: perMille(runMs, covered),
-			promisedMemPerMille: memDenom !== null ? perMille(memMs, BigInt(memDenom) * covered) : null,
-			promisedCpuPerMille: cpuDenom !== null ? perMille(cpuCentiMs, BigInt(cpuDenom) * covered) : null,
-			// CPU time in microseconds over (CPUs x covered ms x 1000), with CPUs = hundredths / 100.
-			usedCpuPerMille: cpuDenom !== null ? perMille(cpuUsedUsec, BigInt(cpuDenom) * covered * 10n) : null,
+			avgMilli: perMille(runMs, BigInt(coveredMs)),
+			promisedMemPerMille: perMille(memNum, memDen),
+			promisedCpuPerMille: perMille(cpuPromiseNum, cpuPromiseDen),
+			usedCpuPerMille: perMille(cpuUsedNum, cpuUsedDen),
 			runs: h.runs.length,
-			refused: h.refused,
 			projects: ranked.slice(0, CAPACITY_TOP_PROJECTS).map(toProject),
 			otherProjects: other,
 			waits: { n: waits.length, p50Ms: waits.length > 0 ? rank(waits, 50) : null, p95Ms: waits.length > 0 ? rank(waits, 95) : null },
-			buckets: buckets.map((b) => ({ fromMs: b.fromMs, coveredMs: b.coveredMs, busyMs: b.busyMs, fullMs: base.slots !== null ? b.fullMs : null, peak: b.peak, avgMilli: perMille(b.runMs, BigInt(b.coveredMs)) })),
+			buckets: buckets.map((b) => ({ fromMs: b.fromMs, coveredMs: b.coveredMs, busyMs: b.busyMs, fullMs: b.fullKnown ? b.fullMs : null, peak: b.peak, avgMilli: perMille(b.runMs, BigInt(b.coveredMs)) })),
 		});
 	}
 
-	const running = liveRows.reduce((sum, row) => {
+	const running = [...liveByName.values()].reduce((sum, row) => {
 		const n = typeof row.budgetRunning === "string" && /^\d{1,9}$/.test(row.budgetRunning) ? Number(row.budgetRunning) : null;
 		return n === null ? sum : (sum ?? 0) + n;
 	}, null);
+	const covered = hosts.filter((h) => h.shared);
 	return {
 		v: CAPACITY_REPORT_VERSION,
 		window: { fromMs: windowStartMs, toMs: nowMs, bucketMs },
 		coverage: {
-			source: typeof coverage.source === "string" ? coverage.source : "local",
+			source: typeof coverage.source === "string" ? coverage.source : "records",
 			reason: typeof coverage.reason === "string" ? coverage.reason : null,
-			fromMs,
-			truncated: coverage.truncated === true,
-			...counts,
+			// Every covered host has history from here on (the latest of their starts); each host's own is in its entry.
+			fromMs: covered.length > 0 ? Math.max(...covered.map((h) => h.coverage.fromMs)) : windowStartMs,
+			truncated: covered.some((h) => h.coverage.truncated),
+			...totals,
+			unreadable,
+			withoutHost,
 			running,
-			historyNotShared: [...notShared].sort(),
+			historyNotShared: notShared,
 		},
 		hosts,
 	};

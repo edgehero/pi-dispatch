@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { UNREADABLE_RECORD } from "../src/run-history.mjs";
-import { MIRROR_MAX_DAYS, RUNS_INDEX, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
+import { MIRROR_MAX_DAYS, RUNS_HORIZON, RUNS_INDEX, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -19,6 +19,7 @@ const anchored = (opts) => makeRunMirror({ now: () => AT, ...opts });
 function fakeRedis({ fail = false, hang = false } = {}) {
 	const strings = new Map();
 	const zset = new Map(); // member -> score
+	const horizon = new Map(); // RUNS_HORIZON's member -> score
 	const calls = [];
 	const guard = () => {
 		if (fail) throw new Error("ECONNREFUSED");
@@ -34,22 +35,42 @@ function fakeRedis({ fail = false, hang = false } = {}) {
 			calls.push(["set", k]);
 			strings.set(k, { v, expiresIn: ms });
 		},
-		async zadd(k, score, member) {
+		horizon,
+		async zadd(k, ...args) {
 			await guard();
+			// The horizon is its own key, written `ZADD runs:horizon GT <score> trim`: raised only, never lowered.
+			if (k === RUNS_HORIZON) {
+				// Redis semantics: `GT` only ever raises an existing score; without it, ZADD sets whatever it is given.
+				const gt = args[0] === "GT";
+				const [score, member] = gt ? args.slice(1) : args;
+				calls.push(["zadd-horizon", ...args]);
+				if (!gt || !horizon.has(member) || score > horizon.get(member)) horizon.set(member, score);
+				return;
+			}
+			const [score, member] = args;
 			calls.push(["zadd", member]);
 			zset.set(member, score);
 		},
 		async zremrangebyscore(_k, _min, max) {
 			await guard();
 			const cut = Number(String(max).replace("(", ""));
-			for (const [m, s] of zset) if (s <= cut) zset.delete(m);
+			let n = 0;
+			for (const [m, s] of zset) if (s < cut) (zset.delete(m), n++);
+			return n;
 		},
 		async zremrangebyrank(_k, _start, stop) {
 			await guard();
 			// Redis semantics: rank 0 is the LOWEST score. `stop` negative counts from the end.
 			const sorted = [...zset.entries()].sort((a, b) => a[1] - b[1]);
 			const end = stop < 0 ? sorted.length + stop : stop;
-			for (let i = 0; i <= end && i < sorted.length; i++) zset.delete(sorted[i][0]);
+			let n = 0;
+			for (let i = 0; i <= end && i < sorted.length; i++) (zset.delete(sorted[i][0]), n++);
+			return n;
+		},
+		async zrange(_k, start, stop, withScores) {
+			await guard();
+			const sorted = [...zset.entries()].sort((a, b) => a[1] - b[1]).slice(start, stop + 1);
+			return withScores === "WITHSCORES" ? sorted.flatMap(([m, sc]) => [m, String(sc)]) : sorted.map(([m]) => m);
 		},
 		async pexpire(k, ms) {
 			await guard();
@@ -255,4 +276,42 @@ test("readMirroredRecord reads one record by its sanitized id; absent or unreach
 	assert.equal(await readMirroredRecord({ get: () => new Promise(() => {}) }, "x", { timeoutMs: 5 }), null, "a server that never answers is bounded, not awaited forever");
 	assert.equal(await readMirroredRecord(null, "x"), null, "no mirror armed");
 	assert.equal(await readMirroredRecord(redis(JSON.stringify(rec)), ""), null, "no id");
+});
+
+// --- the fleet's history horizon (issue #599) --------------------------------------------------------------
+
+test("a trim that removes runs raises the fleet's horizon: by age to the cutoff, by count to the oldest kept", async () => {
+	const redis = fakeRedis();
+	// Two hosts on one index: host B keeps 30 days, host A only 1. A's write trims B's older runs too.
+	const b = anchored({ redis, retentionDays: 30 });
+	for (const d of [3, 10]) await b.mirror(record(`b${d}`, new Date(AT - d * DAY).toISOString(), { host: "b" }), `b${d}`);
+	assert.equal(redis.horizon.size, 0, "nothing trimmed, so no horizon at all");
+	assert.ok(!redis.calls.some((c) => c[0] === "zadd-horizon"));
+	await anchored({ redis, retentionDays: 1 }).mirror(record("a1", new Date(AT).toISOString(), { host: "a" }), "a1");
+	assert.deepEqual([...redis.zset.keys()].sort(), ["a1"], "A's retention trimmed every older run of the fleet");
+	assert.equal(redis.horizon.get("trim"), AT - DAY, "and said so: nothing before this instant is in the index");
+	assert.deepEqual(redis.calls.filter((c) => c[0] === "pexpire" && c[1] === RUNS_HORIZON), [["pexpire", RUNS_HORIZON, mirrorWindowMs(0)]], "kept as long as any reader's deepest window");
+
+	// A later trim by a longer retention never lowers it.
+	await anchored({ redis, retentionDays: 30 }).mirror(record("b-old", new Date(AT - 40 * DAY).toISOString(), { host: "b" }), "b-old");
+	assert.equal(redis.horizon.get("trim"), AT - DAY, "GT: raised only");
+
+	// The count cap: the oldest REMAINING score, which a removed run ended at or before.
+	const capped = fakeRedis();
+	const m = anchored({ redis: capped, retentionDays: 30, indexMax: 2 });
+	for (const h of [5, 4, 3]) await m.mirror(record(`c${h}`, new Date(AT - h * 3600_000).toISOString()), `c${h}`);
+	assert.deepEqual([...capped.zset.keys()].sort(), ["c3", "c4"]);
+	assert.equal(capped.horizon.get("trim"), AT - 4 * 3600_000);
+});
+
+test("a horizon write that fails is the mirror's failure: logged once, never thrown", async () => {
+	const redis = fakeRedis();
+	const logs = [];
+	await anchored({ redis, retentionDays: 30 }).mirror(record("old", new Date(AT - 20 * DAY).toISOString()), "old");
+	redis.zadd = async (k, ...args) => {
+		if (k === RUNS_HORIZON) throw new Error("READONLY");
+		return undefined;
+	};
+	assert.equal(await anchored({ redis, retentionDays: 1, log: (e, f) => logs.push([e, f.reason]) }).mirror(record("new", new Date(AT).toISOString()), "new"), false);
+	assert.deepEqual(logs, [["run_mirror_failed", "READONLY"]]);
 });

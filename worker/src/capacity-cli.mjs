@@ -7,8 +7,9 @@
  * READ-ONLY, and needs what `status` needs and no more: the Valkey URL (the kill switch's rule, `killSwitchValkeyUrls`)
  * and the deployment's logs directory, never `loadConfig`, so it answers on a deployment whose forge auth is broken.
  * Where this shell and the deployment's `.env` name different Valkeys it refuses until `--valkey-url` says which: a
- * report from the wrong one would read a busy fleet as idle. An unreachable or refused Valkey is not a failure: the
- * local files are read and the report says so.
+ * report from the wrong one would read a busy fleet as idle. An unreachable or refused Valkey taken from the shell or
+ * the `.env` is not a failure: the local files are read and the report says why. One named with `--valkey-url` is: the
+ * operator asked for that Valkey's fleet, and a local-only report would answer another question.
  */
 
 import { parseArgs } from "node:util";
@@ -34,7 +35,7 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 	try {
 		parsed = parseArgs({ args, allowPositionals: false, options: { since: { type: "string", default: "7d" }, host: { type: "string" }, json: { type: "boolean", default: false }, "valkey-url": { type: "string" } } });
 	} catch (error) {
-		return fail(`${error.message}\n  usage: pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json]`);
+		return fail(`${error.message}\n  usage: pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]`);
 	}
 	const { since, host, json } = parsed.values;
 	const window = Object.hasOwn(CAPACITY_WINDOWS, since) ? CAPACITY_WINDOWS[since] : null;
@@ -52,13 +53,17 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 	if (picked.note) errWrite(`warning: ${picked.note}\n`);
 	if (picked.urls.length > 1) return fail(`${picked.disagreement}: a report from the wrong one reads its fleet as idle. Say which: pi-dispatch capacity --valkey-url <url>`);
 	const url = picked.urls[0];
+	// A Valkey the operator NAMED that cannot be read is a failure: they asked for that one. One taken from the shell or
+	// the `.env` is not: the report falls back to this host's files and says why.
+	const named = parsed.values["valkey-url"] !== undefined;
 
 	const nowMs = now();
 	const windowStartMs = nowMs - window.ms;
 	let redis = null;
 	let refusedNote = null;
 	const refused = await valkeyRefusal(url, env);
-	if (refused) refusedNote = `Valkey at ${urlShown(url)} refused: ${refused}`;
+	if (refused && named) return fail(`Valkey at ${urlShown(url)} refused: ${refused}`);
+	if (refused) refusedNote = `Valkey at ${urlShown(url)} refused (${refused}): only this host's files were read`;
 	else {
 		redis = (redisFn ?? makeRedisClient)(url);
 		redis.on?.("error", () => {});
@@ -66,11 +71,13 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 	try {
 		const { readLiveHosts } = await import("./host-registry.mjs");
 		// Both reads at once, so a Valkey that does not answer costs one timeout, not two.
+		// `prune: false`: this command writes nothing, not even the registry reader's tidying of a dead member.
 		const [fleet, read] = await Promise.all([
-			redis ? (readLiveHostsFn ?? readLiveHosts)(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((error) => ({ unreachable: error?.message ?? "registry unreadable" })) : { unreachable: "no Valkey" },
-			readCapacityRecords({ redis, logsDir, sinceMs: windowStartMs, nowMs, retentionDays, localHost, timeoutMs: FLEET_READ_TIMEOUT_MS, ...(fs ? { fs } : {}) }),
+			redis ? (readLiveHostsFn ?? readLiveHosts)(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS, prune: false }).catch((error) => ({ unreachable: error?.message ?? "registry unreadable" })) : { unreachable: null },
+			readCapacityRecords({ redis, logsDir, sinceMs: windowStartMs, nowMs, retentionDays, localHost, noMirrorReason: refusedNote, timeoutMs: FLEET_READ_TIMEOUT_MS, ...(fs ? { fs } : {}) }),
 		]);
-		const coverage = { ...read.coverage, reason: [refusedNote, read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
+		if (named && (fleet.unreachable || read.mirrorState.startsWith("unreachable"))) return fail(`could not read Valkey at ${urlShown(url)}: ${fleet.unreachable ? `host registry ${fleet.unreachable}` : `run mirror ${read.mirrorState}`}`);
+		const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
 		const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs, nowMs, bucketMs: window.bucketMs, coverage });
 		if (host !== undefined) {
 			const known = report.hosts.map((h) => h.name);
@@ -123,51 +130,71 @@ export function milliText(milli) {
 /** Part of whole as a per-mille, rounded half up; 0 when there is no whole. */
 const share = (part, whole) => (whole > 0 ? Math.floor((part * 2000 + whole) / (whole * 2)) : 0);
 
-/** The human report: one block per host, then what the history covers. */
+/**
+ * C0 and C1 control characters, which a terminal acts on (cursor moves, a title, a cleared screen). The report admits
+ * only worker names and project ids, which hold none; this strips them anyway before anything reaches the terminal, so
+ * a reader that ever admits more cannot hand a record's author the operator's screen.
+ */
+const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
+
+/** The human report: one block per host, then what the fleet's history covers. Control characters stripped. */
 export function capacityText(report, { since }) {
 	const lines = [];
-	for (const h of report.hosts) {
-		lines.push(`Host ${h.name}, last ${since}`);
-		if (h.coveredMs === 0) {
-			lines.push(`  no history here${h.shared ? "" : ": this host's runs are not shared (it declares no PI_WORKER_NAME, so it writes no run mirror)"}`);
-			continue;
-		}
-		const missing = h.missingMs > 0 ? ` (${percentText(share(h.missingMs, h.missingMs + h.coveredMs))} of the window has no history)` : "";
-		lines.push(`  busy ${percentText(share(h.busyMs, h.coveredMs))}, idle ${percentText(share(h.idleMs, h.coveredMs))}${missing}`);
-		const c = h.capacity;
-		const of = c.slots !== null ? ` of ${c.slots}` : "";
-		const basis = c.basis === "recorded" ? (c.changed ? " (changed in the window, newest shown)" : "") : c.basis === "current" ? " (current setting, no run recorded one)" : " (slot count unknown)";
-		const full = h.fullMs !== null ? `, full ${percentText(share(h.fullMs, h.coveredMs))} of the time` : "";
-		lines.push(`  slots: avg ${milliText(h.avgMilli ?? 0)}${of}, peak ${h.peak}${of}${full}${basis}`);
-		const mem = h.promisedMemPerMille !== null ? `memory ${percentText(h.promisedMemPerMille)} of ${formatMemory(c.memMiB)}` : `memory: no budget${c.memMiB === "off" ? " (off)" : ""}`;
-		const cpuOf = Number.isSafeInteger(c.cpuCenti) && c.cpuCenti > 0 ? `${formatCpus(c.cpuCenti)} CPUs (budget)` : c.cpus !== null ? `${c.cpus} CPUs (all, no CPU budget)` : null;
-		const cpu = h.promisedCpuPerMille !== null ? `CPU ${percentText(h.promisedCpuPerMille)} of ${cpuOf}` : "CPU: no budget or CPU count known";
-		lines.push(`  promised: ${mem}, ${cpu}`);
-		if (h.usedCpuPerMille !== null) lines.push(`  CPU used: ${percentText(h.usedCpuPerMille)} of ${cpuOf}`);
-		lines.push(h.waits.n > 0 ? `  wait for a slot: p50 ${durationText(h.waits.p50Ms)}, p95 ${durationText(h.waits.p95Ms)} (${h.waits.n} run${h.waits.n === 1 ? "" : "s"})` : "  wait for a slot: no run recorded one");
-		if (h.projects.length > 0) {
-			const named = h.projects.map((p) => `${p.project ?? "(no project)"} ${durationText(p.runMs)}`);
-			if (h.otherProjects) named.push(`${h.otherProjects.count} other${h.otherProjects.count === 1 ? "" : "s"} ${durationText(h.otherProjects.runMs)}`);
-			lines.push(`  projects by run time: ${named.join(", ")}`);
-		}
-		if (h.refused > 0) lines.push(`  ${h.refused} job${h.refused === 1 ? "" : "s"} refused before a slot`);
-	}
+	for (const h of report.hosts) lines.push(...hostLines(h, since));
 	if (report.hosts.length === 0) lines.push(`No host ran a job in the last ${since}.`);
-	lines.push(...coverageLines(report.coverage, report.window));
-	return `${lines.join("\n")}\n`;
+	lines.push(...coverageLines(report.coverage));
+	return `${lines.join("\n").replace(CONTROL, "")}\n`;
 }
 
-/** What the history covers, said plainly, ending with what this report cannot see. */
-function coverageLines(cov, window) {
-	const notes = [`history: ${cov.source === "local" ? "this host's files only" : cov.source === "mirror" ? "the run mirror" : "the run mirror and this host's files"}`];
-	if (cov.fromMs > window.fromMs) notes.push(`from ${new Date(cov.fromMs).toISOString()} on${cov.truncated ? " (the run mirror is at its cap, so older runs were cut)" : ""}, earlier time counted as neither busy nor idle`);
-	if (cov.historyNotShared.length > 0) notes.push(`not shared here: ${cov.historyNotShared.join(", ")}`);
-	if (cov.legacyInferred > 0) notes.push(`${cov.legacyInferred} run${cov.legacyInferred === 1 ? "" : "s"} from before capacity was recorded, inferred from their length`);
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+function hostLines(h, since) {
+	const lines = [`Host ${h.name}, last ${since}`];
+	if (h.coveredMs === 0) {
+		lines.push(`  no history here${h.shared ? "" : ": no source here holds this host's runs (a worker without PI_WORKER_NAME writes no run mirror)"}`);
+		return lines;
+	}
+	const cov = h.coverage;
+	const missing = h.missingMs > 0 ? ` (${percentText(share(h.missingMs, h.missingMs + h.coveredMs))} of the window has no history)` : "";
+	lines.push(`  busy ${percentText(share(h.busyMs, h.coveredMs))}, idle ${percentText(share(h.idleMs, h.coveredMs))}${missing}`);
+	const c = h.capacity;
+	const of = c.slots !== null ? ` of ${c.slots}` : "";
+	const basis = c.basis === "recorded" ? (c.changed ? " (the capacity changed in the window: each part is judged by the one in force then, the newest is shown)" : "") : c.basis === "current" ? " (current setting, no run recorded one)" : " (slot count unknown)";
+	const full = h.fullMs !== null ? `, full ${percentText(share(h.fullMs, h.coveredMs))} of the time` : "";
+	lines.push(`  slots: avg ${milliText(h.avgMilli ?? 0)}${of}, peak ${h.peak}${of}${full}${basis}`);
+	const memOf = Number.isSafeInteger(c.memMiB) && c.memMiB > 0 ? ` of the ${formatMemory(c.memMiB)} budget` : "";
+	const mem = h.promisedMemPerMille !== null ? `memory ${percentText(h.promisedMemPerMille)}${memOf}` : `memory: no budget${c.memMiB === "off" ? " (off)" : ""}`;
+	const hostCpus = c.cpus !== null ? `the host's ${c.cpus} CPUs` : "the host's CPUs";
+	const promiseOf = Number.isSafeInteger(c.cpuCenti) && c.cpuCenti > 0 ? `the ${formatCpus(c.cpuCenti)} CPU budget` : `${hostCpus} (no CPU budget)`;
+	const cpu = h.promisedCpuPerMille !== null ? `CPU ${percentText(h.promisedCpuPerMille)} of ${promiseOf}` : "CPU: no budget or CPU count known";
+	lines.push(`  promised: ${mem}, ${cpu}`);
+	if (h.usedCpuPerMille !== null) lines.push(`  CPU used: ${percentText(h.usedCpuPerMille)} of ${hostCpus}`);
+	lines.push(h.waits.n > 0 ? `  wait for a slot: p50 ${durationText(h.waits.p50Ms)}, p95 ${durationText(h.waits.p95Ms)} (${plural(h.waits.n, "run")})` : "  wait for a slot: no run recorded one");
+	if (h.projects.length > 0) {
+		const named = h.projects.map((p) => `${p.project ?? "(no project)"} ${durationText(p.runMs)}`);
+		if (h.otherProjects) named.push(`${plural(h.otherProjects.count, "other")} ${durationText(h.otherProjects.runMs)}`);
+		lines.push(`  projects by run time: ${named.join(", ")}`);
+	}
+	if (cov.refusedBeforeSlot > 0) lines.push(`  ${plural(cov.refusedBeforeSlot, "job")} refused before a slot`);
+	if (cov.retried > 0) lines.push(`  ${plural(cov.retried, "retried run")}: earlier attempts are not counted, busy time can be under-counted`);
+	const notes = [`history from ${cov.source === "local" ? "this host's files" : cov.source === "mirror" ? "the run mirror" : "the run records"}`];
+	if (h.missingMs > 0) notes.push(`from ${new Date(cov.fromMs).toISOString()} on${cov.truncated ? " (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)" : ""}, earlier time counted as neither busy nor idle`);
+	const legacy = cov.legacyOccupied + cov.legacyRefused;
+	if (legacy > 0) notes.push(`${plural(legacy, "record")} from before capacity was recorded, inferred (${cov.legacyOccupied} held a slot, ${cov.legacyRefused} refused)`);
 	if (cov.withoutSize > 0) notes.push(`${cov.withoutSize} without a size (not in promised)`);
 	if (cov.withoutResources > 0) notes.push(`${cov.withoutResources} without a CPU measurement (not in CPU used)`);
-	if (cov.unreadable > 0) notes.push(`${cov.unreadable} record${cov.unreadable === 1 ? "" : "s"} unreadable, not counted`);
+	if (cov.cpuClamped > 0) notes.push(`${cov.cpuClamped} reporting more CPU than the job could use, read at that most`);
+	lines.push(`  ${notes.join("; ")}`);
+	return lines;
+}
+
+/** What the fleet's history covers, said plainly, ending with what this report cannot see. */
+function coverageLines(cov) {
+	const notes = [`history: ${cov.source === "local" ? "this host's files only" : cov.source === "mirror" ? "the run mirror" : cov.source === "mirror+local" ? "the run mirror and this host's files" : "the records given"}`];
+	if (cov.historyNotShared.length > 0) notes.push(`not shared here: ${cov.historyNotShared.join(", ")}`);
+	if (cov.unreadable > 0) notes.push(`${plural(cov.unreadable, "record")} unreadable, not counted`);
 	if (cov.withoutHost > 0) notes.push(`${cov.withoutHost} without a host, not counted`);
-	if (cov.running !== null && cov.running > 0) notes.push(`${cov.running} job${cov.running === 1 ? "" : "s"} running now, counted once ${cov.running === 1 ? "it ends" : "they end"}`);
+	if (cov.running !== null && cov.running > 0) notes.push(`${plural(cov.running, "job")} running now, counted once ${cov.running === 1 ? "it ends" : "they end"}`);
 	if (cov.reason) notes.push(cov.reason);
 	return [`Coverage: ${notes.join("; ")}.`, "Jobs only: a machine busy with other work reads as idle."];
 }
