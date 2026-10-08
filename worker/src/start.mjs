@@ -63,7 +63,7 @@ import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootf
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
-import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RUNNER_POLICY_REASONS, sanitizeJobId } from "./run-history.mjs";
+import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
@@ -1368,7 +1368,7 @@ export async function startWorker(
 	// would be bytes nothing reads. That is also what keeps a single-host deployment byte-identical, since
 	// no job then issues a single extra Valkey command.
 	const runMirror = config.workerNameDeclared ? makeRunMirrorFn({ redis, retentionDays: config.logRetentionDays, log }) : null;
-	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null }) => {
+	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null }) => {
 		// The project (issue #499) was resolved at the pickup gate and rides here as `project` (an id or null), so a live
 		// edit of projects.json mid-run cannot make the record disagree with what the job was counted against. A record
 		// path that ends BEFORE the pickup gate (the wait gate's refusals) passes none, and resolves from the live ref
@@ -1378,7 +1378,7 @@ export async function startWorker(
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
 		// The default venue rides the same way and for the same reason (#277): it is the value the registry
 		// below is built with, so the record resolves a job's venue exactly as dispatch does.
-		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity });
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier });
 		writeRecord(record);
 		// STRICTLY AFTER the file, and deliberately not awaited. After, because a crash between the two must
 		// leave a record with no fleet row rather than a fleet row with no record -- the mirror is a VIEW,
@@ -1399,10 +1399,21 @@ export async function startWorker(
 	// The record read back, for a job the queue lost the lock of after it finished (DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK,
 	// CONST-RETRY-INFRA-ONLY): this host's own file first, then the fleet's copy where a mirror is armed, because the
 	// host that meets the stalled job need not be the one that ran it. A single host has no mirror and needs none.
+	const readRecord = makeReadRecord({ logsDir: config.logsDir });
 	const settledRecord = makeSettledRecord({
-		readRecord: makeReadRecord({ logsDir: config.logsDir }),
+		readRecord,
 		readMirrored: runMirror ? (jobId) => readMirroredRecordFn(redis, sanitizeJobId(jobId)) : null,
 	});
+	// The record a retry (or a pickup after a stall) is about to replace (issue #599), read the same two ways: this host's
+	// file, else the fleet's copy where a mirror is armed (the earlier attempt may have run on another host). Its slot
+	// interval rides the new record as `earlier`. Never rejects: unreadable or unreachable is no previous record.
+	const previousRecord = async (jobId) => {
+		const local = readRecord(jobId);
+		if (local !== null && local !== UNREADABLE_RECORD) return local;
+		if (!runMirror) return null;
+		const mirrored = await readMirroredRecordFn(redis, sanitizeJobId(jobId)).catch(() => null);
+		return mirrored !== null && mirrored !== UNREADABLE_RECORD ? mirrored : null;
+	};
 
 	// INT-CONFIG-OVERLAY-CONTRACT: the worker reads the runtime-settings overlay at EACH job start, so this
 	// closure -- not a value frozen at boot -- is what the processor calls per job. It resolves the fourteen
@@ -2059,6 +2070,7 @@ export async function startWorker(
 		redis,
 		recordRun,
 		settledRecord,
+		previousRecord,
 		extraClosers,
 		// REQ-SCOPED-PAUSE-WINDOWS: the processor defers a job whose folder/repo is inside an active window.
 		// Reads the live-reloaded ref, so an operator edit takes effect on the next job without a restart.

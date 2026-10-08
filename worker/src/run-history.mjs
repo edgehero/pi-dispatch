@@ -8,6 +8,7 @@ import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { recordedJobSize } from "./job-size.mjs";
 import { waitArmed } from "./wait-for.mjs";
+import { WORKER_NAME_RE } from "./worker-name.mjs";
 
 /**
  * Durable per-run history.
@@ -570,7 +571,7 @@ function rebuildUsage(u) {
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null }) {
 	const data = job.data ?? {};
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
@@ -747,19 +748,65 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// the record's own answer to "did this run hold a slot": null on every refusal before one, which is what
 		// lets a capacity report tell a run from a refusal without guessing from the wall time (capacity.mjs).
 		capacity: recordedCapacity(capacity),
+		// The slot time of this job's EARLIER attempts (issue #599, INT-RUN-HISTORY-FILE-CONTRACT), which a retry's record
+		// would otherwise erase: it overwrites the same file and the same mirror key. `[{ host, startedAt, endedAt, memMiB,
+		// cpuCenti }]`, at most `EARLIER_MAX`, newest last, read by the processor from the previous record BEFORE this one
+		// replaces it (`earlierFrom`) and passed in. Additive, nullable, an explicit literal REBUILT here, TAIL position after
+		// `capacity`. A worker name, two ISO instants and two integers per entry: never the earlier attempt's dollars,
+		// tokens or usage, so every cost reader, which reads the top-level fields only, counts nothing twice. Null on a
+		// first attempt and when the previous record held no slot or could not be read.
+		earlier: recordedEarlier(earlier),
+		// Whether this pickup came after a STALL (issue #599): BullMQ raised `stalledCounter`, not `attemptsMade`, so the
+		// stalled pickup wrote no record and its slot time is in none. A boolean, TAIL position after `earlier`, so the
+		// capacity report can say how many runs that is.
+		stalledRepick: Number.isInteger(job.stalledCounter) && job.stalledCounter > 0,
 	};
+}
+
+/** The most earlier attempts a record carries: the newest are kept. */
+export const EARLIER_MAX = 4;
+
+/** One earlier attempt as a record carries it, or null: a worker name, two canonical ISO instants in order, two sizes. */
+function earlierEntry(e) {
+	if (e === null || typeof e !== "object" || Array.isArray(e)) return null;
+	const instant = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) && new Date(Date.parse(v)).toISOString() === v ? v : null);
+	const startedAt = instant(e.startedAt);
+	const endedAt = instant(e.endedAt);
+	if (typeof e.host !== "string" || !WORKER_NAME_RE.test(e.host) || startedAt === null || endedAt === null || Date.parse(endedAt) < Date.parse(startedAt)) return null;
+	return { host: e.host, startedAt, endedAt, memMiB: recordInt(e.memMiB), cpuCenti: recordInt(e.cpuCenti) };
+}
+
+/** A record's `earlier`, rebuilt: the valid entries, the newest `EARLIER_MAX` of them, or null when none is. */
+export function recordedEarlier(list) {
+	if (!Array.isArray(list)) return null;
+	const kept = list.map(earlierEntry).filter((e) => e !== null).slice(-EARLIER_MAX);
+	return kept.length > 0 ? kept : null;
+}
+
+/**
+ * What a retry's record carries forward from the record it is about to replace: that record's own `earlier`, then its
+ * own slot interval when it held a slot (`capacity` an object), each rebuilt; null when there is nothing.
+ */
+export function earlierFrom(previous) {
+	if (previous === null || typeof previous !== "object" || Array.isArray(previous)) return null;
+	const carried = Array.isArray(previous.earlier) ? previous.earlier : [];
+	const own = previous.capacity !== null && typeof previous.capacity === "object" && !Array.isArray(previous.capacity) ? [{ host: previous.host, startedAt: previous.startedAt, endedAt: previous.endedAt, memMiB: previous.size?.memMiB, cpuCenti: previous.size?.cpuCenti }] : [];
+	return recordedEarlier([...carried, ...own]);
 }
 
 /**
  * When a job became eligible to run, as an ISO string, or null: `job.timestamp` plus the delay it was added with
  * (`opts.delay`, at least 0). Null for a job armed with `run.waitFor` (its wait is its trigger's own), for a retry
- * (`attemptsMade` above 0), and for any input that is not a finite, representable instant.
+ * (`attemptsMade` above 0) or a pickup after a stall (`stalledCounter` above 0), and for any input that is not a
+ * finite, representable instant.
  */
 export function queuedAtOf(job) {
 	if (waitArmed(job?.data)) return null;
 	// A RETRY's wait would include its earlier attempt and that attempt's run (the add's moment is kept across attempts),
 	// so only a first attempt says how long the job waited for a slot. `attemptsMade` counts attempts finished before.
 	if (Number.isInteger(job?.attemptsMade) && job.attemptsMade > 0) return null;
+	// A pickup after a STALL is the same: BullMQ raises `stalledCounter`, not `attemptsMade`, and the add's moment is kept.
+	if (Number.isInteger(job?.stalledCounter) && job.stalledCounter > 0) return null;
 	const timestamp = job?.timestamp;
 	const delay = job?.opts?.delay ?? 0;
 	if (!Number.isSafeInteger(timestamp) || timestamp < 0 || typeof delay !== "number" || !Number.isFinite(delay)) return null;

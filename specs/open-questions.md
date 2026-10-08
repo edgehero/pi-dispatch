@@ -1873,9 +1873,11 @@ adversarial passes did.
 - **Position**: the capacity report (`DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`) is computed from run records
   alone, by the operator's decision, and four things are outside what records can say. Each is stated on the
   surfaces, and none is read as idle where the reader knows it is missing:
-  - **a retry overwrites its earlier attempt's record** (one file and one mirror key per job id), so the slot time
-    of every attempt but the last is lost, and that time reads as idle. The report counts the retried runs and says
-    busy time can be under-counted there, and a retry adds no wait;
+  - **a retry overwrites its earlier attempt's record** (one file and one mirror key per job id). The new record
+    carries the earlier attempts' slot intervals (`earlier`, at most 4), so they are counted; an attempt whose record
+    could not be read when the retry was picked up, or beyond the 4, is lost and reads as idle. A retry adds no wait;
+  - **a pickup after a stall** follows a pickup that usually wrote no record (its worker died or lost its lock), so
+    that pickup's slot time is in no record and reads as idle. The report counts such runs (`stalledRepick`) and says so;
   - **a writer from before the fleet horizon** (`runs:horizon`) trims the shared run index by its own retention without
     recording it, so while one runs in a fleet a shorter retention than the reader's can still cut history that reads
     as idle; every writer from this version on records its trims;
@@ -1988,3 +1990,4 @@ adversarial passes did.
 | 2026-10-08 | The pi 1.1.0 bump (pull request #604). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.1.0 tarball. `excludeTools` is still `string[]` and `allToolNames` is still the eight. `tools` now takes a list of only `+name` and `-name` entries as changes to the default selection; the runner never passes `tools`, so no job sees it. |
 | 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `OQ-039`**, what the capacity report cannot see: a retry overwrites its earlier attempt's record, so that slot time reads as idle; an unnamed or offline worker's history is not shared (a live one is named and counted as missing, one that is not live is absent); `resources` is produced by the job and only advisory; a machine busy with other work reads as idle, and a job running now is not counted until it ends. |
 | 2026-10-08 | Issue #599, phase 1, corrections. **`OQ-039` AMENDED**: a new residual, a writer from before the fleet horizon trims the shared run index without recording it; the retry residual now says the report counts retried runs and adds no wait for them. |
+| 2026-10-08 | Issue #599, phase 1, second corrections. **`OQ-039` AMENDED**: the retry residual narrows (a retry now carries its earlier attempts' slot intervals; only an attempt whose record could not be read, or beyond the 4 kept, is lost), and a new residual names a stalled pickup's slot time, which no record holds and the report counts and says. |

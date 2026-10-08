@@ -407,12 +407,15 @@ produce different digests legitimately. It means "check", not "broken".
 | `slot:s:<hash>:<i>` | the fleet-wide slots for a limited forge scope |
 | `runs:index` | the merged run history's index, newest first |
 | `runs:rec:<jobId>` | one run's record, a copy of the sidecar on its host's disk |
+| `runs:horizon` | the fleet's history horizon: the newest instant before which any host's trim removed runs from `runs:index` (each host trims by its own `PI_LOG_RETENTION_DAYS`), read by `pi-dispatch capacity` so that time reads as missing, not idle |
 
 Deleting the whole `host:*` keyspace while the fleet is running is safe: every host falls back to
 behaving as a single host, which is the behaviour before any of this existed. The one decision that reads it, a
 forge job refused as too big for every host, can only be delayed by that, never caused. The same is true of
 `runs:*`: you lose the merged view until the next runs repopulate it, and never a record, because the
-record is the file on disk.
+record is the file on disk. One thing goes with it: deleting `runs:horizon` loses where the hosts trimmed the index,
+so until the next trim records it again, `pi-dispatch capacity` can read a gap a peer's shorter retention cut as idle
+time.
 
 **Version floor**: worker 1.7.0, admin 1.7.0. Every host must be on it. A worker below the floor does not
 publish itself, so the others cannot see it, and it will not route its own work.

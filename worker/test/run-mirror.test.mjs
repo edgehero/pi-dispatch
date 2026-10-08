@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { UNREADABLE_RECORD } from "../src/run-history.mjs";
-import { MIRROR_MAX_DAYS, RUNS_HORIZON, RUNS_INDEX, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
+import { MIRROR_MAX_DAYS, RUNS_HORIZON, RUNS_INDEX, TRIM_SCRIPT, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -67,6 +67,27 @@ function fakeRedis({ fail = false, hang = false } = {}) {
 			for (let i = 0; i <= end && i < sorted.length; i++) (zset.delete(sorted[i][0]), n++);
 			return n;
 		},
+		// `TRIM_SCRIPT`, done step for step on this fake's maps (the real script is run against Valkey in
+		// run-mirror.integration.test.mjs): the two trims, the horizon raised by GT only when one removed something.
+		async eval(script, nkeys, index, horizonKey, cutoff, cap, ttl, member) {
+			await guard();
+			assert.equal(script, TRIM_SCRIPT);
+			assert.deepEqual([nkeys, index, horizonKey], [2, RUNS_INDEX, RUNS_HORIZON]);
+			calls.push(["eval", Number(cutoff), Number(cap), Number(ttl)]);
+			const byAge = await this.zremrangebyscore(index, "-inf", `(${cutoff}`);
+			const byCount = await this.zremrangebyrank(index, 0, -Number(cap) - 1);
+			let h = byAge > 0 ? Number(cutoff) : null;
+			if (byCount > 0) {
+				const oldest = [...zset.values()].sort((a, b) => a - b)[0];
+				if (oldest !== undefined) h = Math.max(h ?? oldest, oldest);
+			}
+			if (h !== null) {
+				await this.zadd(horizonKey, "GT", h, member);
+				calls.push(["pexpire", horizonKey, Number(ttl)]);
+			}
+			calls.push(["pexpire", index, Number(ttl)]);
+			return h === null ? null : String(h);
+		},
 		async zrange(_k, start, stop, withScores) {
 			await guard();
 			const sorted = [...zset.entries()].sort((a, b) => a[1] - b[1]).slice(start, stop + 1);
@@ -127,10 +148,13 @@ test("the index rolls with traffic and is trimmed by the writer", async () => {
 	// traffic never resets, but an ACTIVITY index should roll, because that is what it describes.
 	const redis = fakeRedis();
 	await anchored({ redis, retentionDays: 7 }).mirror(record("j", "2026-08-30T12:00:00.000Z"), "j");
+	// The DEEPEST reader window, never this writer's 7 days: the index is shared, and a short-retention writer that set
+	// its TTL made every peer's history expire on a quiet day. Members are trimmed by score; the body keeps its own PX.
 	assert.deepEqual(
 		redis.calls.filter((c) => c[0] === "pexpire"),
-		[["pexpire", RUNS_INDEX, 7 * DAY]],
+		[["pexpire", RUNS_INDEX, mirrorWindowMs(0)]],
 	);
+	assert.equal(redis.strings.get(runRecordKey("j")).expiresIn, 7 * DAY);
 	// The expiry is only half the claim. Without this the test passed for a week against an index the
 	// writer's own age trim had already emptied: a `pexpire` on nothing is still a `pexpire`.
 	assert.deepEqual([...redis.zset.keys()], ["j"], "and the member the expiry is being set over survives");

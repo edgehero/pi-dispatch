@@ -50,6 +50,38 @@ export const RUNS_HORIZON = "runs:horizon";
 /** The horizon's one member. */
 export const RUNS_HORIZON_MEMBER = "trim";
 
+/**
+ * The writer's trim, in one script so it is atomic with the horizon it raises (issue #599). KEYS: the index and the
+ * horizon; ARGV: the age cutoff in millis, the count cap, the expiry both keys get, and the horizon's member.
+ *
+ * - By age (scores below the cutoff, exclusive) and by count (all but the newest `cap`). A trim that REMOVED something
+ *   raises the horizon with `ZADD GT`: to the cutoff, or after a count trim to the oldest score that remains, which is
+ *   conservative (a removed run ended at or before it). Nothing removed, nothing written: a fleet whose writers trim
+ *   nothing keeps no horizon.
+ * - Both keys expire after the DEEPEST window any reader asks for (`mirrorWindowMs(0)`), never the writer's own. The
+ *   index's members are trimmed by score anyway; a short-retention writer that set the shared index's TTL to its own
+ *   window made the whole index expire on a quiet day, every peer's history with it and no horizon to say so. The
+ *   expiry still rolls with traffic: a fleet that runs nothing for that long has nothing to show.
+ */
+export const TRIM_SCRIPT = `
+local removed = redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", "(" .. ARGV[1])
+local horizon = nil
+if removed > 0 then horizon = tonumber(ARGV[1]) end
+if redis.call("ZREMRANGEBYRANK", KEYS[1], 0, -tonumber(ARGV[2]) - 1) > 0 then
+	local oldest = redis.call("ZRANGE", KEYS[1], 0, 0, "WITHSCORES")
+	if oldest[2] then
+		local score = tonumber(oldest[2])
+		if horizon == nil or score > horizon then horizon = score end
+	end
+end
+if horizon then
+	redis.call("ZADD", KEYS[2], "GT", string.format("%d", horizon), ARGV[4])
+	redis.call("PEXPIRE", KEYS[2], ARGV[3])
+end
+redis.call("PEXPIRE", KEYS[1], ARGV[3])
+return horizon and string.format("%d", horizon) or false
+`;
+
 /** One run's own bytes. */
 export const runRecordKey = (sanitizedJobId) => `runs:rec:${sanitizedJobId}`;
 
@@ -118,32 +150,10 @@ export function makeRunMirror({ redis, retentionDays, now = () => Date.now(), lo
 				const body = JSON.stringify(record);
 				await bounded(redis.set(runRecordKey(sanitizedJobId), body, "PX", windowMs), timeoutMs);
 				await bounded(redis.zadd(RUNS_INDEX, score, sanitizedJobId), timeoutMs);
-				// Trimmed by the WRITER, twice: by age, and by count. Two `ZREMRANGE`s against a run that
-				// took minutes is free, and it means no reader has to pay for a backlog it did not create.
-				const cutoff = now() - windowMs;
-				const byAge = await bounded(redis.zremrangebyscore(RUNS_INDEX, "-inf", `(${cutoff}`), timeoutMs);
-				const byCount = await bounded(redis.zremrangebyrank(RUNS_INDEX, 0, -indexMax - 1), timeoutMs);
-				// A trim that REMOVED something moves the fleet's horizon (`RUNS_HORIZON`): by age to the cutoff, by count to
-				// the oldest score that remains, which is conservative (a removed run ended at or before it). Only when
-				// something went, so a fleet whose writers trim nothing keeps no horizon at all.
-				let horizon = Number(byAge) > 0 ? cutoff : null;
-				if (Number(byCount) > 0) {
-					const oldest = await bounded(redis.zrange(RUNS_INDEX, 0, 0, "WITHSCORES"), timeoutMs);
-					const score = Array.isArray(oldest) && oldest.length >= 2 ? Number(oldest[1]) : NaN;
-					if (Number.isFinite(score)) horizon = Math.max(horizon ?? score, score);
-				}
-				if (horizon !== null) {
-					await bounded(redis.zadd(RUNS_HORIZON, "GT", horizon, RUNS_HORIZON_MEMBER), timeoutMs);
-					// The DEEPEST window any reader asks for, not this writer's: a horizon must outlive every window it can cut
-					// into, and after `MIRROR_MAX_DAYS` every window a reader can ask for starts after it.
-					await bounded(redis.pexpire(RUNS_HORIZON, mirrorWindowMs(0)), timeoutMs);
-				}
-				// ROLLING expiry, deliberately unlike `budget.mjs`'s set-once rule and deliberately like
-				// `pi-dispatch:sched-stalls:<schedulerId>`. A budget window must not be pushed forward by traffic or a busy
-				// day never resets; an ACTIVITY index should roll with traffic, because that is what it
-				// describes. A fleet that stops running jobs loses its index one window later, which is
-				// correct: there is nothing left to show.
-				await bounded(redis.pexpire(RUNS_INDEX, windowMs), timeoutMs);
+				// Trimmed by the WRITER, twice: by age, and by count, and the fleet's horizon raised by the same script
+				// (`TRIM_SCRIPT`), so no crash or timeout can land between a cut and the record of it. A script, not a
+				// MULTI, because the horizon is written only when a trim REMOVED something and depends on what remains.
+				await bounded(redis.eval(TRIM_SCRIPT, 2, RUNS_INDEX, RUNS_HORIZON, now() - windowMs, indexMax, mirrorWindowMs(0), RUNS_HORIZON_MEMBER), timeoutMs);
 				warned = false;
 				return true;
 			} catch (err) {

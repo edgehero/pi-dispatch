@@ -701,7 +701,7 @@ test("getSettings is read ONCE per pickup, and its throw is recorded exactly as 
 		// Plus the pickup-time project (issue #499), null with no projects, and the size resolved beside it (issue #596), the
 		// built-in default with no project and no setting: the gate resolved both before the settings read. And the capacity
 		// (issue #599): the settings are read after admission, so this job held a slot when it threw.
-		assert.deepEqual(Object.keys(records[0]).sort(), ["capacity", "endedAt", "error", "job", "project", "size", "startedAt"]);
+		assert.deepEqual(Object.keys(records[0]).sort(), ["capacity", "earlier", "endedAt", "error", "job", "project", "size", "startedAt"]);
 		assert.equal(typeof records[0].capacity, "object");
 		assert.notEqual(records[0].capacity, null);
 		assert.equal(records[0].project, null);

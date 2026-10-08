@@ -31,11 +31,18 @@
  * window for every host, and a truncated history can never read as a quiet machine. A job running now has no record
  * yet and is not in the history until it ends.
  *
+ * RETRIES AND STALLS. A retry's record replaces its earlier attempt's, so the record carries those attempts' slot
+ * intervals (`earlier`), each counted as an occupied interval on its own host with its size (no wait, no CPU measured).
+ * A pickup after a stall (`stalledRepick`) follows a pickup that wrote no record, whose time is unknown: it is counted,
+ * and said, never guessed. Neither adds a wait.
+ *
  * THE CAPACITY IN FORCE. Every admitted run recorded what its host offered when it started, so the host's capacity is a
  * step function of time (each recorded value holds from its run's start until the next one; before the first, the first
  * holds). Each piece of time is judged against the capacity in force then: the slot count for "full", the budget for
- * what was promised, the host's CPUs for what was used. A share above 100% is then a real over-commit (a budget lowered
- * while jobs ran), and is reported as one.
+ * what was promised, the host's CPUs for what was used. A promise above 100% is then a real over-commit (a budget
+ * lowered while jobs ran), and is reported as one. CPU used never is: in every moment the jobs' measured CPU time is
+ * held to what they could use together (the CPU budget, capped at the host's CPUs), so a container that inflates its
+ * own numbers cannot push the host past what it has.
  *
  * INTEGER MATH. Every instant is a millisecond count from `Date.parse` (a safe integer), and every span, busy, idle and
  * full time is at most the window, so those stay Numbers. A sum of run time is NOT bounded by the window (it is the
@@ -44,7 +51,7 @@
  * a BigInt, and only the final per-mille ratios, rounded half up, come back as Numbers.
  */
 
-import { WORKER_NAME_RE } from "./config.mjs";
+import { WORKER_NAME_RE } from "./worker-name.mjs";
 import { JOB_CPUS_CEILING_CENTI, SIZE_REFUSAL_REASONS, recordedJobSize } from "./job-size.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { SUGGEST_CLOCK_SKEW_MS, SUGGEST_MAX_WALL_MS } from "./size-suggest.mjs";
@@ -129,6 +136,17 @@ const jobCpuCeilingCenti = (c) => {
 	return known.length > 0 ? Math.min(...known) : JOB_CPUS_CEILING_CENTI;
 };
 
+/**
+ * The most CPU this host's jobs could use TOGETHER, in hundredths: the CPU budget (the quota of the one parent cgroup
+ * every job runs under, `cpu-reserve.mjs`) capped at the host's CPUs, or the host's CPUs with the budget off or
+ * unknown; null when neither is known.
+ */
+const segmentCpuCeilingCenti = (c) => {
+	const host = positiveInt(c.cpus) ? c.cpus * 100 : null;
+	if (positiveInt(c.cpuCenti)) return host === null ? c.cpuCenti : Math.min(c.cpuCenti, host);
+	return host;
+};
+
 /** A record's span `{ start, end, wallMs }` in millis, or null when it is not one this report counts (see the header). */
 function spanOf(record, nowMs) {
 	const start = Date.parse(record.startedAt ?? "");
@@ -147,7 +165,7 @@ function perMille(num, den) {
 /** The nearest-rank percentile of a sorted array: the value at rank ceil(p/100 x n). size-suggest's rule. */
 const rank = (sorted, pct) => sorted[Math.max(0, Math.ceil((pct * sorted.length) / 100) - 1)];
 
-const zeroCounts = () => ({ used: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0 });
+const zeroCounts = () => ({ used: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0, earlier: 0, stalledRepick: 0 });
 
 /**
  * Where each host's history starts: `Map<name, { fromMs, source, truncated } | null>`, null for a host no source holds.
@@ -204,6 +222,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 
 	// PASS 1: every record judged once, so the hosts (and so each host's coverage) are known before anything is counted.
 	const judged = [];
+	const earlierRuns = [];
 	for (const record of Array.isArray(records) ? records : []) {
 		const occupancy = occupancyOf(record);
 		const project = record?.project ?? null;
@@ -220,9 +239,19 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			continue;
 		}
 		judged.push({ record, occupancy, project, span: spanOf(record, nowMs) });
+		// The slot time of the job's EARLIER attempts, which this record carries because it replaced theirs: each an
+		// occupied interval on its own host, with its size and nothing else known (no wait, no CPU measurement).
+		for (const e of Array.isArray(record.earlier) ? record.earlier : []) {
+			if (!isObject(e) || !isHostName(e.host)) continue;
+			const eSpan = spanOf(e, nowMs);
+			if (eSpan === null) continue;
+			const eSize = positiveInt(e.memMiB) && positiveInt(e.cpuCenti) ? { memMiB: e.memMiB, cpuCenti: e.cpuCenti } : null;
+			earlierRuns.push({ host: e.host, span: eSpan, size: eSize, project });
+		}
 	}
 	const names = new Set([...liveByName.keys()]);
 	for (const j of judged) names.add(j.record.host);
+	for (const e of earlierRuns) names.add(e.host);
 	const covers = hostCoverage(names, liveByName, coverage, windowStartMs, nowMs);
 
 	const byHost = new Map();
@@ -263,6 +292,9 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		if (size === null) host.counts.withoutSize++;
 		const retry = Number.isInteger(record.attempt) && record.attempt > 1;
 		if (retry) host.counts.retried++;
+		// A pickup after a stall: the stalled pickup wrote no record (a crash or a lost lock), so its time is unknown.
+		const repick = record.stalledRepick === true;
+		if (repick) host.counts.stalledRepick++;
 		const recorded = capacityOf(record.capacity);
 		if (recorded !== null) host.recorded.push({ at: span.start, capacity: recorded });
 		const raw = record.resources?.cpuUsec;
@@ -271,7 +303,18 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		// its first add's, so its wait would include the earlier attempt; a clock between two hosts can put a queuedAt
 		// after its own start, and that run says nothing about waiting.
 		const queued = typeof record.queuedAt === "string" ? Date.parse(record.queuedAt) : NaN;
-		if (!retry && Number.isFinite(queued) && span.start >= coveredFrom && span.start <= nowMs && span.start - queued >= 0) host.waits.push(span.start - queued);
+		if (!retry && !repick && Number.isFinite(queued) && span.start >= coveredFrom && span.start <= nowMs && span.start - queued >= 0) host.waits.push(span.start - queued);
+	}
+
+	for (const e of earlierRuns) {
+		const cover = covers.get(e.host);
+		if (cover === null) continue;
+		const start = Math.max(e.span.start, cover.fromMs);
+		const end = Math.min(e.span.end, nowMs);
+		if (end < start || (end === start && (e.span.start < cover.fromMs || e.span.start > nowMs))) continue;
+		const host = hostOf(e.host);
+		host.counts.earlier++;
+		host.runs.push({ start, end, span: e.span, size: e.size, rawCpuUsec: null, recorded: null, project: e.project, earlier: true });
 	}
 
 	const hosts = [];
@@ -330,9 +373,24 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		// starts, at one instant). Only a segment of positive length is counted, so a run that ends exactly when the next
 		// begins is one slot reused, never two at once, whatever the order of the two events; sorting the end first keeps
 		// the level itself true at that instant too. A segment's slot count is the one in force when it begins.
+		// Each run's own CPU time first, clamped to what its job could use: its `--cpus` (the CPU budget, capped at the
+		// runtime's count) over its whole wall. A run with no measurement adds nothing to CPU used.
+		const clamped = new Set();
+		h.runs.forEach((r, i) => {
+			r.used = 0n;
+			r.cpuUsec = null;
+			if (r.rawCpuUsec === null) {
+				if (!r.earlier) h.counts.withoutResources++;
+				return;
+			}
+			const most = BigInt(jobCpuCeilingCenti(r.recorded ?? capAt(r.span.start))) * BigInt(r.span.wallMs) * 10n; // hundredths x ms x 10 = microseconds
+			const reported = BigInt(r.rawCpuUsec);
+			if (reported > most) clamped.add(i);
+			r.cpuUsec = reported > most ? most : reported;
+		});
 		const events = [];
-		for (const r of h.runs) events.push([r.start, 1], [r.end, -1]);
-		for (const t of changes) events.push([t, 0]);
+		h.runs.forEach((r, i) => events.push([r.start, 1, i], [r.end, -1, i]));
+		for (const t of changes) events.push([t, 0, -1]);
 		events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 		let level = 0;
 		let at = coveredFrom;
@@ -341,9 +399,34 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		let fullKnown = false;
 		let peak = 0;
 		let runMs = 0n;
+		let cpuUsedNum = 0n;
+		const active = new Set();
 		const segment = (a, b, n) => {
 			if (b <= a) return;
-			const slots = capAt(a).slots;
+			const cap = capAt(a);
+			// CPU used in this segment: each running job's measured time spread over its wall, together never more than
+			// the host could give its jobs then (the CPU budget, which the jobs' parent cgroup holds them all to, capped at
+			// the host's CPUs; with the budget off, the host's CPUs). Past it, every share is cut in proportion and the runs
+			// are counted as clamped.
+			const parts = [];
+			let sum = 0n;
+			for (const i of active) {
+				const r = h.runs[i];
+				if (r.cpuUsec === null || r.span.wallMs <= 0) continue;
+				const part = (r.cpuUsec * BigInt(b - a)) / BigInt(r.span.wallMs);
+				parts.push([i, part]);
+				sum += part;
+			}
+			const ceiling = segmentCpuCeilingCenti(cap);
+			const most = ceiling === null ? null : BigInt(ceiling) * BigInt(b - a) * 10n;
+			const cut = most !== null && sum > most;
+			for (const [i, part] of parts) {
+				const kept = cut ? (part * most) / sum : part;
+				h.runs[i].used += kept;
+				if (positiveInt(cap.cpus)) cpuUsedNum += kept;
+				if (cut) clamped.add(i);
+			}
+			const slots = cap.slots;
 			if (slots !== null) fullKnown = true;
 			const full = slots !== null && n >= slots;
 			if (n > 0) busyMs += b - a;
@@ -358,17 +441,19 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 				bucket.runMs += BigInt(n) * BigInt(hi - lo);
 			});
 		};
-		for (const [t, delta] of events) {
+		for (const [t, delta, i] of events) {
 			segment(at, t, level);
 			at = Math.max(at, t);
 			level += delta;
+			if (delta === 1) active.add(i);
+			else if (delta === -1) active.delete(i);
 		}
 		segment(at, nowMs, level);
+		h.counts.cpuClamped += clamped.size;
 
-		// What was promised and used, against the capacity IN FORCE piece by piece (the covered window cut at every change).
-		// A piece whose budget (or CPU count) is not a number adds to neither side of its share. CPU used is each run's
-		// measured CPU time spread evenly over its wall (a record carries one total, not a profile), clamped first to the
-		// most its job could use: its `--cpus` (the CPU budget, capped at the runtime's count) over its whole wall.
+		// What was promised (CPU used is counted in the sweep above), against the capacity IN FORCE piece by piece (the
+		// covered window cut at every change). A piece whose budget (or CPU count) is not a number adds to neither side of
+		// its share.
 		const pieces = [coveredFrom, ...changes, nowMs];
 		const forEachPiece = (a, b, fn) => {
 			for (let i = 0; i + 1 < pieces.length; i++) {
@@ -389,32 +474,15 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		});
 		let memNum = 0n;
 		let cpuPromiseNum = 0n;
-		let cpuUsedNum = 0n;
 		const projects = new Map();
 		for (const r of h.runs) {
-			let cpuUsec = null;
-			if (r.rawCpuUsec !== null) {
-				const ceiling = jobCpuCeilingCenti(r.recorded ?? capAt(r.span.start));
-				const most = BigInt(ceiling) * BigInt(r.span.wallMs) * 10n; // hundredths x ms x 10 = microseconds
-				const reported = BigInt(r.rawCpuUsec);
-				if (reported > most) h.counts.cpuClamped++;
-				cpuUsec = reported > most ? most : reported;
-			} else {
-				h.counts.withoutResources++;
-			}
-			let used = 0n;
 			forEachPiece(r.start, r.end, (c, len) => {
 				if (r.size !== null && positiveInt(c.memMiB)) memNum += BigInt(r.size.memMiB) * len;
 				if (r.size !== null && promiseCpuCenti(c) !== null) cpuPromiseNum += BigInt(r.size.cpuCenti) * len;
-				if (cpuUsec !== null && r.span.wallMs > 0) {
-					const part = (cpuUsec * len) / BigInt(r.span.wallMs);
-					used += part;
-					if (positiveInt(c.cpus)) cpuUsedNum += part;
-				}
 			});
 			const p = projects.get(r.project) ?? { runMs: 0n, cpuUsec: 0n };
 			p.runMs += BigInt(r.end - r.start);
-			p.cpuUsec += used;
+			p.cpuUsec += r.used;
 			projects.set(r.project, p);
 		}
 		const ranked = [...projects.entries()].sort((a, b) => (b[1].runMs > a[1].runMs ? 1 : b[1].runMs < a[1].runMs ? -1 : String(a[0] ?? "").localeCompare(String(b[0] ?? ""))));

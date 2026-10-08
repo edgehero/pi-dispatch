@@ -120,16 +120,16 @@ export function parseCpus(value) {
 }
 
 /**
- * The one spelling of a memory size: `<n>g` when it is whole gigabytes, else `<n>m`. Every `--memory`, `--memory-swap`
- * and stored row is written by this function, and `container-spec.mjs`'s `memoryBytes` reads every value it can write
- * (a test walks the whole accepted range), so the OOM rule's 90%-of-the-limit comparison works at every size.
- */
-/**
  * The two never-fits refusals (index.mjs `SIZE_REFUSAL_COMMENTS`, issue #596), both decided before the job holds a slot.
  * Here, beside the size they judge, so a leaf can read them; a test holds them equal to the processor's.
  */
 export const SIZE_REFUSAL_REASONS = Object.freeze(["job-size-exceeds-host", "job-size-exceeds-share"]);
 
+/**
+ * The one spelling of a memory size: `<n>g` when it is whole gigabytes, else `<n>m`. Every `--memory`, `--memory-swap`
+ * and stored row is written by this function, and `container-spec.mjs`'s `memoryBytes` reads every value it can write
+ * (a test walks the whole accepted range), so the OOM rule's 90%-of-the-limit comparison works at every size.
+ */
 export function formatMemory(memMiB) {
 	return memMiB % 1024 === 0 ? `${memMiB / 1024}g` : `${memMiB}m`;
 }
