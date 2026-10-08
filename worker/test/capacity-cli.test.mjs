@@ -169,7 +169,7 @@ test("the registry is read without pruning, and per host lines carry that host's
 	h.opts.readLiveHostsFn = async (_redis, opts) => ((asked = opts), { hosts: [] });
 	assert.equal(await runCapacity(["--since", "24h"], h.opts), 0);
 	assert.equal(asked.prune, false, "a report writes nothing, not even the registry's tidying");
-	assert.match(h.out.join(""), /1 retried run: its earlier attempts are counted on the host that ran them, from the record the retry kept; an attempt whose record was not kept is not counted, so busy time can be under-counted/);
+	assert.match(h.out.join(""), /1 retried run: its earlier attempts are counted on the host that ran them, where that host's history is here and covers them; an attempt whose record was not kept is not counted, so busy time can be under-counted/);
 });
 
 test("control characters never reach the terminal, whatever a report holds", () => {
@@ -206,7 +206,8 @@ test("a retry whose earlier attempt ran on another host: each host's sentence is
 	const retry = { jobId: "r", host: "b", project: "web", startedAt: iso(NOW - 2 * H), endedAt: iso(NOW - H), queuedAt: null, attempt: 2, capacity: cap, earlier: [{ host: "a", startedAt: iso(NOW - 4 * H), endedAt: iso(NOW - 3 * H), memMiB: 1024, cpuCenti: 100 }] };
 	const r = computeCapacity({ records: [retry], windowStartMs: NOW - 24 * H, nowMs: NOW, bucketMs: H });
 	const by = Object.fromEntries(r.hosts.map((h) => [h.name, hostCaveats(h.coverage)]));
-	assert.deepEqual(by.b, ["1 retried run: its earlier attempts are counted on the host that ran them, from the record the retry kept; an attempt whose record was not kept is not counted, so busy time can be under-counted"]);
+	assert.deepEqual(by.b, ["1 retried run: its earlier attempts are counted on the host that ran them, where that host's history is here and covers them; an attempt whose record was not kept is not counted, so busy time can be under-counted"]);
 	assert.deepEqual(by.a, ["1 earlier attempt of a retried run counted here, from the record its retry kept"]);
 	assert.ok(!capacityText(r, { since: "24h" }).includes("0 earlier attempts"));
+	assert.equal(hostCaveats({ ...r.hosts[0].coverage, retried: 0, earlier: 2 }).at(-1), "2 earlier attempts of retried runs counted here, from the records their retries kept");
 });

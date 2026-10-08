@@ -192,7 +192,8 @@ Two more fields in every run record feed the capacity report (issue #599), which
   A record from before this field has no `capacity` key at all; the report reads its reason first (a wait or size
   refusal never used a slot), then counts it as having used one when it lasted at least a second or reported
   `resources`, and says how many it inferred each way. A value no host can have (more than 16384 slots, 4096 CPUs or
-  64 TiB of memory) is written as null, and a record that says one anyway is counted as unreadable.
+  64 TiB of memory) is written as null, and one in a record from an older worker is read as unknown; the run still
+  counts, and the report says how many records gave one.
 - Both are numbers and fixed words, like the rest of the record.
 
 ### `pi-dispatch capacity`
@@ -229,7 +230,7 @@ reads the report when it opens and again on `u` ([what the panel shows](multi-ho
   said as not counted, and so is one on a host whose history is not shared. A row whose list of running jobs cannot be read is named, and the number running now is then unknown. A container whose stop did not take (an
   orphan) is named, but its time after the failed stop is in no record and is not counted as busy.
 - A retry replaces its earlier attempt's record, but carries that attempt's
-  slot time in `earlier`, so it is counted, on the host that ran that attempt; only an attempt whose record could not be read is not, and the report says
+  slot time in `earlier`, so it is counted, on the host that ran that attempt where that host's history is here and covers it. An attempt the record could not carry (its own record unreadable, or beyond the 4 kept) is not counted, nor is one outside its host's history, and the report says
   how many runs were retries. A run whose first attempt stalled and was picked up again is counted too, and the report says the stalled
   pickup's own time is not. A stall of a later attempt is not counted at all: the run after it reads as an ordinary
   retry, and the stalled attempt's time is in no record. CPU used comes from `resources`, which the job's container
