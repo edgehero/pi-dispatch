@@ -4732,21 +4732,15 @@ export function appliedSplitChecks(applied, mine, myName, peers) {
  */
 export async function defaultReadAppliedSplit(url) {
 	try {
-		const { makeRedisClient } = await import("./connection.mjs");
-		const client = makeRedisClient(url, { failFast: true, lazyConnect: true });
-		client.on("error", () => {});
-		try {
-			await client.connect();
-			const text = await client.get(ALLOC_PLAN_KEY);
+		return await withDoctorClient(url, async (client) => {
+			const text = await boundedOp(client.get(ALLOC_PLAN_KEY), DOCTOR_VALKEY_OP_TIMEOUT_MS);
 			if (text === null || text === undefined) return null;
 			let digest = null;
 			try {
 				digest = JSON.parse(text)?.envelopeDigest;
 			} catch {}
 			return typeof digest === "string" && /^[0-9a-f]{16}$/.test(digest) ? { digest } : { undecodable: true };
-		} finally {
-			client.disconnect();
-		}
+		});
 	} catch {
 		return null;
 	}
@@ -7399,16 +7393,9 @@ function workerNameOf(declared) {
 
 async function defaultReadHosts(url) {
 	try {
-		const { makeRedisClient } = await import("./connection.mjs");
 		const { readLiveHosts } = await import("./host-registry.mjs");
-		const client = makeRedisClient(url, { failFast: true, lazyConnect: true });
-		client.on("error", () => {});
-		try {
-			await client.connect();
-			return await readLiveHosts(client);
-		} finally {
-			client.disconnect();
-		}
+		// readLiveHosts bounds each of its own commands.
+		return await withDoctorClient(url, (client) => readLiveHosts(client));
 	} catch (err) {
 		return { unreachable: err?.message ?? "registry unreadable" };
 	}
@@ -7457,33 +7444,58 @@ export async function dollarKeysExistWith(client, { now = () => new Date(), dead
 /** `dollarKeysExistWith` over a fail-fast client on `url`, always disconnected. */
 export async function defaultDollarKeysExist(url) {
 	try {
-		const { makeRedisClient } = await import("./connection.mjs");
-		const client = makeRedisClient(url, { failFast: true, lazyConnect: true });
-		client.on("error", () => {});
-		try {
-			await client.connect();
-			return await dollarKeysExistWith(client);
-		} finally {
-			client.disconnect();
-		}
+		// dollarKeysExistWith bounds its whole read.
+		return await withDoctorClient(url, (client) => dollarKeysExistWith(client));
 	} catch {
 		return false;
 	}
 }
 
 async function defaultProbeValkey(url) {
-	const { makeRedisClient } = await import("./connection.mjs");
-	const client = makeRedisClient(url, { failFast: true, lazyConnect: true });
-	client.on("error", () => {}); // swallow connect errors + retries; reachability is the ✓/✗, not a trace
 	try {
-		await client.connect();
-		await client.ping();
-		return true;
+		return await withDoctorClient(url, async (client) => (await boundedOp(client.ping(), DOCTOR_VALKEY_OP_TIMEOUT_MS), true));
 	} catch {
 		return false;
-	} finally {
-		client.disconnect();
 	}
+}
+
+/** How long doctor waits for a Valkey connection to be ready (the TCP connect AND the ready check), and for one command. */
+export const DOCTOR_VALKEY_CONNECT_TIMEOUT_MS = 5_000;
+export const DOCTOR_VALKEY_OP_TIMEOUT_MS = 5_000;
+
+/**
+ * One fail-fast client for one of doctor's own Valkey reads, its connection bounded, always dropped. Measured: a
+ * server that accepts the connection and never answers holds ioredis in its ready check forever (`failFast` bounds
+ * only the TCP connect), so doctor never exited; and `disconnect()` arms a 2 s timer a closed socket never clears, so
+ * the client is built with a disconnect timeout of 0 and its stream destroyed. Throws when the connection is not ready
+ * in time; `fn`'s own commands are the caller's to bound (`boundedOp`).
+ */
+export async function withDoctorClient(url, fn, { connectTimeoutMs = DOCTOR_VALKEY_CONNECT_TIMEOUT_MS, makeClient } = {}) {
+	const make = makeClient ?? (await import("./connection.mjs")).makeRedisClient;
+	const client = make(url, { failFast: true, lazyConnect: true, disconnectTimeoutMs: 0 });
+	client.on?.("error", () => {}); // swallow connect errors + retries; reachability is the ✓/✗, not a trace
+	try {
+		await connectWithin(client, connectTimeoutMs);
+		return await fn(client);
+	} finally {
+		try {
+			client.disconnect?.();
+			client.stream?.destroy?.();
+		} catch {
+			// a release that failed has stopped mattering
+		}
+	}
+}
+
+/** A command's reply, or a rejection after `ms` (the client is dropped by `withDoctorClient` either way). */
+export function boundedOp(promise, ms) {
+	return new Promise((resolve, reject) => {
+		const t = setTimeout(() => reject(new Error("timeout")), ms);
+		Promise.resolve(promise).then(
+			(v) => (clearTimeout(t), resolve(v)),
+			(e) => (clearTimeout(t), reject(e)),
+		);
+	});
 }
 
 /**
