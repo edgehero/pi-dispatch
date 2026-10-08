@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, microsUsd, INSIGHTS_SPLIT_REFUSALS, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
+import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, layoutCapacityChart, microsUsd, capMilliText, capPercentText, capShare, INSIGHTS_CAPACITY_HOST_NAME, INSIGHTS_CAPACITY_JOBS_ONLY, INSIGHTS_SPLIT_REFUSALS, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { buildGraphModel } from "../src/graph-model.mjs";
-import { buildGraphScene, drawnColumns } from "../src/graph-html.mjs";
+import { buildGraphScene, drawnColumns, PAGE_THEME } from "../src/graph-html.mjs";
 import { COST_CLASSES, foldTriggerCosts } from "../src/costs.mjs";
 
 const NOW = 1770000000000;
@@ -1091,4 +1091,168 @@ test("the split box scrolls sideways on a narrow window, and its labels never wr
   assert.match(out, /#split\{[^}]*overflow-x:auto\}/);
   assert.match(out, /#split \.wl\{[^}]*flex-shrink:0\}/);
   assert.match(out, /#split \.state\.over\{[^}]*flex-shrink:0\}/);
+});
+
+// ---- the capacity section (issue #599, phase 4, REQ-CAPACITY-INSIGHTS) ----
+
+const CH = 60 * 60 * 1000;
+/** Ten one-hour buckets ending at NOW; `covered(i)` says how much of bucket i the host's history covers. */
+function capBuckets(covered, { avg = () => 1500, peak = () => 2 } = {}) {
+  return Array.from({ length: 10 }, (_, i) => {
+    const c = covered(i);
+    return { fromMs: NOW - 10 * CH + i * CH, coveredMs: c, busyMs: c > 0 ? Math.floor(c / 2) : 0, fullMs: c > 0 ? 0 : 0, peak: c > 0 ? peak(i) : 0, avgMilli: c > 0 ? avg(i) : null };
+  });
+}
+const CAP_FACTS = () => ({ busy: "50%", idle: "50%", missing: null, avg: "1.5", slots: 4, peak: 2, full: "0%", basis: null, memory: "memory 25% of the 16g budget", cpu: "CPU 20% of the 8 CPU budget", cpuUsed: "10% of the host's 8 CPUs", wait: "p50 40s, p95 6m (12 runs)", projects: ["web 3h", "api 1h"] });
+const CAP_SLICE = () => ({
+  window: { fromMs: NOW - 10 * CH, toMs: NOW, bucketMs: CH },
+  truncated: true,
+  coverage: "Coverage: history: the run mirror; not shared here: laptop.",
+  hosts: [
+    { name: "mini1", fromMs: NOW - 10 * CH, truncated: false, slots: 4, buckets: capBuckets(() => CH), facts: CAP_FACTS(), caveats: ["2 jobs refused before a slot"], notes: "history from the run mirror" },
+    // history from 4.5h in: the first four buckets and half of the fifth have none
+    { name: "mini2", fromMs: NOW - 5.5 * CH, truncated: true, slots: 2, buckets: capBuckets((i) => (i < 4 ? 0 : i === 4 ? CH / 2 : CH)), facts: { ...CAP_FACTS(), missing: "45%", slots: 2 }, caveats: [], notes: "history from the run mirror; from ... on" },
+    { name: "laptop", fromMs: NOW, truncated: false, slots: 1, buckets: capBuckets(() => 0), notShared: "no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)" },
+  ],
+});
+const capPage = (capacity, extra = {}) => buildInsightsHtml({ window: "7d", capacity, ...extra }, { now: NOW });
+const capSection = (html) => {
+  const at = html.indexOf("<h2>capacity</h2>");
+  return at < 0 ? null : html.slice(at, html.indexOf("</section>", at));
+};
+
+test("the capacity section's restated rules are the worker's: the host name, the per-mille words and the fleet sentence", async () => {
+  const { WORKER_NAME_RE } = await import("@edgehero/pi-dispatch/config");
+  const cli = await import("@edgehero/pi-dispatch/capacity-cli");
+  assert.equal(INSIGHTS_CAPACITY_HOST_NAME.source, WORKER_NAME_RE.source);
+  assert.equal(INSIGHTS_CAPACITY_HOST_NAME.flags, WORKER_NAME_RE.flags);
+  for (let m = 0; m <= 12_345; m += 7) {
+    assert.equal(capPercentText(m), cli.percentText(m));
+    assert.equal(capMilliText(m), cli.milliText(m));
+  }
+  for (const [part, whole] of [[0, 0], [1, 3], [2, 3], [5, 1000], [604_800_000, 604_800_000], [1, 2000], [3, 2000], [123_456_789, 604_800_000]]) assert.equal(capShare(part, whole), cli.share(part, whole));
+  const lines = cli.coverageLines({ source: "mirror", historyNotShared: [], unreadable: 0, withoutHost: 0, earlierDropped: 0, liveUnreadable: 0, running: null, liveNotCounted: 0, reason: null });
+  assert.equal(lines[1], INSIGHTS_CAPACITY_JOBS_ONLY);
+});
+
+test("layoutCapacityChart: a fixed axis to now, bars only over covered time, and no data as its own rectangles", () => {
+  const nc = CAP_SLICE();
+  const win = nc.window;
+  const mini2 = { slots: 2, buckets: nc.hosts[1].buckets };
+  const lay = layoutCapacityChart(mini2, { ...win, nowMs: NOW });
+  const xOf = (t) => lay.plot.x + ((t - win.fromMs) / (NOW - win.fromMs)) * lay.plot.w;
+  // the no-data stretch is exactly the time before the history starts, half a bucket in
+  assert.deepEqual(lay.gaps.map((g) => [g.fromMs, g.toMs]), [[win.fromMs, NOW - 5.5 * CH]]);
+  assert.equal(lay.gaps[0].x, lay.plot.x);
+  assert.ok(Math.abs(lay.gaps[0].x + lay.gaps[0].w - xOf(NOW - 5.5 * CH)) < 1e-9);
+  // no bar starts inside it: missing history is never drawn as a bar, of any height
+  assert.equal(lay.bars.length, 6);
+  for (const b of lay.bars) {
+    assert.ok(b.x >= lay.gaps[0].x + lay.gaps[0].w - 1e-9, "a bar inside the no-data stretch");
+    assert.ok(b.y >= lay.plot.y - 1e-9 && b.y + b.h <= lay.plot.y + lay.plot.h + 1e-9, "a bar outside the plot");
+  }
+  assert.equal(lay.bars[0].partial, true, "the bucket the history starts inside is half covered, and says so");
+  assert.ok(Math.abs(lay.bars[0].w - (xOf(NOW - 5 * CH) - xOf(NOW - 5.5 * CH))) < 1e-9);
+  // the slot line, and a bar's height its average against the scale (2 slots, 1.5 on average)
+  assert.equal(lay.scaleMax, 2);
+  assert.equal(lay.limit.y, lay.plot.y);
+  assert.ok(Math.abs(lay.bars[1].h - 0.75 * lay.plot.h) < 1e-9);
+  assert.equal(lay.bars[1].peakY, lay.plot.y);
+  // the axis ends at now: a report read before now leaves the rest as no data, never idle
+  const early = layoutCapacityChart(mini2, { ...win, toMs: NOW - CH, nowMs: NOW });
+  assert.deepEqual(early.gaps.at(-1).toMs, NOW);
+  assert.ok(early.gaps.at(-1).fromMs <= NOW - CH);
+  // an idle bucket (covered, nothing ran) has no height and is NOT no data
+  const idle = layoutCapacityChart({ slots: 2, buckets: capBuckets(() => CH, { avg: () => 0, peak: () => 0 }) }, { ...win, nowMs: NOW });
+  assert.deepEqual(idle.gaps, []);
+  assert.ok(idle.bars.every((b) => b.h === 0 && b.peakY === null));
+  // nothing at all: the whole axis is no data
+  const none = layoutCapacityChart({ slots: null, buckets: [] }, { ...win, nowMs: NOW });
+  assert.deepEqual(none.gaps.map((g) => [g.fromMs, g.toMs]), [[win.fromMs, NOW]]);
+  assert.equal(none.limit, null);
+  for (const xl of lay.xLabels) assert.ok(xl.x >= lay.plot.x && xl.x <= lay.plot.x + lay.plot.w);
+});
+
+test("the capacity section: each host's numbers and caveats, no data hatched with its reason, truncation said", () => {
+  const html = capPage(CAP_SLICE());
+  const sec = capSection(html);
+  assert.ok(sec !== null);
+  assert.ok(sec.includes(INSIGHTS_CAPACITY_JOBS_ONLY), "the jobs-only limit is always said");
+  assert.match(sec, /<span class="pid">mini1<\/span> <span>busy 50%, idle 50% · avg 1\.5 of 4, peak 2 of 4 · full 0% of the time<\/span>/);
+  assert.ok(sec.includes("promised: memory 25% of the 16g budget, CPU 20% of the 8 CPU budget · CPU used: 10% of the host&#39;s 8 CPUs · wait for a slot: p50 40s, p95 6m (12 runs)"));
+  assert.ok(sec.includes("projects by run time: web 3h, api 1h"));
+  assert.ok(sec.includes("2 jobs refused before a slot"));
+  assert.ok(sec.includes("busy 50%, idle 50% (45% of the window has no history)"));
+  assert.ok(sec.includes("history truncated: it starts at"), "a truncated host says so");
+  assert.ok(sec.includes("history truncated: the run mirror holds nothing older"), "and the section does");
+  assert.match(sec, /<span class="pid">laptop<\/span> <span class="cap-warn">history not here<\/span>/);
+  assert.ok(sec.includes("Coverage: history: the run mirror; not shared here: laptop."));
+  // laptop: one hatched stretch over the whole axis, and no bar at all
+  const laptopSvg = sec.slice(sec.indexOf("jobs at once on laptop"), sec.indexOf("</svg>", sec.indexOf("jobs at once on laptop")));
+  assert.equal((laptopSvg.match(/class="nodata"/g) ?? []).length, 1);
+  assert.ok(!laptopSvg.includes(`fill="${PAGE_THEME.accent}"`), "a host whose history is not here draws no bar, of any height");
+  // its no-data tooltip carries the shared sentence
+  const tips = JSON.parse(html.match(/var INSIGHTS = (.*);\n/)[1]).tips;
+  assert.ok(tips.some((t) => t.endsWith("no data: no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)")));
+  assert.ok(tips.some((t) => /busy 50%, avg 1\.5 of 2, peak 2, full 0% \(part of it has no data\)$/.test(t)), "the half-covered bucket says so");
+  // a payload without the slice draws no section
+  assert.equal(capSection(capPage(undefined)), null);
+});
+
+test("the capacity section is byte-identical for one payload and one now, whatever the hosts' order", () => {
+  const a = capPage(CAP_SLICE());
+  assert.equal(capPage(CAP_SLICE()), a);
+  const p = CAP_SLICE();
+  p.hosts.reverse();
+  for (const h of p.hosts) h.buckets.reverse();
+  assert.equal(capPage(p), a);
+  for (const word of ["NaN", "undefined", "Infinity"]) assert.ok(!a.includes(word), word);
+  assert.equal(a.split("<svg").length, a.split("</svg>").length);
+  assert.equal((a.match(/<g[ >]/g) ?? []).length, (a.match(/<\/g>/g) ?? []).length);
+  for (const [, d] of capSection(a).matchAll(/ d="([^"]*)"/g)) assert.match(d, /^(M[0-9.-]+ [0-9.-]+L[0-9.-]+ [0-9.-]+)*$/);
+  for (const needle of ["src=", "<link", "url(", "@import", "fetch", "XMLHttpRequest", "innerHTML"]) assert.ok(!a.includes(needle), needle);
+  assert.ok(!/free/i.test(capSection(a)));
+});
+
+test("hostile host, project, caveat and reason text in the capacity slice is escaped or dropped", () => {
+  const evil = '"><script>alert(1)</script>';
+  const p = CAP_SLICE();
+  p.hosts.push({ ...p.hosts[0], name: evil });
+  p.hosts[0].facts.projects = [`${evil} 3h`];
+  p.hosts[0].facts.memory = `memory ${evil}`;
+  p.hosts[0].caveats = [evil, "\u001b]0;title\u0007 bell"];
+  p.hosts[0].notes = evil;
+  p.hosts[2].notShared = `the run mirror was not read (${evil})`;
+  p.coverage = evil;
+  const html = capPage(p);
+  assert.equal(html.split("<script").length - 1, 1);
+  assert.ok(!html.includes("<script>alert"));
+  assert.ok(capSection(html).includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
+  assert.ok(!html.includes("\u001b") && !html.includes("\u0007"), "control characters are made visible text");
+  assert.ok(capSection(html).includes("1 more host not drawn"), "a name that is not a worker name is dropped and counted");
+  const down = capPage({ unreachable: evil });
+  assert.ok(capSection(down).includes("capacity not read: &quot;&gt;&lt;script&gt;"));
+  assert.ok(capSection(down).includes(INSIGHTS_CAPACITY_JOBS_ONLY));
+});
+
+test("a bad capacity slice degrades only its own section, and a junk bucket is drawn as no data, never idle", () => {
+  const sizing = { hosts: { rows: [] }, projects: {}, windowDays: 30 };
+  const bad = CAP_SLICE();
+  Object.defineProperty(bad, "hosts", { get() { throw new Error("boom"); } });
+  const html = capPage(bad, { sizing, budget: CANNED_BUDGET() });
+  assert.ok(capSection(html).includes("capacity not read: the capacity slice is not readable"));
+  assert.ok(html.includes("<h2>job sizes</h2>") && html.includes("<h2>budget</h2>"), "the sections beside it still render");
+  // the window not one: a stated absence, no chart
+  assert.ok(capSection(capPage({ ...CAP_SLICE(), window: { fromMs: NOW, toMs: NOW - 1, bucketMs: CH } })).includes("the report&#39;s window is not readable"));
+  // a bucket with junk numbers is dropped: its hour is hatched, not empty
+  const junk = CAP_SLICE();
+  junk.hosts = [junk.hosts[0]];
+  junk.hosts[0].buckets[3] = { ...junk.hosts[0].buckets[3], busyMs: CH * 2 };
+  junk.hosts[0].buckets[5] = { ...junk.hosts[0].buckets[5], avgMilli: "lots" };
+  const sec = capSection(capPage(junk));
+  assert.equal((sec.match(/class="nodata"/g) ?? []).length, 2);
+  // a host whose facts are junk says no history rather than inventing a number
+  const nofacts = CAP_SLICE();
+  nofacts.hosts[0].facts = { busy: 5 };
+  assert.match(capSection(capPage(nofacts)), /<span class="pid">mini1<\/span> <span class="dim">no history here<\/span>/);
 });

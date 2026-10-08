@@ -1133,7 +1133,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the report (`INT-CAPACITY-REPORT`) and `pi-dispatch capacity`; phase 2 counts the jobs running now (from the host
   rows), and shows the same report as one doctor line per host and through the `dispatch_capacity` tool; phase 3
   shows it in the panel's HOSTS view (`u`), each live host's slots, budget and running jobs now beside its last 7 days;
-  a later phase shows it on the insights page. It is READ-ONLY: computing it writes no record, no key and no file, and
+  phase 4 shows it on the insights page, over the page's window. It is READ-ONLY: computing it writes no record, no key and no file, and
   nothing decides on it. It is JOBS ONLY: no host load is sampled, so a machine busy with other work reads as idle,
   and every surface says so. **History it cannot see is never shown as idle**: time before what its sources hold (a
   run mirror at its cap, the log retention) and a live host whose runs it cannot read are reported as missing,
@@ -1178,6 +1178,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   unreadable; given a read that never answers, then after 30 s the view says so and `u` reads again; given fifty presses of Esc and `u` over a
   slow read, then one read runs; given a host name or id with a control character, then it reaches the terminal
   escaped; given a width of 47 columns, then no line is wider.
+  Given `/dispatch insights` for 7d, 30d or mtd, then its capacity section shows each host's busy and idle share,
+  slots on average and at peak, time full, what was promised and CPU used, the wait p50 and p95 and the top projects
+  in the words `pi-dispatch capacity` prints for the same report, `mtd` from the first instant of the month, and a
+  chart per host whose time axis ends at the page's instant; given time before a host's history starts or a host
+  whose history is not here, then the chart hatches it as no data, never draws it as an idle stretch, and says why;
+  given a truncated history, then the section says so; given a hostile host name it is dropped and counted, and any
+  other text is escaped; given a capacity slice that cannot be read, then only that section says so.
 - **Traces to**: `DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-DURABLE-RUN-HISTORY`, `OQ-039`
 
@@ -1814,6 +1821,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   host and no plan reason text appear on the page; given no envelope, then the section is one
   line and no Valkey read is made for it; given an unreadable split, then a banner says so and the
   section draws no number; given an unreadable spend scan, then both counts read "not counted".
+  Given the capacity report (`REQ-CAPACITY-INSIGHTS`, issue #599), then a **capacity** section follows the job sizes:
+  per host its headline numbers in the CLI's words and a chart of the jobs at once per bucket against its slot count
+  on a fixed time axis ending at the page's instant, with every stretch no bucket vouches for hatched as no data
+  (never drawn as idle) and the jobs-only sentence always shown; given an unreadable report or slice, then that
+  section alone says so; given the same report and instant twice, then the bytes are identical.
 
 ## REQ-SCOPED-PAUSE-WINDOWS
 
@@ -3407,6 +3419,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-08 | Issue #599, phase 4. **`REQ-CAPACITY-INSIGHTS` AMENDED**: the Statement says phase 4 shows the report on the insights page over the page's window (it said a later phase); the Acceptance adds the page: each host's headline numbers in the words `pi-dispatch capacity` prints, `mtd` from the first instant of the month, a chart whose axis ends at the page's instant, missing history hatched as no data and never drawn as idle, truncation said, hostile names dropped and counted, and an unreadable slice confined to its section. **`REQ-INSIGHTS-HTML-EXPORT` AMENDED**, the Acceptance: the capacity section after the job sizes, the jobs-only sentence always shown, byte-identical for one report and instant. Its Statement and Scope are UNCHANGED, checked: no port, no tool, nothing new served. |
 | 2026-10-08 | Issue #599, phase 3, second corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance of the panel's HOSTS view: a history read that does not answer within 30 s is said to have not answered in time and `u` reads again, and a malformed budget value reads as unreadable, never as not known yet. The statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 3, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance of the panel's HOSTS view: its 7 days are labelled with the minute they were read and carry the CLI's caveats; `u` in the view reads them again, one read at a time (fifty Esc and `u` presses over a slow read start one); a row without a beat time reads `?` slots, as an unparseable list does; a budget a starting worker has not read is not known yet, not absent. It said the report was read once per opening and inert inside. The statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 3. **`REQ-CAPACITY-INSIGHTS` AMENDED**: the Statement says phase 3 shows the report in the panel's HOSTS view (`u`); the Acceptance adds the view: each live host's slots in use of its limit, what its budget has promised, who waits, its stale age and up to four running jobs, from the registry rows the panel's tick already reads, and its last 7 days from the same report read once when the view opens and never on the tick; a host whose history is not here says why in the CLI's words and shows no busy share; an unparseable job list reads `?`, never 0; a hostile name is escaped; nothing is wider than 47 columns at 47. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is added (the view reads through the panel's own seam), and the model-callable list still matches the registrations. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: the registry gains a reader (the panel), no field. |

@@ -1589,6 +1589,257 @@ function sizingSectionHtml(ns, tips, nowMs) {
   return parts.join("");
 }
 
+// ---- capacity (issue #599, phase 4, REQ-CAPACITY-INSIGHTS, DES-CAPACITY-FROM-RECORDS) ----
+// The assembler (index.ts `capacityViewOf`) hands this section the capacity report's buckets and every sentence and
+// headline number already in the CLI's words; this module loads nothing from the worker, so what it restates is pinned
+// by insights-html.test.mjs: the host-name rule (worker-name.mjs `WORKER_NAME_RE`), the per-mille words (capacity-cli
+// `share`, `percentText`, `milliText`) and the fleet sentence below (the CLI's last line).
+export const INSIGHTS_CAPACITY_HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const INSIGHTS_CAPACITY_JOBS_ONLY = "Jobs only: a machine busy with other work reads as idle.";
+const CAPACITY_HOSTS_MAX = 20;
+// The page's windows give at most 31 x 4 = 124 buckets (index.ts `INSIGHTS_CAPACITY_BUCKET_MS`) or 7 x 24 = 168; one
+// more for a window that does not end on a bucket edge. Past the cap a bucket is dropped, and its time is drawn as no data.
+const CAPACITY_BUCKETS_MAX = 200;
+const CAPACITY_PROJECTS_MAX = 6; // the report's top 5, then the rest summed as one
+const CAPACITY_TEXT_MAX = 400;
+const CAP_W = 920;
+const CAP_H = 96;
+const CAP_ML = 46;
+const CAP_MR = 10;
+const CAP_MT = 10;
+const CAP_MB = 16;
+const CAP_HATCH_STEP = 6;
+
+/** Part of whole as a per-mille, rounded half up; 0 when there is no whole (capacity-cli `share`, restated). */
+export function capShare(part, whole) {
+  return whole > 0 ? Math.floor((part * 2000 + whole) / (whole * 2)) : 0;
+}
+/** Thousandths as a percentage, at most one decimal (capacity-cli `percentText`, restated). */
+export function capPercentText(perMille) {
+  return `${Math.floor(perMille / 10)}${perMille % 10 === 0 ? "" : `.${perMille % 10}`}%`;
+}
+/** Thousandths as a number with at most one decimal, rounded half up (capacity-cli `milliText`, restated). */
+export function capMilliText(milli) {
+  const tenths = Math.floor((milli + 50) / 100);
+  return `${Math.floor(tenths / 10)}${tenths % 10 === 0 ? "" : `.${tenths % 10}`}`;
+}
+
+/** A sentence from the assembler: escaped where a terminal or a page would act on a character, and clipped. */
+function capText(v, max = CAPACITY_TEXT_MAX) {
+  return typeof v === "string" && v !== "" ? clip(escapeInterpreted(v), max) : null;
+}
+
+function capInt(v) {
+  return Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
+
+/** One bucket, or null when any of its numbers is not one the report can give (it is then drawn as no data). */
+function normCapBucket(b, win) {
+  if (b === null || typeof b !== "object") return null;
+  const fromMs = Number.isSafeInteger(b.fromMs) ? b.fromMs : null;
+  if (fromMs === null || fromMs < win.fromMs || fromMs >= win.toMs) return null;
+  const len = Math.min(win.bucketMs, win.toMs - fromMs);
+  const coveredMs = capInt(b.coveredMs);
+  const busyMs = capInt(b.busyMs);
+  const peak = capInt(b.peak);
+  if (coveredMs === null || coveredMs > len || busyMs === null || busyMs > coveredMs || peak === null || peak > 100_000) return null;
+  const fullMs = b.fullMs === null ? null : capInt(b.fullMs);
+  if (b.fullMs !== null && (fullMs === null || fullMs > coveredMs)) return null;
+  const avgMilli = b.avgMilli === null ? null : capInt(b.avgMilli);
+  if (b.avgMilli !== null && avgMilli === null) return null;
+  return { fromMs, coveredMs, busyMs, fullMs, peak, avgMilli: coveredMs > 0 ? Math.min(avgMilli ?? 0, peak * 1000) : null };
+}
+
+/** The headline words, each a string or null; the projects a list. Nothing else is read. */
+function normCapFacts(f) {
+  if (f === null || typeof f !== "object") return null;
+  const busy = capText(f.busy, 12);
+  const idle = capText(f.idle, 12);
+  const avg = capText(f.avg, 16);
+  if (busy === null || idle === null || avg === null) return null;
+  return {
+    busy,
+    idle,
+    missing: capText(f.missing, 12),
+    avg,
+    slots: Number.isSafeInteger(f.slots) && f.slots >= 1 ? f.slots : null,
+    peak: capInt(f.peak) ?? 0,
+    full: capText(f.full, 12),
+    memory: capText(f.memory, 120),
+    cpu: capText(f.cpu, 120),
+    cpuUsed: capText(f.cpuUsed, 120),
+    wait: capText(f.wait, 120),
+    projects: (Array.isArray(f.projects) ? f.projects : []).slice(0, CAPACITY_PROJECTS_MAX).map((p) => capText(p, 80)).filter((p) => p !== null),
+  };
+}
+
+/**
+ * The capacity slice, allowlisted: the window (three integers), at most CAPACITY_HOSTS_MAX hosts by name (the worker
+ * name rule; anything else dropped and counted), each with its buckets, its words, its caveats and its state (history
+ * not shared, no history, or numbers), and the coverage sentence. Null for a payload without the slice (no section),
+ * `{ unreachable }` for a read that failed or a window that is not one.
+ */
+function normCapacity(v) {
+  if (v === null || v === undefined || typeof v !== "object") return null;
+  if (typeof v.unreachable === "string") return { unreachable: capText(v.unreachable, 240) ?? "unknown" };
+  const w = v.window !== null && typeof v.window === "object" ? v.window : {};
+  const win = { fromMs: w.fromMs, toMs: w.toMs, bucketMs: w.bucketMs };
+  if (![win.fromMs, win.toMs, win.bucketMs].every(Number.isSafeInteger) || win.fromMs >= win.toMs || win.bucketMs <= 0 || Math.abs(win.fromMs) > 8.64e15 || Math.abs(win.toMs) > 8.64e15) return { unreachable: "the report's window is not readable" };
+  const valid = (Array.isArray(v.hosts) ? v.hosts : []).filter((h) => h !== null && typeof h === "object" && typeof h.name === "string" && INSIGHTS_CAPACITY_HOST_NAME.test(h.name));
+  const seen = new Set();
+  const unique = [...valid].sort((a, b) => cmpStr(a.name, b.name)).filter((h) => (seen.has(h.name) ? false : (seen.add(h.name), true)));
+  const hosts = unique.slice(0, CAPACITY_HOSTS_MAX).map((h) => {
+    const buckets = (Array.isArray(h.buckets) ? h.buckets : []).map((b) => normCapBucket(b, win)).filter((b) => b !== null).sort((a, b) => a.fromMs - b.fromMs);
+    const kept = [];
+    for (const b of buckets) if (kept.length < CAPACITY_BUCKETS_MAX && (kept.length === 0 || kept[kept.length - 1].fromMs !== b.fromMs)) kept.push(b);
+    const base = {
+      name: h.name,
+      fromMs: Number.isSafeInteger(h.fromMs) ? h.fromMs : null,
+      truncated: h.truncated === true,
+      slots: Number.isSafeInteger(h.slots) && h.slots >= 1 && h.slots <= 100_000 ? h.slots : null,
+      buckets: kept,
+    };
+    const notShared = capText(h.notShared);
+    if (notShared !== null) return { ...base, state: "not-shared", notShared };
+    const facts = normCapFacts(h.facts);
+    if (h.empty === true || facts === null) return { ...base, state: "empty" };
+    const caveats = (Array.isArray(h.caveats) ? h.caveats : []).slice(0, 12).map((c) => capText(c)).filter((c) => c !== null);
+    return { ...base, state: "numbers", facts, caveats, notes: capText(h.notes, 600) };
+  });
+  return { window: win, truncated: v.truncated === true, coverage: capText(v.coverage, 800), hosts, dropped: (Array.isArray(v.hosts) ? v.hosts.length : 0) - hosts.length };
+}
+
+/** A diagonal hatch over one rectangle as ONE path (a pattern fill would need a paint-server reference, banned here). */
+function hatchPath(x, y, w, h) {
+  const segs = [];
+  for (let c = x - h; c < x + w; c += CAP_HATCH_STEP) {
+    const lo = Math.max(0, x - c);
+    const hi = Math.min(h, x + w - c);
+    if (hi > lo) segs.push(`M${fmt(c + lo)} ${fmt(y + h - lo)}L${fmt(c + hi)} ${fmt(y + h - hi)}`);
+  }
+  return segs.join("");
+}
+
+/**
+ * Pure geometry for one host's row of the capacity chart, exported so its invariants are testable as numbers: a fixed
+ * time axis from the window's start to `nowMs` (so a quiet week is visible, never compressed), one bar per bucket over
+ * the part of it the history covers, its height the jobs running there at once on average, a tick at its peak, the
+ * host's slot count as a line; and NO DATA, every stretch of the axis no bucket vouches for (before the host's history
+ * starts, a history not shared, a bucket the allowlist dropped, the time after the report was read), as its own
+ * rectangles. No data is never a bar of zero: an idle stretch has no bar and no hatch, a stretch without data is hatched.
+ */
+export function layoutCapacityChart(host, { fromMs, toMs, bucketMs, nowMs, width, height } = {}) {
+  const w = Number.isFinite(width) && width > 100 ? width : CAP_W;
+  const h = Number.isFinite(height) && height > 40 ? height : CAP_H;
+  const plot = { x: CAP_ML, y: CAP_MT, w: w - CAP_ML - CAP_MR, h: h - CAP_MT - CAP_MB };
+  const start = Number.isFinite(fromMs) ? fromMs : 0;
+  const end = Number.isFinite(nowMs) && nowMs > start ? nowMs : Number.isFinite(toMs) && toMs > start ? toMs : start + 1;
+  const reportEnd = Number.isFinite(toMs) ? Math.min(toMs, end) : end;
+  const xOf = (t) => plot.x + ((Math.min(end, Math.max(start, t)) - start) / (end - start)) * plot.w;
+  const buckets = Array.isArray(host?.buckets) ? host.buckets : [];
+  const slots = Number.isSafeInteger(host?.slots) && host.slots >= 1 ? host.slots : null;
+  let top = Math.max(slots ?? 0, 1);
+  for (const b of buckets) if (b.coveredMs > 0) top = Math.max(top, b.peak, Math.ceil((b.avgMilli ?? 0) / 1000));
+  const scaleMax = top;
+  const yOf = (n) => plot.y + plot.h - (Math.min(n, scaleMax) / scaleMax) * plot.h;
+  const covered = [];
+  const bars = [];
+  for (const b of buckets) {
+    if (!(b.coveredMs > 0)) continue;
+    const bEnd = Math.min(b.fromMs + bucketMs, reportEnd);
+    const cLo = Math.max(start, bEnd - b.coveredMs);
+    if (!(bEnd > cLo)) continue;
+    covered.push([cLo, bEnd]);
+    const x = xOf(cLo);
+    const y = yOf((b.avgMilli ?? 0) / 1000);
+    bars.push({ x, w: xOf(bEnd) - x, y, h: plot.y + plot.h - y, peakY: b.peak > 0 ? yOf(b.peak) : null, bucket: b, partial: bEnd - cLo < Math.min(bucketMs, reportEnd - b.fromMs) });
+  }
+  covered.sort((a, b) => a[0] - b[0]);
+  const noData = [];
+  let at = start;
+  for (const [lo, hi] of covered) {
+    if (lo > at) noData.push([at, lo]);
+    at = Math.max(at, hi);
+  }
+  if (at < end) noData.push([at, end]);
+  const gaps = noData.map(([lo, hi]) => ({ fromMs: lo, toMs: hi, x: xOf(lo), w: xOf(hi) - xOf(lo) })).filter((g) => g.w > 0);
+  const limit = slots !== null ? { y: yOf(slots), label: `${slots} slot${slots === 1 ? "" : "s"}` } : null;
+  const yTicks = slots === scaleMax ? [] : [{ y: yOf(scaleMax), label: String(scaleMax) }];
+  const xLabels = [0, 1, 2, 3].map((k) => ({ x: plot.x + (k / 3) * plot.w, label: utcDateStr(start + (k / 3) * (end - start)).slice(5) }));
+  return { plot, bars, gaps, limit, yTicks, xLabels, scaleMax, width: w, height: h };
+}
+
+function capWhen(ms) {
+  return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC` : "?";
+}
+
+function capacityChartSvg(host, nc, tips, nowMs, noDataWhy) {
+  const lay = layoutCapacityChart(host, { ...nc.window, nowMs });
+  const svg = [`<svg width="${fmt(lay.width)}" height="${fmt(lay.height)}" role="img" aria-label="jobs at once on ${escapeHtml(host.name)}">`];
+  svg.push(axisFrame(lay.plot, lay.yTicks));
+  for (const g of lay.gaps) {
+    const idx = tips.push(`${capWhen(g.fromMs)} to ${capWhen(g.toMs)} · no data: ${noDataWhy}`) - 1;
+    svg.push(`<g class="nodata" data-tip="${fmt(idx)}"><rect x="${fmt(g.x)}" y="${fmt(lay.plot.y)}" width="${fmt(g.w)}" height="${fmt(lay.plot.h)}" fill="${PAGE_THEME.dim}" fill-opacity=".12"/><path d="${hatchPath(g.x, lay.plot.y, g.w, lay.plot.h)}" stroke="${PAGE_THEME.dim}" stroke-width=".6" fill="none"/></g>`);
+  }
+  const of = host.slots !== null ? ` of ${host.slots}` : "";
+  for (const bar of lay.bars) {
+    const b = bar.bucket;
+    const full = b.fullMs === null ? "" : `, full ${capPercentText(capShare(b.fullMs, b.coveredMs))}`;
+    const idx = tips.push(`${capWhen(b.fromMs)} · busy ${capPercentText(capShare(b.busyMs, b.coveredMs))}, avg ${capMilliText(b.avgMilli ?? 0)}${of}, peak ${fmt(b.peak)}${full}${bar.partial ? " (part of it has no data)" : ""}`) - 1;
+    // the whole bucket answers the tooltip, the bar only where it has height
+    svg.push(`<g data-tip="${fmt(idx)}"><rect x="${fmt(bar.x)}" y="${fmt(lay.plot.y)}" width="${fmt(bar.w)}" height="${fmt(lay.plot.h)}" fill="${PAGE_THEME.canvas}" fill-opacity="0"/>`);
+    if (bar.h > 0) svg.push(`<rect x="${fmt(bar.x)}" y="${fmt(bar.y)}" width="${fmt(Math.max(0.5, bar.w - 0.5))}" height="${fmt(bar.h)}" fill="${PAGE_THEME.accent}"/>`);
+    if (bar.peakY !== null) svg.push(`<line x1="${fmt(bar.x)}" y1="${fmt(bar.peakY)}" x2="${fmt(bar.x + bar.w)}" y2="${fmt(bar.peakY)}" stroke="${PAGE_THEME.fg}" stroke-opacity=".5"/>`);
+    svg.push("</g>");
+  }
+  if (lay.limit !== null) {
+    svg.push(`<line x1="${fmt(lay.plot.x)}" y1="${fmt(lay.limit.y)}" x2="${fmt(lay.plot.x + lay.plot.w)}" y2="${fmt(lay.limit.y)}" stroke="${PAGE_THEME.amber}" stroke-dasharray="4,3"/>`);
+    svg.push(`<text x="${fmt(lay.plot.x - 6)}" y="${fmt(lay.limit.y + 3)}" text-anchor="end" font-size="9" fill="${PAGE_THEME.amber}">${escapeHtml(lay.limit.label)}</text>`);
+  }
+  for (const xl of lay.xLabels) svg.push(`<text x="${fmt(xl.x)}" y="${fmt(lay.plot.y + lay.plot.h + 12)}" text-anchor="middle" font-size="8" fill="${PAGE_THEME.dim}">${escapeHtml(xl.label)}</text>`);
+  svg.push("</svg>");
+  return svg.join("");
+}
+
+function capacitySectionHtml(nc, tips, nowMs, windowLabel) {
+  if (nc.unreachable) return `<div class="dim">capacity not read: ${escapeHtml(nc.unreachable)}</div><div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`;
+  const hours = nc.window.bucketMs % 3_600_000 === 0 ? `${fmt(nc.window.bucketMs / 3_600_000)}h` : `${fmt(Math.round(nc.window.bucketMs / 60_000))}m`;
+  const parts = [];
+  parts.push(`<div class="small">${escapeHtml(windowLabel)}, from ${escapeHtml(capWhen(nc.window.fromMs))} to ${escapeHtml(capWhen(nc.window.toMs))}. Each bar is one ${escapeHtml(hours)} bucket: how many jobs ran at once on average, with a tick at the most at once; the dashed line is the host's slot count. Hatched is no data, counted as neither busy nor idle; an idle stretch is empty.</div>`);
+  parts.push(`<div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`);
+  if (nc.truncated) parts.push(`<div class="small cap-warn">history truncated: the run mirror holds nothing older for at least one host, so its earlier time is drawn as no data, never as idle</div>`);
+  if (nc.hosts.length === 0) parts.push('<div class="dim">no host ran a job in this window</div>');
+  for (const host of nc.hosts) {
+    const block = [];
+    if (host.state === "not-shared") {
+      block.push(`<h3><span class="pid">${escapeHtml(host.name)}</span> <span class="cap-warn">history not here</span></h3>`);
+      block.push(`<div class="small">${escapeHtml(host.notShared)}</div>`);
+      block.push(capacityChartSvg(host, nc, tips, nowMs, host.notShared));
+    } else if (host.state === "empty") {
+      block.push(`<h3><span class="pid">${escapeHtml(host.name)}</span> <span class="dim">no history here</span></h3>`);
+      block.push(capacityChartSvg(host, nc, tips, nowMs, "no history here"));
+    } else {
+      const f = host.facts;
+      const of = f.slots !== null ? ` of ${f.slots}` : "";
+      const head = [`busy ${f.busy}, idle ${f.idle}${f.missing !== null ? ` (${f.missing} of the window has no history)` : ""}`, `avg ${f.avg}${of}, peak ${fmt(f.peak)}${of}`];
+      if (f.full !== null) head.push(`full ${f.full} of the time`);
+      block.push(`<h3><span class="pid">${escapeHtml(host.name)}</span> <span>${escapeHtml(head.join(" · "))}</span></h3>`);
+      const used = [f.memory !== null && f.cpu !== null ? `promised: ${f.memory}, ${f.cpu}` : null, f.cpuUsed !== null ? `CPU used: ${f.cpuUsed}` : null, `wait for a slot: ${f.wait ?? "no run recorded one"}`].filter((x) => x !== null);
+      block.push(`<div class="small">${escapeHtml(used.join(" · "))}</div>`);
+      if (f.projects.length > 0) block.push(`<div class="small">projects by run time: ${escapeHtml(f.projects.join(", "))}</div>`);
+      if (host.truncated) block.push(`<div class="small cap-warn">history truncated: it starts at ${escapeHtml(capWhen(host.fromMs))}</div>`);
+      const why = host.fromMs !== null && host.fromMs > nc.window.fromMs ? `this host's history starts at ${capWhen(host.fromMs)}${host.truncated ? " (truncated)" : ""}` : "not covered by the report";
+      block.push(capacityChartSvg(host, nc, tips, nowMs, why));
+      for (const c of host.caveats) block.push(`<div class="small cap-warn">${escapeHtml(c)}</div>`);
+      if (host.notes !== null) block.push(`<div class="dim small">${escapeHtml(host.notes)}</div>`);
+    }
+    parts.push(`<div class="bl cap">${block.join("")}</div>`);
+  }
+  if (nc.dropped > 0) parts.push(`<div class="dim small">${fmt(nc.dropped)} more host${nc.dropped === 1 ? "" : "s"} not drawn (past ${fmt(CAPACITY_HOSTS_MAX)}, or not a worker name)</div>`);
+  if (nc.coverage !== null) parts.push(`<div class="dim small">${escapeHtml(nc.coverage)}</div>`);
+  return `<div id="capacity">${parts.join("")}</div>`;
+}
+
 function utcDateStr(ms) {
   // toISOString throws outside the representable range, and a junk payload must not be able to
   // reach a throw through a date field.
@@ -1674,6 +1925,10 @@ h3{font-size:12px;color:${PAGE_THEME.dim};margin:0 0 4px}
 .alog th{color:${PAGE_THEME.dim};font-weight:400;text-align:left;padding:1px 14px 1px 0}
 .alog td{padding:1px 14px 1px 0;white-space:nowrap}
 .bl{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:8px 10px;overflow:hidden}
+#capacity .bl{margin:8px 0;overflow-x:auto}
+#capacity .small{margin:2px 0}
+#capacity h3{color:${PAGE_THEME.fg}}
+.cap-warn{color:${PAGE_THEME.amber}}
 .rowlink{cursor:pointer}
 #wrap{position:relative;border:1px solid ${PAGE_THEME.border};border-radius:6px}
 svg.canvas{display:block;width:100%;height:auto;min-height:220px;max-height:75vh;cursor:grab;touch-action:none}
@@ -1849,6 +2104,23 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     ns = null;
   }
   if (ns !== null) bodyParts.push(`<section><h2>job sizes</h2>${sizingSectionHtml(ns, tips, scene.nowMs)}</section>`);
+  // Issue #599, phase 4: how busy each host was over the page's window. Its own try: a hostile capacity slice takes
+  // nothing else down, and is taken down by nothing else. No section for a payload without it.
+  let nc;
+  try {
+    nc = normCapacity(p.capacity);
+  } catch {
+    nc = { unreachable: "the capacity slice is not readable" };
+  }
+  if (nc !== null) {
+    let html;
+    try {
+      html = capacitySectionHtml(nc, tips, scene.nowMs, windowLabel);
+    } catch {
+      html = `<div class="dim">capacity not drawn: the slice is not readable</div><div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`;
+    }
+    bodyParts.push(`<section><h2>capacity</h2>${html}</section>`);
+  }
   if (nf !== null) {
     if (nf.plans.length > 0) bodyParts.push(`<section><h2>plans</h2>${planCardsHtml(nf.plans)}</section>`);
     bodyParts.push(`<section><h2>daily spend</h2>${dailyChartHtml(nf.daily, tips)}${cumulativeHtml(nf.daily, tips)}</section>`);

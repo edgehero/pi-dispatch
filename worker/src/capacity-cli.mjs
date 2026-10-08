@@ -176,31 +176,51 @@ function hostLines(h, since, coverage) {
 		lines.push(`  no history here${h.shared ? "" : `: ${notSharedWhy(h, coverage)}`}`);
 		return lines;
 	}
-	const cov = h.coverage;
-	const missing = h.missingMs > 0 ? ` (${percentText(share(h.missingMs, h.missingMs + h.coveredMs))} of the window has no history)` : "";
-	lines.push(`  busy ${percentText(share(h.busyMs, h.coveredMs))}, idle ${percentText(share(h.idleMs, h.coveredMs))}${missing}`);
-	const c = h.capacity;
-	const of = c.slots !== null ? ` of ${c.slots}` : "";
-	const note = basisNote(c);
-	const basis = note === null ? "" : ` (${note})`;
-	const full = h.fullMs !== null ? `, full ${percentText(share(h.fullMs, h.coveredMs))} of the time` : "";
-	lines.push(`  slots: avg ${milliText(h.avgMilli ?? 0)}${of}, peak ${h.peak}${of}${full}${basis}`);
-	const memOf = Number.isSafeInteger(c.memMiB) && c.memMiB > 0 ? ` of the ${formatMemory(c.memMiB)} budget` : "";
-	const mem = h.promisedMemPerMille !== null ? `memory ${percentText(h.promisedMemPerMille)}${memOf}` : `memory: no budget${c.memMiB === "off" ? " (off)" : ""}`;
-	const hostCpus = c.cpus !== null ? `the host's ${c.cpus} CPUs` : "the host's CPUs";
-	const promiseOf = Number.isSafeInteger(c.cpuCenti) && c.cpuCenti > 0 ? `the ${formatCpus(c.cpuCenti)} CPU budget` : `${hostCpus} (no CPU budget)`;
-	const cpu = h.promisedCpuPerMille !== null ? `CPU ${percentText(h.promisedCpuPerMille)} of ${promiseOf}` : "CPU: no budget or CPU count known";
-	lines.push(`  promised: ${mem}, ${cpu}`);
-	if (h.usedCpuPerMille !== null) lines.push(`  CPU used: ${percentText(h.usedCpuPerMille)} of ${hostCpus}`);
-	lines.push(h.waits.n > 0 ? `  wait for a slot: p50 ${durationText(h.waits.p50Ms)}, p95 ${durationText(h.waits.p95Ms)} (${plural(h.waits.n, "run")})` : "  wait for a slot: no run recorded one");
-	if (h.projects.length > 0) {
-		const named = h.projects.map((p) => `${p.project ?? "(no project)"} ${durationText(p.runMs)}`);
-		if (h.otherProjects) named.push(`${plural(h.otherProjects.count, "other")} ${durationText(h.otherProjects.runMs)}`);
-		lines.push(`  projects by run time: ${named.join(", ")}`);
-	}
-	for (const caveat of hostCaveats(cov)) lines.push(`  ${caveat}`);
+	const f = hostFacts(h);
+	const missing = f.missing !== null ? ` (${f.missing} of the window has no history)` : "";
+	lines.push(`  busy ${f.busy}, idle ${f.idle}${missing}`);
+	const of = f.slots !== null ? ` of ${f.slots}` : "";
+	const basis = f.basis === null ? "" : ` (${f.basis})`;
+	const full = f.full !== null ? `, full ${f.full} of the time` : "";
+	lines.push(`  slots: avg ${f.avg}${of}, peak ${f.peak}${of}${full}${basis}`);
+	lines.push(`  promised: ${f.memory}, ${f.cpu}`);
+	if (f.cpuUsed !== null) lines.push(`  CPU used: ${f.cpuUsed}`);
+	lines.push(f.wait !== null ? `  wait for a slot: ${f.wait}` : "  wait for a slot: no run recorded one");
+	if (f.projects.length > 0) lines.push(`  projects by run time: ${f.projects.join(", ")}`);
+	for (const caveat of hostCaveats(h.coverage)) lines.push(`  ${caveat}`);
 	lines.push(`  ${historyNotes(h).join("; ")}`);
 	return lines;
+}
+
+/**
+ * A host's headline numbers in words, as the CLI prints them (`hostLines`) and the insights page shows them, so the two
+ * cannot say a number differently: busy and idle of the covered time, the share of the window with no history (null
+ * when none), slots on average and at peak with the slot count (null when unknown), time full (null when not known),
+ * the basis note, what memory and CPU were promised against, CPU used (null when not measured), the wait (null when no
+ * run recorded one), and the projects by run time with the rest summed. For a host with covered time only.
+ */
+export function hostFacts(h) {
+	const c = h.capacity;
+	const memOf = Number.isSafeInteger(c.memMiB) && c.memMiB > 0 ? ` of the ${formatMemory(c.memMiB)} budget` : "";
+	const hostCpus = c.cpus !== null ? `the host's ${c.cpus} CPUs` : "the host's CPUs";
+	const promiseOf = Number.isSafeInteger(c.cpuCenti) && c.cpuCenti > 0 ? `the ${formatCpus(c.cpuCenti)} CPU budget` : `${hostCpus} (no CPU budget)`;
+	const projects = h.projects.map((p) => `${p.project ?? "(no project)"} ${durationText(p.runMs)}`);
+	if (h.projects.length > 0 && h.otherProjects) projects.push(`${plural(h.otherProjects.count, "other")} ${durationText(h.otherProjects.runMs)}`);
+	return {
+		busy: percentText(share(h.busyMs, h.coveredMs)),
+		idle: percentText(share(h.idleMs, h.coveredMs)),
+		missing: h.missingMs > 0 ? percentText(share(h.missingMs, h.missingMs + h.coveredMs)) : null,
+		avg: milliText(h.avgMilli ?? 0),
+		slots: c.slots,
+		peak: h.peak,
+		full: h.fullMs !== null ? percentText(share(h.fullMs, h.coveredMs)) : null,
+		basis: basisNote(c),
+		memory: h.promisedMemPerMille !== null ? `memory ${percentText(h.promisedMemPerMille)}${memOf}` : `memory: no budget${c.memMiB === "off" ? " (off)" : ""}`,
+		cpu: h.promisedCpuPerMille !== null ? `CPU ${percentText(h.promisedCpuPerMille)} of ${promiseOf}` : "CPU: no budget or CPU count known",
+		cpuUsed: h.usedCpuPerMille !== null ? `${percentText(h.usedCpuPerMille)} of ${hostCpus}` : null,
+		wait: h.waits.n > 0 ? `p50 ${durationText(h.waits.p50Ms)}, p95 ${durationText(h.waits.p95Ms)} (${plural(h.waits.n, "run")})` : null,
+		projects,
+	};
 }
 
 /**
@@ -263,8 +283,11 @@ export function fleetRecordNotes(cov) {
 	return notes;
 }
 
-/** What the fleet's history covers, said plainly, ending with what this report cannot see. */
-function coverageLines(cov) {
+/**
+ * What the fleet's history covers, said plainly, ending with what this report cannot see: the CLI's last two lines, and the
+ * insights page's coverage line.
+ */
+export function coverageLines(cov) {
 	const notes = [`history: ${cov.source === "local" ? "this host's files only" : cov.source === "mirror" ? "the run mirror" : cov.source === "mirror+local" ? "the run mirror and this host's files" : "the records given"}`];
 	if (cov.historyNotShared.length > 0) notes.push(`not shared here: ${cov.historyNotShared.join(", ")}`);
 	notes.push(...fleetRecordNotes(cov));

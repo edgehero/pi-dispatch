@@ -283,12 +283,14 @@ The rules in full, with their rounding steps, are in [choosing a size from the
 runs](scoped-limits.md#choosing-a-size-from-the-runs).
 
 **How busy each host is** is a separate report, from the same run records plus the jobs running now: busy and idle
-time, jobs at once, the memory and CPU promised against the budget and the CPU used. It shows in four places:
+time, jobs at once, the memory and CPU promised against the budget and the CPU used. It shows in five places:
 
 - **`pi-dispatch capacity`** (`--since 24h|7d|30d`, `--host`, `--json`).
 - **`pi-dispatch doctor`**: one line per host for the last 7 days, never a warning.
 - **`dispatch_capacity`**: the same report to a model in pi.
 - **The panel's HOSTS view** (`u`): each host's slots, budget and running jobs now, with its last 7 days.
+- **The insights page**: a chart per host of the jobs at once over the page's window, with the same numbers
+  ([the capacity section](insights.md#the-capacity-section)).
 
 It counts this deployment's jobs only, so a machine busy with other work reads as idle; see
 [the capacity report](insights.md#pi-dispatch-capacity).

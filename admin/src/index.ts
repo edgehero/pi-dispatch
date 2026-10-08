@@ -135,6 +135,7 @@ import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scope
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
+import { coverageLines, historyNotes, hostCaveats, hostFacts, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -2635,7 +2636,58 @@ export async function assembleSizingView(paths: any, nowMs: number, { readHostsF
   return { hosts, ...sizing, windowDays: SUGGEST_WINDOW_DAYS };
 }
 
-async function assembleInsights(paths: any, window: string, fullPaths = false): Promise<any> {
+/**
+ * The bucket each insights window splits its capacity chart into (issue #599, phase 4): an hour over 7 days (168 bars),
+ * six hours over 30 days or the month so far (at most 124). Finer than `CAPACITY_WINDOWS`' own (the CLI prints no
+ * chart), coarse enough that a bar stays wider than a few pixels on the page. The headline numbers do not depend on it.
+ */
+export const INSIGHTS_CAPACITY_BUCKET_MS: Readonly<Record<string, number>> = Object.freeze({ "7d": 60 * 60 * 1000, "30d": 6 * 60 * 60 * 1000, mtd: 6 * 60 * 60 * 1000 });
+
+/**
+ * One capacity report as the insights page draws it (issue #599, phase 4, REQ-CAPACITY-INSIGHTS): every sentence and
+ * headline number in the CLI's own words (capacity-cli `hostFacts`, `hostCaveats`, `historyNotes`, `notSharedWhy`,
+ * `coverageLines`), so the page cannot say a number or a caveat differently from `pi-dispatch capacity`; the buckets
+ * as the report has them, for the chart. The page only lays this out. Exported for its tests.
+ */
+export function capacityViewOf(report: any): any {
+  const cov = report.coverage ?? {};
+  const hosts = (Array.isArray(report.hosts) ? report.hosts : []).map((h: any) => {
+    const base = {
+      name: h.name,
+      fromMs: h.coverage?.fromMs ?? null,
+      truncated: h.coverage?.truncated === true,
+      slots: h.capacity?.slots ?? null,
+      buckets: (Array.isArray(h.buckets) ? h.buckets : []).map((b: any) => ({ fromMs: b.fromMs, coveredMs: b.coveredMs, busyMs: b.busyMs, fullMs: b.fullMs, peak: b.peak, avgMilli: b.avgMilli })),
+    };
+    if (!h.shared) return { ...base, notShared: notSharedWhy(h, cov) };
+    if (!(h.coveredMs > 0)) return { ...base, empty: true };
+    const f = hostFacts(h);
+    const caveats = [...(f.basis ? [`slots: ${f.basis}`] : []), ...hostCaveats(h.coverage)];
+    return { ...base, facts: { ...f, projects: [...f.projects] }, caveats, notes: historyNotes(h).join("; ") };
+  });
+  const [coverage] = coverageLines(cov);
+  return { window: { ...report.window }, truncated: cov.truncated === true, coverage, hosts };
+}
+
+/**
+ * The insights page's capacity slice (issue #599, phase 4): the report `pi-dispatch capacity` and `dispatch_capacity`
+ * compute (`readCapacity`, read-only), over the page's own window (`mtd` from the start of the month, as the spend
+ * is) and the page's instant, cut to `capacityViewOf`. `{ unreachable }` when it could not be read; nothing here is
+ * ever drawn as idle for that.
+ */
+export async function assembleCapacityView(paths: any, window: string, nowMs: number, { readCapacityFn = readCapacity, env = deploymentEnv() }: { readCapacityFn?: any; env?: any } = {}): Promise<any> {
+  const bucketMs = INSIGHTS_CAPACITY_BUCKET_MS[window] ?? INSIGHTS_CAPACITY_BUCKET_MS["30d"];
+  let res: any;
+  try {
+    res = await readCapacityFn({ url: paths.valkeyUrl, env, window, now: () => nowMs, span: { sinceMs: (n: number) => costsSinceMs(window, n), bucketMs } });
+  } catch (err: any) {
+    return { unreachable: `the run records could not be read (${err?.message ?? err})` };
+  }
+  if (!res?.report) return { unreachable: String(res?.error ?? "no report") };
+  return capacityViewOf(res.report);
+}
+
+async function assembleInsights(paths: any, window: string, fullPaths = false, nowMs: number = Date.now()): Promise<any> {
   const graph = await assembleGraph(paths);
   const costs = assembleCosts(paths, window);
   // The budget slice rides BOTH return shapes: the caps are the operator's one real lever on cost,
@@ -2644,13 +2696,13 @@ async function assembleInsights(paths: any, window: string, fullPaths = false): 
   if (costs?.unreachable) {
     // The split too, for the budget's reason; its counts are the records', so here they were not made.
     const allocation = await assembleAllocationView(paths, null, { fullPaths });
-    const sizing = await assembleSizingView(paths, Date.now());
-    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null, budget, allocation, sizing };
+    const sizing = await assembleSizingView(paths, nowMs);
+    const capacity = await assembleCapacityView(paths, window, nowMs);
+    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null, budget, allocation, sizing, capacity };
   }
   const fold = costs?.fold ?? null;
   // Re-fold the spend map at the requested window so badge and table agree. assembleCosts already
   // scanned; scanning again here costs one directory pass and keeps the two assemblers untouched.
-  const nowMs = Date.now();
   const sinceMs = costsSinceMs(window, nowMs);
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
   let costByTrigger: any = null;
@@ -2666,7 +2718,8 @@ async function assembleInsights(paths: any, window: string, fullPaths = false): 
   const projects = Array.isArray(pv?.projects) ? pv.projects.map((x: any) => ({ id: x.id, name: x.name })) : [];
   const allocation = await assembleAllocationView(paths, splitCounts(records), { fullPaths });
   const sizing = await assembleSizingView(paths, nowMs);
-  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget, projects, allocation, sizing };
+  const capacity = await assembleCapacityView(paths, window, nowMs);
+  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget, projects, allocation, sizing, capacity };
 }
 
 /**
@@ -2698,8 +2751,10 @@ export async function insightsCommand(paths: any, tokens: string[], notify: Noti
     notify?.(INSIGHTS_USAGE, "warning");
     return;
   }
-  const payload = await assembleInsights(paths, window, fullPaths);
-  const html = buildInsightsHtml(payload, { now: deps.now(), fullPaths });
+  // One instant for the whole page: the capacity chart's time axis ends where its report was read.
+  const now = deps.now();
+  const payload = await assembleInsights(paths, window, fullPaths, now);
+  const html = buildInsightsHtml(payload, { now, fullPaths });
   const file = `${paths.graphDir}/insights.html`;
   try {
     // Issue #464: the default graph dir's per-account root is this account's (created 0700), or the write refuses.
