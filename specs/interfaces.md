@@ -5506,7 +5506,7 @@ validator rather than a second copy of it.
       "historyNotShared": ["<host>", ...]                                  // hosts no source here holds
     },
     "hosts": [ {                                                           // sorted by name
-      "name": "<host>", "shared": <bool>,
+      "name": "<host>", "shared": <bool>, "notShared": "unnamed" | "unread" | null,  // why its history is not here
       "coverage": { "fromMs": <int>, "source": "local" | "mirror" | "records" | null, "truncated": <bool>,
                     "used": <int>, "refusedBeforeSlot": <int>, "legacyOccupied": <int>, "legacyRefused": <int>,
                     "withoutSize": <int>, "withoutResources": <int>, "cpuClamped": <int>, "retried": <int>,
@@ -5535,7 +5535,11 @@ validator rather than a second copy of it.
   run whose body expired while its index member stayed. A host is covered by the files when it is this host or its
   runs are in them, and by the mirror when its live row says it routes (it declared `PI_WORKER_NAME`) or, with no live
   row, when the mirror holds its runs; it starts at the earliest of the sources that cover it, and `source` names that
-  one. A host no source covers is `shared: false`, listed in `historyNotShared`, and missing for the whole window.
+  one. A host no source covers is `shared: false`, listed in `historyNotShared`, and missing for the whole window;
+  `notShared` says why: `unnamed` when its live row does not route (a worker without `PI_WORKER_NAME` writes no run
+  mirror) or the mirror was read and holds none of its runs, `unread` when the mirror was not read (no Valkey, or it
+  did not answer; `coverage.reason` says which). Every surface words the two differently, so a Valkey that did not
+  answer is never blamed on a worker's name.
   `truncated` is true when that start is past the window's start because the mirror was cut. A caller of
   `computeCapacity` that describes no source (no `local` and no `mirror` in its coverage) gets every host covered from
   its `coverage.fromMs`, `source` `"records"`.
@@ -5610,8 +5614,9 @@ validator rather than a second copy of it.
   12%), promised 48% memory / 40% CPU, used 18% CPU of 8, wait p50 40s p95 6m, most busy: web`, each part only when it
   is known (no budget: no memory promise; no CPU count: no "of 8"), then after a `;` what the line cannot see: the
   running jobs counted (`1 running now, counted to now`), a cut history (`history from <UTC minute> UTC only`, with the
-  mirror named when it was cut), `this host's files only`, `N running now not counted`, and for a host with no history
-  that no source here holds its runs. Read with the registry rows doctor already read, from the Valkey it talks to (no
+  mirror named when it was cut), `this host's files only` with the reason the mirror was not read, `N running now not
+  counted`, and for a host with no history why (`notShared`: the mirror not read, with its reason, or a worker
+  without `PI_WORKER_NAME`). Read with the registry rows doctor already read, from the Valkey it talks to (no
   Valkey: this host's files), each Valkey call bounded, the connection (and its ready check) bounded at 2 s, and the
   whole read under 5 s; past it the read is told to stop and its client is disconnected, so it cannot hold the process,
   and one line says nothing is shown, as it does on any fault. A host whose list of running jobs did not parse says
@@ -8144,3 +8149,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-08 | Issue #599, phase 1, CI correction. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a job scheduler's `queuedAt` is the slot in its `repeat:<id>:<millis>` id, not `timestamp` plus `delay`, which BullMQ computes from two clock reads and can put a few milliseconds past the slot. |
 | 2026-10-08 | Issue #599, phase 2. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: three fields, `waiters` (the budget's waiters, "" without a budget), `jobs` (JSON of at most 32 `{ id, p, m, c, at, o? }`, the jobs a host runs now and its budget's orphans, oldest first) and `jobsMore` (how many it does not list); the source (an in-flight map filled at admission and emptied by the one release, so it works without a budget), the orphan rule (the in-flight entry leaves with its pickup on every exit; orphans come from the budget's ledger alone, so the rule holds with and without a budget), the reader's per-field allowlist and its dropped count, the content rule argument (every id shape the project mints listed against `LIVE_JOB_ID_RE`, a delivery id outside it published as its digest), and the falsification test (the report reads them, no decision does). **`INT-CAPACITY-REPORT` AMENDED**: three coverage counts per host and fleet (`live`, `liveNotCounted`, `orphans`), `running` now every running job the rows report, a section on the jobs running now (counted to now, to a stale row's beat, once beside their record, orphans not as busy, the rest not counted and said), the registry read at the report's clock (the CLI read it at the wall clock, so an injected clock aged every row), doctor's line and the tool's result, and the acceptance. **`INT-RUN-HISTORY-FILE-CONTRACT`** UNCHANGED, checked: no record field moved. |
 | 2026-10-08 | Issue #599, phase 2, corrections. **`INT-CAPACITY-REPORT` AMENDED**: a listed job is matched to its record by the id as the row publishes it (`publishedJobId`), so one published as its digest is counted once, not twice; a row whose `jobs` value is there and does not parse is counted in a new `liveUnreadable` (per host and fleet) and nothing stands in for it, where before the report fell back to its `budgetRunning` as if it were a worker from before the field; `running` is now `live` plus `liveNotCounted` (it counted a listed job whose record already counted it) and null while a host's list is unreadable; doctor's read bounds its connection and ready check at 2 s and disconnects the client when the 5 s bound passes (a read it gave up on kept a socket and the doctor process alive), and its timeout line no longer says the CLI reads with no deadline. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: `readLiveHosts` flags a row whose `jobs` value is there and is not a list (`jobsUnreadable`). |
+| 2026-10-08 | Issue #599, phase 2, second corrections. **`INT-CAPACITY-REPORT` AMENDED**: a host entry gains `notShared` (`unnamed`, `unread` or null), and doctor's line, the CLI and the tool say the reason the run mirror was not read (its `coverage.reason`) where a Valkey did not answer, instead of reading as this host's files only, or blaming a worker without `PI_WORKER_NAME` for a named host whose runs the mirror holds. |

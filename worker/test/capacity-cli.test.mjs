@@ -88,7 +88,7 @@ test("--json prints the report itself; --host keeps one host and refuses a name 
 test("a host whose history is not shared says so rather than reading idle", async () => {
 	const h = harness(deployment([]), { live: [{ name: "far", routes: "false" }] });
 	assert.equal(await runCapacity([], h.opts), 0);
-	assert.match(h.out.join(""), /Host far, last 7d\n {2}no history here: no source here holds this host's runs/);
+	assert.match(h.out.join(""), /Host far, last 7d\n {2}no history here: no source here holds its runs \(a worker without PI_WORKER_NAME/);
 	assert.match(h.out.join(""), /not shared here: far/);
 });
 

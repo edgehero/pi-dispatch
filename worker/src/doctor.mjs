@@ -100,7 +100,7 @@ import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDef
 import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "./size-suggest.mjs";
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
-import { durationText, milliText, percentText } from "./capacity-cli.mjs";
+import { durationText, milliText, notSharedWhy, percentText } from "./capacity-cli.mjs";
 import { CGROUP_PARENT, cgroupParentFor, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -7895,7 +7895,7 @@ export function capacityChecks(report, { since = "7d" } = {}) {
 		let line;
 		if (h.coveredMs === 0) {
 			line = `Host ${h.name}: last ${since} no history here`;
-			if (!h.shared) notes.push("no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)");
+			if (!h.shared) notes.push(notSharedWhy(h, report.coverage));
 		} else {
 			const c = h.capacity ?? {};
 			const slots = Number.isSafeInteger(c.slots) ? ` of ${c.slots} slots` : " at once";
@@ -7909,7 +7909,8 @@ export function capacityChecks(report, { since = "7d" } = {}) {
 			line = `Host ${h.name}: last ${since} ${parts.join(", ")}`;
 			if (h.coverage.live > 0) notes.push(`${h.coverage.live} running now, counted to now`);
 			if (h.missingMs > 0) notes.push(`history from ${new Date(h.coverage.fromMs).toISOString().slice(0, 16).replace("T", " ")} UTC only${h.coverage.truncated ? " (the run mirror holds nothing older)" : ""}, earlier time counted as neither busy nor idle`);
-			if (localOnly) notes.push("this host's files only");
+			// The reason with it: a run mirror that did not answer leaves a busy fleet reading nearly idle here.
+			if (localOnly) notes.push(`this host's files only${report.coverage.reason ? ` (${report.coverage.reason})` : ""}`);
 		}
 		if (h.coverage?.liveNotCounted > 0) notes.push(`${h.coverage.liveNotCounted} running now not counted`);
 		if (h.coverage?.liveUnreadable > 0) notes.push("its running jobs could not be read, not counted");

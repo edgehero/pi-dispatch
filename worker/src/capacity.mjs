@@ -580,6 +580,10 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		hosts.push({
 			name,
 			shared: cover !== null,
+			// Why a host's history is not here: `unnamed` when its live row does not route (a worker without
+			// PI_WORKER_NAME writes no run mirror), `unread` when it does (or has no row) and the mirror was not read
+			// (no Valkey, or it did not answer: the coverage's `reason` says which); null when it is shared.
+			notShared: cover !== null ? null : liveByName.get(name)?.routes !== undefined && liveByName.get(name).routes !== "true" ? "unnamed" : isObject(coverage.mirror) ? "unnamed" : "unread",
 			coverage: { fromMs: coveredFrom, source: cover?.source ?? null, truncated: cover?.truncated === true && coveredFrom > windowStartMs, ...h.counts },
 			capacity: { ...base, basis, changed },
 			coveredMs,
