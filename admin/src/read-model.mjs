@@ -2058,13 +2058,27 @@ export async function readSchedulers({
     // The SHARED queue's failure is a real connection failure and must surface as `{ unreachable }`;
     // an additional HOST queue's is caught, because one unreadable host must degrade to its own rows
     // missing rather than to a panel that says the whole deployment is unreachable.
+    // EVERY wait bounded (issue #599, phase 4's review): BullMQ's scheduler list rides a second connection of its own,
+    // and against a Valkey that nothing answers it neither resolves nor rejects, so `/dispatch insights` (which reads
+    // the schedulers for its topology) never finished. Past `timeoutMs` the shared queue reads as unreachable, a host
+    // queue as empty, and the queues are closed under the same bound.
+    const UNANSWERED = Symbol("unanswered");
+    // The queue's own client is awaited FIRST: BullMQ builds the scheduler inside an async Promise executor that awaits
+    // that client, so a client that fails there is an unhandled rejection no caller can catch; awaited here, it is this
+    // read's own catchable failure, and the scheduler is never built.
+    const bounded = (q) => withTimeout(Promise.resolve().then(async () => {
+      await q.client;
+      return q.getJobSchedulers(0, -1, true);
+    }), timeoutMs, UNANSWERED);
     const [primary, ...rest] = queues;
-    const lists = [await primary.getJobSchedulers(0, -1, true), ...(await Promise.all(rest.map((q) => q.getJobSchedulers(0, -1, true).catch(() => []))))];
-    return mapSchedulers(lists.flat(), now());
+    const first = await bounded(primary);
+    if (first === UNANSWERED) return { unreachable: "timed out reading the job schedulers" };
+    const others = await Promise.all(rest.map((q) => bounded(q).then((l) => (l === UNANSWERED ? [] : l), () => [])));
+    return mapSchedulers([first, ...others].flat(), now());
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
-    for (const q of opened) await q.close().catch(() => {});
+    await withTimeout(Promise.all(opened.map((q) => Promise.resolve().then(() => q.close()).catch(() => {}))), timeoutMs, null);
   }
 }
 
