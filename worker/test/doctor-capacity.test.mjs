@@ -162,7 +162,8 @@ test("a Valkey that did not answer is named on the line, never blamed on PI_WORK
 	const reason = "run mirror unreachable (timeout): only this host's files were read";
 	const live = [{ name: "a", routes: "true", staleMs: 1000, jobs: [], jobsMore: 0 }, { name: "b", routes: "true", staleMs: 1000, jobs: [], jobsMore: 0 }, { name: "c", routes: "false", staleMs: 1000, jobs: [], jobsMore: 0 }];
 	const labels = capacityChecks(week([run("1", 2, 1)], { live, coverage: { source: "local", reason, localHost: "a", local: { fromMs: NOW - W.ms }, mirror: null } })).map((c) => c.label);
-	assert.match(labels[0], new RegExp(`; this host's files only \\(${reason.replace(/[()]/g, "\\$&")}\\)$`));
+	// The clause already says "this host's files only", so the reason's own ending is not repeated.
+	assert.match(labels[0], /; this host's files only \(run mirror unreachable \(timeout\)\)$/);
 	assert.equal(labels[1], `Host b: last 7d no history here; the run mirror was not read (${reason}), so its runs are not here`);
 	assert.equal(labels[2], "Host c: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)");
 });

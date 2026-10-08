@@ -7922,7 +7922,9 @@ export function capacityChecks(report, { since = "7d" } = {}) {
 			if (h.coverage.live > 0) notes.push(`${h.coverage.live} running now, counted to now`);
 			if (h.missingMs > 0) notes.push(`history from ${new Date(h.coverage.fromMs).toISOString().slice(0, 16).replace("T", " ")} UTC only${h.coverage.truncated ? " (the run mirror holds nothing older)" : ""}, earlier time counted as neither busy nor idle`);
 			// The reason with it: a run mirror that did not answer leaves a busy fleet reading nearly idle here.
-			if (localOnly) notes.push(`this host's files only${report.coverage.reason ? ` (${report.coverage.reason})` : ""}`);
+			// The reasons end in "only this host's files were read", which this clause already says.
+			const why = typeof report.coverage.reason === "string" ? report.coverage.reason.replace(/: only this host's files were read$/, "") : "";
+			if (localOnly) notes.push(`this host's files only${why ? ` (${why})` : ""}`);
 		}
 		if (h.coverage?.liveNotCounted > 0) notes.push(`${h.coverage.liveNotCounted} running now not counted`);
 		if (h.coverage?.liveUnreadable > 0) notes.push("its running jobs could not be read, not counted");
