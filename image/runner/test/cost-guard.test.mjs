@@ -128,6 +128,20 @@ test("callCostBound: reasoning raises the output to the model's cap; classify is
 	assert.equal(callCostBound("classify", FLAT, inputOf(10_000), {}, NO_ENV), Infinity, "an output rate with no output bound");
 });
 
+test("callCostBound: openai-decisions (pi 1.1.0) is input only, tiered, and counts each classifier image at OpenAI's ceiling", () => {
+	// gpt-6-luna as the pinned catalog files it: input 0.1, 0.2 above 272k, output 0.
+	const luna = { id: "gpt-6-luna", api: "openai-decisions", provider: "openai", baseUrl: "https://api.openai.com/v1", input: ["text", "image"], cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 272_000, input: 0.2, output: 0, cacheRead: 0, cacheWrite: 0 }] } };
+	assert.equal(callCostBound("classify", luna, inputOf(10_000), {}, NO_ENV), Math.ceil(10_000 * 0.1));
+	assert.equal(callCostBound("classify", luna, inputOf(300_000), {}, NO_ENV), Math.ceil(300_000 * 0.2), "the tier above 272k");
+	// A classify context carries its images at the top level; each counts at the api's ceiling even under an id no family names.
+	const image = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+	const context = { state: { pr: 1 }, images: [image, image], questions: { ok: { type: "bool", instructions: "ok?", criteria: {} } } };
+	const bytes = Buffer.byteLength(JSON.stringify(context));
+	const blockBytes = Buffer.byteLength(JSON.stringify(image));
+	const custom = { ...luna, id: "luna-custom", cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 } };
+	assert.equal(callCostBound("classify", custom, context, {}, NO_ENV), bytes + 8192 + 2 * (48_169 - blockBytes));
+});
+
 test("callCostBound: all-zero rates are 0, an unpriced api or a broken table is Infinity", () => {
 	const zero = { ...FLAT, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 	const cycle = {};
@@ -142,7 +156,7 @@ test("callCostBound: all-zero rates are 0, an unpriced api or a broken table is 
 	for (const broken of [{ input: 1, output: 2, cacheRead: 0 }, { input: Number.NaN, output: 2, cacheRead: 0, cacheWrite: 0 }, { input: -1, output: 2, cacheRead: 0, cacheWrite: 0 }, { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, tiers: [{ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }] }]) {
 		assert.equal(callCostBound("streamSimple", { ...FLAT, cost: broken }, inputOf(10_000), {}, NO_ENV), Infinity, JSON.stringify(broken));
 	}
-	assert.equal(PRICED_APIS.length, 11);
+	assert.equal(PRICED_APIS.length, 12);
 	assert.ok(Object.isFrozen(PRICED_APIS));
 });
 
@@ -686,7 +700,7 @@ test("a charge is never below zero", async () => {
 test("an image block counts at least its api's per-image ceiling, not its base64 bytes, once per reference", () => {
 	assert.deepEqual({ ...IMAGE_RESIZE_MAX }, { width: 2000, height: 2000 });
 	// The arithmetic behind each constant, restated so a changed constant is a changed sum here too.
-	assert.deepEqual({ ...IMAGE_TOKEN_CEILINGS }, { "openai-completions": 2833 + 8 * 5667, "openai-responses": 48_169, "azure-openai-responses": 48_169, "openai-codex-responses": 48_169, "mistral-conversations": 125 * 125 + 125, default: Math.ceil((2000 * 2000) / 750) });
+	assert.deepEqual({ ...IMAGE_TOKEN_CEILINGS }, { "openai-completions": 2833 + 8 * 5667, "openai-responses": 48_169, "azure-openai-responses": 48_169, "openai-codex-responses": 48_169, "openai-decisions": 48_169, "mistral-conversations": 125 * 125 + 125, default: Math.ceil((2000 * 2000) / 750) });
 	const image = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
 	const blockBytes = Buffer.byteLength(JSON.stringify(image));
 	const context = { messages: [{ role: "user", content: [{ type: "text", text: "look" }, image] }] };

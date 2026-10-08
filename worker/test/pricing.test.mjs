@@ -247,8 +247,9 @@ test("piAiVersion default path resolves the real pin, and the pricing surface is
 	assert.equal(realPackage.version, PINNED_PI_AI, "the installed pi-ai is not worker/package.json's pin");
 	// The pricing surface by CONTENT, not by version (issue #587): calculateCost lives in dist/models.js, and a
 	// version literal went red on every bump whether that file moved or not. Re-verified at 1.0.3: models.js
-	// changed only in its OAuth refresh; calculateCost is byte-identical to 0.99.1's.
+	// changed only in its OAuth refresh; calculateCost is byte-identical to 0.99.1's. Re-verified at 1.1.0: models.js
+	// changed only in classify (an image-input check); calculateCost is byte-identical to 1.0.4's.
 	const models = readFileSync(join(dirname(entry), "models.js"));
-	assert.equal(createHash("sha256").update(models).digest("hex"), "633161a0067abbb20a434acc3605f8f25d2fa6d32f903cc7edcdcaa7e0ba7083", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
+	assert.equal(createHash("sha256").update(models).digest("hex"), "0911bab242726dc56517fe62ca422d0602d6eab8aa63841a560f61e1c35a0cd7", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
 	assert.equal(piAiVersion(), piAiVersion(), "cached: repeated calls agree");
 });

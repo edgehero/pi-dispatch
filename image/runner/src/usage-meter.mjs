@@ -1674,9 +1674,9 @@ export function policyEnforcement(handle) {
 // pi-ai rates are dollars per million tokens, so tokens x rate is already micro-dollars.
 
 /**
- * The api ids whose provider prices a call from the model's cost table, at the pin (re-verified at 1.0.3): exactly the
+ * The api ids whose provider prices a call from the model's cost table, at the pin (re-verified at 1.1.0): exactly the
  * dist/api modules that reach pi-ai's `calculateCost` (directly, or through openai-responses-shared.js and
- * system-one-shared.js). pinned-api.test.mjs derives that set from the pinned source and requires it to equal
+ * classifier-shared.js, which carries the System One classifiers and openai-decisions since pi 1.1.0). pinned-api.test.mjs derives that set from the pinned source and requires it to equal
  * this list, so a new priced api fails the pin rather than the budget. An api NOT here prices itself or not at
  * all (`pi-messages` and the Radius providers report their own cost; images and classifiers have their own
  * modules), so the catalog's table says nothing about what its call costs, and the bound is Infinity.
@@ -1691,6 +1691,7 @@ export const PRICED_APIS = Object.freeze([
 	"mistral-conversations",
 	"openai-codex-responses",
 	"openai-completions",
+	"openai-decisions",
 	"openai-responses",
 	"typesafe-system-one",
 ]);
@@ -1712,7 +1713,7 @@ const MIN_OUTPUT_TOKENS = 16;
  * The apis that never put the caller's maxTokens on the request (pinned by needle): the provider then answers up
  * to the model's own limit, so a small options.maxTokens bounds nothing there.
  */
-const MAX_TOKENS_UNSENT_APIS = new Set(["openai-codex-responses", "cloudflare-workers-ai-system-one", "typesafe-system-one"]);
+const MAX_TOKENS_UNSENT_APIS = new Set(["openai-codex-responses", "cloudflare-workers-ai-system-one", "openai-decisions", "typesafe-system-one"]);
 /**
  * The hosts pi's own catalog serves openai-completions models on (issue #507), GENERATED from the pinned catalog by
  * .github/scripts/pi-derived.mjs (a pi bump reruns it and lists the hosts that came or went) and pinned to the catalog
@@ -2008,7 +2009,7 @@ export const IMAGE_RESIZE_MAX = Object.freeze({ width: 2000, height: 2000 });
 /**
  * Input tokens one image can cost in pi's resize box (2000 x 2000), per api. Provider billing rules, not pi facts,
  * so each is stated with its arithmetic, for the family each api natively serves:
- *   - the openai apis (completions, responses, azure, codex): gpt-4o-mini's high-detail tiles, base 2,833 plus
+ *   - the openai apis (completions, responses, azure, codex, decisions): gpt-4o-mini's high-detail tiles, base 2,833 plus
  *     5,667 per 512 px tile. Inside a 2000 box the most tiles is 4 x 2 = 8 (a 2000 x 750 image: no side over
  *     2048, the shortest side under 768 so not scaled), so 2,833 + 8 x 5,667 = 48,169. gpt-4o's 85 + 170 per tile
  *     and the 32 px patch counts (2000 x 2000 is 3,969 patches) are below it;
@@ -2026,6 +2027,9 @@ export const IMAGE_TOKEN_CEILINGS = Object.freeze({
 	"openai-responses": 48_169,
 	"azure-openai-responses": 48_169,
 	"openai-codex-responses": 48_169,
+	// OpenAI's Decisions classifier (pi 1.1.0) sends a classify call's images as they are, without pi's resize; the
+	// tile count is still bounded by OpenAI's own downscale, which is what 48,169 is derived from.
+	"openai-decisions": 48_169,
 	"mistral-conversations": 15_750,
 	default: 5_334,
 });

@@ -242,6 +242,11 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   silently, so the validation still stands. A pattern is not a built-in name, so the loader and the runner refuse
   it like a misspelling. `tools` (which the runner never passes) now keeps MCP tools unless an entry starts with
   `mcp__`; a job loads no built-in extension, so it has no MCP tools either way.
+- **Re-checked at the pi 1.1.0 bump (2026-10-08, pull request #604)**: the Action on bump below was carried out
+  against the 1.1.0 tarball. `excludeTools` is still `string[]` and `allToolNames` is still the eight. What moved is
+  `tools`: a list made only of `+name` and `-name` entries now changes the default selection instead of replacing
+  it. The runner never passes `tools`, and a trigger's `excludeTools` entry still has to be one of the eight names,
+  so neither form reaches a job.
 - **From the automated bump on (issue #587)**: the Action on bump below is the review checklist in the body of every
   pull request `.github/workflows/pi-bump.yml` opens, so it is read at the moment it applies rather than remembered.
 - **Not a question — a scheduled landmine.** pi's changelog carries the breaking change under
@@ -1954,3 +1959,4 @@ adversarial passes did.
 | 2026-10-06 | Issue #587, the pi 1.0.4 bump (pull request #594). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.0.4 tarball. The option set is unchanged and `excludeTools` is still `string[]`, but its entries are now exact names or `*` patterns. An unknown exact name still matches nothing, silently, so the membership validation stands, and it refuses a pattern as an unknown name. `tools` now keeps MCP tools unless an entry starts with `mcp__`; the runner passes no `tools` and a job loads no built-in extension, so nothing in a job moves. |
 | 2026-10-06 | Issue #596, phase 0 (measure). **`OQ-002` AMENDED, not closed**: the RAM footprint per job is now measured on every run (`resources.memPeak` in the run record, from the container's own `memory.peak`, readable on all five venues the lab measured), so the row's answer will come from recorded peaks rather than the 1.5 to 2.5 GB estimate; it stays open until a representative set of real runs has recorded them. A job killed for memory is now recorded `oom-killed` and not retried. **`OQ-012` UNCHANGED, checked**: image conformance gains no capability token (the supervisor is a property of this repo's runner, checked by the image job, not of the portable checklist). |
 | 2026-10-06 | Issue #596, phase 0, the executing review. **`OQ-002` AMENDED (wording)**: the measured keys name `swapPeak` (`memory.swap.peak`), which the record now carries because `memPeak` does not count swap. Still open. |
+| 2026-10-08 | The pi 1.1.0 bump (pull request #604). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.1.0 tarball. `excludeTools` is still `string[]` and `allToolNames` is still the eight. `tools` now takes a list of only `+name` and `-name` entries as changes to the default selection; the runner never passes `tools`, so no job sees it. |
