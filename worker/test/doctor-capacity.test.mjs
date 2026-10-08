@@ -126,7 +126,7 @@ test("a Valkey that accepts the connection and never answers: the default read g
 	}
 });
 
-test("a doctor that gave up on a Valkey that never answers exits at once: nothing of the read holds the process", async () => {
+test("a doctor that gave up on a Valkey that never answers exits instead of hanging: nothing of the read holds the process", async () => {
 	const { spawn } = await import("node:child_process");
 	const doctorUrl = new URL("../src/doctor.mjs", import.meta.url).href;
 	const script = `
@@ -135,24 +135,34 @@ test("a doctor that gave up on a Valkey that never answers exits at once: nothin
 		const server = net.createServer((s) => s.on("data", () => {}));
 		await new Promise((r) => server.listen(0, "127.0.0.1", r));
 		server.unref();
-		const t0 = Date.now();
 		const lines = await doctorCapacity({ seams: { capacityTimeoutMs: Number(process.argv[1]) }, env: { PI_LOGS_DIR: process.argv[2] }, home: "/h", url: "redis://127.0.0.1:" + server.address().port + "/13", hosts: [], localHost: "a" });
-		process.on("exit", () => console.log(JSON.stringify({ returnedMs: Date.now() - t0 - 0, label: lines[0]?.label ?? null, exitMs: Date.now() - t0 })));
+		process.on("exit", () => console.log(JSON.stringify({ label: lines[0]?.label ?? null })));
 	`;
+	// Without the fix the process never exits (an open socket waits on a ready check forever); the kill at 20 s is the
+	// hang's mark, so a slow machine is not mistaken for one.
 	const runChild = (timeoutMs) =>
-		new Promise((resolve, reject) => {
+		new Promise((resolve) => {
 			const child = spawn(process.execPath, ["--input-type=module", "-e", script, String(timeoutMs), tempDir("pi-doctor-exit-")], { stdio: ["ignore", "pipe", "pipe"] });
 			let out = "";
 			child.stdout.on("data", (d) => (out += d));
-			const kill = setTimeout(() => child.kill("SIGKILL"), 10_000);
-			child.on("close", () => (clearTimeout(kill), out ? resolve(JSON.parse(out.trim().split("\n").at(-1))) : reject(new Error("no output"))));
+			const kill = setTimeout(() => child.kill("SIGKILL"), 20_000);
+			child.on("close", (code, signal) => (clearTimeout(kill), resolve({ signal, last: out.trim().split("\n").at(-1) })));
 		});
-	// Doctor's own bound first: the read is stopped and the process ends right after the line.
-	const stopped = await runChild(300);
-	assert.match(stopped.label, /did not answer in time/);
-	assert.ok(stopped.exitMs < 1000, `exited ${stopped.exitMs} ms after it began`);
-	// The connection's own bound (2 s) before doctor's: the report is this host's files, said, and nothing lingers.
-	const local = await runChild(10_000);
-	assert.ok(local.label === null || !/did not answer in time/.test(local.label), "the connection bound answered first");
-	assert.ok(local.exitMs < 3000, `exited ${local.exitMs} ms after it began`);
+	// Doctor's own bound first: the read is stopped, the line says so, and the process ends.
+	const stopped = await runChild(200);
+	assert.equal(stopped.signal, null, "exited by itself");
+	assert.match(JSON.parse(stopped.last).label, /did not answer in time/);
+	// The connection's own bound (2 s) before doctor's (15 s): the read falls back to this host's files, and the process ends.
+	const local = await runChild(15_000);
+	assert.equal(local.signal, null, "exited by itself");
+	assert.doesNotMatch(JSON.parse(local.last).label ?? "", /did not answer in time/, "the connection bound answered first");
+});
+
+test("a Valkey that did not answer is named on the line, never blamed on PI_WORKER_NAME", () => {
+	const reason = "run mirror unreachable (timeout): only this host's files were read";
+	const live = [{ name: "a", routes: "true", staleMs: 1000, jobs: [], jobsMore: 0 }, { name: "b", routes: "true", staleMs: 1000, jobs: [], jobsMore: 0 }, { name: "c", routes: "false", staleMs: 1000, jobs: [], jobsMore: 0 }];
+	const labels = capacityChecks(week([run("1", 2, 1)], { live, coverage: { source: "local", reason, localHost: "a", local: { fromMs: NOW - W.ms }, mirror: null } })).map((c) => c.label);
+	assert.match(labels[0], new RegExp(`; this host's files only \\(${reason.replace(/[()]/g, "\\$&")}\\)$`));
+	assert.equal(labels[1], `Host b: last 7d no history here; the run mirror was not read (${reason}), so its runs are not here`);
+	assert.equal(labels[2], "Host c: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)");
 });

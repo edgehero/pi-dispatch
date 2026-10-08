@@ -270,7 +270,7 @@ test("the report's frame: version, window, every coverage count, hosts sorted, a
 	assert.deepEqual([r.coverage.source, r.coverage.reason, r.coverage.running, r.coverage.liveNotCounted, r.coverage.withoutSize, r.coverage.withoutResources], ["mirror+local", "why", 3, 3, 2, 2], "a row from before `jobs` says how many run, and none of them is counted");
 	assert.deepEqual(r.hosts.map((h) => h.name), ["a", "b", "c", "d", "e"]);
 	assert.equal(report([]).coverage.running, null, "no live row says: unknown, not zero");
-	assert.deepEqual(Object.keys(r.hosts[0]), ["name", "shared", "coverage", "capacity", "coveredMs", "missingMs", "busyMs", "idleMs", "fullMs", "peak", "avgMilli", "promisedMemPerMille", "promisedCpuPerMille", "usedCpuPerMille", "runs", "projects", "otherProjects", "waits", "buckets"]);
+	assert.deepEqual(Object.keys(r.hosts[0]), ["name", "shared", "notShared", "coverage", "capacity", "coveredMs", "missingMs", "busyMs", "idleMs", "fullMs", "peak", "avgMilli", "promisedMemPerMille", "promisedCpuPerMille", "usedCpuPerMille", "runs", "projects", "otherProjects", "waits", "buckets"]);
 	assert.deepEqual(Object.keys(r.hosts[0].coverage), ["fromMs", "source", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "liveUnreadable", "orphans"]);
 });
 
@@ -502,4 +502,13 @@ test("a row whose jobs value is there and is not a list: its running jobs are un
 test("one row whose list cannot be read makes the fleet's running count unknown, while the other rows' jobs still count", () => {
 	const r = report([], { live: [liveRow([job("x", 1)]), { name: "b", staleMs: 1000, jobs: "[[", jobsMore: "0" }] });
 	assert.deepEqual([r.coverage.live, r.coverage.liveUnreadable, r.coverage.running], [1, 1, null]);
+});
+
+test("why a host's history is not here: a row that does not route is unnamed; one that routes, with no mirror read, is unread", () => {
+	const cov = { local: { fromMs: NOW - DAY }, localHost: "z", mirror: null, source: "local", reason: "run mirror unreachable (timeout): only this host's files were read" };
+	const r = report([], { live: [{ name: "named", routes: "true" }, { name: "plain", routes: "false" }], coverage: cov });
+	assert.deepEqual(r.hosts.map((h) => [h.name, h.shared, h.notShared]), [["named", false, "unread"], ["plain", false, "unnamed"]]);
+	const read = report([], { live: [{ name: "plain", routes: "false" }], coverage: { ...cov, mirror: { fromMs: NOW - DAY, truncated: false, hosts: [] } } });
+	assert.equal(read.hosts[0].notShared, "unnamed");
+	assert.equal(report([run("1", 2, 1)]).hosts[0].notShared, null);
 });

@@ -152,7 +152,7 @@ const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
 /** The human report: one block per host, then what the fleet's history covers. Control characters stripped. */
 export function capacityText(report, { since }) {
 	const lines = [];
-	for (const h of report.hosts) lines.push(...hostLines(h, since));
+	for (const h of report.hosts) lines.push(...hostLines(h, since, report.coverage));
 	if (report.hosts.length === 0) lines.push(`No host ran a job in the last ${since}.`);
 	lines.push(...coverageLines(report.coverage));
 	return `${lines.join("\n").replace(CONTROL, "")}\n`;
@@ -160,10 +160,20 @@ export function capacityText(report, { since }) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-function hostLines(h, since) {
+/**
+ * Why a host's history is not here (`hosts[].notShared`), in one sentence for the CLI, the tool and doctor, so none of
+ * them blames the name for a Valkey that did not answer: `unread` names the reason the run mirror was not read (the
+ * coverage's `reason`); only `unnamed` says it is a worker without `PI_WORKER_NAME`.
+ */
+export function notSharedWhy(h, coverage) {
+	if (h?.notShared === "unread") return `the run mirror was not read${coverage?.reason ? ` (${coverage.reason})` : ""}, so its runs are not here`;
+	return "no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)";
+}
+
+function hostLines(h, since, coverage) {
 	const lines = [`Host ${h.name}, last ${since}`];
 	if (h.coveredMs === 0) {
-		lines.push(`  no history here${h.shared ? "" : ": no source here holds this host's runs (a worker without PI_WORKER_NAME writes no run mirror)"}`);
+		lines.push(`  no history here${h.shared ? "" : `: ${notSharedWhy(h, coverage)}`}`);
 		return lines;
 	}
 	const cov = h.coverage;
