@@ -15,6 +15,7 @@ import { buildAzurePrompt } from "./azure-prompt.mjs";
 import { prepareLocalWorkspace } from "./prepare-local.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { recordedJobSize } from "./job-size.mjs";
+import { scheduledForMillis } from "./repeat-slot.mjs";
 
 /**
  * The subdirectory of the per-job dir a trigger's injected skills are copied into, so they reach the
@@ -212,15 +213,6 @@ function localEventContext(job, queueJobId, findPreviousRun) {
 		};
 	}
 	return { source: "manual" };
-}
-
-/** Parse the millis out of a `repeat:<id>:<millis>` BullMQ scheduled jobId, or null. */
-function scheduledForMillis(queueJobId) {
-	if (typeof queueJobId !== "string" || !queueJobId.startsWith("repeat:")) return null;
-	const tail = queueJobId.slice(queueJobId.lastIndexOf(":") + 1);
-	if (tail === "") return null;
-	const millis = Number(tail);
-	return Number.isFinite(millis) ? millis : null;
 }
 
 /**
