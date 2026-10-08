@@ -222,6 +222,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		dollarKeysExist,
 		// Issue #504 part B: the applied split's envelope digest (`alloc:plan`), read once. Undefined means the default.
 		readAppliedSplit,
+		// Issue #599, phase 2: the capacity line's read of the run history (the run mirror and the logs directory).
+		// Undefined means the default, which reads the deployment's real Valkey and files.
+		readCapacity,
 		// --live (issue #278, INT-LIVE-PROBE-CONTRACT): read the backend declarations back off short-lived real containers.
 		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
 		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
@@ -385,7 +388,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -7763,14 +7766,6 @@ export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {},
 	return checks;
 }
 
-/**
- * The fleet's budgets (issue #596, phase 2), from the registry rows (this host's own included): one line per host that
- * publishes a budget (its budget, what its jobs hold, what its holds keep, and the largest project size that fits it),
- * one line per sized project naming the hosts it fits on (a WARNING when none does: its jobs on the shared queue wait,
- * never refused, until a host it fits on is live; a host restarting is missing from the registry for that while), and a
- * WARNING per host whose budget is below the projects' minJobs
- * together. Nothing when no host publishes a budget (workers from before it).
- */
 /** The most the capacity read may take in doctor, all of it: a full mirror reads in well under a second. */
 export const CAPACITY_DOCTOR_TIMEOUT_MS = 5_000;
 
@@ -7784,43 +7779,102 @@ export async function doctorCapacity({ seams, env, home, url, hosts, localHost }
 		const window = CAPACITY_WINDOWS["7d"];
 		const nowMs = (typeof seams.wallClock === "function" ? seams.wallClock : Date.now)();
 		const retention = typeof env.PI_LOG_RETENTION_DAYS === "string" && /^\d{1,6}$/.test(env.PI_LOG_RETENTION_DAYS) ? Number(env.PI_LOG_RETENTION_DAYS) : 30;
-		const args = { url, logsDir: logsDirPath(env, home), sinceMs: nowMs - window.ms, nowMs, retentionDays: retention, localHost };
+		// The read is told to stop when the bound passes (`signal`): giving up on it is not enough, since a client still
+		// waiting on its connection would keep this process alive after doctor has printed everything.
+		const stop = new AbortController();
+		const args = { url, logsDir: logsDirPath(env, home), sinceMs: nowMs - window.ms, nowMs, retentionDays: retention, localHost, signal: stop.signal };
 		let timer;
 		const read = await Promise.race([
 			Promise.resolve()
 				.then(() => (seams.readCapacity ?? defaultReadCapacity)(args))
 				.finally(() => clearTimeout(timer)),
 			new Promise((resolve) => {
-				timer = setTimeout(() => resolve(null), seams.capacityTimeoutMs ?? CAPACITY_DOCTOR_TIMEOUT_MS);
+				timer = setTimeout(() => {
+					stop.abort();
+					resolve(null);
+				}, seams.capacityTimeoutMs ?? CAPACITY_DOCTOR_TIMEOUT_MS);
 			}),
 		]);
-		if (read === null) return [{ ok: true, label: "Capacity: the run history did not answer in time, so nothing is shown (pi-dispatch capacity reads it with no deadline)" }];
+		if (read === null) return [{ ok: true, label: "Capacity: the run history did not answer in time, so nothing is shown (pi-dispatch capacity waits up to 2 s per Valkey call)" }];
 		const report = computeCapacity({ records: read.records, live: hosts, windowStartMs: nowMs - window.ms, nowMs, bucketMs: window.bucketMs, coverage: read.coverage });
 		return capacityChecks(report, { since: "7d" });
 	} catch (err) {
+		if (err?.[FORBIDDEN_READ]) throw err;
 		return [{ ok: true, label: `Capacity: not read (${printable(err?.message ?? "error")})` }];
 	}
 }
 
-async function defaultReadCapacity({ url, logsDir, sinceMs, nowMs, retentionDays, localHost }) {
+/**
+ * Set by the test helper (test/helpers/doctor.mjs): from then on the DEFAULT capacity read throws an error doctor does
+ * not swallow, so a test that reaches the developer's real Valkey and logs directory fails loudly instead of printing
+ * whatever that machine holds.
+ */
+let defaultCapacityReadForbidden = false;
+export function forbidDefaultCapacityRead() {
+	defaultCapacityReadForbidden = true;
+}
+const FORBIDDEN_READ = Symbol("forbidden-read");
+
+/** How long the default read waits for its Valkey connection to be ready (the TCP connect and the ready check). */
+export const CAPACITY_CONNECT_TIMEOUT_MS = 2_000;
+
+/**
+ * The default capacity read: a fail-fast client, its connection bounded (`connectWithin`: a server that accepts TCP and
+ * never answers holds ioredis in its ready check forever) and DISCONNECTED when `signal` aborts, so a read doctor gave
+ * up on cannot keep the process alive.
+ */
+async function defaultReadCapacity({ url, logsDir, sinceMs, nowMs, retentionDays, localHost, signal }) {
+	if (defaultCapacityReadForbidden) throw Object.assign(new Error("doctor reached its real capacity read in a test: pass readCapacity"), { [FORBIDDEN_READ]: true });
 	const { readCapacityRecords } = await import("./capacity-records.mjs");
 	let client = null;
-	if (url) {
+	// Measured on ioredis 5.11: `disconnect()` ends the socket and arms a timer (`disconnectTimeout`, 2 s by default)
+	// that destroys it unless the socket's `close` clears it first, and the client's own failed ready check disconnects
+	// again after the close, arming one that nothing clears: a server that never answered held the process 2 s past
+	// doctor's bound. So the client is built with a disconnect timeout of 0 (no timer outlives the socket), its stream
+	// is destroyed in the same tick (the socket is closed by the time doctor prints), and it is dropped once.
+	const drop = () => {
+		const c = client;
+		client = null;
+		try {
+			c?.disconnect?.();
+			c?.stream?.destroy?.();
+		} catch {
+			// a release that failed has stopped mattering
+		}
+	};
+	signal?.addEventListener?.("abort", drop, { once: true });
+	if (url && !signal?.aborted) {
 		try {
 			const { makeRedisClient } = await import("./connection.mjs");
-			client = makeRedisClient(url, { failFast: true, lazyConnect: true });
+			client = makeRedisClient(url, { failFast: true, lazyConnect: true, disconnectTimeoutMs: 0 });
 			client.on("error", () => {});
-			await client.connect();
+			await connectWithin(client, CAPACITY_CONNECT_TIMEOUT_MS, signal);
 		} catch {
-			client?.disconnect?.();
-			client = null;
+			drop();
 		}
 	}
 	try {
 		return await readCapacityRecords({ redis: client, logsDir, sinceMs, nowMs, retentionDays, localHost, noMirrorReason: url ? "the Valkey did not answer: only this host's files were read" : "no Valkey to read: only this host's files were read" });
 	} finally {
-		client?.disconnect?.();
+		signal?.removeEventListener?.("abort", drop);
+		drop();
 	}
+}
+
+/**
+ * `client.connect()`, or a rejection after `ms` or as soon as `signal` aborts (the client is then the caller's to
+ * disconnect). The timer goes with an abort, so nothing of a read doctor gave up on holds the process.
+ */
+export function connectWithin(client, ms, signal) {
+	return new Promise((resolve, reject) => {
+		const stop = () => (clearTimeout(t), reject(new Error("connect stopped")));
+		const t = setTimeout(() => (signal?.removeEventListener?.("abort", stop), reject(new Error("connect timeout"))), ms);
+		signal?.addEventListener?.("abort", stop, { once: true });
+		Promise.resolve(client.connect()).then(
+			(v) => (clearTimeout(t), signal?.removeEventListener?.("abort", stop), resolve(v)),
+			(e) => (clearTimeout(t), signal?.removeEventListener?.("abort", stop), reject(e)),
+		);
+	});
 }
 
 /** Part of whole in thousandths, rounded half up; 0 without a whole. */
@@ -7858,11 +7912,20 @@ export function capacityChecks(report, { since = "7d" } = {}) {
 			if (localOnly) notes.push("this host's files only");
 		}
 		if (h.coverage?.liveNotCounted > 0) notes.push(`${h.coverage.liveNotCounted} running now not counted`);
+		if (h.coverage?.liveUnreadable > 0) notes.push("its running jobs could not be read, not counted");
 		out.push({ ok: true, label: `${line}${notes.length > 0 ? `; ${notes.join("; ")}` : ""}`.replace(/[\u0000-\u001f\u007f-\u009f]/g, "") });
 	}
 	return out;
 }
 
+/**
+ * The fleet's budgets (issue #596, phase 2), from the registry rows (this host's own included): one line per host that
+ * publishes a budget (its budget, what its jobs hold, what its holds keep, and the largest project size that fits it),
+ * one line per sized project naming the hosts it fits on (a WARNING when none does: its jobs on the shared queue wait,
+ * never refused, until a host it fits on is live; a host restarting is missing from the registry for that while), and a
+ * WARNING per host whose budget is below the projects' minJobs
+ * together. Nothing when no host publishes a budget (workers from before it).
+ */
 export function fleetBudgetChecks(rows, { limits = [], env = {} } = {}) {
 	const hosts = (Array.isArray(rows) ? rows : []).map((row) => ({ name: row.name, budget: publishedBudget(row), row })).filter((h) => h.budget.memMiB !== null && h.budget.cpuCenti !== null);
 	if (hosts.length === 0) return [];

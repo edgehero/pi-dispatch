@@ -1763,18 +1763,6 @@ const HELD_HYDRATE_MAX = 200;
  * listing was truncated rather than shown a silently short list.
  */
 /**
- * The fleet (issue #57): every live worker's own row, newest heartbeat first, pruned as it is read.
- *
- * A sibling of `readHeldJobs` rather than a leg of `readQueueState`: its own client, its own timeout, and
- * one responsibility. It reuses the WORKER's `readLiveHosts` rather than reimplementing the walk, so the
- * panel and the worker can never disagree about which hosts are live or about when a row is stale --
- * the `scopeKeyPrefix` doctrine of one export and N consumers.
- *
- * `{ unreachable }` and an empty list stay distinguishable all the way to the renderer. "There are no
- * other hosts" and "I could not find out" are different facts, and a panel that shows the second as the
- * first tells an operator their fleet is gone when Valkey merely blinked.
- */
-/**
  * The capacity report for `dispatch_capacity` (issue #599, phase 2, INT-CAPACITY-REPORT): the CLI's read and the CLI's
  * function (`readCapacityRecords`, `computeCapacity`, `onlyHost`, `capacityText`), so the tool, `pi-dispatch capacity`
  * and doctor cannot disagree. READ-ONLY: the registry is read with `prune: false` and the mirror reader prunes nothing.
@@ -1816,6 +1804,18 @@ export async function readCapacity({ url, env = process.env, window = "7d", host
   }
 }
 
+/**
+ * The fleet (issue #57): every live worker's own row, newest heartbeat first, pruned as it is read.
+ *
+ * A sibling of `readHeldJobs` rather than a leg of `readQueueState`: its own client, its own timeout, and
+ * one responsibility. It reuses the WORKER's `readLiveHosts` rather than reimplementing the walk, so the
+ * panel and the worker can never disagree about which hosts are live or about when a row is stale --
+ * the `scopeKeyPrefix` doctrine of one export and N consumers.
+ *
+ * `{ unreachable }` and an empty list stay distinguishable all the way to the renderer. "There are no
+ * other hosts" and "I could not find out" are different facts, and a panel that shows the second as the
+ * first tells an operator their fleet is gone when Valkey merely blinked.
+ */
 export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now() } = {}) {
   let redis;
   try {

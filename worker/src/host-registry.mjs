@@ -306,6 +306,9 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 				...row,
 				jobs: live.jobs,
 				jobsMore: live.jobs === null ? more : (more ?? 0) + live.dropped,
+				// A row that HAS a `jobs` value that is not a list: how many it runs is unknown, which a reader must say
+				// rather than read as a worker from before the field.
+				jobsUnreadable: live.jobs === null && typeof row.jobs === "string" && row.jobs !== "",
 				name: row.name || member,
 				// Derived rather than stored, so the panel can say "stale 2m" about a row that still lives.
 				// A row whose clock is AHEAD of ours reads as 0 rather than negative: the difference is the

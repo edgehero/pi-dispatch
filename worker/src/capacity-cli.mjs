@@ -191,6 +191,7 @@ function hostLines(h, since) {
 	if (cov.retried > 0) lines.push(`  ${plural(cov.retried, "retried run")}: ${plural(cov.earlier, "earlier attempt")} counted from the records the retries kept; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
 	if (cov.live > 0) lines.push(`  ${plural(cov.live, "job")} running now, counted as busy up to now (or the host's last beat)`);
 	if (cov.liveNotCounted > 0) lines.push(`  ${cov.liveNotCounted} more running now ${cov.liveNotCounted === 1 ? "is" : "are"} not counted (not listed by its row, or its history is not shared), so busy time can be under-counted`);
+	if (cov.liveUnreadable > 0) lines.push("  its list of running jobs could not be read, so none of them is counted and how many run is unknown");
 	if (cov.orphans > 0) lines.push(`  ${plural(cov.orphans, "orphaned container")} (a stop that did not take) still held by the budget, counted by ${cov.orphans === 1 ? "its record" : "their records"} up to the stop`);
 	if (cov.stalledRepick > 0) lines.push(`  ${cov.stalledRepick} ${cov.stalledRepick === 1 ? "run was" : "runs were"} picked up again after a stall: the first pickup's time is not counted`);
 	const notes = [`history from ${cov.source === "local" ? "this host's files" : cov.source === "mirror" ? "the run mirror" : "the run records"}`];
@@ -211,6 +212,7 @@ function coverageLines(cov) {
 	if (cov.unreadable > 0) notes.push(`${plural(cov.unreadable, "record")} unreadable, not counted`);
 	if (cov.withoutHost > 0) notes.push(`${cov.withoutHost} without a host, not counted`);
 	if (cov.earlierDropped > 0) notes.push(`${plural(cov.earlierDropped, "carried earlier attempt")} not counted (not valid, beyond the 4 a record keeps, or overlapping its own run)`);
+	if (cov.liveUnreadable > 0) notes.push(`the running jobs of ${plural(cov.liveUnreadable, "host")} unreadable, not counted, so how many run now is unknown`);
 	if (cov.running !== null && cov.running > 0) notes.push(`${plural(cov.running, "job")} running now${cov.liveNotCounted > 0 ? `, ${cov.liveNotCounted} of them not counted until ${cov.liveNotCounted === 1 ? "it ends" : "they end"}` : ", counted up to now"}`);
 	if (cov.reason) notes.push(cov.reason);
 	return [`Coverage: ${notes.join("; ")}.`, "Jobs only: a machine busy with other work reads as idle."];

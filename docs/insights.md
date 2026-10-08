@@ -219,7 +219,7 @@ cannot see), never as a warning. The `dispatch_capacity` tool returns it to a mo
 - **A job running now is counted as busy up to now.** Each worker's registry row lists the jobs it runs (with or
   without a host budget), and the report counts each from the moment it was admitted. A row that has not beaten for
   more than 30 seconds counts its jobs only up to its last beat. A running job the row does not list (it lists 32) is
-  said as not counted, and so is one on a host whose history is not shared. A container whose stop did not take (an
+  said as not counted, and so is one on a host whose history is not shared. A row whose list of running jobs cannot be read is named, and the number running now is then unknown. A container whose stop did not take (an
   orphan) is named, but its time after the failed stop is in no record and is not counted as busy.
 - A retry replaces its earlier attempt's record, but carries that attempt's
   slot time in `earlier`, so it is counted; only an attempt whose record could not be read is not, and the report says
