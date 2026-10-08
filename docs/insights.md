@@ -208,13 +208,14 @@ The same report shows in three more places. `pi-dispatch doctor` prints one line
 share, average and slots, promised memory and CPU, CPU used, the wait and the busiest project, then what the line
 cannot see), never as a warning. The `dispatch_capacity` tool returns it to a model in pi (`window` `24h`, `7d` or
 `30d`, and an optional `host`), as text and as the report `--json` prints. The panel's HOSTS view (`u` in
-`/dispatch`) shows each host's last 7 days under its live slots, budget and running jobs, and reads the report once
-when it opens ([what the panel shows](multi-host.md#what-the-panel-and-doctor-show-you)).
+`/dispatch`) shows each host's last 7 days under its live slots, budget and running jobs, with the same caveats, and
+reads the report when it opens and again on `u` ([what the panel shows](multi-host.md#what-the-panel-and-doctor-show-you)).
 
 - **Jobs only.** No machine load is measured, so a machine busy with other work reads as idle.
 - **Missing history is never idle.** It reads the run mirror where workers declare `PI_WORKER_NAME`, and this host's
   own files, and each host's history starts where its own sources do: this host's files to `PI_LOG_RETENTION_DAYS`,
-  the mirror to what it still holds. Every worker trims the shared mirror by its own retention, so a host with a
+  the mirror to what it still holds (a host both hold, such as a named host seen from itself, says "the run mirror and
+  this host's files"). Every worker trims the shared mirror by its own retention, so a host with a
   shorter one cuts everyone's older runs; it records where it cut, and the report starts the mirrored hosts there.
   Time before a host's history, and a live host whose runs it cannot see (one without `PI_WORKER_NAME` writes no
   mirror), count as neither busy nor idle, and the report names them.

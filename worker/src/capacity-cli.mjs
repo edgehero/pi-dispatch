@@ -181,7 +181,8 @@ function hostLines(h, since, coverage) {
 	lines.push(`  busy ${percentText(share(h.busyMs, h.coveredMs))}, idle ${percentText(share(h.idleMs, h.coveredMs))}${missing}`);
 	const c = h.capacity;
 	const of = c.slots !== null ? ` of ${c.slots}` : "";
-	const basis = c.basis === "recorded" ? (c.changed ? " (the capacity changed in the window: each part is judged by the one in force then, the newest is shown)" : "") : c.basis === "current" ? " (current setting, no run recorded one)" : " (slot count unknown)";
+	const note = basisNote(c);
+	const basis = note === null ? "" : ` (${note})`;
 	const full = h.fullMs !== null ? `, full ${percentText(share(h.fullMs, h.coveredMs))} of the time` : "";
 	lines.push(`  slots: avg ${milliText(h.avgMilli ?? 0)}${of}, peak ${h.peak}${of}${full}${basis}`);
 	const memOf = Number.isSafeInteger(c.memMiB) && c.memMiB > 0 ? ` of the ${formatMemory(c.memMiB)} budget` : "";
@@ -197,31 +198,76 @@ function hostLines(h, since, coverage) {
 		if (h.otherProjects) named.push(`${plural(h.otherProjects.count, "other")} ${durationText(h.otherProjects.runMs)}`);
 		lines.push(`  projects by run time: ${named.join(", ")}`);
 	}
-	if (cov.refusedBeforeSlot > 0) lines.push(`  ${plural(cov.refusedBeforeSlot, "job")} refused before a slot`);
-	if (cov.retried > 0) lines.push(`  ${plural(cov.retried, "retried run")}: ${plural(cov.earlier, "earlier attempt")} counted from the records the retries kept; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
-	if (cov.live > 0) lines.push(`  ${plural(cov.live, "job")} running now, counted as busy up to now (or the host's last beat)`);
-	if (cov.liveNotCounted > 0) lines.push(`  ${cov.liveNotCounted} more running now ${cov.liveNotCounted === 1 ? "is" : "are"} not counted (not listed by its row, or its history is not shared), so busy time can be under-counted`);
-	if (cov.liveUnreadable > 0) lines.push("  its list of running jobs could not be read, so none of them is counted and how many run is unknown");
-	if (cov.orphans > 0) lines.push(`  ${plural(cov.orphans, "orphaned container")} (a stop that did not take) still held by the budget, counted by ${cov.orphans === 1 ? "its record" : "their records"} up to the stop`);
-	if (cov.stalledRepick > 0) lines.push(`  ${cov.stalledRepick} ${cov.stalledRepick === 1 ? "run was" : "runs were"} picked up again after a stall: the first pickup's time is not counted`);
-	const notes = [`history from ${cov.source === "local" ? "this host's files" : cov.source === "mirror" ? "the run mirror" : "the run records"}`];
+	for (const caveat of hostCaveats(cov)) lines.push(`  ${caveat}`);
+	lines.push(`  ${historyNotes(h).join("; ")}`);
+	return lines;
+}
+
+/**
+ * How a host's slot count was judged, as the CLI words it after "slots: avg ... of N", or null when the count is the one
+ * every run recorded: the panel's HOSTS view qualifies its "of N" and its full share with the same words.
+ */
+export function basisNote(c) {
+	if (c?.basis === "recorded") return c.changed ? "the capacity changed in the window: each part is judged by the one in force then, the newest is shown" : null;
+	return c?.basis === "current" ? "current setting, no run recorded one" : "slot count unknown";
+}
+
+/**
+ * What a host's numbers leave out or infer, one sentence each, from its coverage counts (`hosts[].coverage`): refusals
+ * before a slot, retries and stalls that under-count busy time, the jobs running now and those not counted, an
+ * unreadable job list, orphans. The CLI prints one per line; the panel's HOSTS view prints the same sentences.
+ */
+export function hostCaveats(cov) {
+	const out = [];
+	if (cov.refusedBeforeSlot > 0) out.push(`${plural(cov.refusedBeforeSlot, "job")} refused before a slot`);
+	if (cov.retried > 0) out.push(`${plural(cov.retried, "retried run")}: ${plural(cov.earlier, "earlier attempt")} counted from the records the retries kept; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
+	if (cov.live > 0) out.push(`${plural(cov.live, "job")} running now, counted as busy up to now (or the host's last beat)`);
+	if (cov.liveNotCounted > 0) out.push(`${cov.liveNotCounted} more running now ${cov.liveNotCounted === 1 ? "is" : "are"} not counted (not listed by its row, or its history is not shared), so busy time can be under-counted`);
+	if (cov.liveUnreadable > 0) out.push("its list of running jobs could not be read, so none of them is counted and how many run is unknown");
+	if (cov.orphans > 0) out.push(`${plural(cov.orphans, "orphaned container")} (a stop that did not take) still held by the budget, counted by ${cov.orphans === 1 ? "its record" : "their records"} up to the stop`);
+	if (cov.stalledRepick > 0) out.push(`${cov.stalledRepick} ${cov.stalledRepick === 1 ? "run was" : "runs were"} picked up again after a stall: the first pickup's time is not counted`);
+	return out;
+}
+
+/** Where a host's history comes from (`hosts[].coverage.source`), in words. */
+export function historySourceText(source) {
+	return source === "local" ? "this host's files" : source === "mirror" ? "the run mirror" : source === "mirror+local" ? "the run mirror and this host's files" : "the run records";
+}
+
+/**
+ * Where a host's history comes from and what of it is missing or inferred, one clause each: its source, the start of a
+ * history that begins inside the window (earlier time is neither busy nor idle), and the records counted by inference
+ * or left out of promised or CPU used. The CLI joins them with "; ", as does the panel's HOSTS view.
+ */
+export function historyNotes(h) {
+	const cov = h.coverage;
+	const notes = [`history from ${historySourceText(cov.source)}`];
 	if (h.missingMs > 0) notes.push(`from ${new Date(cov.fromMs).toISOString()} on${cov.truncated ? " (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)" : ""}, earlier time counted as neither busy nor idle`);
 	const legacy = cov.legacyOccupied + cov.legacyRefused;
 	if (legacy > 0) notes.push(`${plural(legacy, "record")} from before capacity was recorded, inferred (${cov.legacyOccupied} held a slot, ${cov.legacyRefused} refused)`);
 	if (cov.withoutSize > 0) notes.push(`${cov.withoutSize} without a size (not in promised)`);
 	if (cov.withoutResources > 0) notes.push(`${cov.withoutResources} without a CPU measurement (not in CPU used)`);
 	if (cov.cpuClamped > 0) notes.push(`${cov.cpuClamped} reporting more CPU than the job could use, read at that most`);
-	lines.push(`  ${notes.join("; ")}`);
-	return lines;
+	return notes;
+}
+
+/**
+ * The fleet's records that no host's numbers hold, one clause each: unreadable records, records without a host, carried
+ * earlier attempts not counted. The CLI's coverage line and the panel's HOSTS view say them in these words.
+ */
+export function fleetRecordNotes(cov) {
+	const notes = [];
+	if (cov.unreadable > 0) notes.push(`${plural(cov.unreadable, "record")} unreadable, not counted`);
+	if (cov.withoutHost > 0) notes.push(`${cov.withoutHost} without a host, not counted`);
+	if (cov.earlierDropped > 0) notes.push(`${plural(cov.earlierDropped, "carried earlier attempt")} not counted (not valid, beyond the 4 a record keeps, or overlapping its own run)`);
+	return notes;
 }
 
 /** What the fleet's history covers, said plainly, ending with what this report cannot see. */
 function coverageLines(cov) {
 	const notes = [`history: ${cov.source === "local" ? "this host's files only" : cov.source === "mirror" ? "the run mirror" : cov.source === "mirror+local" ? "the run mirror and this host's files" : "the records given"}`];
 	if (cov.historyNotShared.length > 0) notes.push(`not shared here: ${cov.historyNotShared.join(", ")}`);
-	if (cov.unreadable > 0) notes.push(`${plural(cov.unreadable, "record")} unreadable, not counted`);
-	if (cov.withoutHost > 0) notes.push(`${cov.withoutHost} without a host, not counted`);
-	if (cov.earlierDropped > 0) notes.push(`${plural(cov.earlierDropped, "carried earlier attempt")} not counted (not valid, beyond the 4 a record keeps, or overlapping its own run)`);
+	notes.push(...fleetRecordNotes(cov));
 	if (cov.liveUnreadable > 0) notes.push(`the running jobs of ${plural(cov.liveUnreadable, "host")} unreadable, not counted, so how many run now is unknown`);
 	if (cov.running !== null && cov.running > 0) notes.push(`${plural(cov.running, "job")} running now${cov.liveNotCounted > 0 ? `, ${cov.liveNotCounted} of them not counted until ${cov.liveNotCounted === 1 ? "it ends" : "they end"}` : ", counted up to now"}`);
 	if (cov.reason) notes.push(cov.reason);

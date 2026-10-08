@@ -5507,7 +5507,7 @@ validator rather than a second copy of it.
     },
     "hosts": [ {                                                           // sorted by name
       "name": "<host>", "shared": <bool>, "notShared": "unnamed" | "unread" | null,  // why its history is not here
-      "coverage": { "fromMs": <int>, "source": "local" | "mirror" | "records" | null, "truncated": <bool>,
+      "coverage": { "fromMs": <int>, "source": "local" | "mirror" | "mirror+local" | "records" | null, "truncated": <bool>,
                     "used": <int>, "refusedBeforeSlot": <int>, "legacyOccupied": <int>, "legacyRefused": <int>,
                     "withoutSize": <int>, "withoutResources": <int>, "cpuClamped": <int>, "retried": <int>,
                     "earlier": <int>, "stalledRepick": <int>, "live": <int>, "liveNotCounted": <int>,
@@ -5534,8 +5534,8 @@ validator rather than a second copy of it.
   `INT-RUN-HISTORY-FILE-CONTRACT`), the oldest run at the 5,000 run cap when it ended inside the window, and the newest
   run whose body expired while its index member stayed. A host is covered by the files when it is this host or its
   runs are in them, and by the mirror when its live row says it routes (it declared `PI_WORKER_NAME`) or, with no live
-  row, when the mirror holds its runs; it starts at the earliest of the sources that cover it, and `source` names that
-  one. A host no source covers is `shared: false`, listed in `historyNotShared`, and missing for the whole window;
+  row, when the mirror holds its runs; it starts at the earliest of the sources that cover it (the files' on a tie, which
+  the mirror's cap does not cut), and `source` names the one, or `mirror+local` when both cover it. A host no source covers is `shared: false`, listed in `historyNotShared`, and missing for the whole window;
   `notShared` says why: `unread` when its live row routes (it writes the run mirror, so it is uncovered only when the
   mirror was not read: no Valkey, or it did not answer; `coverage.reason` says which), `unnamed` when it does not (a
   worker without `PI_WORKER_NAME` writes no run mirror). Only a host with a live row can be uncovered. Every surface
@@ -8154,3 +8154,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-08 | Issue #599, phase 2, second corrections. **`INT-CAPACITY-REPORT` AMENDED**: a host entry gains `notShared` (`unnamed`, `unread` or null), and doctor's line, the CLI and the tool say the reason the run mirror was not read (its `coverage.reason`) where a Valkey did not answer, instead of reading as this host's files only, or blaming a worker without `PI_WORKER_NAME` for a named host whose runs the mirror holds. |
 | 2026-10-08 | Issue #599, phase 2, wording. **`INT-CAPACITY-REPORT` AMENDED (wording)**: `notShared` is judged by the live row's `routes` alone, `unread` when it routes and `unnamed` when it does not; a host with no live row is never uncovered, so the earlier clause "or the mirror holds none of its runs" is gone. |
 | 2026-10-08 | Issue #599, phase 3. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**, the readers of `jobs` and `jobsMore`: the admin panel's HOSTS view reads them with `concurrency`, `budgetRunning`, `waiters`, the budget fields and the row's age, and parses `jobs` through `parseLiveJobs` again (`@edgehero/pi-dispatch/live-jobs` is exported for it). The fields are UNCHANGED. **`INT-CAPACITY-REPORT` UNCHANGED, checked**: the view draws the report as `readCapacity` returns it, through the CLI's own `notSharedWhy`, `percentText`, `milliText`, `durationText` and `share` (now exported). |
+| 2026-10-08 | Issue #599, phase 3, corrections. **`INT-CAPACITY-REPORT` AMENDED**: a host's `coverage.source` is `mirror+local` when both sources cover it (it named the earlier one, and the files on a tie, so a host the mirror also holds read as this host's files only); its `fromMs` is still the earlier start, the files' on a tie. The fleet's `coverage.source` is UNCHANGED. **`INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked**: the panel reads `beatAt` through `staleMs`, as before. |

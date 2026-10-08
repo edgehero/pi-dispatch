@@ -1170,10 +1170,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   host shows its slots in use of its limit, what its budget has promised its jobs against the budget (or that it has
   none), how many wait for the budget, its age once its row is stale, and up to four running jobs with id, project,
   size and age (an orphan marked, the rest counted), all from the registry rows the panel's tick already reads, and
-  its last 7 days from the same report, read once when the view opens and never on the tick; given a host whose
-  history is not here, then it says why in the words `pi-dispatch capacity` uses and shows no busy share; given a row
-  whose job list does not parse, then its slots in use read `?`, never 0; given a host name or id with a control
-  character, then it reaches the terminal escaped; given a width of 47 columns, then no line is wider.
+  its last 7 days from the same report, labelled with the minute it was read and with the caveats the CLI prints, read
+  when the view opens and on `u` in it, one read at a time, and never on the tick; given a host whose history is not
+  here, then it says why in the words `pi-dispatch capacity` uses and shows no busy share; given a row whose job list
+  does not parse, or which carries no beat time, then its slots in use read `?`, never 0; given a budget a starting
+  worker has not read yet, then it reads as not known yet, not as absent; given fifty presses of Esc and `u` over a
+  slow read, then one read runs; given a host name or id with a control character, then it reaches the terminal
+  escaped; given a width of 47 columns, then no line is wider.
 - **Traces to**: `DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-DURABLE-RUN-HISTORY`, `OQ-039`
 
@@ -3403,6 +3406,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-08 | Issue #599, phase 3, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance of the panel's HOSTS view: its 7 days are labelled with the minute they were read and carry the CLI's caveats; `u` in the view reads them again, one read at a time (fifty Esc and `u` presses over a slow read start one); a row without a beat time reads `?` slots, as an unparseable list does; a budget a starting worker has not read is not known yet, not absent. It said the report was read once per opening and inert inside. The statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 3. **`REQ-CAPACITY-INSIGHTS` AMENDED**: the Statement says phase 3 shows the report in the panel's HOSTS view (`u`); the Acceptance adds the view: each live host's slots in use of its limit, what its budget has promised, who waits, its stale age and up to four running jobs, from the registry rows the panel's tick already reads, and its last 7 days from the same report read once when the view opens and never on the tick; a host whose history is not here says why in the CLI's words and shows no busy share; an unparseable job list reads `?`, never 0; a hostile name is escaped; nothing is wider than 47 columns at 47. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is added (the view reads through the panel's own seam), and the model-callable list still matches the registrations. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: the registry gains a reader (the panel), no field. |
 | 2026-10-08 | Issue #599, phase 2. **`REQ-CAPACITY-INSIGHTS` AMENDED**: the Statement says phase 2 counts the jobs running now (from the host rows) and shows the report as one doctor line per host and through `dispatch_capacity`; the Acceptance adds a running job counted from its admission to now with or without a host budget, a running job its row does not list said as not counted, doctor's one fact line per host and never a warning, and the tool returning the report the CLI prints. **`REQ-MULTI-HOST-COORDINATION` AMENDED**, one line: a row also carries the jobs its host runs now (job ids, project ids and integers), read by the capacity report and by no decision. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Statement names `dispatch_capacity` among the reads (the wiring scan matches the registered tools exactly). **`REQ-HOST-BUDGET`** UNCHANGED, checked: the running jobs come from an in-flight map that exists without a budget; the budget's ledger only flags orphans and decides nothing new. |
 | 2026-10-08 | Issue #599, phase 1, third corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance: CPU used is never above 100% of the host's CPUs, and the CPU budget is not used as a ceiling (it read 50% for two jobs that can really use all 8 CPUs). The statement is UNCHANGED. |
