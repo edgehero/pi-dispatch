@@ -1148,9 +1148,10 @@ test("each driven pi-ai chat family's credential refusal lands in its expected e
 	assert.deepEqual([...new Set(AUTH_REFUSAL_TABLE.map((row) => row.api))].sort(), [...known].sort(), "the table must hold one row per KnownApi family at the pin");
 	// Renamed KnownImagesApi -> KnownImageApi by 0.99.1, which also added the classifier apis. Neither kind
 	// returns an AssistantMessage (generateImages and classify answer AssistantImages / ClassifierResult), so
-	// neither can be the terminal the runner classifies; both are pinned so a new one is looked at.
+	// neither can be the terminal the runner classifies; both are pinned so a new one is looked at. pi 1.1.0 added
+	// openai-decisions: a `classify` export only, answering a ClassifierResult like the others.
 	assert.match(types, /export type KnownImageApi = "openrouter-images";/, "the image api set moved -- re-check whether any of it can end a chat turn");
-	assert.match(types, /export type KnownClassifierApi = "typesafe-system-one" \| "cloudflare-workers-ai-system-one" \| "llama-cpp-classify";/, "the classifier api set moved -- re-check whether any of it can end a chat turn");
+	assert.match(types, /export type KnownClassifierApi = "typesafe-system-one" \| "cloudflare-workers-ai-system-one" \| "llama-cpp-classify" \| "openai-decisions";/, "the classifier api set moved -- re-check whether any of it can end a chat turn");
 });
 
 /**
@@ -1555,9 +1556,10 @@ test("PRICED_APIS is exactly the set of pi-ai api modules that reach calculateCo
 	const modules = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js")).map((name) => name.slice(0, -3));
 	const source = new Map(modules.map((name) => [name, readFileSync(join(apiDir, `${name}.js`), "utf8")]));
 	// Direct: imports calculateCost from ../models.js. Then the fixpoint over sibling imports (the two shared
-	// modules carry it for the responses family and the system-one classifiers).
+	// modules carry it for the responses family and the classifiers: pi 1.1.0 moved the System One pricing into
+	// classifier-shared, which openai-decisions uses too).
 	const reaches = new Set(modules.filter((name) => /import \{[^}]*\bcalculateCost\b[^}]*\} from "\.\.\/models\.js";/.test(source.get(name))));
-	assert.ok(reaches.has("openai-responses-shared") && reaches.has("system-one-shared"), "the premise: the two shared modules price");
+	assert.ok(reaches.has("openai-responses-shared") && reaches.has("classifier-shared"), "the premise: the two shared modules price");
 	for (let grew = true; grew; ) {
 		grew = false;
 		for (const name of modules) {
@@ -1630,7 +1632,13 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	// returns, so the guard's wrapper sees the final routing fields. A new module without it is a payload the guard
 	// cannot read, and fails here.
 	const hooked = modules.filter((name) => /await options\??\.onPayload\?\.\((?:params|payload|commandInput|body), model\)/.test(readFileSync(join(apiDir, name), "utf8"))).sort();
-	assert.deepEqual(hooked, ["anthropic-messages.js", "azure-openai-responses.js", "bedrock-converse-stream.js", "google-generative-ai.js", "google-vertex.js", "llama-cpp-classify.js", "mistral-conversations.js", "openai-codex-responses.js", "openai-completions.js", "openai-responses.js", "openrouter-images.js", "pi-messages.js", "system-one-shared.js"]);
+	assert.deepEqual(hooked, ["anthropic-messages.js", "azure-openai-responses.js", "bedrock-converse-stream.js", "classifier-shared.js", "google-generative-ai.js", "google-vertex.js", "llama-cpp-classify.js", "mistral-conversations.js", "openai-codex-responses.js", "openai-completions.js", "openai-responses.js", "openrouter-images.js", "pi-messages.js"]);
+	// pi 1.1.0: the System One classifiers and openai-decisions send through classifier-shared's postClassifierRequest,
+	// the one place their onPayload is called.
+	for (const file of ["system-one-shared.js", "openai-decisions.js"]) {
+		assert.match(nestedPiAi("api", file), /import \{[^}]*\bpostClassifierRequest\b[^}]*\} from "\.\/classifier-shared\.js";/, file);
+		assert.doesNotMatch(nestedPiAi("api", file), /requestFetch|globalThis\.fetch/, `${file} sends a request of its own`);
+	}
 	assert.match(nestedPiAi("api", "simple-options.js"), /onPayload: options\?\.onPayload,/, "streamSimple's options keep the caller's onPayload");
 	assert.match(agentDistFile("core", "model-runtime.js"), /const \{ transformHeaders, \.\.\.rawProviderOptions \} = options \?\? \{\};[\s\S]*?options: \{\s*\.\.\.providerOptions,/, "prepareRequest passes the caller's options, onPayload included, to the provider");
 	// The session's before_provider_request hooks reach the provider through that same option.
@@ -1700,8 +1708,9 @@ test("the output-bound rules: who sends maxTokens, the 16 floor, the reasoning c
 	assert.match(responses, /if \(options\?\.maxTokens && compat\.supportsMaxOutputTokens && !omitUnsupportedFields\) \{/, "when openai-responses drops the caller's cap");
 	assert.match(responses, /const omitUnsupportedFields = isChatGPTSignIn\(model, options\?\.apiKey\);/);
 	assert.match(responses, /return \(model\.provider === "openai" &&\s*model\.baseUrl === "https:\/\/api\.openai\.com\/v1" &&\s*apiKey !== undefined &&\s*!apiKey\.startsWith\("sk-"\)\);/);
-	// The three that never put the caller's cap on the request: no maxTokens anywhere in their source.
-	for (const file of ["openai-codex-responses.js", "cloudflare-workers-ai-system-one.js", "typesafe-system-one.js", "system-one-shared.js"]) {
+	// The four that never put the caller's cap on the request: no maxTokens anywhere in their source, nor in the two
+	// classifier modules they share.
+	for (const file of ["openai-codex-responses.js", "cloudflare-workers-ai-system-one.js", "openai-decisions.js", "typesafe-system-one.js", "system-one-shared.js", "classifier-shared.js"]) {
 		assert.doesNotMatch(nestedPiAi("api", file), /maxTokens|max_output_tokens|max_tokens/, `${file} now sends an output cap -- callCostBound may use the caller's maxTokens there`);
 	}
 	// openai-completions drops a falsy cap; the bound reads only a positive one as asked.

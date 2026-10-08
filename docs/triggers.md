@@ -272,6 +272,15 @@ Any trigger type can name the model its jobs run on, and how many turns a job ma
 
   pi 1.0.4 removed two more ids, both on `openrouter`: `qwen/qwen3.8-27b:free` and `stealth/space-bunny-alpha`.
   14 models changed price (12 on `openrouter`, 2 on `vercel-ai-gateway`).
+
+  pi 1.1.0 removed these ids:
+  - `opencode-go`: `space-bunny-free` (`space-bunny` is new).
+  - `openrouter`: `kwaipilot/kat-coder-pro-v2.5`, and the classifier `perplexity/pplx-decider-v1-27b`
+    (`perplexity/pplx-decider-v1.1-27b` is new).
+  - `vercel-ai-gateway`: `deepseek/deepseek-v3.1-terminus`, `moonshotai/kimi-k2-thinking` and
+    `stepfun/step-3.5-flash`.
+
+  180 models changed price, most of them on `openrouter` (101) and `vercel-ai-gateway` (48).
 - `"model"` is that provider's model id. Case is kept as you wrote it.
 - `"maxTurns"` is a whole number of 1 or more.
 
