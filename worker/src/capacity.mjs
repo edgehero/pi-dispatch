@@ -61,7 +61,7 @@
  */
 
 import { WORKER_NAME_RE } from "./worker-name.mjs";
-import { JOB_CPUS_CEILING_CENTI, SIZE_REFUSAL_REASONS, recordedJobSize } from "./job-size.mjs";
+import { HOST_CPUS_MAX, HOST_MEMORY_MAX_MIB, HOST_SLOTS_MAX, JOB_CPUS_CEILING_CENTI, SIZE_REFUSAL_REASONS, recordedJobSize } from "./job-size.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { HOST_BEAT_MS } from "./host-registry.mjs";
 import { parseJobsMore, parseLiveJobs, publishedJobId } from "./live-jobs.mjs";
@@ -111,13 +111,23 @@ export function occupancyOf(record) {
 	if (!isObject(record)) return null;
 	if ("capacity" in record) {
 		if (record.capacity === null) return { occupied: false, inferred: false };
-		return isObject(record.capacity) ? { occupied: true, inferred: false } : null;
+		return isObject(record.capacity) && !beyondAnyHost(record.capacity) ? { occupied: true, inferred: false } : null;
 	}
 	if (PRE_SLOT_REFUSAL_REASONS.includes(record.reason)) return { occupied: false, inferred: true };
 	const start = Date.parse(record.startedAt ?? "");
 	const end = Date.parse(record.endedAt ?? "");
 	const wall = Number.isFinite(start) && Number.isFinite(end) ? end - start : NaN;
 	return { occupied: wall >= LEGACY_MIN_WALL_MS || isObject(record.resources), inferred: true };
+}
+
+/**
+ * Whether a `capacity` says more than any host can have (job-size.mjs `HOST_*_MAX`): more slots, CPUs, memory or CPU
+ * budget. The writer never records such a value (it records unknown), so a record that says one is a fault or a
+ * forgery, and is counted as unreadable rather than judging a host's week against it.
+ */
+function beyondAnyHost(c) {
+	const over = (v, max) => typeof v === "number" && v > max;
+	return over(c.slots, HOST_SLOTS_MAX) || over(c.cpus, HOST_CPUS_MAX) || over(c.memMiB, HOST_MEMORY_MAX_MIB) || over(c.cpuCenti, HOST_CPUS_MAX * 100);
 }
 
 /**
@@ -135,9 +145,12 @@ export function capacityOf(value) {
 /** A live host row's capacity (host-registry.mjs strings): the slot count and both budgets; the CPU count is not published. */
 function liveCapacityOf(row) {
 	const int = (s) => (typeof s === "string" && /^\d{1,15}$/.test(s) ? Number(s) : null);
-	const budget = (s) => (s === "off" ? "off" : int(s));
+	const budget = (s, max) => {
+		const n = s === "off" ? "off" : int(s);
+		return typeof n === "number" && n > max ? null : n;
+	};
 	const slots = int(row?.concurrency);
-	return { slots: slots !== null && slots >= 1 ? slots : null, memMiB: budget(row?.budgetMemMiB), cpuCenti: budget(row?.budgetCpuCenti), cpus: null };
+	return { slots: slots !== null && slots >= 1 && slots <= HOST_SLOTS_MAX ? slots : null, memMiB: budget(row?.budgetMemMiB, HOST_MEMORY_MAX_MIB), cpuCenti: budget(row?.budgetCpuCenti, HOST_CPUS_MAX * 100), cpus: null };
 }
 
 const sameCapacity = (a, b) => a.slots === b.slots && a.memMiB === b.memMiB && a.cpuCenti === b.cpuCenti && a.cpus === b.cpus;

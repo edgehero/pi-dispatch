@@ -1100,14 +1100,14 @@ const CH = 60 * 60 * 1000;
 function capBuckets(covered, { avg = () => 1500, peak = () => 2 } = {}) {
   return Array.from({ length: 10 }, (_, i) => {
     const c = covered(i);
-    return { fromMs: NOW - 10 * CH + i * CH, coveredMs: c, busyMs: c > 0 ? Math.floor(c / 2) : 0, fullMs: c > 0 ? 0 : 0, peak: c > 0 ? peak(i) : 0, avgMilli: c > 0 ? avg(i) : null };
+    return { fromMs: NOW - 10 * CH + i * CH, coveredMs: c, busyMs: c > 0 ? Math.floor(c / 2) : 0, fullMs: 0, peak: c > 0 ? peak(i) : 0, avgMilli: c > 0 ? avg(i) : null };
   });
 }
 const CAP_FACTS = () => ({ busy: "50%", idle: "50%", missing: null, avg: "1.5", slots: 4, peak: 2, full: "0%", basis: null, memory: "memory 25% of the 16g budget", cpu: "CPU 20% of the 8 CPU budget", cpuUsed: "10% of the host's 8 CPUs", wait: "p50 40s, p95 6m (12 runs)", projects: ["web 3h", "api 1h"] });
 const CAP_SLICE = () => ({
   window: { fromMs: NOW - 10 * CH, toMs: NOW, bucketMs: CH },
   truncated: true,
-  coverage: "Coverage: history: the run mirror; not shared here: laptop.",
+  coverage: ["history: the run mirror", "not shared here: laptop"],
   hosts: [
     { name: "mini1", fromMs: NOW - 10 * CH, truncated: false, slots: 4, buckets: capBuckets(() => CH), facts: CAP_FACTS(), caveats: ["2 jobs refused before a slot"], notes: "history from the run mirror" },
     // history from 4.5h in: the first four buckets and half of the fifth have none
@@ -1186,7 +1186,7 @@ test("the capacity section: each host's numbers and caveats, no data hatched wit
   assert.ok(sec.includes("history truncated: it starts at"), "a truncated host says so");
   assert.ok(sec.includes("history truncated: the run mirror holds nothing older"), "and the section does");
   assert.match(sec, /<span class="pid">laptop<\/span> <span class="cap-warn">history not here<\/span>/);
-  assert.ok(sec.includes("Coverage: history: the run mirror; not shared here: laptop."));
+  assert.ok(sec.includes('<div class="dim small">Coverage:</div><div class="dim small">history: the run mirror</div><div class="dim small">not shared here: laptop</div>'));
   // laptop: one hatched stretch over the whole axis, and no bar at all
   const laptopSvg = sec.slice(sec.indexOf("jobs at once on laptop"), sec.indexOf("</svg>", sec.indexOf("jobs at once on laptop")));
   assert.equal((laptopSvg.match(/class="nodata"/g) ?? []).length, 1);
@@ -1223,13 +1223,13 @@ test("hostile host, project, caveat and reason text in the capacity slice is esc
   p.hosts[0].caveats = [evil, "\u001b]0;title\u0007 bell"];
   p.hosts[0].notes = evil;
   p.hosts[2].notShared = `the run mirror was not read (${evil})`;
-  p.coverage = evil;
+  p.coverage = [evil];
   const html = capPage(p);
   assert.equal(html.split("<script").length - 1, 1);
   assert.ok(!html.includes("<script>alert"));
   assert.ok(capSection(html).includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
   assert.ok(!html.includes("\u001b") && !html.includes("\u0007"), "control characters are made visible text");
-  assert.ok(capSection(html).includes("1 more host not drawn"), "a name that is not a worker name is dropped and counted");
+  assert.ok(capSection(html).includes("1 host not drawn: not a worker name"), "a name that is not a worker name is dropped and counted");
   const down = capPage({ unreachable: evil });
   assert.ok(capSection(down).includes("capacity not read: &quot;&gt;&lt;script&gt;"));
   assert.ok(capSection(down).includes(INSIGHTS_CAPACITY_JOBS_ONLY));
@@ -1255,4 +1255,75 @@ test("a bad capacity slice degrades only its own section, and a junk bucket is d
   const nofacts = CAP_SLICE();
   nofacts.hosts[0].facts = { busy: 5 };
   assert.match(capSection(capPage(nofacts)), /<span class="pid">mini1<\/span> <span class="dim">no history here<\/span>/);
+});
+
+test("the host cap keeps the hosts with numbers, and says what it left out by kind", () => {
+  const p = CAP_SLICE();
+  const notShared = p.hosts[2];
+  p.hosts = [...Array.from({ length: 22 }, (_, i) => ({ ...notShared, name: `a${String(i).padStart(2, "0")}` })), { ...CAP_SLICE().hosts[0], name: "zz-busy" }, { ...CAP_SLICE().hosts[0], name: "dup" }, { ...notShared, name: "dup" }];
+  const sec = capSection(capPage(p));
+  assert.match(sec, /<span class="pid">zz-busy<\/span> <span>busy 50%/, "the one host with numbers is drawn, first");
+  assert.ok(sec.indexOf("zz-busy") < sec.indexOf("a00"));
+  assert.equal((sec.match(/class="bl cap"/g) ?? []).length, 20);
+  assert.ok(sec.includes("3 more hosts not drawn past the first 20: 3 whose history is not here"));
+  assert.ok(sec.includes("1 host name given more than once, not drawn"));
+  assert.ok(!sec.includes(">dup<"), "neither copy of a repeated name is believed");
+  const q = JSON.parse(JSON.stringify(p));
+  q.hosts.reverse();
+  assert.equal(capSection(capPage(q)), sec, "the order of the slice changes nothing");
+});
+
+test("the coverage clauses are each their own line, so none is cut by a long one", () => {
+  const p = CAP_SLICE();
+  p.coverage = ["history: the run mirror", `14 hosts whose history is not here: ${"x".repeat(2000)}`, "3 without a host, not counted", "Valkey did not answer"];
+  const sec = capSection(capPage(p));
+  assert.ok(sec.includes('<div class="dim small">3 without a host, not counted</div><div class="dim small">Valkey did not answer</div>'));
+});
+
+test("layoutCapacityChart: a report read after the page's instant is cut at it, never drawn over earlier time", () => {
+  const host = { slots: 2, fromMs: 0, buckets: [0, 1, 2, 3].map((i) => ({ fromMs: i * CH, coveredMs: CH, busyMs: i === 3 ? CH : 0, fullMs: 0, peak: i === 3 ? 2 : 0, avgMilli: i === 3 ? 2000 : 0 })) };
+  const lay = layoutCapacityChart(host, { fromMs: 0, toMs: 4 * CH, bucketMs: CH, nowMs: 2 * CH });
+  assert.deepEqual(lay.bars.map((b) => b.bucket.fromMs), [0, CH], "the buckets after the instant are not drawn");
+  assert.ok(lay.bars.every((b) => b.h === 0), "the busy hour after the instant is not drawn over an idle one");
+  assert.deepEqual(lay.gaps, []);
+  // read before the instant: the time after the read is its own kind of no data
+  const later = layoutCapacityChart({ ...host, fromMs: CH }, { fromMs: 0, toMs: 4 * CH, bucketMs: CH, nowMs: 5 * CH });
+  assert.deepEqual(later.gaps.map((g) => [g.kind, g.fromMs, g.toMs]), [["after", 4 * CH, 5 * CH]]);
+  const before = layoutCapacityChart({ ...host, fromMs: 1.5 * CH, buckets: host.buckets.map((b, i) => (i === 0 ? { ...b, coveredMs: 0 } : i === 1 ? { ...b, coveredMs: CH / 2 } : i === 2 ? { ...b, avgMilli: "x" } : b)).filter((b) => b.avgMilli !== "x") }, { fromMs: 0, toMs: 4 * CH, bucketMs: CH, nowMs: 4 * CH });
+  assert.deepEqual(before.gaps.map((g) => [g.kind, g.fromMs, g.toMs]), [["before", 0, 1.5 * CH], ["dropped", 2 * CH, 3 * CH]]);
+});
+
+test("layoutCapacityChart: the x labels sit at UTC midnights, at most eight", () => {
+  const DAY = 24 * CH;
+  const now = Date.UTC(2026, 9, 8, 12, 0, 0);
+  for (const days of [7, 30, 31]) {
+    const lay = layoutCapacityChart({ slots: 1, buckets: [] }, { fromMs: now - days * DAY, toMs: now, bucketMs: 6 * CH, nowMs: now });
+    assert.ok(lay.xLabels.length >= 3 && lay.xLabels.length <= 8, `${days}d: ${lay.xLabels.length}`);
+    for (const l of lay.xLabels) {
+      assert.equal(l.at % DAY, 0);
+      assert.equal(l.label, new Date(l.at).toISOString().slice(5, 10));
+      assert.ok(l.x >= lay.plot.x && l.x <= lay.plot.x + lay.plot.w);
+    }
+  }
+});
+
+test("junk buckets, a window of no time yet, and every gap's own reason", () => {
+  // under a minute (it read "0m"), not whole minutes, and one minute over ten hours (600 slivers); the first two also
+  // over a two-minute window, where they are few
+  for (const [bucketMs, span] of [[1, 10 * CH], [29_999, 10 * CH], [90_500, 10 * CH], [60_000, 10 * CH], [30_000, 120_000], [90_000, 180_000]]) {
+    const p = CAP_SLICE();
+    p.window = { fromMs: NOW - span, toMs: NOW, bucketMs };
+    assert.ok(capSection(capPage(p)).includes("the report&#39;s buckets are not readable"), String(bucketMs));
+  }
+  const none = capSection(capPage({ noTime: true, fromMs: NOW }, { window: "mtd" }));
+  assert.ok(none.includes("no time in this window yet: month to date starts at"));
+  assert.ok(!none.includes("not read"));
+  const tips = JSON.parse(capPage(CAP_SLICE()).match(/var INSIGHTS = (.*);\n/)[1]).tips;
+  assert.ok(tips.some((t) => t.endsWith("no data: before this host's history starts (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)")));
+  const junk = CAP_SLICE();
+  junk.hosts[0].buckets[3] = { ...junk.hosts[0].buckets[3], busyMs: CH * 2 };
+  const jt = JSON.parse(capPage(junk).match(/var INSIGHTS = (.*);\n/)[1]).tips;
+  assert.ok(jt.some((t) => t.endsWith("no data: this bucket's numbers were not readable, so they are not drawn")));
+  const late = JSON.parse(buildInsightsHtml({ window: "7d", capacity: CAP_SLICE() }, { now: NOW + CH }).match(/var INSIGHTS = (.*);\n/)[1]).tips;
+  assert.ok(late.some((t) => t.endsWith("no data: after the report was read")));
 });

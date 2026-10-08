@@ -135,7 +135,7 @@ import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scope
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
-import { coverageLines, historyNotes, hostCaveats, hostFacts, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
+import { coverageNotes, historyNotes, hostCaveats, hostFacts, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -2665,9 +2665,14 @@ export function capacityViewOf(report: any): any {
     const caveats = [...(f.basis ? [`slots: ${f.basis}`] : []), ...hostCaveats(h.coverage)];
     return { ...base, facts: { ...f, projects: [...f.projects] }, caveats, notes: historyNotes(h).join("; ") };
   });
-  const [coverage] = coverageLines(cov);
+  // The coverage clauses one by one (the CLI joins them into one line), so a long list of hosts whose history is not here
+  // can never push out what follows it: the records no host holds, the jobs running now, why a source was not read.
+  const coverage = coverageNotes({ ...cov, historyNotShared: Array.isArray(cov.historyNotShared) ? cov.historyNotShared : [] }, { namesShown: INSIGHTS_CAPACITY_NAMES_SHOWN });
   return { window: { ...report.window }, truncated: cov.truncated === true, coverage, hosts };
 }
+
+/** How many names the page's coverage lists of the hosts whose history is not here, before "and N more". */
+export const INSIGHTS_CAPACITY_NAMES_SHOWN = 5;
 
 /**
  * The insights page's capacity slice (issue #599, phase 4): the report `pi-dispatch capacity` and `dispatch_capacity`
@@ -2677,14 +2682,18 @@ export function capacityViewOf(report: any): any {
  */
 export async function assembleCapacityView(paths: any, window: string, nowMs: number, { readCapacityFn = readCapacity, env = deploymentEnv() }: { readCapacityFn?: any; env?: any } = {}): Promise<any> {
   const bucketMs = INSIGHTS_CAPACITY_BUCKET_MS[window] ?? INSIGHTS_CAPACITY_BUCKET_MS["30d"];
-  let res: any;
+  // The month's very first millisecond: a window of no time, which has nothing to read and is not a failure to read.
+  const sinceMs = costsSinceMs(window, nowMs);
+  if (sinceMs >= nowMs) return { noTime: true, fromMs: sinceMs };
   try {
-    res = await readCapacityFn({ url: paths.valkeyUrl, env, window, now: () => nowMs, span: { sinceMs: (n: number) => costsSinceMs(window, n), bucketMs } });
+    const res: any = await readCapacityFn({ url: paths.valkeyUrl, env, window, now: () => nowMs, span: { sinceMs: (n: number) => costsSinceMs(window, n), bucketMs } });
+    if (!res?.report) return { unreachable: String(res?.error ?? "no report") };
+    // Inside the try: a report this cannot word (a host without its capacity, a coverage that is not an object) is this
+    // section's own degraded state, never a failure of the whole page.
+    return capacityViewOf(res.report);
   } catch (err: any) {
-    return { unreachable: `the run records could not be read (${err?.message ?? err})` };
+    return { unreachable: `the capacity report could not be read (${err?.message ?? err})` };
   }
-  if (!res?.report) return { unreachable: String(res?.error ?? "no report") };
-  return capacityViewOf(res.report);
 }
 
 async function assembleInsights(paths: any, window: string, fullPaths = false, nowMs: number = Date.now()): Promise<any> {

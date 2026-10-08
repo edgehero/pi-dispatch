@@ -339,7 +339,8 @@ test("the caveats are the CLI's sentences: the slot basis, retries, stalls, refu
   for (const sentence of [
     "slots: current setting, no run recorded one",
     "3 jobs refused before a slot",
-    "2 retried runs: 1 earlier attempt counted from the records the retries kept; an attempt whose record was not kept is not counted, so busy time can be under-counted",
+    "2 retried runs: their earlier attempts are counted on the host that ran them, from the record the retry kept; an attempt whose record was not kept is not counted, so busy time can be under-counted",
+    "1 earlier attempt of a retried run counted here, from the record its retry kept",
     "1 run was picked up again after a stall: the first pickup's time is not counted",
     "1 record from before capacity was recorded, inferred (1 held a slot, 0 refused)",
     "2 without a host, not counted",

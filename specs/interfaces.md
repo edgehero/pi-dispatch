@@ -4939,8 +4939,11 @@ validator rather than a second copy of it.
   null where no budget is set or a dimension is unknown), and `cpus` the host's CPU count as its container runtime
   reports it (`docker info` `NCPU`, `podman info` `host.cpus`, from the host budget's own facts read), the worker's
   `os.availableParallelism()` only when no venue answered (on Docker Desktop the worker sees the Mac's cores while every
-  job runs in the VM's); a fact that cannot be read is null, never a failed job. **Null on every record written
-  before a slot was held**: the never-fits refusals, the wait gate's refusals and every record from before the field.
+  job runs in the VM's); a fact that cannot be read is null, never a failed job, and so is one past what any host can
+  have (`HOST_SLOTS_MAX` 16384 slots, `HOST_CPUS_MAX` 4096 CPUs or a 409600 CPU budget, `HOST_MEMORY_MAX_MIB` 64 TiB,
+  in `job-size.mjs`: the runtime facts' own ceilings, and as many 0.25-CPU jobs as those CPUs hold). **Null on every
+  record written before a slot was held**: the never-fits refusals, the wait gate's refusals and every record from
+  before the field.
   So the key also answers "did this run hold a slot", which is what the capacity report reads it for
   (`DES-CAPACITY-FROM-RECORDS`). Integers and a fixed word, so PII-free by construction.
   **The fleet copy (issue #57) and its horizon (issue #599).** Where a worker declares `PI_WORKER_NAME`, each record is
@@ -5590,7 +5593,8 @@ validator rather than a second copy of it.
 - **A record's `earlier` is judged again**: rebuilt by the writer's own rule (`recordedEarlier` in `run-earlier.mjs`:
   valid entries only, the newest 4), and an entry that overlaps the record's own span on the same host is dropped (one
   job cannot hold one host's slot twice at once). Every entry given and not counted is in `earlierDropped`.
-- **What is counted as unreadable**: a record whose `capacity` is neither an object nor null, whose span cannot be read
+- **What is counted as unreadable**: a record whose `capacity` is neither an object nor null, or says more than any
+  host can have (the bounds above; the writer never records such a value), whose span cannot be read
   (see `DES-CAPACITY-FROM-RECORDS`), whose `host` is not a worker name (`WORKER_NAME_RE`) or whose `project` is neither
   null nor a project id. A record with no `host` is `withoutHost`. Neither is counted anywhere else.
 - **The CLI.** `pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]`; `--since`
@@ -8156,3 +8160,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-08 | Issue #599, phase 3. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**, the readers of `jobs` and `jobsMore`: the admin panel's HOSTS view reads them with `concurrency`, `budgetRunning`, `waiters`, the budget fields and the row's age, and parses `jobs` through `parseLiveJobs` again (`@edgehero/pi-dispatch/live-jobs` is exported for it). The fields are UNCHANGED. **`INT-CAPACITY-REPORT` UNCHANGED, checked**: the view draws the report as `readCapacity` returns it, through the CLI's own `notSharedWhy`, `percentText`, `milliText`, `durationText` and `share` (now exported). |
 | 2026-10-08 | Issue #599, phase 3, corrections. **`INT-CAPACITY-REPORT` AMENDED**: a host's `coverage.source` is `mirror+local` when both sources cover it (it named the earlier one, and the files on a tie, so a host the mirror also holds read as this host's files only); its `fromMs` is still the earlier start, the files' on a tie. The fleet's `coverage.source` is UNCHANGED. **`INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked**: the panel reads `beatAt` through `staleMs`, as before. |
 | 2026-10-08 | Issue #599, phase 4. **`INT-CAPACITY-REPORT` UNCHANGED, checked**: the insights page reads the report as `readCapacity` returns it, over the page's own start and bucket (`window.fromMs` is then the start of the page's window, the first instant of the month for `mtd`, and `window.bucketMs` an hour or six hours); no field is added or reworded, and the CLI's `--json` is byte for byte what it was. |
+| 2026-10-08 | Issue #599, phase 4, corrections. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a `capacity` value past what any host can have (more than 16384 slots, 4096 CPUs, a 409600 CPU budget or a 64 TiB memory budget, `job-size.mjs` `HOST_*_MAX`) is written as null, as an unreadable fact is. **`INT-CAPACITY-REPORT` AMENDED**: a record whose `capacity` says such a value is counted as `unreadable`, and a live row's slot count or budget past the bounds is unknown; the CLI's retry caveat says the earlier attempts are counted on the host that ran them, and a host that ran one says "N earlier attempts of a retried run counted here" (it said "N retried runs: 0 earlier attempts counted" on the retry's host while the attempt was counted on another). The report's fields are UNCHANGED. |
