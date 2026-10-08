@@ -200,6 +200,7 @@ function coverageLines(cov) {
 	if (cov.historyNotShared.length > 0) notes.push(`not shared here: ${cov.historyNotShared.join(", ")}`);
 	if (cov.unreadable > 0) notes.push(`${plural(cov.unreadable, "record")} unreadable, not counted`);
 	if (cov.withoutHost > 0) notes.push(`${cov.withoutHost} without a host, not counted`);
+	if (cov.earlierDropped > 0) notes.push(`${plural(cov.earlierDropped, "carried earlier attempt")} not counted (not valid, beyond the 4 a record keeps, or overlapping its own run)`);
 	if (cov.running !== null && cov.running > 0) notes.push(`${plural(cov.running, "job")} running now, counted once ${cov.running === 1 ? "it ends" : "they end"}`);
 	if (cov.reason) notes.push(cov.reason);
 	return [`Coverage: ${notes.join("; ")}.`, "Jobs only: a machine busy with other work reads as idle."];
