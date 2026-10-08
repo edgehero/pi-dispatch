@@ -41,6 +41,13 @@ function configError(message) {
 export const WAIT_CONDITION_KEYS = ["after", "profile"];
 
 /**
+ * Every reason the wait gate refuses a job with (index.mjs `refuseWait`), each before the job holds a slot. A test
+ * holds this list equal to the processor's calls; the capacity report reads it to tell such a refusal from a run on
+ * a record from before `capacity` was recorded (issue #599).
+ */
+export const WAIT_REFUSAL_REASONS = Object.freeze(["wait-superseded", "wait-unreadable", "wait-profile-unknown", "wait-after-beyond-max", "wait-expired", "wait-refused", "wait-unanswerable"]);
+
+/**
  * The ceiling on conditions per trigger. Four, on `SECRETS_MAX`'s reasoning rather than `REPLICAS_MAX`':
  * this multiplies no spend, but every `profile` condition is a subprocess evaluated before the container,
  * so an unbounded array is an unbounded slot occupancy. Four is generous for a conjunction a human wrote.

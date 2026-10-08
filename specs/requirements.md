@@ -1144,15 +1144,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   were taken for that hour and the peak was two; given one job ending the instant the next starts, then the peak is
   one. Given a job refused before a slot (a never-fits or wait-gate refusal), then its record carries `capacity: null`
   and it adds nothing to busy time; given a record from before the field, then it counts when it spans a second or
-  carries `resources`, and the report counts the inference. Given a run mirror at its cap whose oldest run ended
-  inside the window, then the report says the history is truncated and from when, and the earlier time is missing,
-  not idle; given a live host that declares no `PI_WORKER_NAME`, then another host's report names it as not shared and
-  counts its window as missing. Given a daily cron trigger, then its runs' waits are measured from their scheduled
-  minute, not from a day before; given a job held on `run.waitFor`, then it records no wait. Given a host with its CPU
-  budget off, then CPU shares are of all its CPUs. Given an unreachable Valkey, then `pi-dispatch capacity` still
-  answers from this host's files and says the mirror was not read; given a shell and `.env` naming different
-  Valkeys, then it refuses until `--valkey-url` names one. Given the same records and instant, then the report is the
-  same on every host.
+  carries `resources` (a wait gate or never-fits refusal reason first says it did not), and the report counts the
+  inference. Given a run mirror at its cap whose oldest run ended inside the window, or a peer whose shorter
+  `PI_LOG_RETENTION_DAYS` trimmed the shared run index, then the report says the mirrored hosts' history is truncated
+  and from when, and the earlier time is missing, not idle, while this host's own files still cover it; given a live
+  host that declares no `PI_WORKER_NAME`, then another host's report names it as not shared and counts its window as
+  missing. Given a daily cron trigger, then its runs' waits are measured from their scheduled minute, not from a day
+  before; given a job held on `run.waitFor` or a retry, then it records no wait, and a retried run is counted and said
+  to under-count busy time. Given a host with its CPU budget off, then CPU promises are of all its CPUs; given two jobs
+  each using a 4 CPU budget on an 8 CPU host, then CPU used is 100% of the host, never 200%; given a budget lowered for
+  the last hour, then only that hour is judged by it. Given a record whose host or project carries a control
+  character, then it is not counted and nothing of it reaches the terminal. Given an unreachable Valkey taken from the
+  environment, then `pi-dispatch capacity` still answers from this host's files and says the mirror was not read; given
+  one named with `--valkey-url`, then it exits 1; given a shell and `.env` naming different Valkeys, then it refuses
+  until `--valkey-url` names one. Given the same records and instant, then the report is the same on every host.
 - **Traces to**: `DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-DURABLE-RUN-HISTORY`, `OQ-039`
 
@@ -3380,6 +3385,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-08 | Issue #599, phase 1, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance: a peer's shorter log retention trimming the shared run index is missing history, not idle; a retry records no wait and is counted as under-counting busy time; CPU used is of the host's CPUs, so jobs using a whole CPU budget each never read 200%; a lowered budget judges only the time it was in force; a host or project with a control character is not counted; a Valkey named with `--valkey-url` that fails exits 1. The statement is UNCHANGED. Checked and UNCHANGED: `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`. |
 | 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `REQ-CAPACITY-INSIGHTS`**: per host, how busy it is and was with this deployment's jobs (busy and idle time, slots at once and time full, promised memory and CPU, CPU used, waits, projects), read-only, jobs only (a machine busy with other work reads as idle), history it cannot see reported as missing and never as idle, no secret or PII. Phase 1 delivers the record fields, the report and `pi-dispatch capacity`. Checked and UNCHANGED: `REQ-DURABLE-RUN-HISTORY`, `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-SIZE-SUGGESTIONS`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 3. **`REQ-SIZE-SUGGESTIONS` CORRECTED** to one rule: the apply call is offered exactly when admission would accept the suggested job (the suggested size per dimension, else the current one). Doctor withholds it only when its host has a numeric budget dimension and refuses that job, and offers it with the budget `off` or unknown (it withheld a lowering admission accepts); the panel and the insights page withhold it only when every live host that published a numeric budget refuses it (they judged only the suggested dimension). A withheld call names the dimension that does not fit. Acceptance gains the three cases and the doctor-panel agreement. UNCHANGED, checked: `REQ-HOST-BUDGET`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 2. **`REQ-SIZE-SUGGESTIONS` CORRECTED**: no suggestion goes past the project's `hostShare` of a host's budget (it was capped at the whole budget, then flagged, while still offering the call); a suggestion that would never fit offers no call; refusals no longer crowd measured runs out of the window; the panel says why a raise has no cap; the panel's call never breaks inside a JSON string. The acceptance gains those cases. Checked and UNCHANGED: `REQ-HOST-BUDGET`, `REQ-SCOPED-LIMITS`, `REQ-INSIGHTS-HTML-EXPORT`. |

@@ -52,7 +52,7 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch pause        stop taking new jobs (durable; survives worker restart)
   pi-dispatch resume       resume taking jobs
   pi-dispatch status       show paused state + job counts
-  pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json]
+  pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]
                            how busy each host was: busy and idle time, slots in use, memory and CPU
                            promised and used, waits and projects, read from the run records (jobs only)
   pi-dispatch cancel <jobId>  stop one job: a queued or held job is removed (the line says whether it had

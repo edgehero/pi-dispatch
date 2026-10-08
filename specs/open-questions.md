@@ -1874,7 +1874,11 @@ adversarial passes did.
   alone, by the operator's decision, and four things are outside what records can say. Each is stated on the
   surfaces, and none is read as idle where the reader knows it is missing:
   - **a retry overwrites its earlier attempt's record** (one file and one mirror key per job id), so the slot time
-    of every attempt but the last is lost, and that time reads as idle;
+    of every attempt but the last is lost, and that time reads as idle. The report counts the retried runs and says
+    busy time can be under-counted there, and a retry adds no wait;
+  - **a writer from before the fleet horizon** (`runs:horizon`) trims the shared run index by its own retention without
+    recording it, so while one runs in a fleet a shorter retention than the reader's can still cut history that reads
+    as idle; every writer from this version on records its trims;
   - **an unnamed or offline worker's history is not shared.** A worker without `PI_WORKER_NAME` writes no run
     mirror, so another host's report sees none of its runs; a live one is named in `historyNotShared` and counted as
     missing, but a worker that is not live (stopped, or its row expired) is not in the registry either, so its runs
@@ -1983,3 +1987,4 @@ adversarial passes did.
 | 2026-10-06 | Issue #596, phase 0, the executing review. **`OQ-002` AMENDED (wording)**: the measured keys name `swapPeak` (`memory.swap.peak`), which the record now carries because `memPeak` does not count swap. Still open. |
 | 2026-10-08 | The pi 1.1.0 bump (pull request #604). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.1.0 tarball. `excludeTools` is still `string[]` and `allToolNames` is still the eight. `tools` now takes a list of only `+name` and `-name` entries as changes to the default selection; the runner never passes `tools`, so no job sees it. |
 | 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `OQ-039`**, what the capacity report cannot see: a retry overwrites its earlier attempt's record, so that slot time reads as idle; an unnamed or offline worker's history is not shared (a live one is named and counted as missing, one that is not live is absent); `resources` is produced by the job and only advisory; a machine busy with other work reads as idle, and a job running now is not counted until it ends. |
+| 2026-10-08 | Issue #599, phase 1, corrections. **`OQ-039` AMENDED**: a new residual, a writer from before the fleet horizon trims the shared run index without recording it; the retry residual now says the report counts retried runs and adds no wait for them. |

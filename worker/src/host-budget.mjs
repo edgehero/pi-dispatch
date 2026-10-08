@@ -484,6 +484,9 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		return Number.isSafeInteger(limit) && limit >= 0 ? limit : null;
 	};
 
+	// The runtime's own CPU count from the last facts read (`docker info` NCPU, `podman info` host.cpus), or null: what a
+	// run record names as the host's CPUs (issue #599), never the worker's own count, which on Docker Desktop is the Mac's.
+	let hostCpus = null;
 	const refresh = async () => {
 		let facts = {};
 		try {
@@ -493,6 +496,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		}
 		const next = computeHostBudget(settings, facts, jobDefault);
 		budget = { memMiB: next.memMiB, cpuCenti: next.cpuCenti };
+		hostCpus = Number.isSafeInteger(facts.hostCpus) && facts.hostCpus >= 1 ? facts.hostCpus : null;
 		detail = next.detail;
 		for (const entry of ledger.values()) {
 			if (entry.guess) Object.assign(entry, pessimisticSize([], entry.guess, budget));
@@ -618,6 +622,8 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		refresh,
 		/** The budget in force: `{ memMiB, cpuCenti }`, each an integer, `Infinity` (off) or null (unknown). */
 		current: () => ({ ...budget }),
+		/** The runtime's CPU count from the last facts read, or null when no venue answered. */
+		hostCpus: () => hostCpus,
 		detail: () => detail,
 		/** null when `size` can start here some day, else `host` or `share` (`neverFits`). */
 		neverFits: (size, project, limits = scopedLimits()) => neverFits(size, budget, project ? rulesOf(limits).shareOf(project) : null),

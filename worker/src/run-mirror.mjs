@@ -39,6 +39,17 @@ import { UNREADABLE_RECORD } from "./run-history.mjs";
 /** The index: sanitized jobId -> the run's end (or start) in millis. */
 export const RUNS_INDEX = "runs:index";
 
+/**
+ * The fleet's HISTORY HORIZON (issue #599): a one-member ZSET (`trim`) whose score is the newest instant before which a
+ * writer has trimmed runs out of the index. Every writer trims the SHARED index by its OWN retention (and the shared
+ * count cap), so a host with a short `PI_LOG_RETENTION_DAYS` removes every host's older runs; a reader cannot know
+ * that from its own settings, and without this key it read the gap as idle time. Raised only, never lowered (`ZADD
+ * GT`), so concurrent writers agree on the latest cut without a lock.
+ */
+export const RUNS_HORIZON = "runs:horizon";
+/** The horizon's one member. */
+export const RUNS_HORIZON_MEMBER = "trim";
+
 /** One run's own bytes. */
 export const runRecordKey = (sanitizedJobId) => `runs:rec:${sanitizedJobId}`;
 
@@ -109,8 +120,24 @@ export function makeRunMirror({ redis, retentionDays, now = () => Date.now(), lo
 				await bounded(redis.zadd(RUNS_INDEX, score, sanitizedJobId), timeoutMs);
 				// Trimmed by the WRITER, twice: by age, and by count. Two `ZREMRANGE`s against a run that
 				// took minutes is free, and it means no reader has to pay for a backlog it did not create.
-				await bounded(redis.zremrangebyscore(RUNS_INDEX, "-inf", `(${now() - windowMs}`), timeoutMs);
-				await bounded(redis.zremrangebyrank(RUNS_INDEX, 0, -indexMax - 1), timeoutMs);
+				const cutoff = now() - windowMs;
+				const byAge = await bounded(redis.zremrangebyscore(RUNS_INDEX, "-inf", `(${cutoff}`), timeoutMs);
+				const byCount = await bounded(redis.zremrangebyrank(RUNS_INDEX, 0, -indexMax - 1), timeoutMs);
+				// A trim that REMOVED something moves the fleet's horizon (`RUNS_HORIZON`): by age to the cutoff, by count to
+				// the oldest score that remains, which is conservative (a removed run ended at or before it). Only when
+				// something went, so a fleet whose writers trim nothing keeps no horizon at all.
+				let horizon = Number(byAge) > 0 ? cutoff : null;
+				if (Number(byCount) > 0) {
+					const oldest = await bounded(redis.zrange(RUNS_INDEX, 0, 0, "WITHSCORES"), timeoutMs);
+					const score = Array.isArray(oldest) && oldest.length >= 2 ? Number(oldest[1]) : NaN;
+					if (Number.isFinite(score)) horizon = Math.max(horizon ?? score, score);
+				}
+				if (horizon !== null) {
+					await bounded(redis.zadd(RUNS_HORIZON, "GT", horizon, RUNS_HORIZON_MEMBER), timeoutMs);
+					// The DEEPEST window any reader asks for, not this writer's: a horizon must outlive every window it can cut
+					// into, and after `MIRROR_MAX_DAYS` every window a reader can ask for starts after it.
+					await bounded(redis.pexpire(RUNS_HORIZON, mirrorWindowMs(0)), timeoutMs);
+				}
 				// ROLLING expiry, deliberately unlike `budget.mjs`'s set-once rule and deliberately like
 				// `pi-dispatch:sched-stalls:<schedulerId>`. A budget window must not be pushed forward by traffic or a busy
 				// day never resets; an ACTIVITY index should roll with traffic, because that is what it

@@ -270,7 +270,7 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
  * one treats them alike: "there are no other hosts" and "I could not find out" differ, and a panel that
  * renders the second as the first tells an operator their fleet is gone when Valkey merely blinked.
  */
-export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs = REGISTRY_OP_TIMEOUT_MS } = {}) {
+export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs = REGISTRY_OP_TIMEOUT_MS, prune = true } = {}) {
 	let names;
 	try {
 		names = await bounded(redis.smembers(HOST_SET), timeoutMs);
@@ -285,7 +285,9 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 		try {
 			const row = await bounded(redis.hgetall(hostKey(member)), timeoutMs);
 			if (!row || Object.keys(row).length === 0) {
-				await bounded(redis.srem(HOST_SET, member), timeoutMs).catch(() => {});
+				// `prune: false` for a reader that promises to write nothing (the capacity report, issue #599): the stale member
+				// is skipped the same, and left for the next pruning reader.
+				if (prune) await bounded(redis.srem(HOST_SET, member), timeoutMs).catch(() => {});
 				continue;
 			}
 			const beatAt = typeof row.beatAt === "string" && row.beatAt.trim() !== "" ? Number(row.beatAt) : NaN;

@@ -641,38 +641,64 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **Two record fields make it exact rather than guessed** (`INT-RUN-HISTORY-FILE-CONTRACT`). `capacity` is set by
     the processor at the one point a job is admitted (where `startedAt` is set) and is null on every record written
     before it, so "this run held a slot" is a fact in the record, not an inference from its length. It also carries
-    what the host offered then (the live `PI_CONCURRENCY`, the budget, the CPU count), so a report judges a run by the
-    capacity it ran under, and says when the window saw more than one. `queuedAt` is when the job became eligible,
-    which makes the wait a subtraction.
-  - **Older records are inferred, and counted.** A record without the `capacity` key held a slot when it spans at
-    least one second or carries `resources`: a refusal before a slot writes `startedAt` equal to `endedAt` and never
-    had a container to measure. The count (`legacyInferred`) says how much of a window rests on the inference.
-  - **A sweep line per host.** Every run's start and end, sorted with ENDS BEFORE STARTS at one instant (a run that
-    ends as the next begins is one slot reused, not two at once), each run clipped to the covered window and every
-    segment split at the bucket edges. Busy is the time at least one run held a slot; the time at the slot count is
-    "full"; the run time over the covered time is the average at once.
-  - **Missing history is never idle.** The reader states where its history starts (`coverage.fromMs`): the mirror at
-    its 5,000 run cap whose oldest run ended inside the window, the mirror's own window, and `PI_LOG_RETENTION_DAYS`.
-    A live host whose runs this reader cannot see (not this host, not in the local files, and not a named host
-    mirroring to a mirror that was read) is not shared, and its whole window is missing. Missing time is counted in
-    neither busy nor idle, so busy plus idle plus missing is the window for every host, held by a seeded property test
-    against a minute by minute count.
+    what the host offered then (the live `PI_CONCURRENCY`, the budget, and the CPU count the container RUNTIME reports,
+    from the host budget's own facts read, since on Docker Desktop the worker's own count is the Mac's), so a report
+    judges each moment by the capacity in force then, and says when the window saw more than one. `queuedAt` is when
+    the job became eligible, which makes the wait a subtraction; it is null on a retry, whose wait would include its
+    earlier attempt.
+  - **Older records are inferred, and counted.** A record without the `capacity` key is judged by its reason first: a
+    refusal the processor gives before a slot (the wait gate's reasons, `WAIT_REFUSAL_REASONS`, and the never-fits
+    pair, `SIZE_REFUSAL_REASONS`, each held to the processor's own by a test) did not hold one, however long the gate
+    took (a wait gate refusal can come after a check that ran for seconds, so its `startedAt` is not its `endedAt`).
+    Otherwise it held a slot when it spans at least one second or carries `resources` (a container ran). Both
+    inferences are counted (`legacyOccupied`, `legacyRefused`), so a reader sees how much of a window rests on them.
+  - **A sweep line per host.** Every run's start and end and every change of capacity, sorted with ends before starts
+    at one instant, each run clipped to the covered window and every segment split at the bucket edges. Only a
+    segment of positive length counts, so a run that ends as the next begins is one slot reused, not two at once. Busy
+    is the time at least one run held a slot; the time at the slot count IN FORCE then is "full"; the run time over the
+    covered time is the average at once.
+  - **The capacity in force is a step function** of the runs' own records, ordered by start (each value holds from its
+    run's start to the next one; before the first, the first). Promises and "full" are judged piece by piece against
+    it, so a budget lowered while jobs ran reads as the over-commit it was for the time it was, and never as one over
+    the whole window because the newest record had the lower budget.
+  - **Missing history is never idle, judged per host.** The reader states what each source covers, and each host
+    starts at the earliest source that holds ALL its runs. This host's files (every host's, on a shared logs directory)
+    cover it to `PI_LOG_RETENTION_DAYS`, and nothing when the directory is absent. The run mirror covers the named
+    hosts to the latest of: its 92 day depth, the 5,000 run cap when its oldest run ended inside the window, the newest
+    run whose body expired while its member stayed, and the FLEET HORIZON. Every writer trims the shared `runs:index`
+    by its OWN retention, so a host with a one day retention removes every host's older runs, and the reader's own
+    retention says nothing about it; so a writer whose trim removed anything raises `runs:horizon` (`ZADD GT`, a max
+    with no lock: the age cutoff, or for the count trim the oldest score that remains), and the reader starts the
+    mirror there. A host no source holds (a live worker with no `PI_WORKER_NAME`, seen from another host) is missing for
+    the whole window. Missing time is counted in neither busy nor idle, so busy plus idle plus missing is the window for
+    every host, held by a seeded property test against a minute by minute count.
   - **Integer math.** Instants are milliseconds, so a span, busy, idle and full time stay safe Numbers (each at most
     the window). A sum of run time is the window times the concurrency, and a product with a memory size, a CPU size or
     a CPU time can pass 2^53, so those are BigInts, and only the final per-mille ratios, rounded half up, are Numbers.
-  - **Denominators.** Promised memory is over the memory budget, and only where it is an integer. Promised and used
-    CPU are over the CPU budget, or over every CPU of the machine (`cpus`, recorded) where the budget is off or unknown:
-    a host with no budget still has a CPU count, and "share of the machine" is what an operator asks then. CPU used is
-    each run's measured CPU time spread evenly over its wall (a record carries one total, not a profile), clamped to the
-    most CPU a job can be given, since `resources` is produced inside the job.
-  - **The reader.** The run mirror where workers declared names, in a fixed number of bounded round trips (ZCARD and
-    the oldest score, one ZREVRANGEBYSCORE over the window, MGET in chunks of 500), READ-ONLY (it prunes nothing, unlike
-    the panel's reader), and the local files with `size-records.mjs`' bounds (mtime prefilter, 256 KiB cap). The two
+  - **Denominators.** Promised memory is over the memory budget, and only where it is an integer. Promised CPU is over
+    the CPU budget, or over every CPU of the host (`cpus`, recorded) where the budget is off or unknown. CPU USED is over
+    the host's CPUs, never the budget: each job's `--cpus` is the whole budget (`cpuCeilingCenti`), so two jobs can each
+    use all of it at once, and that use is real; over the budget it read 200% for a host doing exactly what it was set
+    up to do. Each run's measured CPU time is first clamped to what its job could use (its `--cpus`: the CPU budget,
+    capped at the host's CPUs, over its whole wall), since `resources` is produced inside the job, and the clamped runs
+    are counted; then it is spread evenly over its wall (a record carries one total, not a profile).
+  - **Retries.** A retry overwrites its earlier attempt's record, so that attempt's slot time is in no record; the
+    report counts the runs past attempt 1 (`retried`) and says busy time can be under-counted there, and a retry adds
+    no wait.
+  - **Hostile strings.** A record's host must be a worker name (`WORKER_NAME_RE`) and its project a project id
+    (`isProjectId`), the rules the worker writes them by, or the record is unreadable: a record is a file another
+    account may edit, and the text output is printed to a terminal, which also strips every control character.
+  - **The reader.** The run mirror where workers declared names, in a fixed number of bounded round trips (ZCARD, the
+    oldest score and the horizon, one ZREVRANGEBYSCORE over the window, MGET in chunks of 500), READ-ONLY (it prunes
+    nothing, unlike the panel's reader, and reads the registry with `prune: false`), and the local files, both with
+    `size-records.mjs`' bounds (mtime prefilter for the files, the 256 KiB cap for files and mirrored bodies alike). The two
     are merged by `mergeRuns`, the panel's rule (one per job id, the later end winning, since a retry can land on
     another host), with no page limit. An unreachable mirror is read as none, and the report names it.
   - **The CLI** (`pi-dispatch capacity`) needs only the Valkey URL and the logs directory, on the kill switch's footing,
     so it answers on a deployment whose forge setup is broken; it refuses rather than guess when the shell and the
-    `.env` name different Valkeys, since a report from the wrong one reads a busy fleet as idle.
+    `.env` name different Valkeys, since a report from the wrong one reads a busy fleet as idle. A Valkey taken from the
+    environment that refuses or does not answer gives a report from this host's files with the reason; one NAMED with
+    `--valkey-url` fails, because the operator asked about that fleet.
 - **Rejected**:
   - *Sampling host load* (the operator's decision of 2026-10-08): a sampler is a second always-on writer for a question
     the records already answer for this deployment's own jobs. The cost is stated on every surface: a machine busy
@@ -681,15 +707,22 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     runs and delays it until due, so a daily trigger read as a day of waiting. `job.delay` instead of `opts.delay`:
     `moveToDelayed` rewrites it, so a deferral would reset the wait (measured).
   - *Inferring a slot from the wall time on every record*: a refusal after a slow gate can span a second without ever
-    holding a slot, and a run that dies at once spans less; the record now says it.
+    holding a slot, and a run that dies at once spans less; the record now says it, and an older record's reason is
+    read before its length.
   - *Treating time before the history as idle*: a mirror at its cap on a busy fleet then reads as a quiet one, which
     is the exact lie a capacity view exists to prevent.
-  - *A per-host `fromMs`* (the local host's files can reach further back than the mirror): it would make one report's
-    hosts cover different spans, and a comparison between hosts the main thing a reader does. One start for all.
+  - *One history start for all hosts*, which this entry first chose so every host covered the same span: it read this
+    host's complete files as missing whenever the mirror was cut, and could not express a host whose logs directory is
+    absent. Each host starts where its own sources do, and the report says where per host.
+  - *The reader's own retention as the mirror's start*: every writer trims the shared index by its own, so a peer with
+    a shorter one cut history the reader still counted as idle. The horizon is the writers' own statement of what they
+    cut.
+  - *CPU used over the CPU budget*: one job's `--cpus` is the whole budget, so jobs together legitimately exceed it.
   - *Floats*: a ratio at a boundary would round differently on two hosts; per mille, rounded half up, in integers.
 - **Residuals** (`OQ-039`): a retry overwrites its earlier attempt's record, so the earlier attempt's slot time is
-  lost; an unnamed or offline worker's history is not shared; `resources` is produced by the job and only advisory; a
-  machine busy with other work reads as idle; a job running now is not in the history until it ends.
+  lost (counted as `retried`, never hidden); an unnamed or offline worker's history is not shared; a writer from before
+  the horizon trims without recording it; `resources` is produced by the job and only advisory; a machine busy with
+  other work reads as idle; a job running now is not in the history until it ends.
 - **Traces to**: `REQ-CAPACITY-INSIGHTS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, `DES-HOST-BUDGET`, `DES-HOST-REGISTRY`, `DES-SIZE-SUGGESTIONS`
 
@@ -8999,3 +9032,4 @@ a tunnel.
 | 2026-10-07 | Issue #596, phase 3, review gate round 3. **`DES-SIZE-SUGGESTIONS` CORRECTED** to ONE rule for offering an apply call: exactly when admission would accept the suggested job. One exported pure helper (`sizeRefusal` in `worker/src/size-suggest.mjs`, the worker's `neverFits` arithmetic restated and held equal to it by a grid test) is used by doctor, the panel, the insights page and the edit preview. The pair judged is the suggested size per dimension, else the current one. Doctor withholds when its host has an integer budget dimension and refuses the pair; with the budget `off` or unknown it offers the call and only notes a size above the runtime's total (it used to withhold a lowering admission accepts, and to offer one whose kept dimension was above the whole budget). The panel and the insights page withhold when at least one live host published an integer budget and every such host refuses the pair (they used to judge only the suggested dimension). A withheld call names the dimension that does not fit; the `unread` wording is now "no host budget read as a number". A separate test per surface is added to Rejected. `REQ-SIZE-SUGGESTIONS` and `docs/scoped-limits.md` say the same. UNCHANGED, checked: the suggestion rules, the caps, `DES-HOST-BUDGET` (admission itself is untouched). |
 | 2026-10-08 | The pi 1.1.0 bump (pull request #604). **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: pi 1.1.0 adds a fifth classifier api, `openai-decisions` (OpenAI's Decisions API, one catalog model, `openai/gpt-6-luna`, input 0.1 and 0.2 above 272k, output 0), and moves the System One pricing into a new shared module, `classifier-shared.js`, which the new api uses too. It reaches `calculateCost`, so `PRICED_APIS` grows from 11 to 12 ids. Its calls are `classify` only, so the bound is input only, finite because the output rate is 0. Its images are sent as given, without pi's resize, and OpenAI's own downscale bounds the tiles, so the api joins the openai apis at a ceiling of 48,169 per image. It sends no output cap, so it joins the apis that never put the caller's cap on the request. `calculateCost` is byte-identical to 1.0.4's, checked; `models.js` changed only in `classify` (an image-input check), and its content hash moves. |
 | 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `DES-CAPACITY-FROM-RECORDS`**: how busy each host is and was, computed from the run records alone by one pure function (`worker/src/capacity.mjs`) over one reader (`worker/src/capacity-records.mjs`): `capacity` in the record says a run held a slot (older records inferred from a one second span or `resources`, and counted), a sweep line per host with ends before starts, missing history counted in neither busy nor idle, integer math with BigInt where a product can pass 2^53, the CPU budget or every CPU as the CPU denominator, a read-only mirror reader merged with the local files by `mergeRuns`, and `pi-dispatch capacity` on the kill switch's footing. Rejected: host load sampling, `job.timestamp` alone and `job.delay` as the queued moment, a slot inferred from wall time, missing time as idle, a per-host history start, floats. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` AMENDED**: the records are now read across each other by window folds (the cost fold, the size suggestion, the capacity report), which still earn no database; the record gains `queuedAt` and `capacity`; the sidecar, writer and reaper are UNCHANGED. Checked and UNCHANGED: `DES-HOST-BUDGET`, `DES-HOST-REGISTRY`, `DES-SIZE-SUGGESTIONS`, `DES-CONCURRENCY-3`. |
+| 2026-10-08 | Issue #599, phase 1, corrections. **`DES-CAPACITY-FROM-RECORDS` CORRECTED**: (1) the history start is judged PER HOST (this host's files to their retention, nothing without a logs directory; the mirror to the latest of its depth, its cap, an expired body and the new fleet horizon); the rejected alternative is now the single start this entry first chose, which read complete local history as missing and a cut mirror as idle. (2) Every writer trims the shared `runs:index` by its own retention, so a short-retention peer cut history a reader counted as idle: a writer whose trim removed anything raises `runs:horizon` with `ZADD GT`, and the reader starts the mirror there. (3) CPU used is over the host's CPUs (the runtime's count, now recorded as `capacity.cpus`), not the budget, since each job's `--cpus` is the whole budget; each run's CPU time is clamped to its job's `--cpus` and counted. (4) Promises and "full" are judged against the capacity in force at each moment, a step function of the runs' own records. (5) A retry records no `queuedAt` and adds no wait, and the report counts retried runs. (6) Older records are judged by their refusal reason before their length; the claim that a refusal before a slot always writes `startedAt` equal to `endedAt` is removed (a wait gate refusal can come after a check that ran for seconds). (7) A host or project that is not a worker name or project id is unreadable, and the text output strips control characters. (8) The reader caps mirrored bodies at 256 KiB, reads the registry without pruning, and a named `--valkey-url` that fails exits 1. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: the horizon is a fact about the view's trims, not a derived value of any record. **`DES-HOST-BUDGET` UNCHANGED, checked**: the budget keeps the runtime's CPU count from its existing facts read and exposes it; nothing it decides changes. |
