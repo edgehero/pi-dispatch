@@ -10,8 +10,11 @@
  *
  * The in-component views sharing this one overlay: LIST -- a framed panel of status, spend, the unified
  * TRIGGERS pane and an interactive runs list; RUN_DETAIL -- a drill-in of one run's PII-free `.json`
- * fields; LIVE_TAIL -- a tail of a running job's `.log`; and TRIGGER_DETAIL -- one trigger's trust
- * model. Analytics live on the insights page (issue #181): the `i` key writes and opens it.
+ * fields; LIVE_TAIL -- a tail of a running job's `.log`; TRIGGER_DETAIL -- one trigger's trust model;
+ * FAILED (`f`) and HELD_LIST (`h`) -- the failed and held jobs; ALLOCATION (`b`) -- the budget split;
+ * PROJECTS (`j`) -- the projects with their spend and sizes; and HOSTS (`u`) -- each live host's slots,
+ * budget and running jobs, with its last 7 days. Analytics live on the insights page (issue #181): the `i`
+ * key writes and opens it.
  *
  * PII discipline (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT): LIST and RUN_DETAIL surface only
  * PII-free run records, counts, budget, schedulers and the settings overlay. LIVE_TAIL renders tail bytes
@@ -33,6 +36,10 @@ import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS, coresText, cpusText } from "@edgehero/pi-dispatch/size-suggest";
+import { LIVE_FRESH_MS } from "@edgehero/pi-dispatch/capacity";
+import { durationText, milliText, notSharedWhy, percentText, share } from "@edgehero/pi-dispatch/capacity-cli";
+import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
+import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
@@ -255,6 +262,34 @@ async function heldJobs(redis: any) {
  */
 const DOLLAR_RECORDS_TTL_MS = 15_000;
 
+/**
+ * A registry row as the snapshot carries it (issue #596 phase 3, issue #599 phase 3): the budget pair and what its jobs
+ * hold (the PROJECTS view), and the slot count, the budget's running and waiting counts, the running jobs, the row's
+ * age and whether it routes (the HOSTS view). Projected to these keys, so nothing else a row carries reaches the panel.
+ * The jobs go through the worker's own allowlist again (`parseLiveJobs`, which takes the reader's parsed list too): a
+ * row is another host's text, and a reader handed in by a caller may not have parsed it. An entry the allowlist drops
+ * joins `jobsMore`, and a value that is there and is not a list is `jobsUnreadable`, never an empty list.
+ */
+function hostRowOf(h: any): any {
+  const live = parseLiveJobs(h?.jobs);
+  const more = parseJobsMore(h?.jobsMore);
+  return {
+    name: h?.name,
+    budgetMemMiB: h?.budgetMemMiB,
+    budgetCpuCenti: h?.budgetCpuCenti,
+    usedMemMiB: h?.usedMemMiB,
+    usedCpuCenti: h?.usedCpuCenti,
+    concurrency: h?.concurrency,
+    budgetRunning: h?.budgetRunning,
+    waiters: h?.waiters,
+    jobs: live.jobs,
+    jobsMore: live.jobs === null ? more : (more ?? 0) + live.dropped,
+    jobsUnreadable: h?.jobsUnreadable === true || (live.jobs === null && h?.jobs !== undefined && h?.jobs !== null && h?.jobs !== ""),
+    staleMs: Number.isSafeInteger(h?.staleMs) && h.staleMs >= 0 ? h.staleMs : null,
+    routes: h?.routes,
+  };
+}
+
 /** How long the panel waits on the registry before drawing the fleet it last knew. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
 
@@ -458,8 +493,9 @@ export function createDashboardDeps(
         dollars,
         queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
         // Issue #596, phase 3: each live host's budget and use, as the registry publishes them (integers as text, `off`,
-        // or "" while unknown). Read by the PROJECTS view; nothing here judges them.
-        hostBudgets: lastHosts.map((h: any) => ({ name: h?.name, budgetMemMiB: h?.budgetMemMiB, budgetCpuCenti: h?.budgetCpuCenti, usedMemMiB: h?.usedMemMiB, usedCpuCenti: h?.usedCpuCenti })),
+        // or "" while unknown). Read by the PROJECTS view; nothing here judges them. Issue #599, phase 3: with what the
+        // HOSTS view's live lines read off the same rows (`hostRowOf`), so that view adds no read to this tick.
+        hostBudgets: lastHosts.map(hostRowOf),
         budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
         schedulers: mapSchedulers(schedulerList, Date.now()),
         // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so
@@ -623,6 +659,24 @@ export function makeDashboard({
     }
     tui?.requestRender?.();
   };
+  // The HOSTS view (issue #599 phase 3, key `u`): the 7-day capacity report, read through the injected `capacityInfo`
+  // seam ONCE when the view opens, never per tick (index.ts holds the Valkey and file reads); the live lines come from
+  // the tick's own registry rows. `capSeq` numbers each read, so one that answers after Esc (or after a reopen started a
+  // newer one) is dropped rather than drawn under a view that did not ask for it.
+  let capInfo: any = null;
+  let capSeq = 0;
+  const loadCapacity = async () => {
+    const seq = ++capSeq;
+    let res: any;
+    try {
+      res = typeof deps?.capacityInfo === "function" ? await deps.capacityInfo({ window: "7d" }) : { unwired: true };
+    } catch (err: any) {
+      res = { unreachable: err?.message ?? String(err) };
+    }
+    if (seq !== capSeq || disposed || view !== "HOSTS") return;
+    capInfo = res && typeof res === "object" ? res : { unreachable: "no answer" };
+    tui?.requestRender?.();
+  };
   const refresh = async () => {
     if (fetching || disposed) return;
     fetching = true;
@@ -717,6 +771,7 @@ export function makeDashboard({
         allocSelected,
         pendingRevert,
         allocNote,
+        capInfo,
         copiedNote,
         copyAvailable: typeof deps?.copyText === "function",
         // Height through the injected seam, read per frame (a resize changes it): null (seam absent, or
@@ -932,6 +987,17 @@ export function makeDashboard({
             return;
           }
           pendingRevert = row;
+          tui?.requestRender?.();
+        }
+        return;
+      }
+      if (view === "HOSTS") {
+        // Read-only (issue #599 phase 3): Esc backs out and drops the report, so the next `u` reads it again; every other
+        // key is inert, like FAILED.
+        if (matchesKey(data, "escape")) {
+          view = "LIST";
+          capInfo = null;
+          capSeq++;
           tui?.requestRender?.();
         }
         return;
@@ -1226,6 +1292,16 @@ export function makeDashboard({
         tui?.requestRender?.();
         return;
       }
+      // `u` opens the HOSTS view (issue #599 phase 3) -- the runs divider names it, as it names `j`. The report of the
+      // last 7 days is read once, here, through the injected seam; the live lines are the snapshot's and follow the tick.
+      // `h` is the held view's, so the key is `u` (use); not `c` or `g`, the removed views' keys, which stay inert.
+      if (data === "u" || data === "U") {
+        capInfo = { loading: true };
+        view = "HOSTS";
+        void loadCapacity();
+        tui?.requestRender?.();
+        return;
+      }
       // `x` on the ACTIVE row arms the cancel confirm (issue #287). Only there: a run row is history and
       // a trigger row already has its own delete behind Enter. The armed jobId is captured HERE.
       if (data === "x" || data === "X") {
@@ -1451,6 +1527,18 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     return centerBlock(boxed, Math.trunc(width), dw);
   }
 
+  if (view === "HOSTS") {
+    // ALLOC_WIDTH, not DRILL_WIDTH: a host's live line and its 7-day line carry several numbers each, and a running job's
+    // row an id beside its project, size and age. Narrower, the frame takes what there is and those lines wrap or clip.
+    const dw = framed ? Math.min(Math.trunc(width), ALLOC_WIDTH) : Math.trunc(width);
+    const iw = framed ? dw - 4 : 24;
+    const { title: detailTitle, lines } = hostsView(snapshot, state.capInfo, iw, styler);
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "esc back"];
+    const footer = fitLine(styler.fg("accent", "esc") + " " + styler.fg("dim", "back"), iw, styler);
+    const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer });
+    return centerBlock(boxed, Math.trunc(width), dw);
+  }
+
   if (view === "HELD_LIST") {
     // The held drill-in (issue #287): the section's rows with a cursor and the shared in-frame confirm.
     // Same PII posture as the section -- every cell is the worker's own projection, never a queue job.
@@ -1660,7 +1748,8 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     { key: "limits", head: ["scoped limits", `${sl.count} · m manage`], body: sl.lines, priority: 0, viewKey: "m" },
     ...heldSection(snapshot.held, inner, styler),
     ...failedSection(snapshot.failed, inner, styler),
-    { key: "runs", head: ["runs", `last ${runCount} · o ${runSort} · j ${runProject === ALL_RUNS ? "projects" : `project ${runProject ?? "(none)"}`}`], body: runLines(runRows, selected - trg.count, inner, styler) },
+    // `u hosts` rides here beside `j` (issue #599 phase 3), last: a long project filter then clips the hint, never its id.
+    { key: "runs", head: ["runs", `last ${runCount} · o ${runSort} · j ${runProject === ALL_RUNS ? "projects" : `project ${runProject ?? "(none)"}`} · u hosts`], body: runLines(runRows, selected - trg.count, inner, styler) },
     { key: "settings", head: ["settings", "s edit"], body: settingsLines(snapshot.settings, inner, styler), priority: 2, viewKey: "s" },
   ];
   // The cursor's section is never collapsed out from under it. Runs cannot collapse anyway; the rule is
@@ -2674,6 +2763,177 @@ function allocationView(info: any, selected: number, iw: number, styler: any): {
     ];
     lines.push(fitLine(bits.join("  "), iw, styler));
   });
+  return { title, lines };
+}
+
+/** The running jobs a host's block lists before it counts the rest. */
+const HOSTS_JOBS_SHOWN = 4;
+
+/** A registry count back: a non-negative integer (a row's digits, or a number a reader already parsed), or null. */
+function countOf(v: any): number | null {
+  if (Number.isSafeInteger(v) && v >= 0) return v;
+  return typeof v === "string" && /^\d{1,15}$/.test(v) ? Number(v) : null;
+}
+
+/** A host's name as the HOSTS view draws it: the escaped, control-free cell, so a row's text cannot style the panel. */
+function hostName(v: any): string {
+  return typeof v === "string" && v !== "" ? textCell(v) : "(no name)";
+}
+
+/**
+ * One budget dimension of a live row: `memory 6g of 16g`, `memory off` for a dimension switched off, or null without a
+ * budget. What the jobs HOLD against it is what the budget promised them, so this is the live half of "promised".
+ */
+function budgetPart(label: string, budget: any, used: any, fmt: (n: number) => string): string | null {
+  if (budget === "off") return `${label} budget off`;
+  const b = countOf(budget);
+  if (b === null) return null;
+  const u = countOf(used);
+  return `${label} ${u === null ? "?" : fmt(u)} of ${fmt(b)}`;
+}
+
+/**
+ * The HOSTS view (issue #599 phase 3, `REQ-CAPACITY-INSIGHTS`): per host, the live lines from the registry rows the
+ * tick already read (`hostRowOf`), then its last 7 days from the capacity report read once when the view opened
+ * (`capacityInfo`, the report `pi-dispatch capacity` and `dispatch_capacity` print, `INT-CAPACITY-REPORT`).
+ *
+ * LIVE: the slots in use of the limit (the listed jobs that are not orphans plus the row's `jobsMore`; a worker from
+ * before `jobs` falls back to its budget's running count; a list that does not parse is `?`, never 0), what the budget
+ * has promised its jobs against the budget or that there is none, who waits for it, and the row's age once it is older
+ * than the report trusts (`LIVE_FRESH_MS`). Then up to `HOSTS_JOBS_SHOWN` running jobs, oldest first: id, project, size,
+ * age, an orphan (a container whose stop did not take) marked; the rest are counted.
+ *
+ * HISTORY: busy share, slots on average and at peak, time full, the wait p95 and the top projects, from the report as it
+ * is. MISSING HISTORY IS NEVER IDLE: a host whose history is not here says why with the sentence every surface uses
+ * (`notSharedWhy`); a cut or local-only history and an unreadable job list are said under the host. Every value is
+ * another host's or a record's: names and ids are escaped and gated (`textCell`), and every line is fitted to `iw`.
+ */
+function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: string; lines: string[] } {
+  const rows: any[] = Array.isArray(snapshot?.hostBudgets) ? snapshot.hostBudgets : [];
+  const report = info && !info.loading && Array.isArray(info.report?.hosts) ? info.report : null;
+  const byName = new Map<string, any>(report ? report.hosts.map((h: any) => [h?.name, h]) : []);
+  const liveNames = new Set(rows.map((r: any) => r?.name));
+  const historyOnly: any[] = report ? report.hosts.filter((h: any) => !liveNames.has(h?.name)) : [];
+  const title = `hosts · ${rows.length} live · last 7d`;
+  const lines: string[] = [];
+  const wrapped = (t: string, color: string, indent = "") =>
+    wrapColumns(t, Math.max(1, iw - indent.length), styler).map((l) => styler.cell(indent + l, iw, { color }));
+  // Clauses joined by ` · ` and broken only BETWEEN them, so a line never starts with a separator; a clause wider than
+  // the line on its own is wrapped at its spaces.
+  const wrappedBits = (bits: string[], color: string, indent = ""): string[] => {
+    const w = Math.max(1, iw - indent.length);
+    const out: string[] = [];
+    let cur = "";
+    for (const bit of bits) {
+      const next = cur ? `${cur} · ${bit}` : bit;
+      if (styler.visibleLen(next) <= w) cur = next;
+      else {
+        if (cur) out.push(cur);
+        if (styler.visibleLen(bit) <= w) cur = bit;
+        else {
+          const parts = wrapColumns(bit, w, styler);
+          out.push(...parts.slice(0, -1));
+          cur = parts[parts.length - 1] ?? "";
+        }
+      }
+    }
+    if (cur) out.push(cur);
+    return out.map((l) => styler.cell(indent + l, iw, { color }));
+  };
+  const now = Number.isSafeInteger(snapshot?.fetchedAt) ? snapshot.fetchedAt : null;
+
+  if (snapshot?.queue?.fleetDegraded) lines.push(...wrapped(`host registry unreadable (${cellOf(snapshot.queue.fleetDegraded)}): the rows last read`, "warning"));
+  if (!info || info.loading) lines.push(...wrapped("reading the last 7 days of run records", "dim"));
+  else if (info.unwired) lines.push(...wrapped("history not wired in this panel (no capacity reader)", "dim"));
+  else if (info.unreachable || info.error || !report) lines.push(...wrapped(`history unreadable (${cellOf(info.unreachable ?? info.error ?? "no report")})`, "error"));
+  if (rows.length === 0 && historyOnly.length === 0) lines.push(...wrapped(report ? "no live host, and no host ran a job in the last 7d" : "no live host row", "dim"));
+
+  const historyLines = (h: any, name: any): string[] => {
+    if (!report) return wrapped(`last 7d: ${!info || info.loading ? "reading" : "not read"}`, "dim", "  ");
+    if (!h) {
+      // The report judges names by the worker's rule, so a row named outside it has no history line to show.
+      const why = typeof name === "string" && WORKER_NAME_RE.test(name) ? "not in the report (its read did not see this host)" : "not counted (not a worker name)";
+      return wrapped(`last 7d: ${why}`, "warning", "  ");
+    }
+    if (!h.shared) return wrapped(`last 7d: not here: ${notSharedWhy(h, report.coverage)}`, "warning", "  ");
+    if (!(h.coveredMs > 0)) return wrapped("last 7d: no history here", "dim", "  ");
+    const out: string[] = [];
+    const slots = Number.isSafeInteger(h.capacity?.slots) ? ` of ${h.capacity.slots}` : "";
+    const bits = [`busy ${percentText(share(h.busyMs, h.coveredMs))}`, `avg ${milliText(h.avgMilli ?? 0)}${slots}, peak ${h.peak}`];
+    if (h.fullMs !== null && h.fullMs !== undefined) bits.push(`full ${percentText(share(h.fullMs, h.coveredMs))}`);
+    bits.push(h.waits?.n > 0 ? `wait p95 ${durationText(h.waits.p95Ms)}` : "no wait recorded");
+    out.push(...wrappedBits([`last 7d: ${bits[0]}`, ...bits.slice(1)], "text", "  "));
+    const projects: any[] = Array.isArray(h.projects) ? h.projects : [];
+    if (projects.length > 0) {
+      const named = projects.map((p: any) => `${p?.project === null || p?.project === undefined ? "(no project)" : clip(textCell(p.project), 20)} ${durationText(p.runMs)}`);
+      if (h.otherProjects) named.push(`${h.otherProjects.count} other${h.otherProjects.count === 1 ? "" : "s"} ${durationText(h.otherProjects.runMs)}`);
+      out.push(...wrapped(`top: ${named.join(", ")}`, "muted", "  "));
+    }
+    // What this history cannot see, said under the host it is about. Never folded into busy or idle.
+    const cov = h.coverage ?? {};
+    const notes: string[] = [cov.source === "local" ? "from this host's files only" : cov.source === "mirror" ? "from the run mirror" : "from the run records"];
+    if (h.missingMs > 0) notes.push(`${percentText(share(h.missingMs, h.missingMs + h.coveredMs))} of the window has no history${cov.truncated ? " (the run mirror holds nothing older)" : ""}, counted as neither busy nor idle`);
+    if (cov.liveUnreadable > 0) notes.push("its running jobs could not be read, so none is counted");
+    if (cov.liveNotCounted > 0) notes.push(`${cov.liveNotCounted} running not counted`);
+    out.push(...wrapped(notes.join("; "), "dim", "  "));
+    return out;
+  };
+
+  const jobRow = (j: any): string => {
+    const age = now !== null && Number.isSafeInteger(j?.at) ? durationText(Math.max(0, now - j.at)) : "?";
+    const size = Number.isSafeInteger(j?.m) && Number.isSafeInteger(j?.c) ? `${formatMemory(j.m)}, ${cpusText(j.c)}` : "no size";
+    const project = j?.p ? clip(textCell(j.p), 16) : "(no project)";
+    const tail = `  ${project}  ${size}  ${age}${j?.o ? "  orphan" : ""}`;
+    const idWidth = Math.max(6, iw - 4 - styler.visibleLen(tail));
+    return fitLine(`    ${styler.fg("accent", clip(textCell(j?.id), idWidth))}${styler.fg(j?.o ? "warning" : "muted", tail)}`, iw, styler);
+  };
+
+  const liveLines = (r: any): string[] => {
+    const out: string[] = [];
+    const stale = Number.isSafeInteger(r?.staleMs) && r.staleMs > LIVE_FRESH_MS ? `stale ${durationText(r.staleMs)}` : "";
+    const nameWidth = Math.max(8, iw - (stale ? styler.visibleLen(stale) + 2 : 0));
+    out.push(fitLine(styler.bold(styler.fg("accent", clip(hostName(r?.name), nameWidth))) + (stale ? "  " + styler.fg("warning", stale) : ""), iw, styler));
+    const listed: any[] | null = Array.isArray(r?.jobs) ? r.jobs : null;
+    const running = listed ? listed.filter((j: any) => !j?.o).length + (countOf(r?.jobsMore) ?? 0) : r?.jobsUnreadable ? null : countOf(r?.budgetRunning);
+    const limit = countOf(r?.concurrency);
+    const bits = [running === null ? (limit === null ? "? running" : `? of ${limit} slots`) : limit === null ? `${running} running` : `${running} of ${limit} slots`];
+    const mem = budgetPart("memory", r?.budgetMemMiB, r?.usedMemMiB, formatMemory);
+    const cpu = budgetPart("CPU", r?.budgetCpuCenti, r?.usedCpuCenti, formatCpus);
+    bits.push(mem === null && cpu === null ? "no host budget" : `promised ${[mem ?? "memory: no budget", cpu ?? "CPU: no budget"].join(", ")}`);
+    const waiting = countOf(r?.waiters);
+    if (waiting !== null && waiting > 0) bits.push(`${waiting} waiting for the budget`);
+    out.push(...wrappedBits(bits, "text", "  "));
+    if (stale) out.push(...wrapped("its row is stale: its running jobs count up to its last beat", "warning", "  "));
+    if (r?.jobsUnreadable) out.push(...wrapped("its list of running jobs could not be read: how many run is unknown", "warning", "  "));
+    else if (!listed) out.push(...wrapped(running === null ? "it lists no running jobs (a worker older than this panel)" : `it lists no running jobs (a worker older than this panel): ${running} by its budget`, "dim", "  "));
+    else {
+      const more = countOf(r?.jobsMore) ?? 0;
+      if (listed.length === 0 && more === 0) out.push(styler.cell("    no job running", iw, { color: "dim" }));
+      for (const j of listed.slice(0, HOSTS_JOBS_SHOWN)) out.push(jobRow(j));
+      const rest = Math.max(0, listed.length - HOSTS_JOBS_SHOWN) + more;
+      if (rest > 0) out.push(styler.cell(`    +${rest} more running`, iw, { color: "dim" }));
+      if (listed.some((j: any) => j?.o)) out.push(...wrapped("orphan: a container whose stop did not take, still held by the budget", "warning", "    "));
+    }
+    return out;
+  };
+
+  for (const r of rows) {
+    if (lines.length > 0) lines.push(styler.cell("", iw));
+    lines.push(...liveLines(r), ...historyLines(byName.get(r?.name), r?.name));
+  }
+  for (const h of historyOnly) {
+    if (lines.length > 0) lines.push(styler.cell("", iw));
+    lines.push(fitLine(styler.bold(styler.fg("accent", clip(hostName(h?.name), Math.max(8, iw - 14)))) + "  " + styler.fg("dim", "no live row"), iw, styler));
+    lines.push(...historyLines(h, h?.name));
+  }
+  if (report) {
+    lines.push(styler.cell("", iw));
+    const cov = report.coverage ?? {};
+    const notes: string[] = ["Jobs only: a machine busy with other work reads as idle"];
+    if (Number.isSafeInteger(cov.unreadable) && cov.unreadable > 0) notes.push(`${cov.unreadable} record${cov.unreadable === 1 ? "" : "s"} unreadable, not counted`);
+    if (typeof cov.reason === "string" && cov.reason !== "") notes.push(textCell(cov.reason));
+    lines.push(...wrapped(`${notes.join("; ")}.`, "dim"));
+  }
   return { title, lines };
 }
 

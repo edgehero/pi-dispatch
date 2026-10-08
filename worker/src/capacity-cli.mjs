@@ -139,8 +139,8 @@ export function milliText(milli) {
 	return `${Math.floor(tenths / 10)}${tenths % 10 === 0 ? "" : `.${tenths % 10}`}`;
 }
 
-/** Part of whole as a per-mille, rounded half up; 0 when there is no whole. */
-const share = (part, whole) => (whole > 0 ? Math.floor((part * 2000 + whole) / (whole * 2)) : 0);
+/** Part of whole as a per-mille, rounded half up; 0 when there is no whole. The panel's HOSTS view reads its shares by it too. */
+export const share = (part, whole) => (whole > 0 ? Math.floor((part * 2000 + whole) / (whole * 2)) : 0);
 
 /**
  * C0 and C1 control characters, which a terminal acts on (cursor moves, a title, a cleared screen). The report admits
