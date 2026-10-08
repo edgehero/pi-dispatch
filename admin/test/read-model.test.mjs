@@ -508,6 +508,25 @@ test("readSchedulers returns { unreachable } on a connection error", async () =>
   assert.match(res.unreachable, /down/);
 });
 
+test("readSchedulers is bounded: a scheduler list or a close that never settles, and a client that fails, end the read", async () => {
+  const closed = [];
+  const never = () => new Promise(() => {});
+  const redisFn = () => ({ smembers: async () => [], disconnect() {} });
+  const t0 = Date.now();
+  const hung = await readSchedulers({ url: "redis://x", makeQueueFn: () => ({ getJobSchedulers: never, close: () => (closed.push(1), never()) }), parseConnectionFn: () => ({}), redisFn, timeoutMs: 300 });
+  assert.deepEqual(hung, { unreachable: "timed out reading the job schedulers" });
+  assert.equal(closed.length, 1, "the queue is still closed");
+  assert.ok(Date.now() - t0 < 3000, "two bounds, not a hang");
+  // BullMQ builds its scheduler inside an async executor awaiting the queue's client: a client that fails must be
+  // awaited first, so the failure is the read's own and the scheduler is never asked for.
+  let asked = 0;
+  const failing = { client: Promise.reject(new Error("nothing answers VALKEY_URL")), getJobSchedulers: async () => (asked++, []), close: async () => {} };
+  failing.client.catch(() => {});
+  const res = await readSchedulers({ url: "redis://x", makeQueueFn: () => failing, parseConnectionFn: () => ({}), redisFn, timeoutMs: 300 });
+  assert.match(res.unreachable, /nothing answers VALKEY_URL/);
+  assert.equal(asked, 0);
+});
+
 test("readPauseWindows returns normalized windows, and degrades on missing/invalid", () => {
   const fs = triggerFs({ "pw.json": JSON.stringify({ windows: [{ scope: "acme/web", from: "22:00", to: "06:00", tz: "Europe/Amsterdam" }] }) });
   const ok = readPauseWindows({ pauseWindowsPath: "pw.json", fs });
