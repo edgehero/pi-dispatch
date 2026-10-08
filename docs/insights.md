@@ -214,7 +214,8 @@ environment gives a report from this host's files, and says why.
 - A job running now is counted once it ends. A retry replaces its earlier attempt's record, but carries that attempt's
   slot time in `earlier`, so it is counted; only an attempt whose record could not be read is not, and the report says
   how many runs were retries. A run whose first attempt stalled and was picked up again is counted too, and the report says the stalled
-  pickup's own time is not. CPU used comes from `resources`, which the job's container
+  pickup's own time is not. A stall of a later attempt is not counted at all: the run after it reads as an ordinary
+  retry, and the stalled attempt's time is in no record. CPU used comes from `resources`, which the job's container
   produces: advisory, like every number there, and read at most at what the job's `--cpus` allows.
 
 ## Honest limits

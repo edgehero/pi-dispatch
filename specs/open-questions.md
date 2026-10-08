@@ -1877,7 +1877,10 @@ adversarial passes did.
     carries the earlier attempts' slot intervals (`earlier`, at most 4), so they are counted; an attempt whose record
     could not be read when the retry was picked up, or beyond the 4, is lost and reads as idle. A retry adds no wait;
   - **a pickup after a stall** follows a pickup that usually wrote no record (its worker died or lost its lock), so
-    that pickup's slot time is in no record and reads as idle. The report counts such runs (`stalledRepick`) and says so;
+    that pickup's slot time is in no record and reads as idle. The report counts such runs (`stalledRepick`) and says so
+    when the stall was the first attempt's. A stall of a later attempt is NOT counted: BullMQ's `stalledCounter` never
+    resets, so a pickup cannot tell a new stall from an old one, and the run that follows reads as an ordinary retry.
+    That stalled attempt's slot time is in no record, is counted nowhere and reads as idle;
   - **a writer from before the fleet horizon** (`runs:horizon`) trims the shared run index by its own retention without
     recording it, so while one runs in a fleet a shorter retention than the reader's can still cut history that reads
     as idle; every writer from this version on records its trims;
@@ -1991,3 +1994,4 @@ adversarial passes did.
 | 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `OQ-039`**, what the capacity report cannot see: a retry overwrites its earlier attempt's record, so that slot time reads as idle; an unnamed or offline worker's history is not shared (a live one is named and counted as missing, one that is not live is absent); `resources` is produced by the job and only advisory; a machine busy with other work reads as idle, and a job running now is not counted until it ends. |
 | 2026-10-08 | Issue #599, phase 1, corrections. **`OQ-039` AMENDED**: a new residual, a writer from before the fleet horizon trims the shared run index without recording it; the retry residual now says the report counts retried runs and adds no wait for them. |
 | 2026-10-08 | Issue #599, phase 1, second corrections. **`OQ-039` AMENDED**: the retry residual narrows (a retry now carries its earlier attempts' slot intervals; only an attempt whose record could not be read, or beyond the 4 kept, is lost), and a new residual names a stalled pickup's slot time, which no record holds and the report counts and says. |
+| 2026-10-08 | Issue #599, phase 1, last correction. **`OQ-039` AMENDED**: a stall of a later attempt is a named residual. `stalledCounter` never resets, so only a stall of the first attempt is counted as `stalledRepick`; a later attempt that stalled wrote no record, its slot time is counted nowhere, and the run that follows reads as an ordinary retry. |
