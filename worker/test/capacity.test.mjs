@@ -511,4 +511,6 @@ test("why a host's history is not here: a row that does not route is unnamed; on
 	const read = report([], { live: [{ name: "plain", routes: "false" }], coverage: { ...cov, mirror: { fromMs: NOW - DAY, truncated: false, hosts: [] } } });
 	assert.equal(read.hosts[0].notShared, "unnamed");
 	assert.equal(report([run("1", 2, 1)]).hosts[0].notShared, null);
+	// A row with no `routes` (it says nothing about the mirror) is not taken for a routing one.
+	assert.equal(report([], { live: [{ name: "odd" }], coverage: cov }).hosts[0].notShared, "unnamed");
 });

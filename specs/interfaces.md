@@ -5536,9 +5536,9 @@ validator rather than a second copy of it.
   runs are in them, and by the mirror when its live row says it routes (it declared `PI_WORKER_NAME`) or, with no live
   row, when the mirror holds its runs; it starts at the earliest of the sources that cover it, and `source` names that
   one. A host no source covers is `shared: false`, listed in `historyNotShared`, and missing for the whole window;
-  `notShared` says why: `unnamed` when its live row does not route (a worker without `PI_WORKER_NAME` writes no run
-  mirror) or the mirror was read and holds none of its runs, `unread` when the mirror was not read (no Valkey, or it
-  did not answer; `coverage.reason` says which). Every surface words the two differently, so a Valkey that did not
+  `notShared` says why: `unread` when its live row routes (it writes the run mirror, so it is uncovered only when the
+  mirror was not read: no Valkey, or it did not answer; `coverage.reason` says which), `unnamed` when it does not (a
+  worker without `PI_WORKER_NAME` writes no run mirror). Only a host with a live row can be uncovered. Every surface words the two differently, so a Valkey that did not
   answer is never blamed on a worker's name.
   `truncated` is true when that start is past the window's start because the mirror was cut. A caller of
   `computeCapacity` that describes no source (no `local` and no `mirror` in its coverage) gets every host covered from

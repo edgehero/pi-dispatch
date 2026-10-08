@@ -8159,8 +8159,8 @@ const MIXED_PIN = {
 			"✓ Fleet: 2 workers (mini1, mini2)",
 			"⚠ Job image digest differs from the other host",
 			"    → rebuild or re-pull so every host runs the same image; digests are identical only when both hosts pulled one tag from one registry, so two local builds differ legitimately",
-			// Issue #599, phase 2: the capacity line per live host; the seam reads no run mirror, so the peer has no history here.
-			"✓ Host mini2: last 7d no history here; the run mirror was not read, so its runs are not here",
+			// Issue #599, phase 2: the capacity line per live host; the peer's row does not route, so it writes no run mirror.
+			"✓ Host mini2: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)",
 			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
@@ -8221,7 +8221,7 @@ const MIXED_PIN = {
 			"✓ podman: jobs run as uid:gid 1234:1234 (passed as --user, with --userns=keep-id) with HOME=/home/pi",
 			"✓ Valkey reachable (redis://127.0.0.1:6379)",
 			"✓ Fleet: 2 workers (mini1, mini2)",
-			"✓ Host mini2: last 7d no history here; the run mirror was not read, so its runs are not here",
+			"✓ Host mini2: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)",
 			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
@@ -8290,7 +8290,7 @@ const MIXED_PIN = {
 			"✓ podman: jobs run as uid:gid 1234:1234 (passed as --user, with --userns=keep-id) with HOME=/home/pi",
 			"✓ Valkey reachable (redis://127.0.0.1:6379)",
 			"✓ Fleet: 2 workers (mini1, mini2)",
-			"✓ Host mini2: last 7d no history here; the run mirror was not read, so its runs are not here",
+			"✓ Host mini2: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)",
 			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
@@ -8360,8 +8360,8 @@ const MIXED_PIN = {
 			"✓ Fleet: 2 workers (mini1, mini2)",
 			"⚠ Job image digest differs from the other host",
 			"    → rebuild or re-pull so every host runs the same image; digests are identical only when both hosts pulled one tag from one registry, so two local builds differ legitimately",
-			// Issue #599, phase 2: the capacity line per live host; the seam reads no run mirror, so the peer has no history here.
-			"✓ Host mini2: last 7d no history here; the run mirror was not read, so its runs are not here",
+			// Issue #599, phase 2: the capacity line per live host; the peer's row does not route, so it writes no run mirror.
+			"✓ Host mini2: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)",
 			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
