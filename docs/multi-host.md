@@ -382,7 +382,8 @@ so another host's doctor says it has no history there. `pi-dispatch capacity` pr
 **The panel's HOSTS view.** Press `u` in `/dispatch` (the runs divider names it) for one block per host. The first
 lines are live, from the registry rows the panel already reads every second: the slots in use of the host's
 `PI_CONCURRENCY`, the memory and CPU its budget has promised its jobs against the budget (`no memory budget` for a
-dimension switched off, `budget not known yet` while a starting worker has not read it), how many jobs wait for the
+dimension switched off, `budget not known yet` while a starting worker has not read it, `budget unreadable` for a value
+no worker writes), how many jobs wait for the
 budget, `stale` with the row's age when it has not beaten for 30 seconds, and up to four running jobs with their id,
 project, size and age (an orphan, a container whose stop did not take, is marked and holds no slot; the rest are
 counted, running and orphaned apart). Under them comes the host's last 7 days from the same report as doctor, labelled
@@ -390,7 +391,8 @@ with the minute it was read (`last 7d to 12:00 UTC`): busy share, slots on avera
 taken, the wait p95 and the top projects, then the same caveats `pi-dispatch capacity` prints (how the slot count was
 judged, retries and stalls that under-count, refusals, inferred records) and where that history comes from and how much
 of the window it misses. The 7 days are read when the view opens and again when you press `u` in it, never on the
-panel's tick, and only one read runs at a time. A host whose history is not here says why, in the words
+panel's tick, and only one read runs at a time. A read that has not answered after 30 seconds is given up: the view
+says the history did not answer in time, and the next `u` reads again. A host whose history is not here says why, in the words
 `pi-dispatch capacity` uses, and shows no busy share. A host whose job list cannot be read, or whose row carries no beat
 time (no evidence it runs), shows `?` slots in use, never 0.
 

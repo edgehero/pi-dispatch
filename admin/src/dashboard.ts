@@ -290,6 +290,12 @@ function hostRowOf(h: any): any {
   };
 }
 
+/**
+ * The longest the HOSTS view waits for its capacity read (issue #599): well above `readCapacity`'s own bounds (2 s per
+ * Valkey read, plus a bounded local file scan), so it only ever ends a read that would otherwise never settle.
+ */
+const CAPACITY_READ_BOUND_MS = 30_000;
+
 /** How long the panel waits on the registry before drawing the fleet it last knew. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
 
@@ -670,14 +676,27 @@ export function makeDashboard({
   const loadCapacity = async () => {
     const seq = ++capSeq;
     if (!capRead) {
-      capRead = (async () => {
+      // BOUNDED HERE TOO. `readCapacity` bounds its own Valkey reads, but a read that never settles (a wedged file read,
+      // a seam that forgot a bound) would otherwise hold `capRead` for the panel's life, and every later `u` would join
+      // it. Past `CAPACITY_READ_BOUND_MS` the view says the history did not answer and the next `u` starts a fresh read;
+      // the abandoned one is left to settle into nothing. The timer is a seam so a test need not wait 30 s.
+      const setTimer = typeof deps?.setTimer === "function" ? deps.setTimer : setTimeout;
+      const clearTimer = typeof deps?.clearTimer === "function" ? deps.clearTimer : clearTimeout;
+      let timer: any = null;
+      const bound = new Promise<any>((resolve) => {
+        timer = setTimer(() => resolve({ timedOut: true }), CAPACITY_READ_BOUND_MS);
+        timer?.unref?.();
+      });
+      const read = (async () => {
         try {
           const res = typeof deps?.capacityInfo === "function" ? await deps.capacityInfo({ window: "7d" }) : { unwired: true };
           return res && typeof res === "object" ? res : { unreachable: "no answer" };
         } catch (err: any) {
           return { unreachable: err?.message ?? String(err) };
         }
-      })().finally(() => {
+      })();
+      capRead = Promise.race([read, bound]).finally(() => {
+        clearTimer(timer);
         capRead = null;
       });
     }
@@ -2805,14 +2824,19 @@ function budgetText(r: any): string {
   const dim = (label: string, budget: any, used: any, fmt: (n: number) => string) => {
     if (budget === undefined || budget === null) return { kind: "absent", text: `no ${label} budget published` };
     if (budget === "off") return { kind: "off", text: `no ${label} budget` };
-    const b = countOf(budget);
-    if (b === null) return { kind: "unknown", text: `${label} budget not known yet` };
+    // "" is what a starting worker publishes before its budget exists; anything else that is not a positive integer is
+    // no value a worker writes (`budgetField`: an integer, `off` or "", and a budget is floored above 0), so it is said
+    // to be unreadable rather than read as not known yet.
+    if (budget === "") return { kind: "unknown", text: `${label} budget not known yet` };
+    if (typeof budget !== "string" || !/^[1-9]\d{0,14}$/.test(budget)) return { kind: "unreadable", text: `${label} budget unreadable` };
+    const b = Number(budget);
     const u = countOf(used);
     return { kind: "set", text: `${label} ${u === null ? "?" : fmt(u)} of ${fmt(b)}` };
   };
   const parts = [dim("memory", r?.budgetMemMiB, r?.usedMemMiB, formatMemory), dim("CPU", r?.budgetCpuCenti, r?.usedCpuCenti, formatCpus)];
   if (parts.every((p) => p.kind === "absent")) return "no host budget published";
   if (parts.every((p) => p.kind === "unknown")) return "budget not known yet";
+  if (parts.every((p) => p.kind === "unreadable")) return "budget unreadable";
   const set = parts.filter((p) => p.kind === "set").map((p) => p.text);
   return [...(set.length > 0 ? [`promised ${set.join(", ")}`] : []), ...parts.filter((p) => p.kind !== "set").map((p) => p.text)].join(", ");
 }
@@ -2876,6 +2900,7 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
   if (!info || info.loading) lines.push(...wrapped("reading the last 7 days of run records", "dim"));
   else if (info.refreshing) lines.push(...wrapped("reading the last 7 days again", "dim"));
   else if (info.unwired) lines.push(...wrapped("history not wired in this panel (no capacity reader)", "dim"));
+  else if (info.timedOut) lines.push(...wrapped(`history did not answer in time (${CAPACITY_READ_BOUND_MS / 1000} s): u reads it again`, "error"));
   else if (info.unreachable || info.error || !report) lines.push(...wrapped(`history unreadable (${cellOf(info.unreachable ?? info.error ?? "no report")})`, "error"));
   if (rows.length === 0 && historyOnly.length === 0) lines.push(...wrapped(report ? "no live host, and no host ran a job in the last 7d" : "no live host row", "dim"));
 
@@ -2954,7 +2979,7 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
       const hiddenOrphans = hidden.filter((j: any) => j?.o).length;
       const hiddenRunning = hidden.length - hiddenOrphans + more;
       const rest = [...(hiddenRunning > 0 ? [`${hiddenRunning} more running`] : []), ...(hiddenOrphans > 0 ? [`${hiddenOrphans} orphaned container${hiddenOrphans === 1 ? "" : "s"}`] : [])];
-      if (rest.length > 0) out.push(styler.cell(`    +${rest.join(", ")}`, iw, { color: "dim" }));
+      if (rest.length > 0) out.push(...wrapped(`+${rest.join(", ")}`, "dim", "    "));
       if (listed.some((j: any) => j?.o)) out.push(...wrapped("orphan: a container whose stop did not take, still held by the budget", "warning", "    "));
     }
     return out;
