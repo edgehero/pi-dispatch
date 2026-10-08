@@ -371,6 +371,19 @@ On a fleet it lists every host's budget, what its jobs hold and the largest proj
 sized project the hosts it fits on, warning when it fits on none. It also checks this host's own count against the
 size labels of the job containers that are running and warns when they differ.
 
+**How busy each host was.** Doctor ends the fleet part with one line per host over the last 7 days, for example
+`Host a: last 7d busy 63% (avg 2.1 of 4 slots, full 12%), promised 48% memory / 40% CPU, used 18% CPU of 8, wait
+p50 40s p95 6m, most busy: web`. It is a fact, never a warning, and it shows on a single host too. After a `;` it says
+what it cannot see: jobs running now that are not counted, history that starts later than the window (the run mirror
+holds nothing older), or that only this host's files were read. A host without `PI_WORKER_NAME` writes no run mirror,
+so another host's doctor says it has no history there. `pi-dispatch capacity` prints the same report in full, and
+`dispatch_capacity` returns it in pi ([the capacity report](insights.md#pi-dispatch-capacity)).
+
+To count the jobs running now, each worker's registry row carries three more fields: `jobs` (each running job's id,
+project id, size and start, and an `o` flag on a container whose stop did not take, at most 32, oldest first),
+`jobsMore` (how many it does not list) and `waiters` (jobs waiting for the host budget). Ids and numbers only: a job id
+outside the usual characters is published as its hash, and a repository name never is. Nothing decides on them.
+
 What it does **not** check yet: whether two hosts are sharing a directory they should not be. That one is
 on you.
 

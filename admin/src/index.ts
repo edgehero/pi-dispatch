@@ -73,6 +73,7 @@ import {
   readSizeSuggestions,
   hostBudgetsOf,
   readHosts,
+  readCapacity,
   readDollarWindows,
   readHeldJobs,
   cancelHeldJob,
@@ -576,6 +577,29 @@ function registerTools(pi: ExtensionAPI): void {
       // Issue #524: a swallowed duplicate is said as one, so the model never reports a run that was not queued.
       if (res.deduplicated) return toolText(JSON.stringify({ jobId: res.jobId, folder: params.folder, flow: params.flow, queued: false, note: res.said }));
       return toolText(JSON.stringify({ jobId: res.jobId, folder: params.folder, flow: params.flow }));
+    },
+  });
+
+  // Issue #599, phase 2: how busy each host is and was (REQ-CAPACITY-INSIGHTS, INT-CAPACITY-REPORT), through the CLI's
+  // own read and function (`readCapacity`), so the tool, `pi-dispatch capacity` and doctor never disagree. Read-only:
+  // the registry is read without its prune and the mirror reader writes nothing.
+  pi.registerTool({
+    name: "dispatch_capacity",
+    label: "pi-dispatch capacity",
+    description:
+      "Read-only. How busy each worker host was over a window (window = 24h | 7d | 30d, default 7d; host narrows to one " +
+      "host): busy and idle time, jobs at once (average, peak, time with every slot taken), memory and CPU promised " +
+      "against the host budget, CPU used, the wait for a slot (p50, p95) and the projects by run time, from the run " +
+      "records plus the jobs running now. `text` is the plain report; `report` is the capacity report v1 (integers: " +
+      "milliseconds, and ratios per mille). Jobs only: a machine busy with other work reads as idle. History the " +
+      "records do not hold is reported as missing (`missingMs`, `coverage`), never as idle.",
+    parameters: Type.Object({ window: Type.Optional(Type.String()), host: Type.Optional(Type.String()) }),
+    async execute(_toolCallId, params) {
+      const paths = resolvePaths(deploymentEnv());
+      const window = params.window ?? "7d";
+      const res: any = await readCapacity({ url: paths.valkeyUrl, env: deploymentEnv(), window, host: params.host });
+      if (res.error) throw new Error(res.error);
+      return toolText(JSON.stringify({ window, text: res.text, report: res.report }));
     },
   });
 

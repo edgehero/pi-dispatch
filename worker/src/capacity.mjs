@@ -28,8 +28,16 @@
  * and a named host's runs in the run mirror from the mirror's own start on (its window, its cap, and the fleet horizon
  * every writer's trim raises). A host no source holds (a live worker with no `PI_WORKER_NAME`, seen from another host)
  * is missing for the whole window. Missing time is counted in neither busy nor idle, so busy + idle + missing is the
- * window for every host, and a truncated history can never read as a quiet machine. A job running now has no record
- * yet and is not in the history until it ends.
+ * window for every host, and a truncated history can never read as a quiet machine.
+ *
+ * A JOB RUNNING NOW has no record yet, so the live rows supply it (issue #599, phase 2): each host row lists the jobs
+ * it runs (`jobs`, live-jobs.mjs), and each is counted as an occupied interval from its admission to now, with its size
+ * and project, marked live (no wait, no CPU measured) and counted in `live`, never in `used`. Only what the row can
+ * vouch for: a row that has not beaten within `LIVE_FRESH_MS` vouches only up to its last beat, so the interval ends
+ * there; a job whose record is already in the window (it ended between the beat and this read) is the record's; an
+ * orphan (`o`, a container whose stop did not take) is not counted, since its record already covers its run; and a
+ * running job the row does not list (past its 32, unreadable, a worker from before the field, a host whose history is
+ * not shared) is counted in `liveNotCounted`, never guessed.
  *
  * RETRIES AND STALLS. A retry's record replaces its earlier attempt's, so the record carries those attempts' slot
  * intervals (`earlier`), each counted as an occupied interval on its own host with its size (no wait, no CPU measured).
@@ -53,6 +61,8 @@
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 import { JOB_CPUS_CEILING_CENTI, SIZE_REFUSAL_REASONS, recordedJobSize } from "./job-size.mjs";
 import { isProjectId } from "./project-id.mjs";
+import { HOST_BEAT_MS } from "./host-registry.mjs";
+import { parseJobsMore, parseLiveJobs } from "./live-jobs.mjs";
 import { recordedEarlier } from "./run-earlier.mjs";
 import { SUGGEST_CLOCK_SKEW_MS, SUGGEST_MAX_WALL_MS } from "./size-suggest.mjs";
 import { WAIT_REFUSAL_REASONS } from "./wait-for.mjs";
@@ -65,6 +75,11 @@ export const LEGACY_MIN_WALL_MS = 1000;
 export const CAPACITY_TOP_PROJECTS = 5;
 /** The most buckets one report splits its window into, so a caller's mistake cannot cost a render its memory. */
 export const CAPACITY_MAX_BUCKETS = 10_000;
+/**
+ * How recent a host row's beat must be for its running jobs to count up to NOW: two beats. A row older than that (its
+ * worker slow, stopped or gone, the row not yet expired) vouches for its jobs only up to its last beat.
+ */
+export const LIVE_FRESH_MS = 2 * HOST_BEAT_MS;
 /** The refusal reasons the processor gives BEFORE a job holds a slot: a legacy record carrying one never held one. */
 export const PRE_SLOT_REFUSAL_REASONS = Object.freeze([...WAIT_REFUSAL_REASONS, ...SIZE_REFUSAL_REASONS]);
 
@@ -161,7 +176,22 @@ function perMille(num, den) {
 /** The nearest-rank percentile of a sorted array: the value at rank ceil(p/100 x n). size-suggest's rule. */
 const rank = (sorted, pct) => sorted[Math.max(0, Math.ceil((pct * sorted.length) / 100) - 1)];
 
-const zeroCounts = () => ({ used: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0, earlier: 0, stalledRepick: 0 });
+const zeroCounts = () => ({ used: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0, earlier: 0, stalledRepick: 0, live: 0, liveNotCounted: 0, orphans: 0 });
+
+/**
+ * A live row's running jobs: `{ jobs, notListed }`, `jobs` the listed entries through live-jobs.mjs' allowlist (a row
+ * from `readLiveHosts` is parsed already; a raw string is parsed here, the same rule) or null when the row lists none,
+ * `notListed` the running jobs it reports and does not list (its `jobsMore`, or a worker from before `jobs`: its budget's
+ * `budgetRunning`), null when it says nothing.
+ */
+function rowJobsOf(row) {
+	const parsed = parseLiveJobs(row?.jobs);
+	if (parsed.jobs === null) {
+		const n = typeof row?.budgetRunning === "string" && /^\d{1,9}$/.test(row.budgetRunning) ? Number(row.budgetRunning) : null;
+		return { jobs: null, notListed: n };
+	}
+	return { jobs: parsed.jobs, notListed: (parseJobsMore(row.jobsMore) ?? 0) + parsed.dropped };
+}
 
 /**
  * Where each host's history starts: `Map<name, { fromMs, source, truncated } | null>`, null for a host no source holds.
@@ -256,6 +286,12 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			earlierRuns.push({ host: e.host, span: eSpan, size: eSize, project });
 		}
 	}
+	// The newest admission among each job id's records, so a job the live row still lists after its record was written
+	// (it ended between the beat and this read) is counted once, as the record.
+	const recordedFrom = new Map();
+	for (const { record, span } of judged) {
+		if (typeof record.jobId === "string" && span !== null) recordedFrom.set(record.jobId, Math.max(recordedFrom.get(record.jobId) ?? -Infinity, span.start));
+	}
 	const names = new Set([...liveByName.keys()]);
 	for (const j of judged) names.add(j.record.host);
 	for (const e of earlierRuns) names.add(e.host);
@@ -324,6 +360,40 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		host.runs.push({ start, end, span: e.span, size: e.size, rawCpuUsec: null, recorded: null, project: e.project, earlier: true });
 	}
 
+	// THE JOBS RUNNING NOW (see the header), from each live row, each an occupied interval to now (or to a stale row's
+	// last beat), clipped to the host's covered window like a record.
+	let running = null;
+	for (const [name, row] of liveByName) {
+		const { jobs, notListed } = rowJobsOf(row);
+		const host = hostOf(name);
+		const cover = covers.get(name);
+		if (jobs !== null || notListed !== null) running = (running ?? 0) + (jobs ?? []).filter((j) => !j.o).length + (notListed ?? 0);
+		host.counts.liveNotCounted += notListed ?? 0;
+		const staleMs = Number.isSafeInteger(row.staleMs) && row.staleMs >= 0 ? row.staleMs : null;
+		for (const j of jobs ?? []) {
+			if (j.o) {
+				host.counts.orphans++;
+				continue;
+			}
+			if ((recordedFrom.get(j.id) ?? -Infinity) >= j.at) continue; // its record counts it
+			const end = staleMs === null ? null : staleMs <= LIVE_FRESH_MS ? nowMs : nowMs - staleMs;
+			const span = end === null ? null : spanOf({ startedAt: new Date(j.at).toISOString(), endedAt: new Date(end).toISOString() }, nowMs);
+			if (cover === null || cover === undefined || span === null) {
+				host.counts.liveNotCounted++;
+				continue;
+			}
+			const start = Math.max(span.start, cover.fromMs);
+			const stop = Math.min(span.end, nowMs);
+			if (stop < start) {
+				host.counts.liveNotCounted++;
+				continue;
+			}
+			host.counts.live++;
+			const size = positiveInt(j.m) && positiveInt(j.c) ? { memMiB: j.m, cpuCenti: j.c } : null;
+			host.runs.push({ start, end: stop, span, size, rawCpuUsec: null, recorded: null, project: j.p, live: true });
+		}
+	}
+
 	const hosts = [];
 	const totals = zeroCounts();
 	const notShared = [];
@@ -387,7 +457,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			r.used = 0n;
 			r.cpuUsec = null;
 			if (r.rawCpuUsec === null) {
-				if (!r.earlier) h.counts.withoutResources++;
+				if (!r.earlier && !r.live) h.counts.withoutResources++;
 				return;
 			}
 			const most = BigInt(jobCpuCeilingCenti(r.recorded ?? capAt(r.span.start))) * BigInt(r.span.wallMs) * 10n; // hundredths x ms x 10 = microseconds
@@ -520,10 +590,6 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		});
 	}
 
-	const running = [...liveByName.values()].reduce((sum, row) => {
-		const n = typeof row.budgetRunning === "string" && /^\d{1,9}$/.test(row.budgetRunning) ? Number(row.budgetRunning) : null;
-		return n === null ? sum : (sum ?? 0) + n;
-	}, null);
 	const covered = hosts.filter((h) => h.shared);
 	return {
 		v: CAPACITY_REPORT_VERSION,

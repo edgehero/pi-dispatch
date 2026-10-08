@@ -204,6 +204,11 @@ reads only `VALKEY_URL` (or the one `--valkey-url` names) and the logs directory
 nothing. If a Valkey you named with `--valkey-url` refuses or does not answer, it exits 1; one taken from the
 environment gives a report from this host's files, and says why.
 
+The same report shows in two more places. `pi-dispatch doctor` prints one line per host for the last 7 days (busy
+share, average and slots, promised memory and CPU, CPU used, the wait and the busiest project, then what the line
+cannot see), never as a warning. The `dispatch_capacity` tool returns it to a model in pi (`window` `24h`, `7d` or
+`30d`, and an optional `host`), as text and as the report `--json` prints.
+
 - **Jobs only.** No machine load is measured, so a machine busy with other work reads as idle.
 - **Missing history is never idle.** It reads the run mirror where workers declare `PI_WORKER_NAME`, and this host's
   own files, and each host's history starts where its own sources do: this host's files to `PI_LOG_RETENTION_DAYS`,
@@ -211,7 +216,12 @@ environment gives a report from this host's files, and says why.
   shorter one cuts everyone's older runs; it records where it cut, and the report starts the mirrored hosts there.
   Time before a host's history, and a live host whose runs it cannot see (one without `PI_WORKER_NAME` writes no
   mirror), count as neither busy nor idle, and the report names them.
-- A job running now is counted once it ends. A retry replaces its earlier attempt's record, but carries that attempt's
+- **A job running now is counted as busy up to now.** Each worker's registry row lists the jobs it runs (with or
+  without a host budget), and the report counts each from the moment it was admitted. A row that has not beaten for
+  more than 30 seconds counts its jobs only up to its last beat. A running job the row does not list (it lists 32) is
+  said as not counted, and so is one on a host whose history is not shared. A container whose stop did not take (an
+  orphan) is named, but its time after the failed stop is in no record and is not counted as busy.
+- A retry replaces its earlier attempt's record, but carries that attempt's
   slot time in `earlier`, so it is counted; only an attempt whose record could not be read is not, and the report says
   how many runs were retries. A run whose first attempt stalled and was picked up again is counted too, and the report says the stalled
   pickup's own time is not. A stall of a later attempt is not counted at all: the run after it reads as an ordinary

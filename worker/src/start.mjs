@@ -25,6 +25,7 @@ import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
+import { liveJobsFields, liveJobsOf } from "./live-jobs.mjs";
 import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
 import { makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
@@ -1631,6 +1632,18 @@ export async function startWorker(
 		const snap = worker?.hostBudget?.snapshot?.();
 		return Number.isSafeInteger(snap?.[key]) ? String(snap[key]) : "";
 	};
+	// Issue #599, phase 2: the jobs this host runs now and its budget's orphans, oldest first, as the row's two fields
+	// (`live-jobs.mjs`). Without a budget there is no ledger, so no orphan, and the list is the in-flight map alone.
+	const liveJobsNow = () => {
+		const read = (fn) => {
+			try {
+				return fn() ?? [];
+			} catch {
+				return [];
+			}
+		};
+		return liveJobsFields(liveJobsOf({ running: read(() => worker?.runningJobs?.list?.()), budgetEntries: read(() => worker?.hostBudget?.entries?.()) }));
+	};
 	// NOT awaited, and that is load-bearing rather than an optimisation. `makeRedisClient` sets
 	// `maxRetriesPerRequest: null` -- required for BullMQ's blocking connections -- which means a command
 	// issued against an unreachable server QUEUES FOREVER instead of rejecting. Awaiting the first beat
@@ -1697,6 +1710,14 @@ export async function startWorker(
 		heldMemMiB: () => snapshotField("heldMemMiB"),
 		heldCpuCenti: () => snapshotField("heldCpuCenti"),
 		budgetRunning: () => snapshotField("running"),
+		// Issue #599, phase 2: the jobs waiting for the budget ("" without one), and the jobs this host runs now: `jobs` is
+		// JSON of at most 32 `{ id, p, m, c, at, o? }` (job id, project id or null, size integers, admission millis, 1 for an
+		// orphan), oldest first, `jobsMore` how many are not listed. Ids and integers only (live-jobs.mjs says why that
+		// meets the content rule). Each thunk builds the list again; the beat reads every thunk with no await between, so
+		// the two agree. "" before the worker exists.
+		waiters: () => snapshotField("waiters"),
+		jobs: () => (worker ? liveJobsNow().jobs : ""),
+		jobsMore: () => (worker ? liveJobsNow().jobsMore : ""),
 		budgetHolds: () => snapshotField("holds"),
 		budgetOrphans: () => snapshotField("orphans"),
 		// whether the boot listing of the job containers left from before this worker started has been read

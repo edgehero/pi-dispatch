@@ -32,6 +32,11 @@ Observe (no approval needed):
 - `dispatch_allocations` - the allocation envelope (a dollar total per window and a floor per project) and the
   split applied inside it: each project's share and spend in micro-dollars, the applied plan's id and writer,
   and the last 20 outcomes. It never returns the reasons a plan gave; the operator reads those in the panel (`b`).
+- `dispatch_capacity`: how busy each worker host was over `window` (`24h`, `7d` or `30d`, default `7d`; `host`
+  narrows to one): busy and idle share, jobs at once, memory and CPU promised against the budget, CPU used, the wait
+  for a slot and the busiest projects, as `text` and as the `report`. It counts this deployment's jobs only (a machine
+  busy with other work reads as idle), and history it cannot see is `missingMs`, never idle: say so when the coverage
+  is cut, local only, or names running jobs not counted, rather than reading a quiet host into it.
 
 Control (no approval needed — reversible and money-safe):
 - `dispatch_pause` — stop starting new jobs (running ones finish). This is "turn dispatch off".

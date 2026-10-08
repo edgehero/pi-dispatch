@@ -29,7 +29,13 @@
  * from the reader rather than the writer -- the panel is where an operator screenshots, and doctor
  * prints these rows. A value that must be carried but cannot satisfy the rule is HASHED before it gets
  * here (`scopeKeyPrefix`'s idiom), never abbreviated.
+ *
+ * `jobs` (issue #599, phase 2) is the one field that carries a list: JSON of the jobs this host runs now, ids and
+ * integers only, built and read back by `live-jobs.mjs`, whose header argues each field against this rule. The reader
+ * below parses it through that module's allowlist, so a row's `jobs` is an array (or null), never the raw string.
  */
+
+import { parseJobsMore, parseLiveJobs } from "./live-jobs.mjs";
 
 /** The index. A SET cannot expire its members, so the leak is handled by the reader, as `wait:held` does. */
 export const HOST_SET = "host:live";
@@ -291,8 +297,15 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 				continue;
 			}
 			const beatAt = typeof row.beatAt === "string" && row.beatAt.trim() !== "" ? Number(row.beatAt) : NaN;
+			// The running jobs through the allowlist (issue #599, phase 2): an array, or null where the row publishes none (a
+			// worker from before the field) or none that parses. A listed entry that does not read is a running job not
+			// counted, so it joins `jobsMore` rather than vanishing.
+			const live = parseLiveJobs(row.jobs);
+			const more = parseJobsMore(row.jobsMore);
 			hosts.push({
 				...row,
+				jobs: live.jobs,
+				jobsMore: live.jobs === null ? more : (more ?? 0) + live.dropped,
 				name: row.name || member,
 				// Derived rather than stored, so the panel can say "stale 2m" about a row that still lives.
 				// A row whose clock is AHEAD of ours reads as 0 rather than negative: the difference is the

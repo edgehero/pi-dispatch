@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -133,6 +133,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 		return {
 			// Issue #596: the budget the registry beat's thunks read, when a test hands one in.
 			...(workerHostBudget ? { hostBudget: workerHostBudget } : {}),
+			// Issue #599, phase 2: the running jobs the beat's `jobs` thunk reads.
+			...(workerRunningJobs ? { runningJobs: workerRunningJobs } : {}),
 			on(evt, fn) {
 				registered[evt] = fn;
 			},
@@ -4694,6 +4696,52 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	assert.equal(published.budgetSeed(), "unlisted:local", "the unread venues, named");
 	snap.seeded = true;
 	assert.equal(published.budgetSeed(), "listed");
+});
+
+test("issue #599, phase 2: the registry beat publishes the jobs running now and the budget's orphans, oldest first, and its waiters", { skip }, async () => {
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	let published = null;
+	let running = [
+		{ id: "repeat:nightly:1760000000000", project: "web", memMiB: 2048, cpuCenti: 100, at: 3000 },
+		{ id: "gh-3f2a\"x/y", project: "Not A Project", memMiB: 4096, cpuCenti: 200, at: 1000 },
+	];
+	let entries = [
+		{ id: "repeat:nightly:1760000000000", project: "web", memMiB: 2048, cpuCenti: 100, at: 3000, orphan: null },
+		{ id: "container:pi-job-left", project: null, memMiB: 1024, cpuCenti: 50, at: 2000, orphan: { name: "pi-job-left" } },
+	];
+	await runStart({
+		workerHostBudget: { snapshot: () => ({ waiters: 2 }), current: () => ({ memMiB: 8192, cpuCenti: 400 }), entries: () => entries },
+		workerRunningJobs: { list: () => running },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		makeHostRegistry: (args) => {
+			const real = makeHostRegistry(args);
+			return { ...real, start: (fields, opts) => ((published = fields), real.start(fields, opts)) };
+		},
+	});
+	for (const key of ["waiters", "jobs", "jobsMore"]) assert.equal(typeof published[key], "function", `${key} is a thunk, re-read every beat`);
+	assert.equal(published.waiters(), "2");
+	const jobs = JSON.parse(published.jobs());
+	// The id outside the charset is its digest; the project that is not an id is null; the orphan is flagged.
+	assert.match(jobs[0].id, /^sha256:[0-9a-f]{16}$/);
+	assert.deepEqual(jobs.map((j) => [j.p, j.at, j.o ?? 0]), [[null, 1000, 0], [null, 2000, 1], ["web", 3000, 0]]);
+	assert.deepEqual(jobs[1], { id: "container:pi-job-left", p: null, m: 1024, c: 50, at: 2000, o: 1 });
+	assert.equal(published.jobsMore(), "0");
+	assert.doesNotMatch(published.jobs(), /\\|^[/]/, "nothing the writer's path-shape check would refuse");
+	// Forty running jobs: the oldest 32 are listed, the rest counted.
+	running = Array.from({ length: 40 }, (_, i) => ({ id: `chain-${String(i).padStart(16, "0")}`, project: null, memMiB: 1, cpuCenti: 1, at: 10_000 + i }));
+	entries = [];
+	assert.equal(JSON.parse(published.jobs()).length, 32);
+	assert.equal(JSON.parse(published.jobs())[0].at, 10_000);
+	assert.equal(published.jobsMore(), "8");
+	// A worker with no budget: the in-flight map alone, and no waiters.
+	running = [{ id: "local-0123456789abcdef", project: null, memMiB: 2048, cpuCenti: 200, at: 5 }];
+	const plain = await (async () => {
+		let fields = null;
+		await runStart({ workerRunningJobs: { list: () => running }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), makeHostRegistry: (args) => ({ ...makeHostRegistry(args), start: async (f) => void (fields = f) }) });
+		return fields;
+	})();
+	assert.deepEqual([plain.waiters(), JSON.parse(plain.jobs()), plain.jobsMore()], ["", [{ id: "local-0123456789abcdef", p: null, m: 2048, c: 200, at: 5 }], "0"]);
 });
 
 test("issue #596, each blessed venue is listed on its own, and a venue whose job user is unmappable counts as holding none", { skip }, async () => {

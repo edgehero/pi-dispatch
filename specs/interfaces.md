@@ -5498,9 +5498,10 @@ validator rather than a second copy of it.
       "withoutSize": <int>, "withoutResources": <int>,                     // counted runs not in promised / CPU used
       "cpuClamped": <int>, "retried": <int>,                               // CPU read at its most; runs past attempt 1
       "earlier": <int>, "stalledRepick": <int>,                            // earlier attempts counted; pickups after a stall
+      "live": <int>, "liveNotCounted": <int>, "orphans": <int>,            // running now: counted, not counted, orphans
       "unreadable": <int>, "withoutHost": <int>,                           // records not counted, and why
       "earlierDropped": <int>,                                             // carried earlier attempts not counted
-      "running": <int> | null,                                             // jobs the live rows say run now (no record yet)
+      "running": <int> | null,                                             // jobs the live rows say run now
       "historyNotShared": ["<host>", ...]                                  // hosts no source here holds
     },
     "hosts": [ {                                                           // sorted by name
@@ -5508,7 +5509,8 @@ validator rather than a second copy of it.
       "coverage": { "fromMs": <int>, "source": "local" | "mirror" | "records" | null, "truncated": <bool>,
                     "used": <int>, "refusedBeforeSlot": <int>, "legacyOccupied": <int>, "legacyRefused": <int>,
                     "withoutSize": <int>, "withoutResources": <int>, "cpuClamped": <int>, "retried": <int>,
-                    "earlier": <int>, "stalledRepick": <int> },
+                    "earlier": <int>, "stalledRepick": <int>, "live": <int>, "liveNotCounted": <int>,
+                    "orphans": <int> },
       "capacity": { "slots": <int> | null, "memMiB": <int> | "off" | null, "cpuCenti": <int> | "off" | null,
                     "cpus": <int> | null, "basis": "recorded" | "current" | "unknown", "changed": <bool> },
       "coveredMs": <int>, "missingMs": <int>, "busyMs": <int>, "idleMs": <int>,  // busy + idle + missing = the window
@@ -5561,6 +5563,20 @@ validator rather than a second copy of it.
   `projects` ranks by run time (the sum of each run's time in the window, so two parallel runs count twice); `cpuMs` is
   their measured CPU time. `buckets` split the window from its start, the last ending at the window's end. A run of no
   length that started in the covered window is counted in `used` and its wait kept, with no busy time.
+- **The jobs running now** (issue #599, phase 2). A job running now has no record yet, so each live row's `jobs`
+  (`INT-HOST-REGISTRY-CONTRACT`) supplies it: each listed job that is not an orphan is an occupied interval on its host
+  from its `at` (its admission, the `startedAt` its record will carry) to NOW, with its size promised and its project
+  counted, no wait and no CPU measured, clipped to the host's covered window like a record, and counted in `live`
+  (never in `used`). So a job running now is in busy time, the peak, "full", the promises and the projects. Only what
+  the row can vouch for: a row whose beat is older than `LIVE_FRESH_MS` (two beats, 30 s) vouches only up to that beat
+  (`now - staleMs`), so the interval ends there, and one with no beat counts nothing. A listed job whose record is in
+  the window with a `startedAt` at or after its `at` (it ended between the beat and the read) is the record's, counted
+  once. An orphan (`o`) is counted in `orphans` and not as busy: its record already covers its run up to the stop that
+  did not take. A running job the report cannot count is counted in `liveNotCounted`: past the row's 32 or not read by
+  its allowlist (`jobsMore`), on a row from before `jobs` (its `budgetRunning`, the only count it gives), on a host
+  whose history is not shared (its window is missing as a whole), admitted longer ago than the longest run a record
+  may have, or in the future past the skew. `running` is every running job the live rows report, counted or not (null
+  when no row says); an orphan is not running. A row that `readLiveHosts` already parsed and a raw one read the same.
 - **A record's `earlier` is judged again**: rebuilt by the writer's own rule (`recordedEarlier` in `run-earlier.mjs`:
   valid entries only, the newest 4), and an entry that overlaps the record's own span on the same host is dropped (one
   job cannot hold one host's slot twice at once). Every entry given and not counted is in `earlierDropped`.
@@ -5572,7 +5588,8 @@ validator rather than a second copy of it.
   `--json` prints this object on one line; `--host` keeps that host's entry and refuses a name the report does not
   have, and its `coverage` then says that host's history (its `fromMs`, `truncated` and counts, and
   `historyNotShared` of it alone), keeping only what cannot be put on a host: `source`, `reason`, `unreadable`,
-  `withoutHost` and `running`. It reads `VALKEY_URL` by the kill switch's rule (`--valkey-url` names one) and `PI_LOGS_DIR`,
+  `withoutHost` and `running`. The registry rows are read at the report's own clock, since a row's age decides how far
+  its running jobs count. It reads `VALKEY_URL` by the kill switch's rule (`--valkey-url` names one) and `PI_LOGS_DIR`,
   `PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME` by the deployment's (`cliDeploymentEnv`), never `loadConfig`. It writes
   nothing: the registry is read with `prune: false`. The text output has every C0 and C1 control character removed.
   Exit codes: **0** with a report, also when a Valkey taken from the shell or the `.env` refuses or does not answer (the
@@ -5582,6 +5599,20 @@ validator rather than a second copy of it.
   cannot read as the service does, or that disagrees with this shell on one of the three keys above, a
   `PI_LOG_RETENTION_DAYS` that is not a non-negative integer, and a Valkey NAMED with `--valkey-url` that refuses or
   does not answer.
+- **Doctor** (issue #599, phase 2, `doctor.mjs -> capacityChecks`): after the fleet checks, on every deployment, one
+  `ok` fact line per host of the 7 day report, never a warning: `Host a: last 7d busy 63% (avg 2.1 of 4 slots, full
+  12%), promised 48% memory / 40% CPU, used 18% CPU of 8, wait p50 40s p95 6m, most busy: web`, each part only when it
+  is known (no budget: no memory promise; no CPU count: no "of 8"), then after a `;` what the line cannot see: the
+  running jobs counted (`1 running now, counted to now`), a cut history (`history from <UTC minute> UTC only`, with the
+  mirror named when it was cut), `this host's files only`, `N running now not counted`, and for a host with no history
+  that no source here holds its runs. Read with the registry rows doctor already read, from the Valkey it talks to (no
+  Valkey: this host's files), each Valkey call bounded and the whole read under 5 s; past it, or on any fault, one line
+  says nothing is shown. Every control character is removed. A full mirror (5,000 runs) reads in fourteen round trips.
+- **The tool** (`dispatch_capacity`, `admin/src/read-model.mjs -> readCapacity`): `window` `24h`, `7d` (default) or
+  `30d`, optional `host`; it returns `{ window, text, report }`, `text` the CLI's human report and `report` this
+  object (cut to the host as `--host` cuts it), through the CLI's own read and functions, so the three surfaces print
+  one report. A window it does not offer, an unknown host or an unreadable retention is an error; an unreachable
+  Valkey is not (this host's files, and the reason). Read-only like the CLI.
 - **Content rule.** Host names are worker names and project ids are charset-checked ids, both checked again here, and
   everything else is a number or a fixed word: no repository, folder, branch or payload text reaches the report.
 - **Acceptance**: Given two runs on one host overlapping for an hour with two slots, then `fullMs` is that hour and
@@ -5596,7 +5627,11 @@ validator rather than a second copy of it.
   budget lowered for the last hour, then only that hour is judged by the lower one; given a retry carrying its earlier
   attempt, then that attempt's interval is busy on its own host;
   given a retried run, then it adds no wait and is counted in `retried`; given a host name with a control character,
-  then the record is unreadable; given any input, then for every host `busyMs + idleMs + missingMs` equals the window.
+  then the record is unreadable; given any input, then for every host `busyMs + idleMs + missingMs` equals the window;
+  given a live row listing a job admitted an hour ago, then that hour is busy and the job is counted in `live`; given
+  that row's beat older than 30 s, then the interval ends at its beat; given the job's record already in the window,
+  then it is counted once; given an orphan, then it is in `orphans` and adds no busy time; given a row that lists 32
+  and says `jobsMore` 3, or an entry its allowlist drops, then those are in `liveNotCounted`.
 
 ## INT-OUTBOX-CONTRACT
 
@@ -7482,6 +7517,11 @@ abstains.
     budgetSeed      `listed` once the worker has read its boot listing of the job containers left from before
                     it started on every blessed venue, `unlisted:<venue>[,<venue>]` while it has not read the named
                     venues' (it then admits no job on them; the other venues' jobs run), "" before the worker exists
+    waiters         how many jobs wait for the host budget (an integer), "" without a budget (issue #599, phase 2)
+    jobs            JSON of the jobs this host runs now and its budget's orphans, oldest first, at most 32:
+                    [{"id":<job id>,"p":<project id>|null,"m":<MiB>,"c":<hundredths>,"at":<epoch ms>,"o":1}],
+                    `m`/`c` left out when not known, `o` only on an orphan; "" before the worker exists
+    jobsMore        how many running jobs `jobs` does not list (past 32, or with no id or instant), an integer
 ```
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
@@ -7493,6 +7533,38 @@ live host offers the project, each host judged on its OWN pair of budgets (never
 a pair no host has) and each integer budget taken at the project's `hostShare` of it where its row has one, and show
 each host's budget and use (`DES-SIZE-SUGGESTIONS`). Each reader parses a field itself (`publishedBudget`): an
 integer as text, `off`, or anything else unknown.
+
+**`jobs` and `jobsMore`: the jobs a host runs now** (issue #599, phase 2, `worker/src/live-jobs.mjs`, which both
+writes and reads them). The source works without a host budget: an in-flight map in the processor (`index.mjs ->
+makeRunningJobs`), one entry per PICKUP keyed by a per-pickup number (so a second pickup of one job id cannot remove
+the first's), added where the job is admitted (beside `startedAt` and `capacity`, `at` being `startedAt` in millis) and
+removed only by `releaseAllHolds`, the one release every exit goes through (completed, failed, aborted, a refusal after
+admission, the setup guard, and the stop that did not take); a source-shape test holds both ends. The orphan rule:
+the in-flight entry leaves with its pickup on EVERY exit, the orphan's too, and the orphans (`o: 1`) come from the host
+budget's ledger alone (`entries()`, an entry whose `orphan` is set: a job whose container's stop did not take, or a
+container left from before the worker started, `container:<name>`), since only the budget keeps watching such a
+container until the runtime says it is gone. Without a budget nothing watches it, and the list is what this process
+still runs: a rule that stays true with and without a budget. A job in both is listed once, as running. Oldest first
+(by `at`, then id), at most 32, because the jobs holding a slot longest carry the most busy time and are the ones an
+operator looks for; the rest, and an entry with no id or no instant, are counted in `jobsMore`. A full list is about 7
+KiB per beat. `readLiveHosts` parses `jobs` through a per-field allowlist (`parseLiveJobs`: an object; `id` matching
+`LIVE_JOB_ID_RE`; `p` null or a project id; `m`, `c` absent, null or a positive integer; `at` a positive integer; `o`
+absent or 1), drops every entry that fails it and adds the dropped count to `jobsMore`, so a row's `jobs` is an array
+(`o` a boolean) or null (absent, empty, over 16 KiB, or not a JSON list), and `jobsMore` a number or null. It never
+throws. Readers: the capacity report (`INT-CAPACITY-REPORT`: each listed job busy up to now), and through it doctor,
+`pi-dispatch capacity` and `dispatch_capacity`. NO JOB DECISION READS THEM.
+
+**Why `jobs` meets the content rule.** Every field is an integer, the fixed 1, or an identifier the project mints and
+charset-checks, never a repository name or free text. `id` is the job id, which every run record already carries
+(`jobId`) and `runs:rec:<id>` already puts in Valkey; every shape the project mints is inside `LIVE_JOB_ID_RE`
+(`[A-Za-z0-9._:-]{1,128}`): a forge delivery id with its prefix (`gh-`, `gl-`, `fj-`, `az-`, the poller's `gh-poll-e<n>`)
+and a replica's `-r<n>`, `repeat:<trigger id>:<millis>` and `manual:<trigger id>:<millis>` (a trigger id is
+`[A-Za-z0-9._-]+`, the loader's rule), `local-<hex>`, `chain-<hex>`, and an orphan's `container:<name>`. A delivery id
+is a forge's header value, which the receiver does not charset-check, so the writer holds every id to the pattern and
+publishes one outside it (or longer than 128 characters) as its digest, `sha256:<16 hex>`: this rule's own idiom for a
+value that must be carried and cannot satisfy it. `p` is a project id (`isProjectId`) or null, as `runs:rec:*`
+already carries. So no quote, backslash, slash or control character reaches the JSON, and the writer's path-shape
+check, which refuses any value with a backslash, never drops the field.
 
 **THE CONTENT RULE**: names, integers and digests. Never a path, never a URL with credentials, never a
 repository name, never operator free text. This is `targetFor`'s `local:<basename>` discipline applied to
@@ -7668,7 +7740,9 @@ host declares `PI_WORKER_NAME`; nothing detects the collision yet.
 FLEET RUNS, and every host must behave exactly as it did before this contract existed. That holds because
 absence is read as "no peers", which is the single-host behaviour. Issue #596 phase 2 briefly let one decision read
 the rows (a fleet refusal of a job too big for every listed host), and its gate round removed it, because absence
-CAN cause that refusal (a restarting host is absent); the host budget fields are read by doctor only. A Redis-side toggle fails that test --
+CAN cause that refusal (a restarting host is absent); the host budget fields are read by doctor only. `jobs`, `jobsMore`
+and `waiters` (issue #599) are read by the capacity report only: deleting them loses the running jobs' share of a
+report until the next beat, and no decision. A Redis-side toggle fails that test --
 deleting it loses the operator's edit -- which is precisely why `OQ-008` refuses one, and why this
 keyspace is not that.
 
@@ -8058,3 +8132,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-08 | Issue #599, phase 1, third corrections. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `stalledRepick` is true only when the FIRST attempt stalled (a stall after a failed attempt is a retry, carried in `earlier`); the record a retry replaces is read from both this host's file and the fleet copy, the higher attempt kept (`newerRecord`). **`INT-CAPACITY-REPORT` CORRECTED**: CPU used is held in every moment to the host's CPUs only, not the CPU budget, which is not a proven ceiling (the acceptance now reads 100% for two jobs at a whole 4 CPU budget on 8 CPUs); a record's `earlier` is rebuilt by the writer's rule and an entry overlapping its carrier's own run on its host dropped, counted in the new `earlierDropped`. |
 | 2026-10-08 | Issue #599, phase 1, last correction. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED (wording)**: the `stalledRepick` paragraph now says that a stalled later attempt's slot time is counted nowhere, as `OQ-039` names. |
 | 2026-10-08 | Issue #599, phase 1, CI correction. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a job scheduler's `queuedAt` is the slot in its `repeat:<id>:<millis>` id, not `timestamp` plus `delay`, which BullMQ computes from two clock reads and can put a few milliseconds past the slot. |
+| 2026-10-08 | Issue #599, phase 2. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: three fields, `waiters` (the budget's waiters, "" without a budget), `jobs` (JSON of at most 32 `{ id, p, m, c, at, o? }`, the jobs a host runs now and its budget's orphans, oldest first) and `jobsMore` (how many it does not list); the source (an in-flight map filled at admission and emptied by the one release, so it works without a budget), the orphan rule (the in-flight entry leaves with its pickup on every exit; orphans come from the budget's ledger alone, so the rule holds with and without a budget), the reader's per-field allowlist and its dropped count, the content rule argument (every id shape the project mints listed against `LIVE_JOB_ID_RE`, a delivery id outside it published as its digest), and the falsification test (the report reads them, no decision does). **`INT-CAPACITY-REPORT` AMENDED**: three coverage counts per host and fleet (`live`, `liveNotCounted`, `orphans`), `running` now every running job the rows report, a section on the jobs running now (counted to now, to a stale row's beat, once beside their record, orphans not as busy, the rest not counted and said), the registry read at the report's clock (the CLI read it at the wall clock, so an injected clock aged every row), doctor's line and the tool's result, and the acceptance. **`INT-RUN-HISTORY-FILE-CONTRACT`** UNCHANGED, checked: no record field moved. |
