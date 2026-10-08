@@ -176,7 +176,7 @@ today and the other surfaces will show:
 |---|---|
 | `queuedAt` | when the job became eligible to run, as an ISO time. `startedAt` minus `queuedAt` is how long it waited for a slot |
 | `earlier` | on a retry, the slot time of the job's earlier attempts, whose record this one replaced: `host`, `startedAt`, `endedAt`, `memMiB`, `cpuCenti`, at most 4 (never their cost, so no cost total counts anything twice) |
-| `stalledRepick` | true when this pickup came after a stall (the worker running it died or lost its lock), whose own time no record holds |
+| `stalledRepick` | true when the job's first attempt stalled (the worker running it died or lost its lock) and this pickup re-ran it; that first pickup's time no record holds |
 | `capacity` | what the host offered when the job took its slot: `slots` (the live `PI_CONCURRENCY`), `memMiB` and `cpuCenti` (the host budget, a number, `"off"`, or null without one) and `cpus` (the CPUs the container runtime reports: on Docker Desktop the VM's, not the Mac's) |
 
 - `queuedAt` is the moment the job was added plus the delay it was added with. A cron job is created ahead of its
@@ -197,8 +197,7 @@ today and the other surfaces will show:
 `pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]` (default `7d`) prints, per
 host: the share of the time it ran at least one job and the share it sat idle; the average and peak number of jobs at
 once and how long every slot was taken; the memory and CPU its jobs were promised against its budget (CPU against all
-its CPUs when the CPU budget is off); the CPU they used, as a share of the host's CPUs (at any moment never more than
-the jobs could use together: the CPU budget, capped at the host's CPUs); the wait for a slot at p50 and p95; the projects by run
+its CPUs when the CPU budget is off); the CPU they used, as a share of the host's CPUs (never above 100% of them); the wait for a slot at p50 and p95; the projects by run
 time; and where that host's history starts. Each moment is judged by the capacity in force then, so a budget you
 lowered while jobs ran shows as an over-commit only for the time it was lower. `--json` prints the whole report. It
 reads only `VALKEY_URL` (or the one `--valkey-url` names) and the logs directory, like `pi-dispatch status`, and writes
@@ -214,7 +213,7 @@ environment gives a report from this host's files, and says why.
   mirror), count as neither busy nor idle, and the report names them.
 - A job running now is counted once it ends. A retry replaces its earlier attempt's record, but carries that attempt's
   slot time in `earlier`, so it is counted; only an attempt whose record could not be read is not, and the report says
-  how many runs were retries. A run picked up again after a stall is counted too, and the report says the stalled
+  how many runs were retries. A run whose first attempt stalled and was picked up again is counted too, and the report says the stalled
   pickup's own time is not. CPU used comes from `resources`, which the job's container
   produces: advisory, like every number there, and read at most at what the job's `--cpus` allows.
 

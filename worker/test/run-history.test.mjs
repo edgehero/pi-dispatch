@@ -2116,3 +2116,28 @@ test("a pickup after a stall records stalledRepick and no queuedAt (#599)", asyn
 	assert.deepEqual([rec.stalledRepick, rec.queuedAt, rec.attempt], [true, null, 1]);
 	assert.equal(buildRecord({ job: { ...job, stalledCounter: 0 }, result: { outcome: "completed" } }).stalledRepick, false);
 });
+
+test("stalledRepick is a stall of the FIRST attempt only; a stall after a failed attempt is a retry (#599)", () => {
+	const base = { id: "j", name: "local", timestamp: Date.parse("2026-08-30T11:00:00.000Z"), opts: {}, data: { kind: "local" } };
+	const rec = (attemptsMade, stalledCounter) => buildRecord({ job: { ...base, attemptsMade, stalledCounter }, result: { outcome: "completed" } });
+	assert.deepEqual([rec(0, 1).stalledRepick, rec(0, 1).queuedAt], [true, null]);
+	assert.deepEqual([rec(1, 1).stalledRepick, rec(1, 1).queuedAt], [false, null], "a retry: its earlier attempt's record is carried instead");
+	assert.equal(rec(0, 0).stalledRepick, false);
+});
+
+test("newerRecord keeps the higher attempt, then the later end, then the first given (the local file) (#599)", async () => {
+	const { newerRecord } = await import("../src/run-history.mjs");
+	const r = (attempt, endedAt, host) => ({ jobId: "j", attempt, endedAt, host });
+	// A, B, A: the job ran on A, then B, then is picked up on A. A's file holds attempt 1, the mirror attempt 2.
+	const aFirst = r(1, "2026-08-30T10:00:00.000Z", "a");
+	const bSecond = r(2, "2026-08-30T10:05:00.000Z", "b");
+	assert.equal(newerRecord(aFirst, bSecond), bSecond);
+	assert.equal(newerRecord(bSecond, aFirst), bSecond, "whichever side holds it");
+	assert.equal(newerRecord(r(2, "2026-08-30T10:00:00.000Z", "a"), r(2, "2026-08-30T10:09:00.000Z", "b")).host, "b", "a tie: the later end");
+	const same = r(2, "2026-08-30T10:00:00.000Z", "a");
+	assert.equal(newerRecord(same, { ...same, host: "b" }).host, "a", "an exact tie: the local file");
+	assert.equal(newerRecord(null, bSecond), bSecond);
+	assert.equal(newerRecord(aFirst, null), aFirst);
+	assert.equal(newerRecord(null, "x"), null);
+	assert.equal(newerRecord({ jobId: "j", endedAt: "2026-08-30T12:00:00.000Z" }, aFirst), aFirst, "no attempt reads as 0");
+});

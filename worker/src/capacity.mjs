@@ -41,8 +41,7 @@
  * holds). Each piece of time is judged against the capacity in force then: the slot count for "full", the budget for
  * what was promised, the host's CPUs for what was used. A promise above 100% is then a real over-commit (a budget
  * lowered while jobs ran), and is reported as one. CPU used never is: in every moment the jobs' measured CPU time is
- * held to what they could use together (the CPU budget, capped at the host's CPUs), so a container that inflates its
- * own numbers cannot push the host past what it has.
+ * held to the host's CPUs, so a container that inflates its own numbers cannot push the host past what it has.
  *
  * INTEGER MATH. Every instant is a millisecond count from `Date.parse` (a safe integer), and every span, busy, idle and
  * full time is at most the window, so those stay Numbers. A sum of run time is NOT bounded by the window (it is the
@@ -54,6 +53,7 @@
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 import { JOB_CPUS_CEILING_CENTI, SIZE_REFUSAL_REASONS, recordedJobSize } from "./job-size.mjs";
 import { isProjectId } from "./project-id.mjs";
+import { recordedEarlier } from "./run-earlier.mjs";
 import { SUGGEST_CLOCK_SKEW_MS, SUGGEST_MAX_WALL_MS } from "./size-suggest.mjs";
 import { WAIT_REFUSAL_REASONS } from "./wait-for.mjs";
 
@@ -137,15 +137,11 @@ const jobCpuCeilingCenti = (c) => {
 };
 
 /**
- * The most CPU this host's jobs could use TOGETHER, in hundredths: the CPU budget (the quota of the one parent cgroup
- * every job runs under, `cpu-reserve.mjs`) capped at the host's CPUs, or the host's CPUs with the budget off or
- * unknown; null when neither is known.
+ * The most CPU this host's jobs could use TOGETHER, in hundredths: the host's CPUs, which is physically true; null when
+ * not known. Not the CPU budget: the parent cgroup quota that holds the jobs to it (`cpu-reserve.mjs`) is not set
+ * where only root can set it, so the budget is not a proven ceiling.
  */
-const segmentCpuCeilingCenti = (c) => {
-	const host = positiveInt(c.cpus) ? c.cpus * 100 : null;
-	if (positiveInt(c.cpuCenti)) return host === null ? c.cpuCenti : Math.min(c.cpuCenti, host);
-	return host;
-};
+const segmentCpuCeilingCenti = (c) => (positiveInt(c.cpus) ? c.cpus * 100 : null);
 
 /** A record's span `{ start, end, wallMs }` in millis, or null when it is not one this report counts (see the header). */
 function spanOf(record, nowMs) {
@@ -219,6 +215,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 	const liveByName = new Map((Array.isArray(live) ? live : []).filter((row) => isHostName(row?.name)).map((row) => [row.name, row]));
 	let unreadable = 0;
 	let withoutHost = 0;
+	let earlierDropped = 0;
 
 	// PASS 1: every record judged once, so the hosts (and so each host's coverage) are known before anything is counted.
 	const judged = [];
@@ -241,10 +238,20 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		judged.push({ record, occupancy, project, span: spanOf(record, nowMs) });
 		// The slot time of the job's EARLIER attempts, which this record carries because it replaced theirs: each an
 		// occupied interval on its own host, with its size and nothing else known (no wait, no CPU measurement).
-		for (const e of Array.isArray(record.earlier) ? record.earlier : []) {
-			if (!isObject(e) || !isHostName(e.host)) continue;
+		// Rebuilt by the writer's own rule (`recordedEarlier`: valid entries, the newest EARLIER_MAX), and an entry that
+		// overlaps this record's own span on its own host dropped: one job's attempts cannot hold one host's slot twice at
+		// once. Every entry not kept is counted.
+		const given = Array.isArray(record.earlier) ? record.earlier.length : 0;
+		const rebuilt = recordedEarlier(record.earlier) ?? [];
+		const own = spanOf(record, nowMs);
+		const kept = rebuilt.filter((e) => !(own !== null && e.host === record.host && Date.parse(e.startedAt) < own.end && Date.parse(e.endedAt) > own.start));
+		earlierDropped += given - kept.length;
+		for (const e of kept) {
 			const eSpan = spanOf(e, nowMs);
-			if (eSpan === null) continue;
+			if (eSpan === null) {
+				earlierDropped++;
+				continue;
+			}
 			const eSize = positiveInt(e.memMiB) && positiveInt(e.cpuCenti) ? { memMiB: e.memMiB, cpuCenti: e.cpuCenti } : null;
 			earlierRuns.push({ host: e.host, span: eSpan, size: eSize, project });
 		}
@@ -405,9 +412,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			if (b <= a) return;
 			const cap = capAt(a);
 			// CPU used in this segment: each running job's measured time spread over its wall, together never more than
-			// the host could give its jobs then (the CPU budget, which the jobs' parent cgroup holds them all to, capped at
-			// the host's CPUs; with the budget off, the host's CPUs). Past it, every share is cut in proportion and the runs
-			// are counted as clamped.
+			// the host's CPUs. Past it, every share is cut in proportion and the runs are counted as clamped.
 			const parts = [];
 			let sum = 0n;
 			for (const i of active) {
@@ -532,6 +537,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			...totals,
 			unreadable,
 			withoutHost,
+			earlierDropped,
 			running,
 			historyNotShared: notShared,
 		},

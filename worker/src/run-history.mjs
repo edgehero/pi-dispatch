@@ -8,7 +8,9 @@ import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { recordedJobSize } from "./job-size.mjs";
 import { waitArmed } from "./wait-for.mjs";
-import { WORKER_NAME_RE } from "./worker-name.mjs";
+import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
+
+export { EARLIER_MAX, recordedEarlier };
 
 /**
  * Durable per-run history.
@@ -756,31 +758,31 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// tokens or usage, so every cost reader, which reads the top-level fields only, counts nothing twice. Null on a
 		// first attempt and when the previous record held no slot or could not be read.
 		earlier: recordedEarlier(earlier),
-		// Whether this pickup came after a STALL (issue #599): BullMQ raised `stalledCounter`, not `attemptsMade`, so the
-		// stalled pickup wrote no record and its slot time is in none. A boolean, TAIL position after `earlier`, so the
-		// capacity report can say how many runs that is.
-		stalledRepick: Number.isInteger(job.stalledCounter) && job.stalledCounter > 0,
+		// Whether the FIRST attempt stalled and this pickup re-ran it (issue #599): BullMQ raised `stalledCounter`, not
+		// `attemptsMade`, so that pickup wrote no record and its slot time is in none. A stall after a failed attempt is a
+		// retry like any other (its earlier attempt's record is carried in `earlier`), so it is false there. A boolean,
+		// TAIL position after `earlier`, so the capacity report can say how many runs that is.
+		stalledRepick: Number.isInteger(job.stalledCounter) && job.stalledCounter > 0 && !(Number.isInteger(job.attemptsMade) && job.attemptsMade > 0),
 	};
 }
 
-/** The most earlier attempts a record carries: the newest are kept. */
-export const EARLIER_MAX = 4;
-
-/** One earlier attempt as a record carries it, or null: a worker name, two canonical ISO instants in order, two sizes. */
-function earlierEntry(e) {
-	if (e === null || typeof e !== "object" || Array.isArray(e)) return null;
-	const instant = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) && new Date(Date.parse(v)).toISOString() === v ? v : null);
-	const startedAt = instant(e.startedAt);
-	const endedAt = instant(e.endedAt);
-	if (typeof e.host !== "string" || !WORKER_NAME_RE.test(e.host) || startedAt === null || endedAt === null || Date.parse(endedAt) < Date.parse(startedAt)) return null;
-	return { host: e.host, startedAt, endedAt, memMiB: recordInt(e.memMiB), cpuCenti: recordInt(e.cpuCenti) };
-}
-
-/** A record's `earlier`, rebuilt: the valid entries, the newest `EARLIER_MAX` of them, or null when none is. */
-export function recordedEarlier(list) {
-	if (!Array.isArray(list)) return null;
-	const kept = list.map(earlierEntry).filter((e) => e !== null).slice(-EARLIER_MAX);
-	return kept.length > 0 ? kept : null;
+/**
+ * Of two copies of one job's record (this host's file and the fleet's copy), the one a retry replaces: the HIGHER
+ * `attempt` (a retry on another host writes its own copy there, so either side can be the newer attempt), an exact tie
+ * broken by the later `endedAt` (run-mirror.mjs `mergeRuns`' rule), a remaining tie by the first given (the local file).
+ * Either may be null; a non-object is none.
+ */
+export function newerRecord(a, b) {
+	const ok = (r) => r !== null && typeof r === "object" && !Array.isArray(r);
+	if (!ok(a)) return ok(b) ? b : null;
+	if (!ok(b)) return a;
+	const attempt = (r) => (Number.isInteger(r.attempt) ? r.attempt : 0);
+	if (attempt(a) !== attempt(b)) return attempt(a) > attempt(b) ? a : b;
+	const end = (r) => {
+		const t = Date.parse(r.endedAt ?? r.startedAt ?? "");
+		return Number.isFinite(t) ? t : -Infinity;
+	};
+	return end(b) > end(a) ? b : a;
 }
 
 /**

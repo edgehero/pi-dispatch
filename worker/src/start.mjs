@@ -63,7 +63,7 @@ import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootf
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
-import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
+import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
@@ -1404,15 +1404,17 @@ export async function startWorker(
 		readRecord,
 		readMirrored: runMirror ? (jobId) => readMirroredRecordFn(redis, sanitizeJobId(jobId)) : null,
 	});
-	// The record a retry (or a pickup after a stall) is about to replace (issue #599), read the same two ways: this host's
-	// file, else the fleet's copy where a mirror is armed (the earlier attempt may have run on another host). Its slot
-	// interval rides the new record as `earlier`. Never rejects: unreadable or unreachable is no previous record.
+	// The record a retry (or a pickup after a stall) is about to replace (issue #599), read BOTH ways: this host's file and
+	// the fleet's copy where a mirror is armed. Both, because each host keeps its own file: a job that ran on A, then B,
+	// then A again finds A's stale first attempt locally while B's second is in the mirror. `newerRecord` keeps the higher
+	// attempt (a tie: the later end). Its slot interval rides the new record as `earlier`. Never rejects: unreadable or
+	// unreachable is no record from that side.
 	const previousRecord = async (jobId) => {
-		const local = readRecord(jobId);
-		if (local !== null && local !== UNREADABLE_RECORD) return local;
-		if (!runMirror) return null;
+		const read = readRecord(jobId);
+		const local = read === UNREADABLE_RECORD ? null : read;
+		if (!runMirror) return local;
 		const mirrored = await readMirroredRecordFn(redis, sanitizeJobId(jobId)).catch(() => null);
-		return mirrored !== null && mirrored !== UNREADABLE_RECORD ? mirrored : null;
+		return newerRecord(local, mirrored === UNREADABLE_RECORD ? null : mirrored);
 	};
 
 	// INT-CONFIG-OVERLAY-CONTRACT: the worker reads the runtime-settings overlay at EACH job start, so this
