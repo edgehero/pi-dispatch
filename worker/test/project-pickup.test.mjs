@@ -153,8 +153,8 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 	// The rule is one closure (`recordAfterGate`), not a field each call site has to remember. A bare `recordRun({`
 	// below its definition would record without the pickup project, and start.mjs would then resolve the LIVE ref.
 	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
-	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity });");
-	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project, the size resolved beside it (#596) and the capacity set at admission (#599)");
+	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity, earlier });");
+	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project, the size resolved beside it (#596), the capacity set at admission and the earlier attempts read at pickup (#599)");
 	assert.ok(at > src.indexOf("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"), "the size is resolved from the same limits snapshot and pickup project, before the recorder");
 	// One read of the projects ref per pickup (issue #504 part B reuses the same snapshot for the resolved folder).
 	assert.ok(at > src.indexOf("const project = projectOf(job.data, pickupProjects);"), "and after the pickup resolution");
@@ -170,7 +170,7 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 	// and size by hand there (pinned below).
 	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 8, "exactly the 8 post-gate record paths use it; a new one must be counted here");
 	const above = src.slice(src.indexOf("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"), at);
-	assert.deepEqual(above.match(/recordRun\(\{ job, result, startedAt: at, endedAt: new Date\(\)\.toISOString\(\), project, size \}\)/g)?.length, 1, "the never-fits refusal carries the pickup project and size");
+	assert.deepEqual(above.match(/recordRun\(\{ job, result, startedAt: at, endedAt: new Date\(\)\.toISOString\(\), project, size, earlier \}\)/g)?.length, 1, "the never-fits refusal carries the pickup project and size, and the earlier attempts (#599)");
 });
 
 // Issue #596: the job's size is resolved at the same pickup, from the same limits snapshot and project, and reaches the

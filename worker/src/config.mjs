@@ -19,6 +19,9 @@ import { jobSizeDefaults } from "./job-size.mjs";
 import { hostBudgetSettings } from "./host-budget.mjs";
 import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
 import { modelListProblem } from "./model-ref.mjs";
+import { WORKER_NAME_RE } from "./worker-name.mjs";
+
+export { WORKER_NAME_RE };
 import { DOLLAR_ENV_NAMES, DOLLAR_WINDOW_KEYS, checkDollarInvariant, optionalUsdMicros } from "./money.mjs";
 
 /**
@@ -1146,26 +1149,7 @@ export function underOsTempDir(candidate, env = process.env, { realpath = realpa
 	return false;
 }
 
-/**
- * What a worker may call itself (issue #57). The CHARACTER CLASS is `sanitizeJobId`'s
- * (`[A-Za-z0-9._-]`), reused rather than invented so this project has one name-safe alphabet -- but that
- * function is a REPLACER, not a validator, so the three rules around the class are NEW and are claimed
- * as new here rather than borrowed:
- *
- *   - a leading alphanumeric, which is what refuses `..` and a leading `-` that reads as a flag;
- *   - a 64-character ceiling, because the name is a Valkey key segment and a log field on every line;
- *   - no `.json`/`.log` tail, which is not decoration. The class contains the dot, so `prod.json` is
- *     otherwise a legal name -- and a later slice writes a per-host marker file into `PI_LOGS_DIR`,
- *     where `<something>.json` is parsed as a run record by the admin and DELETED by the log reaper.
- *     A name is refused here rather than escaped there, because the escape would have to be remembered
- *     at every site that ever composes a filename from this value.
- *
- * The class is `:`-free, `,`-free and `#`-free, which is what lets the name be a Valkey key segment
- * UNHASHED. That is the point of validating instead of hashing (`scopeKeyPrefix` does the opposite for
- * a folder path, which was never chosen for key-safety and cannot be refused): the whole value of a host
- * registry is that `HGETALL host:h:mac-mini-1` is readable by a human.
- */
-export const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// WORKER_NAME_RE lives in worker-name.mjs (a leaf, for the capacity report) and is re-exported above; its reasons are there.
 
 /** True when the name would collide with the run-history filename namespace. See WORKER_NAME_RE. */
 const RESERVED_NAME_TAIL = /\.(json|log)$/i;

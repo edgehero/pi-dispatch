@@ -82,7 +82,12 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 		if (host !== undefined) {
 			const known = report.hosts.map((h) => h.name);
 			if (!known.includes(host)) return fail(`no host named ${JSON.stringify(host)} in the last ${since}${known.length > 0 ? ` (hosts: ${known.join(", ")})` : ""}`);
-			report.hosts = report.hosts.filter((h) => h.name === host);
+			const shown = report.hosts.find((h) => h.name === host);
+			report.hosts = [shown];
+			// The coverage says what the shown host's history is: its start, its cut and its counts. What cannot be put on
+			// a host (a record with no readable host, the live rows' running jobs, the reasons a source was not read) stays.
+			const { fromMs, source: _source, truncated, ...counts } = shown.coverage;
+			report.coverage = { ...report.coverage, fromMs, truncated, ...counts, historyNotShared: report.coverage.historyNotShared.filter((n) => n === host) };
 		}
 		write(json ? `${JSON.stringify(report)}\n` : capacityText(report, { since }));
 		return 0;
@@ -176,7 +181,8 @@ function hostLines(h, since) {
 		lines.push(`  projects by run time: ${named.join(", ")}`);
 	}
 	if (cov.refusedBeforeSlot > 0) lines.push(`  ${plural(cov.refusedBeforeSlot, "job")} refused before a slot`);
-	if (cov.retried > 0) lines.push(`  ${plural(cov.retried, "retried run")}: earlier attempts are not counted, busy time can be under-counted`);
+	if (cov.retried > 0) lines.push(`  ${plural(cov.retried, "retried run")}: ${plural(cov.earlier, "earlier attempt")} counted from the records the retries kept; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
+	if (cov.stalledRepick > 0) lines.push(`  ${cov.stalledRepick} ${cov.stalledRepick === 1 ? "run was" : "runs were"} picked up again after a stall: the first pickup's time is not counted`);
 	const notes = [`history from ${cov.source === "local" ? "this host's files" : cov.source === "mirror" ? "the run mirror" : "the run records"}`];
 	if (h.missingMs > 0) notes.push(`from ${new Date(cov.fromMs).toISOString()} on${cov.truncated ? " (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)" : ""}, earlier time counted as neither busy nor idle`);
 	const legacy = cov.legacyOccupied + cov.legacyRefused;

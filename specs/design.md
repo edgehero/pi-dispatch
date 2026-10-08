@@ -668,8 +668,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     run whose body expired while its member stayed, and the FLEET HORIZON. Every writer trims the shared `runs:index`
     by its OWN retention, so a host with a one day retention removes every host's older runs, and the reader's own
     retention says nothing about it; so a writer whose trim removed anything raises `runs:horizon` (`ZADD GT`, a max
-    with no lock: the age cutoff, or for the count trim the oldest score that remains), and the reader starts the
-    mirror there. A host no source holds (a live worker with no `PI_WORKER_NAME`, seen from another host) is missing for
+    with no lock: the age cutoff, or for the count trim the oldest score that remains), in the SAME script as the trims
+    so a crash or a timeout can never land between a cut and its record, and the reader starts the mirror there. For
+    the same reason the shared index's own expiry is always the 92 day reader depth, never a writer's retention: set to
+    a one day writer's window, the whole index expired on a quiet day with no horizon to say so. A host no source holds (a live worker with no `PI_WORKER_NAME`, seen from another host) is missing for
     the whole window. Missing time is counted in neither busy nor idle, so busy plus idle plus missing is the window for
     every host, held by a seeded property test against a minute by minute count.
   - **Integer math.** Instants are milliseconds, so a span, busy, idle and full time stay safe Numbers (each at most
@@ -680,11 +682,21 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     the host's CPUs, never the budget: each job's `--cpus` is the whole budget (`cpuCeilingCenti`), so two jobs can each
     use all of it at once, and that use is real; over the budget it read 200% for a host doing exactly what it was set
     up to do. Each run's measured CPU time is first clamped to what its job could use (its `--cpus`: the CPU budget,
-    capped at the host's CPUs, over its whole wall), since `resources` is produced inside the job, and the clamped runs
-    are counted; then it is spread evenly over its wall (a record carries one total, not a profile).
-  - **Retries.** A retry overwrites its earlier attempt's record, so that attempt's slot time is in no record; the
-    report counts the runs past attempt 1 (`retried`) and says busy time can be under-counted there, and a retry adds
-    no wait.
+    capped at the host's CPUs, over its whole wall), since `resources` is produced inside the job; then it is spread
+    evenly over its wall (a record carries one total, not a profile); then in every moment of the sweep the running
+    jobs' shares TOGETHER are held to what they could use together, the CPU budget (the quota of the one parent cgroup
+    every job runs under, `cpu-reserve.mjs`) capped at the host's CPUs, or the host's CPUs with the budget off, cut in
+    proportion past it. Every run either step cut is counted. CPU used therefore never passes what the host had, which a
+    per-run clamp alone could not promise: two jobs each reporting the whole budget at once read as twice the budget.
+  - **Retries and stalls.** A retry overwrites its earlier attempt's record (one file and one mirror key per job id),
+    so the processor reads that record when the retry is picked up, before anything can replace it, and the new record
+    carries the earlier attempts' slot intervals forward (`earlier`: host, start, end and size, at most 4, never a
+    cost, so no cost fold counts anything twice). The report counts each as busy on its own host. Read at pickup and
+    not when the record is written, because the record writer is synchronous on the job's completion path and the
+    fleet copy is an awaited Valkey read; and at pickup, every record that pickup writes (a refusal included) carries
+    it. A pickup after a stall (`stalledCounter`, which BullMQ raises instead of `attemptsMade`) usually follows one that
+    wrote nothing; it is counted (`stalledRepick`) and said, never guessed. Neither a retry nor a stalled pickup adds a
+    wait: the add's moment is kept across both.
   - **Hostile strings.** A record's host must be a worker name (`WORKER_NAME_RE`) and its project a project id
     (`isProjectId`), the rules the worker writes them by, or the record is unreadable: a record is a file another
     account may edit, and the text output is printed to a terminal, which also strips every control character.
@@ -719,8 +731,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     cut.
   - *CPU used over the CPU budget*: one job's `--cpus` is the whole budget, so jobs together legitimately exceed it.
   - *Floats*: a ratio at a boundary would round differently on two hosts; per mille, rounded half up, in integers.
-- **Residuals** (`OQ-039`): a retry overwrites its earlier attempt's record, so the earlier attempt's slot time is
-  lost (counted as `retried`, never hidden); an unnamed or offline worker's history is not shared; a writer from before
+- **Residuals** (`OQ-039`): an earlier attempt whose record could not be read, or beyond the 4 a record carries, is
+  not counted (the retried runs are, never hidden); a stalled pickup's time is not counted; an unnamed or offline worker's history is not shared; a writer from before
   the horizon trims without recording it; `resources` is produced by the job and only advisory; a machine busy with
   other work reads as idle; a job running now is not in the history until it ends.
 - **Traces to**: `REQ-CAPACITY-INSIGHTS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
@@ -9033,3 +9045,4 @@ a tunnel.
 | 2026-10-08 | The pi 1.1.0 bump (pull request #604). **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: pi 1.1.0 adds a fifth classifier api, `openai-decisions` (OpenAI's Decisions API, one catalog model, `openai/gpt-6-luna`, input 0.1 and 0.2 above 272k, output 0), and moves the System One pricing into a new shared module, `classifier-shared.js`, which the new api uses too. It reaches `calculateCost`, so `PRICED_APIS` grows from 11 to 12 ids. Its calls are `classify` only, so the bound is input only, finite because the output rate is 0. Its images are sent as given, without pi's resize, and OpenAI's own downscale bounds the tiles, so the api joins the openai apis at a ceiling of 48,169 per image. It sends no output cap, so it joins the apis that never put the caller's cap on the request. `calculateCost` is byte-identical to 1.0.4's, checked; `models.js` changed only in `classify` (an image-input check), and its content hash moves. |
 | 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `DES-CAPACITY-FROM-RECORDS`**: how busy each host is and was, computed from the run records alone by one pure function (`worker/src/capacity.mjs`) over one reader (`worker/src/capacity-records.mjs`): `capacity` in the record says a run held a slot (older records inferred from a one second span or `resources`, and counted), a sweep line per host with ends before starts, missing history counted in neither busy nor idle, integer math with BigInt where a product can pass 2^53, the CPU budget or every CPU as the CPU denominator, a read-only mirror reader merged with the local files by `mergeRuns`, and `pi-dispatch capacity` on the kill switch's footing. Rejected: host load sampling, `job.timestamp` alone and `job.delay` as the queued moment, a slot inferred from wall time, missing time as idle, a per-host history start, floats. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` AMENDED**: the records are now read across each other by window folds (the cost fold, the size suggestion, the capacity report), which still earn no database; the record gains `queuedAt` and `capacity`; the sidecar, writer and reaper are UNCHANGED. Checked and UNCHANGED: `DES-HOST-BUDGET`, `DES-HOST-REGISTRY`, `DES-SIZE-SUGGESTIONS`, `DES-CONCURRENCY-3`. |
 | 2026-10-08 | Issue #599, phase 1, corrections. **`DES-CAPACITY-FROM-RECORDS` CORRECTED**: (1) the history start is judged PER HOST (this host's files to their retention, nothing without a logs directory; the mirror to the latest of its depth, its cap, an expired body and the new fleet horizon); the rejected alternative is now the single start this entry first chose, which read complete local history as missing and a cut mirror as idle. (2) Every writer trims the shared `runs:index` by its own retention, so a short-retention peer cut history a reader counted as idle: a writer whose trim removed anything raises `runs:horizon` with `ZADD GT`, and the reader starts the mirror there. (3) CPU used is over the host's CPUs (the runtime's count, now recorded as `capacity.cpus`), not the budget, since each job's `--cpus` is the whole budget; each run's CPU time is clamped to its job's `--cpus` and counted. (4) Promises and "full" are judged against the capacity in force at each moment, a step function of the runs' own records. (5) A retry records no `queuedAt` and adds no wait, and the report counts retried runs. (6) Older records are judged by their refusal reason before their length; the claim that a refusal before a slot always writes `startedAt` equal to `endedAt` is removed (a wait gate refusal can come after a check that ran for seconds). (7) A host or project that is not a worker name or project id is unreadable, and the text output strips control characters. (8) The reader caps mirrored bodies at 256 KiB, reads the registry without pruning, and a named `--valkey-url` that fails exits 1. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: the horizon is a fact about the view's trims, not a derived value of any record. **`DES-HOST-BUDGET` UNCHANGED, checked**: the budget keeps the runtime's CPU count from its existing facts read and exposes it; nothing it decides changes. |
+| 2026-10-08 | Issue #599, phase 1, second corrections. **`DES-CAPACITY-FROM-RECORDS` CORRECTED**: (1) the shared `runs:index` now always expires at the 92 day reader depth, never a writer's retention (a one day writer made the whole index expire on a quiet day, with no horizon), and the two trims, the horizon and both expiries are one script, so no failure can land between a cut and its record; (2) a retry carries its earlier attempts' slot intervals in a new record field, `earlier`, read from the record it replaces when it is picked up, and the report counts them as busy on their own hosts; (3) a pickup after a stall records `stalledRepick` and no `queuedAt`, and the report counts and names such runs; (4) CPU used is held in every moment to what the jobs could use together, the budget capped at the host's CPUs, since a per-run clamp let two jobs each report the whole budget; (5) the capacity module's name rule now comes from a leaf (`worker-name.mjs`), so its import graph holds no filesystem, no os and no config, held by a test. |

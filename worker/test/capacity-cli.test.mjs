@@ -169,7 +169,7 @@ test("the registry is read without pruning, and per host lines carry that host's
 	h.opts.readLiveHostsFn = async (_redis, opts) => ((asked = opts), { hosts: [] });
 	assert.equal(await runCapacity(["--since", "24h"], h.opts), 0);
 	assert.equal(asked.prune, false, "a report writes nothing, not even the registry's tidying");
-	assert.match(h.out.join(""), /1 retried run: earlier attempts are not counted, busy time can be under-counted/);
+	assert.match(h.out.join(""), /1 retried run: 0 earlier attempts counted from the records the retries kept; an attempt whose record was not kept is not counted, so busy time can be under-counted/);
 });
 
 test("control characters never reach the terminal, whatever a report holds", () => {
@@ -177,4 +177,17 @@ test("control characters never reach the terminal, whatever a report holds", () 
 	const text = capacityText(report, { since: "24h" });
 	assert.doesNotMatch(text, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
 	assert.match(text, /not shared here: x\[2J/);
+});
+
+test("--host keeps that host's coverage in --json too: its start, its cut and its counts", async () => {
+	const live = [{ name: "other", routes: "false", concurrency: "4" }];
+	const h = harness(deployment([run("a", 3, 2), run("b", 3, 2, { host: "peer" }), run("c", 2, 1, { host: "peer", stalledRepick: true })]), { live });
+	assert.equal(await runCapacity(["--json", "--host", "peer"], h.opts), 0);
+	const report = JSON.parse(h.out.join(""));
+	assert.deepEqual(report.hosts.map((x) => x.name), ["peer"]);
+	assert.deepEqual([report.coverage.used, report.coverage.stalledRepick, report.coverage.historyNotShared], [2, 1, []]);
+	assert.equal(report.coverage.fromMs, report.hosts[0].coverage.fromMs);
+	const text = harness(deployment([run("c", 2, 1, { stalledRepick: true })]));
+	assert.equal(await runCapacity([], text.opts), 0);
+	assert.match(text.out.join(""), /1 run was picked up again after a stall: the first pickup's time is not counted/);
 });

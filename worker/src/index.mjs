@@ -8,7 +8,7 @@ import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mj
 import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL_COMMENTS, runJob } from "./processor.mjs";
 import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
-import { targetFor } from "./run-history.mjs";
+import { earlierFrom, targetFor } from "./run-history.mjs";
 import { isPerMachineHost } from "./backends.mjs";
 import { hash16 } from "./fleet-lease.mjs";
 import { endpointsForModel } from "./model-endpoints.mjs";
@@ -191,7 +191,7 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -231,6 +231,19 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			if (record) {
 				deps?.log?.("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(record.reason ? { reason: record.reason } : {}) });
 				return { outcome: record.outcome, reason: record.reason ?? null, exitCode: record.exitCode ?? null, turns: record.turns ?? null, tokens: record.tokens ?? null, budgetReserved: record.budgetReserved ?? null };
+			}
+		}
+
+		// THE EARLIER ATTEMPTS' SLOT TIME (issue #599): a retry, or a pickup after a stall, writes its record over the one
+		// before it (one file and one mirror key per job id), so that record is read NOW, before anything here can replace
+		// it, and its slot interval (with the ones it carried) rides every record this pickup writes (`earlier`). Only on
+		// such a pickup, so a first attempt reads nothing; bounded by the reader, and a fault reads as none.
+		let earlier = null;
+		if (typeof previousRecord === "function" && ((Number.isInteger(job.attemptsMade) && job.attemptsMade > 0) || Number(job.stalledCounter) > 0)) {
+			try {
+				earlier = earlierFrom(await previousRecord(job.id));
+			} catch {
+				earlier = null;
 			}
 		}
 
@@ -303,7 +316,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false, hostBudget: { memMiB: budgetNow.memMiB, cpuCenti: budgetNow.cpuCenti, hostShare: share } };
 					// Above the wait gate, so through the recorder's own arguments rather than the bound one below it: the
 					// same pickup project and size, by hand once.
-					recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString(), project, size });
+					recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString(), project, size, earlier });
 					return result;
 				}
 				deps?.log?.("job_size_never_fits_here_deferred", { jobId: job.id, project, misfit, delayMs: NEVER_FITS_RECHECK_MS, ...sizeFields });
@@ -345,7 +358,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// resolver path or a vault topology -- `secret-profile-unknown` sets that rule.
 				if (sentence && deps?.comment) await Promise.resolve(deps.comment(job.data, sentence)).catch(() => {});
 				const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false };
-				recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString() });
+				recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString(), earlier });
 				return result;
 			};
 
@@ -743,7 +756,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// `capacity` (issue #599) rides the same binding, and is null until the job is admitted below (where `startedAt` is
 		// set): every record of a refusal before that point says, by its null, that the job never held a slot.
 		let capacity = null;
-		const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity });
+		const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity, earlier });
 
 		// The MATCHED ROW's scope keys both the in-process slot and the fleet lease (issue #498), the same string
 		// `budgetCapsFor` hashes below and the boot sweeper hashes from the file: a qualified `github:acme/web` row holds
@@ -1543,7 +1556,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1652,6 +1665,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// The run-record lookup a stalled job is checked against before it can run again (see the processor's
 			// first gate). `null` in a bare wiring, which keeps today's behaviour: the job runs.
 			settledRecord,
+			previousRecord,
 		});
 
 		// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.

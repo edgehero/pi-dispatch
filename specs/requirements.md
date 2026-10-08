@@ -1150,10 +1150,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and from when, and the earlier time is missing, not idle, while this host's own files still cover it; given a live
   host that declares no `PI_WORKER_NAME`, then another host's report names it as not shared and counts its window as
   missing. Given a daily cron trigger, then its runs' waits are measured from their scheduled minute, not from a day
-  before; given a job held on `run.waitFor` or a retry, then it records no wait, and a retried run is counted and said
-  to under-count busy time. Given a host with its CPU budget off, then CPU promises are of all its CPUs; given two jobs
-  each using a 4 CPU budget on an 8 CPU host, then CPU used is 100% of the host, never 200%; given a budget lowered for
-  the last hour, then only that hour is judged by it. Given a record whose host or project carries a control
+  before; given a job held on `run.waitFor`, a retry or a pickup after a stall, then it records no wait; given a retry,
+  then its earlier attempts' slot time is counted from the record it replaced, and a pickup after a stall is counted
+  and said to leave its first pickup's time out. Given a host with its CPU budget off, then CPU promises are of all its
+  CPUs; given two jobs each reporting a whole 4 CPU budget at once on an 8 CPU host, then CPU used is 50% of the host
+  (what the jobs could use together), never more than the host has; given a budget lowered for the last hour, then
+  only that hour is judged by it. Given a short-retention peer and a quiet day, then the shared run index does not
+  expire with that peer's retention. Given a record whose host or project carries a control
   character, then it is not counted and nothing of it reaches the terminal. Given an unreachable Valkey taken from the
   environment, then `pi-dispatch capacity` still answers from this host's files and says the mirror was not read; given
   one named with `--valkey-url`, then it exits 1; given a shell and `.env` naming different Valkeys, then it refuses
@@ -3385,6 +3388,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-08 | Issue #599, phase 1, second corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance: a retry's earlier attempts are counted from the record it replaced; a pickup after a stall records no wait and is said to leave its first pickup out; two jobs each reporting a whole 4 CPU budget on an 8 CPU host read 50% (it read 100%, which the jobs' shared parent cgroup cannot give them); the shared run index does not expire with a short-retention peer's window. The statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 1, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance: a peer's shorter log retention trimming the shared run index is missing history, not idle; a retry records no wait and is counted as under-counting busy time; CPU used is of the host's CPUs, so jobs using a whole CPU budget each never read 200%; a lowered budget judges only the time it was in force; a host or project with a control character is not counted; a Valkey named with `--valkey-url` that fails exits 1. The statement is UNCHANGED. Checked and UNCHANGED: `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`. |
 | 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `REQ-CAPACITY-INSIGHTS`**: per host, how busy it is and was with this deployment's jobs (busy and idle time, slots at once and time full, promised memory and CPU, CPU used, waits, projects), read-only, jobs only (a machine busy with other work reads as idle), history it cannot see reported as missing and never as idle, no secret or PII. Phase 1 delivers the record fields, the report and `pi-dispatch capacity`. Checked and UNCHANGED: `REQ-DURABLE-RUN-HISTORY`, `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-SIZE-SUGGESTIONS`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 3. **`REQ-SIZE-SUGGESTIONS` CORRECTED** to one rule: the apply call is offered exactly when admission would accept the suggested job (the suggested size per dimension, else the current one). Doctor withholds it only when its host has a numeric budget dimension and refuses that job, and offers it with the budget `off` or unknown (it withheld a lowering admission accepts); the panel and the insights page withhold it only when every live host that published a numeric budget refuses it (they judged only the suggested dimension). A withheld call names the dimension that does not fit. Acceptance gains the three cases and the doctor-panel agreement. UNCHANGED, checked: `REQ-HOST-BUDGET`. |

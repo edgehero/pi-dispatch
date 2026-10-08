@@ -491,3 +491,33 @@ test("capacity names the RUNTIME's CPU count from the budget's facts read, the w
 	await r2;
 	assert.equal(s2.seen.records.at(-1).capacity.cpus, 14, "no venue answered: the worker's own count");
 });
+
+test("a retry or a pickup after a stall reads the record it will replace and carries its slot time as `earlier`; a first attempt reads nothing (#599)", { skip }, async () => {
+	const asked = [];
+	const previous = { host: "mini1", startedAt: "2026-10-06T10:00:00.000Z", endedAt: "2026-10-06T11:00:00.000Z", size: { memMiB: 4096, cpuCenti: 200, source: "env" }, capacity: { slots: 2 } };
+	const h = harness({ hostBudget: null, extra: { previousRecord: async (id) => (asked.push(id), previous) } });
+	const first = h.processor(ghJob("first").job, "tok", signal());
+	await h.untilStarted(1);
+	h.releaseNext();
+	await first;
+	assert.deepEqual(asked, [], "a first attempt reads nothing");
+	assert.equal(h.seen.records.at(-1).earlier, null);
+	const retry = ghJob("again");
+	retry.job.attemptsMade = 1;
+	const second = h.processor(retry.job, "tok", signal());
+	await h.untilStarted(2);
+	h.releaseNext();
+	await second;
+	assert.deepEqual(asked, ["again"]);
+	assert.deepEqual(h.seen.records.at(-1).earlier, [{ host: "mini1", startedAt: previous.startedAt, endedAt: previous.endedAt, memMiB: 4096, cpuCenti: 200 }]);
+	// A stalled pickup reads it too, and a reader that throws is no previous record, never a failed job.
+	const stalled = ghJob("stalled", "acme/web", { stalledCounter: 1 });
+	const failing = harness({ hostBudget: null, extra: { previousRecord: async () => {
+		throw new Error("down");
+	} } });
+	const third = failing.processor(stalled.job, "tok", signal());
+	await failing.untilStarted(1);
+	failing.releaseNext();
+	assert.equal((await third).outcome, "completed");
+	assert.equal(failing.seen.records.at(-1).earlier, null);
+});

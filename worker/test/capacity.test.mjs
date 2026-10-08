@@ -70,11 +70,16 @@ test("promised memory and CPU against the budget, CPU used against the host's CP
 	assert.equal(budgeted.promisedMemPerMille, 125, "4g for half the day of a 16g budget");
 	assert.equal(budgeted.promisedCpuPerMille, 125, "2 CPUs for half the day of the 8 CPU budget");
 	assert.equal(budgeted.usedCpuPerMille, 63, "1 CPU for half the day of the host's 8: 62.5, rounded half up");
-	// A 4 CPU budget on an 8 CPU host: each job's --cpus is the whole budget, so two jobs may use 8 CPUs between them,
-	// all of it real. Used is judged against the host, never the budget, so it cannot pass 100% by being true.
-	const twoOnEight = { slots: 2, memMiB: 8192, cpuCenti: 400, cpus: 8 };
-	const both = hostA([run("d1", 24, 0, { size, capacity: twoOnEight, resources: { cpuUsec: 4 * DAY * 1000 } }), run("d2", 24, 0, { size, capacity: twoOnEight, resources: { cpuUsec: 4 * DAY * 1000 } })]);
-	assert.deepEqual([both.usedCpuPerMille, both.promisedCpuPerMille, both.coverage.cpuClamped], [1000, 1000, 0]);
+	// A 4 CPU budget on an 8 CPU host: each job's --cpus is the whole budget, but the one parent cgroup every job runs
+	// under holds them TOGETHER to it, so two jobs each reporting all 4 CPUs at once cannot both be true. Used is over
+	// the host's CPUs, and every moment is held to what the jobs could use together: half the host, never all of it.
+	const fourOnEight = { slots: 2, memMiB: 8192, cpuCenti: 400, cpus: 8 };
+	const both = hostA([run("d1", 24, 0, { size, capacity: fourOnEight, resources: { cpuUsec: 4 * DAY * 1000 } }), run("d2", 24, 0, { size, capacity: fourOnEight, resources: { cpuUsec: 4 * DAY * 1000 } })]);
+	assert.deepEqual([both.usedCpuPerMille, both.promisedCpuPerMille, both.coverage.cpuClamped], [500, 1000, 2]);
+	const fit = hostA([run("d1", 24, 0, { size, capacity: fourOnEight, resources: { cpuUsec: 2 * DAY * 1000 } }), run("d2", 24, 0, { size, capacity: fourOnEight, resources: { cpuUsec: 2 * DAY * 1000 } })]);
+	assert.deepEqual([fit.usedCpuPerMille, fit.coverage.cpuClamped], [500, 0], "two jobs of 2 CPUs fit the 4 together: nothing cut");
+	const offTwo = hostA([run("d1", 24, 0, { size, capacity: { ...fourOnEight, cpuCenti: "off" }, resources: { cpuUsec: 8 * DAY * 1000 } }), run("d2", 24, 0, { size, capacity: { ...fourOnEight, cpuCenti: "off" }, resources: { cpuUsec: 8 * DAY * 1000 } })]);
+	assert.deepEqual([offTwo.usedCpuPerMille, offTwo.coverage.cpuClamped], [1000, 2], "budget off: never more than the host's CPUs");
 
 	const off = hostA([run("1", 12, 0, { size, resources, capacity: { slots: 2, memMiB: "off", cpuCenti: "off", cpus: 4 } })]);
 	assert.equal(off.promisedMemPerMille, null, "no memory budget, so no share of one");
@@ -258,12 +263,12 @@ test("the report's frame: version, window, every coverage count, hosts sorted, a
 	const r = report([run("1", 2, 1, { host: "b" }), run("2", 2, 1)], { live: [{ name: "c", budgetRunning: "2" }, { name: "d", budgetRunning: "" }, { name: "e", budgetRunning: "1" }], coverage: { source: "mirror+local", reason: "why" } });
 	assert.equal(r.v, 1);
 	assert.deepEqual(r.window, { fromMs: NOW - DAY, toMs: NOW, bucketMs: H });
-	assert.deepEqual(Object.keys(r.coverage), ["source", "reason", "fromMs", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "unreadable", "withoutHost", "running", "historyNotShared"]);
+	assert.deepEqual(Object.keys(r.coverage), ["source", "reason", "fromMs", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "unreadable", "withoutHost", "running", "historyNotShared"]);
 	assert.deepEqual([r.coverage.source, r.coverage.reason, r.coverage.running, r.coverage.withoutSize, r.coverage.withoutResources], ["mirror+local", "why", 3, 2, 2]);
 	assert.deepEqual(r.hosts.map((h) => h.name), ["a", "b", "c", "d", "e"]);
 	assert.equal(report([]).coverage.running, null, "no live row says: unknown, not zero");
 	assert.deepEqual(Object.keys(r.hosts[0]), ["name", "shared", "coverage", "capacity", "coveredMs", "missingMs", "busyMs", "idleMs", "fullMs", "peak", "avgMilli", "promisedMemPerMille", "promisedCpuPerMille", "usedCpuPerMille", "runs", "projects", "otherProjects", "waits", "buckets"]);
-	assert.deepEqual(Object.keys(r.hosts[0].coverage), ["fromMs", "source", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried"]);
+	assert.deepEqual(Object.keys(r.hosts[0].coverage), ["fromMs", "source", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick"]);
 });
 
 test("a window or bucket the function cannot honour is the caller's mistake, refused", () => {
@@ -334,4 +339,46 @@ test("property: for every host, busy + idle + missing is the window, and busy, f
 			assert.deepEqual([h.busyMs, h.fullMs ?? 0, h.peak], [busy, full, peak], `seed ${seed} host ${h.name}`);
 		}
 	}
+});
+
+test("a retry's earlier attempts count as occupied intervals on their own hosts, with their size and no wait or CPU", () => {
+	const earlier = [
+		{ host: "b", startedAt: iso(NOW - 10 * H), endedAt: iso(NOW - 9 * H), memMiB: 4096, cpuCenti: 200 },
+		{ host: "a", startedAt: iso(NOW - 8 * H), endedAt: iso(NOW - 6 * H), memMiB: 4096, cpuCenti: 200 },
+		{ host: "evil\u001b", startedAt: iso(NOW - 8 * H), endedAt: iso(NOW - 6 * H) },
+		{ host: "a", startedAt: "garbled", endedAt: iso(NOW) },
+	];
+	const r = report([run("r", 2, 1, { attempt: 3, earlier, size: { memMiB: 4096, cpuCenti: 200, source: "env" } })]);
+	const by = Object.fromEntries(r.hosts.map((h) => [h.name, h]));
+	assert.deepEqual([by.a.busyMs, by.a.coverage.used, by.a.coverage.earlier, by.a.coverage.retried, by.a.waits.n], [3 * H, 1, 1, 1, 0]);
+	assert.deepEqual([by.b.busyMs, by.b.coverage.used, by.b.coverage.earlier, by.b.coverage.withoutResources], [H, 0, 1, 0], "on its own host; no measurement is expected of it");
+	assert.equal(by.a.promisedMemPerMille, Math.round((4096 * 3 * 1000) / (16384 * 24)), "its size is promised");
+	assert.deepEqual(r.hosts.map((h) => h.name), ["a", "b"], "no hostile name reaches the report");
+	// A refused retry still carries what the attempts before it held.
+	const refused = report([run("q", 1, 1, { capacity: null, attempt: 2, earlier: [earlier[1]] })]);
+	assert.deepEqual([refused.hosts[0].busyMs, refused.hosts[0].coverage.earlier], [2 * H, 1]);
+});
+
+test("a pickup after a stall is counted and adds no wait: the stalled pickup's time is unknown", () => {
+	const a = hostA([run("s", 2, 1, { stalledRepick: true, queuedAt: iso(NOW - 3 * H) })]);
+	assert.deepEqual([a.coverage.stalledRepick, a.waits.n], [1, 0]);
+});
+
+test("capacity.mjs stays pure: its import graph holds no filesystem, no os and no config.mjs", async () => {
+	const { readFileSync } = await import("node:fs");
+	const seen = new Set();
+	const walk = (file) => {
+		if (seen.has(file)) return;
+		seen.add(file);
+		const src = readFileSync(new URL(file, import.meta.url), "utf8");
+		for (const m of src.matchAll(/^import [^;]*? from "([^"]+)";/gms)) {
+			const spec = m[1];
+			if (spec.startsWith("./")) walk(new URL(spec, new URL(file, import.meta.url)).href);
+			else seen.add(spec);
+		}
+	};
+	walk(new URL("../src/capacity.mjs", import.meta.url).href);
+	const graph = [...seen].map((f) => f.replace(/^.*\/src\//, ""));
+	for (const banned of ["node:fs", "fs", "node:os", "os", "node:child_process", "config.mjs"]) assert.ok(!graph.includes(banned), `${banned} in ${graph.join(", ")}`);
+	assert.ok(graph.includes("worker-name.mjs") && graph.includes("project-id.mjs"), "the two name rules come from leaves");
 });
