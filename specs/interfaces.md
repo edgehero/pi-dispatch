@@ -5498,10 +5498,11 @@ validator rather than a second copy of it.
       "withoutSize": <int>, "withoutResources": <int>,                     // counted runs not in promised / CPU used
       "cpuClamped": <int>, "retried": <int>,                               // CPU read at its most; runs past attempt 1
       "earlier": <int>, "stalledRepick": <int>,                            // earlier attempts counted; pickups after a stall
-      "live": <int>, "liveNotCounted": <int>, "orphans": <int>,            // running now: counted, not counted, orphans
+      "live": <int>, "liveNotCounted": <int>,                              // running now: counted, not counted
+      "liveUnreadable": <int>, "orphans": <int>,                           // hosts whose list did not parse; orphans
       "unreadable": <int>, "withoutHost": <int>,                           // records not counted, and why
       "earlierDropped": <int>,                                             // carried earlier attempts not counted
-      "running": <int> | null,                                             // jobs the live rows say run now
+      "running": <int> | null,                                             // live + liveNotCounted; null if unknown
       "historyNotShared": ["<host>", ...]                                  // hosts no source here holds
     },
     "hosts": [ {                                                           // sorted by name
@@ -5510,7 +5511,7 @@ validator rather than a second copy of it.
                     "used": <int>, "refusedBeforeSlot": <int>, "legacyOccupied": <int>, "legacyRefused": <int>,
                     "withoutSize": <int>, "withoutResources": <int>, "cpuClamped": <int>, "retried": <int>,
                     "earlier": <int>, "stalledRepick": <int>, "live": <int>, "liveNotCounted": <int>,
-                    "orphans": <int> },
+                    "liveUnreadable": <int>, "orphans": <int> },
       "capacity": { "slots": <int> | null, "memMiB": <int> | "off" | null, "cpuCenti": <int> | "off" | null,
                     "cpus": <int> | null, "basis": "recorded" | "current" | "unknown", "changed": <bool> },
       "coveredMs": <int>, "missingMs": <int>, "busyMs": <int>, "idleMs": <int>,  // busy + idle + missing = the window
@@ -5571,12 +5572,17 @@ validator rather than a second copy of it.
   the row can vouch for: a row whose beat is older than `LIVE_FRESH_MS` (two beats, 30 s) vouches only up to that beat
   (`now - staleMs`), so the interval ends there, and one with no beat counts nothing. A listed job whose record is in
   the window with a `startedAt` at or after its `at` (it ended between the beat and the read) is the record's, counted
-  once. An orphan (`o`) is counted in `orphans` and not as busy: its record already covers its run up to the stop that
+  once; the record's `jobId` is matched as the row publishes it (`publishedJobId`), so an id published as its digest
+  is recognised too. An orphan (`o`) is counted in `orphans` and not as busy: its record already covers its run up to the stop that
   did not take. A running job the report cannot count is counted in `liveNotCounted`: past the row's 32 or not read by
   its allowlist (`jobsMore`), on a row from before `jobs` (its `budgetRunning`, the only count it gives), on a host
   whose history is not shared (its window is missing as a whole), admitted longer ago than the longest run a record
-  may have, or in the future past the skew. `running` is every running job the live rows report, counted or not (null
-  when no row says); an orphan is not running. A row that `readLiveHosts` already parsed and a raw one read the same.
+  may have, or in the future past the skew. A row whose `jobs` value is THERE and is not a list (`readLiveHosts` flags
+  it `jobsUnreadable`) says nothing about how many it runs: that host counts 1 in `liveUnreadable`, and nothing stands
+  in for it (not its `budgetRunning`, which stands in only for a worker from before the field). `running` is `live` plus
+  `liveNotCounted`: every running job the live rows report, never a listed job whose record already counts it, and
+  null when no row says or when a host's list is unreadable (how many run there is unknown); an orphan is not running.
+  A row that `readLiveHosts` already parsed and a raw one read the same.
 - **A record's `earlier` is judged again**: rebuilt by the writer's own rule (`recordedEarlier` in `run-earlier.mjs`:
   valid entries only, the newest 4), and an entry that overlaps the record's own span on the same host is dropped (one
   job cannot hold one host's slot twice at once). Every entry given and not counted is in `earlierDropped`.
@@ -5606,8 +5612,10 @@ validator rather than a second copy of it.
   running jobs counted (`1 running now, counted to now`), a cut history (`history from <UTC minute> UTC only`, with the
   mirror named when it was cut), `this host's files only`, `N running now not counted`, and for a host with no history
   that no source here holds its runs. Read with the registry rows doctor already read, from the Valkey it talks to (no
-  Valkey: this host's files), each Valkey call bounded and the whole read under 5 s; past it, or on any fault, one line
-  says nothing is shown. Every control character is removed. A full mirror (5,000 runs) reads in fourteen round trips.
+  Valkey: this host's files), each Valkey call bounded, the connection (and its ready check) bounded at 2 s, and the
+  whole read under 5 s; past it the read is told to stop and its client is disconnected, so it cannot hold the process,
+  and one line says nothing is shown, as it does on any fault. A host whose list of running jobs did not parse says
+  so. Every control character is removed. A full mirror (5,000 runs) reads in fourteen round trips.
 - **The tool** (`dispatch_capacity`, `admin/src/read-model.mjs -> readCapacity`): `window` `24h`, `7d` (default) or
   `30d`, optional `host`; it returns `{ window, text, report }`, `text` the CLI's human report and `report` this
   object (cut to the host as `--host` cuts it), through the CLI's own read and functions, so the three surfaces print
@@ -7550,7 +7558,9 @@ operator looks for; the rest, and an entry with no id or no instant, are counted
 KiB per beat. `readLiveHosts` parses `jobs` through a per-field allowlist (`parseLiveJobs`: an object; `id` matching
 `LIVE_JOB_ID_RE`; `p` null or a project id; `m`, `c` absent, null or a positive integer; `at` a positive integer; `o`
 absent or 1), drops every entry that fails it and adds the dropped count to `jobsMore`, so a row's `jobs` is an array
-(`o` a boolean) or null (absent, empty, over 16 KiB, or not a JSON list), and `jobsMore` a number or null. It never
+(`o` a boolean) or null (absent, empty, over 16 KiB, or not a JSON list), and `jobsMore` a number or null; a row whose
+value is there and is not a list is flagged `jobsUnreadable`, so a reader never takes it for a worker from before the
+field. It never
 throws. Readers: the capacity report (`INT-CAPACITY-REPORT`: each listed job busy up to now), and through it doctor,
 `pi-dispatch capacity` and `dispatch_capacity`. NO JOB DECISION READS THEM.
 
@@ -8133,3 +8143,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-08 | Issue #599, phase 1, last correction. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED (wording)**: the `stalledRepick` paragraph now says that a stalled later attempt's slot time is counted nowhere, as `OQ-039` names. |
 | 2026-10-08 | Issue #599, phase 1, CI correction. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a job scheduler's `queuedAt` is the slot in its `repeat:<id>:<millis>` id, not `timestamp` plus `delay`, which BullMQ computes from two clock reads and can put a few milliseconds past the slot. |
 | 2026-10-08 | Issue #599, phase 2. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: three fields, `waiters` (the budget's waiters, "" without a budget), `jobs` (JSON of at most 32 `{ id, p, m, c, at, o? }`, the jobs a host runs now and its budget's orphans, oldest first) and `jobsMore` (how many it does not list); the source (an in-flight map filled at admission and emptied by the one release, so it works without a budget), the orphan rule (the in-flight entry leaves with its pickup on every exit; orphans come from the budget's ledger alone, so the rule holds with and without a budget), the reader's per-field allowlist and its dropped count, the content rule argument (every id shape the project mints listed against `LIVE_JOB_ID_RE`, a delivery id outside it published as its digest), and the falsification test (the report reads them, no decision does). **`INT-CAPACITY-REPORT` AMENDED**: three coverage counts per host and fleet (`live`, `liveNotCounted`, `orphans`), `running` now every running job the rows report, a section on the jobs running now (counted to now, to a stale row's beat, once beside their record, orphans not as busy, the rest not counted and said), the registry read at the report's clock (the CLI read it at the wall clock, so an injected clock aged every row), doctor's line and the tool's result, and the acceptance. **`INT-RUN-HISTORY-FILE-CONTRACT`** UNCHANGED, checked: no record field moved. |
+| 2026-10-08 | Issue #599, phase 2, corrections. **`INT-CAPACITY-REPORT` AMENDED**: a listed job is matched to its record by the id as the row publishes it (`publishedJobId`), so one published as its digest is counted once, not twice; a row whose `jobs` value is there and does not parse is counted in a new `liveUnreadable` (per host and fleet) and nothing stands in for it, where before the report fell back to its `budgetRunning` as if it were a worker from before the field; `running` is now `live` plus `liveNotCounted` (it counted a listed job whose record already counted it) and null while a host's list is unreadable; doctor's read bounds its connection and ready check at 2 s and disconnects the client when the 5 s bound passes (a read it gave up on kept a socket and the doctor process alive), and its timeout line no longer says the CLI reads with no deadline. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: `readLiveHosts` flags a row whose `jobs` value is there and is not a list (`jobsUnreadable`). |

@@ -297,12 +297,12 @@ test("issue #599, phase 2: a row's running jobs are read back through the allowl
 	const old = fakeRedis();
 	await makeHostRegistry({ redis: old, name: "old", now: () => NOW }).start({ version: "4.0.0" });
 	const before = (await readLiveHosts(old, { now: () => NOW })).hosts[0];
-	assert.deepEqual([before.jobs, before.jobsMore], [null, null]);
+	assert.deepEqual([before.jobs, before.jobsMore, before.jobsUnreadable], [null, null, false]);
 	// A value that is not a list: no list, and the published count kept.
 	const junk = fakeRedis();
 	await makeHostRegistry({ redis: junk, name: "junk", now: () => NOW }).start({ jobs: "not json", jobsMore: "2" });
 	const read = (await readLiveHosts(junk, { now: () => NOW })).hosts[0];
-	assert.deepEqual([read.jobs, read.jobsMore], [null, 2]);
+	assert.deepEqual([read.jobs, read.jobsMore, read.jobsUnreadable], [null, 2, true], "there, and not a list: said");
 });
 
 test("a row whose clock runs AHEAD of ours reads as fresh, never as negative age", async () => {

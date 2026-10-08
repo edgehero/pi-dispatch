@@ -52,13 +52,17 @@ test("no control character reaches a line, whatever the report holds", () => {
 
 test("doctorCapacity reads through its seam over the last 7 days, and a slow or failing read costs one line, never the run", async () => {
 	const asked = [];
-	const read = async (args) => (asked.push(args), { records: [run("1", 2, 1)], coverage: { source: "local", localHost: "a", local: { fromMs: args.sinceMs }, mirror: null } });
+	const read = async ({ signal, ...args }) => (asked.push({ ...args, signal: signal instanceof AbortSignal }), { records: [run("1", 2, 1)], coverage: { source: "local", localHost: "a", local: { fromMs: args.sinceMs }, mirror: null } });
 	const env = { PI_LOGS_DIR: "/srv/logs", PI_LOG_RETENTION_DAYS: "3" };
 	const lines = await doctorCapacity({ seams: { readCapacity: read, wallClock: () => NOW }, env, home: "/home/op", url: "redis://v:6379", hosts: [], localHost: "a" });
-	assert.deepEqual(asked, [{ url: "redis://v:6379", logsDir: "/srv/logs", sinceMs: NOW - W.ms, nowMs: NOW, retentionDays: 3, localHost: "a" }]);
+	assert.deepEqual(asked, [{ url: "redis://v:6379", logsDir: "/srv/logs", sinceMs: NOW - W.ms, nowMs: NOW, retentionDays: 3, localHost: "a", signal: true }]);
 	assert.match(lines[0].label, /^Host a: last 7d busy/);
 	const slow = await doctorCapacity({ seams: { readCapacity: () => new Promise(() => {}), wallClock: () => NOW, capacityTimeoutMs: 20 }, env, home: "/h", url: null, hosts: [], localHost: "a" });
-	assert.deepEqual(slow, [{ ok: true, label: "Capacity: the run history did not answer in time, so nothing is shown (pi-dispatch capacity reads it with no deadline)" }]);
+	assert.deepEqual(slow, [{ ok: true, label: "Capacity: the run history did not answer in time, so nothing is shown (pi-dispatch capacity waits up to 2 s per Valkey call)" }]);
+	// The read it gave up on is told to stop.
+	let told = null;
+	await doctorCapacity({ seams: { readCapacity: ({ signal }) => new Promise(() => signal.addEventListener("abort", () => (told = true))), wallClock: () => NOW, capacityTimeoutMs: 10 }, env, home: "/h", url: null, hosts: [], localHost: "a" });
+	assert.equal(told, true);
 	const broken = await doctorCapacity({ seams: { readCapacity: () => {
 		throw new Error("boom\u001b[2J");
 	}, wallClock: () => NOW }, env: {}, home: "/h", url: null, hosts: [], localHost: "a" });
@@ -95,4 +99,60 @@ test("a full mirror (5000 runs) costs doctor well under a second: twelve bounded
 	assert.deepEqual(lines.map((l) => l.label.slice(0, 7)), ["Host h0", "Host h1", "Host h2"]);
 	assert.equal(calls.length, 3 + 1 + 10, "ZCARD, the oldest, the horizon, the range, then ten MGETs of 500");
 	assert.ok(ms < 1500, `took ${Math.round(ms)} ms`);
+});
+
+test("the line says when a host's list of running jobs could not be read", () => {
+	const [line] = capacityChecks(week([run("1", 2, 1)], { live: [{ name: "a", routes: "true", staleMs: 1000, jobs: null, jobsUnreadable: true }] }));
+	assert.match(line.label, /; its running jobs could not be read, not counted$/);
+});
+
+test("a Valkey that accepts the connection and never answers: the default read gives up within its bound and leaves no socket open", async () => {
+	const net = await import("node:net");
+	const sockets = new Set();
+	const server = net.createServer((s) => (sockets.add(s), s.on("data", () => {})));
+	await new Promise((r) => server.listen(0, "127.0.0.1", r));
+	const port = server.address().port;
+	try {
+		const t0 = performance.now();
+		const lines = await doctorCapacity({ seams: { capacityTimeoutMs: 300 }, env: { PI_LOGS_DIR: tempDir("pi-doctor-hang-") }, home: "/h", url: `redis://127.0.0.1:${port}/13`, hosts: [], localHost: "a" });
+		assert.match(lines[0].label, /did not answer in time/);
+		assert.ok(performance.now() - t0 < 1500);
+		// Closed by the time doctor has its line, not a tick later.
+		const clientSockets = process._getActiveHandles().filter((h) => h?.constructor?.name === "Socket" && !h.destroyed && h.remotePort === port);
+		assert.equal(clientSockets.length, 0, "the client's socket is closed when doctor returns");
+	} finally {
+		for (const s of sockets) s.destroy();
+		server.close();
+	}
+});
+
+test("a doctor that gave up on a Valkey that never answers exits at once: nothing of the read holds the process", async () => {
+	const { spawn } = await import("node:child_process");
+	const doctorUrl = new URL("../src/doctor.mjs", import.meta.url).href;
+	const script = `
+		import net from "node:net";
+		const { doctorCapacity } = await import(${JSON.stringify(doctorUrl)});
+		const server = net.createServer((s) => s.on("data", () => {}));
+		await new Promise((r) => server.listen(0, "127.0.0.1", r));
+		server.unref();
+		const t0 = Date.now();
+		const lines = await doctorCapacity({ seams: { capacityTimeoutMs: Number(process.argv[1]) }, env: { PI_LOGS_DIR: process.argv[2] }, home: "/h", url: "redis://127.0.0.1:" + server.address().port + "/13", hosts: [], localHost: "a" });
+		process.on("exit", () => console.log(JSON.stringify({ returnedMs: Date.now() - t0 - 0, label: lines[0]?.label ?? null, exitMs: Date.now() - t0 })));
+	`;
+	const runChild = (timeoutMs) =>
+		new Promise((resolve, reject) => {
+			const child = spawn(process.execPath, ["--input-type=module", "-e", script, String(timeoutMs), tempDir("pi-doctor-exit-")], { stdio: ["ignore", "pipe", "pipe"] });
+			let out = "";
+			child.stdout.on("data", (d) => (out += d));
+			const kill = setTimeout(() => child.kill("SIGKILL"), 10_000);
+			child.on("close", () => (clearTimeout(kill), out ? resolve(JSON.parse(out.trim().split("\n").at(-1))) : reject(new Error("no output"))));
+		});
+	// Doctor's own bound first: the read is stopped and the process ends right after the line.
+	const stopped = await runChild(300);
+	assert.match(stopped.label, /did not answer in time/);
+	assert.ok(stopped.exitMs < 1000, `exited ${stopped.exitMs} ms after it began`);
+	// The connection's own bound (2 s) before doctor's: the report is this host's files, said, and nothing lingers.
+	const local = await runChild(10_000);
+	assert.ok(local.label === null || !/did not answer in time/.test(local.label), "the connection bound answered first");
+	assert.ok(local.exitMs < 3000, `exited ${local.exitMs} ms after it began`);
 });

@@ -189,8 +189,10 @@ export function parseConnection(url, { failFast = false, servername = null, cont
  * `parseConnection`'s options, so it connects through `JudgedConnector` like every other client. `lazyConnect` and
  * `failFast` as ioredis and `parseConnection` read them.
  */
-export function makeRedisClient(url, { servername = null, context = null, failFast = false, lazyConnect = false, judge = null, withoutPassword = false } = {}) {
-	return new Redis({ ...parseConnection(url, { failFast, servername, context, judge, withoutPassword }), ...(lazyConnect ? { lazyConnect: true } : {}) });
+export function makeRedisClient(url, { servername = null, context = null, failFast = false, lazyConnect = false, judge = null, withoutPassword = false, disconnectTimeoutMs = null } = {}) {
+	// `disconnectTimeoutMs` (issue #599): how long ioredis's `disconnect()` waits for a socket to close before it destroys
+	// it (its default is 2 s, on a ref'd timer). A one-shot read that must not hold its process passes 0.
+	return new Redis({ ...parseConnection(url, { failFast, servername, context, judge, withoutPassword }), ...(lazyConnect ? { lazyConnect: true } : {}), ...(Number.isSafeInteger(disconnectTimeoutMs) && disconnectTimeoutMs >= 0 ? { disconnectTimeout: disconnectTimeoutMs } : {}) });
 }
 
 /**

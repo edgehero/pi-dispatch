@@ -12339,3 +12339,13 @@ test("issue #596, a worker whose boot listing of left-over job containers is unr
 	const peer = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini1", tz }, { name: "other", tz, budgetSeed: "unlisted" }] }) }));
 	assert.ok(!peer.some((c) => /host_budget_seed_unread/.test(c.label)), "only this host's own row speaks for this host");
 });
+
+test("issue #599, phase 2: runDoctor hands its readCapacity seam to the checks, and the helper refuses the real read", async () => {
+	const asked = [];
+	const out = [];
+	const read = async (args) => (asked.push(args.url), { records: [], coverage: { source: "local", localHost: "mini1", local: { fromMs: args.sinceMs }, mirror: null } });
+	await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0" }, { ...ghDeps((s) => out.push(s), { ...green }, []), agentDir: NO_AGENT_DIR, readCapacity: read });
+	assert.equal(asked.length, 1, "the seam runDoctor was given is the one doctor read through");
+	// Dropping the seam reaches the default, which this helper has forbidden: the run fails rather than read this machine.
+	await assert.rejects(() => runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0" }, { ...ghDeps(() => {}, { ...green }, []), agentDir: NO_AGENT_DIR, readCapacity: undefined }), /real capacity read in a test/);
+});

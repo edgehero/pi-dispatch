@@ -36,8 +36,10 @@
  * vouch for: a row that has not beaten within `LIVE_FRESH_MS` vouches only up to its last beat, so the interval ends
  * there; a job whose record is already in the window (it ended between the beat and this read) is the record's; an
  * orphan (`o`, a container whose stop did not take) is not counted, since its record already covers its run; and a
- * running job the row does not list (past its 32, unreadable, a worker from before the field, a host whose history is
- * not shared) is counted in `liveNotCounted`, never guessed.
+ * running job the row does not list (past its 32, an entry its allowlist drops, a worker from before the field, a host
+ * whose history is not shared) is counted in `liveNotCounted`, never guessed. A row whose `jobs` value is there and is
+ * not a list says nothing about how many it runs: that host is counted in `liveUnreadable`, and `running` is unknown
+ * (null). A listed job is matched to its record by the id as the row publishes it (`publishedJobId`).
  *
  * RETRIES AND STALLS. A retry's record replaces its earlier attempt's, so the record carries those attempts' slot
  * intervals (`earlier`), each counted as an occupied interval on its own host with its size (no wait, no CPU measured).
@@ -62,7 +64,7 @@ import { WORKER_NAME_RE } from "./worker-name.mjs";
 import { JOB_CPUS_CEILING_CENTI, SIZE_REFUSAL_REASONS, recordedJobSize } from "./job-size.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { HOST_BEAT_MS } from "./host-registry.mjs";
-import { parseJobsMore, parseLiveJobs } from "./live-jobs.mjs";
+import { parseJobsMore, parseLiveJobs, publishedJobId } from "./live-jobs.mjs";
 import { recordedEarlier } from "./run-earlier.mjs";
 import { SUGGEST_CLOCK_SKEW_MS, SUGGEST_MAX_WALL_MS } from "./size-suggest.mjs";
 import { WAIT_REFUSAL_REASONS } from "./wait-for.mjs";
@@ -176,21 +178,23 @@ function perMille(num, den) {
 /** The nearest-rank percentile of a sorted array: the value at rank ceil(p/100 x n). size-suggest's rule. */
 const rank = (sorted, pct) => sorted[Math.max(0, Math.ceil((pct * sorted.length) / 100) - 1)];
 
-const zeroCounts = () => ({ used: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0, earlier: 0, stalledRepick: 0, live: 0, liveNotCounted: 0, orphans: 0 });
+const zeroCounts = () => ({ used: 0, refusedBeforeSlot: 0, legacyOccupied: 0, legacyRefused: 0, withoutSize: 0, withoutResources: 0, cpuClamped: 0, retried: 0, earlier: 0, stalledRepick: 0, live: 0, liveNotCounted: 0, liveUnreadable: 0, orphans: 0 });
 
 /**
- * A live row's running jobs: `{ jobs, notListed }`, `jobs` the listed entries through live-jobs.mjs' allowlist (a row
- * from `readLiveHosts` is parsed already; a raw string is parsed here, the same rule) or null when the row lists none,
- * `notListed` the running jobs it reports and does not list (its `jobsMore`, or a worker from before `jobs`: its budget's
- * `budgetRunning`), null when it says nothing.
+ * A live row's running jobs: `{ jobs, notListed, unreadable }`, `jobs` the listed entries through live-jobs.mjs'
+ * allowlist (a row from `readLiveHosts` is parsed already; a raw string is parsed here, the same rule) or null when the
+ * row lists none, `notListed` the running jobs it reports and does not list (its `jobsMore`, or a worker from before
+ * `jobs`: its budget's `budgetRunning`), null when it says nothing. `unreadable` is a row that HAS a `jobs` value that
+ * is not a list (`readLiveHosts` flags it `jobsUnreadable`): how many it runs is then unknown, and nothing stands in.
  */
 function rowJobsOf(row) {
 	const parsed = parseLiveJobs(row?.jobs);
 	if (parsed.jobs === null) {
+		if (row?.jobsUnreadable === true || (row?.jobs !== undefined && row?.jobs !== null && row?.jobs !== "")) return { jobs: null, notListed: null, unreadable: true };
 		const n = typeof row?.budgetRunning === "string" && /^\d{1,9}$/.test(row.budgetRunning) ? Number(row.budgetRunning) : null;
-		return { jobs: null, notListed: n };
+		return { jobs: null, notListed: n, unreadable: false };
 	}
-	return { jobs: parsed.jobs, notListed: (parseJobsMore(row.jobsMore) ?? 0) + parsed.dropped };
+	return { jobs: parsed.jobs, notListed: (parseJobsMore(row.jobsMore) ?? 0) + parsed.dropped, unreadable: false };
 }
 
 /**
@@ -290,7 +294,9 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 	// (it ended between the beat and this read) is counted once, as the record.
 	const recordedFrom = new Map();
 	for (const { record, span } of judged) {
-		if (typeof record.jobId === "string" && span !== null) recordedFrom.set(record.jobId, Math.max(recordedFrom.get(record.jobId) ?? -Infinity, span.start));
+		// Keyed by the id AS A ROW PUBLISHES IT (`publishedJobId`): an id outside the row's charset is its digest there.
+		const id = typeof record.jobId === "string" ? publishedJobId(record.jobId) : null;
+		if (id !== null && span !== null) recordedFrom.set(id, Math.max(recordedFrom.get(id) ?? -Infinity, span.start));
 	}
 	const names = new Set([...liveByName.keys()]);
 	for (const j of judged) names.add(j.record.host);
@@ -362,12 +368,16 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 
 	// THE JOBS RUNNING NOW (see the header), from each live row, each an occupied interval to now (or to a stale row's
 	// last beat), clipped to the host's covered window like a record.
-	let running = null;
+	// `running` is what the rows say runs now: the jobs counted plus those not counted, never a listed job whose record
+	// already counts it (it has ended); null when no row says anything, or when one row's list could not be read (how
+	// many run on that host is unknown, so the fleet's number is too).
+	let rowsSay = false;
 	for (const [name, row] of liveByName) {
-		const { jobs, notListed } = rowJobsOf(row);
+		const { jobs, notListed, unreadable } = rowJobsOf(row);
 		const host = hostOf(name);
 		const cover = covers.get(name);
-		if (jobs !== null || notListed !== null) running = (running ?? 0) + (jobs ?? []).filter((j) => !j.o).length + (notListed ?? 0);
+		if (jobs !== null || notListed !== null) rowsSay = true;
+		if (unreadable) host.counts.liveUnreadable++;
 		host.counts.liveNotCounted += notListed ?? 0;
 		const staleMs = Number.isSafeInteger(row.staleMs) && row.staleMs >= 0 ? row.staleMs : null;
 		for (const j of jobs ?? []) {
@@ -375,7 +385,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 				host.counts.orphans++;
 				continue;
 			}
-			if ((recordedFrom.get(j.id) ?? -Infinity) >= j.at) continue; // its record counts it
+			if ((recordedFrom.get(j.id) ?? -Infinity) >= j.at) continue; // its record counts it (keyed as the row publishes ids)
 			const end = staleMs === null ? null : staleMs <= LIVE_FRESH_MS ? nowMs : nowMs - staleMs;
 			const span = end === null ? null : spanOf({ startedAt: new Date(j.at).toISOString(), endedAt: new Date(end).toISOString() }, nowMs);
 			if (cover === null || cover === undefined || span === null) {
@@ -604,7 +614,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			unreadable,
 			withoutHost,
 			earlierDropped,
-			running,
+			running: rowsSay && totals.liveUnreadable === 0 ? totals.live + totals.liveNotCounted : null,
 			historyNotShared: notShared,
 		},
 		hosts,
