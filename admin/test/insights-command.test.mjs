@@ -491,3 +491,85 @@ test("the outside-edit notice is one rule and one sentence on the panel's text t
     }
   }
 });
+
+// ---- the capacity section's assembler (issue #599, phase 4) ----
+
+const { computeCapacity } = await import("@edgehero/pi-dispatch/capacity");
+const { capacityText } = await import("@edgehero/pi-dispatch/capacity-cli");
+
+const CNOW = Date.parse("2026-10-08T12:00:00.000Z");
+const CH = 60 * 60 * 1000;
+function capReport() {
+  const cap = { slots: 4, memMiB: 16384, cpuCenti: 800, cpus: 8 };
+  const rec = (jobId, host, project, from, to, extra = {}) => ({ jobId, host, project, startedAt: new Date(CNOW - from * CH).toISOString(), endedAt: new Date(CNOW - to * CH).toISOString(), queuedAt: new Date(CNOW - from * CH - 40_000).toISOString(), capacity: cap, size: { memMiB: 4096, cpuCenti: 200, source: "env" }, resources: { cpuUsec: 3_600_000_000 }, ...extra });
+  const records = [rec("a", "mini1", "web", 30, 28), rec("b", "mini1", "api", 29, 27), rec("c", "mini1", "web", 5, 4, { attempt: 2 }), rec("d", "mini2", "docs", 3, 1), { ...rec("e", "mini1", "web", 2, 2), capacity: null }];
+  const live = [{ name: "mini1", routes: "true", concurrency: "4", staleMs: 1000, jobs: "[]" }, { name: "mini2", routes: "true", concurrency: "2", staleMs: 1000, jobs: "[]" }, { name: "laptop", routes: "false", concurrency: "1", staleMs: 1000, jobs: "[]" }];
+  const coverage = { source: "mirror", reason: null, localHost: "mini1", local: null, mirror: { fromMs: CNOW - 48 * CH, truncated: true, hosts: ["mini1", "mini2"] } };
+  return computeCapacity({ records, live, windowStartMs: CNOW - 7 * 24 * CH, nowMs: CNOW, bucketMs: CH, coverage });
+}
+
+test("capacityViewOf: every headline number and caveat is the CLI's own text for the same report", () => {
+  const report = capReport();
+  const view = mod.capacityViewOf(report);
+  const text = capacityText(report, { since: "7d" });
+  assert.deepEqual(view.window, report.window);
+  assert.equal(view.truncated, true);
+  assert.equal(view.coverage, text.trim().split("\n").at(-2), "the coverage line is the CLI's");
+  assert.deepEqual(view.hosts.map((h) => h.name), ["laptop", "mini1", "mini2"]);
+  const laptop = view.hosts[0];
+  assert.equal(laptop.facts, undefined, "a host whose history is not here has no numbers");
+  assert.ok(text.includes(`no history here: ${laptop.notShared}`));
+  for (const h of view.hosts.slice(1)) {
+    const f = h.facts;
+    const of = f.slots !== null ? ` of ${f.slots}` : "";
+    assert.ok(text.includes(`  busy ${f.busy}, idle ${f.idle}${f.missing ? ` (${f.missing} of the window has no history)` : ""}\n`), h.name);
+    assert.ok(text.includes(`  slots: avg ${f.avg}${of}, peak ${f.peak}${of}${f.full !== null ? `, full ${f.full} of the time` : ""}`), h.name);
+    assert.ok(text.includes(`  promised: ${f.memory}, ${f.cpu}\n`), h.name);
+    if (f.cpuUsed !== null) assert.ok(text.includes(`  CPU used: ${f.cpuUsed}\n`), h.name);
+    assert.ok(text.includes(f.wait === null ? "  wait for a slot: no run recorded one" : `  wait for a slot: ${f.wait}\n`), h.name);
+    if (f.projects.length > 0) assert.ok(text.includes(`  projects by run time: ${f.projects.join(", ")}\n`), h.name);
+    for (const c of h.caveats.filter((c) => !c.startsWith("slots: "))) assert.ok(text.includes(`  ${c}\n`), `${h.name}: ${c}`);
+    assert.ok(text.includes(`  ${h.notes}\n`), h.name);
+    assert.deepEqual(h.buckets, report.hosts.find((r) => r.name === h.name).buckets, "the buckets as the report has them");
+  }
+  // the hand-checkable ones: mini1's two runs overlap for an hour, and its history starts 48h back, inside the window
+  const mini1 = view.hosts[1];
+  assert.equal(mini1.facts.peak, 2);
+  assert.equal(mini1.facts.missing, "71.4%");
+  assert.equal(mini1.truncated, true);
+  assert.ok(mini1.caveats.includes("1 job refused before a slot"));
+  assert.ok(mini1.caveats.some((c) => c.startsWith("1 retried run")));
+});
+
+test("assembleCapacityView: the page's window and instant reach the read, mtd from the start of the month", async () => {
+  const seen = [];
+  const readCapacityFn = async (args) => (seen.push(args), { report: capReport() });
+  const paths = cannedPaths();
+  const view = await mod.assembleCapacityView(paths, "mtd", CNOW, { readCapacityFn, env: {} });
+  assert.equal(view.hosts.length, 3);
+  const [a] = seen;
+  assert.equal(a.url, "not-a-url");
+  assert.equal(a.now(), CNOW, "the page's instant, not a clock of its own");
+  assert.equal(a.span.sinceMs(CNOW), Date.parse("2026-10-01T00:00:00.000Z"), "mtd starts at the start of the month, as the spend does");
+  assert.equal(a.span.bucketMs, 6 * CH);
+  await mod.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn, env: {} });
+  assert.equal(seen[1].span.sinceMs(CNOW), CNOW - 7 * 24 * CH);
+  assert.equal(seen[1].span.bucketMs, CH);
+  await mod.assembleCapacityView(paths, "30d", CNOW, { readCapacityFn, env: {} });
+  assert.equal(seen[2].span.sinceMs(CNOW), CNOW - 30 * 24 * CH);
+  assert.equal(seen[2].span.bucketMs, 6 * CH);
+  assert.deepEqual(mod.INSIGHTS_CAPACITY_BUCKET_MS, { "7d": CH, "30d": 6 * CH, mtd: 6 * CH });
+  // a read that fails says so; it is never a host with nothing to show
+  assert.deepEqual(await mod.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => ({ error: "PI_LOG_RETENTION_DAYS must be a non-negative integer" }), env: {} }), { unreachable: "PI_LOG_RETENTION_DAYS must be a non-negative integer" });
+  assert.deepEqual(await mod.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => { throw new Error("EACCES"); }, env: {} }), { unreachable: "the run records could not be read (EACCES)" });
+});
+
+test("the written page carries the capacity section for its window, read with the page's own instant", async () => {
+  const sink = [];
+  const deps = { fs: { mkdirSync: () => {}, writeFileSync: (_p, data) => sink.push(String(data)), renameSync: () => {} }, openBrowser: () => {}, env: {}, platform: "darwin", now: () => CNOW };
+  await mod.insightsCommand(cannedPaths(), ["insights", "mtd", "--no-open"], () => {}, deps);
+  const page = sink[0];
+  assert.ok(page.includes("<h2>capacity</h2>"));
+  assert.ok(page.includes("month to date, from 2026-10-01 00:00 UTC to 2026-10-08 12:00 UTC"), "the window is the page's, ending at its instant");
+  assert.ok(page.includes("Jobs only: a machine busy with other work reads as idle."));
+});

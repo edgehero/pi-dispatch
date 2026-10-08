@@ -1769,12 +1769,18 @@ const HELD_HYDRATE_MAX = 200;
  * `{ report, text }`, or `{ error }` for a window it does not offer, a host the report does not have, or a retention the
  * worker would refuse. An unreachable Valkey is not an error: the report reads this host's files and says why.
  */
-export async function readCapacity({ url, env = process.env, window = "7d", host, now = () => Date.now(), redisFn = makeRedisClient, timeoutMs = 2000, fs } = {}) {
-  const w = Object.hasOwn(CAPACITY_WINDOWS, window) ? CAPACITY_WINDOWS[window] : null;
-  if (!w) return { error: `window must be one of ${Object.keys(CAPACITY_WINDOWS).join(", ")} (got ${JSON.stringify(window)})` };
+export async function readCapacity({ url, env = process.env, window = "7d", host, now = () => Date.now(), redisFn = makeRedisClient, timeoutMs = 2000, fs, span } = {}) {
+  // `span` is the insights page's own window (issue #599, phase 4): `{ sinceMs(nowMs), bucketMs }`, a start that may be a
+  // calendar instant (`mtd`, the start of the month) and a bucket its chart reads well at. `window` is then only the
+  // label the text says it in. The numbers are the same function's over the same records either way.
+  const w = span ? null : Object.hasOwn(CAPACITY_WINDOWS, window) ? CAPACITY_WINDOWS[window] : null;
+  if (!span && !w) return { error: `window must be one of ${Object.keys(CAPACITY_WINDOWS).join(", ")} (got ${JSON.stringify(window)})` };
   const facts = await deploymentFacts(env);
   if (facts.problem) return { error: facts.problem };
   const nowMs = now();
+  const sinceMs = span ? span.sinceMs(nowMs) : nowMs - w.ms;
+  const bucketMs = span ? span.bucketMs : w.bucketMs;
+  if (!Number.isSafeInteger(sinceMs) || sinceMs >= nowMs || !Number.isSafeInteger(bucketMs) || bucketMs <= 0) return { error: "the window must start before now, with a positive bucket" };
   let redis = null;
   let noMirrorReason = null;
   try {
@@ -1788,10 +1794,10 @@ export async function readCapacity({ url, env = process.env, window = "7d", host
   try {
     const [fleet, read] = await Promise.all([
       redis ? readLiveHosts(redis, { now, timeoutMs, prune: false }).catch((e) => ({ unreachable: e?.message ?? "registry unreadable" })) : { unreachable: null },
-      readCapacityRecords({ redis, logsDir: facts.logsDir, sinceMs: nowMs - w.ms, nowMs, retentionDays: facts.retentionDays, localHost: facts.localHost, noMirrorReason, timeoutMs, ...(fs ? { fs } : {}) }),
+      readCapacityRecords({ redis, logsDir: facts.logsDir, sinceMs, nowMs, retentionDays: facts.retentionDays, localHost: facts.localHost, noMirrorReason, timeoutMs, ...(fs ? { fs } : {}) }),
     ]);
     const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
-    const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs: nowMs - w.ms, nowMs, bucketMs: w.bucketMs, coverage });
+    const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs: sinceMs, nowMs, bucketMs, coverage });
     const shown = host === undefined || host === null ? { report } : onlyHost(report, host);
     if (shown.unknown) return { error: `no host named ${JSON.stringify(host)} in the last ${window}${shown.unknown.length > 0 ? ` (hosts: ${shown.unknown.join(", ")})` : ""}` };
     return { report: shown.report, text: capacityText(shown.report, { since: window }) };

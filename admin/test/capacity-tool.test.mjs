@@ -82,3 +82,16 @@ test("readCapacity: one host, an unknown host, a window it does not offer, and a
   assert.match(local.report.coverage.reason, /the Valkey URL is not usable/);
   assert.deepEqual(local.report.hosts.map((h) => h.name), ["mini1"]);
 });
+
+test("readCapacity with the insights page's span: its start and bucket, the same numbers as the named window", async () => {
+  const { env, records, rows } = fixture();
+  const monthStart = Date.parse("2026-10-01T00:00:00.000Z");
+  const res = await readCapacity({ url: "redis://127.0.0.1:6399", env, window: "mtd", now: () => NOW, redisFn: () => fakeValkey(records, rows), span: { sinceMs: () => monthStart, bucketMs: 6 * H } });
+  assert.equal(res.error, undefined);
+  assert.deepEqual(res.report.window, { fromMs: monthStart, toMs: NOW, bucketMs: 6 * H });
+  assert.equal(res.report.hosts[0].buckets.length, Math.ceil((NOW - monthStart) / (6 * H)));
+  const named = await readCapacity({ url: "redis://127.0.0.1:6399", env, window: "7d", now: () => NOW, redisFn: () => fakeValkey(records, rows) });
+  const sevenDays = await readCapacity({ url: "redis://127.0.0.1:6399", env, window: "7d", now: () => NOW, redisFn: () => fakeValkey(records, rows), span: { sinceMs: (n) => n - 7 * 24 * H, bucketMs: H } });
+  assert.deepEqual(sevenDays.report.hosts.map((h) => [h.name, h.busyMs, h.peak, h.waits]), named.report.hosts.map((h) => [h.name, h.busyMs, h.peak, h.waits]), "the bucket changes the chart, never the numbers");
+  assert.match((await readCapacity({ url: "not a url", env, now: () => NOW, span: { sinceMs: (n) => n, bucketMs: H } })).error, /must start before now/);
+});

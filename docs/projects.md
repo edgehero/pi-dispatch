@@ -149,6 +149,10 @@ from this host's, and a host that publishes none (an older worker) while project
 the fingerprint within one heartbeat. When this host's own `projects.json` does not load, doctor fails on that and
 skips the comparison.
 
+Which projects keep each host busy shows in the capacity report: its projects by run time, per host, in
+`pi-dispatch capacity`, the panel's HOSTS view (`u`) and the insights page's
+[capacity section](insights.md#the-capacity-section).
+
 ## When projects.json is gone
 
 - **`PI_PROJECTS_FILE` still set:** doctor fails with `PI_PROJECTS_FILE is set ... to a file the worker cannot load,

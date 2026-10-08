@@ -42,6 +42,8 @@ tab you keep open picks the new fold up through its Reload/auto-reload controls.
   `portfolio-snapshot-oversize`), and what each portfolio run's plan came to. No host name and no plan reason
   reaches the page. With no envelope the section says so; when Valkey cannot be read it says that and shows no
   number.
+- **Job sizes** and **capacity**: each project's memory peaks against its size ([job sizes](#the-job-sizes-section)),
+  then how busy each host was over the window, hatched where there is no data ([capacity](#the-capacity-section)).
 - **Trend lines**: a cumulative window-spend line under the daily columns (dashed from the first
   estimated day onward — once an estimate enters a running total it never leaves), and per-flow
   daily spend as small panels on one shared scale, dashed wherever an estimated day touches.
@@ -209,7 +211,8 @@ share, average and slots, promised memory and CPU, CPU used, the wait and the bu
 cannot see), never as a warning. The `dispatch_capacity` tool returns it to a model in pi (`window` `24h`, `7d` or
 `30d`, and an optional `host`), as text and as the report `--json` prints. The panel's HOSTS view (`u` in
 `/dispatch`) shows each host's last 7 days under its live slots, budget and running jobs, with the same caveats, and
-reads the report when it opens and again on `u` ([what the panel shows](multi-host.md#what-the-panel-and-doctor-show-you)).
+reads the report when it opens and again on `u` ([what the panel shows](multi-host.md#what-the-panel-and-doctor-show-you)). The insights page draws it too
+([the capacity section](#the-capacity-section)).
 
 - **Jobs only.** No machine load is measured, so a machine busy with other work reads as idle.
 - **Missing history is never idle.** It reads the run mirror where workers declare `PI_WORKER_NAME`, and this host's
@@ -230,6 +233,33 @@ reads the report when it opens and again on `u` ([what the panel shows](multi-ho
   pickup's own time is not. A stall of a later attempt is not counted at all: the run after it reads as an ordinary
   retry, and the stalled attempt's time is in no record. CPU used comes from `resources`, which the job's container
   produces: advisory, like every number there, and read at most at what the job's `--cpus` allows.
+
+### The capacity section
+
+The insights page shows the same report after the job sizes, over the page's own window: the last 7 days, the last
+30 days, or the month so far from its first instant (`mtd`, the same start as the spend). It is read once when the
+page is written, at the moment in its header stamp. Per host:
+
+- **The headline**, in the words `pi-dispatch capacity` prints for the same report: busy and idle (each a share of the
+  time the host's history covers, with the share of the window it does not cover beside them), the jobs at once on
+  average and at peak against the slot count, the time every slot was taken (full), the memory and CPU its jobs were
+  promised against its budget, the CPU they used of the host's CPUs, the wait for a slot at p50 and p95, and the
+  projects by run time.
+- **A chart** of the jobs running at once, on average, in each hour (7 days) or each six hours (30 days and the month).
+  The dashed line is the host's slot count, a tick on a bar is the most that ran at once in it, and hovering a bar
+  gives its busy share, average, peak and full share. The time axis is the whole window and ends at the moment the page
+  was written, so a quiet day is an empty stretch, never squeezed out.
+- **Hatched is no data.** Time before a host's history starts (the run mirror at its cap, the log retention), a host
+  whose history is not here (one without `PI_WORKER_NAME`, or a run mirror that was not read), and anything the page
+  could not read, are hatched in grey and counted as neither busy nor idle. Hovering the hatch says why. An empty
+  stretch with no hatch is a host that ran nothing then.
+- **The caveats** the CLI prints, one per line: jobs refused before a slot, retries, jobs running now, and where the
+  history comes from. A host whose history is not here says why, in the same sentence, and shows no busy share. A
+  history the run mirror cut says "history truncated" with the moment it starts.
+
+Under the hosts, the coverage line the CLI ends with. **Jobs only: a machine busy with other work reads as idle.** The
+page says so every time, because nothing here measures the machine itself. When the report cannot be read at all, the
+section says so and draws no number; the rest of the page is unaffected.
 
 ## Honest limits
 
