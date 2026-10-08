@@ -8,6 +8,7 @@ import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { recordedJobSize } from "./job-size.mjs";
 import { waitArmed } from "./wait-for.mjs";
+import { scheduledForMillis } from "./repeat-slot.mjs";
 import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
 
 export { EARLIER_MAX, recordedEarlier };
@@ -809,6 +810,10 @@ export function queuedAtOf(job) {
 	if (Number.isInteger(job?.attemptsMade) && job.attemptsMade > 0) return null;
 	// A pickup after a STALL is the same: BullMQ raises `stalledCounter`, not `attemptsMade`, and the add's moment is kept.
 	if (Number.isInteger(job?.stalledCounter) && job.stalledCounter > 0) return null;
+	// A job scheduler's job carries its exact slot in its id. BullMQ stamps `timestamp` and computes `delay` from two
+	// separate clock reads, so their sum can land a few milliseconds past the slot (measured in CI).
+	const slot = scheduledForMillis(job?.id);
+	if (Number.isSafeInteger(slot) && slot >= 0 && slot <= 8.64e15) return new Date(slot).toISOString();
 	const timestamp = job?.timestamp;
 	const delay = job?.opts?.delay ?? 0;
 	if (!Number.isSafeInteger(timestamp) || timestamp < 0 || typeof delay !== "number" || !Number.isFinite(delay)) return null;

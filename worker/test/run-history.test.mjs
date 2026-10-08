@@ -2050,6 +2050,12 @@ test("queuedAt is when the job became eligible: timestamp plus the delay it was 
 	const cron = { id: `repeat:daily:${due}`, timestamp: created, opts: { delay: due - created, repeat: { pattern: "0 6 * * *" } }, data: { kind: "local", folder: "/srv/x" } };
 	assert.equal(queuedAtOf(cron), "2026-08-31T06:00:00.000Z");
 	assert.equal(buildRecord({ job: cron, result: { outcome: "completed" } }).queuedAt, "2026-08-31T06:00:00.000Z");
+	// BullMQ stamps the timestamp and computes the delay from two clock reads, so their sum can land past the slot; the
+	// slot in the id wins (measured in CI: 5 ms past).
+	assert.equal(queuedAtOf({ ...cron, opts: { ...cron.opts, delay: due - created + 5 } }), "2026-08-31T06:00:00.000Z", "the id's slot, not the sum");
+	// An id that is not a scheduler's falls back to the sum.
+	assert.equal(queuedAtOf({ ...cron, id: "manual:daily:1" }), "2026-08-31T06:00:00.000Z");
+	assert.equal(queuedAtOf({ ...cron, id: "manual:daily:1", opts: { delay: 5 } }), new Date(created + 5).toISOString());
 	// A job added with no delay is eligible when it was added; a negative delay is no delay.
 	assert.equal(queuedAtOf({ timestamp: created, opts: {} }), new Date(created).toISOString());
 	assert.equal(queuedAtOf({ timestamp: created }), new Date(created).toISOString(), "no opts at all");
