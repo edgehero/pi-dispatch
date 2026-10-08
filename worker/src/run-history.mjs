@@ -7,6 +7,7 @@ import { isForgeKind, targetSeparator } from "./forges.mjs";
 import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { recordedJobSize } from "./job-size.mjs";
+import { waitArmed } from "./wait-for.mjs";
 
 /**
  * Durable per-run history.
@@ -569,7 +570,7 @@ function rebuildUsage(u) {
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null }) {
 	const data = job.data ?? {};
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
@@ -728,7 +729,55 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// refused: an off or unknown dimension never refuses by itself); `hostShare` an integer or null. Present only on
 		// the `job-size-exceeds-host` and `-share` records; null on every other.
 		hostBudget: recordedHostBudget(source.hostBudget),
+		// When the job became ELIGIBLE to run (issue #599, INT-RUN-HISTORY-FILE-CONTRACT), so `startedAt - queuedAt` is how
+		// long it waited for a slot. Additive, nullable, an explicit literal, TAIL position after `hostBudget` on the same
+		// contract. `job.timestamp + opts.delay`, not `job.timestamp` alone: BullMQ's job scheduler creates the next cron
+		// job when the current one runs, stamped with that moment and delayed until it is due (job-scheduler.js
+		// `getNextJobOpts`), so the timestamp alone made a daily trigger read as a day of waiting. `opts.delay` is the
+		// delay the job was ADDED with and survives a `moveToDelayed` (a pause, a deferral) and a retry, while `job.delay`
+		// is rewritten by both (measured against bullmq 5.80.4 on Valkey, worker/test/queued-at.integration.test.mjs), so
+		// a pause window and a retry's backoff count as waiting, which they are. Null for a job held on `run.waitFor`: a
+		// wait its trigger asked for is not a wait for capacity. An ISO string or null, a number's rendering, so PII-free.
+		queuedAt: queuedAtOf(job),
+		// What this host offered when the job took its slot (issue #599, INT-RUN-HISTORY-FILE-CONTRACT): `{ slots, memMiB,
+		// cpuCenti, cpus }`, the live PI_CONCURRENCY, the host budget as `hostBudget` above maps it, and the CPUs the OS
+		// reports. Additive, nullable, an explicit literal REBUILT here (`recordedCapacity`), TAIL position after `queuedAt`.
+		// Passed in by the processor only once the job is ADMITTED (index.mjs, where `startedAt` is set), so it is also
+		// the record's own answer to "did this run hold a slot": null on every refusal before one, which is what
+		// lets a capacity report tell a run from a refusal without guessing from the wall time (capacity.mjs).
+		capacity: recordedCapacity(capacity),
 	};
+}
+
+/**
+ * When a job became eligible to run, as an ISO string, or null: `job.timestamp` plus the delay it was added with
+ * (`opts.delay`, at least 0). Null for a job armed with `run.waitFor` (its wait is its trigger's own) and for any input
+ * that is not a finite, representable instant.
+ */
+export function queuedAtOf(job) {
+	if (waitArmed(job?.data)) return null;
+	const timestamp = job?.timestamp;
+	const delay = job?.opts?.delay ?? 0;
+	if (!Number.isSafeInteger(timestamp) || timestamp < 0 || typeof delay !== "number" || !Number.isFinite(delay)) return null;
+	const at = timestamp + Math.max(0, Math.trunc(delay));
+	// 8.64e15 is the last instant a Date can hold; past it `toISOString` throws, and this function must not.
+	return at <= 8.64e15 ? new Date(at).toISOString() : null;
+}
+
+/** A record's non-negative safe integer, else null. */
+const recordInt = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+/** A record's budget dimension: an integer, `"off"` (the budget's `Infinity`, or the word itself), else null. */
+const recordBudget = (v) => (v === Infinity || v === "off" ? "off" : recordInt(v));
+
+/**
+ * A run's capacity as a record carries it: `{ slots, memMiB, cpuCenti, cpus }`, else null. `slots` and `cpus` are
+ * positive integers or null (unknown); each budget dimension is `recordedHostBudget`'s mapping, so `"off"` and null
+ * keep meaning "not limited" and "not known".
+ */
+export function recordedCapacity(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	const positive = (v) => (Number.isSafeInteger(v) && v >= 1 ? v : null);
+	return { slots: positive(value.slots), memMiB: recordBudget(value.memMiB), cpuCenti: recordBudget(value.cpuCenti), cpus: positive(value.cpus) };
 }
 
 /**
@@ -739,9 +788,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
  */
 export function recordedHostBudget(value) {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
-	const int = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
-	const budget = (v) => (v === Infinity || v === "off" ? "off" : int(v));
-	return { memMiB: budget(value.memMiB), cpuCenti: budget(value.cpuCenti), hostShare: int(value.hostShare) };
+	return { memMiB: recordBudget(value.memMiB), cpuCenti: recordBudget(value.cpuCenti), hostShare: recordInt(value.hostShare) };
 }
 
 /** What became of a collected plan. */

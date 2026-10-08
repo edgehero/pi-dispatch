@@ -1123,6 +1123,39 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Traces to**: `DES-SIZE-SUGGESTIONS`, `REQ-HOST-BUDGET`, `REQ-SCOPED-LIMITS`, `REQ-INSIGHTS-HTML-EXPORT`,
   `INT-RUN-HISTORY-FILE-CONTRACT`
 
+## REQ-CAPACITY-INSIGHTS
+
+- **Statement**: The operator shall be told, per host, how busy it is and was with this deployment's jobs (issue
+  #599): over a window of a day, a week or thirty days, the share of the time it ran at least one job and the share
+  it sat idle, how many jobs ran at once (average and peak) and how long every slot was taken, how much of its
+  memory and CPU budget its jobs were promised and how much CPU they used, how long jobs waited for a slot (p50 and
+  p95), and which projects used it. Phase 1 delivers the record fields that make this exact (`queuedAt`, `capacity`),
+  the report (`INT-CAPACITY-REPORT`) and `pi-dispatch capacity`; later phases show the same report in doctor, the
+  panel, a tool and the insights page. It is READ-ONLY: computing it writes no record, no key and no file, and
+  nothing decides on it. It is JOBS ONLY: no host load is sampled, so a machine busy with other work reads as idle,
+  and every surface says so. **History it cannot see is never shown as idle**: time before what its sources hold (a
+  run mirror at its cap, the log retention) and a live host whose runs it cannot read are reported as missing,
+  counted in neither busy nor idle, and named. It carries no secret and no PII: host names, project ids, numbers and
+  fixed words only.
+- **Why**: without it, whether a machine is at its limit or mostly idle is answered by reading run records by hand.
+  Sizing a host, a budget or `PI_CONCURRENCY` up or down is a decision about money and throughput, and a report that
+  read a truncated history as a quiet machine would steer it the wrong way, which is worse than no report.
+- **Acceptance**: Given two jobs on one host with two slots overlapping for an hour, then the report says both slots
+  were taken for that hour and the peak was two; given one job ending the instant the next starts, then the peak is
+  one. Given a job refused before a slot (a never-fits or wait-gate refusal), then its record carries `capacity: null`
+  and it adds nothing to busy time; given a record from before the field, then it counts when it spans a second or
+  carries `resources`, and the report counts the inference. Given a run mirror at its cap whose oldest run ended
+  inside the window, then the report says the history is truncated and from when, and the earlier time is missing,
+  not idle; given a live host that declares no `PI_WORKER_NAME`, then another host's report names it as not shared and
+  counts its window as missing. Given a daily cron trigger, then its runs' waits are measured from their scheduled
+  minute, not from a day before; given a job held on `run.waitFor`, then it records no wait. Given a host with its CPU
+  budget off, then CPU shares are of all its CPUs. Given an unreachable Valkey, then `pi-dispatch capacity` still
+  answers from this host's files and says the mirror was not read; given a shell and `.env` naming different
+  Valkeys, then it refuses until `--valkey-url` names one. Given the same records and instant, then the report is the
+  same on every host.
+- **Traces to**: `DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-DURABLE-RUN-HISTORY`, `OQ-039`
+
 ## REQ-DELEGATED-ALLOCATION
 
 - **Statement**: The worker shall apply a **priorities plan** (`INT-PRIORITIES-PLAN-CONTRACT`) with no human keypress,
@@ -3347,6 +3380,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `REQ-CAPACITY-INSIGHTS`**: per host, how busy it is and was with this deployment's jobs (busy and idle time, slots at once and time full, promised memory and CPU, CPU used, waits, projects), read-only, jobs only (a machine busy with other work reads as idle), history it cannot see reported as missing and never as idle, no secret or PII. Phase 1 delivers the record fields, the report and `pi-dispatch capacity`. Checked and UNCHANGED: `REQ-DURABLE-RUN-HISTORY`, `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-SIZE-SUGGESTIONS`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 3. **`REQ-SIZE-SUGGESTIONS` CORRECTED** to one rule: the apply call is offered exactly when admission would accept the suggested job (the suggested size per dimension, else the current one). Doctor withholds it only when its host has a numeric budget dimension and refuses that job, and offers it with the budget `off` or unknown (it withheld a lowering admission accepts); the panel and the insights page withhold it only when every live host that published a numeric budget refuses it (they judged only the suggested dimension). A withheld call names the dimension that does not fit. Acceptance gains the three cases and the doctor-panel agreement. UNCHANGED, checked: `REQ-HOST-BUDGET`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 2. **`REQ-SIZE-SUGGESTIONS` CORRECTED**: no suggestion goes past the project's `hostShare` of a host's budget (it was capped at the whole budget, then flagged, while still offering the call); a suggestion that would never fit offers no call; refusals no longer crowd measured runs out of the window; the panel says why a raise has no cap; the panel's call never breaks inside a JSON string. The acceptance gains those cases. Checked and UNCHANGED: `REQ-HOST-BUDGET`, `REQ-SCOPED-LIMITS`, `REQ-INSIGHTS-HTML-EXPORT`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 1. **`REQ-SIZE-SUGGESTIONS` CORRECTED** on two measured facts: page cache alone drives a peak to the limit with no OOM, and a job's throttling is the same at any CPU share because `--cpus` is the host's ceiling. Memory now raises only after a confirmed `oom-killed` run (the at-limit raise is removed; pressure at the limit is a fact with no call), CPUs only lower (the throttled raise is removed; throttling is a fact about the host's CPU ceiling), every suggestion is capped at what the host offers and never advises growing a budget, a lowering never goes below the window's heaviest run nor what an OOM in it asked for, the panel wraps the call instead of cutting it, and doctor says suggestions are off while the scoped-limits file does not load. The acceptance is rewritten around those cases (the cap, the page-cache and throttle non-raises, the deflation and flip-flop floors, the 256 KiB cap). Checked and UNCHANGED: `REQ-HOST-BUDGET` (the budget is what the cap reads), `REQ-SCOPED-LIMITS`, `REQ-INSIGHTS-HTML-EXPORT`. |

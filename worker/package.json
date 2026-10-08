@@ -65,6 +65,7 @@
 		"./container-spec": "./src/container-spec.mjs",
 		"./job-size": "./src/job-size.mjs",
 		"./size-suggest": "./src/size-suggest.mjs",
+		"./capacity": "./src/capacity.mjs",
 		"./size-records": "./src/size-records.mjs",
 		"./host-budget": "./src/host-budget.mjs",
 		"./backend-conformance": "./src/backend-conformance.mjs",

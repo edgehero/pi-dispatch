@@ -4863,7 +4863,10 @@ validator rather than a second copy of it.
     "size":    { "memMiB": <int>, "cpuCenti": <int>,                                    // issue #596, phase 1: the size the job was GIVEN,
                  "source": "project" | "env" | "default" } | null,                       // resolved at pickup
     "hostBudget": { "memMiB": <int> | "off" | null, "cpuCenti": <int> | "off" | null,   // issue #596, phase 2: the budget a never-fits
-                    "hostShare": <int> | null } | null }                                // refusal judged the size against
+                    "hostShare": <int> | null } | null,                                 // refusal judged the size against
+    "queuedAt": "<ISO-8601>" | null,                                                    // issue #599: when the job became eligible to run
+    "capacity": { "slots": <int> | null, "memMiB": <int> | "off" | null,                // issue #599: what this host offered when the job
+                  "cpuCenti": <int> | "off" | null, "cpus": <int> | null } | null }     // took its slot; null on a refusal before one
   ```
   **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
   after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
@@ -4911,6 +4914,30 @@ validator rather than a second copy of it.
   NOW is deferred; neither writes a record. There is no fleet refusal: an earlier draft of phase 2 had one
   (`job-size-exceeds-fleet`), and it was removed before release because the registry it read lists no host that is
   restarting.
+  **`queuedAt` (issue #599) is additive, nullable, an explicit literal, and TAIL position** after `hostBudget`: the
+  moment the job became ELIGIBLE to run, `job.timestamp` plus the delay it was added with (`opts.delay`, at least 0), as
+  an ISO string, so `startedAt - queuedAt` is how long it waited for a slot. Not `job.timestamp` alone: BullMQ's job
+  scheduler creates the next cron job when the current one runs, stamped with that moment and delayed until it is due,
+  so the timestamp alone made a daily trigger read as a day of waiting. `opts.delay` is the add's and survives a
+  `moveToDelayed` (a pause window, a scope or budget deferral) and a retry, so those count as waiting, which they are;
+  measured against bullmq 5.80.4 on Valkey, including both scheduler kinds (`worker/test/queued-at.integration.test.mjs`).
+  Null for a job armed with `run.waitFor` (the wait its trigger asked for is not a wait for capacity) and when the
+  wrapper carries no finite timestamp. A number's rendering, so PII-free by construction. A retry keeps the first
+  add's moment, so its wait includes the earlier attempt and its backoff.
+  **`capacity` (issue #599) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position** after
+  `queuedAt`: what the host offered when the job was ADMITTED, set by the processor at the one point where `startedAt`
+  is (after every gate, before the clone and the container) and carried by every record written after it. `slots` is
+  the live `PI_CONCURRENCY`, `memMiB` and `cpuCenti` the host budget as `hostBudget` writes it (an integer, `"off"`, or
+  null where no budget is set or a dimension is unknown), and `cpus` the CPU count the OS reports
+  (`os.availableParallelism()`); a fact that cannot be read is null, never a failed job. **Null on every record written
+  before a slot was held**: the never-fits refusals, the wait gate's refusals and every record from before the field.
+  So the key also answers "did this run hold a slot", which is what the capacity report reads it for
+  (`DES-CAPACITY-FROM-RECORDS`). Integers and a fixed word, so PII-free by construction.
+  **Readers of `queuedAt` and `capacity` (issue #599)**: the capacity report (`worker/src/capacity.mjs`,
+  `INT-CAPACITY-REPORT`) reads them with `host`, `project`, `startedAt`, `endedAt`, `size` and `resources.cpuUsec`,
+  judges every value again as untrusted, and writes nothing to any record. A record without the `capacity` key (from
+  before it) is inferred to have held a slot when its span is at least one second or it carries `resources`, and the
+  report counts each such inference.
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
   only the attempts that FINISHED before this one (it increments in `moveToFinished`/`moveToFailed`, bullmq 5.80.4),
@@ -5399,7 +5426,81 @@ validator rather than a second copy of it.
   the job's `run.backend`, else the deployment default, including a job refused before any container (a `backend-unblessed` refusal records the
   unblessed name, and a venue this worker never built is refused and recorded rather than retried); given a
   deployment that never sets `run.backend`, the first twenty-five fields serialise
-  exactly as before and `backend` names the default.
+  exactly as before and `backend` names the default. Given a job the processor admitted, its record carries
+  `capacity` with the slot count, budget and CPU count read at admission, whatever changed while it ran; given a
+  never-fits or wait-gate refusal, `capacity` is null; given a cron job, `queuedAt` is its scheduled slot (the millis
+  in its `repeat:<id>:<millis>` id), not the moment the scheduler created it; given a job held on `run.waitFor`,
+  `queuedAt` is null.
+
+## INT-CAPACITY-REPORT
+
+- **Contract** (issue #599, `REQ-CAPACITY-INSIGHTS`, `DES-CAPACITY-FROM-RECORDS`): the capacity report, version 1,
+  returned by `computeCapacity` (`worker/src/capacity.mjs`, exported as `@edgehero/pi-dispatch/capacity`) and printed
+  whole by `pi-dispatch capacity --json`. Every surface that shows capacity shows this object, so they cannot disagree.
+  Times are integer milliseconds (instants since the epoch, spans as lengths); a ratio is an integer PER MILLE (a
+  thousandth), rounded half up, never a float; a number that cannot be known is null, never 0.
+  ```jsonc
+  {
+    "v": 1,
+    "window": { "fromMs": <int>, "toMs": <int>, "bucketMs": <int> },     // the window asked for, and its bucket
+    "coverage": {
+      "source": "mirror" | "mirror+local" | "local",                       // where the records came from
+      "reason": "<sentence>" | null,                                       // why a source is missing, in words
+      "fromMs": <int>,                                                     // history starts here: earlier is MISSING
+      "truncated": <bool>,                                                 // the run mirror was at its cap
+      "used": <int>, "refusedBeforeSlot": <int>, "legacyInferred": <int>,  // records counted, refusals, inferences
+      "withoutSize": <int>, "withoutResources": <int>,                     // counted runs not in promised / CPU used
+      "unreadable": <int>, "withoutHost": <int>,                           // records not counted, and why
+      "running": <int> | null,                                             // jobs the live rows say run now (no record yet)
+      "historyNotShared": ["<host>", ...]                                  // live hosts whose runs this reader cannot see
+    },
+    "hosts": [ {                                                           // sorted by name
+      "name": "<host>", "shared": <bool>,
+      "capacity": { "slots": <int> | null, "memMiB": <int> | "off" | null, "cpuCenti": <int> | "off" | null,
+                    "cpus": <int> | null, "basis": "recorded" | "current" | "unknown", "changed": <bool> },
+      "coveredMs": <int>, "missingMs": <int>, "busyMs": <int>, "idleMs": <int>,  // busy + idle + missing = the window
+      "fullMs": <int> | null,                                              // time with every slot taken
+      "peak": <int>, "avgMilli": <int> | null,                             // most at once; average x 1000
+      "promisedMemPerMille": <int> | null, "promisedCpuPerMille": <int> | null, "usedCpuPerMille": <int> | null,
+      "runs": <int>, "refused": <int>,
+      "projects": [ { "project": "<id>" | null, "runMs": <int>, "cpuMs": <int> } ],   // at most 5, by run time
+      "otherProjects": { "count": <int>, "runMs": <int>, "cpuMs": <int> } | null,
+      "waits": { "n": <int>, "p50Ms": <int> | null, "p95Ms": <int> | null },
+      "buckets": [ { "fromMs": <int>, "coveredMs": <int>, "busyMs": <int>, "fullMs": <int> | null,
+                     "peak": <int>, "avgMilli": <int> | null } ]
+    } ]
+  }
+  ```
+- **Meaning of the numbers.** `busyMs` is the time at least one job held a slot; `idleMs` the covered time with none;
+  `missingMs` the time this reader has no history for (before `coverage.fromMs`, or the whole window for a host in
+  `historyNotShared`), counted in neither. `fullMs` is the time at or above `capacity.slots`, null when the slot count
+  is unknown. `avgMilli` is the run time over the covered time (the average number of jobs at once, x 1000).
+  `promisedMemPerMille` is the jobs' memory sizes times their time over the memory budget times the covered time,
+  null without an integer budget; `promisedCpuPerMille` the same for CPU sizes, and `usedCpuPerMille` the measured CPU
+  time (each run's `cpuUsec` spread evenly over its wall and clamped to the most CPU a job can be given), both over the
+  CPU budget or, where that is `off` or unknown, every CPU of the machine (`cpus`), null when neither is known. A
+  share can pass 1000 (a budget lowered while jobs ran). `capacity` is the newest one a run in the window recorded
+  (`basis: "recorded"`, `changed` when runs recorded different ones), else the live registry row's slot count and
+  budget (`"current"`, `cpus` null since the row does not carry it), else all null (`"unknown"`). `waits` are
+  `startedAt - queuedAt` of the runs that started in the covered window, non-negative only, at nearest-rank p50 and
+  p95. `projects` ranks by run time (the sum of each run's time in the window, so two parallel runs count twice);
+  `cpuMs` is their measured CPU time. `buckets` split the window from its start, the last ending at the window's end.
+- **The CLI.** `pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]`; `--since`
+  defaults to `7d`, and the bucket is an hour, six hours and a day for the three windows (`CAPACITY_WINDOWS`).
+  `--json` prints this object on one line; `--host` keeps that host's entry and refuses a name the report does not
+  have. It reads `VALKEY_URL` by the kill switch's rule and `PI_LOGS_DIR`, `PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME`
+  by the deployment's (`cliDeploymentEnv`), never `loadConfig`. Exit 0 with a report, also when Valkey is unreachable
+  or refused (the coverage says so); exit 1 for a usage error, an unknown host, or a shell and `.env` naming different
+  Valkeys without `--valkey-url`.
+- **Content rule.** Host names are the records' and the registry's (`PI_WORKER_NAME`'s charset), project ids are
+  charset-checked ids, and everything else is a number or a fixed word: no repository, folder, branch or payload text
+  reaches the report.
+- **Acceptance**: Given two runs on one host overlapping for an hour with two slots, then `fullMs` is that hour and
+  `peak` 2; given two runs where one ends at the instant the next starts, then `peak` is 1; given a mirror at its cap
+  whose oldest run ended inside the window, then `truncated` is true, `fromMs` is that run's end, and the time before
+  it is in `missingMs`, never in `idleMs`; given a live host that does not mirror its runs, then it is listed in
+  `historyNotShared` and its whole window is missing; given a CPU budget `off`, then the CPU shares are over `cpus`;
+  given any input, then for every host `busyMs + idleMs + missingMs` equals the window.
 
 ## INT-OUTBOX-CONTRACT
 
@@ -7855,3 +7956,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-07 | Issue #596, phase 3 (size suggestions). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED** with its new readers: the size suggestion (`DES-SIZE-SUGGESTIONS`) reads `resources`, `size`, `project`, `startedAt`, `endedAt` and `reason`, judges each record again as untrusted, and writes nothing; the record's shape is UNCHANGED. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: the admin panel's PROJECTS view and the insights page read `budgetMemMiB`, `budgetCpuCenti`, `usedMemMiB` and `usedCpuCenti` (the view flags a suggestion above the largest published budget; the page shows each host's budget and use); the fields are UNCHANGED. No new file or wire shape: the suggestion is an in-process value of the worker package (`@edgehero/pi-dispatch/size-suggest`, and `./host-budget` is exported for `publishedBudget`). Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT` (a suggestion is applied only through its existing tools), `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT` (no new setting). |
 | 2026-10-07 | Issue #596, phase 3, review gate round 1. **`INT-HOST-REGISTRY-CONTRACT` CORRECTED**, the readers paragraph: the PROJECTS view and the insights page no longer flag a suggestion against the largest budget per field across hosts (a pair no host has, so a size fitting one host's memory and another's CPUs passed); they cap a raise per host on that host's own pair of `budgetMemMiB` and `budgetCpuCenti`. The fields are UNCHANGED. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the readers paragraph: the suggestion also reads `memFullUsec` (a fact line, no call), only `reason` `oom-killed` raises memory, and its one file reader (`worker/src/size-records.mjs`, exported as `@edgehero/pi-dispatch/size-records` for the admin) opens a file only within the window plus a day by mtime, skips and counts one over 256 KiB, and keeps the newest 50 records per project; the record's shape is UNCHANGED. Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 2. **`INT-HOST-REGISTRY-CONTRACT` CORRECTED**, the readers paragraph (rewrapped): the PROJECTS view and the insights page cap a raise at the project's `hostShare` of each integer budget, floor(budget x hostShare / 100), not at the whole budget, since the worker refuses a job above the share. The fields are UNCHANGED. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**, the readers paragraph: the file reader drops a record without an object `resources` and a `size` BEFORE it keeps the newest 50 per project; it kept the newest 50 first, so fifty refusals crowded every measured run out. The record's shape is UNCHANGED. Checked and UNCHANGED: `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONFIG-OVERLAY-CONTRACT`. |
+| 2026-10-08 | Issue #599, phase 1 (capacity records). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED** with two tail fields after `hostBudget`: `queuedAt`, when the job became eligible (`job.timestamp` plus the `opts.delay` it was added with, measured against bullmq 5.80.4 on Valkey to survive `moveToDelayed`, a retry and both scheduler kinds; null for a `run.waitFor` hold), and `capacity`, what the host offered when the job was admitted (`{ slots, memMiB, cpuCenti, cpus }`, the live `PI_CONCURRENCY`, the budget as `hostBudget` writes it, the OS CPU count), set where `startedAt` is and null on every record before a slot. Readers and acceptance lines added. **NEW `INT-CAPACITY-REPORT`**: the report v1 (`computeCapacity`, `@edgehero/pi-dispatch/capacity`) and `pi-dispatch capacity [--since 24h\|7d\|30d] [--host <name>] [--json]`. Checked and UNCHANGED: `INT-HOST-REGISTRY-CONTRACT` (the report reads `concurrency`, `budgetMemMiB`, `budgetCpuCenti`, `budgetRunning` and `routes` as they are). |
