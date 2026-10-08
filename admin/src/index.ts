@@ -2800,6 +2800,10 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
           const sizing = projectSizing(paths, { hostBudgets: hostBudgetsOf(hosts), nowMs: Date.now() });
           return c?.unreachable ? { unreachable: String(c.unreachable), sizing } : { byProject: c?.fold?.byProject ?? [], sizing };
         },
+        // The HOSTS view (issue #599 phase 3, key `u`): the capacity report of the last 7 days, read once when the view
+        // opens, through `readCapacity`, the read `dispatch_capacity` and `pi-dispatch capacity` make, so the three cannot
+        // print two reports. Read-only: no registry prune, no mirror write. Its Valkey and file reads live here.
+        capacityInfo: ({ window = "7d" }: any = {}) => readCapacity({ url: paths.valkeyUrl, env: deploymentEnv(), window }),
         launchSandbox: ({ jobId }: { jobId: string }) => openSandboxSession(paths, jobId),
         // The ALLOCATION view (issue #504 part C, key `b`): the envelope and the split, read here where the Valkey and the
         // file reads live, WITH the plan's reasons, which only this view draws (escaped, through the control-byte gate).

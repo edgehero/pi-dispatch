@@ -169,8 +169,8 @@ the memory part of it (below).
 
 ## What each run records about capacity
 
-Two more fields in every run record feed the capacity report (issue #599), which `pi-dispatch capacity` prints
-today and the other surfaces will show:
+Two more fields in every run record feed the capacity report (issue #599), which `pi-dispatch capacity`, doctor,
+`dispatch_capacity` and the panel's HOSTS view show:
 
 | Field | What it is |
 |---|---|
@@ -204,10 +204,12 @@ reads only `VALKEY_URL` (or the one `--valkey-url` names) and the logs directory
 nothing. If a Valkey you named with `--valkey-url` refuses or does not answer, it exits 1; one taken from the
 environment gives a report from this host's files, and says why.
 
-The same report shows in two more places. `pi-dispatch doctor` prints one line per host for the last 7 days (busy
+The same report shows in three more places. `pi-dispatch doctor` prints one line per host for the last 7 days (busy
 share, average and slots, promised memory and CPU, CPU used, the wait and the busiest project, then what the line
 cannot see), never as a warning. The `dispatch_capacity` tool returns it to a model in pi (`window` `24h`, `7d` or
-`30d`, and an optional `host`), as text and as the report `--json` prints.
+`30d`, and an optional `host`), as text and as the report `--json` prints. The panel's HOSTS view (`u` in
+`/dispatch`) shows each host's last 7 days under its live slots, budget and running jobs, and reads the report once
+when it opens ([what the panel shows](multi-host.md#what-the-panel-and-doctor-show-you)).
 
 - **Jobs only.** No machine load is measured, so a machine busy with other work reads as idle.
 - **Missing history is never idle.** It reads the run mirror where workers declare `PI_WORKER_NAME`, and this host's

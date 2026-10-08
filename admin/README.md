@@ -172,6 +172,11 @@ One command puts a live terminal view over the whole deployment:
   the runs list. `dispatch_projects` lists them, and `dispatch_project_add`, `dispatch_project_edit` and
   `dispatch_project_delete` change `projects.json` behind your confirm
   ([`docs/projects.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/projects.md)).
+- **Hosts.** `u` shows each worker host: its slots in use of its limit, what its budget has promised its jobs,
+  who waits, and its running jobs with project, size and age, then how busy it was over the last 7 days (busy
+  share, jobs at once, time full, the wait and the top projects). The 7 days are read when the view opens, and
+  history the records do not hold is said, never shown as idle. `dispatch_capacity` returns the same report
+  ([`docs/multi-host.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/multi-host.md#what-the-panel-and-doctor-show-you)).
 - **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`
   in the list shows each project's share and spend, the applied plan with the reasons it gave, and the history.
   `r` on a history row reverts to it after a yes or no. `dispatch_priorities_set` sets a plan of weights with

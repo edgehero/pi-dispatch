@@ -723,6 +723,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     it cannot count is counted as such; a row whose list does not parse makes that host's count, and so the fleet's,
     unknown rather than borrowed from its budget. The registry is read at
     the report's clock, since a row's age decides how far its jobs count.
+  - **The panel's HOSTS view** (phase 3, key `u`) shows the same report's 7 days per host under the live lines the
+    panel's tick reads from the registry rows (slots in use of the limit, what the budget promised, waiters, the
+    running jobs). The report is read once when the view opens, through `readCapacity`, never per tick: a records read
+    every second is the quiet load a dashboard must not add. A host whose history is not here gets `notSharedWhy`, the
+    sentence the CLI prints, and no busy share; a job list that does not parse reads `?`, never 0.
   - **Doctor and the tool** show the same report: doctor one fact line per host over 7 days, never a warning (nothing
     decides on it), from the Valkey it already talks to under a 5 s bound for the whole read, its connection bounded and
     its client disconnected when the bound passes, since giving up on a read is not enough to let the process exit; `dispatch_capacity`
@@ -2467,7 +2472,13 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   substituted, so an operator sees that a bidi override is there and it reorders nothing; the panel puts the name
   LAST on its line, so nothing follows it, and the insights page wraps it in `<bdi>`. The dashboard's PROJECTS view
   (`j`) reads the month's fold by project once on entry through an injected `projectsInfo` seam whose records scan
-  lives in `index.ts`, and its Enter filters the runs list by the id each record carries. A
+  lives in `index.ts`, and its Enter filters the runs list by the id each record carries. The HOSTS view (`u`, issue
+  #599; `h` is the held view's, `c` and `g` stay dead) draws each live host from the registry rows the panel's tick
+  already reads, projected to the budget and live fields and their running jobs put through the worker's allowlist
+  again (`hostRowOf`, `parseLiveJobs`), and its last 7 days from the capacity report read once on entry through an
+  injected `capacityInfo` seam (`readCapacity` in `index.ts`, the read `dispatch_capacity` makes), never on the 1 s
+  tick, so the tick never reads history; an answer that arrives after Esc is dropped. Its hint rides the runs divider
+  beside `j`, after it, so a long project filter clips the hint rather than its id. A
   write can be **operator-typed** (`ctx.ui` `select`/`input`/`confirm` dialogs from the overlay, or a
   `/dispatch set` command) **or model-initiated but operator-approved**: a write tool routes through
   `confirmedWrite`, which applies the change only after the operator approves a `ctx.ui.confirm` showing the
@@ -9092,3 +9103,4 @@ a tunnel.
 | 2026-10-08 | Issue #599, phase 1, CI correction. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: a scheduler job's queued moment is the slot in its id (exact), and the rejected alternatives say why `timestamp` plus `delay` is not used for it. |
 | 2026-10-08 | Issue #599, phase 2. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: two pieces, the jobs running now (from the host rows' `jobs`, counted from admission to now, to the row's last beat when the row is older than two beats, a job with a record already in the window as the record, an orphan not as busy, every running job not counted said as such; the registry read at the report's clock) and the other surfaces (doctor's one fact line per host over 7 days under a 5 s bound, `dispatch_capacity` through the CLI's own read and functions); three rejected alternatives (the budget ledger as the source, keeping an orphan's entry until the budget sweep, counting a running job to now on any row); the residual "a job running now is not in the history until it ends" replaced by what is still not counted. **`DES-HOST-REGISTRY` AMENDED**: the new fields and why they meet the content rule (job ids and project ids are charset-checked identifiers already in `runs:rec:*`; a delivery id, the one part not checked at its source, is held to `[A-Za-z0-9._:-]{1,128}` by the writer and digested otherwise, which also keeps every backslash out of the JSON), with two rejected alternatives (publishing a job's repository or target; an uncapped list). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Decision names `dispatch_capacity` among the reads. **`DES-HOST-BUDGET`** UNCHANGED, checked: no admission rule moved; the one release point gained the running-jobs entry beside the holds. |
 | 2026-10-08 | Issue #599, phase 2, corrections. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: a listed job is matched to its record by the id as the row publishes it (a digested id was counted twice until its row's next beat); a row whose list does not parse leaves that host's running count, and the fleet's, unknown instead of borrowing the budget's count; doctor's read is stopped and its client disconnected when its bound passes, with the connection and its ready check bounded too, because a server that accepted the connection and never answered kept doctor alive after it had printed everything. |
+| 2026-10-08 | Issue #599, phase 3. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the panel gains the HOSTS view on `u` (`h` is the held view's; `c` and `g` stay dead): each live host from the registry rows the tick already reads (the snapshot's `hostBudgets` gains the slot count, the budget's running and waiting counts, the running jobs through the worker's allowlist again, the row's age and `routes`), and its last 7 days from the capacity report, read once on entry through an injected `capacityInfo` seam whose read (`readCapacity`) lives in `index.ts`, never on the tick; a late answer after Esc is dropped; the hint rides the runs divider after `j`. Rejected: reading the report on the tick (a records read every second) and a footer hint (the footer has 7 columns left at 80). **`DES-CAPACITY-FROM-RECORDS` AMENDED**: the panel is named among the surfaces, with why its read is once per opening. **`DES-HOST-REGISTRY` UNCHANGED, checked**: a new reader, no field. **Code evidence**: admin/src/dashboard.ts -> hostsView, hostRowOf, loadCapacity; admin/src/index.ts -> capacityInfo. |

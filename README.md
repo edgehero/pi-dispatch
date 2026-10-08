@@ -470,6 +470,7 @@ In the panel:
 | `w` `m` | manage quiet hours, manage scoped limits |
 | `j` | show the projects, their members and spend; `Enter` on one filters the runs list |
 | `b` | show the budget split (the list's `b`; in an opened run, `b` reopens its workspace) |
+| `u` | show each host: its slots, budget and running jobs now, and how busy it was over the last 7 days |
 | `h` `f` | show held jobs, show failed jobs |
 | `l` `o` | open the running job's live log, change the runs sort |
 | `x` on a running job | cancel it (asks first) |
