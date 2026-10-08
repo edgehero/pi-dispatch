@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CAPACITY_ENV_KEYS, capacityText, durationText, milliText, percentText, runCapacity } from "../src/capacity-cli.mjs";
+import { CAPACITY_ENV_KEYS, capacityText, durationText, historySourceText, milliText, percentText, runCapacity } from "../src/capacity-cli.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // `pi-dispatch capacity` (issue #599, REQ-CAPACITY-INSIGHTS): every collaborator injected, the clock too. The Valkey is
@@ -190,4 +190,8 @@ test("--host keeps that host's coverage in --json too: its start, its cut and it
 	const text = harness(deployment([run("c", 2, 1, { stalledRepick: true })]));
 	assert.equal(await runCapacity([], text.opts), 0);
 	assert.match(text.out.join(""), /1 run was picked up again after a stall: the first pickup's time is not counted/);
+});
+
+test("a host's history source in words: both sources are named when both hold it, and none says `only`", () => {
+	assert.deepEqual(["local", "mirror", "mirror+local", "records"].map(historySourceText), ["this host's files", "the run mirror", "the run mirror and this host's files", "the run records"]);
 });

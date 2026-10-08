@@ -37,7 +37,7 @@ import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS, coresText, cpusText } from "@edgehero/pi-dispatch/size-suggest";
 import { LIVE_FRESH_MS } from "@edgehero/pi-dispatch/capacity";
-import { durationText, milliText, notSharedWhy, percentText, share } from "@edgehero/pi-dispatch/capacity-cli";
+import { basisNote, durationText, fleetRecordNotes, historyNotes, hostCaveats, milliText, notSharedWhy, percentText, share } from "@edgehero/pi-dispatch/capacity-cli";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
@@ -659,22 +659,31 @@ export function makeDashboard({
     }
     tui?.requestRender?.();
   };
-  // The HOSTS view (issue #599 phase 3, key `u`): the 7-day capacity report, read through the injected `capacityInfo`
-  // seam ONCE when the view opens, never per tick (index.ts holds the Valkey and file reads); the live lines come from
-  // the tick's own registry rows. `capSeq` numbers each read, so one that answers after Esc (or after a reopen started a
-  // newer one) is dropped rather than drawn under a view that did not ask for it.
+  // The HOSTS view (issue #599, key `u`): the 7-day capacity report, read through the injected `capacityInfo` seam when
+  // the view opens and when `u` is pressed in it, never per tick (index.ts holds the Valkey and file reads); the live
+  // lines come from the tick's own registry rows. AT MOST ONE READ IS IN FLIGHT (`capRead`): a `u` while one runs waits
+  // for that one rather than starting another, so pressing Esc and `u` over a slow mirror cannot stack reads. `capSeq`
+  // numbers each request, so an answer that lands after Esc is never drawn, and only the latest request draws it.
   let capInfo: any = null;
   let capSeq = 0;
+  let capRead: Promise<any> | null = null;
   const loadCapacity = async () => {
     const seq = ++capSeq;
-    let res: any;
-    try {
-      res = typeof deps?.capacityInfo === "function" ? await deps.capacityInfo({ window: "7d" }) : { unwired: true };
-    } catch (err: any) {
-      res = { unreachable: err?.message ?? String(err) };
+    if (!capRead) {
+      capRead = (async () => {
+        try {
+          const res = typeof deps?.capacityInfo === "function" ? await deps.capacityInfo({ window: "7d" }) : { unwired: true };
+          return res && typeof res === "object" ? res : { unreachable: "no answer" };
+        } catch (err: any) {
+          return { unreachable: err?.message ?? String(err) };
+        }
+      })().finally(() => {
+        capRead = null;
+      });
     }
+    const res = await capRead;
     if (seq !== capSeq || disposed || view !== "HOSTS") return;
-    capInfo = res && typeof res === "object" ? res : { unreachable: "no answer" };
+    capInfo = res;
     tui?.requestRender?.();
   };
   const refresh = async () => {
@@ -992,12 +1001,18 @@ export function makeDashboard({
         return;
       }
       if (view === "HOSTS") {
-        // Read-only (issue #599 phase 3): Esc backs out and drops the report, so the next `u` reads it again; every other
-        // key is inert, like FAILED.
+        // Read-only (issue #599): Esc backs out and drops the report; `u` reads the 7 days again, keeping the report on
+        // screen, marked, until the new one lands; every other key is inert, like FAILED.
         if (matchesKey(data, "escape")) {
           view = "LIST";
           capInfo = null;
           capSeq++;
+          tui?.requestRender?.();
+          return;
+        }
+        if (data === "u" || data === "U") {
+          capInfo = capInfo?.report ? { ...capInfo, refreshing: true } : { loading: true };
+          void loadCapacity();
           tui?.requestRender?.();
         }
         return;
@@ -1292,8 +1307,8 @@ export function makeDashboard({
         tui?.requestRender?.();
         return;
       }
-      // `u` opens the HOSTS view (issue #599 phase 3) -- the runs divider names it, as it names `j`. The report of the
-      // last 7 days is read once, here, through the injected seam; the live lines are the snapshot's and follow the tick.
+      // `u` opens the HOSTS view (issue #599) -- the runs divider names it, as it names `j`. The report of the last 7 days
+      // is read here, through the injected seam, and again on `u` in the view; the live lines are the snapshot's.
       // `h` is the held view's, so the key is `u` (use); not `c` or `g`, the removed views' keys, which stay inert.
       if (data === "u" || data === "U") {
         capInfo = { loading: true };
@@ -1533,8 +1548,9 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     const dw = framed ? Math.min(Math.trunc(width), ALLOC_WIDTH) : Math.trunc(width);
     const iw = framed ? dw - 4 : 24;
     const { title: detailTitle, lines } = hostsView(snapshot, state.capInfo, iw, styler);
-    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "esc back"];
-    const footer = fitLine(styler.fg("accent", "esc") + " " + styler.fg("dim", "back"), iw, styler);
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "u refresh · esc back"];
+    const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
+    const footer = fitLine([k("u", "refresh"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer });
     return centerBlock(boxed, Math.trunc(width), dw);
   }
@@ -2781,36 +2797,50 @@ function hostName(v: any): string {
 }
 
 /**
- * One budget dimension of a live row: `memory 6g of 16g`, `memory off` for a dimension switched off, or null without a
- * budget. What the jobs HOLD against it is what the budget promised them, so this is the live half of "promised".
+ * A live row's budget in words. Each dimension is a published integer (what the jobs HOLD against it is what the budget
+ * promised them: `memory 6g of 16g`), `off` (`no memory budget`), "" (the worker has not read it yet: it publishes ""
+ * until its budget exists), or absent (a worker from before the budget fields). Never a guessed number.
  */
-function budgetPart(label: string, budget: any, used: any, fmt: (n: number) => string): string | null {
-  if (budget === "off") return `${label} budget off`;
-  const b = countOf(budget);
-  if (b === null) return null;
-  const u = countOf(used);
-  return `${label} ${u === null ? "?" : fmt(u)} of ${fmt(b)}`;
+function budgetText(r: any): string {
+  const dim = (label: string, budget: any, used: any, fmt: (n: number) => string) => {
+    if (budget === undefined || budget === null) return { kind: "absent", text: `no ${label} budget published` };
+    if (budget === "off") return { kind: "off", text: `no ${label} budget` };
+    const b = countOf(budget);
+    if (b === null) return { kind: "unknown", text: `${label} budget not known yet` };
+    const u = countOf(used);
+    return { kind: "set", text: `${label} ${u === null ? "?" : fmt(u)} of ${fmt(b)}` };
+  };
+  const parts = [dim("memory", r?.budgetMemMiB, r?.usedMemMiB, formatMemory), dim("CPU", r?.budgetCpuCenti, r?.usedCpuCenti, formatCpus)];
+  if (parts.every((p) => p.kind === "absent")) return "no host budget published";
+  if (parts.every((p) => p.kind === "unknown")) return "budget not known yet";
+  const set = parts.filter((p) => p.kind === "set").map((p) => p.text);
+  return [...(set.length > 0 ? [`promised ${set.join(", ")}`] : []), ...parts.filter((p) => p.kind !== "set").map((p) => p.text)].join(", ");
 }
 
 /**
  * The HOSTS view (issue #599 phase 3, `REQ-CAPACITY-INSIGHTS`): per host, the live lines from the registry rows the
- * tick already read (`hostRowOf`), then its last 7 days from the capacity report read once when the view opened
- * (`capacityInfo`, the report `pi-dispatch capacity` and `dispatch_capacity` print, `INT-CAPACITY-REPORT`).
+ * tick already read (`hostRowOf`), then its last 7 days from the capacity report read when the view opened or on `u`
+ * in it (`capacityInfo`, the report `pi-dispatch capacity` and `dispatch_capacity` print, `INT-CAPACITY-REPORT`),
+ * labelled with the minute it was read, so a week read then never reads as contradicting the live lines above it.
  *
  * LIVE: the slots in use of the limit (the listed jobs that are not orphans plus the row's `jobsMore`; a worker from
- * before `jobs` falls back to its budget's running count; a list that does not parse is `?`, never 0), what the budget
- * has promised its jobs against the budget or that there is none, who waits for it, and the row's age once it is older
- * than the report trusts (`LIVE_FRESH_MS`). Then up to `HOSTS_JOBS_SHOWN` running jobs, oldest first: id, project, size,
- * age, an orphan (a container whose stop did not take) marked; the rest are counted.
+ * before `jobs` falls back to its budget's running count; a list that does not parse, or a row with no beat time, is
+ * `?`, never 0), what the budget has promised its jobs against the budget (or that a dimension is off, not known yet or
+ * not published), who waits for it, and the row's age once it is older than the report trusts (`LIVE_FRESH_MS`). Then
+ * up to `HOSTS_JOBS_SHOWN` running jobs, oldest first: id, project, size, age, an orphan (a container whose stop did not
+ * take) marked; the rest are counted, running and orphaned apart.
  *
  * HISTORY: busy share, slots on average and at peak, time full, the wait p95 and the top projects, from the report as it
- * is. MISSING HISTORY IS NEVER IDLE: a host whose history is not here says why with the sentence every surface uses
- * (`notSharedWhy`); a cut or local-only history and an unreadable job list are said under the host. Every value is
+ * is, then the CLI's own caveats and history notes. MISSING HISTORY IS NEVER IDLE: a host whose history is not here
+ * says why with the sentence every surface uses (`notSharedWhy`). Every value is
  * another host's or a record's: names and ids are escaped and gated (`textCell`), and every line is fitted to `iw`.
  */
 function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: string; lines: string[] } {
   const rows: any[] = Array.isArray(snapshot?.hostBudgets) ? snapshot.hostBudgets : [];
   const report = info && !info.loading && Array.isArray(info.report?.hosts) ? info.report : null;
+  // The moment the report was read (its `nowMs`): the 7 days are a reading taken then, not the live lines' now.
+  const readAt = Number.isSafeInteger(report?.window?.toMs) ? `${new Date(report.window.toMs).toISOString().slice(11, 16)} UTC` : null;
+  const last7 = readAt ? `last 7d to ${readAt}` : "last 7d";
   const byName = new Map<string, any>(report ? report.hosts.map((h: any) => [h?.name, h]) : []);
   const liveNames = new Set(rows.map((r: any) => r?.name));
   const historyOnly: any[] = report ? report.hosts.filter((h: any) => !liveNames.has(h?.name)) : [];
@@ -2844,38 +2874,41 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
 
   if (snapshot?.queue?.fleetDegraded) lines.push(...wrapped(`host registry unreadable (${cellOf(snapshot.queue.fleetDegraded)}): the rows last read`, "warning"));
   if (!info || info.loading) lines.push(...wrapped("reading the last 7 days of run records", "dim"));
+  else if (info.refreshing) lines.push(...wrapped("reading the last 7 days again", "dim"));
   else if (info.unwired) lines.push(...wrapped("history not wired in this panel (no capacity reader)", "dim"));
   else if (info.unreachable || info.error || !report) lines.push(...wrapped(`history unreadable (${cellOf(info.unreachable ?? info.error ?? "no report")})`, "error"));
   if (rows.length === 0 && historyOnly.length === 0) lines.push(...wrapped(report ? "no live host, and no host ran a job in the last 7d" : "no live host row", "dim"));
 
   const historyLines = (h: any, name: any): string[] => {
     if (!report) return wrapped(`last 7d: ${!info || info.loading ? "reading" : "not read"}`, "dim", "  ");
+    const label = last7;
     if (!h) {
       // The report judges names by the worker's rule, so a row named outside it has no history line to show.
       const why = typeof name === "string" && WORKER_NAME_RE.test(name) ? "not in the report (its read did not see this host)" : "not counted (not a worker name)";
-      return wrapped(`last 7d: ${why}`, "warning", "  ");
+      return wrapped(`${label}: ${why}`, "warning", "  ");
     }
-    if (!h.shared) return wrapped(`last 7d: not here: ${notSharedWhy(h, report.coverage)}`, "warning", "  ");
-    if (!(h.coveredMs > 0)) return wrapped("last 7d: no history here", "dim", "  ");
+    if (!h.shared) return wrapped(`${label}: not here: ${notSharedWhy(h, report.coverage)}`, "warning", "  ");
+    if (!(h.coveredMs > 0)) return wrapped(`${label}: no history here`, "dim", "  ");
     const out: string[] = [];
     const slots = Number.isSafeInteger(h.capacity?.slots) ? ` of ${h.capacity.slots}` : "";
     const bits = [`busy ${percentText(share(h.busyMs, h.coveredMs))}`, `avg ${milliText(h.avgMilli ?? 0)}${slots}, peak ${h.peak}`];
     if (h.fullMs !== null && h.fullMs !== undefined) bits.push(`full ${percentText(share(h.fullMs, h.coveredMs))}`);
     bits.push(h.waits?.n > 0 ? `wait p95 ${durationText(h.waits.p95Ms)}` : "no wait recorded");
-    out.push(...wrappedBits([`last 7d: ${bits[0]}`, ...bits.slice(1)], "text", "  "));
+    out.push(...wrappedBits([`${label}: ${bits[0]}`, ...bits.slice(1)], "text", "  "));
     const projects: any[] = Array.isArray(h.projects) ? h.projects : [];
     if (projects.length > 0) {
       const named = projects.map((p: any) => `${p?.project === null || p?.project === undefined ? "(no project)" : clip(textCell(p.project), 20)} ${durationText(p.runMs)}`);
       if (h.otherProjects) named.push(`${h.otherProjects.count} other${h.otherProjects.count === 1 ? "" : "s"} ${durationText(h.otherProjects.runMs)}`);
       out.push(...wrapped(`top: ${named.join(", ")}`, "muted", "  "));
     }
-    // What this history cannot see, said under the host it is about. Never folded into busy or idle.
+    // What these numbers leave out or infer, and what the history cannot see, in the CLI's own sentences (capacity-cli
+    // `basisNote`, `hostCaveats`, `historyNotes`), so the panel cannot word a caveat differently or drop one. Never folded
+    // into busy or idle.
     const cov = h.coverage ?? {};
-    const notes: string[] = [cov.source === "local" ? "from this host's files only" : cov.source === "mirror" ? "from the run mirror" : "from the run records"];
-    if (h.missingMs > 0) notes.push(`${percentText(share(h.missingMs, h.missingMs + h.coveredMs))} of the window has no history${cov.truncated ? " (the run mirror holds nothing older)" : ""}, counted as neither busy nor idle`);
-    if (cov.liveUnreadable > 0) notes.push("its running jobs could not be read, so none is counted");
-    if (cov.liveNotCounted > 0) notes.push(`${cov.liveNotCounted} running not counted`);
-    out.push(...wrapped(notes.join("; "), "dim", "  "));
+    const basis = basisNote(h.capacity);
+    const caveats = [...(basis ? [`slots: ${basis}`] : []), ...hostCaveats(cov)];
+    if (caveats.length > 0) out.push(...wrapped(caveats.join("; "), "warning", "  "));
+    out.push(...wrapped(historyNotes(h).join("; "), "dim", "  "));
     return out;
   };
 
@@ -2890,28 +2923,38 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
 
   const liveLines = (r: any): string[] => {
     const out: string[] = [];
-    const stale = Number.isSafeInteger(r?.staleMs) && r.staleMs > LIVE_FRESH_MS ? `stale ${durationText(r.staleMs)}` : "";
+    // A row with no readable beat time is no evidence the host runs (capabilities.mjs, and the report counts none of its
+    // jobs), so its slots in use are `?`, never its list's count; a row older than the report trusts is stale.
+    const undated = !Number.isSafeInteger(r?.staleMs);
+    const stale = undated ? "no beat time" : r.staleMs > LIVE_FRESH_MS ? `stale ${durationText(r.staleMs)}` : "";
     const nameWidth = Math.max(8, iw - (stale ? styler.visibleLen(stale) + 2 : 0));
     out.push(fitLine(styler.bold(styler.fg("accent", clip(hostName(r?.name), nameWidth))) + (stale ? "  " + styler.fg("warning", stale) : ""), iw, styler));
     const listed: any[] | null = Array.isArray(r?.jobs) ? r.jobs : null;
-    const running = listed ? listed.filter((j: any) => !j?.o).length + (countOf(r?.jobsMore) ?? 0) : r?.jobsUnreadable ? null : countOf(r?.budgetRunning);
+    const running = undated ? null : listed ? listed.filter((j: any) => !j?.o).length + (countOf(r?.jobsMore) ?? 0) : r?.jobsUnreadable ? null : countOf(r?.budgetRunning);
     const limit = countOf(r?.concurrency);
     const bits = [running === null ? (limit === null ? "? running" : `? of ${limit} slots`) : limit === null ? `${running} running` : `${running} of ${limit} slots`];
-    const mem = budgetPart("memory", r?.budgetMemMiB, r?.usedMemMiB, formatMemory);
-    const cpu = budgetPart("CPU", r?.budgetCpuCenti, r?.usedCpuCenti, formatCpus);
-    bits.push(mem === null && cpu === null ? "no host budget" : `promised ${[mem ?? "memory: no budget", cpu ?? "CPU: no budget"].join(", ")}`);
+    bits.push(budgetText(r));
     const waiting = countOf(r?.waiters);
     if (waiting !== null && waiting > 0) bits.push(`${waiting} waiting for the budget`);
     out.push(...wrappedBits(bits, "text", "  "));
-    if (stale) out.push(...wrapped("its row is stale: its running jobs count up to its last beat", "warning", "  "));
+    if (undated) out.push(...wrapped("its row carries no beat time, so it is no evidence the host runs: its jobs are not counted", "warning", "  "));
+    else if (stale) out.push(...wrapped("its row is stale: its running jobs count up to its last beat", "warning", "  "));
     if (r?.jobsUnreadable) out.push(...wrapped("its list of running jobs could not be read: how many run is unknown", "warning", "  "));
-    else if (!listed) out.push(...wrapped(running === null ? "it lists no running jobs (a worker older than this panel)" : `it lists no running jobs (a worker older than this panel): ${running} by its budget`, "dim", "  "));
-    else {
+    else if (!listed) {
+      // `waiters` came with `jobs` (issue #599): a row that has the one and not the other is a worker still starting,
+      // which publishes "" for both; a row with neither is a worker from before the fields.
+      const why = r?.waiters !== undefined ? "its running jobs are not published yet (the worker is starting)" : running === null ? "it lists no running jobs (a worker older than this panel)" : `it lists no running jobs (a worker older than this panel): ${running} by its budget`;
+      out.push(...wrapped(why, "dim", "  "));
+    } else {
       const more = countOf(r?.jobsMore) ?? 0;
       if (listed.length === 0 && more === 0) out.push(styler.cell("    no job running", iw, { color: "dim" }));
       for (const j of listed.slice(0, HOSTS_JOBS_SHOWN)) out.push(jobRow(j));
-      const rest = Math.max(0, listed.length - HOSTS_JOBS_SHOWN) + more;
-      if (rest > 0) out.push(styler.cell(`    +${rest} more running`, iw, { color: "dim" }));
+      // The hidden rest, running and orphaned counted apart: an orphan holds no slot, as the slots line already says.
+      const hidden = listed.slice(HOSTS_JOBS_SHOWN);
+      const hiddenOrphans = hidden.filter((j: any) => j?.o).length;
+      const hiddenRunning = hidden.length - hiddenOrphans + more;
+      const rest = [...(hiddenRunning > 0 ? [`${hiddenRunning} more running`] : []), ...(hiddenOrphans > 0 ? [`${hiddenOrphans} orphaned container${hiddenOrphans === 1 ? "" : "s"}`] : [])];
+      if (rest.length > 0) out.push(styler.cell(`    +${rest.join(", ")}`, iw, { color: "dim" }));
       if (listed.some((j: any) => j?.o)) out.push(...wrapped("orphan: a container whose stop did not take, still held by the budget", "warning", "    "));
     }
     return out;
@@ -2929,8 +2972,7 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
   if (report) {
     lines.push(styler.cell("", iw));
     const cov = report.coverage ?? {};
-    const notes: string[] = ["Jobs only: a machine busy with other work reads as idle"];
-    if (Number.isSafeInteger(cov.unreadable) && cov.unreadable > 0) notes.push(`${cov.unreadable} record${cov.unreadable === 1 ? "" : "s"} unreadable, not counted`);
+    const notes: string[] = ["Jobs only: a machine busy with other work reads as idle", ...fleetRecordNotes(cov).map(textCell)];
     if (typeof cov.reason === "string" && cov.reason !== "") notes.push(textCell(cov.reason));
     lines.push(...wrapped(`${notes.join("; ")}.`, "dim"));
   }

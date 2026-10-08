@@ -219,8 +219,11 @@ function hostCoverage(names, liveByName, coverage, windowStartMs, nowMs) {
 		// A named host's runs are all in the mirror (its row says it routes), and so are those of a host with no live row
 		// whose runs the mirror holds; a live row that does NOT route is a worker without `PI_WORKER_NAME`, which mirrors none.
 		if (isObject(coverage.mirror) && (row ? row.routes === "true" : mirrorHosts.has(name))) options.push({ fromMs: clamp(coverage.mirror.fromMs), source: "mirror", truncated: coverage.mirror.truncated === true });
-		options.sort((a, b) => a.fromMs - b.fromMs);
-		out.set(name, options[0] ?? null);
+		// The earliest start wins, and on a tie the files (never cut by the mirror's cap). A host BOTH sources cover says so
+		// (`mirror+local`): its records came from both, and naming one read a host the mirror also holds as files only.
+		options.sort((a, b) => a.fromMs - b.fromMs || Number(a.truncated) - Number(b.truncated));
+		const first = options[0] ?? null;
+		out.set(name, first && options.length > 1 ? { ...first, source: "mirror+local" } : first);
 	}
 	return out;
 }

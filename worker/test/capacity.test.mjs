@@ -210,9 +210,12 @@ test("each host's history starts where the best source holding all its runs star
 	assert.deepEqual([by.seen.coverage.fromMs, by.seen.coverage.source], [NOW - 20 * H, "local"], "a peer on a shared logs directory");
 	assert.equal(r.coverage.used, 3);
 	assert.equal(r.coverage.fromMs, NOW - 6 * H, "the fleet's: every covered host has history from here on");
-	// A host both sources hold is covered from the earlier of the two.
+	// A host both sources hold is covered from the earlier of the two, and its source says both.
 	const both = report([], { live: [{ name: "here", routes: "true" }], coverage: { ...coverage, mirror: { ...coverage.mirror, hosts: ["here"] } } });
-	assert.deepEqual([both.hosts[0].coverage.fromMs, both.hosts[0].coverage.source], [NOW - 20 * H, "local"]);
+	assert.deepEqual([both.hosts[0].coverage.fromMs, both.hosts[0].coverage.source, both.hosts[0].coverage.truncated], [NOW - 20 * H, "mirror+local", false]);
+	// On a tie the files' start is taken (the mirror's cut does not apply to them), still named as both.
+	const tie = report([], { live: [{ name: "here", routes: "true" }], coverage: { ...coverage, local: { fromMs: NOW - 6 * H }, mirror: { ...coverage.mirror, hosts: ["here"] } } });
+	assert.deepEqual([tie.hosts[0].coverage.source, tie.hosts[0].coverage.truncated], ["mirror+local", false]);
 	// Without a readable mirror a named host is not shared; without the logs directory this host is not either.
 	assert.deepEqual(report([], { live, coverage: { ...coverage, mirror: null } }).coverage.historyNotShared, ["a", "b"]);
 	assert.deepEqual(report([], { live, coverage: { ...coverage, local: null } }).coverage.historyNotShared, ["b", "here", "seen"]);
