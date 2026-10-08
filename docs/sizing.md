@@ -282,6 +282,16 @@ confirm. The panel's limit dialogs (`m` in `/dispatch`) cannot do this: they edi
 The rules in full, with their rounding steps, are in [choosing a size from the
 runs](scoped-limits.md#choosing-a-size-from-the-runs).
 
+**How busy each host is** is a separate report, from the same run records plus the jobs running now: busy and idle
+time, jobs at once, the memory and CPU promised against the budget and the CPU used. It shows in three places:
+
+- **`pi-dispatch capacity`** (`--since 24h|7d|30d`, `--host`, `--json`).
+- **`pi-dispatch doctor`**: one line per host for the last 7 days, never a warning.
+- **`dispatch_capacity`**: the same report to a model in pi.
+
+It counts this deployment's jobs only, so a machine busy with other work reads as idle; see
+[the capacity report](insights.md#pi-dispatch-capacity).
+
 ## A worked example
 
 One Linux machine with 64 GB of memory and 16 CPUs, Docker with systemd, a single worker (no `PI_WORKER_NAME`), and

@@ -71,25 +71,18 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 	try {
 		const { readLiveHosts } = await import("./host-registry.mjs");
 		// Both reads at once, so a Valkey that does not answer costs one timeout, not two.
-		// `prune: false`: this command writes nothing, not even the registry reader's tidying of a dead member.
+		// `prune: false`: this command writes nothing, not even the registry reader's tidying of a dead member. `now` is the
+		// report's clock: a row's age decides how far its running jobs count (`LIVE_FRESH_MS`).
 		const [fleet, read] = await Promise.all([
-			redis ? (readLiveHostsFn ?? readLiveHosts)(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS, prune: false }).catch((error) => ({ unreachable: error?.message ?? "registry unreadable" })) : { unreachable: null },
+			redis ? (readLiveHostsFn ?? readLiveHosts)(redis, { now, timeoutMs: FLEET_READ_TIMEOUT_MS, prune: false }).catch((error) => ({ unreachable: error?.message ?? "registry unreadable" })) : { unreachable: null },
 			readCapacityRecords({ redis, logsDir, sinceMs: windowStartMs, nowMs, retentionDays, localHost, noMirrorReason: refusedNote, timeoutMs: FLEET_READ_TIMEOUT_MS, ...(fs ? { fs } : {}) }),
 		]);
 		if (named && (fleet.unreachable || read.mirrorState.startsWith("unreachable"))) return fail(`could not read Valkey at ${urlShown(url)}: ${fleet.unreachable ? `host registry ${fleet.unreachable}` : `run mirror ${read.mirrorState}`}`);
 		const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
 		const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs, nowMs, bucketMs: window.bucketMs, coverage });
-		if (host !== undefined) {
-			const known = report.hosts.map((h) => h.name);
-			if (!known.includes(host)) return fail(`no host named ${JSON.stringify(host)} in the last ${since}${known.length > 0 ? ` (hosts: ${known.join(", ")})` : ""}`);
-			const shown = report.hosts.find((h) => h.name === host);
-			report.hosts = [shown];
-			// The coverage says what the shown host's history is: its start, its cut and its counts. What cannot be put on
-			// a host (a record with no readable host, the live rows' running jobs, the reasons a source was not read) stays.
-			const { fromMs, source: _source, truncated, ...counts } = shown.coverage;
-			report.coverage = { ...report.coverage, fromMs, truncated, ...counts, historyNotShared: report.coverage.historyNotShared.filter((n) => n === host) };
-		}
-		write(json ? `${JSON.stringify(report)}\n` : capacityText(report, { since }));
+		const shown = host === undefined ? { report } : onlyHost(report, host);
+		if (shown.unknown) return fail(`no host named ${JSON.stringify(host)} in the last ${since}${shown.unknown.length > 0 ? ` (hosts: ${shown.unknown.join(", ")})` : ""}`);
+		write(json ? `${JSON.stringify(shown.report)}\n` : capacityText(shown.report, { since }));
 		return 0;
 	} finally {
 		redis?.disconnect?.();
@@ -97,11 +90,25 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 }
 
 /**
+ * The report cut to one host (`--host`, and the admin's `dispatch_capacity`): `{ report }`, or `{ unknown: [names] }` when
+ * the report has no such host. The coverage then says what the shown host's history is: its start, its cut and its
+ * counts. What cannot be put on a host (a record with no readable host, the live rows' running jobs, the reasons a
+ * source was not read) stays.
+ */
+export function onlyHost(report, host) {
+	const known = report.hosts.map((h) => h.name);
+	if (!known.includes(host)) return { unknown: known };
+	const shown = report.hosts.find((h) => h.name === host);
+	const { fromMs, source: _source, truncated, ...counts } = shown.coverage;
+	return { report: { ...report, hosts: [shown], coverage: { ...report.coverage, fromMs, truncated, ...counts, historyNotShared: report.coverage.historyNotShared.filter((n) => n === host) } } };
+}
+
+/**
  * What this command reads of the deployment: the logs directory (config.mjs `logsDirPath`, the worker's rule), the
  * retention (30 days unless set; 0 keeps the files) and this host's name (`PI_WORKER_NAME`, else the hostname), or
  * `{ problem }` for a retention the worker would refuse to boot with.
  */
-async function deploymentFacts(env) {
+export async function deploymentFacts(env) {
 	const raw = env.PI_LOG_RETENTION_DAYS;
 	if (raw !== undefined && raw !== "" && !/^\d{1,6}$/.test(raw)) return { problem: `PI_LOG_RETENTION_DAYS must be a non-negative integer (got ${JSON.stringify(raw)})` };
 	const { logsDirPath, defaultWorkerName, WORKER_NAME_RE } = await import("./config.mjs");
@@ -182,6 +189,9 @@ function hostLines(h, since) {
 	}
 	if (cov.refusedBeforeSlot > 0) lines.push(`  ${plural(cov.refusedBeforeSlot, "job")} refused before a slot`);
 	if (cov.retried > 0) lines.push(`  ${plural(cov.retried, "retried run")}: ${plural(cov.earlier, "earlier attempt")} counted from the records the retries kept; an attempt whose record was not kept is not counted, so busy time can be under-counted`);
+	if (cov.live > 0) lines.push(`  ${plural(cov.live, "job")} running now, counted as busy up to now (or the host's last beat)`);
+	if (cov.liveNotCounted > 0) lines.push(`  ${cov.liveNotCounted} more running now ${cov.liveNotCounted === 1 ? "is" : "are"} not counted (not listed by its row, or its history is not shared), so busy time can be under-counted`);
+	if (cov.orphans > 0) lines.push(`  ${plural(cov.orphans, "orphaned container")} (a stop that did not take) still held by the budget, counted by ${cov.orphans === 1 ? "its record" : "their records"} up to the stop`);
 	if (cov.stalledRepick > 0) lines.push(`  ${cov.stalledRepick} ${cov.stalledRepick === 1 ? "run was" : "runs were"} picked up again after a stall: the first pickup's time is not counted`);
 	const notes = [`history from ${cov.source === "local" ? "this host's files" : cov.source === "mirror" ? "the run mirror" : "the run records"}`];
 	if (h.missingMs > 0) notes.push(`from ${new Date(cov.fromMs).toISOString()} on${cov.truncated ? " (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)" : ""}, earlier time counted as neither busy nor idle`);
@@ -201,7 +211,7 @@ function coverageLines(cov) {
 	if (cov.unreadable > 0) notes.push(`${plural(cov.unreadable, "record")} unreadable, not counted`);
 	if (cov.withoutHost > 0) notes.push(`${cov.withoutHost} without a host, not counted`);
 	if (cov.earlierDropped > 0) notes.push(`${plural(cov.earlierDropped, "carried earlier attempt")} not counted (not valid, beyond the 4 a record keeps, or overlapping its own run)`);
-	if (cov.running !== null && cov.running > 0) notes.push(`${plural(cov.running, "job")} running now, counted once ${cov.running === 1 ? "it ends" : "they end"}`);
+	if (cov.running !== null && cov.running > 0) notes.push(`${plural(cov.running, "job")} running now${cov.liveNotCounted > 0 ? `, ${cov.liveNotCounted} of them not counted until ${cov.liveNotCounted === 1 ? "it ends" : "they end"}` : ", counted up to now"}`);
 	if (cov.reason) notes.push(cov.reason);
 	return [`Coverage: ${notes.join("; ")}.`, "Jobs only: a machine busy with other work reads as idle."];
 }

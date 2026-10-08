@@ -407,6 +407,11 @@ test("BY SHAPE: every hold is given back through the ONE releaseAllHolds, and no
 	// Every exit calls it: the scope deferral, the endpoint deferral, the budget deferral, the setup guard and the finally
 	// (with the orphan flag). The never-fits check is above the wait gate and every hold: it holds nothing.
 	assert.equal((outside.match(/releaseAllHolds\(/g) ?? []).length, 5, "five calls; a new exit must be counted here");
+	// Issue #599, phase 2: the running-jobs entry is given back there too, and nowhere else; it is added once, at admission.
+	assert.ok(/runningJobs\.remove\(/.test(inside), "the running entry is removed inside releaseAllHolds");
+	assert.deepEqual(outside.match(/runningJobs\.remove\(/g) ?? [], [], "and nowhere else");
+	assert.equal((body.match(/runningJobs\.add\(/g) ?? []).length, 1, "added once");
+	assert.match(body, /capacity = capacityNow\(\);\s*runningKey = runningJobs\.add\(/, "right where the job is admitted");
 	assert.match(outside, /await releaseAllHolds\(\{ orphan: stopDidNotTake \}\);/);
 });
 
@@ -520,4 +525,85 @@ test("a retry or a pickup after a stall reads the record it will replace and car
 	failing.releaseNext();
 	assert.equal((await third).outcome, "completed");
 	assert.equal(failing.seen.records.at(-1).earlier, null);
+});
+
+// Issue #599, phase 2: the jobs this host runs now, an entry per admitted pickup, gone on every exit.
+test("the running-jobs entry exists exactly while an admitted job runs, and is gone on completion, failure, abort and a refusal after admission (#599)", { skip }, async () => {
+	for (const hostBudget of [null, (await budgetOf()).b]) {
+		const runningJobs = mod.makeRunningJobs();
+		const h = harness({ hostBudget, extra: { runningJobs } });
+		const run = h.processor(ghJob("ran").job, "tok", signal());
+		await h.untilStarted(1);
+		const [entry] = runningJobs.list();
+		assert.deepEqual({ ...entry, at: typeof entry.at }, { id: "ran", project: "shop", memMiB: 8192, cpuCenti: 200, at: "number" });
+		h.releaseNext();
+		assert.equal((await run).outcome, "completed");
+		assert.equal(entry.at, Date.parse(h.seen.records.at(-1).startedAt), "admitted at the record's startedAt");
+		assert.equal(runningJobs.size(), 0, `completed (budget: ${hostBudget !== null})`);
+	}
+
+	// A failure (the container step throws), an abort, and a refusal after admission (an invalid overlay).
+	const runningJobs = mod.makeRunningJobs();
+	const cases = [
+		["failed", { runContainer: async () => { throw new Error("daemon went away"); } }, {}],
+		["aborted", { runContainer: async () => ({ code: 137, aborted: true, turns: null }) }, {}],
+		["refused after admission", {}, { getSettings: () => ({ invalid: "overlay does not parse" }) }],
+	];
+	for (const [name, deps, extra] of cases) {
+		const seenDuring = [];
+		const h = harness({ hold: false, extra: { runningJobs, ...extra } });
+		const processor = deps.runContainer
+			? mod.makeProcessor({ cancelJob: () => {}, stopContainer: () => {}, redis: fakeRedis(), getSettings: SETTINGS, projects: () => SHOP, jobSizeEnv: { PI_JOB_MEMORY: "8g", PI_JOB_CPUS: "2" }, now: () => NOW, recordRun: () => {}, timeoutMs: 100000, runningJobs, deps: { mintToken: async () => "tok", isDefaultBranchProtected: async () => true, prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }), runContainer: async (...a) => (seenDuring.push(runningJobs.size()), deps.runContainer(...a)), cleanup: async () => {}, comment: async () => {}, log: () => {} } })
+			: h.processor;
+		await Promise.resolve(processor(ghJob(name).job, "tok", signal())).catch(() => {});
+		if (deps.runContainer) assert.deepEqual(seenDuring, [1], `${name}: listed while it ran`);
+		else assert.ok(Number.isInteger(h.seen.records.at(-1).capacity?.slots), `${name}: its record says it was admitted`);
+		assert.equal(runningJobs.size(), 0, `${name}: gone`);
+	}
+});
+
+test("a setup throw after admission gives the running-jobs entry back with every other hold (#599)", { skip }, async () => {
+	const runningJobs = mod.makeRunningJobs();
+	const h = harness({ extra: { runningJobs, containerName: () => {
+		throw new Error("no name for this venue");
+	} } });
+	await assert.rejects(() => h.processor(ghJob("setup").job, "tok", signal()), /no name/);
+	assert.equal(runningJobs.size(), 0);
+});
+
+test("stop_did_not_take: the running entry goes with the pickup, and the orphan is listed from the budget's ledger alone (#599)", { skip }, async () => {
+	const { liveJobsOf } = await import("../src/live-jobs.mjs");
+	const { b } = await budgetOf();
+	const runningJobs = mod.makeRunningJobs();
+	const ac = new AbortController();
+	const processor = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis: fakeRedis(),
+		getSettings: SETTINGS,
+		projects: () => SHOP,
+		jobSizeEnv: { PI_JOB_MEMORY: "2g", PI_JOB_CPUS: "2" },
+		hostBudget: b,
+		abortGraceMs: 0,
+		now: () => NOW,
+		recordRun: () => {},
+		timeoutMs: 100000,
+		runningJobs,
+		deps: {
+			mintToken: async () => "tok",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
+			runContainer: async () => {
+				ac.abort("job-timeout-30m");
+				return new Promise(() => {});
+			},
+			cleanup: async () => {},
+			comment: async () => {},
+			log: () => {},
+		},
+	});
+	await processor(ghJob("o").job, "tok", ac.signal);
+	assert.equal(runningJobs.size(), 0, "the processor is done with it");
+	const { jobs } = liveJobsOf({ running: runningJobs.list(), budgetEntries: b.entries() });
+	assert.deepEqual(jobs.map((j) => [j.id, j.o]), [["o", 1]], "listed as an orphan while the budget keeps watching its container");
 });

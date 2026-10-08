@@ -648,8 +648,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
   `parseTriggers`, atomic — and reloaded **live** by both services, `OQ-008`). The model-callable tools are
   the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`,
-  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_allocations`; the **queue
-  controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue** `dispatch_run`; the **confirm-gated writes**
+  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_allocations`,
+  `dispatch_capacity` (issue #599: the capacity report, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue** `dispatch_run`; the **confirm-gated writes**
   `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_delete`, `dispatch_pause_add`,
   `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`,
   `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`,
@@ -1130,8 +1130,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   it sat idle, how many jobs ran at once (average and peak) and how long every slot was taken, how much of its
   memory and CPU budget its jobs were promised and how much CPU they used, how long jobs waited for a slot (p50 and
   p95), and which projects used it. Phase 1 delivers the record fields that make this exact (`queuedAt`, `capacity`),
-  the report (`INT-CAPACITY-REPORT`) and `pi-dispatch capacity`; later phases show the same report in doctor, the
-  panel, a tool and the insights page. It is READ-ONLY: computing it writes no record, no key and no file, and
+  the report (`INT-CAPACITY-REPORT`) and `pi-dispatch capacity`; phase 2 counts the jobs running now (from the host
+  rows), and shows the same report as one doctor line per host and through the `dispatch_capacity` tool; later phases
+  show it in the panel and the insights page. It is READ-ONLY: computing it writes no record, no key and no file, and
   nothing decides on it. It is JOBS ONLY: no host load is sampled, so a machine busy with other work reads as idle,
   and every surface says so. **History it cannot see is never shown as idle**: time before what its sources hold (a
   run mirror at its cap, the log retention) and a live host whose runs it cannot read are reported as missing,
@@ -1161,6 +1162,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   environment, then `pi-dispatch capacity` still answers from this host's files and says the mirror was not read; given
   one named with `--valkey-url`, then it exits 1; given a shell and `.env` naming different Valkeys, then it refuses
   until `--valkey-url` names one. Given the same records and instant, then the report is the same on every host.
+  Given a job running now on a host whose row is fresh, then it counts as busy from its admission to now, with or
+  without a host budget; given a running job its row does not list, then the report says it is not counted. Given
+  `pi-dispatch doctor`, then each host gets one fact line and never a warning; given `dispatch_capacity`, then it
+  returns the report `pi-dispatch capacity --json` prints for the same window.
 - **Traces to**: `DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-DURABLE-RUN-HISTORY`, `OQ-039`
 
@@ -3325,7 +3330,9 @@ instead of drifting.
 
 - Every worker has an IDENTITY: `PI_WORKER_NAME`, defaulting to this machine's sanitized hostname. It is
   always populated, so a fleet of two can be told apart before anyone has configured anything.
-- Every worker PUBLISHES a row about itself and can READ its peers' (`INT-HOST-REGISTRY-CONTRACT`).
+- Every worker PUBLISHES a row about itself and can READ its peers' (`INT-HOST-REGISTRY-CONTRACT`), including the
+  jobs it runs now (`jobs`, job ids, project ids and integers only, issue #599), which the capacity report reads and no
+  decision does.
 - The identity reaches the operator where they already look: on every worker log line, in every run
   record, on the boot line, and as the BullMQ worker name.
 - **A single-host deployment is unchanged in every way that decides anything.** The registry runs, because
@@ -3388,6 +3395,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-08 | Issue #599, phase 2. **`REQ-CAPACITY-INSIGHTS` AMENDED**: the Statement says phase 2 counts the jobs running now (from the host rows) and shows the report as one doctor line per host and through `dispatch_capacity`; the Acceptance adds a running job counted from its admission to now with or without a host budget, a running job its row does not list said as not counted, doctor's one fact line per host and never a warning, and the tool returning the report the CLI prints. **`REQ-MULTI-HOST-COORDINATION` AMENDED**, one line: a row also carries the jobs its host runs now (job ids, project ids and integers), read by the capacity report and by no decision. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Statement names `dispatch_capacity` among the reads (the wiring scan matches the registered tools exactly). **`REQ-HOST-BUDGET`** UNCHANGED, checked: the running jobs come from an in-flight map that exists without a budget; the budget's ledger only flags orphans and decides nothing new. |
 | 2026-10-08 | Issue #599, phase 1, third corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance: CPU used is never above 100% of the host's CPUs, and the CPU budget is not used as a ceiling (it read 50% for two jobs that can really use all 8 CPUs). The statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 1, second corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance: a retry's earlier attempts are counted from the record it replaced; a pickup after a stall records no wait and is said to leave its first pickup out; two jobs each reporting a whole 4 CPU budget on an 8 CPU host read 50% (it read 100%, which the jobs' shared parent cgroup cannot give them); the shared run index does not expire with a short-retention peer's window. The statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 1, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the acceptance: a peer's shorter log retention trimming the shared run index is missing history, not idle; a retry records no wait and is counted as under-counting busy time; CPU used is of the host's CPUs, so jobs using a whole CPU budget each never read 200%; a lowered budget judges only the time it was in force; a host or project with a control character is not counted; a Valkey named with `--valkey-url` that fails exits 1. The statement is UNCHANGED. Checked and UNCHANGED: `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`. |

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CAPACITY_MAX_BUCKETS, CAPACITY_TOP_PROJECTS, CAPACITY_WINDOWS, LEGACY_MIN_WALL_MS, PRE_SLOT_REFUSAL_REASONS, capacityOf, computeCapacity, occupancyOf } from "../src/capacity.mjs";
+import { CAPACITY_MAX_BUCKETS, CAPACITY_TOP_PROJECTS, CAPACITY_WINDOWS, LEGACY_MIN_WALL_MS, LIVE_FRESH_MS, PRE_SLOT_REFUSAL_REASONS, capacityOf, computeCapacity, occupancyOf } from "../src/capacity.mjs";
 import { recordedCapacity } from "../src/run-history.mjs";
 import { SUGGEST_CLOCK_SKEW_MS, SUGGEST_MAX_WALL_MS } from "../src/size-suggest.mjs";
 
@@ -265,12 +265,12 @@ test("the report's frame: version, window, every coverage count, hosts sorted, a
 	const r = report([run("1", 2, 1, { host: "b" }), run("2", 2, 1)], { live: [{ name: "c", budgetRunning: "2" }, { name: "d", budgetRunning: "" }, { name: "e", budgetRunning: "1" }], coverage: { source: "mirror+local", reason: "why" } });
 	assert.equal(r.v, 1);
 	assert.deepEqual(r.window, { fromMs: NOW - DAY, toMs: NOW, bucketMs: H });
-	assert.deepEqual(Object.keys(r.coverage), ["source", "reason", "fromMs", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "unreadable", "withoutHost", "earlierDropped", "running", "historyNotShared"]);
-	assert.deepEqual([r.coverage.source, r.coverage.reason, r.coverage.running, r.coverage.withoutSize, r.coverage.withoutResources], ["mirror+local", "why", 3, 2, 2]);
+	assert.deepEqual(Object.keys(r.coverage), ["source", "reason", "fromMs", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "orphans", "unreadable", "withoutHost", "earlierDropped", "running", "historyNotShared"]);
+	assert.deepEqual([r.coverage.source, r.coverage.reason, r.coverage.running, r.coverage.liveNotCounted, r.coverage.withoutSize, r.coverage.withoutResources], ["mirror+local", "why", 3, 3, 2, 2], "a row from before `jobs` says how many run, and none of them is counted");
 	assert.deepEqual(r.hosts.map((h) => h.name), ["a", "b", "c", "d", "e"]);
 	assert.equal(report([]).coverage.running, null, "no live row says: unknown, not zero");
 	assert.deepEqual(Object.keys(r.hosts[0]), ["name", "shared", "coverage", "capacity", "coveredMs", "missingMs", "busyMs", "idleMs", "fullMs", "peak", "avgMilli", "promisedMemPerMille", "promisedCpuPerMille", "usedCpuPerMille", "runs", "projects", "otherProjects", "waits", "buckets"]);
-	assert.deepEqual(Object.keys(r.hosts[0].coverage), ["fromMs", "source", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick"]);
+	assert.deepEqual(Object.keys(r.hosts[0].coverage), ["fromMs", "source", "truncated", "used", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "orphans"]);
 });
 
 test("a window or bucket the function cannot honour is the caller's mistake, refused", () => {
@@ -395,4 +395,81 @@ test("a record's earlier attempts are rebuilt by the writer's rule: the newest 4
 	const overlap = report([run("o", 3, 1, { attempt: 2, earlier: [{ host: "a", startedAt: at(2.5), endedAt: at(2) }, { host: "a", startedAt: at(5), endedAt: at(4) }, { host: "a b", startedAt: at(5), endedAt: at(4) }] })]);
 	assert.deepEqual([overlap.hosts[0].coverage.earlier, overlap.hosts[0].busyMs, overlap.coverage.earlierDropped], [1, 3 * H, 2]);
 	assert.deepEqual(report([run("n", 2, 1)]).coverage.earlierDropped, 0);
+});
+
+// Issue #599, phase 2: the jobs a live row lists as running now (`jobs`, live-jobs.mjs) are busy up to now.
+const liveRow = (jobs, extra = {}) => ({ name: "a", concurrency: "2", staleMs: 5_000, jobs: JSON.stringify(jobs), jobsMore: "0", ...extra });
+const job = (id, fromH, extra = {}) => ({ id, p: "web", m: 4096, c: 200, at: NOW - fromH * H, ...extra });
+
+test("a job running now is busy from its admission to now, marked live, never in used, and adds no wait or CPU", () => {
+	const r = report([run("done", 5, 4)], { live: [liveRow([job("now-1", 2)])] });
+	const a = r.hosts.find((h) => h.name === "a");
+	assert.equal(a.busyMs, 3 * H, "the record's hour and the running job's two");
+	assert.deepEqual([a.coverage.used, a.coverage.live, a.coverage.liveNotCounted, a.coverage.withoutResources, a.waits.n], [1, 1, 0, 1, 0], "the record has no resources; the running job is not counted as without them");
+	assert.equal(a.runs, 2);
+	assert.deepEqual(a.projects.find((p) => p.project === "web"), { project: "web", runMs: 2 * H, cpuMs: 0 });
+	assert.equal(a.buckets.at(-1).busyMs, H, "the last bucket is busy to its end");
+	assert.equal(r.coverage.running, 1);
+	// Its size is promised: 4096 of 16384 MiB for 2 of 24 hours is 1/48.
+	assert.equal(a.promisedMemPerMille, 21);
+	assert.equal(a.busyMs + a.idleMs + a.missingMs, DAY);
+});
+
+test("running jobs overlap like records: peak and full count them", () => {
+	const a = hostA([run("r", 3, 0.5)], { live: [liveRow([job("x", 1), job("y", 2)])] });
+	assert.equal(a.peak, 3);
+	assert.equal(a.fullMs, 2 * H, "two or three at once from y's start 2h ago to now");
+});
+
+test("a stale row vouches for its jobs only up to its last beat", () => {
+	assert.equal(LIVE_FRESH_MS, 30_000, "two beats");
+	const fresh = hostA([], { live: [liveRow([job("x", 1)], { staleMs: LIVE_FRESH_MS })] });
+	assert.equal(fresh.busyMs, H, "two beats old is fresh");
+	const stale = hostA([], { live: [liveRow([job("x", 1)], { staleMs: LIVE_FRESH_MS + 1 })] });
+	assert.equal(stale.busyMs, H - LIVE_FRESH_MS - 1, "ends at the beat");
+	const noBeat = report([], { live: [liveRow([job("x", 1)], { staleMs: null })] }).hosts[0];
+	assert.deepEqual([noBeat.busyMs, noBeat.coverage.live, noBeat.coverage.liveNotCounted], [0, 0, 1], "no beat known: not counted, and said");
+});
+
+test("a listed job whose record is already in the window is the record's, counted once", () => {
+	const a = hostA([run("x", 1, 0.5)], { live: [liveRow([job("x", 1)])] });
+	assert.deepEqual([a.busyMs, a.coverage.live, a.coverage.used], [30 * M, 0, 1]);
+	// An EARLIER attempt's record (it started before this admission) does not hide the running retry.
+	const retry = hostA([run("x", 3, 2)], { live: [liveRow([job("x", 1)])] });
+	assert.deepEqual([retry.busyMs, retry.coverage.live], [2 * H, 1]);
+});
+
+test("an orphan is counted as an orphan, not as busy: its record covers its run", () => {
+	const a = hostA([], { live: [liveRow([job("gone", 3, { o: 1 }), job("x", 1)])] });
+	assert.deepEqual([a.busyMs, a.coverage.orphans, a.coverage.live], [H, 1, 1]);
+});
+
+test("running jobs a row does not list, or cannot vouch for, are counted as not counted", () => {
+	const more = report([], { live: [liveRow([job("x", 1)], { jobsMore: "3" })] });
+	assert.deepEqual([more.hosts[0].coverage.liveNotCounted, more.coverage.running], [3, 4]);
+	// Hostile entries are dropped by the allowlist and counted, never read.
+	const hostile = report([], { live: [liveRow([job("x", 1), { ...job("y", 1), id: "a/b" }, { ...job("z", 1), p: "Web\u001b[2J" }, { ...job("w", 1), at: "1" }, { ...job("v", 1), m: -1 }])] }).hosts[0];
+	assert.deepEqual([hostile.coverage.live, hostile.coverage.liveNotCounted, hostile.busyMs], [1, 4, H]);
+	// A job admitted more than the longest wall a run may have, or in the future past the skew: not counted.
+	const old = report([], { live: [liveRow([job("x", (SUGGEST_MAX_WALL_MS + H) / H), job("y", -1)])] }).hosts[0];
+	assert.deepEqual([old.coverage.live, old.coverage.liveNotCounted], [0, 2]);
+	// A host whose history is not shared is missing as a whole: its running jobs are not counted either.
+	const unshared = report([], { live: [liveRow([job("x", 1)], { routes: "false" })], coverage: { local: null, mirror: { fromMs: NOW - DAY, truncated: false, hosts: [] } } }).hosts[0];
+	assert.deepEqual([unshared.shared, unshared.busyMs, unshared.coverage.liveNotCounted], [false, 0, 1]);
+	// A raw string that is not a list: the row lists nothing, and without a budget says nothing.
+	assert.equal(report([], { live: [{ name: "a", jobs: "{" }] }).coverage.running, null);
+});
+
+test("a running job that began before the host's covered window is clipped to it, never counted in the missing part", () => {
+	const r = report([], { live: [liveRow([job("x", 20)])], coverage: { local: { fromMs: NOW - 10 * H }, localHost: "a" } });
+	const a = r.hosts[0];
+	assert.deepEqual([a.busyMs, a.missingMs, a.busyMs + a.idleMs + a.missingMs], [10 * H, 14 * H, DAY]);
+	assert.equal(a.projects[0].runMs, 10 * H, "its project's run time is clipped too");
+});
+
+test("a row readLiveHosts already parsed (jobs an array, o a boolean, jobsMore a number) counts the same as the raw one", () => {
+	const raw = report([], { live: [liveRow([job("x", 1), job("y", 2, { o: 1 })], { jobsMore: "2" })] }).hosts[0];
+	const parsed = report([], { live: [{ name: "a", concurrency: "2", staleMs: 5_000, jobs: [{ id: "x", p: "web", m: 4096, c: 200, at: NOW - H, o: false }, { id: "y", p: "web", m: 4096, c: 200, at: NOW - 2 * H, o: true }], jobsMore: 2 }] }).hosts[0];
+	assert.deepEqual([parsed.busyMs, parsed.coverage.live, parsed.coverage.orphans, parsed.coverage.liveNotCounted], [H, 1, 1, 2]);
+	assert.deepEqual(parsed, raw);
 });

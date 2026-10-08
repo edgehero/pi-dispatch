@@ -278,6 +278,33 @@ test("the reader PRUNES a member whose row is gone, and distinguishes empty from
 	assert.equal(dead.hosts, undefined);
 });
 
+test("issue #599, phase 2: a row's running jobs are read back through the allowlist, a hostile entry counted in jobsMore", async () => {
+	const redis = fakeRedis();
+	const reg = makeHostRegistry({ redis, name: "mini1", now: () => NOW });
+	const jobs = JSON.stringify([{ id: "gh-1", p: "web", m: 2048, c: 100, at: NOW - 1000 }, { id: "gh-2 two", p: "web", at: NOW }, { id: "gh-3", p: "x/y", at: NOW }]);
+	await reg.start({ jobs: () => jobs, jobsMore: () => "4", waiters: () => "1" });
+	assert.equal(redis.hashes.get(hostKey("mini1")).jobs, jobs, "the writer publishes the JSON as it is: no path shape");
+	// Why the writer holds every id to a charset: JSON escapes a control character with a backslash, which the content
+	// rule's path check refuses, so one raw id would cost the whole field.
+	const raw = fakeRedis();
+	await makeHostRegistry({ redis: raw, name: "raw", now: () => NOW }).start({ jobs: JSON.stringify([{ id: "gh-\u001b", at: 1 }]) });
+	assert.equal(raw.hashes.get(hostKey("raw")).jobs, undefined);
+	const { hosts } = await readLiveHosts(redis, { now: () => NOW });
+	assert.deepEqual(hosts[0].jobs, [{ id: "gh-1", p: "web", m: 2048, c: 100, at: NOW - 1000, o: false }]);
+	assert.equal(hosts[0].jobsMore, 6, "four not listed and two not readable");
+	assert.equal(hosts[0].waiters, "1");
+	// A row from before the field: no list, nothing more known.
+	const old = fakeRedis();
+	await makeHostRegistry({ redis: old, name: "old", now: () => NOW }).start({ version: "4.0.0" });
+	const before = (await readLiveHosts(old, { now: () => NOW })).hosts[0];
+	assert.deepEqual([before.jobs, before.jobsMore], [null, null]);
+	// A value that is not a list: no list, and the published count kept.
+	const junk = fakeRedis();
+	await makeHostRegistry({ redis: junk, name: "junk", now: () => NOW }).start({ jobs: "not json", jobsMore: "2" });
+	const read = (await readLiveHosts(junk, { now: () => NOW })).hosts[0];
+	assert.deepEqual([read.jobs, read.jobsMore], [null, 2]);
+});
+
 test("a row whose clock runs AHEAD of ours reads as fresh, never as negative age", async () => {
 	const redis = fakeRedis();
 	const reg = makeHostRegistry({ redis, name: "mini1", now: () => NOW + 60_000 });

@@ -47,6 +47,9 @@ import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch
 import { parseConnection, makeRedisClient, killSwitchValkeyUrls, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
+import { CAPACITY_WINDOWS, computeCapacity } from "@edgehero/pi-dispatch/capacity";
+import { readCapacityRecords } from "@edgehero/pi-dispatch/capacity-records";
+import { capacityText, deploymentFacts, onlyHost } from "@edgehero/pi-dispatch/capacity-cli";
 import { resolveJobSize } from "@edgehero/pi-dispatch/job-size";
 import { projectBudgetRow, publishedBudget } from "@edgehero/pi-dispatch/host-budget";
 import { peakSeries, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "@edgehero/pi-dispatch/size-suggest";
@@ -1771,6 +1774,48 @@ const HELD_HYDRATE_MAX = 200;
  * other hosts" and "I could not find out" are different facts, and a panel that shows the second as the
  * first tells an operator their fleet is gone when Valkey merely blinked.
  */
+/**
+ * The capacity report for `dispatch_capacity` (issue #599, phase 2, INT-CAPACITY-REPORT): the CLI's read and the CLI's
+ * function (`readCapacityRecords`, `computeCapacity`, `onlyHost`, `capacityText`), so the tool, `pi-dispatch capacity`
+ * and doctor cannot disagree. READ-ONLY: the registry is read with `prune: false` and the mirror reader prunes nothing.
+ * `{ report, text }`, or `{ error }` for a window it does not offer, a host the report does not have, or a retention the
+ * worker would refuse. An unreachable Valkey is not an error: the report reads this host's files and says why.
+ */
+export async function readCapacity({ url, env = process.env, window = "7d", host, now = () => Date.now(), redisFn = makeRedisClient, timeoutMs = 2000, fs } = {}) {
+  const w = Object.hasOwn(CAPACITY_WINDOWS, window) ? CAPACITY_WINDOWS[window] : null;
+  if (!w) return { error: `window must be one of ${Object.keys(CAPACITY_WINDOWS).join(", ")} (got ${JSON.stringify(window)})` };
+  const facts = await deploymentFacts(env);
+  if (facts.problem) return { error: facts.problem };
+  const nowMs = now();
+  let redis = null;
+  let noMirrorReason = null;
+  try {
+    parseConnection(url, { failFast: true }); // throws on junk before any client exists
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+  } catch (err) {
+    redis = null;
+    noMirrorReason = `the Valkey URL is not usable (${err?.message ?? "error"}): only this host's files were read`;
+  }
+  try {
+    const [fleet, read] = await Promise.all([
+      redis ? readLiveHosts(redis, { now, timeoutMs, prune: false }).catch((e) => ({ unreachable: e?.message ?? "registry unreadable" })) : { unreachable: null },
+      readCapacityRecords({ redis, logsDir: facts.logsDir, sinceMs: nowMs - w.ms, nowMs, retentionDays: facts.retentionDays, localHost: facts.localHost, noMirrorReason, timeoutMs, ...(fs ? { fs } : {}) }),
+    ]);
+    const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
+    const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs: nowMs - w.ms, nowMs, bucketMs: w.bucketMs, coverage });
+    const shown = host === undefined || host === null ? { report } : onlyHost(report, host);
+    if (shown.unknown) return { error: `no host named ${JSON.stringify(host)} in the last ${window}${shown.unknown.length > 0 ? ` (hosts: ${shown.unknown.join(", ")})` : ""}` };
+    return { report: shown.report, text: capacityText(shown.report, { since: window }) };
+  } finally {
+    try {
+      redis?.disconnect?.();
+    } catch {
+      // best-effort teardown
+    }
+  }
+}
+
 export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now() } = {}) {
   let redis;
   try {

@@ -714,6 +714,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `.env` name different Valkeys, since a report from the wrong one reads a busy fleet as idle. A Valkey taken from the
     environment that refuses or does not answer gives a report from this host's files with the reason; one NAMED with
     `--valkey-url` fails, because the operator asked about that fleet.
+  - **The jobs running now** (phase 2) come from the live host rows, not the records: each worker publishes the jobs
+    it runs (`jobs` in `INT-HOST-REGISTRY-CONTRACT`, from an in-flight map that exists with or without a host budget,
+    filled where a job is admitted and emptied by the one release every exit goes through), and the report counts each
+    as busy from its admission to now, marked live and kept out of the history counts. Only what a row can vouch for:
+    a row older than two beats only up to its beat, a job whose record already exists as the record, an orphan not at
+    all (its record covers its run), and every running job it cannot count is counted as such. The registry is read at
+    the report's clock, since a row's age decides how far its jobs count.
+  - **Doctor and the tool** show the same report: doctor one fact line per host over 7 days, never a warning (nothing
+    decides on it), from the Valkey it already talks to under a 5 s bound for the whole read; `dispatch_capacity`
+    through `readCapacity`, which is the CLI's read and functions called from the admin, so the three surfaces cannot
+    print two different reports.
 - **Rejected**:
   - *Sampling host load* (the operator's decision of 2026-10-08): a sampler is a second always-on writer for a question
     the records already answer for this deployment's own jobs. The cost is stated on every surface: a machine busy
@@ -736,10 +747,19 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     cut.
   - *CPU used over the CPU budget*: one job's `--cpus` is the whole budget, so jobs together legitimately exceed it.
   - *Floats*: a ratio at a boundary would round differently on two hosts; per mille, rounded half up, in integers.
+  - *The host budget's ledger as the running jobs*: it exists only when a budget is set, so a deployment without one
+    would show nothing running. The in-flight map is the source, and the ledger only says which containers are
+    orphans.
+  - *Keeping an orphan's in-flight entry until the budget's sweep clears it*: without a budget there is no sweep, so
+    the entry would stay for the life of the process; the rule would be true only with a budget.
+  - *Counting a running job up to now on any row*: a worker that stopped beating left its jobs counted for the row's
+    whole 90 s life, past anything it could vouch for.
 - **Residuals** (`OQ-039`): an earlier attempt whose record could not be read, or beyond the 4 a record carries, is
   not counted (the retried runs are, never hidden); a stalled pickup's time is not counted; an unnamed or offline worker's history is not shared; a writer from before
   the horizon trims without recording it; `resources` is produced by the job and only advisory; a machine busy with
-  other work reads as idle; a job running now is not in the history until it ends.
+  other work reads as idle; a job running now is counted only as far as its host's row vouches for it (to its last
+  beat), and one its row does not list (past 32, or a worker from before `jobs`) is counted as not counted until it
+  ends; an orphaned container's time after its stop failed is in no record and reads as idle.
 - **Traces to**: `REQ-CAPACITY-INSIGHTS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, `DES-HOST-BUDGET`, `DES-HOST-REGISTRY`, `DES-SIZE-SUGGESTIONS`
 
@@ -2362,7 +2382,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the fold as JSON whose every monetary value carries its `class`, so a model consuming it cannot launder
   an estimate into a fact; the `dollars` beside it are enforcement amounts in integer micro-dollars, with no
   class), `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`,
-  `dispatch_allocations`; the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue**
+  `dispatch_allocations`, `dispatch_capacity` (issue #599: the capacity report through the CLI's own read and
+  function, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue**
   `dispatch_run`; the **confirm-gated writes** `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`,
   `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`,
   `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete`, `dispatch_wait_cancel`,
@@ -6196,6 +6217,14 @@ a tunnel.
   is also the right identity, since two spellings of one scope that reserve in one counter are one row. Doctor
   computes this host's value from the service's own settings with the worker's function rather than reading its
   own row back, because doctor answers for the configuration, which a worker that has not restarted may not run.
+- **The jobs a host runs now are published** (issue #599, phase 2: `jobs`, `jobsMore`, `waiters`), for the capacity
+  report, and they meet the content rule by construction: job ids, project ids and integers. A job id is already in
+  every run record and in `runs:rec:<id>`, a project id in `runs:rec:*` too, and both are charset-checked identifiers
+  the project mints. The one part not checked at its source is a forge's delivery id (a header value), so the writer
+  holds every id to `[A-Za-z0-9._:-]{1,128}` and publishes one outside it as its digest, the rule's hashing idiom; that
+  also keeps every backslash out of the JSON, which the writer's path-shape check would otherwise refuse. The reader
+  parses the field through a per-field allowlist and drops what fails it, counted. The falsification test holds: the
+  report reads them and no decision does, so deleting them costs a report its running jobs until the next beat.
 - **Rejected**:
   - *One HASH keyed by name, with per-field TTLs.* Verified unavailable: `HEXPIRE` does not exist on the
     pinned `valkey/valkey:8` (`ERR unknown command`), so the retention window would become the writer's
@@ -6211,6 +6240,11 @@ a tunnel.
   - *Publishing the caps themselves.* Amounts are not paths, but a scoped row's amount without its scope says
     nothing, and with it the row leaks a repository name or a folder. A digest says exactly what doctor needs
     (same or not), and an operator reads the values on each host.
+  - *Publishing each running job's repository, flow or target*, which would let the panel say what a job is doing: a
+    repository name and a target are exactly what the content rule keeps out; the job id finds the run record, where
+    the operator's own surfaces show the rest.
+  - *Every running job, uncapped*: a row is rewritten every beat, so its size is paid four times a minute; 32 covers
+    any `PI_CONCURRENCY` in practice, and the rest are counted, never dropped silently.
 - **Traces to**: `INT-HOST-REGISTRY-CONTRACT`, `REQ-MULTI-HOST-COORDINATION`, `DES-CONCURRENCY-3`,
   `OQ-008`, `OQ-012`
 
@@ -9053,3 +9087,4 @@ a tunnel.
 | 2026-10-08 | Issue #599, phase 1, second corrections. **`DES-CAPACITY-FROM-RECORDS` CORRECTED**: (1) the shared `runs:index` now always expires at the 92 day reader depth, never a writer's retention (a one day writer made the whole index expire on a quiet day, with no horizon), and the two trims, the horizon and both expiries are one script, so no failure can land between a cut and its record; (2) a retry carries its earlier attempts' slot intervals in a new record field, `earlier`, read from the record it replaces when it is picked up, and the report counts them as busy on their own hosts; (3) a pickup after a stall records `stalledRepick` and no `queuedAt`, and the report counts and names such runs; (4) CPU used is held in every moment to what the jobs could use together, the budget capped at the host's CPUs, since a per-run clamp let two jobs each report the whole budget; (5) the capacity module's name rule now comes from a leaf (`worker-name.mjs`), so its import graph holds no filesystem, no os and no config, held by a test. |
 | 2026-10-08 | Issue #599, phase 1, third corrections. **`DES-CAPACITY-FROM-RECORDS` CORRECTED**: CPU used is held per moment to the host's CPUs only, since the CPU budget is not a proven ceiling (its parent cgroup quota fails open where only root can set it); a retry reads both copies of the record it replaces and keeps the higher attempt; `stalledRepick` means a stalled first attempt only; the reader rebuilds `earlier` with the writer's rule (`run-earlier.mjs`, a leaf both import) and drops entries overlapping their carrier's run on its host. |
 | 2026-10-08 | Issue #599, phase 1, CI correction. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: a scheduler job's queued moment is the slot in its id (exact), and the rejected alternatives say why `timestamp` plus `delay` is not used for it. |
+| 2026-10-08 | Issue #599, phase 2. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: two pieces, the jobs running now (from the host rows' `jobs`, counted from admission to now, to the row's last beat when the row is older than two beats, a job with a record already in the window as the record, an orphan not as busy, every running job not counted said as such; the registry read at the report's clock) and the other surfaces (doctor's one fact line per host over 7 days under a 5 s bound, `dispatch_capacity` through the CLI's own read and functions); three rejected alternatives (the budget ledger as the source, keeping an orphan's entry until the budget sweep, counting a running job to now on any row); the residual "a job running now is not in the history until it ends" replaced by what is still not counted. **`DES-HOST-REGISTRY` AMENDED**: the new fields and why they meet the content rule (job ids and project ids are charset-checked identifiers already in `runs:rec:*`; a delivery id, the one part not checked at its source, is held to `[A-Za-z0-9._:-]{1,128}` by the writer and digested otherwise, which also keeps every backslash out of the JSON), with two rejected alternatives (publishing a job's repository or target; an uncapped list). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Decision names `dispatch_capacity` among the reads. **`DES-HOST-BUDGET`** UNCHANGED, checked: no admission rule moved; the one release point gained the running-jobs entry beside the holds. |

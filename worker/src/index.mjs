@@ -191,7 +191,43 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism }) {
+/**
+ * The jobs this host runs right now (issue #599, phase 2): one entry per PICKUP that holds a slot, `{ id, project, memMiB,
+ * cpuCenti, at }`, `at` its admission instant in millis (the record's `startedAt`). The registry beat publishes it
+ * (`jobs`, live-jobs.mjs), and the capacity report counts each as busy until its record exists.
+ *
+ * It works WITHOUT a host budget, which is why it is not the budget's ledger: the ledger exists only when a budget is
+ * set. Keyed by a per-pickup number, not the job id, so a second pickup of the same id (a stalled job handed back while
+ * the first still runs here) can never remove the first's entry. Process memory, `makeInFlight`'s reason: it counts
+ * this process's own pickups, and a restart that loses it has no pickup left to count.
+ *
+ * An entry is added where the job is admitted (`startedAt`, `capacity`) and removed only by `releaseAllHolds`, the one
+ * release every exit goes through, so it cannot outlive its pickup. An ORPHAN (the container's stop did not take) is
+ * removed like any other exit: the processor is done with it, and only the host budget keeps watching its container,
+ * so the beat flags orphans from the budget's ledger alone. Without a budget nothing watches such a container, and the
+ * list says only what this process still runs.
+ */
+export function makeRunningJobs() {
+	const entries = new Map();
+	let next = 0;
+	return {
+		/** Adds one pickup's entry; returns its key. Total: it never throws, so the admission block may call it. */
+		add(entry) {
+			next += 1;
+			entries.set(next, { ...entry });
+			return next;
+		},
+		/** Removes one pickup's entry; true only the first time. */
+		remove(key) {
+			return entries.delete(key);
+		},
+		/** Copies, never the live map. */
+		list: () => [...entries.values()].map((e) => ({ ...e })),
+		size: () => entries.size,
+	};
+}
+
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs() }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -687,6 +723,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// guard) still frees every local slot before it rethrows; the fleet halves are release-if-mine and awaited where
 		// the caller can. Draining, so a second call releases nothing: the in-process map's release is not idempotent.
 		let budgetHeld = false;
+		// This pickup's entry in the running jobs (issue #599, phase 2), null until it is admitted below.
+		let runningKey = null;
 		let stopDidNotTake = false;
 		let name;
 		let venue;
@@ -706,6 +744,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			return Promise.all(taken.map((hold) => hold.fleet?.release?.()));
 		};
 		const releaseAllHolds = ({ orphan = false } = {}) => {
+			// The running-jobs entry first (issue #599, phase 2): this pickup no longer runs the job, orphan or not.
+			if (runningKey !== null) {
+				runningJobs.remove(runningKey);
+				runningKey = null;
+			}
 			const endpointsReleased = releaseEndpointHolds();
 			const scopesReleased = releaseScopeHolds();
 			if (hostHeld) {
@@ -1023,6 +1066,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// reports. Each read guarded: this block must not throw (above), and a fact that cannot be read is unknown, never
 			// a reason to fail a job that is about to run.
 			capacity = capacityNow();
+			// This host runs the job from here on (issue #599, phase 2): its entry, at the same instant as `startedAt`, given
+			// back by `releaseAllHolds` on every exit. `add` is total, so this block still cannot throw.
+			runningKey = runningJobs.add({ id: job.id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: Date.parse(startedAt) });
 			// The producer of the name both boot reapers sweep by substring. Built from the shared prefix
 			// rather than typed here, so a rename cannot land in the producer and not in the sweeps (#227).
 			// From the VENUE that will build the container, not from the local adapter reached for directly:
@@ -1556,7 +1602,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1666,6 +1712,9 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// first gate). `null` in a bare wiring, which keeps today's behaviour: the job runs.
 			settledRecord,
 			previousRecord,
+			// Issue #599, phase 2: SHARED across both workers for the host slot's reason: the registry row lists what this
+			// HOST runs, and two maps would each list half.
+			runningJobs,
 		});
 
 		// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
@@ -1692,6 +1741,8 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	primary.hostWorker = workers[1] ?? null;
 	// Issue #596, phase 2: the host budget, for the registry beat's thunks (start.mjs) and doctor-facing snapshots.
 	primary.hostBudget = hostBudget;
+	// Issue #599, phase 2: the jobs this host runs now, for the registry beat's `jobs` thunk (start.mjs).
+	primary.runningJobs = runningJobs;
 
 	const stop = async () => {
 		// Abort active jobs (=> docker stop via onAbort), then close. Without the cancel,

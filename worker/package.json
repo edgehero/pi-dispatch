@@ -66,6 +66,8 @@
 		"./job-size": "./src/job-size.mjs",
 		"./size-suggest": "./src/size-suggest.mjs",
 		"./capacity": "./src/capacity.mjs",
+		"./capacity-records": "./src/capacity-records.mjs",
+		"./capacity-cli": "./src/capacity-cli.mjs",
 		"./size-records": "./src/size-records.mjs",
 		"./host-budget": "./src/host-budget.mjs",
 		"./backend-conformance": "./src/backend-conformance.mjs",

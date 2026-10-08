@@ -1099,7 +1099,7 @@ test("doctor: a host where pi will not load warns instead of guessing a variable
 // when unset), so a test's output depended on whether something answered there. A host running its own Redis read an
 // empty registry and printed nothing; CI's release job, with nothing there, printed "Fleet: could not read the host
 // registry", and the exact-output pins that were captured on the first failed on the second.
-const ghDeps = (out, plan, calls, extra = {}) => ({ out, spawn: fakeSpawn(plan, calls), probeValkey: async () => true, readHosts: async () => ({ hosts: [] }), fileExists: () => true, nodeVersion: "22.19.0", ...extra });
+const ghDeps = (out, plan, calls, extra = {}) => ({ out, spawn: fakeSpawn(plan, calls), probeValkey: async () => true, readHosts: async () => ({ hosts: [] }), readCapacity: async () => ({ records: [], coverage: { source: "local", reason: null, localHost: null, localHosts: [], local: null, mirror: null } }), fileExists: () => true, nodeVersion: "22.19.0", ...extra });
 const ghEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", ...extra });
 
 test("doctor: default source gh warns with the login's scopes and names the broad ones", async () => {
@@ -3512,6 +3512,8 @@ const collectSeams = (plan, extra = {}) => ({
 	dollarKeysExist: async () => false,
 	// Issue #504 part B: never the default, which reads alloc:plan off a Valkey.
 	readAppliedSplit: async () => null,
+	// Issue #599, phase 2: never the default, which reads this account's real run history and the Valkey's run mirror.
+	readCapacity: async () => ({ records: [], coverage: { source: "local", reason: null, localHost: null, localHosts: [], local: null, mirror: null } }),
 	fileExists: existsSync,
 	nodeVersion: "20.10.0",
 	...extra,
@@ -8157,6 +8159,8 @@ const MIXED_PIN = {
 			"✓ Fleet: 2 workers (mini1, mini2)",
 			"⚠ Job image digest differs from the other host",
 			"    → rebuild or re-pull so every host runs the same image; digests are identical only when both hosts pulled one tag from one registry, so two local builds differ legitimately",
+			// Issue #599, phase 2: the capacity line per live host; the peer here mirrors no runs, so it has no history here.
+			"✓ Host mini2: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)",
 			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
@@ -8217,6 +8221,7 @@ const MIXED_PIN = {
 			"✓ podman: jobs run as uid:gid 1234:1234 (passed as --user, with --userns=keep-id) with HOME=/home/pi",
 			"✓ Valkey reachable (redis://127.0.0.1:6379)",
 			"✓ Fleet: 2 workers (mini1, mini2)",
+			"✓ Host mini2: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)",
 			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
@@ -8285,6 +8290,7 @@ const MIXED_PIN = {
 			"✓ podman: jobs run as uid:gid 1234:1234 (passed as --user, with --userns=keep-id) with HOME=/home/pi",
 			"✓ Valkey reachable (redis://127.0.0.1:6379)",
 			"✓ Fleet: 2 workers (mini1, mini2)",
+			"✓ Host mini2: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)",
 			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
@@ -8354,6 +8360,8 @@ const MIXED_PIN = {
 			"✓ Fleet: 2 workers (mini1, mini2)",
 			"⚠ Job image digest differs from the other host",
 			"    → rebuild or re-pull so every host runs the same image; digests are identical only when both hosts pulled one tag from one registry, so two local builds differ legitimately",
+			// Issue #599, phase 2: the capacity line per live host; the peer here mirrors no runs, so it has no history here.
+			"✓ Host mini2: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)",
 			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",

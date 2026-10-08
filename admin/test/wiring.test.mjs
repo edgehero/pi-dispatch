@@ -329,7 +329,7 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
 
 /**
  * The model-facing control surface (DES-ADMIN-VIA-PI-EXTENSION, amended): the reads
- * (`dispatch_status`/`_runs`/`_costs`/`_triggers`/`_pauses`/`_limits`/`_waits`/`_projects`/`_allocations`), the on/off
+ * (`dispatch_status`/`_runs`/`_costs`/`_capacity`/`_triggers`/`_pauses`/`_limits`/`_waits`/`_projects`/`_allocations`), the on/off
  * controls (`_pause`/`_resume`), the gated PAID enqueue (`_run`), the confirm-gated writes (`_set`, the trigger,
  * pause-window, scoped-limit and project CRUD, `_wait_cancel` and `_envelope_set`), and the one write with no confirm,
  * `_priorities_set` (issue #504, bounded by the envelope's arithmetic; crud.test.mjs proves it shows no dialog). No
@@ -349,9 +349,10 @@ const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_e
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
   const { calls } = await loadRegistered();
   const names = calls.registerTool.map((t) => t.name).sort();
-  assert.equal(calls.registerTool.length, 28, "exactly twenty-eight tools");
+  assert.equal(calls.registerTool.length, 29, "exactly twenty-nine tools");
   assert.deepEqual(names, [
     "dispatch_allocations",
+    "dispatch_capacity",
     "dispatch_costs",
     "dispatch_envelope_set",
     "dispatch_limit_add",
@@ -391,6 +392,16 @@ test("registers exactly the read/control/enqueue/write tools, and never a raw-lo
     assert.equal(typeof tool.description, "string");
     assert.ok(tool.parameters && tool.parameters.type === "object", `${tool.name} has an object param schema`);
   }
+});
+
+test("dispatch_capacity is a read: not sequential, a window and a host its only params, and a window it does not offer is an error (#599)", async () => {
+  const { calls } = await loadRegistered();
+  const tool = toolByName(calls, "dispatch_capacity");
+  assert.equal(tool.executionMode, undefined, "a read tool, never sequential");
+  assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["host", "window"]);
+  assert.match(tool.description, /^Read-only\./);
+  assert.match(tool.description, /a machine busy with other work reads as idle/);
+  await assert.rejects(() => tool.execute("call-1", { window: "1y" }), /window must be one of 24h, 7d, 30d/);
 });
 
 /**

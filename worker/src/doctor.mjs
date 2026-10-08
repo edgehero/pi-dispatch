@@ -99,6 +99,8 @@ import { CONTAINER_HOME, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM } fro
 import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDefaults, resolveJobSize } from "./job-size.mjs";
 import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "./size-suggest.mjs";
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
+import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
+import { durationText, milliText, percentText } from "./capacity-cli.mjs";
 import { CGROUP_PARENT, cgroupParentFor, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -595,7 +597,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -2594,6 +2596,11 @@ export async function collectChecks(shellVars, seams) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
 	}
+	// Issue #599, phase 2: how busy each host was over the last 7 days, one fact line per host, never a warning (nothing
+	// decides on it). On every deployment, a single host too: its own files are read when the run mirror is not. Read from
+	// the same Valkey the fleet was, with the registry rows just read (their running jobs count up to now), every Valkey
+	// call bounded and the whole read under `CAPACITY_DOCTOR_TIMEOUT_MS`, so a slow mirror costs this line, not the run.
+	checks.push(...(await doctorCapacity({ seams, env, home, url: valkeyUsable ? valkeyTalkUrl : null, hosts: fleet.hosts ?? [], localHost: workerNameOf(declaredWorkerName) })));
 	// Issue #504 part B: the APPLIED split names the envelope it was made for, and every host
 	// whose envelope differs refuses its governed jobs. Read whenever this command may talk to the Valkey (above), from
 	// the same Valkey the fleet was read from; with no split there, or no answer, nothing is said.
@@ -7764,6 +7771,98 @@ export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {},
  * WARNING per host whose budget is below the projects' minJobs
  * together. Nothing when no host publishes a budget (workers from before it).
  */
+/** The most the capacity read may take in doctor, all of it: a full mirror reads in well under a second. */
+export const CAPACITY_DOCTOR_TIMEOUT_MS = 5_000;
+
+/**
+ * The capacity lines (issue #599, phase 2): the report over the last 7 days (`capacity.mjs`, the CLI's function), read
+ * by `seams.readCapacity` (default: `readCapacityRecords` through a fail-fast client, `prune`-free and writing nothing).
+ * Never throws and never warns: an unreadable history is one line saying so.
+ */
+export async function doctorCapacity({ seams, env, home, url, hosts, localHost }) {
+	try {
+		const window = CAPACITY_WINDOWS["7d"];
+		const nowMs = (typeof seams.wallClock === "function" ? seams.wallClock : Date.now)();
+		const retention = typeof env.PI_LOG_RETENTION_DAYS === "string" && /^\d{1,6}$/.test(env.PI_LOG_RETENTION_DAYS) ? Number(env.PI_LOG_RETENTION_DAYS) : 30;
+		const args = { url, logsDir: logsDirPath(env, home), sinceMs: nowMs - window.ms, nowMs, retentionDays: retention, localHost };
+		let timer;
+		const read = await Promise.race([
+			Promise.resolve()
+				.then(() => (seams.readCapacity ?? defaultReadCapacity)(args))
+				.finally(() => clearTimeout(timer)),
+			new Promise((resolve) => {
+				timer = setTimeout(() => resolve(null), seams.capacityTimeoutMs ?? CAPACITY_DOCTOR_TIMEOUT_MS);
+			}),
+		]);
+		if (read === null) return [{ ok: true, label: "Capacity: the run history did not answer in time, so nothing is shown (pi-dispatch capacity reads it with no deadline)" }];
+		const report = computeCapacity({ records: read.records, live: hosts, windowStartMs: nowMs - window.ms, nowMs, bucketMs: window.bucketMs, coverage: read.coverage });
+		return capacityChecks(report, { since: "7d" });
+	} catch (err) {
+		return [{ ok: true, label: `Capacity: not read (${printable(err?.message ?? "error")})` }];
+	}
+}
+
+async function defaultReadCapacity({ url, logsDir, sinceMs, nowMs, retentionDays, localHost }) {
+	const { readCapacityRecords } = await import("./capacity-records.mjs");
+	let client = null;
+	if (url) {
+		try {
+			const { makeRedisClient } = await import("./connection.mjs");
+			client = makeRedisClient(url, { failFast: true, lazyConnect: true });
+			client.on("error", () => {});
+			await client.connect();
+		} catch {
+			client?.disconnect?.();
+			client = null;
+		}
+	}
+	try {
+		return await readCapacityRecords({ redis: client, logsDir, sinceMs, nowMs, retentionDays, localHost, noMirrorReason: url ? "the Valkey did not answer: only this host's files were read" : "no Valkey to read: only this host's files were read" });
+	} finally {
+		client?.disconnect?.();
+	}
+}
+
+/** Part of whole in thousandths, rounded half up; 0 without a whole. */
+const shareOf = (part, whole) => (whole > 0 ? Math.floor((part * 2000 + whole) / (whole * 2)) : 0);
+
+/**
+ * One fact line per host of a capacity report (`INT-CAPACITY-REPORT`), `{ ok: true, label }` each, never a warning:
+ * `Host a: last 7d busy 63% (avg 2.1 of 4 slots, full 12%), promised 48% memory / 40% CPU, used 18% CPU of 8, wait p50
+ * 40s p95 6m, most busy: web`, each part only when it is known, then what the line cannot see: the running jobs not
+ * counted, and the coverage when the history is cut, not shared, or this host's files only. Every control character is
+ * removed (the report admits none; this is the printer not relying on it).
+ */
+export function capacityChecks(report, { since = "7d" } = {}) {
+	const out = [];
+	const localOnly = report?.coverage?.source === "local";
+	for (const h of Array.isArray(report?.hosts) ? report.hosts : []) {
+		const notes = [];
+		let line;
+		if (h.coveredMs === 0) {
+			line = `Host ${h.name}: last ${since} no history here`;
+			if (!h.shared) notes.push("no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)");
+		} else {
+			const c = h.capacity ?? {};
+			const slots = Number.isSafeInteger(c.slots) ? ` of ${c.slots} slots` : " at once";
+			const full = h.fullMs !== null ? `, full ${percentText(shareOf(h.fullMs, h.coveredMs))}` : "";
+			const parts = [`busy ${percentText(shareOf(h.busyMs, h.coveredMs))} (avg ${milliText(h.avgMilli ?? 0)}${slots}${full})`];
+			const promised = [h.promisedMemPerMille !== null ? `${percentText(h.promisedMemPerMille)} memory` : null, h.promisedCpuPerMille !== null ? `${percentText(h.promisedCpuPerMille)} CPU` : null].filter(Boolean);
+			if (promised.length > 0) parts.push(`promised ${promised.join(" / ")}`);
+			if (h.usedCpuPerMille !== null) parts.push(`used ${percentText(h.usedCpuPerMille)} CPU${Number.isSafeInteger(c.cpus) ? ` of ${c.cpus}` : ""}`);
+			if (h.waits?.n > 0) parts.push(`wait p50 ${durationText(h.waits.p50Ms)} p95 ${durationText(h.waits.p95Ms)}`);
+			if (h.projects?.length > 0) parts.push(`most busy: ${h.projects[0].project ?? "(no project)"}`);
+			line = `Host ${h.name}: last ${since} ${parts.join(", ")}`;
+			if (h.coverage.live > 0) notes.push(`${h.coverage.live} running now, counted to now`);
+			if (h.missingMs > 0) notes.push(`history from ${new Date(h.coverage.fromMs).toISOString().slice(0, 16).replace("T", " ")} UTC only${h.coverage.truncated ? " (the run mirror holds nothing older)" : ""}, earlier time counted as neither busy nor idle`);
+			if (localOnly) notes.push("this host's files only");
+		}
+		if (h.coverage?.liveNotCounted > 0) notes.push(`${h.coverage.liveNotCounted} running now not counted`);
+		out.push({ ok: true, label: `${line}${notes.length > 0 ? `; ${notes.join("; ")}` : ""}`.replace(/[\u0000-\u001f\u007f-\u009f]/g, "") });
+	}
+	return out;
+}
+
 export function fleetBudgetChecks(rows, { limits = [], env = {} } = {}) {
 	const hosts = (Array.isArray(rows) ? rows : []).map((row) => ({ name: row.name, budget: publishedBudget(row), row })).filter((h) => h.budget.memMiB !== null && h.budget.cpuCenti !== null);
 	if (hosts.length === 0) return [];

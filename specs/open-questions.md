@@ -1871,7 +1871,7 @@ adversarial passes did.
 
 - **Status**: `WATCH` (issue #599, 2026-10-08).
 - **Position**: the capacity report (`DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`) is computed from run records
-  alone, by the operator's decision, and four things are outside what records can say. Each is stated on the
+  alone, by the operator's decision, and the things below are outside what records can say. Each is stated on the
   surfaces, and none is read as idle where the reader knows it is missing:
   - **a retry overwrites its earlier attempt's record** (one file and one mirror key per job id). The new record
     carries the earlier attempts' slot intervals (`earlier`, at most 4), so they are counted; an attempt whose record
@@ -1891,7 +1891,13 @@ adversarial passes did.
   - **`resources` is advisory**: produced inside the job's container, so a job can inflate or deflate its own CPU time.
     The report clamps it to the most a job can be given and only shows it; nothing decides on it;
   - **a machine busy with other work reads as idle**: no host load is sampled, so the report says how busy this
-    deployment's jobs kept a host, not how busy the host was. A job running now is not in the history until it ends.
+    deployment's jobs kept a host, not how busy the host was;
+  - **a job running now is counted only as far as its row vouches for it** (issue #599, phase 2): from its admission
+    to now on a fresh row, to the row's last beat on one older than 30 s, and not at all when its row does not list it
+    (past 32, unreadable, a worker from before `jobs`) or its host's history is not shared; those are counted in
+    `liveNotCounted` and said. An ORPHAN (a container whose stop did not take) is not counted as busy: its record ends
+    at the failed stop, so its container's time after that is in no record and reads as idle, though doctor and the
+    report name it (`orphans`).
 - **What would resolve it**: a record per attempt (a new file contract), a mirror that unnamed workers also write (the
   mirror is armed only on a declared name, so a single host issues no extra Valkey command), and a host load sampler (declined on 2026-10-08).
 - **What would reopen it as urgent**: an operator sizing a fleet down on a report that read a busy host as idle
@@ -1995,3 +2001,4 @@ adversarial passes did.
 | 2026-10-08 | Issue #599, phase 1, corrections. **`OQ-039` AMENDED**: a new residual, a writer from before the fleet horizon trims the shared run index without recording it; the retry residual now says the report counts retried runs and adds no wait for them. |
 | 2026-10-08 | Issue #599, phase 1, second corrections. **`OQ-039` AMENDED**: the retry residual narrows (a retry now carries its earlier attempts' slot intervals; only an attempt whose record could not be read, or beyond the 4 kept, is lost), and a new residual names a stalled pickup's slot time, which no record holds and the report counts and says. |
 | 2026-10-08 | Issue #599, phase 1, last correction. **`OQ-039` AMENDED**: a stall of a later attempt is a named residual. `stalledCounter` never resets, so only a stall of the first attempt is counted as `stalledRepick`; a later attempt that stalled wrote no record, its slot time is counted nowhere, and the run that follows reads as an ordinary retry. |
+| 2026-10-08 | Issue #599, phase 2. **`OQ-039` AMENDED**: "a job running now is not in the history until it ends" is gone, since the host rows now list running jobs; in its place, a running job is counted only as far as its row vouches for it (to now on a fresh row, to its last beat on one older than 30 s, not at all when its row does not list it or its host's history is not shared, counted in `liveNotCounted`), and an orphaned container's time after its failed stop is in no record and reads as idle, though it is named (`orphans`). The Position no longer counts its items (it said four and listed six). |
