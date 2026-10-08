@@ -522,3 +522,57 @@ test("the tick's snapshot carries each row's live fields through the worker's al
   assert.equal(snap.hostBudgets[1].staleMs, null, "a negative age is not an age");
   assert.equal(fleet.scans, 0, "no run-records scan on the tick (no dollar window is set)");
 });
+
+test("a read that never settles is bounded: the view says so, and the next u starts a fresh read", async () => {
+  let calls = 0;
+  const timers = [];
+  const cleared = [];
+  const capacityInfo = () => (++calls === 1 ? new Promise(() => {}) : Promise.resolve({ report: reportOf() }));
+  const comp = await openHosts({
+    capacityInfo,
+    setTimer: (fn, ms) => (timers.push({ fn, ms }), timers.length),
+    clearTimer: (h) => cleared.push(h),
+  });
+  for (let i = 0; i < 3; i++) {
+    comp.handleInput("u");
+    await flush();
+  }
+  assert.equal(calls, 1, "a u while the read runs joins it");
+  assert.equal(timers.length, 1);
+  assert.ok(timers[0].ms >= 30_000, "the bound is well above readCapacity's own");
+  timers[0].fn();
+  await flush();
+  await flush();
+  assert.match(textAt(comp, 80), /history did not answer in time \(30 s\): u reads it again/);
+  comp.handleInput("\x1b");
+  comp.handleInput("u");
+  await flush();
+  await flush();
+  assert.equal(calls, 2, "past the bound a reopen starts a new read");
+  assert.match(textAt(comp, 80), /last 7d to 12:00 UTC: busy/);
+  assert.deepEqual(cleared, [1, 2], "each bound's timer is cleared when its read ends");
+  await comp.dispose();
+});
+
+test("a malformed budget value reads as unreadable, never as not known yet; only \"\" is not known yet", async () => {
+  const row = (name, v) => ({ name, routes: "true", concurrency: "2", budgetMemMiB: v, budgetCpuCenti: v, usedMemMiB: "0", usedCpuCenti: "0", waiters: "0", staleMs: 1000, jobs: [], jobsMore: 0, jobsUnreadable: false });
+  const bad = ["-1", "1e3", "12.5", "garbage", "OFF", " 512", "99999999999999999999", "0", "0512"];
+  const rows = [row("empty", ""), ...bad.map((v, i) => row(`bad${i}`, v))];
+  const comp = await openHosts({ fetchSnapshot: async () => ({ ...SNAP, hostBudgets: rows }), capacityInfo: async () => ({ unwired: true }) });
+  const out = body(comp, 140);
+  await comp.dispose();
+  assert.match(out, /empty 0 of 2 slots · budget not known yet/);
+  for (let i = 0; i < bad.length; i++) assert.match(out, new RegExp(`bad${i} 0 of 2 slots · budget unreadable`), `${JSON.stringify(bad[i])} is unreadable`);
+});
+
+test("the hidden-jobs summary wraps rather than clips at a narrow width", async () => {
+  const run = (i) => ({ id: `gh-${i}`, p: "web", m: 1024, c: 100, at: AT - (40 - i) * 60_000, o: false });
+  const orphan = (i) => ({ id: `container:pi-job-${i}`, p: "ops", m: 1024, c: 100, at: AT - (12 - i) * 60_000, o: true });
+  const row = { ...LIVE[0], concurrency: "32", jobs: Array.from({ length: 20 }, (_, i) => run(i)).concat(Array.from({ length: 12 }, (_, i) => orphan(i))), jobsMore: 12 };
+  const comp = await openHosts({ fetchSnapshot: async () => ({ ...SNAP, hostBudgets: [row] }), capacityInfo: async () => ({ unwired: true }) });
+  const lines = comp.render(47).map(stripAnsi);
+  await comp.dispose();
+  assert.ok(lines.every((l) => visibleLen(l) <= 47));
+  assert.match(body({ render: () => lines }, 47), /\+28 more running, 12 orphaned containers/, "whole, across the wrap");
+  assert.ok(!lines.some((l) => /\+28.*…/.test(l)), "never clipped with an ellipsis");
+});
