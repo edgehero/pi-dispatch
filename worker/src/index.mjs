@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
 import { jobContainerName } from "./backend-local.mjs";
@@ -190,7 +191,7 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -718,11 +719,28 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			hostHeld = true;
 		}
 
+		// The host's capacity as the record carries it (issue #599). Read when the job is admitted, not here: the slot count
+		// and the budget are live settings, and the value a run is judged against is the one it started under.
+		const capacityNow = () => {
+			const read = (fn) => {
+				try {
+					return fn();
+				} catch {
+					return null;
+				}
+			};
+			const budget = hostBudget ? read(() => hostBudget.current()) : null;
+			return { slots: read(concurrencyNow), memMiB: budget?.memMiB ?? null, cpuCenti: budget?.cpuCenti ?? null, cpus: read(cpus) };
+		};
 		// THE ONE RECORDER BELOW THE GATE, bound once, so the pickup project is a property of the path and not of each call
 		// site: every record from here on goes through it, and none can drop the field and fall back to the live ref in
 		// start.mjs, which would disagree with the pickup value exactly when projects.json was edited mid-run. A bolt in
 		// project-pickup.test.mjs refuses a bare `recordRun(` call below this line.
-		const recordAfterGate = (args) => recordRun({ ...args, project, size });
+		//
+		// `capacity` (issue #599) rides the same binding, and is null until the job is admitted below (where `startedAt` is
+		// set): every record of a refusal before that point says, by its null, that the job never held a slot.
+		let capacity = null;
+		const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity });
 
 		// The MATCHED ROW's scope keys both the in-process slot and the fleet lease (issue #498), the same string
 		// `budgetCapsFor` hashes below and the boot sweeper hashes from the file: a qualified `github:acme/web` row holds
@@ -984,6 +1002,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// exception, and it is named: the registry's refusal of an unheld venue is caught at the call, and
 			// anything else it throws propagates to the catch below, which releases what was acquired.
 			startedAt = new Date().toISOString();
+			// What this host offered as the job took its slot (issue #599, INT-RUN-HISTORY-FILE-CONTRACT): the live slot
+			// count, the host budget (null without one; `recordedCapacity` writes its `Infinity` as "off") and the CPUs the OS
+			// reports. Each read guarded: this block must not throw (above), and a fact that cannot be read is unknown, never
+			// a reason to fail a job that is about to run.
+			capacity = capacityNow();
 			// The producer of the name both boot reapers sweep by substring. Built from the shared prefix
 			// rather than typed here, so a rename cannot land in the producer and not in the sweeps (#227).
 			// From the VENUE that will build the container, not from the local adapter reached for directly:

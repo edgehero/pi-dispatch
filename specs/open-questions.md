@@ -1867,6 +1867,28 @@ adversarial passes did.
 - **Cross-links**: `OQ-025` (the pointer allowlist is paths, never capability grants), `OQ-036`,
   `OQ-016` (the panel suspends its TUI to hand the terminal to that shell), `INT-SANDBOX-CONTRACT`.
 
+## OQ-039: What the capacity report cannot see
+
+- **Status**: `WATCH` (issue #599, 2026-10-08).
+- **Position**: the capacity report (`DES-CAPACITY-FROM-RECORDS`, `INT-CAPACITY-REPORT`) is computed from run records
+  alone, by the operator's decision, and four things are outside what records can say. Each is stated on the
+  surfaces, and none is read as idle where the reader knows it is missing:
+  - **a retry overwrites its earlier attempt's record** (one file and one mirror key per job id), so the slot time
+    of every attempt but the last is lost, and that time reads as idle;
+  - **an unnamed or offline worker's history is not shared.** A worker without `PI_WORKER_NAME` writes no run
+    mirror, so another host's report sees none of its runs; a live one is named in `historyNotShared` and counted as
+    missing, but a worker that is not live (stopped, or its row expired) is not in the registry either, so its runs
+    are simply absent and its time is not attributed to anyone;
+  - **`resources` is advisory**: produced inside the job's container, so a job can inflate or deflate its own CPU time.
+    The report clamps it to the most a job can be given and only shows it; nothing decides on it;
+  - **a machine busy with other work reads as idle**: no host load is sampled, so the report says how busy this
+    deployment's jobs kept a host, not how busy the host was. A job running now is not in the history until it ends.
+- **What would resolve it**: a record per attempt (a new file contract), a mirror that unnamed workers also write (the
+  mirror is armed only on a declared name, so a single host issues no extra Valkey command), and a host load sampler (declined on 2026-10-08).
+- **What would reopen it as urgent**: an operator sizing a fleet down on a report that read a busy host as idle
+  because of one of the above.
+- **Cross-links**: `REQ-CAPACITY-INSIGHTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-002`.
+
 ## Revision History
 
 | Date | Change |
@@ -1960,3 +1982,4 @@ adversarial passes did.
 | 2026-10-06 | Issue #596, phase 0 (measure). **`OQ-002` AMENDED, not closed**: the RAM footprint per job is now measured on every run (`resources.memPeak` in the run record, from the container's own `memory.peak`, readable on all five venues the lab measured), so the row's answer will come from recorded peaks rather than the 1.5 to 2.5 GB estimate; it stays open until a representative set of real runs has recorded them. A job killed for memory is now recorded `oom-killed` and not retried. **`OQ-012` UNCHANGED, checked**: image conformance gains no capability token (the supervisor is a property of this repo's runner, checked by the image job, not of the portable checklist). |
 | 2026-10-06 | Issue #596, phase 0, the executing review. **`OQ-002` AMENDED (wording)**: the measured keys name `swapPeak` (`memory.swap.peak`), which the record now carries because `memPeak` does not count swap. Still open. |
 | 2026-10-08 | The pi 1.1.0 bump (pull request #604). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.1.0 tarball. `excludeTools` is still `string[]` and `allToolNames` is still the eight. `tools` now takes a list of only `+name` and `-name` entries as changes to the default selection; the runner never passes `tools`, so no job sees it. |
+| 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `OQ-039`**, what the capacity report cannot see: a retry overwrites its earlier attempt's record, so that slot time reads as idle; an unnamed or offline worker's history is not shared (a live one is named and counted as missing, one that is not live is absent); `resources` is produced by the job and only advisory; a machine busy with other work reads as idle, and a job running now is not counted until it ends. |

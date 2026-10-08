@@ -167,6 +167,45 @@ the memory part of it (below).
 - Only this host's run records are read for the sizes. A run another host recorded is counted only on a shared
   `PI_LOGS_DIR`.
 
+## What each run records about capacity
+
+Two more fields in every run record feed the capacity report (issue #599), which `pi-dispatch capacity` prints
+today and the other surfaces will show:
+
+| Field | What it is |
+|---|---|
+| `queuedAt` | when the job became eligible to run, as an ISO time. `startedAt` minus `queuedAt` is how long it waited for a slot |
+| `capacity` | what the host offered when the job took its slot: `slots` (the live `PI_CONCURRENCY`), `memMiB` and `cpuCenti` (the host budget, a number, `"off"`, or null without one) and `cpus` (the CPUs the machine reports) |
+
+- `queuedAt` is the moment the job was added plus the delay it was added with. A cron job is created ahead of its
+  slot and delayed until it, so its `queuedAt` is the scheduled minute, not the moment before. A pause window, a
+  deferral (a busy folder, a full budget) and a retry's backoff all count as waiting, because the job was ready and
+  did not run. A retry keeps the first attempt's `queuedAt`, so its wait includes the earlier attempt. A job held on
+  `run.waitFor` records null: the wait its trigger asked for is not a wait for capacity.
+- `capacity` is set when the worker admits the job, after every gate and before the clone, and is read then: a
+  `PI_CONCURRENCY` or budget change while it runs does not change it. **It is null on every job refused before it
+  held a slot** (a size that never fits, a wait gate refusal), so the record itself says whether the run used a slot.
+  A record from before this field has no `capacity` key at all; the report counts such a run as having used a slot
+  when it lasted at least a second or reported `resources`, and says how many it inferred.
+- Both are numbers and fixed words, like the rest of the record.
+
+### `pi-dispatch capacity`
+
+`pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json]` (default `7d`) prints, per host: the share of
+the time it ran at least one job and the share it sat idle; the average and peak number of jobs at once and how long
+every slot was taken; the memory and CPU its jobs were promised against its budget (CPU against all its CPUs when the
+CPU budget is off); the CPU they used; the wait for a slot at p50 and p95; and the projects by run time. `--json`
+prints the whole report. It reads only `VALKEY_URL` and the logs directory, like `pi-dispatch status`, and writes
+nothing.
+
+- **Jobs only.** No machine load is measured, so a machine busy with other work reads as idle.
+- **Missing history is never idle.** It reads the run mirror where workers declare `PI_WORKER_NAME`, and this host's
+  own files. Time before what those hold (a mirror at its 5,000 run cap, the log retention) and a live host whose
+  runs it cannot see (one without `PI_WORKER_NAME` writes no mirror) count as neither busy nor idle, and the coverage
+  line names them. An unreachable Valkey still gives a report from this host's files, and says so.
+- A job running now is counted once it ends. A retry replaces its earlier attempt's record, so that attempt's time is
+  not counted. CPU used comes from `resources`, which the job's container produces: advisory, like every number there.
+
 ## Honest limits
 
 - The page is a snapshot: it re-renders when you re-run the command, not by itself. The auto-reload

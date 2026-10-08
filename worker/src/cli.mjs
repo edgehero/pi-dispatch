@@ -52,6 +52,9 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch pause        stop taking new jobs (durable; survives worker restart)
   pi-dispatch resume       resume taking jobs
   pi-dispatch status       show paused state + job counts
+  pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json]
+                           how busy each host was: busy and idle time, slots in use, memory and CPU
+                           promised and used, waits and projects, read from the run records (jobs only)
   pi-dispatch cancel <jobId>  stop one job: a queued or held job is removed (the line says whether it had
                            made attempts; cancel records nothing), a running one is aborted on whichever
                            host owns it (its record says operator-cancel)
@@ -233,6 +236,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			code = Math.max(code, await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal }));
 		}
 		return code;
+	}
+
+	if (cmd === "capacity") {
+		// Read-only, and on the kill switch's footing: the Valkey URL and the logs directory, never loadConfig (issue #599).
+		const { runCapacity } = await import("./capacity-cli.mjs");
+		return runCapacity(argv.slice(1), { env, write, valkeyRefusal, deploymentEnv: cliDeploymentEnv });
 	}
 
 	if (cmd === "cancel") {

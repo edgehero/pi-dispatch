@@ -444,6 +444,9 @@ Steer the running worker from any terminal:
   covers held jobs and retries).
 - `pi-dispatch run --trigger <id>` runs one cron trigger from the triggers file now, once, as its schedule
   would ([`docs/triggers.md`](docs/triggers.md#firing-a-cron-trigger-by-hand)).
+- `pi-dispatch capacity` says how busy each host was over the last day, week or thirty days: busy and idle
+  time, jobs at once, memory and CPU promised and used, waits and projects, read from the run records. Like
+  `status`, it reads only `VALKEY_URL` and the logs directory ([`docs/insights.md`](docs/insights.md#pi-dispatch-capacity)).
 
 ## The admin panel
 

@@ -432,3 +432,39 @@ test("the two never-fits reasons are the record contract's own tokens, each with
 	assert.equal(tokens.includes("job-size-exceeds-fleet"), false, "no longer emitted, so no longer in the contract");
 	for (const reason of Object.keys(mod.SIZE_REFUSAL_COMMENTS)) assert.ok(tokens.includes(reason), `${reason} is in the record's reason enum`);
 });
+
+test("capacity rides the record only once the job is admitted: the live slots, the budget and the CPUs at the start, none on a never-fits refusal (#599)", { skip }, async () => {
+	const { b } = await budgetOf();
+	let slots = 4;
+	const h = harness({ hostBudget: b, extra: { concurrencyNow: () => slots, cpus: () => 12 } });
+	const run = h.processor(ghJob("ran").job, "tok", signal());
+	await h.untilStarted(1);
+	slots = 2; // a live PI_CONCURRENCY change mid-run: the record keeps what the job started under
+	h.releaseNext();
+	assert.equal((await run).outcome, "completed");
+	assert.deepEqual(h.seen.records.at(-1).capacity, { slots: 4, memMiB: 36864, cpuCenti: 800, cpus: 12 });
+
+	// A refusal BEFORE a slot passes none, so its record says null: it never held one.
+	const refusing = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" }, extra: { concurrencyNow: () => 4, cpus: () => 12 } });
+	assert.equal((await refusing.processor(localJob("big").job, "tok", signal())).reason, "job-size-exceeds-host");
+	assert.equal(refusing.seen.records.length, 1);
+	assert.equal(refusing.seen.records[0].capacity ?? null, null, "never-fits refusal: no capacity");
+});
+
+test("capacity without a host budget names the slots and CPUs and leaves both budgets unknown; an unreadable fact is null, never a failed job (#599)", { skip }, async () => {
+	const h = harness({ hostBudget: null, extra: { concurrencyNow: () => 3, cpus: () => 8 } });
+	const run = h.processor(ghJob("plain").job, "tok", signal());
+	await h.untilStarted(1);
+	h.releaseNext();
+	assert.equal((await run).outcome, "completed");
+	assert.deepEqual(h.seen.records.at(-1).capacity, { slots: 3, memMiB: null, cpuCenti: null, cpus: 8 });
+
+	const broken = harness({ hostBudget: null, extra: { concurrencyNow: () => 3, cpus: () => {
+		throw new Error("no cpu count");
+	} } });
+	const ran = broken.processor(ghJob("odd").job, "tok", signal());
+	await broken.untilStarted(1);
+	broken.releaseNext();
+	assert.equal((await ran).outcome, "completed");
+	assert.deepEqual(broken.seen.records.at(-1).capacity, { slots: 3, memMiB: null, cpuCenti: null, cpus: null });
+});

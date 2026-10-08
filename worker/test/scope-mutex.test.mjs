@@ -699,8 +699,11 @@ test("getSettings is read ONCE per pickup, and its throw is recorded exactly as 
 		assert.equal(records.length, 1);
 		assert.equal(records[0].error.message, "overlay boom");
 		// Plus the pickup-time project (issue #499), null with no projects, and the size resolved beside it (issue #596), the
-		// built-in default with no project and no setting: the gate resolved both before the settings read.
-		assert.deepEqual(Object.keys(records[0]).sort(), ["endedAt", "error", "job", "project", "size", "startedAt"]);
+		// built-in default with no project and no setting: the gate resolved both before the settings read. And the capacity
+		// (issue #599): the settings are read after admission, so this job held a slot when it threw.
+		assert.deepEqual(Object.keys(records[0]).sort(), ["capacity", "endedAt", "error", "job", "project", "size", "startedAt"]);
+		assert.equal(typeof records[0].capacity, "object");
+		assert.notEqual(records[0].capacity, null);
 		assert.equal(records[0].project, null);
 		assert.deepEqual(records[0].size, { memMiB: 4096, cpuCenti: 200, source: "default" });
 		assert.equal(typeof records[0].startedAt, "string", "startedAt is set before the error is recorded, as it was");

@@ -203,6 +203,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     rotation as that same second authority. Both violate the deliberate "no database" thinness
     (`interfaces.md` preamble) and the library-first ethos — the same reasoning as
     `DES-QUEUE-BULLMQ-OVER-CUSTOM`.
+- **Amended (issue #599)**: the records ARE now read across each other, by folds that scan a window and hold
+  nothing (the cost fold, the size suggestion, and the capacity report, `DES-CAPACITY-FROM-RECORDS`), and that still
+  earns no database: each fold is one pass over a bounded window of small files (an mtime prefilter and a size cap
+  per file), and a store with query power would add a second retention authority to answer the same scan. The record
+  gains two tail fields for the capacity report, `queuedAt` and `capacity` (`INT-RUN-HISTORY-FILE-CONTRACT`); the
+  sidecar, its writer and the reaper are UNCHANGED.
 - **Traces to**: `DES-QUEUE-BULLMQ-OVER-CUSTOM`; implemented in `worker/src/run-history.mjs`.
 
 ## DES-PERSONA-VIA-APPEND-SYSTEM-MD
@@ -625,6 +631,67 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   registry carries no memory or CPU count), so such a host offers no call there; its doctor caps at its own total.
 - **Traces to**: `REQ-SIZE-SUGGESTIONS`, `DES-HOST-BUDGET`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-HOST-REGISTRY-CONTRACT`, `INT-SCOPED-LIMITS-FILE-CONTRACT`
+
+## DES-CAPACITY-FROM-RECORDS
+
+- **Decision** (issue #599, phase 1): how busy each host is and was is computed from the RUN RECORDS alone, by ONE
+  pure function (`worker/src/capacity.mjs`, `computeCapacity`) that every surface calls, over the records of the
+  window read by one reader (`worker/src/capacity-records.mjs`). Jobs only: nothing samples a machine's load. The
+  pieces, each with its reason:
+  - **Two record fields make it exact rather than guessed** (`INT-RUN-HISTORY-FILE-CONTRACT`). `capacity` is set by
+    the processor at the one point a job is admitted (where `startedAt` is set) and is null on every record written
+    before it, so "this run held a slot" is a fact in the record, not an inference from its length. It also carries
+    what the host offered then (the live `PI_CONCURRENCY`, the budget, the CPU count), so a report judges a run by the
+    capacity it ran under, and says when the window saw more than one. `queuedAt` is when the job became eligible,
+    which makes the wait a subtraction.
+  - **Older records are inferred, and counted.** A record without the `capacity` key held a slot when it spans at
+    least one second or carries `resources`: a refusal before a slot writes `startedAt` equal to `endedAt` and never
+    had a container to measure. The count (`legacyInferred`) says how much of a window rests on the inference.
+  - **A sweep line per host.** Every run's start and end, sorted with ENDS BEFORE STARTS at one instant (a run that
+    ends as the next begins is one slot reused, not two at once), each run clipped to the covered window and every
+    segment split at the bucket edges. Busy is the time at least one run held a slot; the time at the slot count is
+    "full"; the run time over the covered time is the average at once.
+  - **Missing history is never idle.** The reader states where its history starts (`coverage.fromMs`): the mirror at
+    its 5,000 run cap whose oldest run ended inside the window, the mirror's own window, and `PI_LOG_RETENTION_DAYS`.
+    A live host whose runs this reader cannot see (not this host, not in the local files, and not a named host
+    mirroring to a mirror that was read) is not shared, and its whole window is missing. Missing time is counted in
+    neither busy nor idle, so busy plus idle plus missing is the window for every host, held by a seeded property test
+    against a minute by minute count.
+  - **Integer math.** Instants are milliseconds, so a span, busy, idle and full time stay safe Numbers (each at most
+    the window). A sum of run time is the window times the concurrency, and a product with a memory size, a CPU size or
+    a CPU time can pass 2^53, so those are BigInts, and only the final per-mille ratios, rounded half up, are Numbers.
+  - **Denominators.** Promised memory is over the memory budget, and only where it is an integer. Promised and used
+    CPU are over the CPU budget, or over every CPU of the machine (`cpus`, recorded) where the budget is off or unknown:
+    a host with no budget still has a CPU count, and "share of the machine" is what an operator asks then. CPU used is
+    each run's measured CPU time spread evenly over its wall (a record carries one total, not a profile), clamped to the
+    most CPU a job can be given, since `resources` is produced inside the job.
+  - **The reader.** The run mirror where workers declared names, in a fixed number of bounded round trips (ZCARD and
+    the oldest score, one ZREVRANGEBYSCORE over the window, MGET in chunks of 500), READ-ONLY (it prunes nothing, unlike
+    the panel's reader), and the local files with `size-records.mjs`' bounds (mtime prefilter, 256 KiB cap). The two
+    are merged by `mergeRuns`, the panel's rule (one per job id, the later end winning, since a retry can land on
+    another host), with no page limit. An unreachable mirror is read as none, and the report names it.
+  - **The CLI** (`pi-dispatch capacity`) needs only the Valkey URL and the logs directory, on the kill switch's footing,
+    so it answers on a deployment whose forge setup is broken; it refuses rather than guess when the shell and the
+    `.env` name different Valkeys, since a report from the wrong one reads a busy fleet as idle.
+- **Rejected**:
+  - *Sampling host load* (the operator's decision of 2026-10-08): a sampler is a second always-on writer for a question
+    the records already answer for this deployment's own jobs. The cost is stated on every surface: a machine busy
+    with other work reads as idle.
+  - *`job.timestamp` alone as the queued moment*: BullMQ's scheduler creates each next cron job when the previous one
+    runs and delays it until due, so a daily trigger read as a day of waiting. `job.delay` instead of `opts.delay`:
+    `moveToDelayed` rewrites it, so a deferral would reset the wait (measured).
+  - *Inferring a slot from the wall time on every record*: a refusal after a slow gate can span a second without ever
+    holding a slot, and a run that dies at once spans less; the record now says it.
+  - *Treating time before the history as idle*: a mirror at its cap on a busy fleet then reads as a quiet one, which
+    is the exact lie a capacity view exists to prevent.
+  - *A per-host `fromMs`* (the local host's files can reach further back than the mirror): it would make one report's
+    hosts cover different spans, and a comparison between hosts the main thing a reader does. One start for all.
+  - *Floats*: a ratio at a boundary would round differently on two hosts; per mille, rounded half up, in integers.
+- **Residuals** (`OQ-039`): a retry overwrites its earlier attempt's record, so the earlier attempt's slot time is
+  lost; an unnamed or offline worker's history is not shared; `resources` is produced by the job and only advisory; a
+  machine busy with other work reads as idle; a job running now is not in the history until it ends.
+- **Traces to**: `REQ-CAPACITY-INSIGHTS`, `INT-CAPACITY-REPORT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, `DES-HOST-BUDGET`, `DES-HOST-REGISTRY`, `DES-SIZE-SUGGESTIONS`
 
 ## DES-CRON-VIA-BULLMQ-SCHEDULER
 
@@ -8931,3 +8998,4 @@ a tunnel.
 | 2026-10-07 | Issue #596, phase 3, review gate round 2. **`DES-SIZE-SUGGESTIONS` CORRECTED**: (1) a raise is capped at the project's `hostShare` of each integer budget, floor(budget x hostShare / 100), in doctor and across live hosts alike; it was capped at the whole budget, so doctor said a size would never fit the share and still offered the call that applies it. A flagged suggestion (a lowering still above the cap, or a pair whose other dimension is above the share) now carries no call on any surface. (2) The record reader drops records without an object `resources` and a `size` BEFORE it keeps the newest 50 per project; fifty refusals had crowded every measured run out. (3) A raise with no cap across live hosts says which of three it is (no budget read, none holds the size, every budget off); all three read "no host budget read". (4) The panel breaks a call only outside a JSON string, lets its indent give way before a string would break, and adds a dim "join the lines before running it" under a wrapped call. (5) A size above the cap is said to be above it, and the CPU over-cap text names its unit. The rejected list gains the whole-budget cap and the column wrap. Checked and UNCHANGED: `DES-HOST-BUDGET` (`largestFit` is the share rule the cap restates), `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-CONCURRENCY-3`, `DES-HOST-REGISTRY`. |
 | 2026-10-07 | Issue #596, phase 3, review gate round 3. **`DES-SIZE-SUGGESTIONS` CORRECTED** to ONE rule for offering an apply call: exactly when admission would accept the suggested job. One exported pure helper (`sizeRefusal` in `worker/src/size-suggest.mjs`, the worker's `neverFits` arithmetic restated and held equal to it by a grid test) is used by doctor, the panel, the insights page and the edit preview. The pair judged is the suggested size per dimension, else the current one. Doctor withholds when its host has an integer budget dimension and refuses the pair; with the budget `off` or unknown it offers the call and only notes a size above the runtime's total (it used to withhold a lowering admission accepts, and to offer one whose kept dimension was above the whole budget). The panel and the insights page withhold when at least one live host published an integer budget and every such host refuses the pair (they used to judge only the suggested dimension). A withheld call names the dimension that does not fit; the `unread` wording is now "no host budget read as a number". A separate test per surface is added to Rejected. `REQ-SIZE-SUGGESTIONS` and `docs/scoped-limits.md` say the same. UNCHANGED, checked: the suggestion rules, the caps, `DES-HOST-BUDGET` (admission itself is untouched). |
 | 2026-10-08 | The pi 1.1.0 bump (pull request #604). **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: pi 1.1.0 adds a fifth classifier api, `openai-decisions` (OpenAI's Decisions API, one catalog model, `openai/gpt-6-luna`, input 0.1 and 0.2 above 272k, output 0), and moves the System One pricing into a new shared module, `classifier-shared.js`, which the new api uses too. It reaches `calculateCost`, so `PRICED_APIS` grows from 11 to 12 ids. Its calls are `classify` only, so the bound is input only, finite because the output rate is 0. Its images are sent as given, without pi's resize, and OpenAI's own downscale bounds the tiles, so the api joins the openai apis at a ceiling of 48,169 per image. It sends no output cap, so it joins the apis that never put the caller's cap on the request. `calculateCost` is byte-identical to 1.0.4's, checked; `models.js` changed only in `classify` (an image-input check), and its content hash moves. |
+| 2026-10-08 | Issue #599, phase 1 (capacity records). **NEW `DES-CAPACITY-FROM-RECORDS`**: how busy each host is and was, computed from the run records alone by one pure function (`worker/src/capacity.mjs`) over one reader (`worker/src/capacity-records.mjs`): `capacity` in the record says a run held a slot (older records inferred from a one second span or `resources`, and counted), a sweep line per host with ends before starts, missing history counted in neither busy nor idle, integer math with BigInt where a product can pass 2^53, the CPU budget or every CPU as the CPU denominator, a read-only mirror reader merged with the local files by `mergeRuns`, and `pi-dispatch capacity` on the kill switch's footing. Rejected: host load sampling, `job.timestamp` alone and `job.delay` as the queued moment, a slot inferred from wall time, missing time as idle, a per-host history start, floats. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` AMENDED**: the records are now read across each other by window folds (the cost fold, the size suggestion, the capacity report), which still earn no database; the record gains `queuedAt` and `capacity`; the sidecar, writer and reaper are UNCHANGED. Checked and UNCHANGED: `DES-HOST-BUDGET`, `DES-HOST-REGISTRY`, `DES-SIZE-SUGGESTIONS`, `DES-CONCURRENCY-3`. |
