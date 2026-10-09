@@ -129,7 +129,7 @@ Four things to know before you build on it:
 One command puts a live terminal view over the whole deployment:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-05" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects, and settings" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-09" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
 </p>
 
 - **Status and spend.** Queue and worker state, day, week and month spend meters, a daily token counter,
@@ -138,12 +138,12 @@ One command puts a live terminal view over the whole deployment:
 - **Insights, the one analytics page.** Press `i` (or type `/dispatch insights`) and one self contained
   page opens in your browser. It shows the budget dials, plan verdicts against API rates, daily,
   cumulative and per flow spend charts, five breakdowns (by flow, trigger, model, repo and project), the
-  budget split with each project's share, spend and floor and the split's history, and the trigger and flow
-  topology with spend on each trigger. A plan covered run never shows as $0.00, and an estimate is
+  budget split with each project's share, spend and floor and the split's history, how busy each host was
+  (jobs only), and the trigger and flow topology with spend on each trigger. A plan covered run never shows as $0.00, and an estimate is
   always marked as one ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-05" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, and the topology with spend badges" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-09" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
 </p>
 
 - **Triggers, editable live.** Add, edit and delete triggers without a restart. Drill-ins show what
@@ -173,11 +173,17 @@ One command puts a live terminal view over the whole deployment:
   `dispatch_project_delete` change `projects.json` behind your confirm
   ([`docs/projects.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/projects.md)).
 - **Hosts.** `u` shows each worker host: its slots in use of its limit, what its budget has promised its jobs,
-  who waits, and its running jobs with project, size and age, then how busy it was over the last 7 days (busy
+  how many jobs wait for its budget, and its running jobs with project, size and age, then how busy it was over the last 7 days (busy
   share, jobs at once, time full, the wait and the top projects), labelled with when they were read. The 7 days
-  are read when the view opens and again on `u` in it, and history the records do not hold is said, never shown as
-  idle. `dispatch_capacity` returns the same report
+  are read when the view opens and again on `u` in it. Time before a host's history starts is said and not counted,
+  but a host that is new, or was down, inside history that is here reads as idle for that time. `dispatch_capacity` returns the same report
   ([`docs/multi-host.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/multi-host.md#what-the-panel-and-doctor-show-you)).
+  It counts jobs only: a machine busy with other work reads as idle.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-09" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a stale host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects" width="820">
+</p>
+
 - **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`
   in the list shows each project's share and spend, the applied plan with the reasons it gave, and the history.
   `r` on a history row reverts to it after a yes or no. `dispatch_priorities_set` sets a plan of weights with
@@ -218,6 +224,9 @@ One command puts a live terminal view over the whole deployment:
 The console reads the whole deployment, not one host. The status line names the workers once they have
 names. The run detail names the machine that ran a job. The pause switch stops every queue, and the
 scheduler view spans hosts. On a single host none of that shows, because there is nothing to tell apart.
+The HOSTS view (`u`) shows each machine's slots, budget and running jobs now and how busy it was over the last 7
+days; `pi-dispatch capacity`, doctor, the insights page and `dispatch_capacity` read the same capacity report, from
+the run records (jobs only: a machine busy with other work reads as idle).
 See [`docs/multi-host.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/multi-host.md).
 
 ## Install

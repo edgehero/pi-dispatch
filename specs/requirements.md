@@ -1137,7 +1137,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and nothing decides on it. It is JOBS ONLY: no host load is sampled, so a machine busy with other work reads as
   idle, and every surface says so. **History it cannot see is never shown as idle**: time before what its sources hold
   (a run mirror at its cap, the log retention) and a live host whose runs it cannot read are reported as missing,
-  counted in neither busy nor idle, and named. It carries no secret and no PII: host names, project ids, numbers and
+  counted in neither busy nor idle, and named. Inside history it can see, a host that is new or was down reads as idle
+  for that time: the records cannot tell a machine that ran nothing from one that was not there, and the docs say so.
+  It carries no secret and no PII: host names, project ids, numbers and
   fixed words only.
 - **Why**: without it, whether a machine is at its limit or mostly idle is answered by reading run records by hand.
   Sizing a host, a budget or `PI_CONCURRENCY` up or down is a decision about money and throughput, and a report that
@@ -3426,6 +3428,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-09 | Issue #599, phase 5. **`REQ-CAPACITY-INSIGHTS` AMENDED** (the Statement): "history it cannot see is never shown as idle" was stronger than the report. Time before a host's sources start is missing, never idle, as it said; but inside history a source does hold, a host that is new or was down reads as idle for that time, because no record says a machine was absent, and the docs now say so (docs/insights.md, docs/multi-host.md, both READMEs, the operator skill and the `dispatch_capacity` description). No behaviour changed. **Code evidence**: worker/src/capacity.mjs -> computeCapacity (idle is covered time with no run). |
 | 2026-10-08 | Issue #599, phase 4, second corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the Acceptance: a record whose `capacity` says more than any host can have keeps its busy time (that value is unknown, and such records are counted); it said the record was unreadable. The Statement is UNCHANGED. |
 | 2026-10-08 | Issue #599, phase 4, corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the Acceptance: a report the page cannot word degrades only its section; past twenty hosts the ones with numbers are drawn first and the rest counted by kind; a long list of hosts whose history is not here is cut to five names and no other coverage clause is lost; `mtd` at a month's first millisecond is no time yet, not a failed read; each stretch of no data says its kind; a record whose `capacity` says more than any host can have is unreadable; a retry whose earlier attempt ran elsewhere is worded truly on both hosts. The Statement is UNCHANGED (re-wrapped). **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: its degrades are total; a dead Valkey now reaches them, since the scheduler read is bounded. |
 | 2026-10-08 | Issue #599, phase 4. **`REQ-CAPACITY-INSIGHTS` AMENDED**: the Statement says phase 4 shows the report on the insights page over the page's window (it said a later phase); the Acceptance adds the page: each host's headline numbers in the words `pi-dispatch capacity` prints, `mtd` from the first instant of the month, a chart whose axis ends at the page's instant, missing history hatched as no data and never drawn as idle, truncation said, hostile names dropped and counted, and an unreadable slice confined to its section. **`REQ-INSIGHTS-HTML-EXPORT` AMENDED**, the Acceptance: the capacity section after the job sizes, the jobs-only sentence always shown, byte-identical for one report and instant. Its Statement and Scope are UNCHANGED, checked: no port, no tool, nothing new served. |

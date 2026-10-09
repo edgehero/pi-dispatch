@@ -35,8 +35,9 @@ Observe (no approval needed):
 - `dispatch_capacity`: how busy each worker host was over `window` (`24h`, `7d` or `30d`, default `7d`; `host`
   narrows to one): busy and idle share, jobs at once, memory and CPU promised against the budget, CPU used, the wait
   for a slot and the busiest projects, as `text` and as the `report`. It counts this deployment's jobs only (a machine
-  busy with other work reads as idle), and history it cannot see is `missingMs`, never idle: say so when the coverage
-  is cut, local only, or names running jobs not counted, rather than reading a quiet host into it. The operator sees
+  busy with other work reads as idle), and history before its sources start is `missingMs`, never idle; a host that
+  is new, or was down, inside history that is there reads as idle for that time. Say so when the coverage is cut,
+  local only, or names running jobs not counted, rather than reading a quiet host into it. The operator sees
   the same 7 days per host, under its running jobs, in the panel (`u`).
 
 Control (no approval needed — reversible and money-safe):
