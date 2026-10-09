@@ -1,6 +1,6 @@
 {
   "name": "pi-dispatch",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "private": true,
   "description": "Run the pi coding agent as a self-hosted service: queued jobs in locked down Docker or Podman containers, spend caps checked before anything is spent, triggered by cron, the CLI, or GitHub, GitLab, Forgejo and Azure DevOps events.",
   "license": "MIT",
