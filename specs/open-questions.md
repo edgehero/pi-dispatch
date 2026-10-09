@@ -1883,7 +1883,23 @@ adversarial passes did.
     That stalled attempt's slot time is in no record, is counted nowhere and reads as idle;
   - **a writer from before the fleet horizon** (`runs:horizon`) trims the shared run index by its own retention without
     recording it, so while one runs in a fleet a shorter retention than the reader's can still cut history that reads
-    as idle; every writer from this version on records its trims;
+    as idle; every writer from this version on records its trims. Such a writer does not record when the mirror
+    started (`runs:since`) either. Where it recreates a lost index, the start left from before is not trusted (its run
+    is not in the new index) and the reader starts the mirror at the index's oldest run. That is conservative only as
+    far as that run's own write: a run that ENDED before the loss and whose mirror write landed just after it (a slow
+    write, seconds in practice) is the oldest run, and the time between its end and the loss reads as idle where other
+    hosts' lost runs are missing. A writer of this version records its write's time instead, so this is a mixed-fleet
+    residual;
+  - **a vouching job re-mirrored across a loss**: the index lost on its own (a 4.0.1 worker's shorter expiry), an
+    older worker recreating it, and then a retry of exactly the job whose run vouches for the start, mirrored by that
+    older worker. Its member is back in the index, so the stale start is trusted again and the lost runs read as idle.
+    It needs an older writer, the index lost without the start, and a retry of that one job;
+  - **a start lost on its own**: an eviction or a hand deletion of `runs:since` alone, with the index left. The next
+    write starts the mirror at the index's oldest run, which is true unless a slow write gave the index a run older than
+    the mirror's real start; then the time between the two reads as idle;
+  - **a mirror write that fails** (Valkey down, a timeout) is logged once and never retried: the record is on that
+    host's disk, but the index survives without it, so a peer reads that run's time as idle. Its own host's report
+    reads its files and counts it;
   - **an unnamed or offline worker's history is not shared.** A worker without `PI_WORKER_NAME` writes no run
     mirror, so another host's report sees none of its runs; a live one is named in `historyNotShared` and counted as
     missing, but a worker that is not live (stopped, or its row expired) is not in the registry either, so its runs
@@ -2002,3 +2018,4 @@ adversarial passes did.
 | 2026-10-08 | Issue #599, phase 1, second corrections. **`OQ-039` AMENDED**: the retry residual narrows (a retry now carries its earlier attempts' slot intervals; only an attempt whose record could not be read, or beyond the 4 kept, is lost), and a new residual names a stalled pickup's slot time, which no record holds and the report counts and says. |
 | 2026-10-08 | Issue #599, phase 1, last correction. **`OQ-039` AMENDED**: a stall of a later attempt is a named residual. `stalledCounter` never resets, so only a stall of the first attempt is counted as `stalledRepick`; a later attempt that stalled wrote no record, its slot time is counted nowhere, and the run that follows reads as an ordinary retry. |
 | 2026-10-08 | Issue #599, phase 2. **`OQ-039` AMENDED**: "a job running now is not in the history until it ends" is gone, since the host rows now list running jobs; in its place, a running job is counted only as far as its row vouches for it (to now on a fresh row, to its last beat on one older than 30 s, not at all when its row does not list it or its host's history is not shared, counted in `liveNotCounted`), and an orphaned container's time after its failed stop is in no record and reads as idle, though it is named (`orphans`). The Position no longer counts its items (it said four and listed six). |
+| 2026-10-09 | Issue #599, the run mirror's start. **`OQ-039` AMENDED**: residuals of `runs:since`, the first three reachable only beside a worker from before it or by a hand on the keys: a run that ended before a loss and whose older writer's mirror write landed just after it reads as idle from its end to the loss; a start lost on its own beside a slow older run; a retry of exactly the vouching job id that an older writer mirrors into an index it recreated, which makes the stale start trusted again; and a failed mirror write, which is never retried and reads as idle to a peer. |

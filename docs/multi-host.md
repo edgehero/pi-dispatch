@@ -374,11 +374,12 @@ size labels of the job containers that are running and warns when they differ.
 **How busy each host was.** Doctor ends the fleet part with one line per host over the last 7 days, for example
 `Host a: last 7d busy 63% (avg 2.1 of 4 slots, full 12%), promised 48% memory / 40% CPU, used 18% CPU of 8, wait
 p50 40s p95 6m, most busy: web`. It is a fact, never a warning, and it shows on a single host too. After a `;` it says
-what it cannot see: jobs running now that are not counted, history that starts later than the window (the run mirror
-holds nothing older), or that only this host's files were read. A host without `PI_WORKER_NAME` writes no run mirror,
-so another host's doctor says it has no history there. `pi-dispatch capacity` prints the same report in full, and
-`dispatch_capacity` returns it in pi ([the capacity report](insights.md#pi-dispatch-capacity)). It counts this
-deployment's jobs only, so a machine busy with other work reads as idle.
+what it cannot see: jobs running now that are not counted (or not known, while this host's row is not there),
+history that starts later than the window (the run mirror holds nothing older), or that only this host's files were
+read. A host without `PI_WORKER_NAME` writes no run mirror, so another host's doctor says it has no history there.
+`pi-dispatch capacity` prints the same report in full, and `dispatch_capacity` returns it in pi
+([the capacity report](insights.md#pi-dispatch-capacity)). It counts this deployment's jobs only, so a machine busy
+with other work reads as idle.
 
 **The panel's HOSTS view.** Press `u` in `/dispatch` (the runs divider names it) for one block per host. The first
 lines are live, from the registry rows the panel already reads every second: the slots in use of the host's
@@ -441,14 +442,16 @@ produce different digests legitimately. It means "check", not "broken".
 | `runs:index` | the merged run history's index, newest first |
 | `runs:rec:<jobId>` | one run's record, a copy of the sidecar on its host's disk |
 | `runs:horizon` | the fleet's history horizon: the newest instant before which any host's trim removed runs from `runs:index` (each host trims by its own `PI_LOG_RETENTION_DAYS`), read by `pi-dispatch capacity` so that time reads as missing, not idle |
+| `runs:since` | when the merged run history started (`at`), and a run of `runs:index` that vouches for it (`member`): set by the write that creates the index, or on an index without a start it can trust to the index's oldest run, expiring with it, and trusted only while that run is in the index; read by `pi-dispatch capacity` so that time before it reads as missing, not idle |
 
 Deleting the whole `host:*` keyspace while the fleet is running is safe: every host falls back to
 behaving as a single host, which is the behaviour before any of this existed. The one decision that reads it, a
 forge job refused as too big for every host, can only be delayed by that, never caused. The same is true of
 `runs:*`: you lose the merged view until the next runs repopulate it, and never a record, because the
-record is the file on disk. One thing goes with it: deleting `runs:horizon` loses where the hosts trimmed the index,
-so until the next trim records it again, `pi-dispatch capacity` can read a gap a peer's shorter retention cut as idle
-time.
+record is the file on disk. The capacity report says so: the next write records that the merged history starts
+again then (`runs:since`), and `pi-dispatch capacity` reads the time before it as missing, not idle. Deleting
+`runs:horizon` alone loses where the hosts trimmed the index, so until the next trim records it again, a gap a peer's
+shorter retention cut inside the history that is still there can read as idle time.
 
 **Version floor**: worker 1.7.0, admin 1.7.0. Every host must be on it. A worker below the floor does not
 publish itself, so the others cannot see it, and it will not route its own work.

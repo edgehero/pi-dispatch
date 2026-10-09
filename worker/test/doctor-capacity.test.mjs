@@ -4,7 +4,7 @@ import { CAPACITY_WINDOWS, computeCapacity } from "../src/capacity.mjs";
 import { JOBS_ONLY } from "../src/capacity-cli.mjs";
 import { readCapacityRecords } from "../src/capacity-records.mjs";
 import { capacityChecks, doctorCapacity } from "../src/doctor.mjs";
-import { RUNS_HORIZON, RUNS_INDEX, runRecordKey } from "../src/run-mirror.mjs";
+import { runRecordKey } from "../src/run-mirror.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Doctor's capacity lines (issue #599, phase 2): one fact per host, never a warning. Every instant is an offset from
@@ -49,7 +49,9 @@ test("the coverage clauses: running now, a cut history, this host's files only, 
 	assert.equal(labels[0], "Host a: last 7d busy 4.2% (avg 0 of 4 slots, full 0%), promised 1% memory / 1% CPU, used 0.3% CPU of 8, wait p50 40s p95 40s, most busy: web; 1 running now, counted to now; history from 2026-10-06 12:00 UTC only (the run mirror holds nothing older), earlier time counted as neither busy nor idle; 2 running now not counted");
 	assert.equal(labels[1], "Host b: last 7d no history here; no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)");
 	const local = capacityChecks(week([run("1", 2, 1)], { coverage: { source: "local", localHost: "a", local: { fromMs: NOW - W.ms }, mirror: null } }));
-	assert.match(local[0].label, /; this host's files only$/);
+	assert.match(local[0].label, /; this host's files only; no live row read for it, so its running jobs are not known$/, "no registry read: this host's running jobs are not known");
+	const withRow = capacityChecks(week([run("1", 2, 1)], { live: [{ name: "a", concurrency: "4", routes: "true", staleMs: 1000, jobs: [], jobsMore: 0 }], coverage: { source: "local", localHost: "a", local: { fromMs: NOW - W.ms }, mirror: null } }));
+	assert.match(withRow[0].label, /; this host's files only$/);
 	assert.deepEqual(capacityChecks(week([])), [], "no host: no line");
 });
 
@@ -85,7 +87,7 @@ test("doctorCapacity reads through its seam over the last 7 days, and a slow or 
 	assert.deepEqual(asked30, [30]);
 });
 
-test("a full mirror (5000 runs) costs doctor well under a second: twelve bounded round trips and one sweep", async () => {
+test("a full mirror (5000 runs) costs doctor well under a second: eleven bounded round trips and one sweep", async () => {
 	const index = [];
 	const kv = new Map();
 	for (let i = 0; i < 5000; i++) {
@@ -96,10 +98,8 @@ test("a full mirror (5000 runs) costs doctor well under a second: twelve bounded
 	}
 	const calls = [];
 	const redis = {
-		zcard: async (k) => (calls.push("zcard"), k === RUNS_INDEX ? index.length : 0),
-		zrange: async () => (calls.push("zrange"), [index.at(-1)[0], String(index.at(-1)[1])]),
-		zscore: async (k) => (calls.push("zscore"), k === RUNS_HORIZON ? null : null),
-		zrevrangebyscore: async (_k, _max, min) => (calls.push("zrevrangebyscore"), index.filter(([, s]) => s > Number(min.slice(1))).flatMap(([id, s]) => [id, String(s)])),
+		// The reader's one snapshot (`READ_SCRIPT`): the size, the oldest score, no horizon, a held start a month back, the range.
+		eval: async (_script, _n, _index, _horizon, _since, _member, min) => (calls.push("eval"), [index.length, String(index.at(-1)[1]), null, String(NOW - 30 * DAY), 1, index.filter(([, s]) => s > Number(min)).flatMap(([id, s]) => [id, String(s)])]),
 		mget: async (...keys) => (calls.push("mget"), keys.map((k) => kv.get(k) ?? null)),
 	};
 	const logsDir = tempDir("pi-doctor-capacity-");
@@ -107,7 +107,7 @@ test("a full mirror (5000 runs) costs doctor well under a second: twelve bounded
 	const lines = await doctorCapacity({ seams: { readCapacity: (args) => readCapacityRecords({ ...args, redis }), wallClock: () => NOW }, env: { PI_LOGS_DIR: logsDir }, home: "/h", url: "redis://v", hosts: [], localHost: "h0" });
 	const ms = performance.now() - started;
 	assert.deepEqual(lines.map((l) => l.label.slice(0, 7)), ["Host h0", "Host h1", "Host h2", "Jobs on"]);
-	assert.equal(calls.length, 3 + 1 + 10, "ZCARD, the oldest, the horizon, the range, then ten MGETs of 500");
+	assert.equal(calls.length, 1 + 10, "one snapshot of the index, then ten MGETs of 500");
 	assert.ok(ms < 1500, `took ${Math.round(ms)} ms`);
 });
 

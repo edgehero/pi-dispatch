@@ -1775,7 +1775,7 @@ function normCapacity(v) {
   const notDrawn = { numbers: 0, empty: 0, "not-shared": 0, unnamed: all.length - valid.length, repeated: [...times.values()].filter((n) => n > 1).length };
   for (const h of left) notDrawn[h.state]++;
   const coverage = (Array.isArray(v.coverage) ? v.coverage : [v.coverage]).slice(0, CAPACITY_COVERAGE_MAX).map((c) => capText(c)).filter((c) => c !== null);
-  return { window: win, truncated: v.truncated === true, coverage, hosts, notDrawn };
+  return { window: win, truncated: v.truncated === true, coverage, hosts, notDrawn, noRun: capText(v.noRun) ?? "no host ran a job in this window" };
 }
 
 /** A diagonal hatch over one rectangle as ONE path (a pattern fill would need a paint-server reference, banned here). */
@@ -1872,7 +1872,7 @@ function capGapWhy(gap, host) {
   if (gap.kind === "after") return "after the report was read";
   if (host.state === "not-shared") return host.notShared;
   if (host.state === "empty") return "no history here";
-  if (gap.kind === "before") return `before this host's history starts${host.truncated ? " (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)" : ""}`;
+  if (gap.kind === "before") return `before this host's history starts${host.truncated ? " (the run mirror holds nothing older: it started then, or its cap or a peer's shorter retention cut it)" : ""}`;
   return "this bucket's numbers were not readable, so they are not drawn";
 }
 
@@ -1915,7 +1915,7 @@ function capacitySectionHtml(nc, tips, nowMs, windowLabel) {
   parts.push(`<div class="small">${escapeHtml(windowLabel)}, from ${escapeHtml(capWhen(nc.window.fromMs))} to ${escapeHtml(capWhen(nc.window.toMs))}. Each bar is one ${escapeHtml(hours)} bucket: how many jobs ran at once on average, with a tick at the most at once; the dashed line is the host's slot count. Hatched is no data, counted as neither busy nor idle; an idle stretch is empty.</div>`);
   parts.push(`<div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`);
   if (nc.truncated) parts.push(`<div class="small cap-warn">history truncated: the run mirror holds nothing older for at least one host, so its earlier time is drawn as no data, never as idle</div>`);
-  if (nc.hosts.length === 0) parts.push('<div class="dim">no host ran a job in this window</div>');
+  if (nc.hosts.length === 0) parts.push(`<div class="dim">${escapeHtml(nc.noRun)}</div>`);
   for (const host of nc.hosts) {
     const block = [];
     if (host.state === "not-shared") {

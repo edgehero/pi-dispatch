@@ -143,7 +143,7 @@ One command puts a live terminal view over the whole deployment:
   always marked as one ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-09" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-09.2" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
 </p>
 
 - **Triggers, editable live.** Add, edit and delete triggers without a restart. Drill-ins show what

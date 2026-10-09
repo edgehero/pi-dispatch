@@ -211,6 +211,10 @@ time; and where that host's history starts. Each moment is judged by the capacit
 lowered while jobs ran shows as an over-commit only for the time it was lower. A share of time that is there but
 rounds to nothing prints as `under 0.1%` (and one short of all of it as `over 99.9%`), idle is printed as the
 complement of the printed busy, so the two always sum to 100%, and a history start reads `2026-10-01 09:29 UTC`.
+The last lines say what the history covers, including `history truncated` when the run mirror holds nothing older for
+a host. With no host in the report it says `No host ran a job in the last 7d.` only when the whole window was read:
+both sources, nothing cut, no record skipped, unreadable or without a host. Otherwise it says `No run in the history
+read here in the last 7d.`, since a host whose runs were not read may have run many.
 `--json` prints the whole report. It
 never loads the full config: it reads only `VALKEY_URL` (or the one `--valkey-url` names), `PI_LOGS_DIR`,
 `PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME`, from the shell or the `.env` of the folder you run it in (the logs directory defaults to
@@ -231,6 +235,8 @@ reads the report when it opens and again on `u` ([what the panel shows](multi-ho
   the mirror to what it still holds (a host both hold, such as a named host seen from itself, says "the run mirror and
   this host's files"). Every worker trims the shared mirror by its own retention, so a host with a
   shorter one cuts everyone's older runs; it records where it cut, and the report starts the mirrored hosts there.
+  The mirror also records when it started (`runs:since`), so on a new deployment, or after its Valkey lost the mirror's
+  keys, the mirrored hosts' history starts then.
   Time before a host's history, and a live host whose runs it cannot see (one without `PI_WORKER_NAME` writes no
   mirror), count as neither busy nor idle, and the report names them. What it cannot see inside a history it has is
   another matter: a host that is new, or was down, inside a window whose history is here reads as idle for that time,
@@ -238,8 +244,11 @@ reads the report when it opens and again on `u` ([what the panel shows](multi-ho
 - **A job running now is counted as busy up to now.** Each worker's registry row lists the jobs it runs (with or
   without a host budget), and the report counts each from the moment it was admitted. A row that has not beaten for
   more than 30 seconds counts its jobs only up to its last beat. A running job the row does not list (it lists 32) is
-  said as not counted, and so is one on a host whose history is not shared. A row whose list of running jobs cannot be read is named, and the number running now is then unknown. A container whose stop did not take (an
-  orphan) is named, but its time after the failed stop is in no record and is not counted as busy.
+  said as not counted, and so is one on a host whose history is not shared. A row whose list of running jobs cannot
+  be read is named, and the number running now is then unknown. When the host you read from has runs here and no row
+  (the registry was not read, or its row is gone until its next beat), the coverage line says the jobs it runs now are
+  not known; the other hosts' count stands. A container whose stop did not take (an orphan) is named, but its time
+  after the failed stop is in no record and is not counted as busy.
 - A retry replaces its earlier attempt's record, but carries that attempt's
   slot time in `earlier`, so it is counted, on the host that ran that attempt where that host's history is here and covers it. An attempt the record could not carry (its own record unreadable, or beyond the 4 kept) is not counted, nor is one outside its host's history, and the report says
   how many runs were retries. A run whose first attempt stalled and was picked up again is counted too, and the report says the stalled
@@ -262,11 +271,11 @@ page is written, at the moment in its header stamp. Per host:
   The dashed line is the host's slot count, a tick on a bar is the most that ran at once in it, and hovering a bar
   gives its busy share, average, peak and full share. The time axis is the whole window and ends at the moment the page
   was written, so a quiet day is an empty stretch, never squeezed out.
-- **Hatched is no data.** Time before a host's history starts (the run mirror at its cap, the log retention), a host
-  whose history is not here (one without `PI_WORKER_NAME`, or a run mirror that was not read), a bucket the page could
-  not read, and time after the report was read, are hatched in grey and counted as neither busy nor idle. Hovering
-  the hatch says which of these it is. An empty stretch with no hatch is a host that ran nothing then. The dates under
-  the chart mark UTC midnights.
+- **Hatched is no data.** Time before a host's history starts (the run mirror at its cap or since it started, the log
+  retention), a host whose history is not here (one without `PI_WORKER_NAME`, or a run mirror that was not read), a
+  bucket the page could not read, and time after the report was read, are hatched in grey and counted as neither busy
+  nor idle. Hovering the hatch says which of these it is. An empty stretch with no hatch is a host that ran nothing
+  then. The dates under the chart mark UTC midnights.
 - **The caveats** the CLI prints, one per line: jobs refused before a slot, retries, jobs running now, and where the
   history comes from. A host whose history is not here says why, in the same sentence, and shows no busy share. A
   history the run mirror cut says "history truncated" with the moment it starts.

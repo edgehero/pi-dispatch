@@ -2,10 +2,11 @@
  * The run records a capacity report reads (issue #599, DES-CAPACITY-FROM-RECORDS), and what they cover. Two sources,
  * merged by the one rule the panel already reads the fleet's runs by (run-mirror.mjs `mergeRuns`):
  *
- *   - THE RUN MIRROR, where workers declared names (`runs:index`, `runs:rec:*` and `runs:horizon`, run-mirror.mjs):
- *     every named host's records. Read in a fixed number of bounded round trips: ZCARD, the oldest score and the
- *     horizon, one ZREVRANGEBYSCORE over the window, then MGET in chunks of `CAPACITY_MGET_CHUNK`. A body over 256 KiB is
- *     skipped and counted, as a local file is. READ-ONLY: unlike `readMirroredRuns`, this reader prunes nothing, so a
+ *   - THE RUN MIRROR, where workers declared names (`runs:index`, `runs:rec:*`, `runs:horizon` and `runs:since`,
+ *     run-mirror.mjs): every named host's records. Read in a fixed number of bounded round trips: ONE script
+ *     (`READ_SCRIPT`: the size, the oldest score, the horizon, the mirror's start and the members over the window, one
+ *     snapshot, so a flush between them cannot mix two states), then MGET in chunks of `CAPACITY_MGET_CHUNK`. A body
+ *     over 256 KiB is skipped and counted, as a local file is. READ-ONLY: unlike `readMirroredRuns`, this reader prunes nothing, so a
  *     report can never change what another surface shows.
  *   - THE LOCAL FILES in the logs directory, size-records.mjs' pattern: an mtime prefilter (a file last written before
  *     the window, less a day of skew, is not opened) and the 256 KiB cap per file (`SIZING_RECORD_MAX_BYTES`), a larger
@@ -17,12 +18,17 @@
  *   - the local files hold this host's runs (and every host's, on a shared logs directory) back to
  *     `PI_LOG_RETENTION_DAYS` (0 keeps them). An absent or unreadable directory covers nothing (`local: null`): a host
  *     whose files are gone has no history here, not an idle one;
- *   - the mirror holds the named hosts' runs back to the LATEST of: the deepest window any writer keeps
+ *   - the mirror holds the named hosts' runs back to the LATEST of: the mirror's own start (`runs:since`, trusted only
+ *     while the run that vouches for it is in the index; without a trusted one, the index's oldest run, since an index
+ *     written before that key, recreated by a worker that does not know it, or whose key was lost, vouches for nothing
+ *     older), the deepest window any writer keeps
  *     (`mirrorWindowMs(0)`), the fleet horizon (`runs:horizon`, raised by every writer whose trim removed runs, by its
  *     OWN retention or the count cap, so a peer with a short retention cuts everyone's history and says so), the oldest
  *     run at the `RUNS_INDEX_MAX` cap when that run ended after the window began, and the newest run whose body has
  *     expired while its index member stayed (its writer has not trimmed since). Any of these past the window's start
- *     makes it `truncated`.
+ *     makes it `truncated`. The start is the one bound that survives losing the mirror's keys: a flushed or replaced
+ *     Valkey, or an index that expired, loses the horizon with the runs, and the next write recreates an index whose
+ *     other bounds all reach back past the loss, so without it a peer read every lost run as idle.
  *
  * An absent index is `off` (no named worker, or none since the index expired), and an unreachable or slow Valkey is
  * read as no mirror, both with the reason stated: the local files are still read, and the report says it is local
@@ -34,7 +40,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { RUNS_HORIZON, RUNS_HORIZON_MEMBER, RUNS_INDEX, RUNS_INDEX_MAX, mergeRuns, mirrorWindowMs, runRecordKey } from "./run-mirror.mjs";
+import { READ_SCRIPT, RUNS_HORIZON, RUNS_HORIZON_MEMBER, RUNS_INDEX, RUNS_INDEX_MAX, RUNS_SINCE, mergeRuns, mirrorWindowMs, runRecordKey } from "./run-mirror.mjs";
 import { SIZING_RECORD_MAX_BYTES } from "./size-records.mjs";
 
 /** How many record bodies one MGET asks for: a full mirror is ten round trips, never one 5,000-key command. */
@@ -63,13 +69,16 @@ export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPA
 	const none = (state) => ({ records: [], state, fromMs: null, truncated: false, skipped: 0 });
 	if (!redis) return none("off");
 	try {
-		const size = Number(await bounded(redis.zcard(RUNS_INDEX), timeoutMs));
+		const snap = await bounded(redis.eval(READ_SCRIPT, 3, RUNS_INDEX, RUNS_HORIZON, RUNS_SINCE, RUNS_HORIZON_MEMBER, sinceMs), timeoutMs);
+		if (!Array.isArray(snap)) throw new Error("the index did not answer a list");
+		const size = Number(snap[0]);
 		if (!Number.isSafeInteger(size) || size <= 0) return none("off");
-		const oldest = await bounded(redis.zrange(RUNS_INDEX, 0, 0, "WITHSCORES"), timeoutMs);
-		const oldestMs = Array.isArray(oldest) && oldest.length >= 2 ? Number(oldest[1]) : NaN;
-		const horizonRaw = await bounded(redis.zscore(RUNS_HORIZON, RUNS_HORIZON_MEMBER), timeoutMs);
-		const horizonMs = horizonRaw === null || horizonRaw === undefined ? NaN : Number(horizonRaw);
-		const ids = await bounded(redis.zrevrangebyscore(RUNS_INDEX, "+inf", `(${sinceMs}`, "WITHSCORES"), timeoutMs);
+		const num = (v) => (typeof v === "string" && /^\d{1,16}$/.test(v) ? Number(v) : typeof v === "number" && Number.isSafeInteger(v) ? v : NaN);
+		const oldestMs = num(snap[1]);
+		const horizonMs = num(snap[2]);
+		// The start counts only while the run that vouches for it is in the index (`RUNS_SINCE`).
+		const startMs = snap[4] === 1 ? num(snap[3]) : NaN;
+		const ids = snap[5];
 		if (!Array.isArray(ids) || ids.length % 2 !== 0) throw new Error("the index did not answer a list");
 		const members = [];
 		for (let i = 0; i < ids.length; i += 2) members.push({ id: ids[i], score: Number(ids[i + 1]) });
@@ -100,6 +109,10 @@ export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPA
 			});
 		}
 		let fromMs = Math.max(sinceMs, nowMs - mirrorWindowMs(0));
+		// The mirror's own start; without a trusted one, the oldest run the index holds (`RUNS_SINCE`): never the window's
+		// start.
+		if (Number.isFinite(startMs)) fromMs = Math.max(fromMs, startMs);
+		else if (Number.isFinite(oldestMs)) fromMs = Math.max(fromMs, oldestMs);
 		if (Number.isFinite(horizonMs)) fromMs = Math.max(fromMs, horizonMs);
 		if (size >= RUNS_INDEX_MAX && Number.isFinite(oldestMs)) fromMs = Math.max(fromMs, oldestMs);
 		if (Number.isFinite(expiredMs)) fromMs = Math.max(fromMs, expiredMs);
