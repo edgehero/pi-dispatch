@@ -1,6 +1,6 @@
 {
   "name": "@edgehero/pi-dispatch-receiver",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "type": "module",
   "description": "The pi-dispatch trigger edge: verifies GitHub, GitLab, Forgejo and Azure DevOps webhooks, or polls GitHub with no public URL, and queues one pi coding agent job per event (per replica, if set) for the worker.",
   "keywords": [
@@ -48,7 +48,7 @@
   },
   "dependencies": {
     "@octokit/webhooks": "14.2.0",
-    "@edgehero/pi-dispatch": "^4.0.1",
+    "@edgehero/pi-dispatch": "^4.1.0",
     "bullmq": "5.80.4",
     "ioredis": "5.11.1"
   }
