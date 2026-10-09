@@ -165,12 +165,33 @@ const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
 export function capacityText(report, { since }) {
 	const lines = [];
 	for (const h of report.hosts) lines.push(...hostLines(h, since, report.coverage));
-	if (report.hosts.length === 0) lines.push(`No host ran a job in the last ${since}.`);
+	if (report.hosts.length === 0) lines.push(`${capitalized(noRunText(report.coverage, `in the last ${since}`))}.`);
 	lines.push(...coverageLines(report.coverage));
 	return `${lines.join("\n").replace(CONTROL, "")}\n`;
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const capitalized = (text) => `${text.slice(0, 1).toUpperCase()}${text.slice(1)}`;
+
+/**
+ * What a report with no host says, `when` being "in the last 24h" or "in this window": that no host ran a job only when
+ * the whole window was read: no reason (no source missing, no record skipped), not this host's files alone, the run
+ * mirror's history not cut (`truncated`, which for a report with no host is the mirror's own), and no record left
+ * uncounted (unreadable, or without a host). Otherwise only that the history read here holds no run, since a host whose
+ * runs were not read may have run many. The CLI, the panel's HOSTS view and the insights page say it in these words.
+ */
+export function noRunText(cov, when) {
+	const whole = (cov?.reason ?? null) === null && cov?.source !== "local" && cov?.truncated !== true && !(cov?.unreadable > 0) && !(cov?.withoutHost > 0);
+	return whole ? `no host ran a job ${when}` : `no run in the history read here ${when}`;
+}
+
+/**
+ * Why a host's history starts inside the window when the run mirror cut it (`coverage.truncated`), in the words the CLI
+ * uses; the insights page restates them (admin/src/insights-html.mjs `capGapWhy`, pinned by its test): the mirror
+ * holds nothing older, because it started then (`runs:since`: a new deployment, or a Valkey that lost its keys), or its
+ * cap or a peer's shorter retention cut it.
+ */
+export const MIRROR_CUT_WHY = "the run mirror holds nothing older: it started then, or its cap or a peer's shorter retention cut it";
 
 /**
  * Why a host's history is not here (`hosts[].notShared`), in one sentence for the CLI, the tool and doctor, so none of
@@ -277,7 +298,7 @@ export function historySourceText(source) {
 export function historyNotes(h) {
 	const cov = h.coverage;
 	const notes = [`history from ${historySourceText(cov.source)}`];
-	if (h.missingMs > 0) notes.push(`from ${new Date(cov.fromMs).toISOString().slice(0, 16).replace("T", " ")} UTC on${cov.truncated ? " (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)" : ""}, earlier time counted as neither busy nor idle`);
+	if (h.missingMs > 0) notes.push(`from ${new Date(cov.fromMs).toISOString().slice(0, 16).replace("T", " ")} UTC on${cov.truncated ? ` (${MIRROR_CUT_WHY})` : ""}, earlier time counted as neither busy nor idle`);
 	const legacy = cov.legacyOccupied + cov.legacyRefused;
 	if (legacy > 0) notes.push(`${plural(legacy, "record")} from before capacity was recorded, inferred (${cov.legacyOccupied} held a slot, ${cov.legacyRefused} refused)`);
 	if (cov.withoutSize > 0) notes.push(`${cov.withoutSize} without a size (not in promised)`);
@@ -311,8 +332,14 @@ export function coverageNotes(cov, { namesShown = Infinity } = {}) {
 	if (names.length > namesShown) notes.push(`${plural(names.length, "host")} whose history is not here: ${names.slice(0, namesShown).join(", ")} and ${names.length - namesShown} more`);
 	else if (names.length > 0) notes.push(`not shared here: ${names.join(", ")}`);
 	notes.push(...fleetRecordNotes(cov));
+	// No row that lists anything (the registry not read, or every row gone until its next beat), or none for the reading
+	// host while its runs are here: those running jobs are not counted, and the line says so rather than leaving a busy
+	// host reading as one that runs nothing. The other rows' count stands.
+	const noRows = cov.liveUnreadable === 0 && cov.running === null;
 	if (cov.liveUnreadable > 0) notes.push(`the running jobs of ${plural(cov.liveUnreadable, "host")} unreadable, not counted, so how many run now is unknown`);
+	else if (noRows) notes.push("no live row lists the jobs running now, so they are not known");
 	if (cov.running !== null && cov.running > 0) notes.push(`${plural(cov.running, "job")} running now${cov.liveNotCounted > 0 ? `, ${cov.liveNotCounted} of them not counted until ${cov.liveNotCounted === 1 ? "it ends" : "they end"}` : ", counted up to now"}`);
+	if (typeof cov.liveRowMissing === "string" && !noRows) notes.push(`no live row read for this host (${cov.liveRowMissing}), so the jobs it runs now are not known`);
 	if (cov.reason) notes.push(cov.reason);
 	return notes;
 }
@@ -338,5 +365,11 @@ export const JOBS_ONLY = "Jobs only: a machine busy with other work reads as idl
 
 /** The CLI's last two lines: what the fleet's history covers, and what this report cannot see. */
 export function coverageLines(cov) {
-	return [`Coverage: ${coverageNotes(cov).join("; ")}.`, JOBS_ONLY];
+	const notes = coverageNotes(cov);
+	// The insights page draws this clause as its own warning, so it is added here, not in `coverageNotes`.
+	if (cov.truncated === true) notes.splice(1, 0, TRUNCATED_NOTE);
+	return [`Coverage: ${notes.join("; ")}.`, JOBS_ONLY];
 }
+
+/** The fleet's history cut by the run mirror (`coverage.truncated`), as the CLI's coverage line says it. */
+export const TRUNCATED_NOTE = "history truncated: the run mirror holds nothing older for at least one host, so its earlier time is counted as neither busy nor idle";

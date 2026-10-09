@@ -495,7 +495,7 @@ test("the outside-edit notice is one rule and one sentence on the panel's text t
 // ---- the capacity section's assembler (issue #599, phase 4) ----
 
 const { computeCapacity } = await import("@edgehero/pi-dispatch/capacity");
-const { capacityText } = await import("@edgehero/pi-dispatch/capacity-cli");
+const { TRUNCATED_NOTE, capacityText } = await import("@edgehero/pi-dispatch/capacity-cli");
 
 const CNOW = Date.parse("2026-10-08T12:00:00.000Z");
 const CH = 60 * 60 * 1000;
@@ -514,7 +514,8 @@ test("capacityViewOf: every headline number and caveat is the CLI's own text for
   const text = capacityText(report, { since: "7d" });
   assert.deepEqual(view.window, report.window);
   assert.equal(view.truncated, true);
-  assert.equal(`Coverage: ${view.coverage.join("; ")}.`, text.trim().split("\n").at(-2), "the coverage clauses are the CLI's, one by one");
+  // The page draws the cut history as its own warning (`truncated`), where the CLI's line says it as a clause.
+  assert.equal(`Coverage: ${[view.coverage[0], TRUNCATED_NOTE, ...view.coverage.slice(1)].join("; ")}.`, text.trim().split("\n").at(-2), "the coverage clauses are the CLI's, one by one");
   assert.deepEqual(view.hosts.map((h) => h.name), ["laptop", "mini1", "mini2"]);
   const laptop = view.hosts[0];
   assert.equal(laptop.facts, undefined, "a host whose history is not here has no numbers");

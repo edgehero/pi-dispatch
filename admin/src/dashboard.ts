@@ -37,7 +37,7 @@ import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { LIVE_FRESH_MS } from "@edgehero/pi-dispatch/capacity";
-import { basisNote, durationText, fleetRecordNotes, historyNotes, hostCaveats, milliText, notSharedWhy, percentText, share, shareText } from "@edgehero/pi-dispatch/capacity-cli";
+import { basisNote, durationText, fleetRecordNotes, historyNotes, hostCaveats, milliText, noRunText, notSharedWhy, percentText, share, shareText } from "@edgehero/pi-dispatch/capacity-cli";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
@@ -2823,7 +2823,9 @@ function hostName(v: any): string {
  * until its budget exists), or absent (a worker from before the budget fields). Never a guessed number.
  */
 function budgetText(r: any): string {
-  const dim = (label: string, budget: any, used: any, fmt: (n: number) => string) => {
+  // Both numbers of a dimension in ONE unit: memory's is `formatMemory`'s `g` only when both are whole gigabytes, else
+  // both in `m` ("0g of 6812m" read as two units).
+  const dim = (label: string, budget: any, used: any, fmt: (u: number, b: number) => [string, string]) => {
     if (budget === undefined || budget === null) return { kind: "absent", text: `no ${label} budget published` };
     if (budget === "off") return { kind: "off", text: `no ${label} budget` };
     // "" is what a starting worker publishes before its budget exists; anything else that is not a positive integer is
@@ -2833,9 +2835,11 @@ function budgetText(r: any): string {
     if (typeof budget !== "string" || !/^[1-9]\d{0,14}$/.test(budget)) return { kind: "unreadable", text: `${label} budget unreadable` };
     const b = Number(budget);
     const u = countOf(used);
-    return { kind: "set", text: `${label} ${u === null ? "?" : fmt(u)} of ${fmt(b)}` };
+    const [usedShown, budgetShown] = fmt(u ?? 0, b);
+    return { kind: "set", text: `${label} ${u === null ? "?" : usedShown} of ${budgetShown}` };
   };
-  const parts = [dim("memory", r?.budgetMemMiB, r?.usedMemMiB, formatMemory), dim("CPU", r?.budgetCpuCenti, r?.usedCpuCenti, formatCpus)];
+  const memPair = (u: number, b: number): [string, string] => (u % 1024 === 0 && b % 1024 === 0 ? [formatMemory(u), formatMemory(b)] : [`${u}m`, `${b}m`]);
+  const parts = [dim("memory", r?.budgetMemMiB, r?.usedMemMiB, memPair), dim("CPU", r?.budgetCpuCenti, r?.usedCpuCenti, (u, b) => [formatCpus(u), formatCpus(b)])];
   if (parts.every((p) => p.kind === "absent")) return "no host budget published";
   if (parts.every((p) => p.kind === "unknown")) return "budget not known yet";
   if (parts.every((p) => p.kind === "unreadable")) return "budget unreadable";
@@ -2904,7 +2908,7 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
   else if (info.unwired) lines.push(...wrapped("history not wired in this panel (no capacity reader)", "dim"));
   else if (info.timedOut) lines.push(...wrapped(`history did not answer in time (${CAPACITY_READ_BOUND_MS / 1000} s): u reads it again`, "error"));
   else if (info.unreachable || info.error || !report) lines.push(...wrapped(`history unreadable (${cellOf(info.unreachable ?? info.error ?? "no report")})`, "error"));
-  if (rows.length === 0 && historyOnly.length === 0) lines.push(...wrapped(report ? "no live host, and no host ran a job in the last 7d" : "no live host row", "dim"));
+  if (rows.length === 0 && historyOnly.length === 0) lines.push(...wrapped(report ? `no live host, and ${noRunText(report.coverage, "in the last 7d")}` : "no live host row", "dim"));
 
   const historyLines = (h: any, name: any): string[] => {
     if (!report) return wrapped(`last 7d: ${!info || info.loading ? "reading" : "not read"}`, "dim", "  ");

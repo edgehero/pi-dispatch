@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runCapacity } from "@edgehero/pi-dispatch/capacity-cli";
-import { RUNS_INDEX, runRecordKey } from "@edgehero/pi-dispatch/run-mirror";
+import { runRecordKey } from "@edgehero/pi-dispatch/run-mirror";
 import { readCapacity } from "../src/read-model.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -27,10 +27,8 @@ function fakeValkey(records, rows) {
     smembers: () => say("smembers", [...rows.map((r) => r.name), "ghost"]), // a member whose row expired: a pruning reader would SREM it
     hgetall: (key) => say("hgetall", rows.find((r) => `host:h:${r.name}` === key) ?? {}),
     srem: () => say("WRITE srem"),
-    zcard: (key) => say("zcard", key === RUNS_INDEX ? index.length : 0),
-    zrange: () => say("zrange", index.length ? [index[0][0], String(index[0][1])] : []),
-    zscore: () => say("zscore", null),
-    zrevrangebyscore: (_k, _max, min) => say("zrevrangebyscore", index.filter(([, s]) => s > Number(min.slice(1))).reverse().flatMap(([id, s]) => [id, String(s)])),
+    // The reader's one snapshot (`READ_SCRIPT`): the run mirror started long before the window, its run still held.
+    eval: (_script, _n, _index, _horizon, _since, _member, min) => say("eval", index.length === 0 ? [0] : [index.length, String(index[0][1]), null, String(NOW - 30 * 24 * H), 1, index.filter(([, s]) => s > Number(min)).reverse().flatMap(([id, s]) => [id, String(s)])]),
     mget: (...keys) => say("mget", keys.map((k) => kv.get(k) ?? null)),
   };
 }

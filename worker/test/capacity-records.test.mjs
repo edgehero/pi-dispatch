@@ -4,7 +4,7 @@ import * as nodeFs from "node:fs";
 import { utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CAPACITY_MGET_CHUNK, readCapacityRecords, readLocalWindow, readMirrorWindow } from "../src/capacity-records.mjs";
-import { RUNS_HORIZON, RUNS_HORIZON_MEMBER, RUNS_INDEX, RUNS_INDEX_MAX, mirrorWindowMs, runRecordKey } from "../src/run-mirror.mjs";
+import { READ_SCRIPT, RUNS_HORIZON, RUNS_HORIZON_MEMBER, RUNS_INDEX, RUNS_INDEX_MAX, RUNS_SINCE, mirrorWindowMs, runRecordKey } from "../src/run-mirror.mjs";
 import { SIZING_RECORD_MAX_BYTES } from "../src/size-records.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -18,10 +18,13 @@ const SINCE = NOW - 7 * DAY;
 const rec = (jobId, endAgo, extra = {}) => ({ jobId, host: "a", startedAt: new Date(NOW - endAgo - H).toISOString(), endedAt: new Date(NOW - endAgo).toISOString(), ...extra });
 
 /**
- * A fake Valkey holding the mirror's index, bodies and horizon, answering the reads the reader makes and recording every
- * call, so a test can see that it never writes. `size` overrides ZCARD (a cap without 5,000 bodies).
+ * A fake Valkey holding the mirror's index, bodies, horizon and start, answering the reader's one snapshot script
+ * (`READ_SCRIPT`, run against Valkey in run-mirror.integration.test.mjs) and its MGETs, and recording every call, so a
+ * test can see that it never writes. `size` overrides the index's size (a cap without 5,000 bodies). `since` is the
+ * mirror's start (`runs:since`'s `at`), by default long before any window here; null is an index without one;
+ * `sinceHeld` false is a start whose run is no longer in the index.
  */
-function fakeMirror(records, { size = null, hang = false, horizon = null } = {}) {
+function fakeMirror(records, { size = null, hang = false, horizon = null, since = NOW - 100 * DAY, sinceHeld = true } = {}) {
 	const index = new Map(records.map((r) => [r.jobId, Date.parse(r.endedAt)]));
 	const kv = new Map(records.map((r) => [runRecordKey(r.jobId), JSON.stringify(r)]));
 	const calls = [];
@@ -30,31 +33,27 @@ function fakeMirror(records, { size = null, hang = false, horizon = null } = {})
 		return hang ? new Promise(() => {}) : Promise.resolve(value);
 	};
 	const sorted = () => [...index.entries()].sort((a, b) => a[1] - b[1]);
-	return {
+	const fake = {
 		calls,
 		kv,
 		index,
-		zcard: (key) => answer("zcard", key === RUNS_INDEX ? (size ?? index.size) : 0),
-		zrange: (key, start, stop, withScores) => {
-			assert.deepEqual([key, start, stop, withScores], [RUNS_INDEX, 0, 0, "WITHSCORES"]);
+		sinceAt: since === null ? null : String(since),
+		eval: (script, nkeys, ...rest) => {
+			assert.equal(script, READ_SCRIPT);
+			assert.deepEqual([nkeys, ...rest.slice(0, 4)], [3, RUNS_INDEX, RUNS_HORIZON, RUNS_SINCE, RUNS_HORIZON_MEMBER]);
+			const min = rest[4];
+			const n = size ?? index.size;
+			if (n === 0) return answer("eval", [0]);
 			const first = sorted()[0];
-			return answer("zrange", first ? [first[0], String(first[1])] : []);
-		},
-		zscore: (key, member) => {
-			assert.deepEqual([key, member], [RUNS_HORIZON, RUNS_HORIZON_MEMBER]);
-			return answer("zscore", horizon === null ? null : String(horizon));
-		},
-		zrevrangebyscore: (key, max, min, withScores) => {
-			assert.deepEqual([key, max, withScores], [RUNS_INDEX, "+inf", "WITHSCORES"]);
-			const floor = Number(min.slice(1));
-			assert.equal(min[0], "(", "exclusive: a run that ended at the window's start spent none of it");
-			return answer("zrevrangebyscore", sorted().filter(([, sc]) => sc > floor).reverse().flatMap(([id, sc]) => [id, String(sc)]));
+			const range = sorted().filter(([, sc]) => sc > Number(min)).reverse().flatMap(([id, sc]) => [id, String(sc)]);
+			return answer("eval", [n, first ? String(first[1]) : null, horizon === null ? null : String(horizon), fake.sinceAt, fake.sinceAt !== null && sinceHeld ? 1 : 0, range]);
 		},
 		mget: (...keys) => {
 			calls.push(`mget:${keys.length}`);
 			return answer("mget", keys.map((k) => kv.get(k) ?? null));
 		},
 	};
+	return fake;
 }
 
 /** A call that throws an fs error with this code. */
@@ -74,7 +73,7 @@ function writer(dir) {
 	};
 }
 
-test("the mirror is read in bounded round trips: ZCARD, the oldest score, the horizon, one range over the window, MGET in chunks", async () => {
+test("the mirror is read in bounded round trips: one snapshot script, then MGET in chunks", async () => {
 	const records = Array.from({ length: 1200 }, (_, i) => rec(`m${i}`, i * 60 * 1000));
 	const redis = fakeMirror(records);
 	const read = await readMirrorWindow(redis, { sinceMs: SINCE, nowMs: NOW });
@@ -82,7 +81,7 @@ test("the mirror is read in bounded round trips: ZCARD, the oldest score, the ho
 	assert.equal(read.records.length, 1200);
 	assert.equal(CAPACITY_MGET_CHUNK, 500);
 	assert.deepEqual(redis.calls.filter((c) => c.startsWith("mget:")), ["mget:500", "mget:500", "mget:200"]);
-	assert.deepEqual(redis.calls.filter((c) => !c.startsWith("mget")), ["zcard", "zrange", "zscore", "zrevrangebyscore"], "READ-ONLY: nothing pruned, nothing written");
+	assert.deepEqual(redis.calls.filter((c) => !c.startsWith("mget")), ["eval"], "ONE snapshot of the index, then the bodies; READ-ONLY: nothing pruned, nothing written");
 	assert.deepEqual([read.truncated, read.fromMs], [false, SINCE]);
 });
 
@@ -115,6 +114,31 @@ test("the mirror's history starts at the latest of its cap, the fleet horizon an
 	assert.equal(merged.coverage.source, "mirror+local");
 });
 
+test("the mirror's history starts no earlier than the mirror itself: its start, else its oldest run, and no index covers nothing", async () => {
+	const kept = [rec("new", H), rec("old", 3 * DAY)];
+	// The start the write that created the index recorded: a new deployment, or one whose keys were lost and recreated.
+	const started = await readMirrorWindow(fakeMirror(kept, { since: NOW - 2 * DAY }), { sinceMs: SINCE, nowMs: NOW });
+	assert.deepEqual([started.truncated, started.fromMs], [true, NOW - 2 * DAY], "nothing before the mirror started is idle");
+	const before = await readMirrorWindow(fakeMirror(kept, { since: SINCE - DAY }), { sinceMs: SINCE, nowMs: NOW });
+	assert.deepEqual([before.truncated, before.fromMs], [false, SINCE], "a start before the window cuts nothing of it");
+	// No start, an index there (written before the key existed, or the key was lost): from its oldest run, never the
+	// window's start.
+	const unmarked = await readMirrorWindow(fakeMirror(kept, { since: null }), { sinceMs: SINCE, nowMs: NOW });
+	assert.deepEqual([unmarked.truncated, unmarked.fromMs], [true, NOW - 3 * DAY]);
+	// A start whose run is gone (it outlived its index, and an older worker recreated it): not trusted, from the oldest run.
+	const stale = await readMirrorWindow(fakeMirror(kept, { since: SINCE - DAY, sinceHeld: false }), { sinceMs: SINCE, nowMs: NOW });
+	assert.deepEqual([stale.truncated, stale.fromMs], [true, NOW - 3 * DAY]);
+	const garbled = fakeMirror(kept);
+	garbled.sinceAt = "soon";
+	assert.equal((await readMirrorWindow(garbled, { sinceMs: SINCE, nowMs: NOW })).fromMs, NOW - 3 * DAY, "a start that is not a number is no start");
+	// No index: the mirror covers nothing, so a named host's history is not here at all.
+	const none = await readMirrorWindow(fakeMirror([], { since: NOW - 2 * DAY }), { sinceMs: SINCE, nowMs: NOW });
+	assert.deepEqual([none.state, none.fromMs], ["off", null]);
+	// The latest bound wins: a horizon past the start cuts further.
+	const both = await readMirrorWindow(fakeMirror(kept, { since: NOW - 2 * DAY, horizon: NOW - DAY }), { sinceMs: SINCE, nowMs: NOW });
+	assert.equal(both.fromMs, NOW - DAY);
+});
+
 test("a mirrored body over 256 KiB is skipped and counted, as a local file is", async () => {
 	const redis = fakeMirror([rec("ok", H), rec("big", H, { pad: "x".repeat(SIZING_RECORD_MAX_BYTES) })]);
 	const read = await readMirrorWindow(redis, { sinceMs: SINCE, nowMs: NOW });
@@ -136,7 +160,7 @@ test("an absent index is off, and a Valkey that does not answer is unreachable w
 	assert.deepEqual([down.coverage.source, down.coverage.mirror, down.records.map((r) => r.jobId)], ["local", null, ["local"]]);
 	assert.equal(down.mirrorState, "unreachable (timeout)");
 	assert.match(down.coverage.reason, /run mirror unreachable \(timeout\)/);
-	const thrown = await readCapacityRecords({ redis: { zcard: () => Promise.reject(new Error("ECONNREFUSED")) }, logsDir: dir, sinceMs: SINCE, nowMs: NOW });
+	const thrown = await readCapacityRecords({ redis: { eval: () => Promise.reject(new Error("ECONNREFUSED")) }, logsDir: dir, sinceMs: SINCE, nowMs: NOW });
 	assert.match(thrown.coverage.reason, /unreachable \(ECONNREFUSED\)/);
 	const none = await readCapacityRecords({ redis: null, logsDir: dir, sinceMs: SINCE, nowMs: NOW });
 	assert.equal(none.coverage.source, "local");

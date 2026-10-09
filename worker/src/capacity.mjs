@@ -39,7 +39,9 @@
  * running job the row does not list (past its 32, an entry its allowlist drops, a worker from before the field, a host
  * whose history is not shared) is counted in `liveNotCounted`, never guessed. A row whose `jobs` value is there and is
  * not a list says nothing about how many it runs: that host is counted in `liveUnreadable`, and `running` is unknown
- * (null). A listed job is matched to its record by the id as the row publishes it (`publishedJobId`).
+ * (null). A listed job is matched to its record by the id as the row publishes it (`publishedJobId`). The reading host
+ * (`coverage.localHost`) with runs here and no live row (the registry not read, or its row gone until its next beat) is
+ * named in `liveRowMissing`: the jobs it runs now are not counted, and `running` is the other rows' count.
  *
  * RETRIES AND STALLS. A retry's record replaces its earlier attempt's, so the record carries those attempts' slot
  * intervals (`earlier`), each counted as an occupied interval on its own host with its size (no wait, no CPU measured).
@@ -624,6 +626,10 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 	}
 
 	const covered = hosts.filter((h) => h.shared);
+	// The reading host has runs here and no live row (the registry was not read, or its row is gone until its next beat):
+	// the jobs it runs now are not counted, and the coverage says so; `running` stays what the other rows say.
+	const mirrorCut = isObject(coverage.mirror) && coverage.mirror.truncated === true && Math.min(nowMs, Number.isSafeInteger(coverage.mirror.fromMs) ? coverage.mirror.fromMs : windowStartMs) > windowStartMs;
+	const liveRowMissing = isHostName(coverage.localHost) && names.has(coverage.localHost) && !liveByName.has(coverage.localHost) ? coverage.localHost : null;
 	return {
 		v: CAPACITY_REPORT_VERSION,
 		window: { fromMs: windowStartMs, toMs: nowMs, bucketMs },
@@ -632,12 +638,15 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			reason: typeof coverage.reason === "string" ? coverage.reason : null,
 			// Every covered host has history from here on (the latest of their starts); each host's own is in its entry.
 			fromMs: covered.length > 0 ? Math.max(...covered.map((h) => h.coverage.fromMs)) : windowStartMs,
-			truncated: covered.some((h) => h.coverage.truncated),
+			// Some host's history was cut; with no covered host, whether the run mirror's own history was (`mirrorCut`), so
+			// an empty report never reads as a whole one.
+			truncated: covered.length > 0 ? covered.some((h) => h.coverage.truncated) : mirrorCut,
 			...totals,
 			unreadable,
 			withoutHost,
 			earlierDropped,
 			running: rowsSay && totals.liveUnreadable === 0 ? totals.live + totals.liveNotCounted : null,
+			liveRowMissing,
 			historyNotShared: notShared,
 		},
 		hosts,

@@ -28,7 +28,7 @@ function harness(dir, { live = [], disagreement = false, refused = null } = {}) 
 	const out = [];
 	const err = [];
 	const redisCalls = [];
-	const redis = { zcard: async () => (redisCalls.push("zcard"), 0), on: () => {}, disconnect: () => redisCalls.push("disconnect") };
+	const redis = { eval: async () => (redisCalls.push("eval"), [0]), on: () => {}, disconnect: () => redisCalls.push("disconnect") };
 	const opts = {
 		env: { PI_LOGS_DIR: dir, PI_WORKER_NAME: "mini1", PI_LOG_RETENTION_DAYS: "30" },
 		write: (c) => out.push(c),
@@ -58,7 +58,7 @@ test("the human report: one block per host with busy and idle, slots, promised a
 			"  projects by run time: shop 2h, web 2h",
 			"  1 job refused before a slot",
 			"  history from this host's files",
-			"Coverage: history: this host's files only; no run mirror: only this host's files were read.",
+			"Coverage: history: this host's files only; no live row lists the jobs running now, so they are not known; no run mirror: only this host's files were read.",
 			"Jobs only: a machine busy with other work reads as idle.",
 			"",
 		].join("\n"),
@@ -141,8 +141,40 @@ test("the words: durations in their largest units, per-mille as a percentage, th
 	assert.deepEqual([0, 40_000, 6 * 60_000, 2 * H + 5 * 60_000, 3 * H, 3 * 24 * H + 4 * H, 2 * 24 * H].map(durationText), ["0s", "40s", "6m", "2h 5m", "3h", "3d 4h", "2d"]);
 	assert.deepEqual([0, 5, 125, 1000, 1234].map(percentText), ["0%", "0.5%", "12.5%", "100%", "123.4%"]);
 	assert.deepEqual([0, 49, 50, 2149, 2150, 2000].map(milliText), ["0", "0", "0.1", "2.1", "2.2", "2"]);
-	const empty = capacityText({ hosts: [], window: { fromMs: 0, toMs: 1 }, coverage: { source: "local", fromMs: 0, historyNotShared: [], unreadable: 0, withoutHost: 0, running: null, reason: null } }, { since: "24h" });
-	assert.match(empty, /^No host ran a job in the last 24h\./);
+});
+
+test("an empty report says no host ran a job only when the whole fleet's history was read", () => {
+	const cov = { source: "mirror+local", fromMs: 0, truncated: false, historyNotShared: [], unreadable: 0, withoutHost: 0, running: 0, reason: null };
+	const said = (c) => capacityText({ hosts: [], window: { fromMs: 0, toMs: 1 }, coverage: { ...cov, ...c } }, { since: "24h" }).split("\n")[0];
+	assert.equal(said({}), "No host ran a job in the last 24h.");
+	// This host's files alone, a source not read, or a cut history: a host whose runs were not read may have run many.
+	assert.equal(said({ source: "local" }), "No run in the history read here in the last 24h.");
+	assert.equal(said({ reason: "run mirror unreachable (timeout): only this host's files were read" }), "No run in the history read here in the last 24h.");
+	assert.equal(said({ truncated: true }), "No run in the history read here in the last 24h.");
+	// Records the report could not put on a host: someone ran something.
+	assert.equal(said({ withoutHost: 1 }), "No run in the history read here in the last 24h.");
+	assert.equal(said({ unreadable: 2 }), "No run in the history read here in the last 24h.");
+});
+
+test("the coverage line says when the fleet's history is cut, and when the jobs running now are not known", async () => {
+	const base = { source: "mirror", fromMs: 0, truncated: false, historyNotShared: [], unreadable: 0, withoutHost: 0, liveUnreadable: 0, liveNotCounted: 0, running: 0, liveRowMissing: null, reason: null };
+	const line = (c) => capacityText({ hosts: [], window: { fromMs: 0, toMs: 1 }, coverage: { ...base, ...c } }, { since: "7d" }).split("\n")[1];
+	assert.equal(line({}), "Coverage: history: the run mirror.");
+	assert.equal(line({ truncated: true }), "Coverage: history: the run mirror; history truncated: the run mirror holds nothing older for at least one host, so its earlier time is counted as neither busy nor idle.");
+	// This host's row gone while a peer's says it runs 2: the peers' count stands, and only this host's is not known.
+	assert.equal(line({ running: 2, liveRowMissing: "mini1" }), "Coverage: history: the run mirror; 2 jobs running now, counted up to now; no live row read for this host (mini1), so the jobs it runs now are not known.");
+	assert.equal(line({ running: null }), "Coverage: history: the run mirror; no live row lists the jobs running now, so they are not known.");
+	assert.equal(line({ running: null, liveRowMissing: "mini1" }), "Coverage: history: the run mirror; no live row lists the jobs running now, so they are not known.", "said once");
+
+	// Through the command: this host's row gone (until its next beat) while its runs are here.
+	const gone = harness(deployment([run("a", 3, 2)]), { live: [{ name: "peer", routes: "true", jobs: "[]", jobsMore: "0" }] });
+	assert.equal(await runCapacity(["--json"], gone.opts), 0);
+	const report = JSON.parse(gone.out.join(""));
+	assert.deepEqual([report.coverage.liveRowMissing, report.coverage.running], ["mini1", 0], "the peer's count stands");
+	// Its row back: nothing to say.
+	const back = harness(deployment([run("a", 3, 2)]), { live: [{ name: "mini1", routes: "true", jobs: "[]", jobsMore: "0" }] });
+	assert.equal(await runCapacity([], back.opts), 0);
+	assert.doesNotMatch(back.out.join(""), /not known/);
 });
 
 test("a Valkey the operator NAMED that refuses or does not answer is a failure, never a local-only report", async () => {
@@ -152,7 +184,7 @@ test("a Valkey the operator NAMED that refuses or does not answer is a failure, 
 	assert.match(refused.err.join(""), /Valkey at redis:\/\/127\.0\.0\.1:6399 refused: WRONGPASS/);
 	assert.deepEqual(refused.out, []);
 	const down = harness(dir);
-	down.opts.redisFn = () => ({ zcard: () => Promise.reject(new Error("ECONNREFUSED")), on: () => {}, disconnect: () => {} });
+	down.opts.redisFn = () => ({ eval: () => Promise.reject(new Error("ECONNREFUSED")), on: () => {}, disconnect: () => {} });
 	down.opts.readLiveHostsFn = async () => ({ hosts: [] });
 	assert.equal(await runCapacity(["--valkey-url", "redis://127.0.0.1:6399"], down.opts), 1);
 	assert.match(down.err.join(""), /could not read Valkey at redis:\/\/127\.0\.0\.1:6399: run mirror unreachable \(ECONNREFUSED\)/);

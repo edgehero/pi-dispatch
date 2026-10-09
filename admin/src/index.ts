@@ -135,7 +135,7 @@ import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scope
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
-import { coverageNotes, historyNotes, hostCaveats, hostFacts, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
+import { coverageNotes, historyNotes, hostCaveats, hostFacts, noRunText, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -2672,7 +2672,7 @@ export function capacityViewOf(report: any): any {
   // The coverage clauses one by one (the CLI joins them into one line), so a long list of hosts whose history is not here
   // can never push out what follows it: the records no host holds, the jobs running now, why a source was not read.
   const coverage = coverageNotes({ ...cov, historyNotShared: Array.isArray(cov.historyNotShared) ? cov.historyNotShared : [] }, { namesShown: INSIGHTS_CAPACITY_NAMES_SHOWN });
-  return { window: { ...report.window }, truncated: cov.truncated === true, coverage, hosts };
+  return { window: { ...report.window }, truncated: cov.truncated === true, coverage, hosts, noRun: noRunText(cov, "in this window") };
 }
 
 /** How many names the page's coverage lists of the hosts whose history is not here, before "and N more". */

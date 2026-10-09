@@ -7925,6 +7925,7 @@ export function capacityChecks(report, { since = "7d" } = {}) {
 		}
 		if (h.coverage?.liveNotCounted > 0) notes.push(`${h.coverage.liveNotCounted} running now not counted`);
 		if (h.coverage?.liveUnreadable > 0) notes.push("its running jobs could not be read, not counted");
+		if (report.coverage?.liveRowMissing === h.name) notes.push("no live row read for it, so its running jobs are not known");
 		out.push({ ok: true, label: `${line}${notes.length > 0 ? `; ${notes.join("; ")}` : ""}`.replace(/[\u0000-\u001f\u007f-\u009f]/g, "") });
 	}
 	// What none of these lines can see, in the words every surface of the report uses (REQ-CAPACITY-INSIGHTS): a fact,

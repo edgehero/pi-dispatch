@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { UNREADABLE_RECORD } from "../src/run-history.mjs";
-import { MIRROR_MAX_DAYS, RUNS_HORIZON, RUNS_INDEX, TRIM_SCRIPT, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
+import { MIRROR_MAX_DAYS, PRUNE_SCRIPT, RUNS_HORIZON, RUNS_INDEX, RUNS_SINCE, TRIM_SCRIPT, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -20,6 +20,7 @@ function fakeRedis({ fail = false, hang = false } = {}) {
 	const strings = new Map();
 	const zset = new Map(); // member -> score
 	const horizon = new Map(); // RUNS_HORIZON's member -> score
+	const since = { value: null }; // RUNS_SINCE: { at, member } or null
 	const calls = [];
 	const guard = () => {
 		if (fail) throw new Error("ECONNREFUSED");
@@ -36,6 +37,7 @@ function fakeRedis({ fail = false, hang = false } = {}) {
 			strings.set(k, { v, expiresIn: ms });
 		},
 		horizon,
+		since,
 		async zadd(k, ...args) {
 			await guard();
 			// The horizon is its own key, written `ZADD runs:horizon GT <score> trim`: raised only, never lowered.
@@ -67,13 +69,44 @@ function fakeRedis({ fail = false, hang = false } = {}) {
 			for (let i = 0; i <= end && i < sorted.length; i++) (zset.delete(sorted[i][0]), n++);
 			return n;
 		},
-		// `TRIM_SCRIPT`, done step for step on this fake's maps (the real script is run against Valkey in
-		// run-mirror.integration.test.mjs): the two trims, the horizon raised by GT only when one removed something.
-		async eval(script, nkeys, index, horizonKey, cutoff, cap, ttl, member) {
+		// `TRIM_SCRIPT` and `PRUNE_SCRIPT`, done step for step on this fake's maps (the real scripts run against Valkey in
+		// run-mirror.integration.test.mjs): the start checked and set from the index before the write (a new index starts
+		// at the write, one whose start's member is gone at its oldest run), the member, the two trims, the horizon raised
+		// by GT only when one removed something, and a trusted start handed on when its member is removed.
+		async eval(script, nkeys, index, horizonKey, sinceKey, ...argv) {
 			await guard();
+			assert.deepEqual([nkeys, index, horizonKey, sinceKey], [3, RUNS_INDEX, RUNS_HORIZON, RUNS_SINCE]);
+			const sorted = () => [...zset.entries()].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1));
+			const held = () => since.value !== null && zset.has(since.value.member);
+			const handOn = () => {
+				const first = sorted()[0];
+				since.value = first ? { ...since.value, member: first[0] } : null;
+			};
+			if (script === PRUNE_SCRIPT) {
+				const [ttl, member, ...ids] = argv;
+				const was = held();
+				let top = null;
+				for (const id of ids) {
+					if (!zset.has(id)) continue;
+					top = Math.max(top ?? -Infinity, zset.get(id));
+					zset.delete(id);
+				}
+				calls.push(["prune", ...ids]);
+				if (top !== null) {
+					await this.zadd(horizonKey, "GT", top, member);
+					calls.push(["pexpire", horizonKey, Number(ttl)]);
+					if (was && !held()) handOn();
+				}
+				return top === null ? null : String(top);
+			}
 			assert.equal(script, TRIM_SCRIPT);
-			assert.deepEqual([nkeys, index, horizonKey], [2, RUNS_INDEX, RUNS_HORIZON]);
+			const [cutoff, cap, ttl, member, score, id, writtenMs] = argv;
 			calls.push(["eval", Number(cutoff), Number(cap), Number(ttl)]);
+			const before = sorted()[0];
+			if (before === undefined) since.value = { at: Number(writtenMs), member: id };
+			else if (!held()) since.value = { at: before[1], member: before[0] };
+			await this.zadd(index, score, id);
+			calls.push(["pexpire", sinceKey, Number(ttl)]);
 			const byAge = await this.zremrangebyscore(index, "-inf", `(${cutoff}`);
 			const byCount = await this.zremrangebyrank(index, 0, -Number(cap) - 1);
 			let h = byAge > 0 ? Number(cutoff) : null;
@@ -84,6 +117,7 @@ function fakeRedis({ fail = false, hang = false } = {}) {
 			if (h !== null) {
 				await this.zadd(horizonKey, "GT", h, member);
 				calls.push(["pexpire", horizonKey, Number(ttl)]);
+				if (!held()) handOn();
 			}
 			calls.push(["pexpire", index, Number(ttl)]);
 			return h === null ? null : String(h);
@@ -150,9 +184,10 @@ test("the index rolls with traffic and is trimmed by the writer", async () => {
 	await anchored({ redis, retentionDays: 7 }).mirror(record("j", "2026-08-30T12:00:00.000Z"), "j");
 	// The DEEPEST reader window, never this writer's 7 days: the index is shared, and a short-retention writer that set
 	// its TTL made every peer's history expire on a quiet day. Members are trimmed by score; the body keeps its own PX.
+	// The mirror's start expires with it, at the same depth: one can never outlive the other by a writer's setting.
 	assert.deepEqual(
 		redis.calls.filter((c) => c[0] === "pexpire"),
-		[["pexpire", RUNS_INDEX, mirrorWindowMs(0)]],
+		[["pexpire", RUNS_SINCE, mirrorWindowMs(0)], ["pexpire", RUNS_INDEX, mirrorWindowMs(0)]],
 	);
 	assert.equal(redis.strings.get(runRecordKey("j")).expiresIn, 7 * DAY);
 	// The expiry is only half the claim. Without this the test passed for a week against an index the
@@ -338,4 +373,84 @@ test("a horizon write that fails is the mirror's failure: logged once, never thr
 	};
 	assert.equal(await anchored({ redis, retentionDays: 1, log: (e, f) => logs.push([e, f.reason]) }).mirror(record("new", new Date(AT).toISOString()), "new"), false);
 	assert.deepEqual(logs, [["run_mirror_failed", "READONLY"]]);
+});
+
+// --- the mirror's start (issue #599) -----------------------------------------------------------------------
+
+test("the write that creates the index records when the mirror started, vouched for by its run; no later write or trim moves it", async () => {
+	const redis = fakeRedis();
+	let clock = AT;
+	const b = makeRunMirror({ redis, retentionDays: 30, now: () => clock });
+	// The record ended before the write: the start is the WRITE's time, since a peer's run that ended between the two
+	// and was written before this write would have found an index already there.
+	await b.mirror(record("first", new Date(AT - 3600_000).toISOString(), { host: "b" }), "first");
+	assert.deepEqual(redis.since.value, { at: AT, member: "first" }, "the write's time, not the run's end, vouched for by the run");
+	clock = AT + DAY;
+	await b.mirror(record("second", new Date(AT + DAY).toISOString(), { host: "b" }), "second");
+	assert.deepEqual(redis.since.value, { at: AT, member: "first" }, "a trusted start is kept");
+	// A peer with a 1 day retention trims everything older, and raises the horizon; the start's `at` does not move, and
+	// the run that remains vouches for it now.
+	clock = AT + 3 * DAY;
+	await makeRunMirror({ redis, retentionDays: 1, now: () => clock }).mirror(record("short", new Date(clock).toISOString(), { host: "a" }), "short");
+	assert.deepEqual([...redis.zset.keys()], ["short"]);
+	assert.equal(redis.horizon.get("trim"), AT + 2 * DAY);
+	assert.deepEqual(redis.since.value, { at: AT, member: "short" }, "handed on, never moved");
+});
+
+test("a start whose run is gone is not trusted: a lost index starts again at the next write, an index without a trusted start at its oldest run", async () => {
+	const redis = fakeRedis();
+	let clock = AT;
+	const m = makeRunMirror({ redis, retentionDays: 30, now: () => clock });
+	await m.mirror(record("a", new Date(AT).toISOString()), "a");
+	// Every runs:* key deleted (a flushed Valkey), or only the index (a start that outlived it): the next write's index
+	// is new, and a start left from before vouches for runs that are gone, so it is replaced.
+	redis.zset.clear();
+	clock = AT + 5 * DAY;
+	await m.mirror(record("b", new Date(clock).toISOString()), "b");
+	assert.deepEqual(redis.since.value, { at: AT + 5 * DAY, member: "b" }, "the mirror starts again at this write");
+	// An older worker recreated the index after it was lost (it knows nothing of the start): the start's run is not in
+	// it, so this write starts it at the index's oldest run before the write, the most it can vouch for.
+	redis.since.value = { at: AT, member: "gone" };
+	redis.zset.clear();
+	redis.zset.set("older", AT + 4 * DAY);
+	clock = AT + 6 * DAY;
+	await m.mirror(record("c", new Date(AT + 2 * DAY).toISOString()), "c");
+	assert.deepEqual(redis.since.value, { at: AT + 4 * DAY, member: "older" }, "the oldest run BEFORE this write, not this write's older one");
+	// No start at all (written before the key existed, or the key was lost): the same.
+	redis.since.value = null;
+	await m.mirror(record("d", new Date(AT + 6 * DAY).toISOString()), "d");
+	assert.deepEqual(redis.since.value, { at: AT + 2 * DAY, member: "c" });
+});
+
+test("a pruning reader records the cut: the horizon is raised to the newest run it removed, and the start is handed on or deleted with the last run", async () => {
+	const redis = fakeRedis();
+	let clock = AT - 10 * DAY;
+	const m = makeRunMirror({ redis, retentionDays: 30, now: () => clock });
+	for (const d of [10, 9, 8, 2, 1]) {
+		clock = AT - d * DAY;
+		await m.mirror(record(`r${d}`, new Date(clock).toISOString()), `r${d}`);
+	}
+	// The three oldest bodies expired (a 7 day writer's PX) while their members stayed.
+	for (const d of [10, 9, 8]) redis.strings.delete(runRecordKey(`r${d}`));
+	const { runs } = await readMirroredRuns(redis, { limit: 50 });
+	assert.deepEqual(runs.map((r) => r.jobId), ["r1", "r2"]);
+	assert.deepEqual([...redis.zset.keys()].sort(), ["r1", "r2"]);
+	assert.equal(redis.horizon.get("trim"), AT - 8 * DAY, "the time up to the newest pruned run is no longer whole");
+	assert.deepEqual(redis.since.value, { at: AT - 10 * DAY, member: "r2" }, "the start handed on to the oldest run kept, `at` unchanged");
+	// Every body gone: the last run pruned takes the start with it, so a worker that recreates the index cannot inherit it.
+	for (const d of [2, 1]) redis.strings.delete(runRecordKey(`r${d}`));
+	await readMirroredRuns(redis, { limit: 50 });
+	assert.deepEqual([redis.zset.size, redis.since.value, redis.horizon.get("trim")], [0, null, AT - DAY]);
+});
+
+test("a pruning reader hands on only a start it trusted before the removal", async () => {
+	const redis = fakeRedis();
+	// A start whose run is not in this index (an older worker recreated it under the start), then one run pruned.
+	redis.since.value = { at: AT - 30 * DAY, member: "gone" };
+	redis.zset.set("b1", AT - DAY);
+	redis.zset.set("b2", AT);
+	redis.strings.set(runRecordKey("b2"), { v: JSON.stringify(record("b2", new Date(AT).toISOString())) });
+	await readMirroredRuns(redis, { limit: 50 });
+	assert.deepEqual([...redis.zset.keys()], ["b2"]);
+	assert.deepEqual(redis.since.value, { at: AT - 30 * DAY, member: "gone" }, "never handed to a run of the new index");
 });

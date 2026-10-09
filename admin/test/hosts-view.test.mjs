@@ -249,7 +249,7 @@ test("missing history is never idle: a cut mirror, a host whose history is not s
   assert.match(out, /mini2[^]*last 7d to 12:00 UTC: not here: no source here holds its runs \(a worker without PI_WORKER_NAME writes no run mirror\)/);
   assert.doesNotMatch(out.split("mini2")[1].split("old3")[0], /busy/, "no busy share for a host whose history is not here");
   assert.match(out, /old3 {2}no live row/);
-  assert.match(out, /history from the run mirror; from 2026-10-05 12:00 UTC on \(the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it\), earlier time counted as neither busy nor idle/, "the CLI's words");
+  assert.match(out, /history from the run mirror; from 2026-10-05 12:00 UTC on \(the run mirror holds nothing older: it started then, or its cap or a peer's shorter retention cut it\), earlier time counted as neither busy nor idle/, "the CLI's words");
 });
 
 test("a mirror that was not read names its reason, through the shared sentence", async () => {
@@ -279,6 +279,17 @@ test("a worker older than the jobs field falls back to its budget's running coun
   await comp.dispose();
   assert.match(out, /2 of 3 slots · promised CPU 2 of 4, no memory budget/);
   assert.match(out, /it lists no running jobs \(a worker older than this panel\): 2 by its budget/);
+});
+
+test("the live budget line says memory in one unit: g when both are whole gigabytes, else both in m", async () => {
+  const row = (name, budget, used) => ({ name, routes: "true", concurrency: "2", budgetMemMiB: budget, budgetCpuCenti: "400", usedMemMiB: used, usedCpuCenti: "0", waiters: "0", staleMs: 1000, jobs: [], jobsMore: 0, jobsUnreadable: false });
+  const rows = [row("odd", "6812", "0"), row("half", "8192", "1536"), row("whole", "8192", "2048")];
+  const comp = await openHosts({ fetchSnapshot: async () => ({ ...SNAP, hostBudgets: rows }), capacityInfo: async () => ({ unwired: true }) });
+  const out = body(comp, 140);
+  await comp.dispose();
+  assert.match(out, /odd 0 of 2 slots · promised memory 0m of 6812m, CPU 0 of 4/, "never 0g of 6812m");
+  assert.match(out, /half 0 of 2 slots · promised memory 1536m of 8192m/);
+  assert.match(out, /whole 0 of 2 slots · promised memory 2g of 8g/);
 });
 
 test("unknown is not absent: a starting worker, a budget switched off, a worker from before the budget fields", async () => {
@@ -368,6 +379,11 @@ test("an empty fleet, an unreachable history, an error and an unwired panel each
   const empty = computeCapacity({ records: [], live: [], windowStartMs: AT - 7 * DAY, nowMs: AT, bucketMs: 6 * H, coverage: {} });
   let comp = await openHosts({ fetchSnapshot: async () => ({ ...SNAP, hostBudgets: [] }), capacityInfo: async () => ({ report: empty }) });
   assert.match(textAt(comp, 80), /hosts · 0 live[^]*no live host, and no host ran a job in the last 7d/);
+  await comp.dispose();
+  // This host's files alone: the history read here holds no run, which says nothing of the hosts it could not read.
+  const localOnly = computeCapacity({ records: [], live: [], windowStartMs: AT - 7 * DAY, nowMs: AT, bucketMs: 6 * H, coverage: { source: "local", reason: "no Valkey to read: only this host's files were read", local: { fromMs: AT - 7 * DAY }, mirror: null } });
+  comp = await openHosts({ fetchSnapshot: async () => ({ ...SNAP, hostBudgets: [] }), capacityInfo: async () => ({ report: localOnly }) });
+  assert.match(textAt(comp, 80), /no live host, and no run in the history read here in the last 7d/);
   await comp.dispose();
   comp = await openHosts({ capacityInfo: async () => { throw new Error("valkey \x1b[31mgone"); } });
   let out = textAt(comp, 80);

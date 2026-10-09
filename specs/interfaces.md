@@ -4956,10 +4956,29 @@ validator rather than a second copy of it.
   Because every writer trims the SHARED index by its OWN retention, a reader cannot tell from its own settings what the
   index still holds, so a writer whose trim removed anything records it in `runs:horizon`, a one-member ZSET (`trim`)
   whose score is raised with `ZADD GT` and never lowered: the age trim's cutoff, or for the count trim the oldest score
-  that remains. The two trims, the horizon and both expiries are ONE script (`TRIM_SCRIPT` in `run-mirror.mjs`, run with
-  EVAL), so no crash or timeout can land between a cut and the record of it. It expires after 92 days, the deepest
-  window any reader asks for. A reader treats nothing before the horizon as history. A writer from before this field
-  trims without recording one (`OQ-039`).
+  that remains. The member's `ZADD`, the start (`runs:since`, below), the two trims, the horizon and all three expiries
+  are ONE script (`TRIM_SCRIPT` in `run-mirror.mjs`, run with EVAL), so no crash or timeout can land between a member
+  and the record of where the index starts, or between a cut and the record of it. It expires after 92 days, the
+  deepest window any reader asks for. A reader treats nothing before the horizon as history. A writer from before this
+  field trims without recording one (`OQ-039`). A pruning reader (`readMirroredRuns`, the panel's and the portfolio
+  snapshot's) that removes members whose bodies are gone records that cut the same way, in one script
+  (`PRUNE_SCRIPT`): the horizon is raised to the highest score it removed, since the time up to a removed run is no
+  longer whole. The capacity reader reads the index's size, its oldest score, the horizon, the start and the members
+  in the window as ONE snapshot (`READ_SCRIPT`), so a flush between them cannot mix two states.
+  **When the fleet copy started (`runs:since`, issue #599).** A hash: `at`, millis from which the index holds every run
+  that ended, and `member`, a run of the index that vouches for it. The horizon cannot say it: a flushed or replaced
+  Valkey, or an index that expired, loses the horizon with the runs, and the next write recreates an index whose other
+  bounds all reach back past the loss. A start is TRUSTED only while its `member` is in the index: the start can
+  outlive its index (a 4.0.1 worker sets the index's expiry to its own retention, and a pruning reader can remove every
+  member) and an older worker can recreate the index without knowing the key, so a run still held is the one proof that
+  the index it describes is the one that exists. `TRIM_SCRIPT` sets it from the index as it was before the write: no
+  index, the write's own time vouched for by the run it adds (replacing anything left from before); an index whose
+  start is absent or not trusted, the index's oldest score before the write, vouched for by that run; a trusted start
+  is kept. Whatever removes the vouching run while the start is trusted (a trim, `PRUNE_SCRIPT`) hands it to the oldest
+  run that remains, `at` unchanged, and deletes it with the last run, so neither a retention trim nor a peer with a
+  shorter retention moves `at`. A start that is not a hash (a stray string) is read as absent and deleted by the next
+  writing script, so it cannot stop the mirror. Its PEXPIRE is the index's, set in the same script. A reader starts the copy no earlier
+  than a trusted start, and without one at the index's oldest score; no index covers nothing.
   **`earlier` (issue #599) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position** after
   `capacity`. A retry (`attemptsMade` above 0) or a pickup after a stall (`stalledCounter` above 0) writes its record
   over its earlier attempt's (one file and one mirror key per job id), so the processor reads that record when the
@@ -5478,7 +5497,12 @@ validator rather than a second copy of it.
   never-fits or wait-gate refusal, `capacity` is null; given a cron job, `queuedAt` is its scheduled slot (the millis
   in its `repeat:<id>:<millis>` id), not the moment the scheduler created it; given a job held on `run.waitFor`, or a
   retry, `queuedAt` is null; given a Docker Desktop host, `capacity.cpus` is the VM's count. Given a writer whose
-  retention trims runs another host's longer retention kept, then `runs:horizon` holds the cutoff.
+  retention trims runs another host's longer retention kept, then `runs:horizon` holds the cutoff. Given every
+  `runs:*` key lost and one more write, then `runs:since` holds that write's time and the run it added, its expiry is
+  the index's exactly, and a peer's capacity report reads the time before it as missing; given an index an older worker
+  recreated, or one a pruning reader emptied, while a start from before stayed, then that start is not trusted and the
+  next write replaces it with the index's oldest run; given a pruning reader that removes runs whose bodies expired,
+  then `runs:horizon` holds the newest of them.
 
 ## INT-CAPACITY-REPORT
 
@@ -5507,6 +5531,7 @@ validator rather than a second copy of it.
       "unreadable": <int>, "withoutHost": <int>,                           // records not counted, and why
       "earlierDropped": <int>,                                             // carried earlier attempts not counted
       "running": <int> | null,                                             // live + liveNotCounted; null if unknown
+      "liveRowMissing": "<host>" | null,                                   // the reading host: runs here, no live row
       "historyNotShared": ["<host>", ...]                                  // hosts no source here holds
     },
     "hosts": [ {                                                           // sorted by name
@@ -5535,8 +5560,8 @@ validator rather than a second copy of it.
 - **Where each host's history starts** (`hosts[].coverage.fromMs`, judged per host). The reader
   (`worker/src/capacity-records.mjs`) states what each source covers: this host's files (and every host's, on a shared
   logs directory) from `PI_LOG_RETENTION_DAYS` on, and nothing when the directory is absent or unreadable; the run
-  mirror from the latest of the deepest window any writer keeps (92 days), the fleet horizon (`runs:horizon`,
-  `INT-RUN-HISTORY-FILE-CONTRACT`), the oldest run at the 5,000 run cap when it ended inside the window, and the newest
+  mirror from the latest of the mirror's own start (`runs:since` while trusted, else the index's oldest run), the deepest window any
+  writer keeps (92 days), the fleet horizon (`runs:horizon`, `INT-RUN-HISTORY-FILE-CONTRACT`), the oldest run at the 5,000 run cap when it ended inside the window, and the newest
   run whose body expired while its index member stayed. A host is covered by the files when it is this host or its
   runs are in them, and by the mirror when its live row says it routes (it declared `PI_WORKER_NAME`) or, with no live
   row, when the mirror holds its runs; it starts at the earliest of the sources that cover it (the files' on a tie, which
@@ -5545,7 +5570,9 @@ validator rather than a second copy of it.
   mirror was not read: no Valkey, or it did not answer; `coverage.reason` says which), `unnamed` when it does not (a
   worker without `PI_WORKER_NAME` writes no run mirror). Only a host with a live row can be uncovered. Every surface
   words the two differently, so a Valkey that did not answer is never blamed on a worker's name.
-  `truncated` is true when that start is past the window's start because the mirror was cut. A caller of
+  `truncated` is true when that start is past the window's start because of the mirror (it started then, or it was
+  cut). The fleet's `coverage.truncated` is true when any covered host's is; with no covered host, when the run
+  mirror's own start is past the window's start, so an empty report never reads as a whole one. A caller of
   `computeCapacity` that describes no source (no `local` and no `mirror` in its coverage) gets every host covered from
   its `coverage.fromMs`, `source` `"records"`.
 - **Meaning of the numbers.** `busyMs` is the time at least one job held a slot; `idleMs` the covered time with none;
@@ -5590,7 +5617,10 @@ validator rather than a second copy of it.
   it `jobsUnreadable`) says nothing about how many it runs: that host counts 1 in `liveUnreadable`, and nothing stands
   in for it (not its `budgetRunning`, which stands in only for a worker from before the field). `running` is `live` plus
   `liveNotCounted`: every running job the live rows report, never a listed job whose record already counts it, and
-  null when no row says or when a host's list is unreadable (how many run there is unknown); an orphan is not running.
+  null when no row says or when a host's list is unreadable (how many run there is unknown). When the reading host
+  (`coverage.localHost` as the reader gives it) has records in the window and no live row (the registry not read, or
+  its row gone until its next beat), its running jobs are not counted and `liveRowMissing` names it; `running` stays
+  what the other rows say. An orphan is not running.
   A row that `readLiveHosts` already parsed and a raw one read the same.
 - **A record's `earlier` is judged again**: rebuilt by the writer's own rule (`recordedEarlier` in `run-earlier.mjs`:
   valid entries only, the newest 4), and an entry that overlaps the record's own span on the same host is dropped (one
@@ -5611,6 +5641,11 @@ validator rather than a second copy of it.
   its running jobs count. It reads `VALKEY_URL` by the kill switch's rule (`--valkey-url` names one) and `PI_LOGS_DIR`,
   `PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME` by the deployment's (`cliDeploymentEnv`), never `loadConfig`. It writes
   nothing: the registry is read with `prune: false`. The text output has every C0 and C1 control character removed.
+  Its coverage line says `history truncated` when `coverage.truncated`, that the jobs running now are not known when
+  `running` is null, and that this host's own are not known when `liveRowMissing` names it. A report with no host says
+  that no host ran a job only when the whole window was read: no `reason` (no source missing, no record skipped), not
+  `local`, not `truncated`, and no `unreadable` or `withoutHost` record; otherwise that the history read here holds no
+  run (`noRunText`, which the panel's HOSTS view and the insights page use too).
   Exit codes: **0** with a report, also when a Valkey taken from the shell or the `.env` refuses or does not answer (the
   report then reads this host's files and its coverage says why); **1** for a usage error (an unknown flag or argument,
   a `--since` it does not offer, a `--valkey-url` that is not a URL or carries a password), an unknown `--host`, a shell
@@ -8171,3 +8206,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-08 | Issue #599, phase 4, second corrections. **`INT-CAPACITY-REPORT` AMENDED**: a record whose `capacity` says more than any host can have is no longer unreadable: that field is read as unknown, the run counts with its span, size and CPU, and the record is counted in a new coverage count `capacityOutOfRange` (per host and fleet). It made a busy host whose worker predates the bound (a legal `PI_CONCURRENCY` of 20000) read as idle. The retry caveat says the earlier attempts are counted on the host that ran them "where that host's history is here and covers them", and a host that ran several says "N earlier attempts of retried runs counted here, from the records their retries kept". **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the writer's bound is as amended in the row above. |
 | 2026-10-09 | Issue #599, phase 5. **`INT-CAPACITY-REPORT` AMENDED**: doctor ends its capacity lines with one more fact line, `Jobs only: a machine busy with other work reads as idle` (`JOBS_ONLY` in `capacity-cli.mjs`, the sentence the CLI ends with), as `REQ-CAPACITY-INSIGHTS` asks of every surface; it said it nowhere before. Nothing printed when there is no host line. **Code evidence**: worker/src/capacity-cli.mjs -> JOBS_ONLY, coverageLines; worker/src/doctor.mjs -> capacityChecks. |
 | 2026-10-09 | Issue #599, phase 5. **`INT-CAPACITY-REPORT` AMENDED** (presentation only; the JSON report is unchanged): every surface prints a share of time through one helper (`shareText`), so a share that is there but rounds to nothing reads `under 0.1%` and one short of the whole `over 99.9%` ("full 0%" stood beside "peak 3 of 3"); idle is printed as the complement of the printed busy (`busyIdleText`), so the two sum to 100% (123.5 per mille printed 12.4% and 87.7%); and a history start inside the window reads `2026-10-01 09:29 UTC`, the minute format of the lines around it, not a raw ISO instant. **Code evidence**: worker/src/capacity-cli.mjs -> shareText, busyIdleText, hostFacts, historyNotes; worker/src/doctor.mjs -> capacityChecks; admin/src/dashboard.ts -> hostsView; admin/src/insights-html.mjs -> capShareText. |
+| 2026-10-09 | Issue #599, the run mirror's start. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the fleet copy gains `runs:since`, a hash of when the copy started (`at`) and a run of the index that vouches for it (`member`), written by the writer's one script together with the member (the `ZADD` moved into it): the write's time and its run when the index did not exist before it, else the index's oldest run when the start there is absent, not a hash, or no longer trusted; it is trusted only while its run is in the index, a removal of that run hands it to the oldest run left (`at` unchanged) or deletes it with the last, and it expires with the index. Every earlier bound lived in keys lost with the runs (a flushed or replaced Valkey, an expired index), so after one more write a peer read every lost run as idle with nothing missing; and a start can itself outlive its index (a 4.0.1 worker's 30 day index expiry, a pruning reader that empties the index) under an index an older worker recreates, so a start without a held run proves nothing. Rejected: trusting a start while the horizon is at or past it, since the horizon outlives a lost index too. A pruning reader now records its cut in `runs:horizon` (`PRUNE_SCRIPT`), where it erased the expired-body bound; the capacity reader reads the index as one snapshot (`READ_SCRIPT`). The Acceptance gains the start's and the pruning reader's cases. **`INT-CAPACITY-REPORT` AMENDED**: the mirror's coverage starts no earlier than a trusted `runs:since` (else the index's oldest run); `truncated` covers a mirror that started inside the window, and for a report with no covered host is the mirror's own cut; the fleet coverage gains `liveRowMissing` (the reading host with records and no live row; the other rows' `running` count stands); the CLI's coverage line says a truncated history and running jobs it could not count; an empty report says no host ran a job only with no reason, not local, not truncated and no unreadable or host-less record. The report's other fields UNCHANGED, checked. |

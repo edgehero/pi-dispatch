@@ -269,10 +269,11 @@ test("the report's frame: version, window, every coverage count, hosts sorted, a
 	const r = report([run("1", 2, 1, { host: "b" }), run("2", 2, 1)], { live: [{ name: "c", budgetRunning: "2" }, { name: "d", budgetRunning: "" }, { name: "e", budgetRunning: "1" }], coverage: { source: "mirror+local", reason: "why" } });
 	assert.equal(r.v, 1);
 	assert.deepEqual(r.window, { fromMs: NOW - DAY, toMs: NOW, bucketMs: H });
-	assert.deepEqual(Object.keys(r.coverage), ["source", "reason", "fromMs", "truncated", "used", "capacityOutOfRange", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "liveUnreadable", "orphans", "unreadable", "withoutHost", "earlierDropped", "running", "historyNotShared"]);
+	assert.deepEqual(Object.keys(r.coverage), ["source", "reason", "fromMs", "truncated", "used", "capacityOutOfRange", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "liveUnreadable", "orphans", "unreadable", "withoutHost", "earlierDropped", "running", "liveRowMissing", "historyNotShared"]);
 	assert.deepEqual([r.coverage.source, r.coverage.reason, r.coverage.running, r.coverage.liveNotCounted, r.coverage.withoutSize, r.coverage.withoutResources], ["mirror+local", "why", 3, 3, 2, 2], "a row from before `jobs` says how many run, and none of them is counted");
 	assert.deepEqual(r.hosts.map((h) => h.name), ["a", "b", "c", "d", "e"]);
 	assert.equal(report([]).coverage.running, null, "no live row says: unknown, not zero");
+	assert.equal(r.coverage.liveRowMissing, null, "no reading host named: nothing to say of its row");
 	assert.deepEqual(Object.keys(r.hosts[0]), ["name", "shared", "notShared", "coverage", "capacity", "coveredMs", "missingMs", "busyMs", "idleMs", "fullMs", "peak", "avgMilli", "promisedMemPerMille", "promisedCpuPerMille", "usedCpuPerMille", "runs", "projects", "otherProjects", "waits", "buckets"]);
 	assert.deepEqual(Object.keys(r.hosts[0].coverage), ["fromMs", "source", "truncated", "used", "capacityOutOfRange", "refusedBeforeSlot", "legacyOccupied", "legacyRefused", "withoutSize", "withoutResources", "cpuClamped", "retried", "earlier", "stalledRepick", "live", "liveNotCounted", "liveUnreadable", "orphans"]);
 });
@@ -544,4 +545,29 @@ test("a capacity past what any host can have: the writer records unknown, and th
 	const fromRow = report([], { live }).hosts[0];
 	assert.deepEqual([fromRow.capacity.slots, fromRow.capacity.memMiB, fromRow.capacity.cpuCenti, fromRow.capacity.basis], [null, null, "off", "current"]);
 	assert.deepEqual([fromRow.busyMs, fromRow.coverage.live], [H, 1]);
+});
+
+test("the reading host with runs here and no live row: its running jobs are not counted and said, the peers' count stands", () => {
+	const cov = { local: { fromMs: NOW - DAY }, localHost: "a", mirror: null, source: "local" };
+	// Its row gone (until its next beat), a peer's row there: the fleet's count would leave this host out.
+	const gone = report([run("1", 3, 2)], { live: [liveRow([], { name: "b" })], coverage: cov });
+	assert.deepEqual([gone.coverage.liveRowMissing, gone.coverage.running], ["a", 0]);
+	const peerBusy = report([run("1", 3, 2)], { live: [liveRow([job("p1", 1), job("p2", 1)], { name: "b" })], coverage: cov });
+	assert.deepEqual([peerBusy.coverage.liveRowMissing, peerBusy.coverage.running], ["a", 2], "a stopped reading host does not hide the peers' running jobs");
+	// No registry read at all: the same.
+	assert.deepEqual([report([run("1", 3, 2)], { coverage: cov }).coverage.liveRowMissing], ["a"]);
+	// Its row there: counted as ever.
+	const back = report([run("1", 3, 2)], { live: [liveRow([job("x", 1)])], coverage: cov });
+	assert.deepEqual([back.coverage.liveRowMissing, back.coverage.running], [null, 1]);
+	// A reading host that ran nothing in the window (an operator's laptop): nothing to say of a row it never had.
+	const laptop = report([run("1", 3, 2)], { live: [liveRow([])], coverage: { ...cov, localHost: "laptop" } });
+	assert.deepEqual([laptop.coverage.liveRowMissing, laptop.coverage.running], [null, 0]);
+});
+
+test("a report with no host says whether the run mirror's own history was cut, and nothing else marks it truncated", () => {
+	const mirror = (fromMs, truncated = true) => ({ source: "mirror", localHost: "z", local: null, mirror: { fromMs, truncated, hosts: [] } });
+	assert.equal(report([], { coverage: mirror(NOW - 2 * H) }).coverage.truncated, true, "the mirror started two hours ago: the window is not whole");
+	assert.equal(report([], { coverage: mirror(NOW - 2 * DAY) }).coverage.truncated, false, "cut before the window: whole");
+	assert.equal(report([], { coverage: mirror(NOW - 2 * H, false) }).coverage.truncated, false);
+	assert.equal(report([], { coverage: { source: "local", local: { fromMs: NOW - DAY }, mirror: null } }).coverage.truncated, false);
 });

@@ -1192,6 +1192,12 @@ test("layoutCapacityChart: a fixed axis to now, bars only over covered time, and
   for (const xl of lay.xLabels) assert.ok(xl.x >= lay.plot.x && xl.x <= lay.plot.x + lay.plot.w);
 });
 
+test("an empty capacity section says what the report says: no host ran a job only when the whole history was read", () => {
+  const empty = (noRun) => capSection(capPage({ ...CAP_SLICE(), truncated: false, hosts: [], ...(noRun === undefined ? {} : { noRun }) }));
+  assert.ok(empty("no run in the history read here in this window").includes('<div class="dim">no run in the history read here in this window</div>'));
+  assert.ok(empty(undefined).includes('<div class="dim">no host ran a job in this window</div>'), "a slice without the sentence keeps the old one");
+});
+
 test("the capacity section: each host's numbers and caveats, no data hatched with its reason, truncation said", () => {
   const html = capPage(CAP_SLICE());
   const sec = capSection(html);
@@ -1338,7 +1344,7 @@ test("junk buckets, a window of no time yet, and every gap's own reason", () => 
   assert.ok(none.includes("no time in this window yet: month to date starts at"));
   assert.ok(!none.includes("not read"));
   const tips = JSON.parse(capPage(CAP_SLICE()).match(/var INSIGHTS = (.*);\n/)[1]).tips;
-  assert.ok(tips.some((t) => t.endsWith("no data: before this host's history starts (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)")));
+  assert.ok(tips.some((t) => t.endsWith("no data: before this host's history starts (the run mirror holds nothing older: it started then, or its cap or a peer's shorter retention cut it)")));
   const junk = CAP_SLICE();
   junk.hosts[0].buckets[3] = { ...junk.hosts[0].buckets[3], busyMs: CH * 2 };
   const jt = JSON.parse(capPage(junk).match(/var INSIGHTS = (.*);\n/)[1]).tips;
