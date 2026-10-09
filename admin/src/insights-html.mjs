@@ -1432,7 +1432,7 @@ function normSizingDim(v, reasons) {
   const wanted = sizeInt(v.wanted);
   const capMissing = INSIGHTS_CAP_MISSING.includes(v.capMissing) ? v.capMissing : null;
   const cap = sizeInt(v.cap);
-  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, held, fact, wanted: wanted === 0 ? null : wanted, capMissing, cap: cap === 0 ? null : cap, samples: sizeInt(e.samples) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti), pressured: sizeInt(e.pressured) ?? 0, throttledPct: sizeInt(e.throttledPct) };
+  return { current, suggested: suggested === 0 ? null : suggested, reason: v.reason, held, fact, wanted: wanted === 0 ? null : wanted, capMissing, cap: cap === 0 ? null : cap, samples: sizeInt(e.samples) ?? 0, smaller: sizeInt(e.smaller) ?? 0, p95MiB: sizeInt(e.p95MiB), p95CoresCenti: sizeInt(e.p95CoresCenti), pressured: sizeInt(e.pressured) ?? 0, throttledPct: sizeInt(e.throttledPct) };
 }
 
 /**
@@ -1524,7 +1524,17 @@ function sizingWhat(dim, unit) {
   if (dim.held === "largest") return `stays (${dim.reason}, ${dim.cap !== null && dim.current > dim.cap ? "already above the most a live host offers" : "already the largest size a live host offers"})`;
   // the three ways no cap is known, worded apart (the panel's words, held equal by a test); an unknown one reads as unread
   if (dim.held === "no-cap" && dim.wanted !== null) return `wants ${unit(dim.wanted)} (${dim.reason}, ${SIZING_NO_CAP_WORDS[dim.capMissing ?? "unread"]}: no call)`;
-  return dim.reason === "not-enough-runs" ? `not enough runs (${dim.samples})` : dim.reason;
+  return dim.reason === "not-enough-runs" ? sizingNotEnoughText(dim, unit === sizeCpuText ? sizeCpusWords : unit) : dim.reason;
+}
+
+/**
+ * The worker's "not enough runs" verdict (size-suggest.mjs `notEnoughRunsText`, restated and held equal by a test): the
+ * runs counted at the current size, and the smaller ones the chart draws but the verdict does not count.
+ */
+/** CPUs with their unit, singular for exactly one (the worker's `cpusText`, restated). */
+const sizeCpusWords = (centi) => `${sizeCpuText(centi)} CPU${centi === 100 ? "" : "s"}`;
+export function sizingNotEnoughText(dim, unit) {
+  return `not enough runs at ${unit(dim.current)} (${dim.samples}${dim.smaller > 0 ? `; ${dim.smaller} at smaller sizes` : ""})`;
 }
 
 /** A withheld pair's refusal in words, naming each dimension every live host refuses (the worker's `refusalWords`, restated). */

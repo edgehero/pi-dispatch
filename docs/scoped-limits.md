@@ -298,12 +298,16 @@ call it names.
   below 1.25x the largest peak in the window, nor 1.5x the largest size in the window that was killed, nor 512m. So
   two heavy runs among fifty still hold the size up, and a size an OOM caused is not lowered back to it.
   Sizes are rounded up: to 256m steps up to 2g, 512m steps up to 8g, then whole gigabytes.
-- **CPUs are only ever lowered.** With at least 10 runs, when the p95 of the cores used is below 0.4x the size, to
-  1.25x that p95, but never below 1.25x the busiest run in the window, nor 0.25. Steps of 0.25. A job's `--cpus` is
-  this host's CPU ceiling, the same for every job, and its size is only its weight, so a job held back by the ceiling
-  is held back the same at any size (measured: the same throttled time at 1024 and 4096 shares). When the median run
-  was held back more than 25% of its time, the line says so as a fact about the host, with no call. A run's time is
-  counted from pickup, clone included, so cores used read a little low.
+- **CPUs are only ever lowered.** With at least 10 runs at the current size or larger, when the p95 of the cores used
+  is below 0.4x the size, to 1.25x that p95, but never below 1.25x the busiest run in the window, nor 0.25. Steps of
+  0.25. A run's CPU time counts even where the venue reports no throttled time (cgroup v2 writes it only with the cpu
+  controller on). A job's `--cpus` is this host's CPU ceiling, the same for every job, and its size is only its
+  weight, so a job held back by the ceiling is held back the same at any size (measured: the same throttled time at
+  1024 and 4096 shares). When at least 10 of the runs report throttled time and their median was held back more than
+  25% of its time, the line says so as a fact about the host, with no call. A run's time is counted from pickup, clone
+  included, so cores used read a little low.
+- **Too few runs says what it counted**: the runs at the current size or larger, and how many smaller ones it left
+  out, for example "not enough runs at 4g (0; 20 at smaller sizes)".
 - **What this host offers caps every suggestion.** A raise never goes past this host's budget in that dimension
   (`PI_HOST_MEMORY_BUDGET`), or the project's `hostShare` of it when its row has one (50% of a 10g budget caps it at
   5g, the most a job of it may take here), or, where the budget is `off` or not yet known, past the host's own memory.

@@ -35,7 +35,7 @@ import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
-import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS, coresText, cpusText } from "@edgehero/pi-dispatch/size-suggest";
+import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { LIVE_FRESH_MS } from "@edgehero/pi-dispatch/capacity";
 import { basisNote, durationText, fleetRecordNotes, historyNotes, hostCaveats, milliText, notSharedWhy, percentText, share } from "@edgehero/pi-dispatch/capacity-cli";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
@@ -2580,11 +2580,13 @@ function sizingLines(sizing: any, id: string, iw: number, styler: any): string[]
   const size = `${formatMemory(m.current)}, ${cpusText(c.current)}`;
   const peaks = `p95 ${m.evidence?.p95MiB === null || m.evidence?.p95MiB === undefined ? "-" : formatMemory(m.evidence.p95MiB)}, ${c.evidence?.p95CoresCenti === null || c.evidence?.p95CoresCenti === undefined ? "-" : coresText(c.evidence.p95CoresCenti)}`;
   const verdicts = [sizingVerdict(m, "memory", formatMemory), sizingVerdict(c, "CPUs", formatCpus)].filter((v): v is string => v !== null);
-  const enough = m.reason !== "not-enough-runs" || c.reason !== "not-enough-runs";
   // the worker's one rule (`sizeRefusal`): no call exactly when every live host with an integer budget refuses the pair
   const over = s.refusal !== null && s.refusal !== undefined;
   const tone = over ? "error" : "warning";
-  const headText = verdicts.length > 0 ? "suggest" : enough ? "fits" : `not enough runs (${m.evidence?.samples ?? 0} of ${SUGGEST_MIN_SAMPLES})`;
+  // "fits" only when BOTH dimensions were judged and fit; otherwise each dimension says what it is, so a CPU still short
+  // of runs is never hidden behind memory's "fits", and both counts show when both lack runs.
+  const judged = (d: any, sizeText: (v: number) => string) => (d.reason === "not-enough-runs" ? notEnoughRunsText(d, sizeText) : "fits");
+  const headText = verdicts.length > 0 ? "suggest" : m.reason !== "not-enough-runs" && c.reason !== "not-enough-runs" ? "fits" : `memory ${judged(m, formatMemory)}, CPUs ${judged(c, cpusText)}`;
   const headTone = verdicts.length > 0 ? tone : "dim";
   const indent = "      ";
   const sub = Math.max(1, iw - indent.length);

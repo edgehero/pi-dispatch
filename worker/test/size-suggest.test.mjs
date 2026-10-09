@@ -109,7 +109,7 @@ test("a CPU size rounds UP to a 0.25 step, never below 0.25 nor above the ceilin
 });
 
 test("memory: fewer than 10 runs is not enough, exactly 10 decides", () => {
-	const ev = (samples) => ({ samples, p95MiB: 3072, maxPeakMiB: 3072, ooms: 0, largestOomMiB: null, pressured: 0 });
+	const ev = (samples) => ({ samples, smaller: 0, p95MiB: 3072, maxPeakMiB: 3072, ooms: 0, largestOomMiB: null, pressured: 0 });
 	assert.deepEqual(mem(runs(9, { peakMiB: 3072 })), { current: 4096, suggested: null, reason: "not-enough-runs", evidence: ev(9), ...NO, cap: ROOMY.memMiB, capMissing: null });
 	assert.deepEqual(mem(runs(10, { peakMiB: 3072 })), { current: 4096, suggested: null, reason: "fits", evidence: ev(10), ...NO, cap: ROOMY.memMiB, capMissing: null });
 	assert.equal(mem([]).reason, "not-enough-runs");
@@ -153,10 +153,9 @@ test("the p95 and p50 are the nearest rank: of 10 runs the p95 is the largest, o
 	// 10 distinct peaks: the p95 rank is ceil(9.5) = 10, the largest, never the 9th.
 	const ten = Array.from({ length: 10 }, (_, i) => rec({ i, peakMiB: 1000 + 100 * i }));
 	assert.equal(mem(ten).evidence.p95MiB, 1900);
-	// 9 runs of distinct throttling: the p50 rank is ceil(4.5) = 5, the 5th smallest share (30%), never the 4th (24%).
-	// Nine runs decide nothing for CPU, so the rank is read through the evidence.
-	const nine = Array.from({ length: 9 }, (_, i) => rec({ i, cores: 2, throttle: [0.1, 0.2, 0.22, 0.24, 0.3, 0.4, 0.5, 0.6, 0.7][i] }));
-	assert.equal(cpu(nine).evidence.throttledPct, 30);
+	// 11 runs of distinct throttling: the p50 rank is ceil(5.5) = 6, the 6th smallest share (30%), never the 5th (26%).
+	const eleven = Array.from({ length: 11 }, (_, i) => rec({ i, cores: 2, throttle: [0.1, 0.2, 0.22, 0.24, 0.26, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8][i] }));
+	assert.equal(cpu(eleven).evidence.throttledPct, 30);
 });
 
 test("an OOM is the record's reason, never its outcome alone: another policy refusal is no OOM", () => {
@@ -166,7 +165,7 @@ test("an OOM is the record's reason, never its outcome alone: another policy ref
 
 test("memory: an OOM raises ONE step, to 1.5x the larger of the size and the largest OOM-killed size in the window", () => {
 	const oom = rec({ i: 0, reason: "oom-killed", peakMiB: 4096 });
-	assert.deepEqual(mem([oom]), { current: 4096, suggested: 6144, reason: "oom-killed", evidence: { samples: 1, p95MiB: 4096, maxPeakMiB: 4096, ooms: 1, largestOomMiB: 4096, pressured: 0 }, fact: null, held: null, wanted: 6144, cap: ROOMY.memMiB, capMissing: null, overBudget: false });
+	assert.deepEqual(mem([oom]), { current: 4096, suggested: 6144, reason: "oom-killed", evidence: { samples: 1, smaller: 0, p95MiB: 4096, maxPeakMiB: 4096, ooms: 1, largestOomMiB: 4096, pressured: 0 }, fact: null, held: null, wanted: 6144, cap: ROOMY.memMiB, capMissing: null, overBudget: false });
 	// an OOM at a LARGER size than now (a lowering that went too far): 1.5x of that size, 8g -> 12g
 	assert.equal(mem([rec({ i: 0, memMiB: 8192, reason: "oom-killed", peakMiB: 8192 })]).suggested, 12288);
 	// the p95 asks for nothing: heavy runs at 8g beside an OOM at 4g still raise to 6g, not 1.25x their 7g
@@ -280,7 +279,7 @@ test("memory: a lowering never goes below the 512m floor, and one that would rou
 });
 
 test("CPU: fewer than 10 runs is not enough, exactly 10 decides", () => {
-	const ev = (samples) => ({ samples, p95CoresCenti: 150, maxCoresCenti: 150, throttledPct: 0 });
+	const ev = (samples) => ({ samples, smaller: 0, throttledSamples: samples, p95CoresCenti: 150, maxCoresCenti: 150, throttledPct: samples >= 10 ? 0 : null });
 	assert.deepEqual(cpu(runs(9, { cores: 1.5 })), { current: 200, suggested: null, reason: "not-enough-runs", evidence: ev(9), ...NO, cap: ROOMY.cpuCenti, capMissing: null });
 	assert.deepEqual(cpu(runs(10, { cores: 1.5 })), { current: 200, suggested: null, reason: "fits", evidence: ev(10), ...NO, cap: ROOMY.cpuCenti, capMissing: null });
 	// even fully throttled: nine runs decide nothing for CPU, and carry no fact
@@ -397,10 +396,16 @@ test("adversarial resources: a non-integer field is ignored, a value past the co
 	// CPU time past 256 cores of the wall is clamped there; throttled time past the wall reads as all of it; neither raises.
 	const wild = suggest(runs(10, { resources: { memPeak: MIB, cpuUsec: Number.MAX_SAFE_INTEGER, throttledUsec: Number.MAX_SAFE_INTEGER } })).cpu;
 	assert.deepEqual([wild.evidence.p95CoresCenti, wild.evidence.maxCoresCenti, wild.evidence.throttledPct, wild.reason, wild.suggested, wild.fact], [25600, 25600, 100, "fits", null, "ceiling"]);
-	// a negative or fractional CPU field, or a missing one, leaves the CPU dimension; the memory sample stays.
-	for (const bad of [{ cpuUsec: -1 }, { cpuUsec: 0.5 }, { throttledUsec: "0" }, { throttledUsec: null }, { cpuUsec: undefined }]) {
+	// a negative, fractional or missing CPU time leaves the CPU dimension; the memory sample stays.
+	for (const bad of [{ cpuUsec: -1 }, { cpuUsec: 0.5 }, { cpuUsec: undefined }]) {
 		const s = suggest([r({ memPeak: MIB, ...bad })]);
 		assert.deepEqual([s.memory.evidence.samples, s.cpu.evidence.samples], [1, 0], JSON.stringify(bad));
+	}
+	// a bad or missing throttled time is still a CPU sample (cgroup v2 writes throttled_usec only with the cpu controller
+	// on), and only the throttle fact leaves it out.
+	for (const bad of [{ throttledUsec: "0" }, { throttledUsec: null }, { throttledUsec: undefined }]) {
+		const s = suggest([r({ memPeak: MIB, ...bad })]);
+		assert.deepEqual([s.memory.evidence.samples, s.cpu.evidence.samples, s.cpu.evidence.throttledSamples], [1, 1, 0], JSON.stringify(bad));
 	}
 	// a record whose resources are an array, or a size out of range or of another shape, is no evidence at all.
 	assert.equal(suggest([rec({ resources: [1, 2] }), rec({ size: { memMiB: 100, cpuCenti: 200, source: "project" } }), rec({ size: { memMiB: 4096, cpuCenti: 1.5, source: "project" } }), rec({ size: { memMiB: 4096, cpuCenti: 200, source: "guess" } })]).runs, 0);
@@ -538,7 +543,7 @@ test("the words: singular one core and one CPU, held raises as what the host off
 	const pressed = suggestionEvidence(suggest(runs(10, { memPeak: 4096 * MIB, full: 0.5, cores: 2, throttle: 0.9 })));
 	assert.equal(pressed.memoryFact, "10 of 10 runs reached the memory limit while stalled for memory more than 1% of their time");
 	assert.equal(pressed.cpuFact, "the median run was held back 90% of its time by this host's CPU ceiling (its CPU budget, shared by every job), which a job's cpus do not change");
-	assert.equal(suggestionEvidence(suggest(runs(3))).memory, "3 of the 10 runs with measurements it needs");
+	assert.equal(suggestionEvidence(suggest(runs(3))).memory, "3 of the 10 runs with measurements at 4g or larger it needs");
 	// nothing any of them says advises raising a size past the cap, or growing a host's budget
 	for (const w of [fits, pressed, suggestionEvidence(suggest(oom, { cap: { memMiB: 5120 } })), suggestionEvidence(suggest(oom, { cap: null }))]) {
 		for (const text of Object.values(w)) assert.doesNotMatch(text, /raise|increase|grow/i, text);
@@ -613,4 +618,26 @@ test("refusalWords names the dimension that does not fit, by its new size or as 
 	assert.equal(refusalWords({ memMiB: "host", cpuCenti: "host" }, s(null, 100), null, { memMiB: 2048, cpuCenti: 50 }), "its memory 4g is above this host's budget (2g) and 1 CPU is above this host's budget (0.5 CPUs)");
 	assert.equal(refusalWords({ memMiB: null, cpuCenti: "share" }, s(768, null), 40), "its 4 CPUs are above its hostShare (40%) of every live host's budget");
 	assert.equal(refusalWords({ memMiB: null, cpuCenti: null }, s(768, null)), "memory 768m with 4 CPUs fits no live host's budget");
+});
+
+test("CPU: a run whose cgroup reports no throttled time is a CPU sample; the throttle fact reads only the runs that do (#599)", async () => {
+	const { notEnoughRunsText } = await import("../src/size-suggest.mjs");
+	const { formatMemory } = await import("../src/job-size.mjs");
+	const plain = (n) => Array.from({ length: n }, (_, i) => rec({ i, resources: { memPeak: MIB, cpuUsec: Math.round(0.5 * WALL_US) } }));
+	const c = cpu(plain(10));
+	assert.deepEqual([c.reason, c.evidence.samples, c.evidence.throttledSamples, c.evidence.throttledPct, c.fact], ["underused", 10, 0, null, null], "ten CPU samples with no throttled time decide CPUs, with no fact");
+	// ten throttled heavily and ten not reporting it: the fact reads the ten, the suggestion all twenty.
+	const mixed = cpu([...plain(10), ...Array.from({ length: 10 }, (_, i) => rec({ i: 20 + i, cores: 0.5, throttle: 0.5 }))]);
+	assert.deepEqual([mixed.evidence.samples, mixed.evidence.throttledSamples, mixed.evidence.throttledPct, mixed.fact], [20, 10, 50, "ceiling"]);
+	// one throttled run among twenty is not "the median run": the fact needs as many runs that report it as a suggestion
+	// needs runs, and nine are not enough.
+	const one = cpu([...plain(19), rec({ i: 40, cores: 0.5, throttle: 0.5 })]);
+	assert.deepEqual([one.evidence.samples, one.evidence.throttledSamples, one.evidence.throttledPct, one.fact], [20, 1, null, null]);
+	const nine = cpu([...plain(11), ...Array.from({ length: 9 }, (_, i) => rec({ i: 20 + i, cores: 0.5, throttle: 0.5 }))]);
+	assert.deepEqual([nine.evidence.throttledSamples, nine.fact], [9, null]);
+	// the words say what was counted and what was not
+	const small = mem(runs(20, { memMiB: 2048 }));
+	assert.deepEqual([small.reason, small.evidence.samples, small.evidence.smaller], ["not-enough-runs", 0, 20], "runs at a smaller size are drawn, not counted");
+	assert.equal(notEnoughRunsText(small, formatMemory), "not enough runs at 4g (0; 20 at smaller sizes)");
+	assert.equal(notEnoughRunsText(mem(runs(3)), formatMemory), "not enough runs at 4g (3)");
 });

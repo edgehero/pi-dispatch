@@ -133,7 +133,7 @@ import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REV
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
-import { SUGGEST_WINDOW_DAYS, coresText, cpusText } from "@edgehero/pi-dispatch/size-suggest";
+import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
 import { coverageNotes, historyNotes, hostCaveats, hostFacts, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
@@ -3324,7 +3324,7 @@ export function sizingNote(paths: any, scope: any, nowMs: number): string {
     if (dim.suggested) return `${shown(dim.suggested)} (${dim.reason}: ${words})`;
     if (dim.held === "no-cap") return `${shown(dim.wanted)} (${dim.reason}: ${words}; budget not checked here)`;
     if (dim.held === "largest") return `no larger size (${dim.reason}: ${words})`;
-    return dim.reason === "not-enough-runs" ? "not enough runs" : "fits";
+    return dim.reason === "not-enough-runs" ? notEnoughRunsText(dim, shown === formatCpus ? cpusText : shown) : "fits";
   };
   const facts = [s.words.memoryFact, s.words.cpuFact].filter(Boolean);
   return `\nProject ${id}'s runs (the last ${SUGGEST_WINDOW_DAYS} days, measured inside the jobs, so advisory): size now ${formatMemory(m.current)}, ${cpusText(c.current)}; ${peaks}. They suggest memory ${said(m, s.words.memory, formatMemory)}, CPUs ${said(c, s.words.cpu, formatCpus)}.${facts.length > 0 ? ` ${facts.map((f: string) => `${f[0].toUpperCase()}${f.slice(1)}.`).join(" ")}` : ""}`;

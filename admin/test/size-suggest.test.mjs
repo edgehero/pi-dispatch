@@ -135,7 +135,8 @@ test("the PROJECTS view shows each project's size, p95 peaks and verdict, then t
   assert.match(out, /^sizes: p95 of 30 days' runs · capped by 1 host budget$/m);
   assert.match(out, /^(?:› )?shop .*\n4g, 2 CPUs · p95 4g, 1 core · suggest\nmemory 5g \(oom-killed, the most a live host offers\)\ndispatch_limit_edit \{"index":0,"memory":"5g"\}\ngithub:acme\/web$/m);
   assert.match(out, /^ops .*\n4g, 2 CPUs · p95 3000m, 1\.5 cores · fits\nthe median run was held back 50% of its time by this host's\nCPU ceiling/m);
-  assert.match(out, /^new .*\n4g, 2 CPUs · p95 1g, 1 core · not enough runs \(1 of 10\)\n\/srv\/new$/m);
+  // neither dimension has enough runs: each says its own count, never memory's alone
+  assert.match(out, /^new .*\n4g, 2 CPUs · p95 1g, 1 core\nmemory not enough runs at 4g \(1\), CPUs not enough runs at 2\nCPUs \(1\)\n\/srv\/new$/m);
   // a lowering every live host would still refuse (its 7 CPUs hold the 3.75 the lowering leaves, its 5g budget does
   // not hold 7680m) names the dimension that does not fit, and carries NO call: it would never fit; only that project
   assert.match(out, /^big .*\n16g, 8 CPUs · p95 6000m, 3 cores · suggest\nmemory 7680m \(oversized\); CPUs 3\.75 \(underused\)\nno live host admits it \(memory 7680m is above every live\nhost's budget\)/m);
@@ -291,11 +292,11 @@ test("sizingNote names a project with no measured runs, and a limits file that d
   writeFileSync(join(dir, "projects.json"), JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
   writeFileSync(join(dir, "bad.json"), "{nope");
   const paths = { logsDir: join(dir, "logs"), scopedLimitsPath: join(dir, "absent.json"), projectsFile: join(dir, "projects.json") };
-  assert.match(indexMod.sizingNote(paths, "project:shop", NOW), /size now 4g, 2 CPUs; p95 peak none over 0 runs, p95 none used over 0 runs\. They suggest memory not enough runs, CPUs not enough runs\.$/);
+  assert.match(indexMod.sizingNote(paths, "project:shop", NOW), /size now 4g, 2 CPUs; p95 peak none over 0 runs, p95 none used over 0 runs\. They suggest memory not enough runs at 4g \(0\), CPUs not enough runs at 2 CPUs \(0\)\.$/);
   assert.equal(indexMod.sizingNote({ ...paths, scopedLimitsPath: join(dir, "bad.json") }, "project:shop", NOW), "\nThe project's runs could not be read (the scoped-limits file does not load).");
   // a raise: no host budget is read in a confirm, so it names what the runs ask for and says the budget was not checked
   const oomLogs = logsWith([rec({ reason: "oom-killed", peakMiB: 4096 })]);
-  assert.match(indexMod.sizingNote({ ...paths, logsDir: oomLogs }, "project:shop", NOW), /They suggest memory 6g \(oom-killed: 1 run ended oom-killed \(the largest size killed 4g\); budget not checked here\), CPUs not enough runs\.$/);
+  assert.match(indexMod.sizingNote({ ...paths, logsDir: oomLogs }, "project:shop", NOW), /They suggest memory 6g \(oom-killed: 1 run ended oom-killed \(the largest size killed 4g\); budget not checked here\), CPUs not enough runs at 2 CPUs \(1\)\.$/);
   // a fact rides along as a sentence of its own
   const hot = logsWith(Array.from({ length: 10 }, (_, i) => rec({ i, cores: 1, throttle: 0.5 })));
   assert.match(indexMod.sizingNote({ ...paths, logsDir: hot }, "project:shop", NOW), /CPUs fits\. The median run was held back 50% of its time by this host's CPU ceiling \(its CPU budget, shared by every job\), which a job's cpus do not change\.$/);
@@ -365,7 +366,7 @@ test("the insights page draws a job sizes section: the hosts' budgets in use, ea
   assert.match(html, /<h2>job sizes<\/h2>/);
   assert.match(html, /<span class="pid">mini1<\/span> budget 29492m, 7 CPUs · in use 4g, off CPUs/);
   assert.match(html, /<span class="pid">shop<\/span> <span class="dim">size 4g, 2 CPUs · p95 4g, 1 core<\/span>/);
-  assert.match(html, /memory: suggest 6g \(oom-killed\) · CPUs: not enough runs \(1\)/);
+  assert.match(html, /memory: suggest 6g \(oom-killed\) · CPUs: not enough runs at 2 CPUs \(1\)/);
   assert.match(html, /<code>dispatch_limit_edit \{&quot;index&quot;:0,&quot;memory&quot;:&quot;6g&quot;\}<\/code>/);
   assert.match(html, /aria-label="peak memory against size · shop"/);
   assert.match(html, /peak 4g of 4g · oom-killed/, "the point's tip");
@@ -493,4 +494,21 @@ test("doctor and the panel offer the call for exactly the same pairs (one rule, 
     else if (panel.call !== null) offered++;
   }
   assert.ok(withheld >= 10 && offered >= 10, `both sides exercised: ${withheld} withheld, ${offered} offered`);
+});
+test("the page's not-enough-runs words are the worker's (#599)", async () => {
+  const { notEnoughRunsText, cpusText } = await import("@edgehero/pi-dispatch/size-suggest");
+  const { sizingNotEnoughText } = await import("../src/insights-html.mjs");
+  for (const [current, samples, smaller] of [[4096, 0, 20], [4096, 3, 0], [2048, 9, 1]]) {
+    assert.equal(sizingNotEnoughText({ current, samples, smaller }, sizeMemText), notEnoughRunsText({ current, evidence: { samples, smaller } }, formatMemory));
+  }
+  assert.equal(sizingNotEnoughText({ current: 100, samples: 0, smaller: 2 }, (v) => `${sizeCpuText(v)} CPU${v === 100 ? "" : "s"}`), notEnoughRunsText({ current: 100, evidence: { samples: 0, smaller: 2 } }, cpusText));
+});
+
+test("the PROJECTS view says fits only when both dimensions fit; one still short of runs says so beside the other (#599)", async () => {
+  const sizing = sizingInfo();
+  const ops = sizing.projects.ops;
+  sizing.projects.ops = { ...ops, memory: { ...ops.memory, reason: "fits", suggested: null, held: null }, cpu: { ...ops.cpu, reason: "not-enough-runs", suggested: null, held: null, fact: null, evidence: { ...ops.cpu.evidence, samples: 3, smaller: 0 } }, call: null };
+  const out = (await projectsAt(140, sizing)).lines.map(content).join("\n");
+  assert.match(out, /^ops .*\n4g, 2 CPUs · p95 3000m, 1\.5 cores(?: · |\n)memory fits, CPUs not enough runs at 2 CPUs \(3\)$/m);
+  assert.doesNotMatch(out, /^ops .*\n.* · fits$/m, "never a bare fits while CPUs lack runs");
 });
