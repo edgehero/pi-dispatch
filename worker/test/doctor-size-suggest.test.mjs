@@ -35,7 +35,7 @@ const checksOf = (args) => sizeSuggestionChecks({ projects: projects("web"), lim
 test("a project with too few runs, and one whose runs fit, are fact lines", () => {
 	const checks = sizeSuggestionChecks({ projects: projects("web", "api"), limits: [], env: {}, budget: ROOMY, records: [...runs(3, { project: "web" }), ...runs(12, { project: "api", peakMiB: 3500, cores: 1.5 })], nowMs: NOW });
 	assert.deepEqual(labels(checks), [
-		"ok: project web: size 4g, 2 CPUs: not enough runs to suggest a size yet (3 of the 10 runs with measurements it needs in the last 30 days)",
+		"ok: project web: size 4g, 2 CPUs: not enough runs to suggest a size yet (3 of the 10 runs with measurements at 4g or larger it needs in the last 30 days)",
 		"ok: project api: size 4g, 2 CPUs fits its runs (memory: p95 peak 3500m, largest 3500m, over 12 runs; CPUs: p95 1.5 cores used, largest 1.5 cores, over 12 runs)",
 	]);
 });
@@ -173,7 +173,7 @@ test("a size already ABOVE what this host offers is said to be above it, not at 
 test("memory unmeasured with CPU measured is not 'not enough runs'", () => {
 	const noPeak = runs(10, { cores: 1 }).map((r) => ({ ...r, resources: { ...r.resources, memPeak: null } }));
 	const [line] = checksOf({ records: noPeak });
-	assert.equal(line.label, "project web: size 4g, 2 CPUs fits its runs (memory: not-enough-runs, 0 of the 10 runs with measurements it needs; CPUs: p95 1 core used, largest 1 core, over 10 runs)");
+	assert.equal(line.label, "project web: size 4g, 2 CPUs fits its runs (memory: not-enough-runs, 0 of the 10 runs with measurements at 4g or larger it needs; CPUs: p95 1 core used, largest 1 core, over 10 runs)");
 });
 
 test("no projects, no lines; a project's line reads only its own runs", () => {

@@ -63,9 +63,13 @@ Where to see them:
 - **`pi-dispatch doctor`**: one line per project with its size and what its runs suggest.
 
 Only runs that carry both `size` and `resources` count, which means runs of an upgraded worker with an upgraded job
-image: the count starts when you upgrade, not before. A lowering needs at least 10 such runs of the project in the
+image: the count starts when you upgrade, not before. Only runs at the current size or larger decide, so after a
+change the count starts again: "not enough runs at 4g (0; 20 at smaller sizes)" says how many it counted and how many
+smaller ones the chart draws but the verdict does not. A lowering needs at least 10 such runs of the project in the
 last 30 days (until then doctor says "not enough runs to suggest a size yet"), and a raise needs one confirmed out of
-memory kill. These numbers are produced inside the job's container, which runs code the job controls, so read them
+memory kill. A run's CPU time counts even where the venue reports no throttled time (cgroup v2 writes it only with the
+cpu controller on); the "held back by the CPU ceiling" fact reads only the runs that report it, and needs at least 10
+of them. These numbers are produced inside the job's container, which runs code the job controls, so read them
 as advisory: a job can inflate them or report less.
 
 ## 2. Set a size per project
@@ -352,9 +356,9 @@ lines, before any run and before the CPU quota is set:
 ✓ Host budget: memory 60108m (auto: 64204m here, 4g kept for the host), CPUs 15 (auto: 16 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host
 ✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host
 ✓ The host budget binds first: it holds 7 jobs of the default size (4g, 2 CPUs) at once, fewer than PI_CONCURRENCY (10); bigger sizes fit fewer
-✓ project heavy: size 20g, 4 CPUs: not enough runs to suggest a size yet (0 of the 10 runs with measurements it needs in the last 30 days)
-✓ project medium: size 8g, 2 CPUs: not enough runs to suggest a size yet (0 of the 10 runs with measurements it needs in the last 30 days)
-✓ project light: size 2g, 1 CPU: not enough runs to suggest a size yet (0 of the 10 runs with measurements it needs in the last 30 days)
+✓ project heavy: size 20g, 4 CPUs: not enough runs to suggest a size yet (0 of the 10 runs with measurements at 20g or larger it needs in the last 30 days)
+✓ project medium: size 8g, 2 CPUs: not enough runs to suggest a size yet (0 of the 10 runs with measurements at 8g or larger it needs in the last 30 days)
+✓ project light: size 2g, 1 CPU: not enough runs to suggest a size yet (0 of the 10 runs with measurements at 2g or larger it needs in the last 30 days)
 ⚠ local: no host CPU reserve across jobs: pidispatch.slice has no CPU quota, not the CPU budget of 15 CPUs
     → run once, as root (persistent across reboots): `sudo systemctl set-property pidispatch.slice CPUQuota=1500%`
 ```

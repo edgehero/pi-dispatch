@@ -42,7 +42,8 @@
  *   A size is rounded UP to a step: 256m up to 2g, 512m up to 8g, then 1g.
  * CPUs: fewer than `SUGGEST_MIN_SAMPLES` runs is not enough runs; the p95 cores used (CPU time over wall time) below
  * 0.4x the current cpus lowers to 1.25x that p95, never below 1.25x the window's largest cores used, nor 0.25;
- * otherwise it fits. A FACT (no call) rides along when the median run was throttled more than 25% of its wall time.
+ * otherwise it fits. A FACT (no call) rides along when the median run was throttled more than 25% of its wall time,
+ * read over the runs that report throttled time and only when at least `SUGGEST_MIN_SAMPLES` of them do.
  * The wall time is the record's pickup-to-end span, which includes the clone, so cores used read slightly LOW.
  *
  * THE CAP. A raise never goes past `cap` (this host's budget per dimension, or where that is off or unknown the host's
@@ -119,9 +120,10 @@ const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
 /**
  * One record as a suggestion reads it, or null when it is not evidence: `{ at, size, memPeak, oom, wallUsec, cpuUsec,
  * throttledUsec, memFullUsec }`. `memPeak` (bytes, clamped to the record's own limit) is null when absent or not a
- * count; `wallUsec` is null unless the span is readable; `cpuUsec` and `throttledUsec` are null unless both can be read
- * with a wall time (CPU time clamped to the CPU ceiling over the wall, throttled time to the wall); `memFullUsec` is
- * null unless it can be read with a wall time.
+ * count; `wallUsec` is null unless the span is readable; `cpuUsec` is null unless it can be read with a wall time (CPU
+ * time clamped to the CPU ceiling over the wall), and `throttledUsec` likewise on its own (clamped to the wall): cgroup v2
+ * writes `throttled_usec` in `cpu.stat` only where the cpu controller is enabled, so a run without it is still a CPU
+ * sample, and only the throttle fact leaves it out. `memFullUsec` is null unless it can be read with a wall time.
  */
 function evidenceOf(record, project, nowMs) {
 	if (record === null || typeof record !== "object" || Array.isArray(record)) return null;
@@ -136,11 +138,10 @@ function evidenceOf(record, project, nowMs) {
 	const start = typeof record.startedAt === "string" ? Date.parse(record.startedAt) : NaN;
 	const wallMs = Number.isFinite(start) ? at - start : NaN;
 	const wallUsec = Number.isSafeInteger(wallMs) && wallMs > 0 && wallMs <= SUGGEST_MAX_WALL_MS ? wallMs * 1000 : null;
-	let cpu = { cpuUsec: null, throttledUsec: null };
-	if (wallUsec !== null && isCount(r.cpuUsec) && isCount(r.throttledUsec)) {
-		const cpuCap = (wallUsec * JOB_CPUS_CEILING_CENTI) / 100;
-		cpu = { cpuUsec: Math.min(r.cpuUsec, cpuCap), throttledUsec: Math.min(r.throttledUsec, wallUsec) };
-	}
+	const cpu = {
+		cpuUsec: wallUsec !== null && isCount(r.cpuUsec) ? Math.min(r.cpuUsec, (wallUsec * JOB_CPUS_CEILING_CENTI) / 100) : null,
+		throttledUsec: wallUsec !== null && isCount(r.cpuUsec) && isCount(r.throttledUsec) ? Math.min(r.throttledUsec, wallUsec) : null,
+	};
 	// unclamped: it is only ever compared (exactly, in BigInt) with 1% of the wall, and a stall past the wall is above it
 	const memFullUsec = wallUsec !== null && isCount(r.memFullUsec) ? r.memFullUsec : null;
 	if (memPeak === null && cpu.cpuUsec === null) return null;
@@ -174,7 +175,8 @@ function suggestMemory(runs, current, cap) {
 	const largestOom = oomSizes.length > 0 ? Math.max(...oomSizes) : null;
 	// at the limit (90% of it or more: peak x 10 >= limit x 9) AND stalled for memory more than 1% of the wall.
 	const pressured = relevant.filter((e) => !productAbove(e.size.memMiB * MIB, 9, e.memPeak, 10) && e.memFullUsec !== null && productAbove(e.memFullUsec, 100, e.wallUsec, 1)).length;
-	const evidence = { samples, p95MiB: p95 === null ? null : Math.ceil(p95 / MIB), maxPeakMiB: maxPeak === null ? null : Math.ceil(maxPeak / MIB), ooms, largestOomMiB: largestOom, pressured };
+	// `smaller`: the measured runs below the current size, which a chart draws and this verdict does not count.
+	const evidence = { samples, smaller: measured.length - samples, p95MiB: p95 === null ? null : Math.ceil(p95 / MIB), maxPeakMiB: maxPeak === null ? null : Math.ceil(maxPeak / MIB), ooms, largestOomMiB: largestOom, pressured };
 	const fact = pressured > 0 ? "pressure" : null;
 	const out = (reason, suggested, more = {}) => ({ current, suggested: suggested === null || suggested === current ? null : suggested, reason, evidence, fact, held: null, wanted: null, ...more });
 	if (ooms > 0) {
@@ -198,12 +200,17 @@ function suggestCpus(runs, current) {
 	const samples = relevant.length;
 	// ordered by the exact fraction, never a float: a/b < c/d  <=>  a x d < c x b.
 	const byFraction = (num) => (x, y) => (productAbove(num(y), x.wallUsec, num(x), y.wallUsec) ? -1 : productAbove(num(x), y.wallUsec, num(y), x.wallUsec) ? 1 : 0);
-	const throttle = samples > 0 ? rank([...relevant].sort(byFraction((e) => e.throttledUsec)), 50) : null;
+	// The throttle fact reads only the runs whose cgroup reported throttled time (see `evidenceOf`), and needs as many of
+	// them as a suggestion needs runs: one throttled run among twenty is not "the median run".
+	const throttled = relevant.filter((e) => e.throttledUsec !== null);
+	const throttle = throttled.length >= SUGGEST_MIN_SAMPLES ? rank([...throttled].sort(byFraction((e) => e.throttledUsec)), 50) : null;
 	const busy = samples > 0 ? rank([...relevant].sort(byFraction((e) => e.cpuUsec)), 95) : null;
 	const busiest = measured.length > 0 ? [...measured].sort(byFraction((e) => e.cpuUsec)).at(-1) : null;
 	const coresOf = (e) => (e === null ? null : Math.ceil((e.cpuUsec * 100) / e.wallUsec));
 	const evidence = {
 		samples,
+		smaller: measured.length - samples,
+		throttledSamples: throttled.length,
 		p95CoresCenti: coresOf(busy),
 		maxCoresCenti: coresOf(busiest),
 		throttledPct: throttle === null ? null : Math.round((throttle.throttledUsec * 100) / throttle.wallUsec),
@@ -211,7 +218,7 @@ function suggestCpus(runs, current) {
 	const out = (reason, suggested, fact = null) => ({ current, suggested: suggested === null || suggested === current ? null : suggested, reason, evidence, fact, held: null, wanted: null });
 	if (samples < SUGGEST_MIN_SAMPLES) return out("not-enough-runs", null);
 	// throttled more than 25% of the wall time (throttled x 4 > wall): a fact about the host's ceiling, never a call.
-	const fact = productAbove(throttle.throttledUsec, 4, throttle.wallUsec, 1) ? "ceiling" : null;
+	const fact = throttle !== null && productAbove(throttle.throttledUsec, 4, throttle.wallUsec, 1) ? "ceiling" : null;
 	// p95 cores below 0.4 x cpus: cpuUsec / wall < 0.4 x current / 100, that is cpuUsec x 1000 < 4 x current x wall.
 	if (productAbove(4 * current, busy.wallUsec, busy.cpuUsec, 1000)) {
 		const lower = Math.max(roundCpusUp(quarterMoreCenti(busy)), roundCpusUp(quarterMoreCenti(busiest)));
@@ -400,6 +407,19 @@ export const coresText = (centi) => `${formatCpus(centi)} core${centi === 100 ? 
 export const cpusText = (centi) => `${formatCpus(centi)} CPU${centi === 100 ? "" : "s"}`;
 
 /**
+ * A "not enough runs" verdict in words for the panel's PROJECTS view and the dispatch_limit_edit preview (the insights
+ * page restates it; doctor says the same counts through `suggestionEvidence`): how many runs at the current size or
+ * larger it counted, and how many smaller ones it did not, which for memory the chart beside it draws:
+ * `not enough runs at 4g (0; 20 at smaller sizes)`. `sizeText` formats the dimension's size.
+ */
+export function notEnoughRunsText(dim, sizeText) {
+	const e = dim?.evidence ?? {};
+	const samples = Number.isSafeInteger(e.samples) ? e.samples : 0;
+	const smaller = Number.isSafeInteger(e.smaller) && e.smaller > 0 ? `; ${e.smaller} at smaller sizes` : "";
+	return `not enough runs at ${sizeText(dim.current)} (${samples}${smaller})`;
+}
+
+/**
  * The evidence of a suggestion in words, for doctor, the panel and the insights page alike: `{ memory, cpu, memoryHeld,
  * memoryFact, cpuFact }`, each a short clause (empty when it does not apply), such as `2 runs ended oom-killed (the
  * largest size killed 4g)` or `p95 peak 2560m, largest 3g, over 24 runs`. Ids and numbers only. A fact is worded as
@@ -415,12 +435,12 @@ export function suggestionEvidence(suggestion) {
 	const cores = `p95 ${coresText(ce.p95CoresCenti ?? 0)} used, largest ${coresText(ce.maxCoresCenti ?? 0)}, over ${plural(ce.samples, "run")}`;
 	const memWords = {
 		"oom-killed": `${plural(me.ooms, "run")} ended oom-killed (the largest size killed ${formatMemory(me.largestOomMiB ?? 0)})`,
-		"not-enough-runs": `${me.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements it needs`,
+		"not-enough-runs": `${me.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements at ${formatMemory(m.current ?? 0)} or larger it needs${me.smaller > 0 ? `, ${me.smaller} more at smaller sizes` : ""}`,
 		oversized: peaks,
 		fits: peaks,
 	};
 	const cpuWords = {
-		"not-enough-runs": `${ce.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements it needs`,
+		"not-enough-runs": `${ce.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements at ${cpusText(c.current ?? 0)} or more it needs${ce.smaller > 0 ? `, ${ce.smaller} more at smaller sizes` : ""}`,
 		underused: cores,
 		fits: cores,
 	};
