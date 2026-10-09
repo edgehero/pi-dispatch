@@ -143,6 +143,18 @@ export function milliText(milli) {
 export const share = (part, whole) => (whole > 0 ? Math.floor((part * 2000 + whole) / (whole * 2)) : 0);
 
 /**
+ * Part of whole as a percentage, the way every surface prints a share of time: `percentText(share(...))`, except that a
+ * share that is there but rounds to nothing reads `under 0.1%` and one short of the whole that rounds to all of it reads
+ * `over 99.9%`. "full 0%" beside "peak 3 of 3" said the host was never full when it was, briefly.
+ */
+export function shareText(part, whole) {
+	const p = share(part, whole);
+	if (p === 0 && part > 0 && whole > 0) return "under 0.1%";
+	if (p === 1000 && part < whole) return "over 99.9%";
+	return percentText(p);
+}
+
+/**
  * C0 and C1 control characters, which a terminal acts on (cursor moves, a title, a cleared screen). The report admits
  * only worker names and project ids, which hold none; this strips them anyway before anything reaches the terminal, so
  * a reader that ever admits more cannot hand a record's author the operator's screen.
@@ -207,13 +219,12 @@ export function hostFacts(h) {
 	const projects = h.projects.map((p) => `${p.project ?? "(no project)"} ${durationText(p.runMs)}`);
 	if (h.projects.length > 0 && h.otherProjects) projects.push(`${plural(h.otherProjects.count, "other")} ${durationText(h.otherProjects.runMs)}`);
 	return {
-		busy: percentText(share(h.busyMs, h.coveredMs)),
-		idle: percentText(share(h.idleMs, h.coveredMs)),
-		missing: h.missingMs > 0 ? percentText(share(h.missingMs, h.missingMs + h.coveredMs)) : null,
+		...busyIdleText(h.busyMs, h.coveredMs),
+		missing: h.missingMs > 0 ? shareText(h.missingMs, h.missingMs + h.coveredMs) : null,
 		avg: milliText(h.avgMilli ?? 0),
 		slots: c.slots,
 		peak: h.peak,
-		full: h.fullMs !== null ? percentText(share(h.fullMs, h.coveredMs)) : null,
+		full: h.fullMs !== null ? shareText(h.fullMs, h.coveredMs) : null,
 		basis: basisNote(c),
 		memory: h.promisedMemPerMille !== null ? `memory ${percentText(h.promisedMemPerMille)}${memOf}` : `memory: no budget${c.memMiB === "off" ? " (off)" : ""}`,
 		cpu: h.promisedCpuPerMille !== null ? `CPU ${percentText(h.promisedCpuPerMille)} of ${promiseOf}` : "CPU: no budget or CPU count known",
@@ -266,7 +277,7 @@ export function historySourceText(source) {
 export function historyNotes(h) {
 	const cov = h.coverage;
 	const notes = [`history from ${historySourceText(cov.source)}`];
-	if (h.missingMs > 0) notes.push(`from ${new Date(cov.fromMs).toISOString()} on${cov.truncated ? " (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)" : ""}, earlier time counted as neither busy nor idle`);
+	if (h.missingMs > 0) notes.push(`from ${new Date(cov.fromMs).toISOString().slice(0, 16).replace("T", " ")} UTC on${cov.truncated ? " (the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it)" : ""}, earlier time counted as neither busy nor idle`);
 	const legacy = cov.legacyOccupied + cov.legacyRefused;
 	if (legacy > 0) notes.push(`${plural(legacy, "record")} from before capacity was recorded, inferred (${cov.legacyOccupied} held a slot, ${cov.legacyRefused} refused)`);
 	if (cov.withoutSize > 0) notes.push(`${cov.withoutSize} without a size (not in promised)`);
@@ -306,7 +317,26 @@ export function coverageNotes(cov, { namesShown = Infinity } = {}) {
 	return notes;
 }
 
+/**
+ * Busy and idle as printed, `{ busy, idle }`: busy is `shareText(busy, covered)`, and idle is its complement, so the two
+ * printed numbers always sum to 100% (each rounded on its own, 123.5 and 876.5 per mille printed 12.4% and 87.7%).
+ * Covered time is busy or idle and nothing else (missing time is neither), so the complement is the idle share.
+ */
+export function busyIdleText(busyMs, coveredMs) {
+	const busy = shareText(busyMs, coveredMs);
+	if (!(coveredMs > 0)) return { busy, idle: busy };
+	if (busyMs <= 0) return { busy, idle: "100%" };
+	if (busyMs >= coveredMs) return { busy, idle: "0%" };
+	const p = share(busyMs, coveredMs);
+	if (p === 0) return { busy, idle: "over 99.9%" };
+	if (p === 1000) return { busy, idle: "under 0.1%" };
+	return { busy, idle: percentText(1000 - p) };
+}
+
+/** What no surface of the report can see (REQ-CAPACITY-INSIGHTS): every one says it in these words. */
+export const JOBS_ONLY = "Jobs only: a machine busy with other work reads as idle.";
+
 /** The CLI's last two lines: what the fleet's history covers, and what this report cannot see. */
 export function coverageLines(cov) {
-	return [`Coverage: ${coverageNotes(cov).join("; ")}.`, "Jobs only: a machine busy with other work reads as idle."];
+	return [`Coverage: ${coverageNotes(cov).join("; ")}.`, JOBS_ONLY];
 }

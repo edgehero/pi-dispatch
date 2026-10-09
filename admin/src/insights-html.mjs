@@ -443,6 +443,8 @@ function normScopedRow(v) {
     month: win(v.month),
     concurrent: Number.isInteger(v.concurrent) && v.concurrent > 0 ? v.concurrent : null,
     usd: { day: usdWin(usd.day), week: usdWin(usd.week), month: usdWin(usd.month) },
+    // A project row's size, as the assembler words it (render.mjs `sizeBits`): at most four short strings.
+    size: Array.isArray(v.size) ? v.size.filter((b) => typeof b === "string" && b !== "").slice(0, 4).map((b) => clip(b, 24)) : [],
   };
 }
 
@@ -1095,6 +1097,7 @@ function budgetSectionHtml(nb) {
         if (w === null) continue;
         bits.push(`${key} spent+held ${w.usedMicros !== null ? microsUsd(w.usedMicros) : "?"} / cap ${microsUsd(w.capMicros)}`);
       }
+      bits.push(...s.size);
       rows.push(`<div class="row"><span class="wl">${escapeHtml(s.scope)}</span><span>${escapeHtml(bits.join(" · "))}</span>${worst !== "ok" ? stateWord(worst) : ""}</div>`);
     }
     rows.push('<div class="lever">scoped: dispatch_limit_add/edit/delete · or press m in the /dispatch panel</div>');
@@ -1421,6 +1424,18 @@ function regField(v) {
   return v === "off" ? "off" : typeof v === "string" && /^[0-9]{1,15}$/.test(v) ? Number(v) : null;
 }
 
+/**
+ * A row's budget field in the panel's states (dashboard.ts `budgetText`): a positive integer, `"off"`, `"unknown"`
+ * for the "" a starting worker publishes, `"absent"` for a worker from before the field, `"unreadable"` for anything
+ * a worker never writes. Kept apart because "not known yet" and "unreadable" are different facts.
+ */
+function regBudget(v) {
+  if (v === undefined || v === null) return "absent";
+  if (v === "off") return "off";
+  if (v === "") return "unknown";
+  return typeof v === "string" && /^[1-9][0-9]{0,14}$/.test(v) ? Number(v) : "unreadable";
+}
+
 function normSizingDim(v, reasons) {
   if (v === null || typeof v !== "object" || !reasons.includes(v.reason)) return null;
   const current = sizeInt(v.current);
@@ -1450,7 +1465,7 @@ function normSizing(v) {
         rows: (Array.isArray(hostsIn.rows) ? hostsIn.rows : [])
           .filter((h) => h !== null && typeof h === "object" && typeof h.name === "string" && SIZING_HOST_NAME.test(h.name))
           .slice(0, SIZING_HOSTS_MAX)
-          .map((h) => ({ name: h.name, budgetMemMiB: regField(h.budgetMemMiB), budgetCpuCenti: regField(h.budgetCpuCenti), usedMemMiB: regField(h.usedMemMiB), usedCpuCenti: regField(h.usedCpuCenti) }))
+          .map((h) => ({ name: h.name, budgetMemMiB: regBudget(h.budgetMemMiB), budgetCpuCenti: regBudget(h.budgetCpuCenti), usedMemMiB: regField(h.usedMemMiB), usedCpuCenti: regField(h.usedCpuCenti) }))
           .sort((a, b) => cmpStr(a.name, b.name)),
       };
   const projects = [];
@@ -1508,7 +1523,9 @@ export function layoutSizingChart(series, { nowMs, windowDays = 30, currentMiB, 
   steps.push({ x1: x, x2: x === plot.x + plot.w ? x : plot.x + plot.w, y: yOf(size) });
   if (Number.isSafeInteger(currentMiB) && currentMiB !== size) steps.push({ x1: plot.x + plot.w, x2: plot.x + plot.w, y: yOf(currentMiB), from: yOf(size) });
   const yTicks = scaleMax > 0 ? [2, 4].map((k) => ({ y: plot.y + plot.h - (k / 4) * plot.h, label: sizeMemText(step * k) })) : [];
-  const xLabels = [0, 1, 2, 3].map((k) => ({ x: plot.x + (k / 3) * plot.w, label: utcDateStr(start + (k / 3) * (end - start)).slice(5) }));
+  // The last label ends AT the plot's right edge rather than centring on it: the right margin (`SIZING_MR`) is far
+  // narrower than half a date, so a centred last label was cut by the chart's own edge ("10-0" and a sliver).
+  const xLabels = [0, 1, 2, 3].map((k) => ({ x: plot.x + (k / 3) * plot.w, label: utcDateStr(start + (k / 3) * (end - start)).slice(5), anchor: k === 3 ? "end" : "middle" }));
   return { plot, points, steps, yTicks, xLabels, scaleMax, width: w, height: h };
 }
 
@@ -1559,11 +1576,29 @@ function sizingFacts(m, c) {
 function sizingSectionHtml(ns, tips, nowMs) {
   if (ns.unreachable) return `<div class="dim">job sizes not read: ${escapeHtml(ns.unreachable)}</div>`;
   const parts = [];
-  const shown = (v, text) => (v === "off" ? "off" : v === null ? "unknown" : text(v));
   if (ns.hosts.unreachable) parts.push(`<div class="dim small">host budgets not read: ${escapeHtml(ns.hosts.unreachable)}</div>`);
   else if (ns.hosts.rows.length === 0) parts.push('<div class="dim small">no live host publishes a budget</div>');
   else {
-    const rows = ns.hosts.rows.map((h) => `<div><span class="pid">${escapeHtml(h.name)}</span> budget ${escapeHtml(shown(h.budgetMemMiB, sizeMemText))}, ${escapeHtml(shown(h.budgetCpuCenti, sizeCpuText))} CPUs · in use ${escapeHtml(shown(h.usedMemMiB, sizeMemText))}, ${escapeHtml(shown(h.usedCpuCenti, sizeCpuText))} CPUs</div>`);
+    // Each dimension in the panel's HOSTS view states and words (dashboard.ts `budgetText`): what the jobs were promised
+    // of a budget ("promised memory 6g of 16g"), "no memory budget" for one switched off, "memory budget not known yet"
+    // while a starting worker has not read it, "memory budget unreadable" for a value no worker writes, "no memory
+    // budget published" for a worker from before the field; one phrase when both dimensions agree.
+    const dims = (h) => {
+      const one = (label, budget, used, text) => {
+        if (budget === "absent") return { kind: "absent", text: `no ${label} budget published` };
+        if (budget === "off") return { kind: "off", text: `no ${label} budget` };
+        if (budget === "unknown") return { kind: "unknown", text: `${label} budget not known yet` };
+        if (budget === "unreadable") return { kind: "unreadable", text: `${label} budget unreadable` };
+        return { kind: "set", text: `${label} ${used === null || used === "off" ? "?" : text(used)} of ${text(budget)}` };
+      };
+      const both = [one("memory", h.budgetMemMiB, h.usedMemMiB, sizeMemText), one("CPU", h.budgetCpuCenti, h.usedCpuCenti, sizeCpuText)];
+      if (both.every((d) => d.kind === "absent")) return "no host budget published";
+      if (both.every((d) => d.kind === "unknown")) return "budget not known yet";
+      if (both.every((d) => d.kind === "unreadable")) return "budget unreadable";
+      const set = both.filter((d) => d.kind === "set").map((d) => d.text);
+      return [...(set.length > 0 ? [`promised ${set.join(", ")}`] : []), ...both.filter((d) => d.kind !== "set").map((d) => d.text)].join(", ");
+    };
+    const rows = ns.hosts.rows.map((h) => `<div><span class="pid">${escapeHtml(h.name)}</span> ${escapeHtml(dims(h))}</div>`);
     parts.push(`<div class="small">${rows.join("")}</div>`);
   }
   if (ns.projects.length === 0) {
@@ -1591,7 +1626,7 @@ function sizingSectionHtml(ns, tips, nowMs) {
       svg.push(`<circle data-tip="${fmt(idx)}" cx="${fmt(pt.x)}" cy="${fmt(pt.y)}" r="2.5" fill="${pt.oom ? PAGE_THEME.danger : PAGE_THEME.accent}"/>`);
     }
     if (lay.points.length === 0) svg.push(`<text x="${fmt(lay.plot.x + lay.plot.w / 2)}" y="${fmt(lay.plot.y + lay.plot.h / 2)}" text-anchor="middle" font-size="11" fill="${PAGE_THEME.dim}">no measured runs in the window</text>`);
-    for (const xl of lay.xLabels) svg.push(`<text x="${fmt(xl.x)}" y="${fmt(lay.plot.y + lay.plot.h + 12)}" text-anchor="middle" font-size="8" fill="${PAGE_THEME.dim}">${escapeHtml(xl.label)}</text>`);
+    for (const xl of lay.xLabels) svg.push(`<text x="${fmt(xl.x)}" y="${fmt(lay.plot.y + lay.plot.h + 12)}" text-anchor="${xl.anchor}" font-size="8" fill="${PAGE_THEME.dim}">${escapeHtml(xl.label)}</text>`);
     svg.push("</svg>");
     return `<div class="bl">${head}${verdict}${call}${refused}${facts}${svg.join("")}</div>`;
   });
@@ -1603,7 +1638,7 @@ function sizingSectionHtml(ns, tips, nowMs) {
 // The assembler (index.ts `capacityViewOf`) hands this section the capacity report's buckets and every sentence and
 // headline number already in the CLI's words; this module loads nothing from the worker, so what it restates is pinned
 // by insights-html.test.mjs: the host-name rule (worker-name.mjs `WORKER_NAME_RE`), the per-mille words (capacity-cli
-// `share`, `percentText`, `milliText`) and the fleet sentence below (the CLI's last line).
+// `share`, `shareText`, `percentText`, `milliText`) and the fleet sentence below (the CLI's last line).
 export const INSIGHTS_CAPACITY_HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const INSIGHTS_CAPACITY_JOBS_ONLY = "Jobs only: a machine busy with other work reads as idle.";
 const CAPACITY_HOSTS_MAX = 20;
@@ -1625,6 +1660,13 @@ const CAP_HATCH_STEP = 6;
 /** Part of whole as a per-mille, rounded half up; 0 when there is no whole (capacity-cli `share`, restated). */
 export function capShare(part, whole) {
   return whole > 0 ? Math.floor((part * 2000 + whole) / (whole * 2)) : 0;
+}
+/** A share of time as a percentage, `under 0.1%` and `over 99.9%` at the ends (capacity-cli `shareText`, restated). */
+export function capShareText(part, whole) {
+  const p = capShare(part, whole);
+  if (p === 0 && part > 0 && whole > 0) return "under 0.1%";
+  if (p === 1000 && part < whole) return "over 99.9%";
+  return capPercentText(p);
 }
 /** Thousandths as a percentage, at most one decimal (capacity-cli `percentText`, restated). */
 export function capPercentText(perMille) {
@@ -1845,8 +1887,8 @@ function capacityChartSvg(host, nc, tips, nowMs) {
   const of = host.slots !== null ? ` of ${host.slots}` : "";
   for (const bar of lay.bars) {
     const b = bar.bucket;
-    const full = b.fullMs === null ? "" : `, full ${capPercentText(capShare(b.fullMs, b.coveredMs))}`;
-    const idx = tips.push(`${capWhen(b.fromMs)} · busy ${capPercentText(capShare(b.busyMs, b.coveredMs))}, avg ${capMilliText(b.avgMilli ?? 0)}${of}, peak ${fmt(b.peak)}${full}${bar.partial ? " (part of it has no data)" : ""}`) - 1;
+    const full = b.fullMs === null ? "" : `, full ${capShareText(b.fullMs, b.coveredMs)}`;
+    const idx = tips.push(`${capWhen(b.fromMs)} · busy ${capShareText(b.busyMs, b.coveredMs)}, avg ${capMilliText(b.avgMilli ?? 0)}${of}, peak ${fmt(b.peak)}${full}${bar.partial ? " (part of it has no data)" : ""}`) - 1;
     // the whole bucket answers the tooltip, the bar only where it has height
     svg.push(`<g data-tip="${fmt(idx)}"><rect x="${fmt(bar.x)}" y="${fmt(lay.plot.y)}" width="${fmt(bar.w)}" height="${fmt(lay.plot.h)}" fill="${PAGE_THEME.canvas}" fill-opacity="0"/>`);
     if (bar.h > 0) svg.push(`<rect x="${fmt(bar.x)}" y="${fmt(bar.y)}" width="${fmt(Math.max(0.5, bar.w - 0.5))}" height="${fmt(bar.h)}" fill="${PAGE_THEME.accent}"/>`);

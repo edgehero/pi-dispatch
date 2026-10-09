@@ -2538,6 +2538,9 @@ export async function assembleBudgetView(paths: any, { redisFn }: { redisFn?: an
       month: win(l.month, "month"),
       concurrent: l.concurrent,
       usd: { day: usdWin("dayUsd", "day"), week: usdWin("weekUsd", "week"), month: usdWin("monthUsd", "month") },
+      // A project row's size (issue #596) in the words the panel and `/dispatch budget` use (`sizeBits`): a size-only
+      // row has no window, and the page drew its scope with nothing beside it.
+      size: sizeBits(l),
     };
   });
   return {

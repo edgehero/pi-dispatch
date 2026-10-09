@@ -364,7 +364,7 @@ function sizingPayload(overrides = {}) {
 test("the insights page draws a job sizes section: the hosts' budgets in use, each project's chart, suggestion and call", () => {
   const html = buildInsightsHtml({ sizing: sizingPayload() }, { now: NOW });
   assert.match(html, /<h2>job sizes<\/h2>/);
-  assert.match(html, /<span class="pid">mini1<\/span> budget 29492m, 7 CPUs · in use 4g, off CPUs/);
+  assert.match(html, /<span class="pid">mini1<\/span> promised memory 4g of 29492m, CPU \? of 7</, "each dimension in the HOSTS view's words");
   assert.match(html, /<span class="pid">shop<\/span> <span class="dim">size 4g, 2 CPUs · p95 4g, 1 core<\/span>/);
   assert.match(html, /memory: suggest 6g \(oom-killed\) · CPUs: not enough runs at 2 CPUs \(1\)/);
   assert.match(html, /<code>dispatch_limit_edit \{&quot;index&quot;:0,&quot;memory&quot;:&quot;6g&quot;\}<\/code>/);
@@ -495,6 +495,42 @@ test("doctor and the panel offer the call for exactly the same pairs (one rule, 
   }
   assert.ok(withheld >= 10 && offered >= 10, `both sides exercised: ${withheld} withheld, ${offered} offered`);
 });
+
+test("insights job sizes chart: every date under the axis fits inside the chart, the last one ending at its right edge", () => {
+  const NOW_AT = Date.UTC(2026, 9, 8, 15, 39, 8);
+  const lay = layoutSizingChart([], { nowMs: NOW_AT, windowDays: 30, currentMiB: 4096 });
+  // A date label is "MM-DD" at font size 8: about 0.62 em a digit, so about 25 px. Middle-anchored labels extend half
+  // of that each side, an end-anchored one all of it to the left.
+  const textW = (label) => label.length * 8 * 0.62;
+  for (const xl of lay.xLabels) {
+    const [left, right] = xl.anchor === "end" ? [xl.x - textW(xl.label), xl.x] : xl.anchor === "start" ? [xl.x, xl.x + textW(xl.label)] : [xl.x - textW(xl.label) / 2, xl.x + textW(xl.label) / 2];
+    assert.ok(left >= 0 && right <= lay.width, `${xl.label} (${xl.anchor}) spans ${left.toFixed(1)}..${right.toFixed(1)} of ${lay.width}`);
+  }
+  assert.equal(lay.xLabels.at(-1).label, "10-08");
+  assert.equal(lay.xLabels.at(-1).anchor, "end");
+});
+
+test("the job sizes section says a host with no budget has none, in the HOSTS view's words", () => {
+  const html = buildInsightsHtml({ sizing: sizingPayload({ hosts: { rows: [{ name: "mini2", budgetMemMiB: "off", budgetCpuCenti: "off", usedMemMiB: "", usedCpuCenti: "" }, { name: "mini1", budgetMemMiB: "16384", budgetCpuCenti: "800", usedMemMiB: "6144", usedCpuCenti: "300" }] } }) }, { now: NOW });
+  assert.match(html, /<span class="pid">mini2<\/span> no memory budget, no CPU budget</);
+  assert.match(html, /<span class="pid">mini1<\/span> promised memory 6g of 16g, CPU 3 of 8</);
+  assert.doesNotMatch(html, /off CPUs|in use unknown/);
+});
+
+test("the job sizes section keeps the panel's budget states apart: not known yet, unreadable, not published", () => {
+  const rows = [
+    { name: "a1", budgetMemMiB: "", budgetCpuCenti: "", usedMemMiB: "", usedCpuCenti: "" },
+    { name: "a2", budgetMemMiB: "0", budgetCpuCenti: "x", usedMemMiB: "", usedCpuCenti: "" },
+    { name: "a3" },
+    { name: "a4", budgetMemMiB: "8192", budgetCpuCenti: "", usedMemMiB: "4096", usedCpuCenti: "" },
+  ];
+  const html = buildInsightsHtml({ sizing: sizingPayload({ hosts: { rows } }) }, { now: NOW });
+  assert.match(html, /<span class="pid">a1<\/span> budget not known yet</);
+  assert.match(html, /<span class="pid">a2<\/span> budget unreadable</);
+  assert.match(html, /<span class="pid">a3<\/span> no host budget published</);
+  assert.match(html, /<span class="pid">a4<\/span> promised memory 4g of 8g, CPU budget not known yet</);
+});
+
 test("the page's not-enough-runs words are the worker's (#599)", async () => {
   const { notEnoughRunsText, cpusText } = await import("@edgehero/pi-dispatch/size-suggest");
   const { sizingNotEnoughText } = await import("../src/insights-html.mjs");

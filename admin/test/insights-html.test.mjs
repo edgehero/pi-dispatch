@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, layoutCapacityChart, microsUsd, capMilliText, capPercentText, capShare, INSIGHTS_CAPACITY_HOST_NAME, INSIGHTS_CAPACITY_JOBS_ONLY, INSIGHTS_SPLIT_REFUSALS, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
+import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, layoutCapacityChart, microsUsd, capMilliText, capPercentText, capShare, capShareText, INSIGHTS_CAPACITY_HOST_NAME, INSIGHTS_CAPACITY_JOBS_ONLY, INSIGHTS_SPLIT_REFUSALS, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { buildGraphModel } from "../src/graph-model.mjs";
@@ -697,6 +697,22 @@ test("a scoped row's dollar windows render as exact micro-dollars; junk and an o
   assert.equal(row("acme/web"), "day used 2 / cap 10 · concurrent ≤1 (config; in-flight not shown)", "a payload row without the key draws what it always did");
 });
 
+test("a project row's size rides beside its scope, so a size-only row is never a bare label (#599)", () => {
+  const p = CANNED_PAYLOAD();
+  p.budget = {
+    ...CANNED_BUDGET(),
+    scoped: [
+      { scope: "project:billing", day: null, week: null, month: null, concurrent: null, usd: {}, size: ["memory 8g", "4 CPUs", 7, ""] },
+      { scope: "project:web", day: null, week: null, month: null, concurrent: null, usd: { week: { usedMicros: 1_000_000, capMicros: 45_000_000 } }, size: [] },
+    ],
+    scopedInvalid: null,
+  };
+  const page = buildInsightsHtml(p, { now: NOW });
+  const row = (scope) => page.match(new RegExp(`<div class="row"><span class="wl">${scope.replace(/[/:]/g, "\\$&")}</span><span>([^<]*)</span>`))?.[1] ?? null;
+  assert.equal(row("project:billing"), "memory 8g · 4 CPUs", "the size in sizeBits' words; junk entries dropped");
+  assert.equal(row("project:web"), "week spent+held $1.00 / cap $45.00");
+});
+
 test("a pre-#242 payload (no scoped key) and an invalid limits file both state their absence honestly", () => {
   const base = cannedHtml(); // CANNED_BUDGET carries no `scoped` -- the pre-#242 payload shape
   assert.ok(!base.includes("scoped limits (scoped-limits.json)"), "no scoped block invented for an old payload");
@@ -1130,7 +1146,10 @@ test("the capacity section's restated rules are the worker's: the host name, the
     assert.equal(capPercentText(m), cli.percentText(m));
     assert.equal(capMilliText(m), cli.milliText(m));
   }
-  for (const [part, whole] of [[0, 0], [1, 3], [2, 3], [5, 1000], [604_800_000, 604_800_000], [1, 2000], [3, 2000], [123_456_789, 604_800_000]]) assert.equal(capShare(part, whole), cli.share(part, whole));
+  for (const [part, whole] of [[0, 0], [1, 3], [2, 3], [5, 1000], [604_800_000, 604_800_000], [1, 2000], [3, 2000], [123_456_789, 604_800_000], [604_799_999, 604_800_000]]) {
+    assert.equal(capShare(part, whole), cli.share(part, whole));
+    assert.equal(capShareText(part, whole), cli.shareText(part, whole));
+  }
   const lines = cli.coverageLines({ source: "mirror", historyNotShared: [], unreadable: 0, withoutHost: 0, earlierDropped: 0, liveUnreadable: 0, running: null, liveNotCounted: 0, reason: null });
   assert.equal(lines[1], INSIGHTS_CAPACITY_JOBS_ONLY);
 });
