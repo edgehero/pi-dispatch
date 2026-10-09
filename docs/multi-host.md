@@ -377,7 +377,8 @@ p50 40s p95 6m, most busy: web`. It is a fact, never a warning, and it shows on 
 what it cannot see: jobs running now that are not counted, history that starts later than the window (the run mirror
 holds nothing older), or that only this host's files were read. A host without `PI_WORKER_NAME` writes no run mirror,
 so another host's doctor says it has no history there. `pi-dispatch capacity` prints the same report in full, and
-`dispatch_capacity` returns it in pi ([the capacity report](insights.md#pi-dispatch-capacity)).
+`dispatch_capacity` returns it in pi ([the capacity report](insights.md#pi-dispatch-capacity)). It counts this
+deployment's jobs only, so a machine busy with other work reads as idle.
 
 **The panel's HOSTS view.** Press `u` in `/dispatch` (the runs divider names it) for one block per host. The first
 lines are live, from the registry rows the panel already reads every second: the slots in use of the host's
@@ -389,8 +390,10 @@ project, size and age (an orphan, a container whose stop did not take, is marked
 counted, running and orphaned apart). Under them comes the host's last 7 days from the same report as doctor, labelled
 with the minute it was read (`last 7d to 12:00 UTC`): busy share, slots on average and at peak, time with every slot
 taken, the wait p95 and the top projects, then the same caveats `pi-dispatch capacity` prints (how the slot count was
-judged, retries and stalls that under-count, refusals, inferred records) and where that history comes from and how much
-of the window it misses. The 7 days are read when the view opens and again when you press `u` in it, never on the
+judged, retries and stalls that under-count, refusals, inferred records), where that history comes from, and, when it
+starts inside the 7 days, from when. Time before a host's history starts is counted as neither busy nor idle, but a
+host that is new, or was down, inside history that is here reads as idle for that time: the records cannot tell a
+machine that ran nothing from one that was not there. The 7 days are read when the view opens and again when you press `u` in it, never on the
 panel's tick, and only one read runs at a time. A read that has not answered after 30 seconds is given up: the view
 says the history did not answer in time, and the next `u` reads again. A host whose history is not here says why, in the words
 `pi-dispatch capacity` uses, and shows no busy share. A host whose job list cannot be read, or whose row carries no beat

@@ -20,7 +20,7 @@ system. pi-dispatch adds exactly that layer and nothing else. It is not another 
 the one you use. It is the queue, the budget and the box around the pi you already run, steered by the
 `.pi/` setup your repo already has.
 
-![The /dispatch dashboard: live queue state, day, week and month job meters with a daily token counter, the dollar windows, the triggers pane with a portfolio trigger, pause windows, scoped limits with a project row and a model row showing their dollar caps, held and failed jobs, and the interactive runs list with each run's project, in one framed terminal view](docs/images/dispatch-dashboard.svg?v=2026-10-05)
+![The /dispatch dashboard: live queue state, day, week and month job meters with a daily token counter, the dollar windows, the triggers pane with a portfolio trigger, pause windows, scoped limits with a project row and a model row showing their dollar caps, held and failed jobs, and the interactive runs list with each run's project and the u hosts key on its divider, in one framed terminal view](docs/images/dispatch-dashboard.svg?v=2026-10-09)
 
 What you get:
 
@@ -69,10 +69,11 @@ For a one off session on your own machine, plain pi is enough. pi-dispatch is fo
 nobody watches the terminal. Two views help you tune what you built: the **graph** shows which triggers
 start which flows (the skill a job runs, see [Flows](#flows-the-custom-prompt-a-trigger-runs)) and what
 chained to what ([`docs/graph.md`](docs/graph.md)), and **insights** shows
-what each of them costs and whether a subscription pays off ([`docs/insights.md`](docs/insights.md)).
-`/dispatch insights` writes both into one file that your browser opens from disk:
+what each of them costs, whether a subscription pays off, and how busy each machine was
+([`docs/insights.md`](docs/insights.md)). `/dispatch insights` writes both into one file that your browser opens
+from disk:
 
-![The insights page: KPI tiles, budget dials, the budget split with each project's share, spend and floor and the split's history, a plan verdict, daily and cumulative spend charts, per flow trends, five breakdowns (flow, trigger, model, repo and project), and the trigger and flow topology with spend shown on each trigger](docs/images/insights-view.png?v=2026-10-05)
+![The insights page: KPI tiles, budget dials, the budget split with each project's share, spend and floor and the split's history, a plan verdict, daily and cumulative spend charts, per flow trends, five breakdowns (flow, trigger, model, repo and project), the job sizes, how busy each host was with a chart of the jobs running at once against its slots and hatched stretches with no data, and the trigger and flow topology with spend shown on each trigger](docs/images/insights-view.png?v=2026-10-09)
 
 ## Quickstart
 
@@ -296,6 +297,13 @@ Several machines can share one queue, one budget and one panel once each worker 
 for a machine its size fits on ([`docs/sizing.md`](docs/sizing.md)). Do not share the sandbox directory between them
 ([`docs/multi-host.md`](docs/multi-host.md) says why).
 
+`u` in the panel shows each machine: its slots in use, what its budget has promised the jobs it runs, how many jobs
+wait for its budget, the jobs running there now, and how busy it was over the last 7 days, from the run records.
+`pi-dispatch capacity`, `pi-dispatch doctor`, the insights page and the `dispatch_capacity` tool read the same report. It counts jobs
+only: a machine busy with other work reads as idle.
+
+![The panel's hosts view: three machines, each with its slots in use of its limit, the memory and CPU its budget has promised against that budget (or that it has none), its running jobs with project, size and age, a stale host with an orphaned container, and the last 7 days as busy share, average and peak jobs at once, time at the slot limit, the 95th percentile wait and the projects that used it most, ending with the note that only jobs are counted](docs/images/dispatch-hosts.svg?v=2026-10-09)
+
 ## Flows: the custom prompt a trigger runs
 
 A **flow** is a pi skill, a Markdown instruction file, committed to the target repo at
@@ -445,8 +453,11 @@ Steer the running worker from any terminal:
 - `pi-dispatch run --trigger <id>` runs one cron trigger from the triggers file now, once, as its schedule
   would ([`docs/triggers.md`](docs/triggers.md#firing-a-cron-trigger-by-hand)).
 - `pi-dispatch capacity` says how busy each host was over the last day, week or thirty days: busy and idle
-  time, jobs at once, memory and CPU promised and used, waits and projects, read from the run records. Like
-  `status`, it reads only `VALKEY_URL` and the logs directory ([`docs/insights.md`](docs/insights.md#pi-dispatch-capacity)).
+  time, jobs at once, memory and CPU promised and used, waits and projects, read from the run records. It never
+  loads the full config: it reads only `VALKEY_URL` (or `--valkey-url`), `PI_LOGS_DIR`, `PI_LOG_RETENTION_DAYS` and
+  `PI_WORKER_NAME`, from the shell or the `.env` of the folder you run it in (the logs directory defaults to
+  `~/.pi-dispatch/logs`, the worker name to this machine's hostname as the worker names itself: lowercased, with any other character a dash), so a broken forge setting cannot stop it. It
+  counts jobs only, so a machine busy with other work reads as idle ([`docs/insights.md`](docs/insights.md#pi-dispatch-capacity)).
 
 ## The admin panel
 

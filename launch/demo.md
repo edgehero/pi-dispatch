@@ -12,7 +12,7 @@ recipe; it needs a real terminal, so it's yours to run (the panel can't be drive
    `pi -e admin/src/index.ts`; the published extension's entry point is its built `./dist/index.mjs`.)
 2. `↵` on a trigger → the MATCHES / RUNS / TRUST MODEL drill-in.
 3. `↵` on a run → the colored post-mortem.
-4. `i` → the insights page opens in the browser: the budget lever, the plan verdicts, the spend
+4. `i` → the insights page opens in the browser: the budget lever, the plan verdicts, how busy each host was, the spend
    charts and the topology, one page. (In a pure-terminal recording, skip this beat or show the
    printed `file://` URL instead.)
 5. (optional) `w` on the dashboard → the pause-window dialogs: a three-way select (add / edit / delete a
@@ -127,3 +127,38 @@ output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate the
 
 `cli-service-windows.svg` is `service render` with `platform: "win32"` and Windows paths passed through
 `runService`'s seams, titled `PowerShell · C:\Users\you\pi-work`.
+
+## The panel and insights images
+
+`docs/images/dispatch-dashboard.svg`, `dispatch-hosts.svg`, their `.png` copies and `insights-view.png` are drawn by
+the shipped code over one canned deployment, by a committed script:
+
+```sh
+node launch/render-images.mjs          # the two SVGs
+node launch/render-images.mjs --png    # also the two PNGs (for the npm page) and insights-view.png
+```
+
+What it needs:
+
+- `valkey-server` or `redis-server` on PATH. The script starts its own on a free port of 127.0.0.1, with no
+  persistence and its files in a temporary directory, and stops it at the end. `--url redis://host:port/<db>` uses
+  an existing database instead; it must be empty, and is emptied again when the script ends.
+- Google Chrome, for `--png` only: `/Applications/Google Chrome.app/...` on macOS, or set `CHROME` to its executable.
+  It is driven headless over its DevTools pipe, with every host name mapped to nothing.
+- git, for `--png` only (the insights topology reads the two job folders' flow gate from git).
+
+The deployment is `launch/fixture-deployment.mjs`: three hosts (`mini1`, `mini2`, `build3`), four projects (`web`,
+`api`, `billing`, `ops`), repos under `acme`, a month of run records, all dated around one frozen instant and written
+through the worker's own record, mirror, registry, budget, wait and allocation code. Its config and its records agree:
+no run breaks a cap, a scoped limit, a host's slots or budget, or a project's share. build3 keeps its own logs for 7
+days and trims the shared run mirror by them, so its history here starts at the age cutoff of its last trim that
+removed a run (that write's time less 7 days), and the insights page hatches the time before as no data. The script empties its
+environment before anything loads, so no key or deployment of the machine running it is read, and nothing is fetched.
+Only the queue's live counts, its workers, the active job and the failed job are canned. The dashboard is
+`makeDashboard`'s LIST at width 80, the hosts image the same panel after `u`; each SVG is checked against the
+renderer's lines before it is written, and two runs write the same bytes (`admin/test/render-images.test.mjs`). The
+insights page is `insightsCommand`'s, shot at 1240 px and device scale 2, full page, with the browser's clock one
+minute after the page was generated.
+
+After a render, bump the `?v=` on each changed image in both READMEs (the admin README links the PNGs by their
+absolute raw.githubusercontent.com URLs, because the npm page cannot show an SVG from there).

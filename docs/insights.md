@@ -155,7 +155,11 @@ the memory part of it (below).
 ### The job sizes section
 
 - **Each host's budget in use**: every live host's memory and CPU budget, and what its running jobs hold now, as the
-  hosts publish them. "unknown" while a host has not read its runtime yet, "off" for a budget switched off.
+  hosts publish them, in the panel's HOSTS view states and words: `promised memory 6g of 16g, CPU 3 of 8`, `no memory
+  budget` for a budget switched off, `memory budget not known yet` while a starting worker has not read it, `memory
+  budget unreadable` for a value no worker writes, and `no host budget published` for a worker from before the fields.
+- **Each project row's size** shows in the budget card's scoped limits too (`memory 8g · 4 CPUs`), as the panel and
+  `/dispatch budget` print it, so a row that sets only a size is never a bare name.
 - **Per project, a chart of peak memory over time against the size line.** One dot per run (red for a run that ended
   `oom-killed`) at its peak, over the last 30 days. The line is each run's size from that run on, and it steps to the
   project's current size at the right edge. A dot on the line is a run that reached its limit, which page cache alone
@@ -171,15 +175,15 @@ the memory part of it (below).
 
 ## What each run records about capacity
 
-Two more fields in every run record feed the capacity report (issue #599), which `pi-dispatch capacity`, doctor,
-`dispatch_capacity` and the panel's HOSTS view show:
+Four more fields in every run record feed the capacity report (issue #599), which `pi-dispatch capacity`, doctor,
+`dispatch_capacity`, the panel's HOSTS view and the insights page show:
 
 | Field | What it is |
 |---|---|
 | `queuedAt` | when the job became eligible to run, as an ISO time. `startedAt` minus `queuedAt` is how long it waited for a slot |
 | `earlier` | on a retry, the slot time of the job's earlier attempts, whose record this one replaced: `host`, `startedAt`, `endedAt`, `memMiB`, `cpuCenti`, at most 4 (never their cost, so no cost total counts anything twice) |
 | `stalledRepick` | true when the job's first attempt stalled (the worker running it died or lost its lock) and this pickup re-ran it; that first pickup's time no record holds |
-| `capacity` | what the host offered when the job took its slot: `slots` (the live `PI_CONCURRENCY`), `memMiB` and `cpuCenti` (the host budget, a number, `"off"`, or null without one) and `cpus` (the CPUs the container runtime reports: on Docker Desktop the VM's, not the Mac's) |
+| `capacity` | what the host offered when the job took its slot: `slots` (the live `PI_CONCURRENCY`), `memMiB` and `cpuCenti` (the host budget, a number, `"off"`, or null without one) and `cpus` (the CPUs the container runtime reports: on Docker Desktop the VM's, not the Mac's; the worker's own count when the runtime's was not read) |
 
 - `queuedAt` is the moment the job was added plus the delay it was added with. A cron job is created ahead of its
   slot and delayed until it, so its `queuedAt` is the scheduled minute, not the moment before. A pause window, a
@@ -194,7 +198,8 @@ Two more fields in every run record feed the capacity report (issue #599), which
   `resources`, and says how many it inferred each way. A value no host can have (more than 16384 slots, 4096 CPUs or
   64 TiB of memory) is written as null, and one in a record from an older worker is read as unknown; the run still
   counts, and the report says how many records gave one.
-- Both are numbers and fixed words, like the rest of the record.
+- All four are numbers, ISO times, worker names, true or false (`stalledRepick`) and fixed words, like the rest of
+  the record.
 
 ### `pi-dispatch capacity`
 
@@ -203,12 +208,16 @@ host: the share of the time it ran at least one job and the share it sat idle; t
 once and how long every slot was taken; the memory and CPU its jobs were promised against its budget (CPU against all
 its CPUs when the CPU budget is off); the CPU they used, as a share of the host's CPUs (never above 100% of them); the wait for a slot at p50 and p95; the projects by run
 time; and where that host's history starts. Each moment is judged by the capacity in force then, so a budget you
-lowered while jobs ran shows as an over-commit only for the time it was lower. `--json` prints the whole report. It
-reads only `VALKEY_URL` (or the one `--valkey-url` names) and the logs directory, like `pi-dispatch status`, and writes
-nothing. If a Valkey you named with `--valkey-url` refuses or does not answer, it exits 1; one taken from the
+lowered while jobs ran shows as an over-commit only for the time it was lower. A share of time that is there but
+rounds to nothing prints as `under 0.1%` (and one short of all of it as `over 99.9%`), idle is printed as the
+complement of the printed busy, so the two always sum to 100%, and a history start reads `2026-10-01 09:29 UTC`.
+`--json` prints the whole report. It
+never loads the full config: it reads only `VALKEY_URL` (or the one `--valkey-url` names), `PI_LOGS_DIR`,
+`PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME`, from the shell or the `.env` of the folder you run it in (the logs directory defaults to
+`~/.pi-dispatch/logs`, the worker name to this machine's hostname as the worker names itself: lowercased, with any other character a dash), and writes nothing. If a Valkey you named with `--valkey-url` refuses or does not answer, it exits 1; one taken from the
 environment gives a report from this host's files, and says why.
 
-The same report shows in three more places. `pi-dispatch doctor` prints one line per host for the last 7 days (busy
+The same report shows in four more places. `pi-dispatch doctor` prints one line per host for the last 7 days (busy
 share, average and slots, promised memory and CPU, CPU used, the wait and the busiest project, then what the line
 cannot see), never as a warning. The `dispatch_capacity` tool returns it to a model in pi (`window` `24h`, `7d` or
 `30d`, and an optional `host`), as text and as the report `--json` prints. The panel's HOSTS view (`u` in
@@ -223,7 +232,9 @@ reads the report when it opens and again on `u` ([what the panel shows](multi-ho
   this host's files"). Every worker trims the shared mirror by its own retention, so a host with a
   shorter one cuts everyone's older runs; it records where it cut, and the report starts the mirrored hosts there.
   Time before a host's history, and a live host whose runs it cannot see (one without `PI_WORKER_NAME` writes no
-  mirror), count as neither busy nor idle, and the report names them.
+  mirror), count as neither busy nor idle, and the report names them. What it cannot see inside a history it has is
+  another matter: a host that is new, or was down, inside a window whose history is here reads as idle for that time,
+  since the records cannot tell a machine that ran nothing from one that was not there.
 - **A job running now is counted as busy up to now.** Each worker's registry row lists the jobs it runs (with or
   without a host budget), and the report counts each from the moment it was admitted. A row that has not beaten for
   more than 30 seconds counts its jobs only up to its last beat. A running job the row does not list (it lists 32) is

@@ -592,8 +592,9 @@ function registerTools(pi: ExtensionAPI): void {
       "host): busy and idle time, jobs at once (average, peak, time with every slot taken), memory and CPU promised " +
       "against the host budget, CPU used, the wait for a slot (p50, p95) and the projects by run time, from the run " +
       "records plus the jobs running now. `text` is the plain report; `report` is the capacity report v1 (integers: " +
-      "milliseconds, and ratios per mille). Jobs only: a machine busy with other work reads as idle. History the " +
-      "records do not hold is reported as missing (`missingMs`, `coverage`), never as idle.",
+      "milliseconds, and ratios per mille). Jobs only: a machine busy with other work reads as idle. Time before a " +
+      "host's history starts is reported as missing (`missingMs`, `coverage`), never as idle; a host that is new, or " +
+      "was down, inside history that is there reads as idle for that time.",
     parameters: Type.Object({ window: Type.Optional(Type.String()), host: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const paths = resolvePaths(deploymentEnv());

@@ -126,8 +126,21 @@ function foldDoctor(lines) {
 }
 
 const escapeXml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/**
+ * `dashRefs` writes the dash punctuation characters (U+2010 to U+2015) as character references: the picture is the
+ * same, and the file holds none of the raw characters the repository keeps out of its added lines. The panel draws a
+ * pause window's range with one (`launch/render-images.mjs`).
+ */
+const escapeDashes = (s) => s.replace(/[\u{2010}-\u{2015}]/gu, (c) => `&#x${c.codePointAt(0).toString(16)};`);
 
-export function renderTranscript(text, { cols = 118, fit = false, foldDoctor: fold = false, title = "", prompt = "" } = {}) {
+/** Each text row of an SVG this module drew, as plain text: the check that an image holds exactly the lines it was given. */
+export function svgRows(svg) {
+	const unescape = (s) => s.replace(/&#x([0-9a-f]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16))).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+	return [...svg.matchAll(/<text x="16" y="\d+"[^>]*>(.*?)<\/text>/g)].map((m) => unescape(m[1].replace(/<[^>]+>/g, "")));
+}
+
+export function renderTranscript(text, { cols = 118, fit = false, foldDoctor: fold = false, title = "", prompt = "", dashRefs = false } = {}) {
+	const esc = dashRefs ? (s) => escapeDashes(escapeXml(s)) : escapeXml;
 	let lines = text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
 	if (fold) lines = foldDoctor(lines);
 	const state = { color: null, bold: false, dim: false };
@@ -138,17 +151,17 @@ export function renderTranscript(text, { cols = 118, fit = false, foldDoctor: fo
 	const w = width * CHAR_W + 40;
 	const h = 48 + LINE_H * rows.length;
 	const out = [
-		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${escapeXml(title)}">`,
+		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${esc(title)}">`,
 		`  <rect width="${w}" height="${h}" rx="10" fill="#0d1117" stroke="#30363d"/>`,
 		`  <rect width="${w}" height="34" rx="10" fill="#161b22"/>`,
 		`  <rect y="24" width="${w}" height="10" fill="#161b22"/>`,
 		`  <circle cx="20" cy="17" r="6" fill="#ff5f57"/>`,
 		`  <circle cx="42" cy="17" r="6" fill="#febc2e"/>`,
 		`  <circle cx="64" cy="17" r="6" fill="#28c840"/>`,
-		`  <text x="${w / 2}" y="21" text-anchor="middle" fill="#8b949e" font-size="12" font-family="${FONT}">${escapeXml(title)}</text>`,
+		`  <text x="${w / 2}" y="21" text-anchor="middle" fill="#8b949e" font-size="12" font-family="${FONT}">${esc(title)}</text>`,
 	];
 	rows.forEach((row, i) => {
-		const spans = row.map((r) => `<tspan fill="${r.color}"${r.bold ? ` font-weight="bold"` : ""}>${escapeXml(r.text)}</tspan>`).join("");
+		const spans = row.map((r) => `<tspan fill="${r.color}"${r.bold ? ` font-weight="bold"` : ""}>${esc(r.text)}</tspan>`).join("");
 		out.push(`  <text x="16" y="${47 + LINE_H * i}" xml:space="preserve" font-size="13" font-family="${FONT}">${spans}</text>`);
 	});
 	out.push("</svg>");
