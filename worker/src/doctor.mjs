@@ -100,7 +100,7 @@ import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDef
 import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "./size-suggest.mjs";
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
-import { durationText, milliText, notSharedWhy, percentText } from "./capacity-cli.mjs";
+import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareText } from "./capacity-cli.mjs";
 import { CGROUP_PARENT, cgroupParentFor, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -7889,9 +7889,6 @@ export function connectWithin(client, ms, signal) {
 	});
 }
 
-/** Part of whole in thousandths, rounded half up; 0 without a whole. */
-const shareOf = (part, whole) => (whole > 0 ? Math.floor((part * 2000 + whole) / (whole * 2)) : 0);
-
 /**
  * One fact line per host of a capacity report (`INT-CAPACITY-REPORT`), `{ ok: true, label }` each, never a warning:
  * `Host a: last 7d busy 63% (avg 2.1 of 4 slots, full 12%), promised 48% memory / 40% CPU, used 18% CPU of 8, wait p50
@@ -7911,8 +7908,8 @@ export function capacityChecks(report, { since = "7d" } = {}) {
 		} else {
 			const c = h.capacity ?? {};
 			const slots = Number.isSafeInteger(c.slots) ? ` of ${c.slots} slots` : " at once";
-			const full = h.fullMs !== null ? `, full ${percentText(shareOf(h.fullMs, h.coveredMs))}` : "";
-			const parts = [`busy ${percentText(shareOf(h.busyMs, h.coveredMs))} (avg ${milliText(h.avgMilli ?? 0)}${slots}${full})`];
+			const full = h.fullMs !== null ? `, full ${shareText(h.fullMs, h.coveredMs)}` : "";
+			const parts = [`busy ${shareText(h.busyMs, h.coveredMs)} (avg ${milliText(h.avgMilli ?? 0)}${slots}${full})`];
 			const promised = [h.promisedMemPerMille !== null ? `${percentText(h.promisedMemPerMille)} memory` : null, h.promisedCpuPerMille !== null ? `${percentText(h.promisedCpuPerMille)} CPU` : null].filter(Boolean);
 			if (promised.length > 0) parts.push(`promised ${promised.join(" / ")}`);
 			if (h.usedCpuPerMille !== null) parts.push(`used ${percentText(h.usedCpuPerMille)} CPU${Number.isSafeInteger(c.cpus) ? ` of ${c.cpus}` : ""}`);
@@ -7930,6 +7927,9 @@ export function capacityChecks(report, { since = "7d" } = {}) {
 		if (h.coverage?.liveUnreadable > 0) notes.push("its running jobs could not be read, not counted");
 		out.push({ ok: true, label: `${line}${notes.length > 0 ? `; ${notes.join("; ")}` : ""}`.replace(/[\u0000-\u001f\u007f-\u009f]/g, "") });
 	}
+	// What none of these lines can see, in the words every surface of the report uses (REQ-CAPACITY-INSIGHTS): a fact,
+	// never a warning, once after the hosts.
+	if (out.length > 0) out.push({ ok: true, label: JOBS_ONLY.replace(/\.$/, "") });
 	return out;
 }
 

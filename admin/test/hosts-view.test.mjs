@@ -249,7 +249,7 @@ test("missing history is never idle: a cut mirror, a host whose history is not s
   assert.match(out, /mini2[^]*last 7d to 12:00 UTC: not here: no source here holds its runs \(a worker without PI_WORKER_NAME writes no run mirror\)/);
   assert.doesNotMatch(out.split("mini2")[1].split("old3")[0], /busy/, "no busy share for a host whose history is not here");
   assert.match(out, /old3 {2}no live row/);
-  assert.match(out, /history from the run mirror; from 2026-10-05T12:00:00\.000Z on \(the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it\), earlier time counted as neither busy nor idle/, "the CLI's words");
+  assert.match(out, /history from the run mirror; from 2026-10-05 12:00 UTC on \(the run mirror holds nothing older: its cap, or a peer's shorter retention, cut it\), earlier time counted as neither busy nor idle/, "the CLI's words");
 });
 
 test("a mirror that was not read names its reason, through the shared sentence", async () => {

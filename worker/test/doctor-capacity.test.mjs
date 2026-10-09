@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CAPACITY_WINDOWS, computeCapacity } from "../src/capacity.mjs";
+import { JOBS_ONLY } from "../src/capacity-cli.mjs";
 import { readCapacityRecords } from "../src/capacity-records.mjs";
 import { capacityChecks, doctorCapacity } from "../src/doctor.mjs";
 import { RUNS_HORIZON, RUNS_INDEX, runRecordKey } from "../src/run-mirror.mjs";
@@ -20,7 +21,16 @@ const week = (records, opts = {}) => computeCapacity({ records, windowStartMs: N
 
 test("one fact line per host: busy, slots, promises, CPU used, waits and the busiest project", () => {
 	const lines = capacityChecks(week([run("1", 10, 8), run("2", 9, 7)]));
-	assert.deepEqual(lines, [{ ok: true, label: "Host a: last 7d busy 1.8% (avg 0 of 4 slots, full 0%), promised 0.6% memory / 0.6% CPU, used 0.1% CPU of 8, wait p50 40s p95 40s, most busy: web" }]);
+	assert.deepEqual(lines, [
+		{ ok: true, label: "Host a: last 7d busy 1.8% (avg 0 of 4 slots, full 0%), promised 0.6% memory / 0.6% CPU, used 0.1% CPU of 8, wait p50 40s p95 40s, most busy: web" },
+		// REQ-CAPACITY-INSIGHTS: every surface says what the report cannot see, in the words the CLI ends with; a fact, once.
+		{ ok: true, label: JOBS_ONLY.replace(/\.$/, "") },
+	]);
+	assert.equal(JOBS_ONLY, "Jobs only: a machine busy with other work reads as idle.");
+});
+
+test("no host, no jobs-only line: there is no report line for it to qualify", () => {
+	assert.deepEqual(capacityChecks(week([])), []);
 });
 
 test("a host with no budget and no CPU count says only what it knows", () => {
@@ -96,7 +106,7 @@ test("a full mirror (5000 runs) costs doctor well under a second: twelve bounded
 	const started = performance.now();
 	const lines = await doctorCapacity({ seams: { readCapacity: (args) => readCapacityRecords({ ...args, redis }), wallClock: () => NOW }, env: { PI_LOGS_DIR: logsDir }, home: "/h", url: "redis://v", hosts: [], localHost: "h0" });
 	const ms = performance.now() - started;
-	assert.deepEqual(lines.map((l) => l.label.slice(0, 7)), ["Host h0", "Host h1", "Host h2"]);
+	assert.deepEqual(lines.map((l) => l.label.slice(0, 7)), ["Host h0", "Host h1", "Host h2", "Jobs on"]);
 	assert.equal(calls.length, 3 + 1 + 10, "ZCARD, the oldest, the horizon, the range, then ten MGETs of 500");
 	assert.ok(ms < 1500, `took ${Math.round(ms)} ms`);
 });

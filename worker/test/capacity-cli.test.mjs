@@ -211,3 +211,26 @@ test("a retry whose earlier attempt ran on another host: each host's sentence is
 	assert.ok(!capacityText(r, { since: "24h" }).includes("0 earlier attempts"));
 	assert.equal(hostCaveats({ ...r.hosts[0].coverage, retried: 0, earlier: 2 }).at(-1), "2 earlier attempts of retried runs counted here, from the records their retries kept");
 });
+
+test("shareText: a share that is there but rounds to nothing says so, at both ends; otherwise percentText(share)", async () => {
+	const { shareText, percentText, share } = await import("../src/capacity-cli.mjs");
+	assert.equal(shareText(1, 604_800_000), "under 0.1%", "a moment full in a week is not 0%");
+	assert.equal(shareText(0, 604_800_000), "0%", "nothing is 0%");
+	assert.equal(shareText(604_799_999, 604_800_000), "over 99.9%", "a moment idle in a week is not 100%");
+	assert.equal(shareText(604_800_000, 604_800_000), "100%");
+	assert.equal(shareText(5, 0), "0%", "no whole, no share");
+	for (const [p, w] of [[1, 3], [2, 3], [123_456_789, 604_800_000]]) assert.equal(shareText(p, w), percentText(share(p, w)));
+});
+
+test("busyIdleText: idle is the complement of the printed busy, so the two always sum to 100%", async () => {
+	const { busyIdleText } = await import("../src/capacity-cli.mjs");
+	assert.deepEqual(busyIdleText(1235, 10_000), { busy: "12.4%", idle: "87.6%" }, "123.5 per mille: rounded on its own idle read 87.7%");
+	assert.deepEqual(busyIdleText(0, 10_000), { busy: "0%", idle: "100%" });
+	assert.deepEqual(busyIdleText(10_000, 10_000), { busy: "100%", idle: "0%" });
+	assert.deepEqual(busyIdleText(1, 604_800_000), { busy: "under 0.1%", idle: "over 99.9%" });
+	assert.deepEqual(busyIdleText(604_799_999, 604_800_000), { busy: "over 99.9%", idle: "under 0.1%" });
+	for (const b of [7, 333, 1235, 4999, 5000, 9876]) {
+		const { busy, idle } = busyIdleText(b, 10_000);
+		assert.equal(Math.round((parseFloat(busy) + parseFloat(idle)) * 10), 1000, `${busy} + ${idle}`);
+	}
+});
