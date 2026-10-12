@@ -5476,6 +5476,71 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   by the runner's name, so one pointed elsewhere by its own arguments or environment fails when it starts, before the
   prompt; a custom provider whose models.json key is a `!command` names no variable the reserved check can see.
 
+## DES-MCP-TARGETED-LIFECYCLE
+
+- **Decision**: The runner hands pi's MCP extension a guarded API (`image/runner/src/mcp.mjs`, `guardedApi`) and fires
+  its session events itself. pi's MCP connects only in its `session_start` handler, and the SDK emits `session_start`
+  only from `bindExtensions`, which the runner never calls; `AgentSession.dispose()` emits no `session_shutdown`. So
+  the guarded API CAPTURES those two handlers, and `run-job.mjs` calls
+  `lifecycle.start(session.extensionRunner.createContext())` after the shadow check and before the command check and
+  the prompt, and `lifecycle.stop()` before `dispose()` and in the catch path, bounded at 5 s (pi-mcp's own exit hook
+  kills a stdio server's process group if that runs out). The same API answers `getMcpServers` with nothing (a server
+  another extension registers is never connected), drops `mcp_servers_change` and the `/mcp` command, and passes
+  `before_agent_start`, `tool_call` and `turn_start` through. A subscription outside that table throws, which refuses
+  the extension at load; the handlers it captured are kept only once pi's factory returned whole, so the job then
+  refuses at `lifecycle.start` rather than connecting servers for an extension pi discarded. `lifecycle.start` waits
+  for every enabled server (15 s, or a server's own longer `timeout`, at most 120 s), observed on the transports the
+  runner builds as pi's connect runs: ready once `notifications/initialized` is sent, `tools/list` has answered when
+  the server declares tools, and no request of that connect is unanswered, one turn of the event loop later, by when
+  pi has registered the tools. Answers are matched to requests as responses, so a server's own request reusing an id
+  is not one. A refusal (an error answer to `initialize` or `tools/list`, a failed send of either or of `initialized`,
+  a close before ready, a non-transient HTTP status, a redirect, a transport that cannot be built) is
+  `mcp-unavailable` (exit 2); a server still pending is `mcp-unreachable` (exit 1, retried). Pending includes a
+  transient failure of an HTTP server (pi's `isTransientError`) and the close pi makes after it, since pi retries an
+  HTTP server then and nothing else. pi's verdict on an answer is read off the transport too: a transport pi has begun
+  to close (its `closed` flag, set at once) is never ready, and a request pi cancelled (`notifications/cancelled`, its
+  own timeout of a list it tolerates) is no longer waited for. A server's own `timeout` shorter than its start is pi's
+  to enforce, and ends as a refusal. The job's MCP factory also holds every `tool_call`: a reserved name another
+  extension registers after the shadow check (from a timer, say) is refused its calls. That catches a collision, not a
+  hostile extension: one loaded first can rewrite the event the guard reads, as any in-process extension can already
+  rewrite a tool's result. `lifecycle.stop` ends by releasing each stdio server's pipes, which a process the server
+  started in a session of its own would otherwise hold open past the runner's exit line.
+- **Rejected**: calling `bindExtensions` (it fires `session_start` for EVERY extension, the repository's and the
+  overlay's included, which the runner has never done, and it binds UI and command actions a job has no use for);
+  counting a server ready on its `initialize` answer (pi still checks the protocol version and lists the tools, and a
+  server that fails either would have let the job run without it); letting the first prompt connect the servers in
+  the background as the CLI does (a server that never answers would let the job run its flow without it and report
+  success); trusting pi to close the servers (dispose does not).
+- **Residuals**: a server that answers the handshake and then fails each call is the agent's to report; a server's
+  tools, resources and instructions are untrusted text the model reads, like an issue's; a `tools/list_changed` the
+  server sends before its first tool list makes a failed refresh read as a failed connect; a hand-run container's
+  `/job/mcp.json` may reference the provider's key (the worker refuses that, `mcp-secret-reserved`; the runner refuses
+  only its own `PI_*` and meter variables).
+
+## DES-MCP-TRANSPORTS-OWNED
+
+- **Decision**: The runner builds every MCP transport itself (`createTransport`) from `/job/mcp.json`, and passes pi
+  `loadConfig` (that file, nothing else), an inert OAuth store, a log in the job's temp folder, and an `openUrl` and
+  `updateConfig` that throw. References are resolved by the runner, once, from the container's environment: pi's
+  resolver is never reached, so a value that starts with `!` is text and a value holding `${OTHER}` is not resolved
+  again. HTTP: pi-mcp's `StreamableHttpTransport` with the resolved url and headers, no auth provider (a 401 refuses,
+  never signs in), and a fetch that admits only the server's own origin and refuses a redirect rather than following
+  it, and bounds every body but an event stream at 16 MiB (pi-mcp reads a JSON answer and an error body whole, and
+  bounds only a stream's events); that fetch calls `globalThis.fetch`, which the restored env-proxy dispatcher sends
+  through the egress proxy. A control character in a document value or a resolved header is refused before spawn or
+  fetch would refuse it with a TypeError pi reads as the network. stdio: pi-mcp's `StdioTransport` with `inheritEnv:
+  false`, the cwd `/workspace`, and an environment of the server's own resolved `env` over a fixed base (PATH, HOME,
+  locale, zone, temp, the proxy variables, and the child meter's `NODE_OPTIONS`, `PI_DISPATCH_CHILD_LEDGER` and
+  `PI_DISPATCH_RUNNER_PID`, which a server may not replace). The transports are subclasses, so pi still sees a
+  `StdioTransport` (its stderr tail, its close on exit), and the runner's pi-mcp is held to the copy pi uses and to
+  pi's version (`pi-pin-check`).
+- **Rejected**: pi's default transports (a stdio server would get the runner's whole environment, the provider's key
+  included; config values would run `!commands`; an HTTP server's redirect would be followed to any host; a 401
+  would start a browser sign-in and write `mcp-auth.json`); an allowlist of variable names for the stdio base built
+  from the job's env (any name not fixed here is one a server did not ask for).
+- **Residuals**: a stdio server runs code with the secrets its entry names, inside the job's container and its
+  egress; a JSON batch body over 16 MiB is refused though each message in it is smaller.
+
 ## DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS
 
 - **Decision**: `@playwright/cli` with Chromium bundled in the job image, with
@@ -9269,3 +9334,4 @@ a tunnel.
 | 2026-10-12 | No issue: MCP in a job's pi children. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the preload and the nested runner inject `-e <child-meter.ts> --no-mcp`, so no pi child loads pi's built-in MCP (OQ-011 M6), and `hasChildMeter` recognises the three tokens. The decision and the residuals are otherwise UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `DES-MCP-OPERATOR-ONLY`**: one operator file in pi's shape and a strict subset of its keys, rewritten by `import-pi` (accepted servers only, each refused one named), references resolved by pi-dispatch and never by pi, per-server refusals, stdio commands from the image or the overlay, and doctor's egress reading of each HTTP server. `DES-OPERATOR-GLOBAL-OVERLAY` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **NEW `DES-MCP-EGRESS-PREFLIGHT`**: one pickup check reads the overlay once, refuses before spend in a fixed order (the job's own list, file, name, references to a credential the job spends with, unmapped references, egress) and hands `prepare` the document it writes, and a dropped `run.mcp` is `trigger-skew`; the public comment is fixed text per reason. `DES-MCP-OPERATOR-ONLY` is UNCHANGED, checked. |
+| 2026-10-12 | No issue: MCP servers in jobs, the runner. **NEW `DES-MCP-TARGETED-LIFECYCLE`**: the runner fires pi's MCP `session_start` and `session_shutdown` itself through a guarded API (no `bindExtensions`), waits for every server to finish pi's connect (its tools listed; 15 s, or a server's longer `timeout`, at most 120 s) before the prompt, holds every `tool_call` against a late shadow, and closes them, pipes included, before `dispose`. **NEW `DES-MCP-TRANSPORTS-OWNED`**: the runner builds every transport from `/job/mcp.json`, resolves references once itself, locks HTTP to the server's origin with no redirect and no sign-in, and starts a stdio server with only the environment it names. `DES-MCP-EGRESS-PREFLIGHT` is UNCHANGED, checked. |

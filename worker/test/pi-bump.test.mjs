@@ -123,7 +123,7 @@ test("a resolved lockfile is refused unless every entry is from the registry wit
 test("a package.json may change only by its pin, and the root only by its pi overrides", () => {
 	const before = Object.fromEntries(BUMP_PATHS.filter((p) => p.endsWith("package.json")).map((p) => [p, read(p)]));
 	const after = { ...before };
-	for (const site of PI_PIN_SITES.filter((s) => s.json)) after[site.path] = rewriteSite(site, before[site.path], "9.9.9");
+	for (const site of PI_PIN_SITES.filter((s) => s.json)) after[site.path] = rewriteSite(site, after[site.path], "9.9.9");
 	after[ROOT_PACKAGE] = rewriteOverrides(before[ROOT_PACKAGE], "9.9.9", ["@earendil-works/pi-new"]);
 	assert.deepEqual(packageProblems(before, after, "9.9.9"), []);
 	const withScript = (text) => {

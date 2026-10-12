@@ -4,9 +4,9 @@ pi can call tools on MCP servers. In pi-dispatch a job connects only the servers
 its trigger names. A repo's own `.pi/mcp.json` is never read for a job, and a server an extension registers is never
 connected.
 
-This page covers the overlay file, `import-pi`, `doctor` and naming servers in a trigger (`run.mcp`). Connecting them
-in the job comes next: until the job image declares the `mcp` capability, every job that names a server is refused
-before it costs anything.
+This page covers the overlay file, `import-pi`, `doctor`, naming servers in a trigger (`run.mcp`) and what happens in
+the job. The job image must declare the `mcp` capability (this repository's image does); on one that does not, every
+job that names a server is refused before it costs anything.
 
 ## The overlay file
 
@@ -42,7 +42,8 @@ overlay's file either way.
 
 ### What a server may say
 
-- **A name** of lowercase letters, digits and `-`, up to 32 characters. A name holding `dispatch` is reserved.
+- **A name** of lowercase letters and digits, words joined by a single `-`, up to 32 characters. A name holding
+  `dispatch` is reserved.
 - **`description`**, required: one line of at most 300 characters, with no control or invisible formatting
   character. pi puts it in the job's prompt, so you write the words the agent reads about the server, not the server.
 - **A streamable HTTP server** has `url` and optionally `headers`. **A stdio server** has `command`, and optionally
@@ -136,6 +137,47 @@ refuses each such job as `trigger-skew` rather than running it without its serve
 The registry check reads the runner's name only. A server whose own arguments or environment point the runner at
 another registry (`--registry`, `--index-url`, `npm_config_registry`) passes it and fails when it starts, before the
 prompt: allowlist the registry it really uses.
+
+## In the job
+
+The job loads pi's MCP, codemode and tool_search, as the pi CLI does, and connects exactly the servers in
+`/job/mcp.json`, before its prompt:
+
+- **Exposure.** Each server's `exposure` and `toolExposure` work as in pi: `codemode` (the default) reaches the tools
+  from a codemode script, `deferred` through `tool_search`, `direct` declares them to the model, `hidden` leaves them
+  out. Resources are read through pi's resource tools (`list_mcp_resources`, `list_mcp_resource_templates` and
+  `read_mcp_resource`). Each server's `description` becomes its line in the prompt's list of servers. Codemode's
+  `models.*` calls are off.
+- **References.** The job resolves each `${NAME}` once, from its own environment. A value that starts with `!` is
+  sent as text, never run.
+- **HTTP servers.** Each request goes to the server's own origin, through the egress proxy when it is on. A redirect
+  is refused rather than followed, and an HTTP 401 ends the job: a job never signs in.
+- **stdio servers.** The server starts in `/workspace` with its own `env` over `PATH`, `HOME`, the locale, the time
+  zone, the temp folder, the proxy variables and the job's usage meter (`NODE_OPTIONS`, `PI_DISPATCH_CHILD_LEDGER` and
+  `PI_DISPATCH_RUNNER_PID`, so a pi it starts is metered; its `env` may not replace them). It never sees the
+  provider's key or the forge token: the pickup refuses an entry that names one. It is stopped when the job ends.
+- **Nothing else connects.** Not a repository's `.pi/mcp.json`, not a server an extension registers, and not a pi the
+  job starts (it gets `--no-mcp`; `pi mcp`, the subcommand, is the one residual, open-questions OQ-011). There is no
+  `/mcp` command. An extension that registers `codemode`, `tool_search`, a resource tool, an `mcp__` tool or `/mcp`
+  as it loads ends the job before its prompt, and one that registers such a tool later is refused each call to it
+  (a guard against a collision, not against a hostile extension, which can rewrite a call as any in-process extension
+  can).
+
+The job waits for every server to answer: 15 seconds, or a server's own `timeout` when that is longer, up to 120. A
+server counts as answered once pi has listed its tools. It ends before its prompt, on the exit line with:
+
+| Reason | Code | Why |
+|---|---|---|
+| `mcp-unavailable` | 2 | a server refused: its command did not start, it exited or failed the handshake or the tool list, pi refused an answer, an HTTP error other than 408, 429 or a 5xx other than 501 (401, for example), a redirect, a body over 16 MiB, or its own `timeout` ran out before it answered |
+| `mcp-unreachable` | 1 | a server had not answered when the wait ran out (the network, a 5xx or 429 pi kept retrying, a server still starting); retried like any infrastructure failure |
+| `mcp-shadowed` | 2 | another extension registers a name only the job's MCP may |
+| `mcp-command-missing` | 2 | a stdio server's command is not in the image |
+| `mcp-secret-missing` | 2 | a variable the server references is not set in the job |
+| `mcp-config-mismatch`, `mcp-config-invalid` | 2 | `/job/mcp.json` is not what the worker writes for this job (a hand-run container, or a worker and image at different versions) |
+
+MCP tool results, server instructions and resource text are content the model reads, like an issue's text: treat a
+server as you would any input the job did not write. A stdio server runs code inside the job's container with the
+secrets its entry names.
 
 ## What doctor checks
 

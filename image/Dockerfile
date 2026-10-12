@@ -288,7 +288,12 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # signed line; an image without it is read as before. verify-image.sh runs a job with a key and checks the MAC, checks
 # from a tool child that the runner's memory is closed, and checks that a tool's SIGUSR1 opens no inspector in the
 # supervisor or the runner (both start with --disable-sigusr1, issue #596).
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth"
+# `mcp` (REQ-MCP-OPERATOR-SERVERS) tells the worker this runner reads /job/mcp.json and PI_MCP_SERVERS and connects the
+# servers they name through pi's MCP, codemode and tool_search (image/runner/src/mcp.mjs). An older runner handed them
+# would ignore both and run the job without the servers its trigger names; the worker refuses that pairing pre-spend
+# (its `mcp` capability row, reason job-image-mcp-unsupported). verify-image.sh runs an offline job with a stub stdio
+# server to prove the claim.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp"
 
 USER pi
 WORKDIR /workspace

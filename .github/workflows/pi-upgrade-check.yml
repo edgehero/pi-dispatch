@@ -514,6 +514,15 @@ jobs:
             || { echo "::error::the built image's capabilities label does not declare exitAuth -- the worker would read an exit line the job's tools can forge."; exit 1; }
           echo "OK: the label declares exitAuth, and the CORE checklist ran its proof"
 
+      # --- INT-CONTAINER-RUNTIME-CONTRACT (mcp, REQ-MCP-OPERATOR-SERVERS) ---
+      # Same reason: the worker refuses every run.mcp job on an image without the token, so this repo's image must carry
+      # it, and the CORE checklist's offline stub-server job is what proves it.
+      - name: "RUNNER: the built image declares mcp"
+        run: |
+          docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" | tr ',' '\n' | grep -qx "mcp" \
+            || { echo "::error::the built image's capabilities label does not declare mcp -- a job whose trigger names MCP servers could not be admitted on this image."; exit 1; }
+          echo "OK: the label declares mcp, and the CORE checklist ran its proof"
+
       # --- INT-RUNNER-EXIT-CODE-PROTOCOL (resources and the supervisor, issue #596) ---
       # Two runs, each handed a key. The first is the real offline job (a cap of 0 stops it before any call, nothing is
       # dialled) at the job's real 4g: its signed exit line must carry `resources` with a peak above 0, read from the

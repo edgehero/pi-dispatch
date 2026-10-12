@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MCP_CONFIG_MAX_BYTES, MCP_PACKAGE_RUNNERS, mcpServerWhere, overlayMcpText, parseOverlayMcp, piEntry, readOverlayMcp, refValue } from "../src/mcp-config.mjs";
+import { MCP_CONFIG_MAX_BYTES, MCP_PACKAGE_RUNNERS, MCP_SERVER_NAME_RE, mcpServerWhere, overlayMcpText, parseOverlayMcp, piEntry, readOverlayMcp, refValue } from "../src/mcp-config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const doc = (mcpServers, extra = {}) => JSON.stringify({ ...extra, mcpServers });
@@ -240,4 +240,9 @@ test("readOverlayMcp: absent is null; a link, a non-file and an oversized file a
 	assert.throws(() => readOverlayMcp(ok, { lstatSync: () => { throw eacces; } }), (error) => error.code === "EACCES");
 	// A FIFO is judged from lstat and never opened.
 	assert.throws(() => readOverlayMcp(ok, { lstatSync: () => ({ isSymbolicLink: () => false, isFile: () => false, size: 0 }), readFileSync: () => assert.fail("never opened") }), /not a regular file/);
+});
+
+test("a server name is words joined by single -, so no two servers' tool names can read alike in pi's namespace", () => {
+	for (const name of ["a", "docs", "a-b", "files-2", "a".repeat(32)]) assert.ok(MCP_SERVER_NAME_RE.test(name), name);
+	for (const name of ["a-", "-a", "a--b", "", "a".repeat(33), "A", "a_b"]) assert.equal(MCP_SERVER_NAME_RE.test(name), false, name);
 });

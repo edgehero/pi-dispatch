@@ -335,7 +335,8 @@ test("the outer catch and the SIGTERM handler tear the meter down before they re
 	// rule must reach every exit line a metered run writes, and a stop the final pass makes must rank the catch's exit.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	assert.match(src, /\n\t\tfinishMeter = \(\) => usageMeter\.uninstall\(\);\n/, "armed with the exit fields, once the meter installed");
-	const catchAt = src.indexOf(".catch((error) => {");
+	// Async since REQ-MCP-OPERATOR-SERVERS: the catch awaits the job's MCP servers' close before its line.
+	const catchAt = src.indexOf(".catch(async (error) => {");
 	const finish = src.indexOf("finishMeter();", catchAt);
 	assert.ok(catchAt > 0 && finish > catchAt && finish < src.indexOf("const stopped = meterStopAtExit();", catchAt), "the catch tears down before it reads the stop");
 	assert.ok(finish < src.indexOf("...meteredExitFields() });", catchAt), "and before it reads the fields");

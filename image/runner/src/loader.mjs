@@ -541,6 +541,10 @@ export function buildResourceLoader({
 	protectedPrompts = null,
 	settingsManager,
 	log = defaultLog,
+	// The job's MCP, codemode and tool_search extensions (REQ-MCP-OPERATOR-SERVERS, src/mcp.mjs `createJobMcp`), as
+	// named inline factories: present only for a job whose trigger names MCP servers, and never `builtin: true`, so a
+	// `builtin:<name>` path still reaches pi as an unknown built-in and project settings cannot toggle them.
+	extensionFactories = [],
 } = {}) {
 	const guardrails = readFileSync(guardrailsPath, "utf8");
 	const projectPersona = readIfExists(`${jobPiDir}/APPEND_SYSTEM.md`);
@@ -574,6 +578,8 @@ export function buildResourceLoader({
 		cwd,
 		agentDir: getAgentDir(),
 		settingsManager,
+		// Spread conditionally so a job without MCP servers builds the loader it always has.
+		...(extensionFactories.length > 0 && { extensionFactories }),
 		// Context files and extensions are DISCOVERED, as in any pi run: /workspace is the base repo's
 		// default-branch sha, so its files are merge-gated content (see the posture note above).
 		// CONST-NO-CONTEXT-FILES-MANDATORY is amended in this same change.
