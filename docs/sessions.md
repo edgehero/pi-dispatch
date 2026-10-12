@@ -207,9 +207,11 @@ pull request, then calls the tool, and the run ends. Nothing waits in a containe
 think. The run counts as completed (reason `awaiting-input` in the run record), so its transcript is saved like any
 completed run, and pi-dispatch adds one comment of its own saying how to continue.
 
-Answer in a comment that starts with the comment trigger's phrase (`@pi go with option B`). That starts a job
-which resumes the saved conversation with your answer, below the same data delimiter every comment gets. If its
-trigger also sets `awaitInput`, the agent can ask again.
+On an issue, just reply. pi-dispatch labels a waiting issue `pi-awaiting-input` (a tag on an Azure work item), and
+any comment on it from someone the comment trigger accepts starts a job that resumes the saved conversation with
+your answer, below the same data delimiter every comment gets. On a pull request, start the reply with the comment
+trigger's phrase (`@pi go with option B`). If the trigger also sets `awaitInput`, the agent can ask again. The label
+comes off once a run continues without asking again.
 
 Rules:
 
@@ -220,6 +222,9 @@ Rules:
 - Every question and answer counts as one resume against `PI_SESSION_MAX_RESUME_CHAIN`, like any other resumed job.
 - The job image must declare the `awaitInput` capability; an older one is refused before anything is spent
   (`job-image-await-input-unsupported`).
+- The label only routes the reply. The worker checks the saved session's own `parked` mark before anything is spent,
+  so a label set by hand on an issue that is not waiting starts nothing (the run record says `not-parked`) and is
+  removed.
 - Only the job's own tool can park a run. A repository extension that registers the same name stops the job before
   its prompt (`await-input-shadowed`).
 

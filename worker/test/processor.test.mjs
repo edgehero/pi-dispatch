@@ -3,7 +3,7 @@ import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS
 import { test } from "node:test";
 import { budgetCapsFor, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { readFileSync, readdirSync } from "node:fs";
-import { InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, PARKED_COMMENT, TERMINAL_COMMENTS } from "../src/processor.mjs";
+import { InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, PARKED_COMMENT, PARKED_COMMENT_PR, parkedComment, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { buildRecord, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { MCP_REFUSAL_COMMENT } from "../src/mcp-preflight.mjs";
@@ -1432,6 +1432,58 @@ test("a run that ended awaiting-input is completed, promoted with the key marked
 	assert.equal("reason" in unarmed.r, false);
 	assert.deepEqual(unarmed.promotions, [false]);
 	assert.deepEqual(unarmed.posted, []);
+});
+
+test("a phrase-free reply runs only on a parked key: otherwise refused before any spend, silently, and the stale marker cleared (issue #625)", async () => {
+	const job = { ...ghJob, target: { type: "issue", number: 7 }, resume: true, parkedReply: true };
+	const labels = [];
+	const posted = [];
+	const { deps: d, calls } = deps({
+		isParked: () => false,
+		parkedLabel: async (_j, on) => labels.push(on),
+		comment: async (_j, t) => posted.push(t),
+		sessionsDir: "/srv/pi-sessions",
+		imagePreflight: async () => ({ ok: true, piVersion: "0.80.7" }),
+	});
+	const r = await runJob(job, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "not-parked");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(calls.some((c) => c.startsWith("mint:")), false, "decided before the mint");
+	assert.equal(calls.includes("run-container"), false);
+	assert.deepEqual(labels, [false], "the stale marker is cleared");
+	assert.deepEqual(posted, [], "no comment: the person was talking to people");
+
+	// Parked: it runs, and a run that does not park again clears the marker.
+	const ran = [];
+	const { deps: ok } = deps({
+		isParked: () => true,
+		parkedLabel: async (_j, on) => ran.push(on),
+		sessionsDir: "/srv/pi-sessions",
+		imagePreflight: async () => ({ ok: true, piVersion: "0.80.7" }),
+	});
+	const done = await runJob(job, ok);
+	assert.equal(done.outcome, "completed");
+	assert.deepEqual(ran, [false]);
+});
+
+test("a parked run sets the marker, and its comment says how to continue by target", async () => {
+	const labels = [];
+	const posted = [];
+	const { deps: d } = deps({
+		prepareWorkspace: async () => ({ workspace: "/w", jobDir: "/j", session: { key: "abc", hostDir: "/j/session", resume: true, reason: "resumed", bytes: 1 } }),
+		promoteSession: () => ({ promoted: true, reason: "promoted", bytes: 1 }),
+		parkedLabel: async (_j, on) => labels.push(on),
+		comment: async (_j, t) => posted.push(t),
+		sessionsDir: "/srv/pi-sessions",
+		imagePreflight: async () => ({ ok: true, piVersion: "0.80.7", capabilities: ["awaitInput"] }),
+		runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: true, reason: "resumed" }, exitReason: "awaiting-input" }),
+	});
+	await runJob({ ...ghJob, target: { type: "issue", number: 7 }, resume: true, awaitInput: true }, d);
+	assert.deepEqual(labels, [true]);
+	assert.deepEqual(posted, [PARKED_COMMENT]);
+	assert.equal(parkedComment({ type: "pull_request", number: 9 }), PARKED_COMMENT_PR, "a pull request's reply keeps the phrase");
+	assert.notEqual(PARKED_COMMENT, PARKED_COMMENT_PR);
 });
 
 test("PARKED_COMMENT is fixed, path-free and carries no model text", () => {

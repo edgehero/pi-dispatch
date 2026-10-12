@@ -27,6 +27,7 @@
 import { createHash } from "node:crypto";
 import { escapeRegExp, firstMatchingRule, labelSet, matchedLabel, matchesRule } from "./predicate.mjs";
 import { PR_COMMENT_EVENT, PR_EVENTS, WORK_ITEM_EVENTS } from "./azure-subset.mjs";
+import { hasParkedLabel } from "@edgehero/pi-dispatch/parked";
 
 /** The `pull_request` actions a trigger may name, mirrored from the loader's azure vocabulary. */
 export const PR_ACTION_FOR = {
@@ -146,6 +147,8 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 		// REQ-AWAIT-INPUT (issue #625): whether the job may end awaiting a person's answer. Present only when armed,
 		// resume's rule, so an unflagged job's data stays byte-identical.
 		...(resolved.awaitInput === true ? { awaitInput: true } : {}),
+		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
+		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
 		// reasons filter.mjs states in full: receiver.mjs reads this to decide how many times to enqueue, and an
 		// unflagged job's data must stay byte-identical to today's.
@@ -228,7 +231,14 @@ function matchLabelRules(subset, triggers, labels, action) {
 function routeComment(subset, triggers, knownFlows, targetType) {
 	const phrase = triggers.comment?.phrase;
 	const body = subset.comment;
-	if (typeof phrase !== "string" || typeof body !== "string" || !body.includes(phrase)) {
+	const phraseHit = typeof phrase === "string" && typeof body === "string" && body.includes(phrase);
+	// A reply WITHOUT the phrase resumes a parked issue (issue #625, parked.mjs): only on an issue (a pull request's key
+	// needs its head branch, which costs a token to read, so its reply keeps the phrase), only when the comment
+	// trigger arms run.resume and is not a command, and only when the forge says the issue carries the marker. The
+	// author gate above already ran: this widens WHICH comments start a job, never WHO may. The marker is a hint; the
+	// worker refuses the job before any spend unless the key's `parked` sidecar exists.
+	const parkedReply = !phraseHit && typeof phrase === "string" && typeof body === "string" && triggers.comment?.resume === true && triggers.comment?.command === undefined && targetType === "issue" && hasParkedLabel(subset.tags);
+	if (!phraseHit && !parkedReply) {
 		return { enqueue: false, reason: "no-trigger-phrase" };
 	}
 	// On a COMMAND rule (issue #189) the flow-resolution block below -- default flow, the `<phrase> <flow>`
@@ -266,6 +276,7 @@ function routeComment(subset, triggers, knownFlows, targetType) {
 		awaitInput: triggers.comment.awaitInput,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
+		...(parkedReply && { parkedReply: true }),
 		// No author_association: Azure has none, and the authority that admitted this comment was resolved
 		// from the graph, not read off the body.
 		comment: { body },

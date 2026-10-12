@@ -24,6 +24,7 @@
  */
 
 import { configError } from "./config.mjs";
+import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 import { isDeterminateFetchFailure } from "./transient.mjs";
@@ -164,7 +165,29 @@ export function makeGitLabHost({ apiUrl = "https://gitlab.com", fetchFn = fetch 
 		return { headRef: mr?.source_branch, headRepo: sameProject ? job?.repo : null };
 	}
 
-	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead };
+	/**
+	 * Add or remove the parked marker on an issue (issue #625, parked.mjs). `add_labels` creates a
+	 * project label the project lacks, and `remove_labels` of one the issue does not carry changes nothing. The caller treats any throw as fail-open:
+	 * the session store's sidecar, not this label, decides whether a reply resumes anything.
+	 */
+	async function setParkedLabel(projectRef, target, on, token) {
+		const id = projectId(projectRef);
+		const path = `/projects/${id}/issues/${encodeURIComponent(target?.number)}`;
+		let res;
+		try {
+			res = await fetchFn(`${root}${path}`, {
+				method: "PUT",
+				headers: { "PRIVATE-TOKEN": token, "content-type": "application/json" },
+				body: JSON.stringify(on ? { add_labels: PARKED_LABEL } : { remove_labels: PARKED_LABEL }),
+				redirect: "error",
+			});
+		} catch (err) {
+			throw new InfraRetry(`gitlab-host: PUT ${path} failed (${fetchFailureReason(err)})`);
+		}
+		if (!res.ok) throw new InfraRetry(`gitlab-host: PUT ${path} returned ${res.status}`);
+	}
+
+	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
 }
 
 /**

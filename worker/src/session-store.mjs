@@ -1313,5 +1313,24 @@ export function makeSessionStore({
 		}
 	}
 
-	return { resolveSession, promoteSession, reapSessions };
+	/**
+	 * Whether the key a job resolves to holds a `parked` mark (issue #625): the TRUTH the worker gates a phrase-free reply
+	 * on, where the forge label was only the receiver's hint. Free, read-only and never throws, so it can answer before
+	 * the mint. An issue's key is a pure function of the job (`pi/issue-<n>`); a pull request's needs its head branch,
+	 * which costs a token to read, which is why a phrase-free reply is routed on issues only and this resolves no PR.
+	 * The key's own name must `lstat` as a real directory, resolveSession's first gate, so a planted link answers no.
+	 */
+	function isParked(job) {
+		if (!sessionsDir || job?.target?.type === "pull_request") return false;
+		const key = sessionKeyFor(job);
+		if (!key) return false;
+		try {
+			if (!fs.lstatSync(keyDir(key)).isDirectory()) return false;
+		} catch {
+			return false;
+		}
+		return readSidecar(key, PARKED_FILE) !== null;
+	}
+
+	return { resolveSession, promoteSession, reapSessions, isParked };
 }

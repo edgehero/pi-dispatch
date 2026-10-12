@@ -311,7 +311,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, secrets, secretsProfile, waitFor, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, parkedReply, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -369,6 +369,9 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// REQ-AWAIT-INPUT (issue #625): only when armed, so an unflagged job's data is byte-identical, and at JOB level
 		// for resume's reason: `trigger` is copied verbatim into /job/event.json.
 		...(awaitInput === true && { awaitInput: true }),
+		// A phrase-free reply to a parked issue (issue #625), gated by the worker on the key's `parked` mark. Never part
+		// of an id: it says how the delivery was routed, not what it is.
+		...(parkedReply === true && { parkedReply: true }),
 		// REQ-TRIGGER-SECRETS. The env variables this trigger binds and the profile whose resolver reads
 		// them. REFERENCES only: no value is ever enqueued, because a queued job is durable and a resolved
 		// credential in Redis would outlive the container it was scoped to. The worker resolves them at job

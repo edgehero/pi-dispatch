@@ -354,3 +354,23 @@ test("a label rule's excludeTools reach the job, and an unflagged rule adds no k
 	const plain = run(workItem());
 	assert.equal("excludeTools" in plain.job, false, "an unflagged rule's job literal is byte-identical");
 });
+
+// --- a reply without the phrase on a parked work item (issue #625) ---
+
+test("an Azure work-item comment without the phrase resumes a work item tagged parked", () => {
+	const resumeTriggers = { ...triggers, comment: { ...triggers.comment, resume: true } };
+	const go = (payload) => filterAzure(parseAzureSubset(payload), resumeTriggers, knownFlows, SELF, true, "delivery-guid");
+	const tagged = (tags) => workItem({
+		eventType: "workitem.commented",
+		resource: {
+			id: 7,
+			fields: { "System.ChangedBy": "Dev Person <dev@example.com>", "System.History": "option B" },
+			revision: { fields: { "System.Title": "T", "System.Description": "B", "System.TeamProject": "Fabrikam", "System.Tags": tags } },
+		},
+	});
+	const r = go(tagged("triaged; pi-awaiting-input"));
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.parkedReply, true);
+	assert.equal(go(tagged("triaged")).reason, "no-trigger-phrase");
+	assert.equal(run(tagged("pi-awaiting-input")).reason, "no-trigger-phrase", "a comment trigger without resume has nothing to continue");
+});
