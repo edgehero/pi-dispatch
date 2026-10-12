@@ -374,6 +374,13 @@ PROBE
 				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_EXCLUDE_TOOLS" /app/image/runner/src/config.mjs 2>/dev/null \
 					|| fail "the image declares 'excludeTools' but its baked runner never reads PI_EXCLUDE_TOOLS -- a read-only trigger would run with every tool the file says to remove"
 				;;
+			awaitInput)
+				# Same evidence style as 'excludeTools': the baked runner must read the variable and carry the tool.
+				# A runner that does not would never offer the job the tool a parked run ends on.
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_AWAIT_INPUT" /app/image/runner/src/config.mjs 2>/dev/null \
+					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "await_human_input" /app/image/runner/src/await-input.mjs 2>/dev/null \
+					|| fail "the image declares 'awaitInput' but its baked runner never reads PI_AWAIT_INPUT or carries the await_human_input tool"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done

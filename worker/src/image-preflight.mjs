@@ -215,6 +215,16 @@ export const CAPABILITY_GATES = Object.freeze([
 		event: "refused_image_forge_mcp_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare the forge's own MCP server (\`dev.pi-dispatch.capabilities\` ${declared}), so it does not carry the server \`run.mcp\` names as \`forge\`. Rebuild the image from a version that has this feature. Not run.`,
 	}),
+	// Issue #625: a runner that predates run.awaitInput reads no PI_AWAIT_INPUT, so the agent is never offered the tool a
+	// parked run ends on: it guesses or gives up, and the run ends without the question the trigger was armed for.
+	Object.freeze({
+		token: "awaitInput",
+		needed: (job) => job?.awaitInput === true,
+		result: "awaitInputUnsupported",
+		reason: "job-image-await-input-unsupported",
+		event: "refused_image_await_input_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for stopping to wait for an answer (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.awaitInput\`. Rebuild the image from a version that has this feature. Not run.`,
+	}),
 ]);
 
 /**

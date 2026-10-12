@@ -425,6 +425,9 @@ function normalizeCron(on, run, index, path, state) {
 	// `false` or absent. Both must keep reaching the job payload unchanged -- an operator who wrote down
 	// today's default must not get a `data` that disagrees with the file they reviewed.
 	const resume = validateResumeFlag(run, `cron trigger "${id}"`, path);
+	// Called for its refusal only (issue #625): `true` needs run.resume, which cron refuses, so the returned `run`
+	// grows no `awaitInput` key, exactly as it grows no `replicas` one.
+	validateAwaitInputFlag(run, `cron trigger "${id}"`, path);
 	// Called and DISCARDED: on a cron trigger this can only refuse, and the refusal is the point. The
 	// returned `run` below deliberately grows no `replicas` key -- a cron entry can never carry one.
 	validateReplicas(run, `cron trigger "${id}"`, path);
@@ -555,6 +558,28 @@ function validateResumeFlag(run, at, path) {
 		);
 	}
 	return run.resume;
+}
+
+/**
+ * Validate the per-trigger `run.awaitInput` flag (REQ-AWAIT-INPUT, issue #625): whether the job is offered the tool
+ * that ends a run to wait for a person's answer. Strictly boolean, validateResumeFlag's rule and for its reason: a
+ * truthy `"false"` would arm what the operator meant to leave off.
+ *
+ * `true` needs `run.resume: true` beside it, and that one rule carries every other refusal: a parked run is only
+ * worth anything if the next run resumes its transcript, and `run.resume` is already refused on cron and beside
+ * `run.command`, `run.replicas` and `run.secrets`, each for a reason that holds here too. So this adds no list of
+ * its own, which is one place fewer for the two to disagree.
+ *
+ * Returns the flag, undefined when absent, so an unflagged trigger normalizes byte-identically to today's.
+ */
+function validateAwaitInputFlag(run, at, path) {
+	if (run.awaitInput !== undefined && typeof run.awaitInput !== "boolean") {
+		throw configError(`${at}: run.awaitInput must be true or false when present: ${path}`);
+	}
+	if (run.awaitInput === true && run.resume !== true) {
+		throw configError(`${at}: run.awaitInput needs run.resume: true beside it -- a run that stops to wait for an answer is continued by the next run on the same issue or pull request, and only run.resume keeps the transcript it would continue from: ${path}`);
+	}
+	return run.awaitInput;
 }
 
 /**
@@ -1649,6 +1674,7 @@ function normalizeLabel(on, run, index, path) {
 	const skillsDir = validateSkillsDir(run, at, path);
 	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
+	const awaitInput = validateAwaitInputFlag(run, at, path);
 	const repository = validateRepository(run, "label", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1660,7 +1686,7 @@ function normalizeLabel(on, run, index, path) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1692,6 +1718,7 @@ function normalizeComment(on, run, index, path, state) {
 	const skillsDir = validateSkillsDir(run, at, path);
 	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
+	const awaitInput = validateAwaitInputFlag(run, at, path);
 	const repository = validateRepository(run, "comment", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1703,7 +1730,7 @@ function normalizeComment(on, run, index, path, state) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1762,6 +1789,7 @@ function normalizeIssue(on, run, index, path) {
 	const skillsDir = validateSkillsDir(run, at, path);
 	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
+	const awaitInput = validateAwaitInputFlag(run, at, path);
 	validateRepository(run, "issue", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1780,7 +1808,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1850,6 +1878,7 @@ function normalizePullRequest(on, run, index, path) {
 	const skillsDir = validateSkillsDir(run, at, path);
 	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
+	const awaitInput = validateAwaitInputFlag(run, at, path);
 	validateRepository(run, "pull_request", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1873,7 +1902,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 

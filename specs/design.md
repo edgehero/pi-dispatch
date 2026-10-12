@@ -6037,6 +6037,31 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ---
 
+## DES-AWAIT-INPUT-ENDS-THE-JOB
+
+- **Decision** (issue #625, `REQ-AWAIT-INPUT`): an agent that needs a person's answer ENDS its job. It posts the
+  question, calls the job's own `await_human_input` tool, whose result carries pi's `terminate`, and the runner exits
+  `0` / `awaiting-input`. The worker promotes the transcript, marks the key `parked` and posts one fixed sentence. The
+  answer arrives as an ordinary comment and starts an ordinary resumed job.
+- **Why**: everything this needs already exists at the job boundary. `run.resume` keeps a transcript per key and
+  hands it to the next job, the comment trigger already gates who may start that job, and the resumed prompt already
+  fences the reply as data. What was missing was a way for a run to end on purpose with a question, named so the
+  worker can tell it from a finished run.
+- **Rejected**:
+  - *Waiting inside a live container.* A container kept alive for hours with an operator channel into it is what
+    `DES-SANDBOX-IS-A-FRESH-CONTAINER` rules out: it holds the minted token and the provider key while it waits, it
+    bills a slot, and the person's answer would enter a running agent whose prompt already holds untrusted text.
+  - *A durable agent harness that waits in a task.* Declined whole-project (Rejected alternatives, `OQ-041`).
+  - *The worker posting the agent's question from the exit line.* The exit line feeds the PII-free run record and
+    must carry no model text, so the question is the agent's to post, as every status comment already is.
+  - *A new exit code.* New vocabulary rides `reason` on an existing code (`INT-RUNNER-EXIT-CODE-PROTOCOL`); `3` stays
+    the wait profile's.
+  - *Parking on any tool that ends the run.* A tool from a repository's `.pi/extensions` may end a run too
+    (`tool-terminated`, issue #623); only the job's own tool, refused to any other extension that registers its name,
+    parks, so a repository cannot mark a key parked by naming a tool.
+- **Traces to**: `REQ-AWAIT-INPUT`, `REQ-RESUMABLE-SESSION`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
+  `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`.
+
 ## DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED
 
 - **Decision**: Which transcript a job resumes is **computed from the job**, never looked up. A forge job
@@ -9503,3 +9528,4 @@ a tunnel.
 | 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **NEW `DES-MCP-CODEMODE-MODELS`**: codemode's `models.*` are on unless the overlay turns them off, since they reach the meter, the model list and the cost guard like any call, proven through pi's real codemode tool. **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: the pickup also refuses a server the trigger's own exclusions take its last way in from, routed as pi routes it (either active discovery tool reaches every codemode and deferred tool) (`mcp-excluded`). **`DES-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED**: a chained child inherits the exclusions less the names of MCP tools. |
 | 2026-10-12 | No issue: the forge's own MCP server. **NEW `DES-FORGE-MCP`**: a github or gitlab trigger names the reserved `forge` in `run.mcp`; the worker writes the entry (github-mcp-server 2.0.2 from a sha256-checked release tarball, `@zereight/mcp-gitlab` 2.1.67 from a committed lockfile, both baked in the job image and declared as `forgeMcp`), run as the job's own forge token and exempt from the two secret rules for that reason only; the entry runs a wrapper that withholds the forges' dedicated merge and approval tools (and GitHub's two Copilot tools, GitLab's `discover_tools` and `execute_graphql`), dropped from every tool list and refused at the call by `withhold.mjs` since mcp-gitlab's own hidden list still runs a direct call, stated as a convenience not handed out and not a boundary (a GitLab quick action in a note, the job's CLI, the unwrapped server), the boundary being the token's role and the branch's protection, with a Maintainer GitLab token's settings tools a named residual; a `GITLAB_URL` the entry cannot carry refuses `forge`; lockdown and the default toolsets on GitHub, no listener and no OAuth on GitLab, egress judged on the API host, the overlay optional for `forge` alone, refused at load on cron, forgejo and azure; GitLab's own `/api/v4/mcp` rejected (an OAuth `mcp` scope no access token carries). **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: `forge` is not the file's (the file is needed only for the other names; another kind naming it is `mcp-server-unknown`; its one reference skips the two secret rules; egress asks about its API host), and the rejected forge-token reference names `forge` as the explicit choice it asked for. `DES-MCP-OPERATOR-ONLY` and `DES-MCP-TRANSPORTS-OWNED` are UNCHANGED, checked (the forge entry follows each as written). |
 | 2026-10-12 | No issue: a runner MCP refusal named in the run record, and doctor on an MCP endpoint. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: `TERMINAL_COMMENTS` gains six rows, quoted in the entry, the runner's exit-2 MCP refusals (`mcp-unavailable`, `mcp-config-invalid`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed`), each fixed and naming no server, host or variable, and the six join `RUNNER_POLICY_REASONS` (as `MCP_RUNNER_REASONS`), so the record and the panel name them and the hook pages for them; the pickup's free `mcp-config-invalid` keeps its own comment and pages nobody by `budgetReserved: false`. Rejected: one generic MCP token, and the server's name off the exit line in the comment. **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: one endpoint match, `endpointsAt`, for a model's baseUrl, the pickup's MCP egress check and doctor; doctor's `models` probe passes an endpoint only an enabled overlay MCP server dials on any answer through the tunnel, or on the socket an `https:` one closes. Rejected: skipping that probe, and an MCP handshake from doctor. `DES-MCP-TARGETED-LIFECYCLE` is UNCHANGED, checked: the runner's exit lines are as they were, so an image built before this change is read the same way. |
+| 2026-10-12 | Issue #625 (parked jobs, the parking half). **NEW `DES-AWAIT-INPUT-ENDS-THE-JOB`**: a run that needs a person's answer ends with the job's own `await_human_input` tool, as a completed run with the reason `awaiting-input`; rejected are waiting in a live container, a durable harness, the worker posting the question, a new exit code, and parking on any tool that ends the run. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: nothing waits in a container. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the `parked` mark is keyed state beside the transcript, like `resume-chain`, and nothing looks it up by anything else. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: `TERMINAL_COMMENTS` gains the rows `await-input-shadowed` and `await-input-without-session`, and the completed path posts one comment of its own, `PARKED_COMMENT`, on a parked run only. |
