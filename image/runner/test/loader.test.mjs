@@ -1330,51 +1330,78 @@ test("an excluded tool stays excluded on a resumed session whose transcript rest
 	}
 });
 
-test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in a job, even when a path asks for one", { skip }, async () => {
+test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in a job, even when a path asks for one, with or without the job's MCP factories", { skip }, async () => {
 	// Issue #509. From pi 0.99 the CLI loads four built-in extensions, `builtin:<name>` paths whose code comes
 	// from the loader's `extensionFactories` (main.js: `[...builtInExtensions, ...]`). MCP would connect to
 	// servers an mcp.json names (a repo file, in a job), codemode can call models.classify() and spawn a
-	// worker, tool-search adds a model-callable tool: none of that is part of what a trigger reviewed. The
-	// runner builds pi through the SDK and passes no extensionFactories, so the loader knows no built-in:
-	// this pins that, against a REAL session, including the case where a `builtin:` path does reach the
-	// loader (here through packagePaths, the one list the runner feeds into additionalExtensionPaths).
+	// worker, tool-search adds a model-callable tool: none of that is part of what a trigger reviewed.
+	// REQ-MCP-OPERATOR-SERVERS gives a job whose trigger names servers its own MCP, codemode and tool_search, as NAMED
+	// inline factories (src/mcp.mjs). They are not `builtin: true`, so a `builtin:` path is still refused as unknown:
+	// pinned here against a REAL session both ways, including the case where such a path does reach the loader (here
+	// through packagePaths, the one list the runner feeds into additionalExtensionPaths).
 	const pi = await import("@earendil-works/pi-coding-agent");
-	const f = fixture();
+	const { createJobMcp } = await import("../src/mcp.mjs");
 	const asked = ["builtin:mcp", "builtin:codemode", "builtin:tool-search", "builtin:llama.cpp"];
-	const loader = await loaderModule.buildLoadedResourceLoader({
-		cwd: f.workspace,
-		jobPiDir: f.jobPi,
-		guardrailsPath: f.guardrailsPath,
-		outboxProtocolPath: f.outboxProtocolPath,
-		packagePaths: asked,
-	});
-	const { extensions, errors } = loader.getExtensions();
-	assert.deepEqual(extensions.filter((e) => e.path.startsWith("builtin:")).map((e) => e.path), [], "a built-in extension loaded");
-	// The premise, so the absence above is pi's refusal and not a path that never reached it: each asked-for
-	// name comes back as pi's own "unknown built-in" error.
-	assert.deepEqual(
-		errors.filter((e) => e.path.startsWith("builtin:")).map((e) => [e.path, String(e.error)]).sort(),
-		asked.map((path) => [path, `Unknown built-in extension: ${path}`]).sort(),
-		"each builtin: path must reach the loader and be refused as unknown",
-	);
-	// The source half: the runner never hands pi the factories that would make those names known.
-	const runnerSources = ["../run-job.mjs", "../src/loader.mjs", "../src/session.mjs", "../src/tools.mjs"].map((rel) => readFileSync(new URL(rel, import.meta.url), "utf8"));
-	for (const needle of ["extensionFactories", "builtInExtensions", "createMcpExtension", "createCodemodeExtension", "createToolSearchExtension"]) {
-		assert.ok(!runnerSources.some((src) => src.includes(needle)), `the runner now names ${needle} -- a built-in extension could load in a job`);
+	const jobMcp = createJobMcp({ version: 1, codemodeModels: false, servers: { files: { type: "stdio", command: process.execPath, description: "Files" } }, refs: { files: [] } }, { pi });
+	for (const extensionFactories of [[], jobMcp.factories]) {
+		const f = fixture();
+		const loader = await loaderModule.buildLoadedResourceLoader({
+			cwd: f.workspace,
+			jobPiDir: f.jobPi,
+			guardrailsPath: f.guardrailsPath,
+			outboxProtocolPath: f.outboxProtocolPath,
+			packagePaths: asked,
+			extensionFactories,
+		});
+		const { extensions, errors } = loader.getExtensions();
+		assert.deepEqual(extensions.filter((e) => e.path.startsWith("builtin:")).map((e) => e.path), [], "a built-in extension loaded");
+		// The premise, so the absence above is pi's refusal and not a path that never reached it: each asked-for
+		// name comes back as pi's own "unknown built-in" error.
+		assert.deepEqual(
+			errors.filter((e) => e.path.startsWith("builtin:")).map((e) => [e.path, String(e.error)]).sort(),
+			asked.map((path) => [path, `Unknown built-in extension: ${path}`]).sort(),
+			"each builtin: path must reach the loader and be refused as unknown",
+		);
+		assert.deepEqual(
+			extensions.filter((e) => e.path.startsWith("<inline:")).map((e) => e.path),
+			extensionFactories.map((factory) => `<inline:${factory.name}>`),
+			"the job's own factories load, by name, only when it has them",
+		);
+
+		// And on a real session: without the job's factories no tool or command any of the four registers is present;
+		// with them, the tools are the job's own and there is still no /mcp.
+		const agentDir = tempDir("pi-agent-");
+		const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
+		const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager: pi.SettingsManager.inMemory({}), resourceLoader: loader });
+		try {
+			const tools = session.getAllTools();
+			for (const name of ["codemode", "tool_search"]) {
+				const tool = tools.find((t) => t.name === name);
+				if (extensionFactories.length === 0) assert.equal(tool, undefined, `the ${name} tool is registered in a job: ${JSON.stringify(tools.map((t) => t.name))}`);
+				else assert.match(tool?.sourceInfo?.path ?? "", /^<inline:job-/, name);
+			}
+			assert.ok(!tools.some((t) => t.name === "mcp"));
+			const commands = session.extensionRunner.getRegisteredCommands().map((c) => c.name);
+			assert.ok(!commands.includes("mcp"), `/mcp is registered in a job: ${JSON.stringify(commands)}`);
+		} finally {
+			session.dispose();
+		}
 	}
 
-	// And on a real session: no tool or command any of the four registers is present.
-	const agentDir = tempDir("pi-agent-");
-	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
-	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager: pi.SettingsManager.inMemory({}), resourceLoader: loader });
-	try {
-		const tools = session.getAllTools().map((t) => t.name);
-		for (const name of ["codemode", "tool_search", "mcp"]) assert.ok(!tools.includes(name), `the ${name} tool is registered in a job: ${JSON.stringify(tools)}`);
-		const commands = session.extensionRunner.getRegisteredCommands().map((c) => c.name);
-		assert.ok(!commands.includes("mcp"), `/mcp is registered in a job: ${JSON.stringify(commands)}`);
-	} finally {
-		session.dispose();
+	// The source half: pi's factories are named in the runner only where a job's document builds them, and the
+	// loader hands pi factories only when it was given some. A second call site would load them for every job.
+	const runJob = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const loaderSrc = readFileSync(new URL("../src/loader.mjs", import.meta.url), "utf8");
+	const mcpSrc = readFileSync(new URL("../src/mcp.mjs", import.meta.url), "utf8");
+	for (const name of ["createMcpExtension", "createCodemodeExtension", "createToolSearchExtension"]) {
+		assert.equal(runJob.split(name).length - 1, 2, `run-job.mjs names ${name} outside its import and the createJobMcp call`);
+		assert.ok(!loaderSrc.includes(name), `loader.mjs names ${name}`);
 	}
+	assert.ok(!/builtInExtensions|\bbuiltin:\s*true\s*[,}]/.test(runJob + loaderSrc + mcpSrc), "a factory is marked built-in");
+	assert.equal(runJob.split("extensionFactories").length - 1, 1, "run-job.mjs passes extensionFactories other than from the job's document");
+	assert.match(runJob, /\.\.\.\(jobMcp && \{ extensionFactories: jobMcp\.factories \}\)/);
+	assert.match(runJob, /const jobMcp = mcpDocument \? createJobMcp\(/);
+	assert.match(loaderSrc, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
 });
 
 // --- enforceProtectedSkillPrecedence, decided on injected input (no skills tree, no collisions) ---

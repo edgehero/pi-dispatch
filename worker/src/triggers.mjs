@@ -1450,7 +1450,7 @@ function validateMcp(on, run, at, path) {
 	for (let i = 0; i < mcp.length; i++) {
 		const name = mcp[i];
 		if (typeof name !== "string" || !MCP_SERVER_NAME_RE.test(name)) {
-			throw configError(`${at}: run.mcp[${i}] must name a server of the overlay's mcp.json: lowercase letters, digits and -, up to 32 (got ${JSON.stringify(name)}): ${path}`);
+			throw configError(`${at}: run.mcp[${i}] must name a server of the overlay's mcp.json: lowercase letters and digits, words joined by single -, up to 32 (got ${JSON.stringify(name)}): ${path}`);
 		}
 		if (seen.has(name)) throw configError(`${at}: run.mcp names ${JSON.stringify(name)} twice: ${path}`);
 		seen.add(name);

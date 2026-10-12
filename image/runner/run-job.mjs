@@ -1,6 +1,9 @@
 import { existsSync } from "node:fs";
 import {
 	createAgentSession,
+	createCodemodeExtension,
+	createMcpExtension,
+	createToolSearchExtension,
 	getAgentDir,
 	ModelRuntime,
 	SettingsManager,
@@ -40,6 +43,7 @@ import { precheckAtExit } from "./src/plan-check.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown } from "./src/tools.mjs";
+import { createJobMcp, mcpShadow, readJobMcp } from "./src/mcp.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
 // and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
@@ -121,6 +125,9 @@ let finishMeter = () => {};
 /** The exit line's key (issue #545) and its one writer, both set in the job runner's block at the end of this file before main runs. */
 let exitKey;
 let exitWriter;
+// The job's MCP servers' close (REQ-MCP-OPERATOR-SERVERS), for the catch path: a throw after they connected (a refused
+// command, a shadowed tool) skips the prompt's finally, and a live stdio server's pipes would keep this process up.
+let stopMcp = async () => {};
 
 async function main() {
 	// A worker that asked for a signed exit line and did not deliver a usable key: the run goes on with an unsigned
@@ -164,6 +171,9 @@ async function main() {
 	// with no diagnostic -- the job would run WITH the tool the trigger says to remove. Free, pre-spend,
 	// and before the prompt is even read; the entry is reported verbatim so a padded name reads as itself.
 	if (cfg.excludeTools.length > 0) assertExcludeToolsKnown(cfg.excludeTools);
+	// Same moment, same exit code: the MCP servers the worker passed, read back and checked before anything loads
+	// (src/mcp.mjs `readJobMcp`). Null for a job whose trigger names none, which then builds exactly what it always has.
+	const mcpDocument = readJobMcp();
 
 	// A command job's prompt is rebuilt from PI_COMMAND rather than read from disk: one in-container
 	// authority, so a worker bug that wrote a prompt.md disagreeing with the env var cannot make the
@@ -305,11 +315,14 @@ async function main() {
 	// recursion guard drops an extension during reload() (see dropAdminExtensions), and a drop that
 	// landed on a second, id-less writer would be an operator's only clue to a missing tool while being
 	// unattributable to a run.
+	const jobMcp = mcpDocument ? createJobMcp(mcpDocument, { pi: { createMcpExtension, createCodemodeExtension, createToolSearchExtension }, log }) : null;
+	if (jobMcp) stopMcp = () => jobMcp.lifecycle.stop();
 	const resourceLoader = await buildLoadedResourceLoader({
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
 		packagePaths: cfg.packages,
 		log,
+		...(jobMcp && { extensionFactories: jobMcp.factories }),
 	});
 
 	// Read ONCE, unconditionally: the flow check below needs the loaded set whether or not packages
@@ -419,6 +432,17 @@ async function main() {
 	// runtime half needs no re-arm: a provider an extension registers with pi.registerProvider is served by
 	// the ModelRuntime, whose prototype is already wrapped.)
 	usageMeter.arm();
+
+	// The job's MCP servers (REQ-MCP-OPERATOR-SERVERS, DES-MCP-TARGETED-LIFECYCLE). First, no other extension may answer
+	// for them: one that registered codemode, tool_search, a resource tool, an `mcp__` tool or /mcp would take calls
+	// meant for the job's servers, or reach servers of its own. Then they connect, and the runner waits for each to
+	// answer, before the command check (pi's /mcp is never registered in a job) and before the prompt. pi
+	// connects on session_start, which this runner never emits for every extension: lifecycle fires it for MCP alone.
+	if (jobMcp) {
+		const shadow = mcpShadow({ tools: session.getAllTools(), commands: session.extensionRunner.getRegisteredCommands() });
+		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job's MCP servers may`, "mcp-shadowed");
+		await jobMcp.lifecycle.start(session.extensionRunner.createContext());
+	}
 
 	// The one packages count that cannot ride packages_loaded: a COMMAND exists only once the
 	// ExtensionRunner has executed the factories, which is here, after createAgentSession -- the
@@ -535,6 +559,9 @@ async function main() {
 		// next assistant message re-establishes a count; or real numbers. Only the third is reported --
 		// the host's bound is written to act on a measurement and invent nothing when there is none.
 		contextUsage = session.getContextUsage();
+		// Before dispose: pi's dispose emits no session_shutdown, so without this a stdio server's pipes outlive the
+		// session and hold the container until the job timeout. Bounded (MCP_STOP_TIMEOUT_MS).
+		await stopMcp();
 		// Runs the cleanup callbacks providers register via registerSessionResourceCleanup. Every
 		// official SDK example disposes; skipping it can leak a provider transport and hang the
 		// container until the 30-minute timeout -- a completed job turned into a timeout failure.
@@ -633,7 +660,7 @@ if (!nestedRunner) {
 		.then((code) => {
 			process.exitCode = code;
 		})
-		.catch((error) => {
+		.catch(async (error) => {
 			// The meter's fields ride here too once it installed (issue #543); before that there is nothing to report.
 			const thrown = classifyThrow(error);
 			// The final fold first, so a stop it makes ranks this exit and its counts are on the line.
@@ -646,6 +673,9 @@ if (!nestedRunner) {
 			// The stop wins the exit reason, and the throw it outranked is named on its own line so the second cause is not
 			// lost: its classified reason and the error's class, never its message (names only).
 			if (stopped !== null) log("throw_after_stop", { reason: thrown.reason, error: typeof error?.name === "string" ? error.name : null });
+			// The job's MCP servers, closed before the line is written: bounded (MCP_STOP_TIMEOUT_MS), and a no-op unless
+			// they connected. A live stdio server's pipes would otherwise keep this process up after its exit line.
+			await stopMcp().catch(() => undefined);
 			const outcome = stopped ?? thrown;
 			const capped = capExitMessage(outcome);
 			exitWriter.writeExit({ code: capped.code, reason: capped.reason, ...costRefusalField(outcome, costRefusalWhy()), message: capped.message, ...meteredExitFields() });

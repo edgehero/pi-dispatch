@@ -67,6 +67,7 @@ export const EXACT_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
  */
 export const PI_PIN_SITES = Object.freeze([
 	{ path: "image/runner/package.json", json: ["dependencies", `${SCOPE}pi-coding-agent`] },
+	{ path: "image/runner/package.json", json: ["dependencies", `${SCOPE}pi-mcp`] },
 	{ path: "worker/package.json", json: ["dependencies", `${SCOPE}pi-ai`] },
 	{ path: "admin/package.json", json: ["devDependencies", `${SCOPE}pi-coding-agent`] },
 	{ path: "admin/src/index.ts", line: /^export const SUPPORTED_PI_VERSION = "([^"]*)";$/m },
@@ -74,7 +75,7 @@ export const PI_PIN_SITES = Object.freeze([
 ]);
 
 /** Every path a bump commit may hold. The workflow stages exactly these, and refuses a tree that changed anything else. */
-export const BUMP_PATHS = Object.freeze([...PI_PIN_SITES.map((site) => site.path), ROOT_PACKAGE, LOCKFILE]);
+export const BUMP_PATHS = Object.freeze([...new Set(PI_PIN_SITES.map((site) => site.path)), ROOT_PACKAGE, LOCKFILE]);
 
 export const titleFor = (version) => `chore(pi): run on pi ${version}`;
 
@@ -227,10 +228,11 @@ export function lockfileProblems(beforeText, afterText) {
  */
 export function packageProblems(before, after, version) {
 	const problems = [];
-	for (const site of PI_PIN_SITES.filter((s) => s.json)) {
-		const want = JSON.parse(before[site.path]);
-		site.json.slice(0, -1).reduce((node, part) => node[part], want)[site.json.at(-1)] = version;
-		if (JSON.stringify(JSON.parse(after[site.path])) !== JSON.stringify(want)) problems.push(`${site.path} changed beyond its pi pin`);
+	// Per FILE, every pin it holds moved at once: the runner's package.json pins two pi packages.
+	for (const path of new Set(PI_PIN_SITES.filter((s) => s.json).map((s) => s.path))) {
+		const want = JSON.parse(before[path]);
+		for (const site of PI_PIN_SITES.filter((s) => s.json && s.path === path)) site.json.slice(0, -1).reduce((node, part) => node[part], want)[site.json.at(-1)] = version;
+		if (JSON.stringify(JSON.parse(after[path])) !== JSON.stringify(want)) problems.push(`${path} changed beyond its pi pin`);
 	}
 	const root = JSON.parse(before[ROOT_PACKAGE]);
 	const next = JSON.parse(after[ROOT_PACKAGE]);

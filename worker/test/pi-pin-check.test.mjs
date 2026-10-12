@@ -11,7 +11,7 @@ function pins(pin = "1.0.3") {
 	return {
 		root: { overrides: { "@earendil-works/pi-ai": pin, "@earendil-works/pi-coding-agent": pin, "@earendil-works/pi-tui": pin } },
 		lock: { packages: { "": {}, "node_modules/@earendil-works/pi-ai": entry, "node_modules/@earendil-works/pi-coding-agent": entry, "node_modules/@earendil-works/pi-tui": entry, "node_modules/undici": { version: "8.10.2" } } },
-		runner: { dependencies: { "@earendil-works/pi-coding-agent": pin } },
+		runner: { dependencies: { "@earendil-works/pi-coding-agent": pin, "@earendil-works/pi-mcp": pin } },
 		worker: { dependencies: { "@earendil-works/pi-ai": pin } },
 		admin: { devDependencies: { "@earendil-works/pi-coding-agent": pin } },
 		adminIndex: `x\nexport const SUPPORTED_PI_VERSION = "${pin}";\n`,

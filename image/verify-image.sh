@@ -174,6 +174,45 @@ else
 				[ "$model_code" = 2 ] && echo "$model_exit" | grep -Eq '"reason":"model-not-allowed"[,}]' && echo "$model_exit" | grep -Eq '"modelRefused":1[,}]' \
 					|| fail "the image declares 'modelPolicy' but a job whose PI_ALLOWED_MODELS lacks its model was not stopped before its first call (exit $model_code: $model_exit)"
 				;;
+			mcp)
+				# REQ-MCP-OPERATOR-SERVERS. The claim is that the runner reads /job/mcp.json, connects the stdio server it
+				# names with only the environment it names, waits for it before the prompt, and closes it before it exits.
+				# Proved by running one offline: a stub server in /job that answers the handshake and refuses it when the
+				# provider's key reached it, and a cost cap of 0 so the job stops before its first call. The runner must log
+				# mcp_servers_ready and then exit 2 with cost-cap. A runner that ignored the file would exit cost-cap without
+				# the log line; one that leaked the key, or never connected, would exit mcp-unavailable or hang.
+				mcp_job=$(mktemp -d)
+				echo "Reply with the single word ok." >"$mcp_job/prompt.md"
+				cat >"$mcp_job/stub.mjs" <<'STUB'
+import { createInterface } from "node:readline";
+const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+	const m = JSON.parse(line);
+	if (m.id === undefined) return;
+	if (m.method === "initialize") {
+		if (process.env.ANTHROPIC_API_KEY || process.env.STUB_TOKEN !== "named") return send({ id: m.id, error: { code: -32603, message: "env" } });
+		return send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "stub", version: "1" } } });
+	}
+	if (m.method === "tools/list") return send({ id: m.id, result: { tools: [] } });
+	send({ id: m.id, error: { code: -32601, message: "no" } });
+});
+STUB
+				cat >"$mcp_job/mcp.json" <<'DOC'
+{ "version": 1, "codemodeModels": false, "servers": { "stub": { "type": "stdio", "command": "node", "args": ["/job/stub.mjs"], "env": { "STUB_TOKEN": "${STUB_TOKEN}" }, "description": "Stub" } }, "refs": { "stub": ["STUB_TOKEN"] } }
+DOC
+				chmod -R a+rX "$mcp_job"
+				mcp_started=$(date +%s)
+				mcp_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$mcp_job:/job:ro" \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 \
+					-e PI_MCP_SERVERS=stub -e STUB_TOKEN=named \
+					"$IMAGE_REF" 2>&1) && mcp_code=0 || mcp_code=$?
+				mcp_took=$(($(date +%s) - mcp_started))
+				rm -rf "$mcp_job"
+				mcp_exit=$(echo "$mcp_out" | grep '"event":"exit"' | tail -1)
+				[ "$mcp_code" = 2 ] && echo "$mcp_out" | grep -q '"event":"mcp_servers_ready"' && echo "$mcp_exit" | grep -q '"reason":"cost-cap"' && [ "$mcp_took" -lt 60 ] \
+					|| fail "the image declares 'mcp' but a job naming a stdio server in /job/mcp.json did not connect it and stop cleanly (exit $mcp_code in ${mcp_took}s: $mcp_exit)"
+				;;
 			exitAuth)
 				# Issue #545. Two claims, both checked by running them. First, the runner signs its exit line with the key the
 				# worker writes to its stdin: the same offline job as costCap's (a cap of 0 stops it before any call), handed a

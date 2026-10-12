@@ -2323,7 +2323,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   names and references are judged at the pickup, which logs why).
   Delivered in parts: the overlay file, `import-pi` and `doctor` first; then `run.mcp` and the pickup's refusals,
   which write the job's `/job/mcp.json` and refuse every such job on an image that does not declare the `mcp`
-  capability; then the job's session connecting the servers with pi 1.1.0's MCP, codemode and tool_search.
+  capability; then the job's session connecting the servers with pi 1.1.0's MCP, codemode and tool_search, before
+  the prompt, with transports the runner builds and closes. A server that refuses the connection ends the job before
+  its prompt; one that does not answer is retried as infrastructure.
 - **Why**: pi connects MCP servers from files a job's repo controls and from servers its extensions register, and
   hands their tools to an agent reading adversarial input. Which outside systems a job may act on is a decision
   about money, data and blast radius, so it is the operator's, made once per deployment and opted into per trigger,
@@ -2341,12 +2343,19 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   does not pass through `run.secrets` or `PI_FORWARD_ENV`, or one referencing a key the job spends with or a minted forge
   token, or, with the egress policy on, one the proxy would not let the job reach, then the job is refused before
   the secrets resolver, the mint, the clone and the budget, with a public comment that names the server and the
-  rule and never a host or a variable.
+  rule and never a host or a variable. Given a job whose `/job/mcp.json` names a stdio server, then the server starts
+  with only the variables its entry names (never the provider's key), its tools are registered before the prompt,
+  and it is gone when the runner exits; given a server that exits, refuses the handshake or its tool list, or answers
+  HTTP 401, then the job exits `2` with `mcp-unavailable` before its prompt; given a repository `.pi/mcp.json` or an
+  extension's `registerMcpServer`, then neither server is started; given another extension that registers `codemode`,
+  then the job exits `2` with `mcp-shadowed`.
 - **Traces to**: `REQ-GLOBAL-PI-OVERLAY`, `REQ-EGRESS-ALLOWLIST`, `REQ-TRIGGER-SECRETS`, `CONST-TOKEN-SCOPED-PER-JOB`,
-  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `INT-OVERLAY-MCP-CONFIG`, `DES-MCP-OPERATOR-ONLY`.
+  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `INT-OVERLAY-MCP-CONFIG`, `DES-MCP-OPERATOR-ONLY`,
+  `DES-MCP-TARGETED-LIFECYCLE`, `DES-MCP-TRANSPORTS-OWNED`.
 - **Code evidence**: worker/src/mcp-config.mjs -> parseOverlayMcp, readOverlayMcp, overlayMcpText;
   worker/src/import-pi.mjs -> stageMcp; worker/src/doctor.mjs -> overlayMcpChecks;
-  worker/src/egress-allowlist.mjs -> egressRefusalFor.
+  worker/src/egress-allowlist.mjs -> egressRefusalFor; image/runner/src/mcp.mjs -> readJobMcp, createJobMcp,
+  mcpShadow; image/runner/run-job.mjs.
 
 ## REQ-EGRESS-ALLOWLIST
 
@@ -3478,6 +3487,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-12 | No issue: MCP servers in jobs, the runner. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the third part is delivered (the job's session connects the servers before the prompt, with transports the runner builds and closes); acceptance gains the runner's cases, traces gain `DES-MCP-TARGETED-LIFECYCLE` and `DES-MCP-TRANSPORTS-OWNED`. |
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the second part is delivered (a trigger's `run.mcp`, the pickup's refusals before any spend, the job's `/job/mcp.json`, every such job refused on an image without the `mcp` capability until the runner connects them), with acceptance for each refusal and its public comment. **`REQ-TRIGGER-SECRETS` AMENDED**: an MCP server's references are these names or `PI_FORWARD_ENV`'s. **`REQ-EGRESS-ALLOWLIST` AMENDED**: an MCP server the proxy would not reach is refused before spend like a job the policy cannot serve. **Code evidence**: worker/src/triggers.mjs -> validateMcp; worker/src/mcp-preflight.mjs -> makeMcpCheck; worker/src/processor.mjs; worker/src/prepare.mjs; worker/src/image-preflight.mjs -> the mcp row. |
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `REQ-MCP-OPERATOR-SERVERS`**: a job uses only MCP servers the operator lists in the overlay's `mcp.json` and its trigger names, with credentials as `${NAME}` references only, refused before spend when it cannot use them; this part delivers the file, `import-pi` and `doctor`. **`REQ-GLOBAL-PI-OVERLAY` AMENDED** (the Statement): `import-pi` never copies `mcp-auth.json`, and rewrites `mcp.json` rather than copying it. The rest of `REQ-GLOBAL-PI-OVERLAY` is UNCHANGED, checked. **Code evidence**: worker/src/mcp-config.mjs, worker/src/import-pi.mjs -> stageMcp, worker/src/doctor.mjs -> overlayMcpChecks. |
 | 2026-10-09 | Issue #599, the run mirror's start. **`REQ-CAPACITY-INSIGHTS` AMENDED** (the Statement): a run mirror that started inside the window (a new deployment, or a Valkey that lost its keys) is named among what its sources hold, since the report now knows when the mirror started (`runs:since`, `INT-RUN-HISTORY-FILE-CONTRACT`). Before, losing the mirror's keys and one more write made a peer read every lost run as idle, breaking "missing history is never idle". The Acceptance is UNCHANGED, checked. **Code evidence**: worker/src/run-mirror.mjs -> TRIM_SCRIPT, PRUNE_SCRIPT, READ_SCRIPT, RUNS_SINCE; worker/src/capacity-records.mjs -> readMirrorWindow. |

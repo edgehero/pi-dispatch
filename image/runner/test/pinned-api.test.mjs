@@ -68,6 +68,10 @@ const REQUIRED_VALUE_EXPORTS = [
 	"createGrepToolDefinition",
 	"createFindToolDefinition",
 	"createLsToolDefinition",
+	// The job's MCP (REQ-MCP-OPERATOR-SERVERS, src/mcp.mjs): pi's three factories, handed to the loader by name.
+	"createMcpExtension",
+	"createCodemodeExtension",
+	"createToolSearchExtension",
 ];
 
 test("the pinned package exports everything the runner imports", { skip }, () => {
@@ -1995,4 +1999,93 @@ process.stdout.write(JSON.stringify({ stream: typeof v["@earendil-works/pi-ai"].
 	assert.equal(seen.stream, "function", "the bundle's virtual pi-ai no longer carries createAssistantMessageEventStream");
 	assert.equal(seen.runtime, "function", "the bundle's virtual pi-coding-agent no longer exports ModelRuntime");
 	assert.equal(seen.same, false, "the bundle's ModelRuntime IS dist/index.js's now -- the child route can be simplified");
+});
+
+// ── REQ-MCP-OPERATOR-SERVERS: the pin surface src/mcp.mjs rests on ───────────────────────────────────────────────
+//
+// The runner drives pi's MCP extension through a guarded API and transports of its own (DES-MCP-TARGETED-LIFECYCLE,
+// DES-MCP-TRANSPORTS-OWNED). Each fact below is one a pi bump could change without any test of behaviour noticing
+// until a job connected something it should not, or hung on a server it never closed.
+
+/** A text file of pi-mcp's dist, as the runner resolves the package. */
+function mcpDistFile(...segments) {
+	const dist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-mcp")));
+	return readFileSync(join(dist, ...segments), "utf8");
+}
+
+test("pi's MCP extension subscribes to exactly the events MCP_EVENTS routes, registers only /mcp, and reads registered servers only through getMcpServers", { skip }, async () => {
+	const { MCP_EVENTS } = await import("../src/mcp.mjs");
+	const events = [];
+	const commands = [];
+	const calls = new Set();
+	const api = new Proxy(
+		{},
+		{
+			get: (_target, prop) => (...args) => {
+				calls.add(prop);
+				if (prop === "on") events.push(args[0]);
+				if (prop === "registerCommand") commands.push(args[0]);
+				return prop === "getMcpServers" || prop === "getAllTools" || prop === "getActiveTools" ? [] : undefined;
+			},
+		},
+	);
+	mod.createMcpExtension({})(api);
+	assert.deepEqual([...events].sort(), Object.keys(MCP_EVENTS).sort(), "a new event is one the runner must route before pi's MCP extension may load");
+	assert.deepEqual(commands, ["mcp"]);
+	const index = agentDistFile("extensions", "mcp", "index.js");
+	assert.equal(index.split("pi.getMcpServers()").length - 1, 1, "registered servers are read in one place, which the guarded API answers with []");
+	assert.equal(index.split("\n").filter((line) => !/^\s*(\*|\/\/)/.test(line) && line.includes("pi.registerMcpServer(")).length, 0, "the extension registers servers itself");
+	// The config comes from the option the runner sets; the connections from the transport factory it sets.
+	assert.match(index, /const loaded = \(options\.loadConfig \?\? defaultLoadConfig\)\(ctx\);/);
+	assert.match(agentDistFile("extensions", "mcp", "runtime.js"), /transport = this\.createTransport\(this\.entry, this\.cwd, this\.authProvider\);/);
+	// The extension connects in its session_start handler, which the runner fires; dispose emits no session_shutdown,
+	// which is why the runner fires that one too.
+	assert.match(index, /pi\.on\("session_start", \(_event, ctx\) => \{/);
+	const dispose = agentDistFile("core", "agent-session.js").match(/\n {4}dispose\(\) \{[\s\S]*?\n {4}\}\n/)?.[0] ?? "";
+	assert.ok(dispose.length > 0 && !dispose.includes("session_shutdown"), "dispose now emits session_shutdown: the runner's own stop may be redundant, re-read DES-MCP-TARGETED-LIFECYCLE");
+});
+
+test("McpExtensionOptions is the set the runner fills, and codemode takes its models switch", { skip }, () => {
+	const types = agentDistFile("extensions", "mcp", "index.d.ts");
+	const body = types.match(/export interface McpExtensionOptions \{([\s\S]*?)\n\}/)?.[1] ?? "";
+	const keys = [...body.matchAll(/^\s{4}(\w+)\??:/gm)].map((m) => m[1]);
+	assert.deepEqual(keys, ["loadConfig", "createTransport", "credentials", "logPath", "openUrl", "updateConfig", "startupWaitMs"], "a new option is a default the runner has not decided");
+	assert.match(agentDistFile("extensions", "codemode", "index.js"), /models: options\.models \?\? true,/, "codemode's models.* switch moved: the job's codemodeModels would not reach it");
+});
+
+test("the transports the runner builds: stdio takes inheritEnv and kills its process group at exit; HTTP takes a fetch", { skip }, () => {
+	const stdio = mcpDistFile("transports", "stdio.js");
+	assert.match(stdio, /const env = this\.options\.inheritEnv === false \? \{ \.\.\.this\.options\.env \} : \{ \.\.\.process\.env, \.\.\.this\.options\.env \};/, "inheritEnv:false no longer keeps the runner's environment from a stdio server");
+	assert.match(stdio, /process\.once\("exit", \(\) => \{/, "pi-mcp no longer kills live servers at exit: a SIGTERM'd runner would leave them");
+	assert.match(stdio, /process\.kill\(-pid, "SIGTERM"\)/);
+	// The stop releases a server's pipes through the transport's child (src/mcp.mjs lifecycle.stop).
+	assert.match(stdio, /this\.child = child;/, "the stdio transport no longer keeps its child where the runner's stop reaches it");
+	const http = mcpDistFile("transports", "streamable-http.js");
+	assert.match(http, /const fetch = options\.fetch \?\? globalThis\.fetch;/, "the HTTP transport no longer takes the guarded fetch");
+	assert.match(http, /const body = await response\.json\(\);/, "a JSON answer is no longer read whole: re-read the guarded fetch's bound");
+});
+
+test("isTransientMcpError is pi's own isTransientError, which decides what pi retries and so what the runner waits for", { skip }, async () => {
+	const runtime = agentDistFile("extensions", "mcp", "runtime.js");
+	assert.equal(
+		sha256(piFunction(runtime, "isTransientError")),
+		"127396c86f1bfca05209e7d1f174c67fc09eae40e41880b8db0214ea7f100494",
+		"pi's transient rule changed: re-read it and re-port isTransientMcpError (src/mcp.mjs)",
+	);
+	assert.match(runtime, /const CONNECT_RETRY_DELAYS_MS = \[250, 1_000\];/);
+	assert.match(runtime, /const retries = "url" in this\.entry\.config \? CONNECT_RETRY_DELAYS_MS : \[\];/, "pi now retries a stdio server too");
+});
+
+test("the runner's pi-mcp is the copy pi's MCP extension uses, so a StdioTransport it builds is pi's StdioTransport", { skip }, async () => {
+	const runner = fileURLToPath(import.meta.resolve("@earendil-works/pi-mcp"));
+	const fromPi = fileURLToPath(import.meta.resolve("@earendil-works/pi-mcp", pathToFileURL(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")))));
+	assert.equal(runner, fromPi);
+});
+
+test("pi's connect runs in the order the runner's readiness observes: initialize, initialized, then the tool and resource lists", { skip }, () => {
+	const client = mcpDistFile("client.js");
+	assert.match(client, /await transport\.start\(\);[\s\S]*?this\.requestInternal\("initialize",[\s\S]*?SUPPORTED_PROTOCOL_VERSIONS\.includes[\s\S]*?await this\.notifyInternal\("notifications\/initialized"/, "the client's connect order changed");
+	assert.match(client, /catch \(error\) \{\n\s*await this\.close\(\)\.catch\(\(\) => \{ \}\);\n\s*throw error;/, "a failed connect no longer closes the transport, which the runner reads as a refusal");
+	const runtime = agentDistFile("extensions", "mcp", "runtime.js");
+	assert.match(runtime, /await client\.connect\(transport\);[\s\S]*?client\.serverCapabilities\?\.tools \? client\.listTools\(\) : \[\],[\s\S]*?this\.onTools\(this\);/, "pi no longer lists a server's tools before registering them");
 });

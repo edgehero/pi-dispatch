@@ -34,8 +34,12 @@ import { findDuplicateKey } from "./json-duplicates.mjs";
 export const MCP_CONFIG_FILE_NAME = "mcp.json";
 /** The largest overlay `mcp.json` read, in bytes. A server list is a few hundred bytes; this is a bound, not a budget. */
 export const MCP_CONFIG_MAX_BYTES = 64 * 1024;
-/** A server name: lowercase letters, digits and `-`, up to 32. Narrower than pi's, so no two names share pi's namespace. */
-export const MCP_SERVER_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/**
+ * A server name: lowercase words of letters and digits joined by single `-`, up to 32. Narrower than pi's, so no two
+ * names share pi's namespace: pi writes `-` as `_` in `mcp__<server>__<tool>`, and a trailing `-` or a `--` would let one
+ * server's tool name read as another's (`a-` with `x` and `a` with `_x` are both `mcp__a___x`).
+ */
+export const MCP_SERVER_NAME_RE = /^(?=[a-z0-9-]{1,32}$)[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** The exposures pi 1.1.0 takes, by their current names (pi's alias `codemode-deferred` is refused, not translated). */
 export const MCP_EXPOSURES = Object.freeze(["codemode", "deferred", "direct", "hidden"]);
 /** Top-level keys. */
@@ -115,7 +119,7 @@ const shown = (name) => JSON.stringify(name);
  */
 function checkServer(name, raw) {
 	const refuse = (problem) => ({ name, problem });
-	if (!MCP_SERVER_NAME_RE.test(name)) return refuse("the name must be lowercase letters, digits and `-`, up to 32, starting with a letter or digit");
+	if (!MCP_SERVER_NAME_RE.test(name)) return refuse("the name must be lowercase letters and digits, words joined by single `-`, up to 32");
 	if (name.includes("dispatch")) return refuse("a name holding `dispatch` is reserved for the dispatch admin");
 	if (!isRecord(raw)) return refuse("the entry is not an object");
 	for (const key of Object.keys(raw)) {

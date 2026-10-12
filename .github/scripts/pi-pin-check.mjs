@@ -28,6 +28,9 @@ export function piPinProblems({ root, lock, runner, worker, admin, adminIndex, d
 	const want = (where, value) => {
 		if (value !== pin) problems.push(`${where} is ${JSON.stringify(value)}, not the pin ${pin}`);
 	};
+	// The runner builds its MCP transports from pi-mcp itself (src/mcp.mjs), and pi treats a StdioTransport instance
+	// specially, so the two must be one copy at one version.
+	want("image/runner/package.json's @earendil-works/pi-mcp", runner?.dependencies?.[`${SCOPE}pi-mcp`]);
 	want("worker/package.json's @earendil-works/pi-ai", worker?.dependencies?.[`${SCOPE}pi-ai`]);
 	want("admin/package.json's devDependency @earendil-works/pi-coding-agent", admin?.devDependencies?.[`${SCOPE}pi-coding-agent`]);
 	want("admin/src/index.ts's SUPPORTED_PI_VERSION", /^export const SUPPORTED_PI_VERSION = "([^"]*)";$/m.exec(adminIndex ?? "")?.[1]);

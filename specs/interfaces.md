@@ -569,11 +569,18 @@ Evidence convention as in `constitution.md`.
   with a discarding `modelsStore` and `allowModelNetwork: false`: pi's default store writes `models-store.json`
   beside modelsPath, which on the overlay's :ro mount fails EACCES once per provider on every refresh. Also
   not loaded, by construction: pi 0.99's built-in extensions (`builtin:mcp`, `builtin:codemode`,
-  `builtin:tool-search`, `builtin:llama.cpp`) come only from the loader's `extensionFactories`, which the
-  runner never passes; a `builtin:` path that reaches the loader is refused as unknown (pinned in
-  loader.test.mjs against a real session). So a repo's `mcp.json` is never read in a job's session, and a pi
-  CLI child the job starts gets `--no-mcp` from the preload (OQ-011 M6), so pi's built-in MCP does not read it
-  there either (the residuals are in OQ-011 M6).
+  `builtin:tool-search`, `builtin:llama.cpp`) come only from the loader's BUILT-IN `extensionFactories`
+  (`builtin: true`), which the runner never passes; a `builtin:` path that reaches the loader is refused as
+  unknown (pinned in loader.test.mjs against a real session, with and without the job's own factories). A job
+  whose trigger names MCP servers (`REQ-MCP-OPERATOR-SERVERS`) is handed pi's MCP, codemode and tool_search as
+  three NAMED inline factories (`<inline:job-mcp>`, `<inline:job-codemode>`, `<inline:job-tool-search>`,
+  `image/runner/src/mcp.mjs`), passed only when `/job/mcp.json` exists: its config is that file and nothing else
+  (`loadConfig`), its transports are the runner's (`createTransport`: no OAuth, an origin-locked fetch with no
+  redirect, a stdio server with only the environment it names), servers an extension registers are never
+  connected (the guarded API answers `getMcpServers` with nothing), there is no `/mcp`, and codemode gets the
+  document's `codemodeModels`. So a repo's `mcp.json` is never read in a job's session, and a pi CLI child the
+  job starts gets `--no-mcp` from the preload (OQ-011 M6), so pi's built-in MCP does not read it there either
+  (the residuals are in OQ-011 M6).
 
 ## INT-RUNNER-EXIT-CODE-PROTOCOL
 
@@ -772,6 +779,19 @@ refactor apart.
   runs today and may be doing what its trigger wants: `workspace_not_writable`, `outbox_not_writable`,
   `home_not_writable`, `agent_dir_not_writable` and `home_under_mount` (fields: the path or home, the uid,
   the access code; never content).
+
+  **A job whose trigger names MCP servers (REQ-MCP-OPERATOR-SERVERS, `image/runner/src/mcp.mjs`) adds seven named
+  reasons under the EXISTING codes**, every one before the command check and the prompt:
+
+  | MCP event | Surfaces as | Exit / reason |
+  |---|---|---|
+  | `/job/mcp.json` and `PI_MCP_SERVERS` disagree (one present without the other, other names, another order) | `readJobMcp`, before anything loads → tagged `configError` | `2` / `mcp-config-mismatch` |
+  | `/job/mcp.json` is not a document the worker writes (version, keys, a reference outside the server's list, a stdio `env` key that would replace `NODE_OPTIONS` or the child-meter variables) | same | `2` / `mcp-config-invalid` |
+  | A reference the document lists is unset or empty in the container | same | `2` / `mcp-secret-missing` |
+  | A stdio server's command is not on the image (an enabled server only) | same | `2` / `mcp-command-missing` |
+  | Another extension registers `codemode`, `tool_search`, a resource tool, an `mcp__` tool or `/mcp` | after `createAgentSession` → tagged `configError` | `2` / `mcp-shadowed` |
+  | A server refused the connection (its command did not start, it exited or failed the handshake or its tool list, pi refused an answer, an HTTP error other than 408, 429 or a 5xx other than 501, a redirect, a body over 16 MiB, a control character in a resolved header; a server whose own `timeout` ran out before it answered) | `lifecycle.start`, before the command check and the prompt → tagged `configError` | `2` / `mcp-unavailable`: the next attempt would find it the same |
+  | A server had not answered when the wait ran out (15 s, or its own longer `timeout`, at most 120 s: the network, a transient HTTP status pi kept retrying, a server still starting) | same → tagged `EXIT_INFRA` | `1` / `mcp-unreachable`: retried, as any infrastructure failure |
 
   **Command jobs (issue #189, `run.command`) add three named reasons under the EXISTING codes — never a
   new code and never a new worker-level outcome** (the admin surfaces bucket outcomes into a closed set
@@ -1647,47 +1667,47 @@ refactor apart.
     no benefit of the doubt about what it contains — and neither costs an unflagged job anything.
     `verify-image.sh` greps the baked guardrails when the label claims `replicas`, so this label cannot lie
     any more than `forges` can. The token set at this version is `replicas`, `commands`, `excludeTools`,
-    `anyUid`, `costCap`, `modelPolicy` and `exitAuth` -- the third (issue #291) declares that the baked runner reads `PI_EXCLUDE_TOOLS`, and
-    a job carrying exclusions on an image without it is refused pre-spend
-    (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a
-    "read-only" trigger with every tool the file says to remove: a permission quietly not enforced.
-    `verify-image.sh` fails on any UNKNOWN token and checks each claimed one (a grep of the baked runner, or
-    for `anyUid` runs as uid 4242), so a new capability cannot ship its label without shipping its evidence.
-    `costCap` (issue #501) declares that the baked runner reads `PI_MAX_COST_MICROS` and stops a job before any
-    provider call whose bound could take it past that cap (`INT-RUNNER-EXIT-CODE-PROTOCOL`, the `cost-cap` row).
-    Its evidence is a run, not a grep: a job with a fake key (`ANTHROPIC_API_KEY=sk-ant-not-a-real-key`) on the default
-    priced model, with `--network none` and `PI_MAX_COST_MICROS=0`, must exit `2` with reason `cost-cap` and
-    `costRefused: 1` on its exit line, so nothing is dialled and nothing is spent. A runner that ignored the
-    variable would try the call and die on the network; one that could not enforce it would exit
-    `cost-cap-unenforceable`. The pi-upgrade-check workflow also requires this repo's image to carry the token.
-    `modelPolicy` (issue #502) declares that the baked runner reads `PI_ALLOWED_MODELS` and stops a job before any
-    provider call to a model the list does not name (`INT-RUNNER-EXIT-CODE-PROTOCOL`, the `model-not-allowed` row).
-    Its evidence is a run too: the same offline job on the default model, with a list that names only another model
+    `anyUid`, `costCap`, `modelPolicy`, `exitAuth` and `mcp` (REQ-MCP-OPERATOR-SERVERS: the runner reads
+    `/job/mcp.json`; its evidence is an offline run with a stub stdio server under a cost cap of 0, which must log
+    `mcp_servers_ready` and then stop `cost-cap`) -- the third (issue #291) declares that the baked runner reads
+    `PI_EXCLUDE_TOOLS`, and a job carrying exclusions on an image without it is refused pre-spend
+    (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a "read-only"
+    trigger with every tool the file says to remove: a permission quietly not enforced. `verify-image.sh` fails on any
+    UNKNOWN token and checks each claimed one (a grep of the baked runner, or for `anyUid` runs as uid 4242), so a new
+    capability cannot ship its label without shipping its evidence. `costCap` (issue #501) declares that the baked
+    runner reads `PI_MAX_COST_MICROS` and stops a job before any provider call whose bound could take it past that cap
+    (`INT-RUNNER-EXIT-CODE-PROTOCOL`, the `cost-cap` row). Its evidence is a run, not a grep: a job with a fake key
+    (`ANTHROPIC_API_KEY=sk-ant-not-a-real-key`) on the default priced model, with `--network none` and
+    `PI_MAX_COST_MICROS=0`, must exit `2` with reason `cost-cap` and `costRefused: 1` on its exit line, so nothing is
+    dialled and nothing is spent. A runner that ignored the variable would try the call and die on the network; one
+    that could not enforce it would exit `cost-cap-unenforceable`. The pi-upgrade-check workflow also requires this
+    repo's image to carry the token. `modelPolicy` (issue #502) declares that the baked runner reads
+    `PI_ALLOWED_MODELS` and stops a job before any provider call to a model the list does not name
+    (`INT-RUNNER-EXIT-CODE-PROTOCOL`, the `model-not-allowed` row). Its evidence is a run too: the same offline job on
+    the default model, with a list that names only another model
     (`PI_ALLOWED_MODELS=anthropic/claude-haiku-4-5-20251001`), must exit `2` with reason `model-not-allowed` and
     `modelRefused: 1`, so nothing is dialled. A runner that ignored the variable would try the call and die on the
     network; one that could not enforce it would exit `model-policy-unenforceable`. The pi-upgrade-check workflow
     requires this repo's image to carry this token as well. The worker's `modelPolicy` row in `CAPABILITY_GATES`
-    (below) is what reads it: a job with a list on an image without it is refused pre-spend.
-    The worker's side of the six job-feature tokens (`replicas`, `commands`, `excludeTools`, `modelPolicy`, `costCap`, `mcp`) is ONE table
-    since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which
-    jobs need it, the result key, the record reason, the log event and the comment. The preflight refuses the
-    first row a job needs and the image lacks, in the order the branches had, so the behaviour is unchanged
-    and a new image-gated feature is a row rather than a branch in two files. `anyUid` is not a row: it is
-    read by the job-user gate after the preflight. A fourth row, **`modelPolicy`** (issue #502), lands with
-    the first emission of `PI_ALLOWED_MODELS`: a job whose EFFECTIVE allowed-model list is non-empty (its
-    trigger's `run.models`, else the deployment's `PI_ALLOWED_MODELS`) is refused pre-spend on an image
-    that does not declare it, reason `job-image-model-policy-unsupported`. An older runner either ignores
-    the variable (a list quietly not enforced) or refuses it before the first call as
-    `model-policy-unenforceable`, after the reservation. This repo's image declares it since #502 part 4 (the
-    runner's model guard, with its `verify-image.sh` proof); a job with a list on an image without it is refused
-    here, fail closed, never silently run unrestricted.
-    A fifth row, **`costCap`** (issue #501 part 1), appended after it: it is needed by every job carrying a dollar cap
-    (`maxCostMicros !== null`, 0 included) and by no other, and an image that does not declare it refuses such
-    a job pre-spend with reason `job-image-cost-cap-unsupported` (nothing minted or cloned, no budget reserved,
-    `budgetReserved: false`), because a runner that predates the cost guard reads no `PI_MAX_COST_MICROS` and
-    would run the job with no cap at all. It lands with the first worker that writes the variable, so no
-    worker ever sends a cap to an image that would ignore it. A deployment that sets no dollar cap needs no
-    image change.
+    (below) is what reads it: a job with a list on an image without it is refused pre-spend. The worker's side of the
+    six job-feature tokens (`replicas`, `commands`, `excludeTools`, `modelPolicy`, `costCap`, `mcp`) is ONE table
+    since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which jobs need
+    it, the result key, the record reason, the log event and the comment. The preflight refuses the first row a job
+    needs and the image lacks, in the order the branches had, so the behaviour is unchanged and a new image-gated
+    feature is a row rather than a branch in two files. `anyUid` is not a row: it is read by the job-user gate after
+    the preflight. A fourth row, **`modelPolicy`** (issue #502), lands with the first emission of `PI_ALLOWED_MODELS`:
+    a job whose EFFECTIVE allowed-model list is non-empty (its trigger's `run.models`, else the deployment's
+    `PI_ALLOWED_MODELS`) is refused pre-spend on an image that does not declare it, reason
+    `job-image-model-policy-unsupported`. An older runner either ignores the variable (a list quietly not enforced) or
+    refuses it before the first call as `model-policy-unenforceable`, after the reservation. This repo's image
+    declares it since #502 part 4 (the runner's model guard, with its `verify-image.sh` proof); a job with a list on
+    an image without it is refused here, fail closed, never silently run unrestricted. A fifth row, **`costCap`**
+    (issue #501 part 1), appended after it: it is needed by every job carrying a dollar cap (`maxCostMicros !== null`,
+    0 included) and by no other, and an image that does not declare it refuses such a job pre-spend with reason
+    `job-image-cost-cap-unsupported` (nothing minted or cloned, no budget reserved, `budgetReserved: false`), because
+    a runner that predates the cost guard reads no `PI_MAX_COST_MICROS` and would run the job with no cap at all. It
+    lands with the first worker that writes the variable, so no worker ever sends a cap to an image that would ignore
+    it. A deployment that sets no dollar cap needs no image change.
     **`exitAuth`** (issue #545) declares that the baked runner reads the exit line's key from stdin when
     `PI_EXIT_AUTH=stdin`, signs its exit line with it, writes a real exit line on SIGTERM, and is started by the
     entrypoint under the exec-only `/opt/pi-dispatch/runner-node`, every key holder with `--disable-sigusr1`
@@ -4137,12 +4157,13 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 
 - **`run.mcp` (ALL trigger kinds, optional non-empty array of 1 to 8 server names)**: the overlay MCP servers this
   trigger's jobs connect (`REQ-MCP-OPERATOR-SERVERS`, `INT-OVERLAY-MCP-CONFIG`). Each name matches the overlay's name
-  rule (lowercase letters, digits and `-`, up to 32), unique. The loader is fs-free, so whether the overlay offers a
-  name is asked at pickup (`DES-MCP-EGRESS-PREFLIGHT`), before anything is spent. Near misses (`mcpServers`, `MCP`,
-  `mcp_servers`, a key outside plain ASCII with no plain letter other than those of `mcpservers`) and `on.mcp` are
-  refused, since a dropped list runs the job without its servers. Absent carries no key. File-only: the admin's tools cannot set it, and a chained
-  child does not inherit it (its servers are reached with credentials granted to the parent's trigger). An image that
-  does not declare the `mcp` capability is refused pre-spend as `job-image-mcp-unsupported`.
+  rule (lowercase letters and digits, words joined by single `-`, up to 32), unique. The loader is fs-free, so whether
+  the overlay offers a name is asked at pickup (`DES-MCP-EGRESS-PREFLIGHT`), before anything is spent. Near misses
+  (`mcpServers`, `MCP`, `mcp_servers`, a key outside plain ASCII with no plain letter other than those of
+  `mcpservers`) and `on.mcp` are refused, since a dropped list runs the job without its servers. Absent carries no
+  key. File-only: the admin's tools cannot set it, and a chained child does not inherit it (its servers are reached
+  with credentials granted to the parent's trigger). An image that does not declare the `mcp` capability is refused
+  pre-spend as `job-image-mcp-unsupported`.
 - **`run.excludeTools` (ALL trigger kinds, optional non-empty array of pi tool names)**: the built-in pi
   tools this trigger's sessions must NOT have (`DES-PER-TRIGGER-TOOL-EXCLUSIONS`,
   `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, issue #291). The runner passes the list to `createAgentSession` as
@@ -4818,8 +4839,9 @@ validator rather than a second copy of it.
 - **Contract**: `<PI_GLOBAL_PI_DIR>/mcp.json`, optional. A regular file (never a link, a pipe or a device) of at
   most 64 KiB, JSON with no duplicate key, an object of at most these top-level keys:
   - `autoEnableCodemode`: boolean, default true (pi's own meaning);
-  - `mcpServers`: an object of servers by name. A name is 1 to 32 of `a-z`, `0-9` and `-`, starting with a letter
-    or digit, and holding no `dispatch`.
+  - `mcpServers`: an object of servers by name. A name is 1 to 32 of `a-z`, `0-9` and `-`: words of letters and
+    digits joined by single `-` (no leading or trailing `-`, no `--`, since pi writes `-` as `_` in a tool's name and
+    either would let one server's tool name read as another's), holding no `dispatch`.
 
   A server is streamable HTTP (`url`) or stdio (`command`), never both:
   - **both**: `description` (required, at most 300 characters with no control, format or line-separator character;
@@ -8265,3 +8287,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-12 | No issue: MCP in a job's pi children. **`INT-SDK-SESSION-OPTIONS` AMENDED** in (m): a pi CLI child the job starts gets `--no-mcp` from the preload, so a repo's `mcp.json` is read neither in the job's session nor by pi's built-in MCP in a child (residuals in OQ-011 M6). The session's options are UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `INT-OVERLAY-MCP-CONFIG`**: the overlay's `mcp.json`, its accepted keys per transport, the `${NAME}` reference grammar, the refusals, and its producer and consumers. `INT-PI-PACKAGES-FILE-CONTRACT` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.mcp` on all five kinds, names only, its near-miss sweep (ASCII spellings, and a key under `run` or `on` outside plain ASCII with no plain letter other than those of `mcpservers`), a `trigger-skew` row, file-only and not inherited by a chained child. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/mcp.json` (0444, references only, the admin's tool names hidden first). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-mcp-unsupported` and the seven `mcp-*` pickup refusals (`mcp-list-invalid` for a job's list the loader would not have written). **`INT-OVERLAY-MCP-CONFIG` AMENDED**: its consumers now include the pickup. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the env gains `PI_MCP_SERVERS`; `CAPABILITY_GATES` gains the `mcp` row (six job-feature tokens); the token is declared by no image until the runner reads `/job/mcp.json`, so the label's token set is unchanged. |
+| 2026-10-12 | No issue: MCP servers in jobs, the runner. **`INT-SDK-SESSION-OPTIONS` AMENDED** in (m): a job whose trigger names servers gets pi's MCP, codemode and tool_search as three named inline factories, with the runner's config, transports and guarded API; `builtin:` paths stay unknown, and a repository's `mcp.json` is still never read. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: seven rows, `mcp-config-mismatch`, `mcp-config-invalid`, `mcp-secret-missing`, `mcp-command-missing`, `mcp-shadowed` and `mcp-unavailable` under the policy code and `mcp-unreachable` under the infrastructure code; no new code. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the image declares `mcp`, proved by an offline stub-server run. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: a server name is words joined by single `-` (no trailing `-`, no `--`), so no two servers' tool names read alike once pi writes `-` as `_`. `INT-CONTAINER-JOB-INPUTS` is UNCHANGED, checked: the runner reads `/job/mcp.json` and `PI_MCP_SERVERS` as the worker writes them. `INT-RUN-HISTORY-FILE-CONTRACT` is UNCHANGED, checked: runner reasons ride the exit line, not the record's reason enum. |

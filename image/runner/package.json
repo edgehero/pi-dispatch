@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-mcp": "1.1.0",
     "@playwright/cli": "0.1.17"
   }
 }
