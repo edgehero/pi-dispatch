@@ -76,6 +76,31 @@ function mrReplicaLines(replica, replicas) {
  * toward the full envelope, and a bare "address the feedback" over a cold session is an agent with no
  * idea what it was asked to do. `glab`, never `gh`: this envelope's whole reason for existing.
  */
+/**
+ * What a resumed run is told to do with the activity (issue #624). On a merge request the branch and the pull
+ * request exist, so the words are the ones this envelope always had. On an issue neither is certain: the
+ * previous run may have opened nothing (it concluded there was nothing to change, or it stopped to ask), and
+ * "push to the same branch ... do not open a second" would leave the work on a branch nobody reviews while the
+ * human who asked waits on the issue for a reply. So the issue form names the issue branch, checks for its pull
+ * request first, and replies where the activity came from. No replica argument: run.resume refuses replicas.
+ */
+function resumedActionLines(target, n) {
+	if (target?.type === "pull_request") {
+		return [
+			"Address the activity quoted below. If it asks for changes, make them, push to the same branch with",
+			"`git push --force-with-lease`, and reply on the merge request saying what you did or why you could",
+			"not. Do not open a second merge request -- your push updates the existing one.",
+		];
+	}
+	const branch = issueBranch(n);
+	return [
+		"Address the activity quoted below, then reply on the issue saying what you did or why you could not.",
+		`If it asks for changes, commit them to \`${branch}\` and publish with \`git push --force-with-lease\` to that`,
+		`branch only. Check first for an open merge request from it (\`glab mr list --source-branch ${branch}\`):`,
+		"if one exists your push updates it, so do not open a second; only if none exists, run `glab mr create`.",
+	];
+}
+
 function buildResumedPrompt(flow, target, comment, instructions) {
 	const n = normalizeNumber(target?.number);
 	const noun = target?.type === "pull_request" ? "merge request" : "issue";
@@ -89,9 +114,7 @@ function buildResumedPrompt(flow, target, comment, instructions) {
 		`and \`glab mr diff ${n}\` (or \`glab issue view ${n}\`) before doing anything, then follow the`,
 		`"${flow}" skill from the top.`,
 		"",
-		"Address the activity quoted below. If it asks for changes, make them, push to the same branch with",
-		"`git push --force-with-lease`, and reply on the merge request saying what you did or why you could",
-		"not. Do not open a second merge request -- your push updates the existing one.",
+		...resumedActionLines(target, n),
 		"",
 		// Above the never-merge paragraph, so the harness has the last word before the data region.
 		...(instructionBlock(instructions) ? [instructionBlock(instructions), ""] : []),

@@ -68,6 +68,31 @@ function prReplicaLines(replica, replicas) {
 	];
 }
 
+/**
+ * What a resumed run is told to do with the activity (issue #624). On a pull request the branch and the pull
+ * request exist, so the words are the ones this envelope always had. On a work item neither is certain: the
+ * previous run may have opened nothing (it concluded there was nothing to change, or it stopped to ask), and
+ * "push to the same branch ... do not open a second" would leave the work on a branch nobody reviews while the
+ * human who asked waits on the work item for a reply. So the issue form names the issue branch, checks for its pull
+ * request first, and replies where the activity came from. No replica argument: run.resume refuses replicas.
+ */
+function resumedActionLines(target, n) {
+	if (target?.type === "pull_request") {
+		return [
+			"Address the activity quoted below. If it asks for changes, make them, push to the same branch with",
+			"`git push --force-with-lease`, and reply on the pull request saying what you did or why you could",
+			"not. Do not open a second pull request -- your push updates the existing one.",
+		];
+	}
+	const branch = issueBranch(n);
+	return [
+		"Address the activity quoted below, then reply on the work item saying what you did or why you could not.",
+		`If it asks for changes, commit them to \`${branch}\` and publish with \`git push --force-with-lease\` to that`,
+		`branch only. Check first for an active pull request from it (\`az repos pr list --source-branch ${branch} --status active\`):`,
+		`if one exists your push updates it, so do not create another; only if none exists, run \`az repos pr create --source-branch ${branch}\`.`,
+	];
+}
+
 function buildResumedPrompt(flow, target, comment, instructions) {
 	const n = normalizeNumber(target?.number);
 	const noun = target?.type === "pull_request" ? "pull request" : "work item";
@@ -81,9 +106,7 @@ function buildResumedPrompt(flow, target, comment, instructions) {
 		`\`az repos pr show --id ${n}\` (or \`az boards work-item show --id ${n}\`) before doing anything,`,
 		`then follow the "${flow}" skill from the top.`,
 		"",
-		"Address the activity quoted below. If it asks for changes, make them, push to the same branch with",
-		"`git push --force-with-lease`, and reply on the pull request saying what you did or why you could",
-		"not. Do not open a second pull request -- your push updates the existing one.",
+		...resumedActionLines(target, n),
 		"",
 		// Above the never-merge paragraph, so the harness has the last word before the data region.
 		...(instructionBlock(instructions) ? [instructionBlock(instructions), ""] : []),

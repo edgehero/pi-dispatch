@@ -127,3 +127,19 @@ test("a RESUMED gitlab envelope renders no replica paragraph even if handed an i
 	const p = buildGitLabPrompt({ flow: "fix", target: mr, resumed: true, replica: 2, replicas: 2 });
 	assert.equal(/replica/i.test(p), false);
 });
+
+// --- what a resumed run is told to do, by target (issue #624) ---
+
+test("a resumed issue run replies where the activity came from and checks for the branch's pull request first", () => {
+	const p = buildGitLabPrompt({ flow: "fix", target: { type: "issue", number: 5, title: "t", body: "b" }, comment: { body: "go with option B" }, resumed: true });
+	assert.match(p, /reply on the issue saying what you did/);
+	assert.match(p, /glab mr list --source-branch pi\/issue-5/);
+	assert.match(p, /glab mr create/);
+	assert.equal(/your push updates the existing one/.test(p), false, "an issue run is not told a pull request already exists");
+});
+
+test("a resumed pull request run keeps its words", () => {
+	const p = buildGitLabPrompt({ flow: "fix", target: { type: "pull_request", number: 9, title: "t", body: "b" }, comment: { body: "x" }, resumed: true });
+	assert.match(p, /your push updates the existing one\./);
+	assert.equal(/glab \w+ create/.test(p), false);
+});
