@@ -377,3 +377,16 @@ test("a label rule's excludeTools reach the job, and an unflagged rule adds no k
 	const plain = filterForgejo("issues", parseForgejoSubset(issuePayload()), triggersRaw, knownFlows, SELF_ID, true, "fj-noxt");
 	assert.equal("excludeTools" in plain.job, false, "an unflagged rule's job literal is byte-identical");
 });
+
+// --- a reply without the phrase on a parked issue (issue #625) ---
+
+test("a Forgejo comment without the phrase resumes a parked issue", () => {
+	const resumeTriggers = { ...triggersRaw, comment: { ...triggersRaw.comment, resume: true } };
+	const go = (payload) => filterForgejo("issue_comment", parseForgejoSubset(payload), resumeTriggers, knownFlows, SELF_ID, true, "fj-p");
+	const parked = commentPayload({ issue: { number: 7, title: "T", body: "B", labels: [label("pi-awaiting-input")] }, comment: { body: "option B" } });
+	const r = go(parked);
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.parkedReply, true);
+	assert.equal(go(commentPayload({ comment: { body: "option B" } })).reason, "no-trigger-phrase");
+	assert.equal(run("issue_comment", parked).reason, "no-trigger-phrase", "a comment trigger without resume has nothing to continue");
+});

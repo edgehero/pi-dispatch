@@ -186,3 +186,18 @@ test("exactly two non-empty segments is still the accepted shape", async () => {
 	const host = makeGitHubHost({ octokitFor });
 	assert.deepEqual(await host.resolveDefaultBranchSha({ repo: "o/r" }, "t"), { branch: "main", sha: "s1" });
 });
+
+// -- setParkedLabel (issue #625) ------------------------------------------------------------------
+
+test("setParkedLabel adds the marker by name, and removing one the issue lacks (404) is the state asked for", async () => {
+	const add = "POST /repos/{owner}/{repo}/issues/{issue_number}/labels";
+	const del = "DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}";
+	const octokitFor = fakeOctokitFor({ [add]: [], [del]: httpError(404) });
+	const host = makeGitHubHost({ octokitFor });
+	await host.setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok");
+	assert.deepEqual(octokitFor.constructions[0].calls[0].params, { owner: "owner", repo: "name", issue_number: 7, labels: ["pi-awaiting-input"] });
+	await host.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
+	assert.equal(octokitFor.constructions[1].calls[0].params.name, "pi-awaiting-input");
+	const failing = makeGitHubHost({ octokitFor: fakeOctokitFor({ [del]: httpError(500) }) });
+	await assert.rejects(() => failing.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok"));
+});

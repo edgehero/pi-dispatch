@@ -1950,6 +1950,17 @@ adversarial passes did.
   and approval tools (`DES-FORGE-MCP`) and a proof in `verify-image.sh`, after the same reading.
 - **What would change it**: a forge MCP server for Forgejo or Azure DevOps worth pinning.
 
+## OQ-042: Who may set the parked label
+
+- **Status**: `ACCEPTED RISK` (2026-10-12, issue #625).
+- **Position**: a reply without the phrase is routed on the forge label `pi-awaiting-input`, and on GitHub a
+  triage-role member may label an issue without the write access the comment trigger's author gate asks for. Setting
+  the label alone starts nothing: the reply's author still passes that gate, and the worker refuses the job before any
+  spend unless the key's `parked` sidecar exists. The worst a stray label does is route one admitted author's ordinary
+  comment to a free `not-parked` refusal, which also clears the label.
+- **What would change it**: a forge whose comment route does not run the author gate before this route, or a run of
+  `not-parked` refusals in the records that says labels are being set on purpose.
+
 ## Revision History
 
 | Date | Change |
@@ -2051,3 +2062,4 @@ adversarial passes did.
 | 2026-10-09 | Issue #599, the run mirror's start. **`OQ-039` AMENDED**: residuals of `runs:since`, the first three reachable only beside a worker from before it or by a hand on the keys: a run that ended before a loss and whose older writer's mirror write landed just after it reads as idle from its end to the loss; a start lost on its own beside a slow older run; a retry of exactly the vouching job id that an older writer mirrors into an index it recreated, which makes the stale start trusted again; and a failed mirror write, which is never retried and reads as idle to a peer. |
 | 2026-10-12 | No issue: MCP in a job's pi children. **`OQ-011` AMENDED** (M6): every pi CLI child gets `--no-mcp` beside its injected meter, since a child otherwise connects the MCP servers named by its agent dir's `mcp.json` and, when it trusts the project, the repo's `.pi/mcp.json`. The flag turns off pi's built-in MCP only; the residuals are a `pi mcp` subcommand, pi's MCP extension loaded as an ordinary extension, a process that imports pi's `main`, and a child the preload does not reach. |
 | 2026-10-12 | No issue: the forge's own MCP server. **NEW `OQ-040`** (`WATCH`): `forge` in `run.mcp` is github and gitlab only until a Forgejo or Azure DevOps forge MCP server is read, pinned and wrapped the same way. |
+| 2026-10-12 | Issue #625. **NEW `OQ-042`** (`ACCEPTED RISK`): the parked label can be set by a member who is not an admitted comment author; it routes, it never decides, and the author gate and the worker's sidecar check still run. |

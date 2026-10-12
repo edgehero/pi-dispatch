@@ -481,3 +481,18 @@ test("a label rule's excludeTools reach the job, and an unflagged rule adds no k
 	const plain = filterGitLab(parseGitLabSubset(issuePayload()), triggers, knownFlows, SELF_ID, true, "gl-noxt");
 	assert.equal("excludeTools" in plain.job, false, "an unflagged rule's job literal is byte-identical");
 });
+
+// --- a reply without the phrase on a parked issue (issue #625) ---
+
+test("a GitLab note without the phrase resumes a parked issue, and not a merge request", () => {
+	const resumeTriggers = { ...triggers, comment: { ...triggers.comment, resume: true } };
+	const go = (payload) => filterGitLab(parseGitLabSubset(payload), resumeTriggers, knownFlows, SELF_ID, true, "wh-p");
+	const parked = notePayload({ object_attributes: { action: "create", note: "option B please", noteable_type: "Issue" }, issue: { iid: 5, title: "T", description: "B", labels: [label("pi-awaiting-input")] } });
+	const r = go(parked);
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.parkedReply, true);
+	assert.equal(go(notePayload({ object_attributes: { action: "create", note: "option B please", noteable_type: "Issue" } })).reason, "no-trigger-phrase");
+	const mr = notePayload({ object_attributes: { action: "create", note: "option B please", noteable_type: "MergeRequest" }, merge_request: { iid: 12, title: "MR", description: "D", labels: [label("pi-awaiting-input")] } });
+	assert.equal(go(mr).reason, "no-trigger-phrase");
+	assert.equal(run(parked).reason, "no-trigger-phrase", "a comment trigger without resume has nothing to continue");
+});

@@ -1233,3 +1233,29 @@ test("a rule naming no exclusions adds no key -- an unflagged job's literal is b
 	assert.equal(r.enqueue, true);
 	assert.equal("excludeTools" in r.job, false);
 });
+
+// --- a reply without the phrase on a parked issue (issue #625) ---
+
+test("a reply without the phrase resumes a parked issue: marker, resume and an allowed author all required", () => {
+	const parkedCfg = forgeCfg({ triggers: { ...cfgRaw.triggers, comment: { index: 4, phrase: "@pi", defaultFlow: "triage", resume: true } } });
+	const parked = (over = {}) => commentSubset({ issue: { number: 42, title: "T", body: "B", pull_request: false, labels: [{ name: "pi-awaiting-input" }] }, comment: { author_association: "OWNER", body: "go with option B" }, ...over });
+	const r = filter("issue_comment", parked(), parkedCfg, SELF_ID, "p1");
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.parkedReply, true);
+	assert.equal(r.job.flow, "triage", "the comment trigger's default flow; no override without the phrase");
+	assert.equal(r.job.resume, true);
+	assert.equal("parkedReply" in r.job.trigger, false, "a routing fact at job level, never in /job/event.json");
+
+	// The author gate runs first and is unchanged.
+	assert.equal(filter("issue_comment", parked({ comment: { author_association: "NONE", body: "go with option B" } }), parkedCfg, SELF_ID, "p2").reason, "author-not-allowed");
+	// No marker, no route.
+	assert.equal(filter("issue_comment", commentSubset({ comment: { author_association: "OWNER", body: "go with option B" } }), parkedCfg, SELF_ID, "p3").reason, "no-trigger-phrase");
+	// A comment trigger that does not resume has nothing to continue.
+	assert.equal(filter("issue_comment", parked(), cfg, SELF_ID, "p4").reason, "no-trigger-phrase");
+	// A pull request keeps the phrase: its key needs a head branch the worker cannot read for free.
+	assert.equal(filter("issue_comment", parked({ issue: { number: 42, title: "T", body: "B", pull_request: true, labels: [{ name: "pi-awaiting-input" }] } }), parkedCfg, SELF_ID, "p5").reason, "no-trigger-phrase");
+	// A phrased reply is the ordinary route, with no parkedReply flag.
+	const phrased = filter("issue_comment", parked({ comment: { author_association: "OWNER", body: "@pi go with B" } }), parkedCfg, SELF_ID, "p6");
+	assert.equal(phrased.enqueue, true);
+	assert.equal("parkedReply" in phrased.job, false);
+});

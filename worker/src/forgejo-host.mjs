@@ -21,6 +21,7 @@
  */
 
 import { configError } from "./config.mjs";
+import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 import { matchesBranch } from "./gitlab-host.mjs";
@@ -153,7 +154,38 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 		return { headRef: pr?.head?.ref, headRepo: pr?.head?.repo?.full_name };
 	}
 
-	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead };
+	/**
+	 * Add or remove the parked marker on an issue (issue #625, parked.mjs). Forgejo adds and removes a
+	 * label by NAME (its IssueLabelsOption and the `{identifier}` path take a name or an id), but only one the repository
+	 * already has, so adding first creates the repository label; a label that already exists answers 409 or 422 there. The caller treats any throw as fail-open:
+	 * the session store's sidecar, not this label, decides whether a reply resumes anything.
+	 */
+	async function setParkedLabel(ref, target, on, token) {
+		const [owner, name] = splitRepo(ref);
+		const send = async (method, path, body, accept = []) => {
+			let res;
+			try {
+				res = await fetchFn(`${root}${path}`, {
+					method,
+					headers: { Authorization: `token ${token}`, "content-type": "application/json" },
+					...(body !== undefined && { body: JSON.stringify(body) }),
+					redirect: "error",
+				});
+			} catch (err) {
+				throw new InfraRetry(`forgejo-host: ${method} ${path} failed (${fetchFailureReason(err)})`);
+			}
+			if (!res.ok && !accept.includes(res.status)) throw new InfraRetry(`forgejo-host: ${method} ${path} returned ${res.status}`);
+		};
+		const issue = `/repos/${owner}/${name}/issues/${encodeURIComponent(target?.number)}/labels`;
+		if (on) {
+			await send("POST", `/repos/${owner}/${name}/labels`, { name: PARKED_LABEL, color: "#fbca04", description: "pi-dispatch: the last run is waiting for an answer" }, [409, 422]);
+			await send("POST", issue, { labels: [PARKED_LABEL] });
+			return;
+		}
+		await send("DELETE", `${issue}/${encodeURIComponent(PARKED_LABEL)}`, undefined, [404]);
+	}
+
+	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
 }
 
 /**
