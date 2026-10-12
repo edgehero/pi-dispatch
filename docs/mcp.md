@@ -124,6 +124,7 @@ spent, the worker checks each one and refuses the job when:
 | `mcp-secret-unmapped` | the server references a variable the job will not have: not in `run.secrets`, and not a `PI_FORWARD_ENV` name the worker holds a value for |
 | `mcp-egress-unreachable` | with the egress policy on, the proxy would not let the job reach the server (an `http://` url on port 443 included), or `egress-allowlist.conf` cannot be read |
 | `mcp-package-runner` | with the egress policy on, the registry a package runner fetches from is not allowlisted |
+| `mcp-excluded` | the trigger's `run.excludeTools` leaves the server no way in ([exclude-tools.md](exclude-tools.md)) |
 | `job-image-mcp-unsupported` | the job image does not declare the `mcp` capability |
 | `trigger-skew` | the trigger names servers but the job arrived without them: the trigger changed after the job was queued, or the receiver is older than the worker |
 
@@ -146,8 +147,12 @@ The job loads pi's MCP, codemode and tool_search, as the pi CLI does, and connec
 - **Exposure.** Each server's `exposure` and `toolExposure` work as in pi: `codemode` (the default) reaches the tools
   from a codemode script, `deferred` through `tool_search`, `direct` declares them to the model, `hidden` leaves them
   out. Resources are read through pi's resource tools (`list_mcp_resources`, `list_mcp_resource_templates` and
-  `read_mcp_resource`). Each server's `description` becomes its line in the prompt's list of servers. Codemode's
-  `models.*` calls are off.
+  `read_mcp_resource`). Each server's `description` becomes its line in the prompt's list of servers. A codemode
+  script's `models.classify()` and `models.generateImages()` are on, as in the pi CLI: each is metered with the job,
+  held to its model list, and under a cost cap refused when it cannot be bounded (every image call, and a classifier
+  with an output price). A refused call stops the whole job, as any model call the cap or the list refuses does, so
+  a job under a cap cannot try an image model and carry on. An image model pi's catalog prices at zero is counted
+  at zero. `"codemodeModels": false` at the top of the overlay's `mcp.json` turns them off for every job.
 - **References.** The job resolves each `${NAME}` once, from its own environment. A value that starts with `!` is
   sent as text, never run.
 - **HTTP servers.** Each request goes to the server's own origin, through the egress proxy when it is on. A redirect

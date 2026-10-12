@@ -204,7 +204,8 @@ test("run-job wires run.excludeTools: membership pre-spend, a conditional spread
 	// job's options object stays byte-identical), and every flagged job logs what the session actually
 	// holds, read back via getActiveToolNames.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /assertExcludeToolsKnown\(cfg\.excludeTools\)/, "the membership assert is gone -- an unknown exclusion would be silently ignored in-container");
+	// The known names grow by the job's MCP (REQ-MCP-OPERATOR-SERVERS), never shrink: pi's builtins stay first.
+	assert.match(src, /assertExcludeToolsKnown\(cfg\.excludeTools, \[\.\.\.excludableToolNames\(\), /, "the membership assert is gone -- an unknown exclusion would be silently ignored in-container");
 	assert.ok(
 		src.indexOf("assertExcludeToolsKnown(") < src.indexOf("openSessionManager("),
 		"the membership assert must run pre-spend, before any session machinery",

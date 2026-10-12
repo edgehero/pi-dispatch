@@ -38,6 +38,16 @@ export const MCP_STOP_TIMEOUT_MS = 5_000;
 export const MCP_FACTORY_NAMES = Object.freeze(["job-mcp", "job-codemode", "job-tool-search"]);
 /** The tools pi's resource support registers: with `mcp__*` and the discovery tools, names only these factories may own. */
 export const MCP_RESOURCE_TOOLS = Object.freeze(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+/**
+ * The excludeTools entries a job with this document may carry beyond pi's builtins (the worker's loader accepts the
+ * same, worker/src/triggers.mjs MCP_EXCLUDABLE_TOOL_NAMES and mcpServerToolPattern): the discovery and resource tools,
+ * and each server's tools as a whole, in pi's namespace (`-` written as `_`).
+ */
+export function mcpExcludableNames(doc) {
+	if (doc === null) return [];
+	return [...MCP_DISCOVERY_TOOLS, ...MCP_RESOURCE_TOOLS, ...Object.keys(doc.servers).map((name) => `mcp__${name.replace(/-/g, "_")}__*`)];
+}
+
 /** The two discovery tools, codemode's and tool_search's. */
 export const MCP_DISCOVERY_TOOLS = Object.freeze(["codemode", "tool_search"]);
 

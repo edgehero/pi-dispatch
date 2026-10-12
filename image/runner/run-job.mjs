@@ -42,8 +42,8 @@ import { createChildWatch } from "./src/child-watch.mjs";
 import { precheckAtExit } from "./src/plan-check.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
-import { assertExcludeToolsKnown } from "./src/tools.mjs";
-import { createJobMcp, mcpShadow, readJobMcp } from "./src/mcp.mjs";
+import { assertExcludeToolsKnown, excludableToolNames } from "./src/tools.mjs";
+import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/mcp.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
 // and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
@@ -170,10 +170,11 @@ async function main() {
 	// (issue #291): pi matches excludeTools entries by exact name or `*` pattern, so an unknown name is a no-op
 	// with no diagnostic -- the job would run WITH the tool the trigger says to remove. Free, pre-spend,
 	// and before the prompt is even read; the entry is reported verbatim so a padded name reads as itself.
-	if (cfg.excludeTools.length > 0) assertExcludeToolsKnown(cfg.excludeTools);
 	// Same moment, same exit code: the MCP servers the worker passed, read back and checked before anything loads
 	// (src/mcp.mjs `readJobMcp`). Null for a job whose trigger names none, which then builds exactly what it always has.
+	// Read first, since the job's MCP adds the names an exclusion may carry (codemode, a server's tools).
 	const mcpDocument = readJobMcp();
+	if (cfg.excludeTools.length > 0) assertExcludeToolsKnown(cfg.excludeTools, [...excludableToolNames(), ...mcpExcludableNames(mcpDocument)]);
 
 	// A command job's prompt is rebuilt from PI_COMMAND rather than read from disk: one in-container
 	// authority, so a worker bug that wrote a prompt.md disagreeing with the env var cannot make the

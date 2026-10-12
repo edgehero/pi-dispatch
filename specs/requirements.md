@@ -1378,7 +1378,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Statement**: The harness shall (a) **account** every job's token usage **process-wide** — the runner
   wraps the model-calling methods of pi's `ModelRuntime` class (streamSimple, stream, streamDeferred,
   classify, generateImages) on its prototype, the one choke point every in-process session's model calls go
-  through at the 0.99.1 pin, plus pi-ai's legacy api-provider registry for extensions that call it directly,
+  through (verified at the 0.99.1 pin, and at 1.1.0 for a codemode script's `models.*`, proven end to end by
+  codemode-models.integration.test.mjs), plus pi-ai's legacy api-provider registry for extensions that call it directly,
   and accumulates each provider call's `usage` into per-job totals
   `{ input, output, total, cost }` plus the attribution split
   `{ metered, rootTotal, otherTotal, looseTotal, sessions, calls, unresolved, unpriced }`, emits them on the
@@ -1966,9 +1967,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the named tools, so no extension call and no refresh can restore them -- never merely asked for in
   prompt text. Absent, a job is byte-identical to one before this existed.
 - **Scope**: All five run kinds (cron included: what the container's agent may do is orthogonal to what
-  triggered it). Narrowing only; the built-in set of the pinned pi only. Operator-authored config from
-  the reviewed `triggers.json` only: no panel key, no model-callable tool can set or widen it, a chained
-  job's request file can neither set nor drop it (the child inherits the parent's exclusions), and
+  triggered it). Narrowing only; the built-in set of the pinned pi only, and beside `run.mcp` the tools the job's
+  MCP brings (codemode, tool_search, the resource tools, one server's tools as a whole;
+  REQ-MCP-OPERATOR-SERVERS). Operator-authored config from the reviewed `triggers.json` only: no panel key, no
+  model-callable tool can set or widen it, a chained job's request file can neither set nor drop it (the child
+  inherits the parent's exclusions, less the names of MCP tools, since the child connects no MCP server), and
   `dispatch_run` and non-trigger local enqueues carry none -- absent means today's full default set.
 - **Why**: The pinned pi scopes tools per session and this project never used it, so every job got the
   full built-in set and a "read-only triage" flow's read-onlyness was guardrail prose the README itself
@@ -3487,6 +3490,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: a codemode script's `models.*` reach the wrapped methods, proven end to end. **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED**: beside `run.mcp` the field takes the tools the job's MCP brings, and a chained child inherits the exclusions less those names. |
 | 2026-10-12 | No issue: MCP servers in jobs, the runner. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the third part is delivered (the job's session connects the servers before the prompt, with transports the runner builds and closes); acceptance gains the runner's cases, traces gain `DES-MCP-TARGETED-LIFECYCLE` and `DES-MCP-TRANSPORTS-OWNED`. |
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the second part is delivered (a trigger's `run.mcp`, the pickup's refusals before any spend, the job's `/job/mcp.json`, every such job refused on an image without the `mcp` capability until the runner connects them), with acceptance for each refusal and its public comment. **`REQ-TRIGGER-SECRETS` AMENDED**: an MCP server's references are these names or `PI_FORWARD_ENV`'s. **`REQ-EGRESS-ALLOWLIST` AMENDED**: an MCP server the proxy would not reach is refused before spend like a job the policy cannot serve. **Code evidence**: worker/src/triggers.mjs -> validateMcp; worker/src/mcp-preflight.mjs -> makeMcpCheck; worker/src/processor.mjs; worker/src/prepare.mjs; worker/src/image-preflight.mjs -> the mcp row. |
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `REQ-MCP-OPERATOR-SERVERS`**: a job uses only MCP servers the operator lists in the overlay's `mcp.json` and its trigger names, with credentials as `${NAME}` references only, refused before spend when it cannot use them; this part delivers the file, `import-pi` and `doctor`. **`REQ-GLOBAL-PI-OVERLAY` AMENDED** (the Statement): `import-pi` never copies `mcp-auth.json`, and rewrites `mcp.json` rather than copying it. The rest of `REQ-GLOBAL-PI-OVERLAY` is UNCHANGED, checked. **Code evidence**: worker/src/mcp-config.mjs, worker/src/import-pi.mjs -> stageMcp, worker/src/doctor.mjs -> overlayMcpChecks. |

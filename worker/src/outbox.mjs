@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { readFlowGate as realReadFlowGate } from "./flow-gate.mjs";
 import { chainedJobId } from "./job-id.mjs";
 import { enqueueLocalJob } from "./queue.mjs";
+import { withoutMcpExclusions } from "./triggers.mjs";
 
 /**
  * The outbox chain collector: the host-side reader of a completed LOCAL parent's `/outbox`, the
@@ -207,7 +208,9 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// parent would chain a child that can edit and run bash, a widening no operator wrote.
 					// Off `job.data`, never off `req` -- the request file can neither set nor drop it (explicit
 					// property reads only, above), so the agent cannot widen its child by omitting a key.
-					excludeTools: job.data?.excludeTools,
+					// Less the names of the parent's MCP tools: the child connects no server (`mcp` below), its runner knows
+					// none of them, and they would refuse it at start while removing nothing.
+					excludeTools: withoutMcpExclusions(job.data?.excludeTools),
 					// `secrets`/`secretsProfile` are deliberately ABSENT, and the two lines above are exactly why
 					// this comment exists: their reasoning reads as though it should apply here too, and it must
 					// not. An image and a skills directory are toolchain; a resolved credential is a capability.

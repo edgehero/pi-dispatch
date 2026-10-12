@@ -25,8 +25,21 @@ strictness is not pedantry: pi silently ignores unknown names in its exclusion l
 `"Bash"` would exclude nothing while your file reads as though it did. A field that can be quietly
 wrong about a permission is worse than no field, so the loader refuses what pi would ignore.
 
-Since pi 1.0.4, pi's own exclusion list also takes `*` patterns (`mcp__*`). This field does not: a
-pattern is not a built-in tool name, so it is refused like a misspelling. Name each tool.
+Since pi 1.0.4, pi's own exclusion list also takes `*` patterns (`mcp__*`). This field takes one kind only,
+below; any other pattern is not a built-in tool name, so it is refused like a misspelling. Name each tool.
+
+A trigger that names MCP servers (`run.mcp`, [mcp.md](mcp.md)) may also exclude the tools its job's MCP brings:
+`codemode`, `tool_search`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, and one
+server's tools as a whole as `mcp__<server>__*` (the server's name with `-` written as `_`, as pi writes it). A
+single tool of a server is not excludable here: its name is not known until the server lists it, so a misspelled
+one would exclude nothing. Hide it in the overlay instead (`toolExposure`). The pickup refuses a job whose
+exclusions take away a server's last way in (`mcp-excluded`), routed as pi routes it: a `direct` tool needs
+nothing; a `codemode` or `deferred` tool is reached by whichever discovery tool is active (codemode calls both kinds,
+`tool_search` loads both); resources go through `read_mcp_resource`, which reads any server's and is reached the
+widest way any of them is. A server is assumed to have resources until it connects, so one with none, whose tools
+you exclude, still connects (to no use). So
+excluding `codemode` refuses a job whose servers are all codemode-exposed, and not one that also has a deferred
+server, whose `tool_search` reaches them all.
 
 One nuance worth knowing: at the pinned version only `read`, `bash`, `edit` and `write` are ACTIVE by
 default; `powershell`, `grep`, `find` and `ls` are registered but inactive until something activates them.
@@ -57,7 +70,8 @@ Be precise about the boundary before relying on it:
 ## File only
 
 Like every `run.*` capability field: no panel key, no AI tool can set or widen it, and a chained
-job's request file can neither set nor drop it. A chained child inherits its parent's exclusions,
+job's request file can neither set nor drop it. A chained child inherits its parent's exclusions (less the
+names of MCP tools: the child connects no MCP server),
 because the dangerous direction here is inverted from the other inherited fields: dropping the
 inheritance would hand a read-only parent a child that can edit and run bash.
 
@@ -81,6 +95,6 @@ from a current tree and the refusal disappears.
 | Refused pre-spend | `job-image-exclude-tools-unsupported` (image lacks the `excludeTools` capability token); in-container exit 2 on a name the baked pi does not know (version skew, hand-run containers) |
 | Observability | `tools_excluded` log line on every flagged job: the requested exclusions and the session's active tool list read back |
 | Panel | the trigger drill-in's `excludeTools` row beside `image` (`full pinned tool set` when absent); no panel key, no AI tool |
-| Chaining | inherited from the parent's job data; the request file cannot set or drop it |
+| Chaining | inherited from the parent's job data, less MCP tool names; the request file cannot set or drop it |
 | Version floor | worker 2.0.0, receiver 2.0.0, admin 2.0.0, plus the 2.0.0 job image (`ghcr.io/edgehero/pi-job:2.0.0`) or one rebuilt from the same tree |
 | Related | [job image](job-image.md), [global pi overlay](global-pi-overlay.md), [workflows](workflows.md) |

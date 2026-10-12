@@ -42,7 +42,9 @@ test("makeMcpCheck: the servers the job names pass, and the document holds exact
 	assert.deepEqual(Object.keys(result.document.servers), ["docs", "lan", "files", "npx"]);
 	assert.deepEqual(result.document.refs, { docs: ["DOCS_TOKEN"], lan: [], files: ["FILES_TOKEN"], npx: [] });
 	assert.equal(result.document.version, 1);
-	assert.equal(result.document.codemodeModels, false);
+	assert.equal(result.document.codemodeModels, true, "on unless the overlay says false");
+	const off = parseOverlayMcp(JSON.stringify({ ...OVERLAY, codemodeModels: false }));
+	assert.equal(check({ read: () => off })(job(["docs"])).document.codemodeModels, false);
 	assert.deepEqual(result.document.servers.docs.headers, { Authorization: "Bearer ${DOCS_TOKEN}" });
 	assert.equal("allowPackageRunner" in result.document.servers.npx, false, "pi-dispatch's own key never reaches pi");
 	assert.deepEqual(Object.keys(result.document.servers.docs.toolExposure), ["dispatch_*"]);
@@ -82,7 +84,7 @@ test("makeMcpCheck: each refusal, in order", () => {
 	// With the egress policy off, neither egress question is asked.
 	const off = check({ egress: false, allowlist: () => assert.fail("not read"), endpoints: () => assert.fail("not read") });
 	assert.equal(off(job(["docs", "npx"])).ok, true);
-	for (const reason of ["mcp-list-invalid", "mcp-config-invalid", "mcp-server-unknown", "mcp-secret-unmapped", "mcp-secret-reserved", "mcp-egress-unreachable", "mcp-package-runner"]) {
+	for (const reason of ["mcp-list-invalid", "mcp-excluded", "mcp-config-invalid", "mcp-server-unknown", "mcp-secret-unmapped", "mcp-secret-reserved", "mcp-egress-unreachable", "mcp-package-runner"]) {
 		assert.equal(typeof MCP_REFUSAL_COMMENT[reason], "string", reason);
 		assert.doesNotMatch(MCP_REFUSAL_COMMENT[reason], /\$\{|http|\.com/, "the public sentence names no host and no variable");
 	}
@@ -147,4 +149,39 @@ test("jobProviders: the job's own provider and each on its model list, the trigg
 test("makeMcpCheck: a read inside reserved that may pass on a retry is retried", () => {
 	assert.deepEqual(check({ reserved: () => { throw Object.assign(new Error("x"), { code: "EIO" }); } })(job(["docs"])), { unavailable: "EIO" });
 	assert.throws(() => check({ reserved: () => { throw new Error("bug"); } })(job(["docs"])), /bug/);
+});
+
+test("makeMcpCheck: a server the trigger's own exclusions leave no way in is refused, as pi routes; one with a route left, or the overlay's own hiding, is not", () => {
+	const routes = parseOverlayMcp(JSON.stringify({ mcpServers: {
+		cm: { url: "https://mcp.example.com/a", description: "Codemode" },
+		dd: { url: "https://mcp.example.com/b", description: "Deferred", exposure: "deferred" },
+		mixed: { url: "https://mcp.example.com/c", description: "Mixed", toolExposure: { search: "direct" } },
+		hid: { url: "https://mcp.example.com/d", description: "Hidden", exposure: "hidden" },
+		allhid: { url: "https://mcp.example.com/e", description: "All hidden", toolExposure: { "*": "hidden" } },
+	} }));
+	const run = (mcp, excludeTools) => check({ read: () => routes, allowlist: () => ["mcp.example.com"] })({ ...job(mcp), excludeTools });
+	assert.equal(run(["cm"], ["codemode"]).refused, "mcp-excluded");
+	assert.equal(run(["cm"], ["codemode"]).name, "cm");
+	assert.equal(run(["dd"], ["tool_search"]).refused, "mcp-excluded");
+	assert.equal(run(["dd"], ["codemode"]).ok, true, "a deferred server does not need codemode");
+	assert.equal(run(["mixed"], ["codemode"]).ok, true, "one direct tool is a route");
+	assert.equal(run(["cm", "dd"], ["codemode"]).ok, true, "tool_search, active for dd, loads cm's tools too");
+	assert.equal(run(["cm", "dd"], ["tool_search"]).ok, true, "codemode, active for cm, calls dd's tools too");
+	assert.equal(run(["cm", "dd"], ["codemode", "tool_search"]).refused, "mcp-excluded");
+	assert.equal(run(["cm"], ["mcp__cm__*"]).ok, true, "its tools removed on purpose: its resources, through codemode, are the point");
+	assert.equal(run(["cm"], ["mcp__cm__*", "codemode"]).refused, "mcp-excluded", "nor are its resources reachable now");
+	assert.equal(run(["cm"], ["mcp__cm__*", "read_mcp_resource"]).refused, "mcp-excluded");
+	assert.equal(run(["hid"], ["codemode", "tool_search", "read_mcp_resource"]).ok, true, "the overlay's own hiding is not the trigger's to be refused for");
+	assert.equal(run(["allhid"], ["bash"]).ok, true);
+	assert.equal(run(["allhid"], ["codemode"]).refused, "mcp-excluded", "its tools are hidden, and its resources went through codemode");
+	assert.equal(run(["allhid"], ["read_mcp_resource"]).refused, "mcp-excluded", "a `*` exposure hides every tool, so its resources were its only way");
+	const shared = parseOverlayMcp(JSON.stringify({ mcpServers: { a: { url: "https://mcp.example.com/a", description: "A" }, b: { url: "https://mcp.example.com/b", description: "B", exposure: "direct" }, late: { url: "https://mcp.example.com/c", description: "C", toolExposure: { "*": "hidden", "pub*": "direct" } } } }));
+	const both = (mcp, excludeTools) => check({ read: () => shared, allowlist: () => ["mcp.example.com"] })({ ...job(mcp), excludeTools });
+	assert.equal(both(["a", "b"], ["codemode", "mcp__a__*"]).ok, true, "the resource tools take b's direct exposure and read a's resources too");
+	assert.equal(both(["late"], ["codemode"]).refused, "mcp-excluded", "a pattern after * never applies, so pub* is no direct way in, and its resources went through codemode");
+	assert.equal(both(["late"], ["read_mcp_resource"]).refused, "mcp-excluded", "its resources, through codemode, were its only way");
+	assert.equal(run(["cm"], []).ok, true);
+	assert.equal(run(["cm"], ["bash"]).ok, true);
+	const off = parseOverlayMcp(JSON.stringify({ autoEnableCodemode: false, mcpServers: { cm: { url: "https://mcp.example.com/a", description: "C" }, dd: { url: "https://mcp.example.com/b", description: "D", exposure: "deferred" } } }));
+	assert.equal(check({ read: () => off, allowlist: () => ["mcp.example.com"] })({ ...job(["cm", "dd"]), excludeTools: ["tool_search"] }).refused, "mcp-excluded", "with codemode not activated, tool_search was cm's only way");
 });

@@ -5455,6 +5455,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     server, with a list). A read of models.json that may pass is retried;
   - each reference is a name the job will hold: a `run.secrets` name, or a `PI_FORWARD_ENV` name the worker holds a
     non-empty value for, as the container env is built (`mcp-secret-unmapped`);
+  - each server keeps the way in it had through the tools the trigger's `run.excludeTools` leaves, routed as pi
+    routes it: a `direct` tool needs nothing; a `codemode` or `deferred` tool is reached by whichever discovery tool is
+    active (codemode calls both kinds, tool_search loads both; pi activates each for a server that has its kind, and
+    codemode only while `autoEnableCodemode` holds); a server's resources go through `read_mcp_resource`, which pi
+    registers once with the widest exposure among the servers offering resources and which reads any of them; a
+    server's exposures follow pi's first-match order, so a pattern after `*` never applies (`mcp-excluded`,
+    `mcpRouteProblem`). Whether a server lists resources is unknown before it connects, so each one that is not
+    hidden is assumed to: a server with none, whose tools the exclusions remove, passes and connects to no use. The
+    overlay's own hiding is never the trigger's to be refused for;
   - with the egress policy on, each streamable HTTP server is reachable through the proxy, read as squid reads the
     allowlist (`egressRefusalFor`; an `http://` url on port 443 is refused, as it would speak plain HTTP to a TLS
     port), and each package runner's registry hosts are allowlisted (`mcp-egress-unreachable`,
@@ -5540,6 +5549,26 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   from the job's env (any name not fixed here is one a server did not ask for).
 - **Residuals**: a stdio server runs code with the secrets its entry names, inside the job's container and its
   egress; a JSON batch body over 16 MiB is refused though each message in it is smaller.
+
+## DES-MCP-CODEMODE-MODELS
+
+- **Decision**: A job's codemode scripts may call `models.classify()` and `models.generateImages()`, as in the pi
+  CLI, unless the overlay's `mcp.json` says `"codemodeModels": false`. They were off until this was proven: a script
+  runs in a QuickJS worker, but each `models.*` call crosses to the main thread and reaches the session's
+  ModelRegistry, which forwards to `ModelRuntime.prototype.classify` and `generateImages`, the two result methods the
+  process-wide meter wraps. So each call is counted in the job's totals and its per-model ledger, held to the job's
+  model list, and judged by the cost guard like any call: a classifier is bounded on its input (a classifier with an
+  output price, and every image call, cannot be bounded, and is refused under a cap); concurrent calls are judged
+  against the bounds already in flight; the model is resolved again from the catalog, so a script's own model object
+  (a base url, headers) cannot redirect a call. `image/runner/test/codemode-models.integration.test.mjs` proves each,
+  through pi's real codemode tool in a real session against a stub classifier and image server.
+- **Rejected**: leaving them off for good (a job then lacks a documented pi capability for no reason the meter
+  cannot answer); a per-trigger switch (the spend they make is the same kind any model call makes, which the
+  trigger already bounds with `run.maxCostUsd` and `run.models`).
+- **Residuals**: under a cost cap every image call is refused, priced or not, since its output is not boundable at
+  the pin, and a refused call stops the job as any refused model call does (the meter's first refusal is its stop),
+  so a capped or listed job cannot try a model and carry on; an image model pi's catalog prices at zero settles at
+  zero on a job with no cap, since pi prices it from the catalog alone.
 
 ## DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS
 
@@ -7061,7 +7090,8 @@ a tunnel.
   worker's preflight checks pre-spend (`job-image-exclude-tools-unsupported`); the runner re-asserts
   membership in-container pre-spend against a set DERIVED from the eight root-exported
   `create*ToolDefinition` factories, and logs `tools_excluded` with the session's active tool list read
-  back; a chained child inherits the parent's exclusions off validated job data.
+  back; a chained child inherits the parent's exclusions off validated job data, less the names of MCP tools, since
+  it connects no MCP server.
 - **Why**: pi scopes tools per session and this project never used it, so a "read-only triage" flow's
   read-onlyness was `HARD_RULES.md` prompt text -- and the README's own disclosure prices that: prompt
   text, not enforcement. The enforcement is STRUCTURAL at the pin: `excludeTools` filters the tool
@@ -9335,3 +9365,4 @@ a tunnel.
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `DES-MCP-OPERATOR-ONLY`**: one operator file in pi's shape and a strict subset of its keys, rewritten by `import-pi` (accepted servers only, each refused one named), references resolved by pi-dispatch and never by pi, per-server refusals, stdio commands from the image or the overlay, and doctor's egress reading of each HTTP server. `DES-OPERATOR-GLOBAL-OVERLAY` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **NEW `DES-MCP-EGRESS-PREFLIGHT`**: one pickup check reads the overlay once, refuses before spend in a fixed order (the job's own list, file, name, references to a credential the job spends with, unmapped references, egress) and hands `prepare` the document it writes, and a dropped `run.mcp` is `trigger-skew`; the public comment is fixed text per reason. `DES-MCP-OPERATOR-ONLY` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, the runner. **NEW `DES-MCP-TARGETED-LIFECYCLE`**: the runner fires pi's MCP `session_start` and `session_shutdown` itself through a guarded API (no `bindExtensions`), waits for every server to finish pi's connect (its tools listed; 15 s, or a server's longer `timeout`, at most 120 s) before the prompt, holds every `tool_call` against a late shadow, and closes them, pipes included, before `dispose`. **NEW `DES-MCP-TRANSPORTS-OWNED`**: the runner builds every transport from `/job/mcp.json`, resolves references once itself, locks HTTP to the server's origin with no redirect and no sign-in, and starts a stdio server with only the environment it names. `DES-MCP-EGRESS-PREFLIGHT` is UNCHANGED, checked. |
+| 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **NEW `DES-MCP-CODEMODE-MODELS`**: codemode's `models.*` are on unless the overlay turns them off, since they reach the meter, the model list and the cost guard like any call, proven through pi's real codemode tool. **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: the pickup also refuses a server the trigger's own exclusions take its last way in from, routed as pi routes it (either active discovery tool reaches every codemode and deferred tool) (`mcp-excluded`). **`DES-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED**: a chained child inherits the exclusions less the names of MCP tools. |

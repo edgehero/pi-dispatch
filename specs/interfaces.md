@@ -4173,6 +4173,11 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   (`run.tools` inverts the question to "which tools exist", the pinned package's answer, so a pin bump
   that adds a tool would silently grant it to every allowlisted trigger; `run.noTools` is pi's other
   session option and would otherwise be dropped in exactly the silence this field's validation refuses).
+  Beside a non-empty `run.mcp` (REQ-MCP-OPERATOR-SERVERS) the field also takes the tools the job's MCP brings:
+  `codemode`, `tool_search`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, and
+  `mcp__<server>__*` for each server `run.mcp` names (pi's namespace, `-` written as `_`), the one pattern accepted;
+  a single MCP tool is not (`MCP_EXCLUDABLE_TOOL_NAMES`, `mcpServerToolPattern`). The pickup refuses a job whose
+  exclusions leave a named server no route (`mcp-excluded`, `DES-MCP-EGRESS-PREFLIGHT`).
 
   **Refused at load** for a non-array, an empty array, a non-string or empty member, a duplicate member,
   and -- the load-bearing one -- **any name outside the pinned built-in set** (`read`, `bash`,
@@ -4202,8 +4207,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 
   **File only**: no panel key, no model-callable setter (`dispatch_trigger_add`/`_edit` carry no such
   parameter, pinned structurally beside the `secrets` sweep), and a chained job's request file cannot
-  set OR drop it -- the child inherits the parent's exclusions off validated job data
-  (`INT-OUTBOX-CONTRACT`), because here the destructive direction is inverted: dropping the inheritance
+  set OR drop it -- the child inherits the parent's exclusions off validated job data, less the names of MCP
+  tools, since the child connects no MCP server (`INT-OUTBOX-CONTRACT`), because here the destructive direction is inverted: dropping the inheritance
   would WIDEN the child.
 
   **Absent carries no `excludeTools` key at all**, so a trigger without the field normalizes and
@@ -4839,6 +4844,9 @@ validator rather than a second copy of it.
 - **Contract**: `<PI_GLOBAL_PI_DIR>/mcp.json`, optional. A regular file (never a link, a pipe or a device) of at
   most 64 KiB, JSON with no duplicate key, an object of at most these top-level keys:
   - `autoEnableCodemode`: boolean, default true (pi's own meaning);
+  - `codemodeModels`: boolean, default true, pi-dispatch's own (pi's loader ignores a top-level key it does not
+    know): whether a job's codemode scripts may call `models.classify()` and `models.generateImages()`, written into
+    each job's `/job/mcp.json` (`DES-MCP-CODEMODE-MODELS`);
   - `mcpServers`: an object of servers by name. A name is 1 to 32 of `a-z`, `0-9` and `-`: words of letters and
     digits joined by single `-` (no leading or trailing `-`, no `--`, since pi writes `-` as `_` in a tool's name and
     either would let one server's tool name read as another's), holding no `dispatch`.
@@ -4888,7 +4896,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-egress-unreachable|mcp-package-runner|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -5789,7 +5797,9 @@ validator rather than a second copy of it.
   (`DES-AI-TRIGGER-FLOW-GATE` reads frontmatter, and a command has none), and silently ignoring the key
   under the unknown-keys rule would enqueue a flow the agent did not request — the believed-on-while-off
   shape. **`excludeTools` (issue #291) deliberately STAYS under unknown-keys-ignored** rather than
-  becoming a second exception: the child INHERITS the parent's exclusions off validated `job.data`,
+  becoming a second exception: the child INHERITS the parent's exclusions off validated `job.data` (less the names
+  of MCP tools, `withoutMcpExclusions`: the child gets no `run.mcp`, so they would remove nothing and its runner
+  would refuse them),
   beside its image, backend and skills, so a request-file key can neither set nor drop what the child
   runs with by construction. An ignored addition misleads nobody the contract protects (the child is
   already exactly as narrow as the operator's reviewed trigger), while the `command` refusal exists
@@ -5880,7 +5890,7 @@ validator rather than a second copy of it.
   exists to collect; given a symlink or an oversize `request-<n>.json`, when validated, then it is
   rejected; given a **retried** parent, when its outbox is re-collected, then the idempotent child id
   dedups and no second child is enqueued; given a parent whose data carries `excludeTools`, when a valid
-  request is collected, then the child's data carries the parent's exclusions verbatim and no value from
+  request is collected, then the child's data carries the parent's exclusions, less any MCP tool names, and no value from
   the request file's own `excludeTools` key appears anywhere in it. Given a parent whose data carries `maxCostUsd`, then the child's data
   carries it verbatim, and a request file's own `maxCostUsd` key changes nothing. Given a completed portfolio job
   with a valid `priorities.json` (issue #505), then `applyPlan` judges it with the writer `portfolio-job` and the record
@@ -8288,3 +8298,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `INT-OVERLAY-MCP-CONFIG`**: the overlay's `mcp.json`, its accepted keys per transport, the `${NAME}` reference grammar, the refusals, and its producer and consumers. `INT-PI-PACKAGES-FILE-CONTRACT` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.mcp` on all five kinds, names only, its near-miss sweep (ASCII spellings, and a key under `run` or `on` outside plain ASCII with no plain letter other than those of `mcpservers`), a `trigger-skew` row, file-only and not inherited by a chained child. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/mcp.json` (0444, references only, the admin's tool names hidden first). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-mcp-unsupported` and the seven `mcp-*` pickup refusals (`mcp-list-invalid` for a job's list the loader would not have written). **`INT-OVERLAY-MCP-CONFIG` AMENDED**: its consumers now include the pickup. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the env gains `PI_MCP_SERVERS`; `CAPABILITY_GATES` gains the `mcp` row (six job-feature tokens); the token is declared by no image until the runner reads `/job/mcp.json`, so the label's token set is unchanged. |
 | 2026-10-12 | No issue: MCP servers in jobs, the runner. **`INT-SDK-SESSION-OPTIONS` AMENDED** in (m): a job whose trigger names servers gets pi's MCP, codemode and tool_search as three named inline factories, with the runner's config, transports and guarded API; `builtin:` paths stay unknown, and a repository's `mcp.json` is still never read. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: seven rows, `mcp-config-mismatch`, `mcp-config-invalid`, `mcp-secret-missing`, `mcp-command-missing`, `mcp-shadowed` and `mcp-unavailable` under the policy code and `mcp-unreachable` under the infrastructure code; no new code. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the image declares `mcp`, proved by an offline stub-server run. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: a server name is words joined by single `-` (no trailing `-`, no `--`), so no two servers' tool names read alike once pi writes `-` as `_`. `INT-CONTAINER-JOB-INPUTS` is UNCHANGED, checked: the runner reads `/job/mcp.json` and `PI_MCP_SERVERS` as the worker writes them. `INT-RUN-HISTORY-FILE-CONTRACT` is UNCHANGED, checked: runner reasons ride the exit line, not the record's reason enum. |
+| 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: the top-level `codemodeModels` (boolean, default true). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: beside `run.mcp`, `run.excludeTools` takes codemode, tool_search, the three resource tools and `mcp__<server>__*`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `mcp-excluded`. **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits the parent's exclusions less the names of MCP tools. `INT-CONTAINER-JOB-INPUTS` is UNCHANGED, checked: `/job/mcp.json` already carried `codemodeModels`, and `PI_EXCLUDE_TOOLS` carries the new names as it carries any. |
