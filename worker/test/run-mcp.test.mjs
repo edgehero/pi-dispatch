@@ -55,3 +55,14 @@ test("a near-miss spelling of run.mcp, and on.mcp, are refused rather than dropp
 		assert.equal(parse([KINDS[1][1]({ [key]: 1 })]).length, 1, key);
 	}
 });
+
+test("run.excludeTools names the job's MCP tools only beside run.mcp: codemode, tool_search, the resource tools, and one server's tools as a whole", () => {
+	for (const [kind, make] of KINDS) {
+		const [t] = parse([make({ mcp: ["docs", "my-files"], excludeTools: ["codemode", "tool_search", "read_mcp_resource", "mcp__my_files__*", "bash"] })]);
+		assert.deepEqual(t.run.excludeTools, ["codemode", "tool_search", "read_mcp_resource", "mcp__my_files__*", "bash"], kind);
+		refuses(make({ excludeTools: ["codemode"] }), /excludable only by a trigger whose run\.mcp names its server/);
+		refuses(make({ mcp: ["docs"], excludeTools: ["mcp__other__*"] }), /not a tool the pinned pi knows/);
+		refuses(make({ mcp: ["docs"], excludeTools: ["mcp__docs__search"] }), /a server's tools only all at once/);
+		refuses(make({ mcp: ["my-files"], excludeTools: ["mcp__my-files__*"] }), /not a tool the pinned pi knows/);
+	}
+});

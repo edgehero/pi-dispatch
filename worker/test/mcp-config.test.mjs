@@ -246,3 +246,10 @@ test("a server name is words joined by single -, so no two servers' tool names c
 	for (const name of ["a", "docs", "a-b", "files-2", "a".repeat(32)]) assert.ok(MCP_SERVER_NAME_RE.test(name), name);
 	for (const name of ["a-", "-a", "a--b", "", "a".repeat(33), "A", "a_b"]) assert.equal(MCP_SERVER_NAME_RE.test(name), false, name);
 });
+
+test("codemodeModels is pi-dispatch's own top-level switch: a boolean, on unless false, written back by import-pi", () => {
+	assert.equal(parseOverlayMcp(JSON.stringify({ mcpServers: {} })).codemodeModels, true);
+	assert.equal(parseOverlayMcp(JSON.stringify({ codemodeModels: false, mcpServers: {} })).codemodeModels, false);
+	for (const value of ["no", 0, null]) assert.throws(() => parseOverlayMcp(JSON.stringify({ codemodeModels: value, mcpServers: {} })), /codemodeModels/, JSON.stringify(value));
+	assert.equal(JSON.parse(overlayMcpText(parseOverlayMcp(JSON.stringify({ codemodeModels: false, mcpServers: {} })))).codemodeModels, false);
+});

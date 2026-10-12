@@ -43,7 +43,7 @@ export const MCP_SERVER_NAME_RE = /^(?=[a-z0-9-]{1,32}$)[a-z0-9]+(?:-[a-z0-9]+)*
 /** The exposures pi 1.1.0 takes, by their current names (pi's alias `codemode-deferred` is refused, not translated). */
 export const MCP_EXPOSURES = Object.freeze(["codemode", "deferred", "direct", "hidden"]);
 /** Top-level keys. */
-export const MCP_TOP_KEYS = Object.freeze(["autoEnableCodemode", "mcpServers"]);
+export const MCP_TOP_KEYS = Object.freeze(["autoEnableCodemode", "codemodeModels", "mcpServers"]);
 /** Keys every server may carry. */
 const COMMON_KEYS = ["type", "description", "exposure", "toolExposure", "timeout", "enabled"];
 /** Keys of a streamable HTTP server. */
@@ -254,6 +254,10 @@ export function parseOverlayMcp(text, path = MCP_CONFIG_FILE_NAME) {
 		if (!MCP_TOP_KEYS.includes(key)) throw fail(`${shown(key)} is not a top-level key here (accepted: ${MCP_TOP_KEYS.join(", ")})`);
 	}
 	if (value.autoEnableCodemode !== undefined && typeof value.autoEnableCodemode !== "boolean") throw fail("`autoEnableCodemode` must be true or false");
+	// pi-dispatch's own (pi's loader ignores a top-level key it does not know): whether a job's codemode scripts may call
+	// `models.classify()` and `models.generateImages()`. On by default, as in the pi CLI; every such call is metered,
+	// held to the job's model list, and refused under a cost cap when it cannot be bounded (DES-MCP-CODEMODE-MODELS).
+	if (value.codemodeModels !== undefined && typeof value.codemodeModels !== "boolean") throw fail("`codemodeModels` must be true or false");
 	if (value.mcpServers !== undefined && !isRecord(value.mcpServers)) throw fail("`mcpServers` must be an object of servers by name");
 	const servers = {};
 	const refused = [];
@@ -262,7 +266,7 @@ export function parseOverlayMcp(text, path = MCP_CONFIG_FILE_NAME) {
 		if (entry.problem) refused.push(entry);
 		else servers[name] = entry;
 	}
-	return { autoEnableCodemode: value.autoEnableCodemode ?? true, servers, refused };
+	return { autoEnableCodemode: value.autoEnableCodemode ?? true, codemodeModels: value.codemodeModels ?? true, servers, refused };
 }
 
 /** The entry as pi takes it: pi's keys only, with `type` written out. */
@@ -281,8 +285,9 @@ export const JOB_MCP_VERSION = 1;
  * trigger names, in that order: each in pi's shape with every reference still a reference, `toolExposure` gaining
  * `"dispatch_*": "hidden"` (an MCP tool by that name is never offered, the admin's tools being the one recursion
  * vector), and the names each server references, so the runner resolves those and no other. Never a value: the
- * worker holds the trigger's resolved secrets, and none of them reaches this file. `codemodeModels` is false until
- * the job's spend through codemode's `models.*` is proven metered and capped.
+ * worker holds the trigger's resolved secrets, and none of them reaches this file. `codemodeModels` is the overlay's
+ * (on unless it says false): codemode's `models.*` reach the runner's meter and guards like any model call
+ * (image/runner/test/codemode-models.integration.test.mjs).
  */
 export function jobMcpDocument(parsed, names) {
 	const servers = {};
@@ -299,7 +304,7 @@ export function jobMcpDocument(parsed, names) {
 		servers[name] = entry;
 		refs[name] = [...server.refs];
 	}
-	return { version: JOB_MCP_VERSION, autoEnableCodemode: parsed.autoEnableCodemode, codemodeModels: false, servers, refs };
+	return { version: JOB_MCP_VERSION, autoEnableCodemode: parsed.autoEnableCodemode, codemodeModels: parsed.codemodeModels !== false, servers, refs };
 }
 
 /** The text of an overlay `mcp.json` holding exactly `parsed`'s accepted servers, as import-pi writes it. */
@@ -312,6 +317,7 @@ export function overlayMcpText(parsed) {
 	}
 	const out = { mcpServers };
 	if (parsed.autoEnableCodemode === false) out.autoEnableCodemode = false;
+	if (parsed.codemodeModels === false) out.codemodeModels = false;
 	return `${JSON.stringify(out, null, 2)}\n`;
 }
 

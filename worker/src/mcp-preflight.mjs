@@ -20,12 +20,14 @@
  *                            every reference before the next rule;
  *   mcp-secret-unmapped      a reference the job will not have: not a `run.secrets` name, and not a PI_FORWARD_ENV
  *                            name the worker's environment holds a value for;
+ *   mcp-excluded             the trigger's own run.excludeTools leaves a server no way in that it had: its tools and
+ *                            its resources reachable only through tools it removed (`mcpRouteProblem`);
  *   mcp-egress-unreachable   with the egress policy on, a streamable HTTP server the proxy would not let the job reach;
  *   mcp-package-runner       with the egress policy on, a package runner whose registry the allowlist does not hold.
  */
 import { allowlistEntryFor, egressRefusalFor, packageRunnerHosts } from "./egress-allowlist.mjs";
 import { jobMcpDocument, MCP_SERVER_NAME_RE, readOverlayMcp } from "./mcp-config.mjs";
-import { MCP_SERVERS_MAX } from "./triggers.mjs";
+import { MCP_SERVERS_MAX, mcpServerToolPattern } from "./triggers.mjs";
 
 /**
  * Errnos a read of the overlay may pass on a second try. Restated from model-catalog.mjs `OVERLAY_TRANSIENT_READ_CODES`
@@ -120,6 +122,8 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 				if (!mapped.has(ref)) return { refused: "mcp-secret-unmapped", name, why: `it references ${ref}, which the trigger does not pass (run.secrets, or a PI_FORWARD_ENV name the worker holds a value for)` };
 			}
 		}
+		const cut = mcpRouteProblem(parsed.servers, names, new Set(Array.isArray(job.excludeTools) ? job.excludeTools : []), { autoEnableCodemode: parsed.autoEnableCodemode });
+		if (cut !== null) return { refused: "mcp-excluded", name: cut.name, why: cut.why };
 		if (egress) {
 			let list = null;
 			let declared = null;
@@ -158,6 +162,58 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 }
 
 /**
+ * A server's exposures as pi reads them (`getMcpToolExposure`): an exact tool name first, then the patterns in order,
+ * the first that matches winning, else the server's own. So a pattern after `*` never applies, and `*` replaces the
+ * default; any exact name and any earlier pattern may still match a tool.
+ */
+function exposuresOf(server) {
+	const own = server.exposure ?? "codemode";
+	const entries = Object.entries(server.toolExposure ?? {}).filter(([key]) => !key.startsWith("dispatch_"));
+	const tools = entries.filter(([key]) => !key.includes("*")).map(([, value]) => value);
+	let base = own;
+	for (const [key, value] of entries.filter(([key]) => key.includes("*"))) {
+		if (key === "*") {
+			base = value;
+			break;
+		}
+		tools.push(value);
+	}
+	return { own, tools: [base, ...tools] };
+}
+
+/**
+ * Whether each named server keeps a way in through the tools `excluded` leaves, as pi 1.1.0 routes them: a `direct` tool
+ * needs nothing; a `codemode` or `deferred` tool is reached by whichever discovery tool is active, since codemode calls
+ * both kinds and tool_search loads both, and pi activates codemode when some server has a codemode tool (and
+ * `autoEnableCodemode` is not false) and tool_search when some server has a deferred one; the resource tools take their
+ * server's own exposure, and a `hidden` server's resources are never offered. Judged only for what the trigger's
+ * exclusions take away: a server the overlay leaves no way in is the overlay's, not this trigger's to be refused for.
+ * Returns `{ name, why }` for the first server the exclusions cut off, or null.
+ */
+export function mcpRouteProblem(servers, names, excluded, { autoEnableCodemode = true } = {}) {
+	const routes = (removed) => {
+		const all = names.map((name) => exposuresOf(servers[name]));
+		const has = (kind) => all.some(({ own, tools }) => own === kind || tools.includes(kind));
+		const discovery = (!removed.has("codemode") && autoEnableCodemode !== false && has("codemode")) || (!removed.has("tool_search") && has("deferred"));
+		const reach = (exposure) => exposure === "direct" || ((exposure === "codemode" || exposure === "deferred") && discovery);
+		const widest = ["direct", "codemode", "deferred"].find((kind) => all.some(({ own }) => own === kind)) ?? "hidden";
+		return names.map((name, i) => {
+			const { own, tools } = all[i];
+			const toolRoute = !removed.has(mcpServerToolPattern(name)) && tools.some(reach);
+			// pi registers the resource tools once, with the widest exposure among the servers that offer resources
+			// and are not hidden (syncResourceTools), and read_mcp_resource reads any of them. Whether a server lists
+			// resources is unknown until it connects, so each one that is not hidden is assumed to.
+			const resourceRoute = !removed.has("read_mcp_resource") && own !== "hidden" && reach(widest);
+			return toolRoute || resourceRoute;
+		});
+	};
+	const before = routes(new Set());
+	const after = routes(excluded);
+	const i = names.findIndex((_, k) => before[k] && !after[k]);
+	return i < 0 ? null : { name: names[i], why: "run.excludeTools removes every tool that reaches it (its own, the discovery tools that reach them, and read_mcp_resource)" };
+}
+
+/**
  * The refusal's public sentence, per reason. Fixed text: the comment posts on the issue, and `why` can name an
  * internal host or a variable, which belong in the worker's log, not in a thread anyone can read.
  */
@@ -167,6 +223,7 @@ export const MCP_REFUSAL_COMMENT = Object.freeze({
 	"mcp-server-unknown": "this deployment does not offer that server",
 	"mcp-secret-reserved": "that server would be handed a credential this deployment keeps for the job itself",
 	"mcp-secret-unmapped": "a credential that server needs is not passed by this trigger",
+	"mcp-excluded": "this trigger's run.excludeTools removes every way the job could reach that server",
 	"mcp-egress-unreachable": "the egress policy does not let a job reach that server",
 	"mcp-package-runner": "the egress policy does not let a job reach the registry that server is fetched from",
 });

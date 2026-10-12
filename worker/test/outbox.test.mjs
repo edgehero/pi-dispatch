@@ -470,6 +470,22 @@ test("a chained child inherits the PARENT'S excludeTools, and the request file c
 	assert.equal(JSON.stringify(args).includes("MARKER-read"), false, "the request file's key is never read");
 });
 
+test("a chained child inherits the parent's exclusions less its MCP tools' names, which its runner, with no MCP, would refuse (REQ-MCP-OPERATOR-SERVERS)", async () => {
+	for (const [parentExcludes, childExcludes] of [
+		[["codemode", "mcp__docs__*", "bash"], ["bash"]],
+		[["codemode", "read_mcp_resource"], undefined],
+		[["bash", "edit"], ["bash", "edit"]],
+	]) {
+		const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it" }) } } });
+		const cap = makeCapture();
+		const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+		const parent = localJob();
+		parent.data = { ...parent.data, mcp: ["docs"], excludeTools: parentExcludes };
+		await collect({ job: parent, prepared: PREPARED });
+		assert.deepEqual(cap.enqueued[0].args.excludeTools, childExcludes, JSON.stringify(parentExcludes));
+	}
+});
+
 test("a chained child does NOT inherit the parent's run.mcp, and the request file cannot set one (REQ-MCP-OPERATOR-SERVERS)", async () => {
 	// The servers are reached with credentials the parent's trigger maps, a grant to that trigger like run.secrets,
 	// and the child's task is agent-authored. A child without them connects nothing: the narrowing direction.

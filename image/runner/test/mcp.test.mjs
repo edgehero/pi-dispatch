@@ -352,7 +352,8 @@ test("run-job.mjs reads the document before anything loads, connects after the s
 		return index;
 	};
 	assert.ok(at("const mcpDocument = readJobMcp();") < at("await buildLoadedResourceLoader("), "read before the loader runs any extension");
-	assert.ok(at("assertExcludeToolsKnown(cfg.excludeTools)") < at("const mcpDocument = readJobMcp();"));
+	assert.ok(at("const mcpDocument = readJobMcp();") < at("assertExcludeToolsKnown(cfg.excludeTools,"), "read before the exclusions are judged, which it widens");
+	assert.match(src, /assertExcludeToolsKnown\(cfg\.excludeTools, \[\.\.\.excludableToolNames\(\), \.\.\.mcpExcludableNames\(mcpDocument\)\]\)/);
 	assert.ok(at("const shadow = mcpShadow(") < at("await jobMcp.lifecycle.start("), "no server connects while another extension could answer for it");
 	assert.ok(at("({ session } = await createAgentSession(") < at("const shadow = mcpShadow("));
 	assert.ok(at("await jobMcp.lifecycle.start(") < at("if (cfg.command) {"), "a command job's servers are up before it dispatches");
@@ -607,5 +608,35 @@ test("a request pi tolerates failing at the HTTP level (a resource list, its rep
 		}
 	} finally {
 		server.close();
+	}
+});
+
+test("mcpExcludableNames: the names a job's MCP adds to what an exclusion may carry, the worker's own set", { skip }, async () => {
+	const { MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern } = await import("../../../worker/src/triggers.mjs");
+	assert.deepEqual(mcp.mcpExcludableNames(null), []);
+	const names = mcp.mcpExcludableNames(doc({ "my-files": stdio() }, { "my-files": [] }));
+	assert.deepEqual(names.sort(), [...MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern("my-files")].sort());
+});
+
+test("a real session: an excluded tool stays excluded inside codemode, and an excluded codemode is gone", { skip }, async () => {
+	const f = sessionFixture();
+	const document = doc({ files: stdio({ exposure: "direct" }) }, { files: ["FILES_TOKEN"] });
+	const jobMcp = mcp.createJobMcp(document, { pi, env: { PI_MCP_SERVERS: "files", FILES_TOKEN: "x", PATH: process.env.PATH }, cwd: f.workspace });
+	const loader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, outboxProtocolPath: f.outboxProtocolPath, extensionFactories: jobMcp.factories });
+	const agentDir = tempDir("pi-agent-");
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
+	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager: pi.SettingsManager.inMemory({}), resourceLoader: loader, excludeTools: ["bash", "mcp__files__*"] });
+	try {
+		await jobMcp.lifecycle.start(session.extensionRunner.createContext());
+		const tools = session.getAllTools().map((t) => t.name);
+		assert.ok(!tools.includes("bash") && !tools.some((name) => name.startsWith("mcp__files__")), JSON.stringify(tools));
+		const codemode = session.getToolDefinition("codemode");
+		const result = await codemode.execute("c1", { code: "return Object.keys(tools).join(',');" }, undefined, undefined, session.extensionRunner.createToolContext("c1", undefined));
+		const out = result.content.map((block) => block.text ?? "").join("\n");
+		assert.match(out, /\bread\b/, `the control: the script lists the tools it can call: ${out}`);
+		assert.doesNotMatch(out, /\bbash\b|mcp__files__/, `a script can reach an excluded tool: ${out}`);
+	} finally {
+		await jobMcp.lifecycle.stop();
+		session.dispose();
 	}
 });

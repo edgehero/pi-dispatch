@@ -191,6 +191,29 @@ const REVIEW_ACTION = "review_submitted";
  */
 // EXPORTED for the two pinned-set bolts and for the admin, which states the vocabulary to an operator.
 export const EXCLUDABLE_TOOL_NAMES = new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
+/**
+ * The tools a job's MCP brings (REQ-MCP-OPERATOR-SERVERS, image/runner/src/mcp.mjs), excludable only by a trigger that
+ * names servers: codemode, tool_search and pi's three resource tools. One server's tools are excluded as a whole by
+ * `mcpServerToolPattern(name)`; a single tool of a server is not, since its name (pi's sanitized `mcp__<server>__<tool>`)
+ * is unknown until the server lists it, and a misspelled one would exclude nothing. That is the overlay's
+ * `toolExposure: "hidden"`, the operator's.
+ */
+export const MCP_EXCLUDABLE_TOOL_NAMES = new Set(["codemode", "tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+/**
+ * `excludeTools` without the entries that name the job's MCP tools, or undefined when nothing is left: what a job that
+ * connects no MCP server carries (a chained child, which never inherits `run.mcp`). Its runner knows none of those
+ * names, and with no MCP there is nothing for them to remove, so dropping them narrows nothing.
+ */
+export function withoutMcpExclusions(excludeTools) {
+	if (!Array.isArray(excludeTools)) return excludeTools;
+	const kept = excludeTools.filter((name) => !MCP_EXCLUDABLE_TOOL_NAMES.has(name) && !String(name).startsWith("mcp__"));
+	return kept.length > 0 ? kept : undefined;
+}
+
+/** The excludeTools entry that removes every tool of one named server: pi's namespace, `-` written as `_`. */
+export function mcpServerToolPattern(name) {
+	return `mcp__${String(name).replace(/-/g, "_")}__*`;
+}
 
 // A cron id flows into BullMQ's deterministic `repeat:<id>:<nextMillis>` jobId, so a `:` corrupts that
 // parse; the charset also excludes `:` and the dedicated check names the reason.
@@ -1371,14 +1394,22 @@ function validateExcludeTools(on, run, at, path) {
 	if (!Array.isArray(excludeTools) || excludeTools.length === 0) {
 		throw configError(`${at}: run.excludeTools must be a non-empty array of tool names when present (got ${JSON.stringify(excludeTools)}) -- an empty exclusion is a field that does nothing, and accepted-and-ignored is how an operator comes to trust one that does: ${path}`);
 	}
+	// With run.mcp, the tools the job's MCP brings are known too (its shape is the next validator's to judge; here a
+	// name that is not a valid server name simply adds no pattern).
+	const known = new Set(EXCLUDABLE_TOOL_NAMES);
+	if (Array.isArray(run?.mcp) && run.mcp.length > 0) {
+		for (const name of MCP_EXCLUDABLE_TOOL_NAMES) known.add(name);
+		for (const name of run.mcp) if (typeof name === "string" && MCP_SERVER_NAME_RE.test(name)) known.add(mcpServerToolPattern(name));
+	}
 	const seen = new Set();
 	for (let i = 0; i < excludeTools.length; i++) {
 		const name = excludeTools[i];
 		if (!isNonEmptyString(name)) {
 			throw configError(`${at}: run.excludeTools[${i}] must be a non-empty string naming a pi tool (got ${JSON.stringify(name)}): ${path}`);
 		}
-		if (!EXCLUDABLE_TOOL_NAMES.has(name)) {
-			throw configError(`${at}: run.excludeTools[${i}] ${JSON.stringify(name)} is not a tool the pinned pi knows (known: ${[...EXCLUDABLE_TOOL_NAMES].join(", ")}) -- pi ignores unknown names silently, so a misspelled exclusion would exclude nothing while the file reads as though it did: ${path}`);
+		if (!known.has(name)) {
+			const mcpHint = MCP_EXCLUDABLE_TOOL_NAMES.has(name) || name.startsWith("mcp__") ? " (an MCP tool is excludable only by a trigger whose run.mcp names its server, and a server's tools only all at once, as mcp__<server>__*)" : "";
+			throw configError(`${at}: run.excludeTools[${i}] ${JSON.stringify(name)} is not a tool the pinned pi knows (known: ${[...known].join(", ")})${mcpHint} -- pi ignores unknown names silently, so a misspelled exclusion would exclude nothing while the file reads as though it did: ${path}`);
 		}
 		if (seen.has(name)) {
 			throw configError(`${at}: run.excludeTools names ${JSON.stringify(name)} twice -- the entries are a removal set, so the second can never change the answer: ${path}`);
