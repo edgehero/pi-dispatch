@@ -172,11 +172,30 @@ export function parseExitTurns(text) {
  * Live from the first image that declares `mcp`: an image built before the worker named them prints the same line.
  */
 export const MCP_RUNNER_REASONS = Object.freeze(["mcp-unavailable", "mcp-config-invalid", "mcp-config-mismatch", "mcp-secret-missing", "mcp-command-missing", "mcp-shadowed"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS]);
+/**
+ * The runner's exit-2 refusals of a job armed with `run.awaitInput` (issue #625), each before the prompt: another
+ * extension registers the tool a parked run ends on (`await-input-shadowed`), or the job has no session file to park
+ * a transcript in (`await-input-without-session`, a worker regression, since the worker arms the flag only beside
+ * `run.resume` and refuses that with no store). Named for MCP_RUNNER_REASONS' reason: the operator's fix is not a budget.
+ */
+export const AWAIT_INPUT_RUNNER_REASONS = Object.freeze(["await-input-shadowed", "await-input-without-session"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS]);
+
+/**
+ * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
+ * far: `awaiting-input`, a run that asked a person a question and ended so the next run resumes with the answer. Every
+ * other exit-0 reason (`stop`, `length`, `command-completed`, `tool-terminated`) is still dropped, as before.
+ *
+ * Read for the same bounded reason RUNNER_POLICY_REASONS is: it cannot change the retry class. The processor consults it
+ * only inside its exit-0 branch, so the worst a forged line can do on a real exit 0 is mark a completed run parked: the
+ * worker then posts one fixed sentence and writes a marker beside a transcript the job already promoted.
+ */
+export const RUNNER_COMPLETED_REASONS = new Set(["awaiting-input"]);
 
 /**
  * The reason off the decisive exit line (`decisiveExitLine`), or `null`: a member of `RUNNER_POLICY_REASONS`
- * and only when that same line says `code: 2`. Read off the same line as `parseExitTurns`, and NEVER throws.
+ * and only when that same line says `code: 2`, or a member of `RUNNER_COMPLETED_REASONS` and only when it says
+ * `code: 0` (issue #625). Read off the same line as `parseExitTurns`, and NEVER throws.
  *
  * Why this may reach the outcome when its five siblings may not: it cannot change the retry class. The
  * processor consults it only inside its container-exit-2 branch, so a container that exits 1 while
@@ -189,6 +208,7 @@ export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap
 export function parseExitReason(text) {
 	const parsed = decisiveExitLine(text);
 	if (parsed === null) return null;
+	if (parsed?.code === 0 && RUNNER_COMPLETED_REASONS.has(parsed?.reason)) return parsed.reason;
 	return parsed?.code === 2 && RUNNER_POLICY_REASONS.has(parsed?.reason) ? parsed.reason : null;
 }
 

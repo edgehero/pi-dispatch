@@ -24,6 +24,11 @@ export const COST_CAP = "cost-cap";
 export const MODEL_NOT_ALLOWED = "model-not-allowed";
 export const COST_CAP_UNENFORCEABLE = "cost-cap-unenforceable";
 export const MODEL_POLICY_UNENFORCEABLE = "model-policy-unenforceable";
+/**
+ * A parked run's reason (issue #625), on exit 0. Exported for the reason the policy literals are: the worker's
+ * closed RUNNER_COMPLETED_REASONS cannot import this file and reads this source for `= "<reason>"`.
+ */
+export const AWAITING_INPUT = "awaiting-input";
 
 /**
  * Which rule of the cost guard refused the call that stopped a `cost-cap` job (issue #507), as the exit line's `why`:
@@ -173,7 +178,10 @@ export function captureTerminal(previous, event) {
 // MODEL_NOT_ALLOWED), or null. It ranks below the turn budget only for the stable order the turn budget always
 // had, and above `tokenAborted`, which since the meter learned more than one stop is the FALLBACK bus meter's
 // flag alone: a runner whose meter installed passes its token stop here, as `meterStop`, never as both.
-export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, terminal, command = null, isRetryable = null, rejected = null }) {
+// `parked` (issue #625) is true only when the job was armed with run.awaitInput AND the run ended on that tool's own
+// result (await-input.mjs parkedTerminal). It ranks below every budget stop and a classified rejection, which are the
+// better-named causes, and above everything else: a parked run is completed, and its reason is what the worker reads.
+export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, terminal, command = null, isRetryable = null, rejected = null, parked = false }) {
 	if (budgetAborted) {
 		return { code: EXIT_POLICY, reason: "turn_budget", turns: budgetTurns };
 	}
@@ -184,6 +192,7 @@ export function decideExit({ budgetAborted, budgetTurns, meterStop = null, token
 		return { code: EXIT_POLICY, reason: TOKEN_BUDGET };
 	}
 	if (rejected) return rejected;
+	if (parked) return { code: EXIT_COMPLETED, reason: AWAITING_INPUT };
 	// A command job (issue #189, run.command): session.prompt("/name args") dispatches a registered
 	// extension command and returns with NO assistant message, so the no-terminal branch below would
 	// classify a clean headless run as infra and pay to retry a success. Three rules, in order:

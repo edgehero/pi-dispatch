@@ -56,6 +56,10 @@ export function parseRunnerEnv(env) {
 		// withhold from createAgentSession. `[]` (the overwhelmingly common state) means the full pinned
 		// default set, byte-identical to every job before the feature.
 		excludeTools: parseExcludeTools(env, "PI_EXCLUDE_TOOLS"),
+		// INT-CONTAINER-JOB-INPUTS (issue #625): the trigger's run.awaitInput -- whether the job is offered the
+		// await_human_input tool and may end as `awaiting-input`. `false` (the overwhelmingly common state) is
+		// byte-identical to every job before the feature.
+		awaitInput: parseAwaitInput(env, "PI_AWAIT_INPUT"),
 		retry: {
 			maxRetries: parsePositiveInt(env, "PI_RETRY_MAX", 2),
 			baseDelayMs: parsePositiveInt(env, "PI_RETRY_BASE_MS", 2000),
@@ -184,6 +188,26 @@ function parseAllowGlobalExtensions(env, name) {
 	if (raw === undefined || raw === "" || raw === "1") return true;
 	if (raw === "0") return false;
 	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "0" to disable the overlay's extensions, or leave it unset to load them)`);
+}
+
+// env-internal PI_AWAIT_INPUT: the worker's own per-job input (INT-CONTAINER-JOB-INPUTS), "1" or absent.
+// Strict for parseAllowGlobalExtensions' reason: a third value is a hand-run container or a worker regression,
+// and guessing either way lies about whether the job can park.
+function parseAwaitInput(env, name) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return false;
+	if (raw === "1") return true;
+	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to offer await_human_input, or leave it unset)`);
+}
+
+/**
+ * A job armed to park must have somewhere to keep the transcript it parks with (issue #625). The worker only
+ * arms PI_AWAIT_INPUT beside run.resume, and refuses run.resume with no session store before any spend, so a
+ * job here without PI_SESSION_FILE is a worker regression or a hand-run container. Refused, never run: a parked
+ * run with no transcript is a question nobody can resume, ending as a clean exit 0.
+ */
+export function assertAwaitInputHasSession({ awaitInput, sessionFile }) {
+	if (awaitInput && !sessionFile) throw configError("PI_AWAIT_INPUT is set but PI_SESSION_FILE is not: a parked run would keep no transcript to resume", "await-input-without-session");
 }
 
 /**

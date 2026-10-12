@@ -1398,8 +1398,11 @@ test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in
 		assert.ok(!loaderSrc.includes(name), `loader.mjs names ${name}`);
 	}
 	assert.ok(!/builtInExtensions|\bbuiltin:\s*true\s*[,}]/.test(runJob + loaderSrc + mcpSrc), "a factory is marked built-in");
-	assert.equal(runJob.split("extensionFactories").length - 1, 1, "run-job.mjs passes extensionFactories other than from the job's document");
-	assert.match(runJob, /\.\.\.\(jobMcp && \{ extensionFactories: jobMcp\.factories \}\)/);
+	// Two sources only: the job's MCP document, and the tool a job armed with run.awaitInput may end on (issue #625).
+	assert.match(runJob, /const extensionFactories = \[\.\.\.\(jobMcp\?\.factories \?\? \[\]\), \.\.\.\(awaitInput\?\.factories \?\? \[\]\)\];/, "run-job.mjs passes extensionFactories other than from the job's document and run.awaitInput");
+	assert.equal(runJob.split("extensionFactories").length - 1, 3, "extensionFactories is built once and passed once");
+	assert.match(runJob, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
+	assert.match(runJob, /const awaitInput = cfg\.awaitInput \? createAwaitInput\(\) : null;/);
 	assert.match(runJob, /const jobMcp = mcpDocument \? createJobMcp\(/);
 	assert.match(loaderSrc, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
 });

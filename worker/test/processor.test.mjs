@@ -3,7 +3,7 @@ import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS
 import { test } from "node:test";
 import { budgetCapsFor, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { readFileSync, readdirSync } from "node:fs";
-import { InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
+import { InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, PARKED_COMMENT, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { buildRecord, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { MCP_REFUSAL_COMMENT } from "../src/mcp-preflight.mjs";
@@ -1396,6 +1396,49 @@ test("a completed run promotes its transcript; a policy or infra exit does NOT",
 	assert.deepEqual(calls, [], "an infra exit must not promote either -- the retry would otherwise continue rather than re-run");
 });
 
+test("a run that ended awaiting-input is completed, promoted with the key marked parked, and posts the one fixed comment (issue #625)", async () => {
+	const prepared = { workspace: "/w", jobDir: "/j", session: { key: "abc", hostDir: "/j/session", resume: true, reason: "resumed", bytes: 42 } };
+	const run = (job, exitReason) => {
+		const promotions = [];
+		const posted = [];
+		const { deps: d } = deps({
+			prepareWorkspace: async () => prepared,
+			promoteSession: (_s, opts) => {
+				promotions.push(opts.parked);
+				return { promoted: true, reason: "promoted", bytes: 99 };
+			},
+			imagePreflight: async () => ({ ok: true, piVersion: "0.80.7", capabilities: ["awaitInput"] }),
+			comment: async (_j, t) => posted.push(t),
+			sessionsDir: "/srv/pi-sessions",
+		});
+		return runJob(job, { ...d, runContainer: async () => ({ code: 0, aborted: false, turns: 2, tokens: null, session: { resumed: true, reason: "resumed" }, exitReason }) }).then((r) => ({ r, promotions, posted }));
+	};
+	const armed = { ...ghJob, resume: true, awaitInput: true };
+
+	const parked = await run(armed, "awaiting-input");
+	assert.equal(parked.r.outcome, "completed", "a parked run is a completed run, never retried (CONST-RETRY-INFRA-ONLY)");
+	assert.equal(parked.r.reason, "awaiting-input");
+	assert.deepEqual(parked.promotions, [true]);
+	assert.deepEqual(parked.posted, [PARKED_COMMENT]);
+
+	// A run that did not park is the completed run it always was: no reason, no mark, no comment.
+	const done = await run(armed, null);
+	assert.equal("reason" in done.r, false);
+	assert.deepEqual(done.promotions, [false]);
+	assert.deepEqual(done.posted, []);
+
+	// A line that claims a park on a job that was never offered the tool is ignored.
+	const unarmed = await run({ ...ghJob, resume: true }, "awaiting-input");
+	assert.equal("reason" in unarmed.r, false);
+	assert.deepEqual(unarmed.promotions, [false]);
+	assert.deepEqual(unarmed.posted, []);
+});
+
+test("PARKED_COMMENT is fixed, path-free and carries no model text", () => {
+	assert.equal(typeof PARKED_COMMENT, "string");
+	assert.doesNotMatch(PARKED_COMMENT, /\/|\$\{/);
+});
+
 test("the record's session merges host intent with what the container actually did", async () => {
 	// Both halves, because either alone lies. A host that staged a transcript while the runner reports
 	// resumed:false is a degrade, and with one number it is indistinguishable from an ordinary cold start.
@@ -1434,13 +1477,13 @@ test("the promotion carries the container's context reading, or the bound it fee
 		...base,
 		runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: true, reason: "resumed" }, context: { tokens: 5000, window: 200000 } }),
 	});
-	assert.deepEqual(calls, [{ piVersion: "0.80.7", context: { tokens: 5000, window: 200000 } }]);
+	assert.deepEqual(calls, [{ piVersion: "0.80.7", context: { tokens: 5000, window: 200000 }, parked: false }]);
 
 	// A container that reported none passes null through rather than omitting the key, so the store's
 	// "leave the last real reading alone" branch is reached rather than its "no key" one.
 	calls.length = 0;
 	await runJob(ghJob, { ...base, runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: true, reason: "resumed" }, context: null }) });
-	assert.deepEqual(calls, [{ piVersion: "0.80.7", context: null }]);
+	assert.deepEqual(calls, [{ piVersion: "0.80.7", context: null, parked: false }]);
 });
 
 test("a host gate that refused outranks the runner's absent, so the record names WHICH gate", async () => {

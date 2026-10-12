@@ -140,10 +140,18 @@ export const TERMINAL_COMMENTS = {
 	"mcp-secret-missing": "Stopped: a credential an MCP server this trigger names needs was not set inside the job, so the run ended before the agent started. The operator needs to check the secrets this trigger passes. Not retried.",
 	"mcp-command-missing": "Stopped: the job image does not have the program an MCP server this trigger names runs, so the run ended before the agent started. The operator needs to install that server in the job image or the overlay. Not retried.",
 	"mcp-shadowed": "Stopped: another extension in this job registers a tool or command that only the job's MCP servers may, so the run ended before the agent started. The operator needs to remove that extension or this trigger's MCP servers. Not retried.",
+	// Issue #625. The runner's two refusals of a job armed with run.awaitInput, each before the prompt.
+	"await-input-shadowed": "Stopped: another extension in this job registers the tool a run uses to stop and wait for an answer, so the run ended before the agent started. The operator needs to remove that extension or this trigger's run.awaitInput. Not retried.",
+	"await-input-without-session": "Stopped: this run may stop to wait for an answer but had nowhere to keep its work, so it ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",
 	// Issue #596. Never the size or the project: both are operator configuration, and the reader may be an issue author
 	// who can act on neither. The worker log and the run record carry them.
 	[EXIT_OOM_KILLED]: "Stopped: the job's container ran out of memory and was stopped. Partial work may exist. Not retried, because the same size would stop the same way. The operator can raise this job's memory size.",
 };
+
+// Issue #625: the one comment the COMPLETED path posts, on a run that ended awaiting-input. The agent posted its own
+// question (the tool tells it to, before it ends); this says how the run continues. Fixed and path-free, the
+// TERMINAL_COMMENTS rule, and it carries no model text: the question never crosses the exit line.
+export const PARKED_COMMENT = "This run stopped to wait for an answer to the question above. Reply in a comment that starts with this repository's pi-dispatch comment phrase, and the next run continues from here.";
 
 // Issue #502: the `model-unknown` refusal's comment. Names no model: the reader may be an issue author.
 export const MODEL_UNKNOWN_COMMENT = "Refused: this job names an AI model that this deployment does not know (it is in neither pi's model catalog nor the overlay models.json), so no container was started and nothing was spent. Ask the operator to check the trigger's model settings. Not run.";
@@ -345,7 +353,8 @@ export async function runJob(job, deps) {
 		// runContainer({ job, token, prepared, secrets, name, signal, user, home, modelEndpoints?, size?, hostCpus?, unenforced? }) => { code, aborted, abortReason, turns, tokens, session, usage, context, exitReason }.
 		// `size` (issue #596) is `jobSize` below; `hostCpus` the runtime's CPU count off the job-user gate's own facts read.
 		// `unenforced` (issue #596) is the size flags that same read says the runtime drops, passed only when there are some.
-		// `exitReason` (issue #437) is parseExitReason's closed-set label, read only inside the exit-2 branch.
+		// `exitReason` (issue #437) is parseExitReason's closed-set label, read only inside the exit-2 branch, and in the
+		// exit-0 branch for `awaiting-input` alone (issue #625).
 		// `resources` and `exitOomKilled` (issue #596) are the exit line's cgroup block and the supervisor's OOM report.
 		// `user`/`home` are the job-user gate's answer (issue #341), null for the image's own USER.
 		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
@@ -1482,9 +1491,17 @@ export async function runJob(job, deps) {
 				// (CONST-RETRY-INFRA-ONLY). Same completed-only rule INT-OUTBOX-CONTRACT already uses, and
 				// it sits beside the chain collection for the same reason: both must happen before the
 				// `finally` deletes jobDir. Never throws.
-				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context }) : null;
+				// A run that asked a person a question and ended (issue #625, REQ-AWAIT-INPUT) is still a completed run: it is
+				// promoted like any other, with the key marked parked, and the one fixed comment says how it continues.
+				// exitReason is RUNNER_COMPLETED_REASONS-filtered and read only here, on code 0, so it cannot move a job
+				// between retry classes. Only a job armed with run.awaitInput may park: a line that says so on any other
+				// job is ignored, since that runner was never offered the tool.
+				const parked = exitReason === "awaiting-input" && job.awaitInput === true;
+				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked }) : null;
+				if (parked) await comment(job, PARKED_COMMENT);
 				return {
 					outcome: "completed",
+					...(parked ? { reason: "awaiting-input" } : {}),
 					exitCode: code,
 					turns,
 					tokens,

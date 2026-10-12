@@ -803,6 +803,27 @@ test("a matched rule's run.resume reaches the JOB, and an unflagged rule omits t
 	assert.equal(commented.job.resume, true);
 });
 
+test("a matched rule's run.awaitInput reaches the JOB only when armed (issue #625)", () => {
+	const cfg = forgeCfg({
+		triggers: {
+			label: [
+				{ index: 0, predicate: { any: ["pi:fix"] }, flow: "fix", resume: true, awaitInput: true },
+				{ index: 1, predicate: { any: ["pi:docs"] }, flow: "docs", resume: true, awaitInput: false },
+			],
+			comment: { index: 2, phrase: "@pi", defaultFlow: "triage", resume: true, awaitInput: true },
+			pullRequest: [],
+			knownFlows: new Set(["fix", "docs", "triage"]),
+		},
+	});
+	const armed = filter("issues", { sender: { id: 1 }, action: "labeled", issue: { number: 7, title: "T", body: "B", labels: [{ name: "pi:fix" }] } }, cfg, 99, "a1");
+	assert.equal(armed.job.awaitInput, true);
+	assert.equal("awaitInput" in armed.job.trigger, false);
+	const off = filter("issues", { sender: { id: 1 }, action: "labeled", issue: { number: 8, title: "T", body: "B", labels: [{ name: "pi:docs" }] } }, cfg, 99, "a2");
+	assert.equal("awaitInput" in off.job, false, "absent, not present-and-false");
+	const commented = filter("issue_comment", { sender: { id: 1 }, action: "created", comment: { body: "@pi go with B", author_association: "OWNER" }, issue: { number: 9, title: "T", body: "B", labels: [] } }, cfg, 99, "a3");
+	assert.equal(commented.job.awaitInput, true);
+});
+
 // --- replicas ride the MATCHED rule onto the job (REQ-REPLICA-RUNS) ---
 
 test("replicas rides the matched rule onto the job, at JOB level and never inside trigger", () => {
