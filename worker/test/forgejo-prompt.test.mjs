@@ -103,3 +103,19 @@ test("an unflagged forgejo prompt is byte-identical to before the feature", () =
 		assert.equal(/replica/i.test(buildForgejoPrompt({ flow: "fix", target })), false);
 	}
 });
+
+// --- what a resumed run is told to do, by target (issue #624) ---
+
+test("a resumed issue run replies where the activity came from and checks for the branch's pull request first", () => {
+	const p = buildForgejoPrompt({ flow: "fix", target: { type: "issue", number: 5, title: "t", body: "b" }, comment: { body: "go with option B" }, resumed: true });
+	assert.match(p, /reply on the issue saying what you did/);
+	assert.match(p, /tea pr list --state open/);
+	assert.match(p, /tea pr create --head pi\/issue-5/);
+	assert.equal(/your push updates the existing one/.test(p), false, "an issue run is not told a pull request already exists");
+});
+
+test("a resumed pull request run keeps its words", () => {
+	const p = buildForgejoPrompt({ flow: "fix", target: { type: "pull_request", number: 9, title: "t", body: "b" }, comment: { body: "x" }, resumed: true });
+	assert.match(p, /your push updates the existing one\./);
+	assert.equal(/tea \w+ create/.test(p), false);
+});

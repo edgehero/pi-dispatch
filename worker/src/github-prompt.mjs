@@ -155,6 +155,31 @@ function prReplicaLines(replica, replicas) {
  * The safety paragraph is repeated verbatim rather than assumed inherited. It is cheap, and the whole
  * premise of a long-lived transcript is that early turns get compacted away.
  */
+/**
+ * What a resumed run is told to do with the activity (issue #624). On a pull request the branch and the pull
+ * request exist, so the words are the ones this envelope always had. On an issue neither is certain: the
+ * previous run may have opened nothing (it concluded there was nothing to change, or it stopped to ask), and
+ * "push to the same branch ... do not open a second" would leave the work on a branch nobody reviews while the
+ * human who asked waits on the issue for a reply. So the issue form names the issue branch, checks for its pull
+ * request first, and replies where the activity came from. No replica argument: run.resume refuses replicas.
+ */
+function resumedActionLines(target, n) {
+	if (target?.type === "pull_request") {
+		return [
+			"Address the activity quoted below. If it asks for changes, make them, push to the same branch with",
+			"`git push --force-with-lease`, and reply on the pull request saying what you did or why you could",
+			"not. Do not open a second pull request -- your push updates the existing one.",
+		];
+	}
+	const branch = issueBranch(n);
+	return [
+		"Address the activity quoted below, then reply on the issue saying what you did or why you could not.",
+		`If it asks for changes, commit them to \`${branch}\` and publish with \`git push --force-with-lease\` to that`,
+		`branch only. Check first for an open pull request from it (\`gh pr list --head ${branch} --state open\`):`,
+		"if one exists your push updates it, so do not open a second; only if none exists, run `gh pr create`.",
+	];
+}
+
 function buildResumedPrompt(flow, target, comment, review, instructions) {
 	const n = normalizeNumber(target?.number);
 	const noun = target?.type === "pull_request" ? "pull request" : "issue";
@@ -168,9 +193,7 @@ function buildResumedPrompt(flow, target, comment, review, instructions) {
 		`and \`gh pr diff ${n}\` (or \`gh issue view ${n}\`) before doing anything, then follow the`,
 		`"${flow}" skill from the top.`,
 		"",
-		"Address the activity quoted below. If it asks for changes, make them, push to the same branch with",
-		"`git push --force-with-lease`, and reply on the pull request saying what you did or why you could",
-		"not. Do not open a second pull request -- your push updates the existing one.",
+		...resumedActionLines(target, n),
 		"",
 		// The operator block sits HERE and not after: later text reads as more specific, and the harness's
 		// non-negotiables must be the last thing before the data region rather than something an operator

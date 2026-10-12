@@ -306,8 +306,9 @@ test("a resumed envelope never sees a replica -- triggers.mjs refuses the combin
 	// Belt-and-braces on a coupling stated in three files. The resumed envelope says "Do not open a second
 	// pull request", which is the exact opposite of what a replica exists to do.
 	const p = buildGithubPrompt({ ...issue, resumed: true, replica: 2, replicas: 2 });
-	assert.match(p, /Do not open a second pull request/);
-	assert.equal(/replica/i.test(p), false);
+	assert.match(p, /so do not open a second/);
+	assert.match(p, /`pi\/issue-42`/, "the unreplicated issue branch, never a replica's");
+	assert.equal(/replica|-r2/i.test(p), false);
 });
 
 // --- run.instructions: the operator's standing text, in the ENVELOPE (issue #60) ---
@@ -380,4 +381,22 @@ test("instructionBlock returns empty for absent or blank input, so callers can s
 	assert.equal(instructionBlock(""), "");
 	assert.equal(instructionBlock("   \n "), "");
 	assert.ok(instructionBlock("x").includes("x"));
+});
+
+// --- what a resumed run is told to do, by target (issue #624) ---
+
+test("a resumed issue run replies on the issue and checks for the branch's pull request before opening one", () => {
+	const p = buildGithubPrompt({ ...issue, comment: { body: "go with option B" }, resumed: true });
+	assert.match(p, /reply on the issue saying what you did/);
+	assert.match(p, /gh pr list --head pi\/issue-42 --state open/);
+	assert.match(p, /only if none exists, run `gh pr create`/);
+	assert.equal(/reply on the pull request/.test(p), false, "an issue run is not told to reply on a pull request that may not exist");
+	assert.equal(/your push updates the existing one/.test(p), false);
+});
+
+test("a resumed pull request run keeps its words: push to the same branch, reply on the PR, no second PR", () => {
+	const p = buildGithubPrompt({ flow: "fix", target: { type: "pull_request", number: 9, title: "t", body: "b" }, comment: { body: "x" }, resumed: true });
+	assert.match(p, /reply on the pull request saying what you did/);
+	assert.match(p, /Do not open a second pull request -- your push updates the existing one\./);
+	assert.equal(/gh pr create/.test(p), false);
 });
