@@ -475,6 +475,9 @@ export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	// unknown), the job would run under the deployment's wider cap, or with none, on a clean record. Any present
 	// value counts as authored; whether it is a valid amount is the loader's question, not this one.
 	Object.freeze({ key: "maxCostUsd", authored: (v) => v !== undefined && v !== null }),
+	// REQ-MCP-OPERATOR-SERVERS: the MCP servers a trigger's jobs connect. Not a widening when dropped but the same
+	// silent outcome: the job runs its flow without the servers it was written against, on a clean record.
+	Object.freeze({ key: "mcp", authored: (v) => Array.isArray(v) && v.length > 0 }),
 ]);
 
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {

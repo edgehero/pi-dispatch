@@ -7,6 +7,7 @@ import { unqualifiedScope } from "./pause-windows.mjs";
 import { PROJECT_CAP_REASON } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
+import { MCP_REFUSAL_COMMENT } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
@@ -307,6 +308,10 @@ export async function runJob(job, deps) {
 		// would leave an INJECTED resolver running on every job, which is how a probe nobody wanted starts
 		// spawning a subprocess per delivery to learn nothing.
 		resolveSecrets = async (job) => ({ profileUnknown: job.secretsProfile ?? DEFAULT_SECRETS_PROFILE }),
+		// (job) => { ok, document } | { refused, name, why } | { unavailable: code } (REQ-MCP-OPERATOR-SERVERS,
+		// mcp-preflight.mjs). The default passes a job that names no server and refuses one that does, so a wiring that
+		// forgot the check can never run a job without the servers its trigger names.
+		checkMcp = (job) => (job?.mcp !== undefined ? { refused: "mcp-config-invalid", name: null, why: "this worker reads no MCP servers" } : { ok: true, document: null }),
 		// #227. Which backends this deployment BLESSED (PI_BACKENDS). Defaults to the one name every
 		// deployment already runs rather than to admit-everything: a wiring that says nothing blesses
 		// `local` only, so a job naming anything else is refused instead of running somewhere the operator
@@ -491,7 +496,7 @@ export async function runJob(job, deps) {
 				// Three causes, the likeliest first (PR #536's review, round 3, made the check strict): the trigger gained the
 				// field after this job was queued, a service is below the version that carries it, or one still reads an
 				// older copy of the triggers file. The first is fixed by re-running the job, so the comment says so.
-				await comment(job, `Refused: this trigger sets \`run.${skew.field}\`, but the job reached the worker without it, so it would have run without that limit. Either the trigger changed after this job was queued (re-run it), or a service in this deployment is stale: below the version that carries the field, or still reading an older copy of the triggers file and in need of a restart. Not run.`);
+				await comment(job, `Refused: this trigger sets \`run.${skew.field}\`, but the job reached the worker without it, so it would have run as though the trigger did not set it. Either the trigger changed after this job was queued (re-run it), or a service in this deployment is stale: below the version that carries the field, or still reading an older copy of the triggers file and in need of a restart. Not run.`);
 				log("refused_trigger_skew", { triggerIndex: job.trigger?.matched?.index ?? null, field: skew.field, causes: "trigger-changed-after-queue-or-stale-service" });
 				return { outcome: "policy", reason: "trigger-skew", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 			}
@@ -974,6 +979,25 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "skills-dir-missing", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
+		// REQ-MCP-OPERATOR-SERVERS. A trigger that named MCP servers its job cannot use would run its flow without them,
+		// or hand a server the job's own credentials, or open a connection the egress proxy refuses at its first call:
+		// each a plausible report and a clean exit. One read of the overlay's mcp.json, no credential and no network, so
+		// it sits with the free refusals before the secrets resolver (the one gate that spawns) and before anything that
+		// spends (CONST-BUDGET-BEFORE-TOKENS). Its answer carries the per-job document prepare writes, so the servers the
+		// job connects are exactly the ones this passed.
+		const mcpChecked = checkMcp(job);
+		if (mcpChecked.unavailable) {
+			throw new InfraRetry(`an overlay file the MCP check reads (mcp.json, models.json or egress-allowlist.conf) could not be read just now (${mcpChecked.unavailable})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+		}
+		if (mcpChecked.refused) {
+			// The server NAME is the operator's own configuration, the same class as the image ref on the image refusal.
+			// `why` can name an internal host or a variable (never a value, a url's path or its query), so it goes to the
+			// worker's log and the public comment says only which rule refused.
+			await comment(job, `Refused: this trigger names MCP server${mcpChecked.name ? ` "${mcpChecked.name}"` : "s"} in \`run.mcp\`, and ${MCP_REFUSAL_COMMENT[mcpChecked.refused] ?? "it cannot be used"}. The job would have run without the servers its flow was written against; the worker's log says why (\`refused_mcp\`). Not run.`);
+			log("refused_mcp", { kind: job.kind ?? null, reason: mcpChecked.refused, server: mcpChecked.name ?? null, why: mcpChecked.why });
+			return { outcome: "policy", reason: mcpChecked.refused, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
 		// REQ-TRIGGER-SECRETS. A trigger that named secret references the worker cannot resolve would run its
 		// flow with those variables UNSET, get a 401 from whatever it was meant to reach, write a plausible
 		// report about why the integration is down, and exit 0.
@@ -1107,7 +1131,7 @@ export async function runJob(job, deps) {
 		// `podmanStore` (issue #429) only where the venue's job user carried one: the podman store the container ran in.
 		// `portfolio` (issue #505) only for a job the gate above confirmed: prepare then writes /job/portfolio.json, after
 		// asking the live file once more. Absent otherwise, so every other job's prepare call is unchanged.
-		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
+		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
 
 		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
 		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)

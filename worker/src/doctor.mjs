@@ -73,7 +73,7 @@ import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
 import { mcpServerWhere, readOverlayMcp } from "./mcp-config.mjs";
-import { allowlistEntryFor, egressRefusalFor, parseAllowlist } from "./egress-allowlist.mjs";
+import { allowlistEntryFor, egressRefusalFor, packageRunnerHosts, parseAllowlist } from "./egress-allowlist.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
@@ -5972,11 +5972,7 @@ export function overlayMcpChecks({ overlay, env, fileExists, read, allowlist = [
 	for (const name of names) {
 		const server = parsed.servers[name];
 		if (server.packageRunner) {
-			// Every host the runner fetches from, by name, since the proxy matches names: uv and pipx take the index from
-			// pypi.org and the files from files.pythonhosted.org, and yarn's default registry is its own name.
-			const runner = mcpServerWhere(server);
-			const hosts = ["uv", "uvx", "pipx"].includes(runner) ? ["pypi.org", "files.pythonhosted.org"] : runner === "yarn" ? ["registry.yarnpkg.com"] : ["registry.npmjs.org"];
-			const missing = hosts.filter((host) => allowlistEntryFor(allowlist, host) === null);
+			const missing = packageRunnerHosts(server.command).filter((host) => allowlistEntryFor(allowlist, host) === null);
 			const listed = missing.length === 0;
 			const registry = missing.join(" and ");
 			checks.push({
@@ -5994,7 +5990,7 @@ export function overlayMcpChecks({ overlay, env, fileExists, read, allowlist = [
 			ok: false,
 			warn: true,
 			label: `MCP server ${name} (${mcpServerWhere(server)}) is not reachable with the egress policy on: ${refusal}`,
-			fix: "allowlist its host for https on 443, or declare its host and port in model-endpoints.json: docs/egress.md. Until then no job can reach it",
+			fix: "use an https:// url and allowlist its host for 443, or declare its host and port in model-endpoints.json: docs/egress.md. Until then no job can reach it",
 		});
 	}
 	return checks;

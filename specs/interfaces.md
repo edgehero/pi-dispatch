@@ -1127,6 +1127,11 @@ refactor apart.
                                    `run.skillsDir` names. Present only when the trigger set it.
   /job/portfolio.json              a portfolio job's snapshot (issue #505), 0444. Present only for a job the
                                    processor confirmed as a portfolio job and the live triggers file still flags.
+  /job/mcp.json                    the MCP servers the trigger's `run.mcp` names (REQ-MCP-OPERATOR-SERVERS), 0444:
+                                   { version: 1, autoEnableCodemode, codemodeModels, servers: { name: pi entry },
+                                   refs: { name: [NAME...] } }, each entry in pi's shape with every reference still
+                                   `${NAME}` and `toolExposure` led by "dispatch_*": "hidden". Present only when
+                                   the pickup's MCP check passed the job; never holds a value.
   ```
   **The guardrails are baked into the image** at a path outside `agentDir` and are **not** mounted.
 - **What the container additionally reads from `/workspace`, and why it is not a `/job` input.** A job's
@@ -1663,7 +1668,7 @@ refactor apart.
     network; one that could not enforce it would exit `model-policy-unenforceable`. The pi-upgrade-check workflow
     requires this repo's image to carry this token as well. The worker's `modelPolicy` row in `CAPABILITY_GATES`
     (below) is what reads it: a job with a list on an image without it is refused pre-spend.
-    The worker's side of the five job-feature tokens (`replicas`, `commands`, `excludeTools`, `modelPolicy`, `costCap`) is ONE table
+    The worker's side of the six job-feature tokens (`replicas`, `commands`, `excludeTools`, `modelPolicy`, `costCap`, `mcp`) is ONE table
     since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which
     jobs need it, the result key, the record reason, the log event and the comment. The preflight refuses the
     first row a job needs and the image lacks, in the order the branches had, so the behaviour is unchanged
@@ -1836,7 +1841,9 @@ refactor apart.
     asserts MEMBERSHIP against the factory-derived pinned set pre-spend, exit 2, because pi silently
     ignores unknown `excludeTools` names -- then passes the list to `createAgentSession` and logs
     `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
-    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `HOME=/home/pi` (issue #341: set ONLY beside
+    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
+    trigger's `run.mcp` names, comma-joined, safe by the loader's name rule, omitted when the job names none, never
+    empty; the runner holds `/job/mcp.json` to exactly these names); `HOME=/home/pi` (issue #341: set ONLY beside
     `--user`, assigned after the `PI_FORWARD_ENV` and `run.secrets` loops so neither can move it, and reserved so a
     trigger cannot bind it); `PI_DISPATCH_KEYLESS=keyless` (issue #503), fixed and non-secret, set ONLY when the credential gate passed the
     job's provider keyless: a provider pi does not know whose every model is on a `keyless` model endpoint and whose
@@ -4128,6 +4135,14 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   write down -- the run record's `backend`, the session store's `venue` stamp and the sandbox manifest's
   `backend` (issue #277) -- never the raw field, which is absent for every trigger that names no venue.
 
+- **`run.mcp` (ALL trigger kinds, optional non-empty array of 1 to 8 server names)**: the overlay MCP servers this
+  trigger's jobs connect (`REQ-MCP-OPERATOR-SERVERS`, `INT-OVERLAY-MCP-CONFIG`). Each name matches the overlay's name
+  rule (lowercase letters, digits and `-`, up to 32), unique. The loader is fs-free, so whether the overlay offers a
+  name is asked at pickup (`DES-MCP-EGRESS-PREFLIGHT`), before anything is spent. Near misses (`mcpServers`, `MCP`,
+  `mcp_servers`, a key outside plain ASCII with no plain letter other than those of `mcpservers`) and `on.mcp` are
+  refused, since a dropped list runs the job without its servers. Absent carries no key. File-only: the admin's tools cannot set it, and a chained
+  child does not inherit it (its servers are reached with credentials granted to the parent's trigger). An image that
+  does not declare the `mcp` capability is refused pre-spend as `job-image-mcp-unsupported`.
 - **`run.excludeTools` (ALL trigger kinds, optional non-empty array of pi tool names)**: the built-in pi
   tools this trigger's sessions must NOT have (`DES-PER-TRIGGER-TOOL-EXCLUSIONS`,
   `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, issue #291). The runner passes the list to `createAgentSession` as
@@ -4507,7 +4522,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `:ro` mount sees an older file) would enqueue the job WITHOUT its list, and the job would run on the
   deployment's list or on none while every record reads like a correct run. The worker's own read of the
   triggers file catches it, `run.waitFor`'s skew check generalised to a table of authored NARROWING fields
-  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models` and, since #501, `maxCostUsd`): when
+  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, and `mcp`): when
   the entry at the job's matched index (identity-checked on flow, command, kind and on-type) sets the field and
   the job ARRIVED without it (`job.data.models` or `job.data.maxCostUsd`, read before the env fill), the job is refused pre-spend as
   `trigger-skew`, naming the field. The same limits as the wait check: it reads `PI_TRIGGERS_FILE`, else
@@ -4830,7 +4845,8 @@ validator rather than a second copy of it.
   on its own. `mcp-auth.json` is never in the overlay.
 - **Producer**: the operator, through `pi-dispatch import-pi` (which writes only accepted servers, in pi's shape,
   with `type: "http"` written out for a streamable HTTP server; each import replaces the file) or by hand.
-  **Consumers**: `pi-dispatch doctor`; from `run.mcp` on, the worker's pickup and the job.
+  **Consumers**: `pi-dispatch doctor`; the worker's pickup (`mcp-preflight.mjs`), which writes the job's
+  `/job/mcp.json` from it; and the job.
 - **Location**: worker/src/mcp-config.mjs -> parseOverlayMcp, readOverlayMcp, MCP_* constants.
 
 ## INT-RUN-HISTORY-FILE-CONTRACT
@@ -4850,7 +4866,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-egress-unreachable|mcp-package-runner|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -8248,3 +8264,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-09 | Issue #599, the run mirror's start. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the fleet copy gains `runs:since`, a hash of when the copy started (`at`) and a run of the index that vouches for it (`member`), written by the writer's one script together with the member (the `ZADD` moved into it): the write's time and its run when the index did not exist before it, else the index's oldest run when the start there is absent, not a hash, or no longer trusted; it is trusted only while its run is in the index, a removal of that run hands it to the oldest run left (`at` unchanged) or deletes it with the last, and it expires with the index. Every earlier bound lived in keys lost with the runs (a flushed or replaced Valkey, an expired index), so after one more write a peer read every lost run as idle with nothing missing; and a start can itself outlive its index (a 4.0.1 worker's 30 day index expiry, a pruning reader that empties the index) under an index an older worker recreates, so a start without a held run proves nothing. Rejected: trusting a start while the horizon is at or past it, since the horizon outlives a lost index too. A pruning reader now records its cut in `runs:horizon` (`PRUNE_SCRIPT`), where it erased the expired-body bound; the capacity reader reads the index as one snapshot (`READ_SCRIPT`). The Acceptance gains the start's and the pruning reader's cases. **`INT-CAPACITY-REPORT` AMENDED**: the mirror's coverage starts no earlier than a trusted `runs:since` (else the index's oldest run); `truncated` covers a mirror that started inside the window, and for a report with no covered host is the mirror's own cut; the fleet coverage gains `liveRowMissing` (the reading host with records and no live row; the other rows' `running` count stands); the CLI's coverage line says a truncated history and running jobs it could not count; an empty report says no host ran a job only with no reason, not local, not truncated and no unreadable or host-less record. The report's other fields UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP in a job's pi children. **`INT-SDK-SESSION-OPTIONS` AMENDED** in (m): a pi CLI child the job starts gets `--no-mcp` from the preload, so a repo's `mcp.json` is read neither in the job's session nor by pi's built-in MCP in a child (residuals in OQ-011 M6). The session's options are UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `INT-OVERLAY-MCP-CONFIG`**: the overlay's `mcp.json`, its accepted keys per transport, the `${NAME}` reference grammar, the refusals, and its producer and consumers. `INT-PI-PACKAGES-FILE-CONTRACT` is UNCHANGED, checked. |
+| 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.mcp` on all five kinds, names only, its near-miss sweep (ASCII spellings, and a key under `run` or `on` outside plain ASCII with no plain letter other than those of `mcpservers`), a `trigger-skew` row, file-only and not inherited by a chained child. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/mcp.json` (0444, references only, the admin's tool names hidden first). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-mcp-unsupported` and the seven `mcp-*` pickup refusals (`mcp-list-invalid` for a job's list the loader would not have written). **`INT-OVERLAY-MCP-CONFIG` AMENDED**: its consumers now include the pickup. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the env gains `PI_MCP_SERVERS`; `CAPABILITY_GATES` gains the `mcp` row (six job-feature tokens); the token is declared by no image until the runner reads `/job/mcp.json`, so the label's token set is unchanged. |

@@ -32,6 +32,8 @@ import { imageRefProblem } from "./image-ref.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
+// The server-name rule, from the one module that parses the overlay's list (its body is import-inert).
+import { MCP_SERVER_NAME_RE } from "./mcp-config.mjs";
 import { validateModelRef } from "./model-ref.mjs";
 import { parseUsdMicros } from "./money.mjs";
 import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
@@ -416,6 +418,7 @@ function normalizeCron(on, run, index, path, state) {
 	// A cron job's session narrows like any other: the field selects what the container's agent can do,
 	// which is orthogonal to what triggered it (issue #291).
 	const excludeTools = validateExcludeTools(on, run, `cron trigger "${id}"`, path);
+	const mcp = validateMcp(on, run, `cron trigger "${id}"`, path);
 	// Validated since #502; before it these three were copied untouched, so `run.provider: 7` loaded.
 	const ref = validateRunModel(on, run, `cron trigger "${id}"`, path);
 	// Issue #505: the portfolio flag. Strictly boolean, the house rule (`run.github`'s reason: a truthy string must not
@@ -430,7 +433,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }) },
 	};
 }
 
@@ -1386,6 +1389,75 @@ function validateExcludeTools(on, run, at, path) {
 	return [...excludeTools];
 }
 
+/** The most MCP servers one trigger may name. A bound, not a budget: each one is a connection the job opens at start. */
+export const MCP_SERVERS_MAX = 8;
+
+/** The spellings of `run.mcp` a key is refused for, compared after `mcpKeySkeleton`. */
+const MCP_NEAR_MISSES = Object.freeze(["mcp", "mcps", "mcpserver", "mcpservers"]);
+
+/** An ASCII key reduced to its letters and digits, lowercased: `MCP_Servers` and `mcp-servers` both read `mcpservers`. */
+export function mcpKeySkeleton(key) {
+	return String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Whether `key` (not the field itself) is refused as a spelling of `run.mcp` rather than dropped: an ASCII key whose
+ * skeleton is one of the field's spellings, or a key that is not plain ASCII and whose plain letters are all letters
+ * of `mcpservers`. A key in another script can be drawn exactly like this one (Greek, Cyrillic, Cherokee, small
+ * capitals, fullwidth forms), which no table of lookalikes keeps up with, but any such key keeps at most the field's
+ * own letters in ASCII. An unrelated non-ASCII key (`fl\u00f6w`) keeps others and still loads, and a lookalike of
+ * another field (`m\u043edels`) is left to that field's sweep.
+ */
+export function isMcpNearMiss(key) {
+	if (key === "mcp") return false;
+	if (/^[\x20-\x7E]*$/.test(key)) return MCP_NEAR_MISSES.includes(mcpKeySkeleton(key));
+	return [...key.matchAll(/[a-z]/gi)].every(([letter]) => "mcpservers".includes(letter.toLowerCase()));
+}
+
+/**
+ * `run.mcp` -- the overlay MCP servers this trigger's jobs connect (REQ-MCP-OPERATOR-SERVERS), by name.
+ *
+ * NAMES ONLY. A server's definition is the operator's, in the overlay's `mcp.json` (INT-OVERLAY-MCP-CONFIG), so a
+ * trigger edit can choose among the servers the deployment offers and never point a credential at a new host. The
+ * loader is fs-free, so whether a name is in the overlay is checked where the file is read: at the job's pickup,
+ * before anything is spent, and by doctor. Absent means none: a job connects no MCP server unless its trigger says
+ * so. The near-miss sweep is excludeTools': a dropped `run.mcp` runs the job without the servers its flow was written
+ * against, while the file reads as though it named them.
+ */
+function validateMcp(on, run, at, path) {
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal ? isMcpNearMiss(key) : key === "mcp" || isMcpNearMiss(key)) {
+				if (!/^[\x20-\x7E]*$/.test(key)) {
+					throw configError(`${at}: ${label}.${JSON.stringify(key)} is not a field: a key outside plain ASCII with no plain letter other than run.mcp's can be drawn exactly like run.mcp, which the loader would drop while the file reads as though it named servers. Write field names in plain ASCII: ${path}`);
+				}
+				throw configError(`${at}: ${label}.${key} is not a field -- did you mean run.mcp? A list of MCP servers the loader drops runs the job without them while the file reads as though it named them, so a near miss is refused rather than dropped: ${path}`);
+			}
+		}
+	}
+	const mcp = run?.mcp;
+	if (mcp === undefined) return undefined;
+	if (!Array.isArray(mcp) || mcp.length === 0) {
+		throw configError(`${at}: run.mcp must be a non-empty array of server names from the overlay's mcp.json when present (got ${JSON.stringify(mcp)}); leave it out for none: ${path}`);
+	}
+	if (mcp.length > MCP_SERVERS_MAX) {
+		throw configError(`${at}: run.mcp names ${mcp.length} servers, more than ${MCP_SERVERS_MAX}: ${path}`);
+	}
+	const seen = new Set();
+	for (let i = 0; i < mcp.length; i++) {
+		const name = mcp[i];
+		if (typeof name !== "string" || !MCP_SERVER_NAME_RE.test(name)) {
+			throw configError(`${at}: run.mcp[${i}] must name a server of the overlay's mcp.json: lowercase letters, digits and -, up to 32 (got ${JSON.stringify(name)}): ${path}`);
+		}
+		if (seen.has(name)) throw configError(`${at}: run.mcp names ${JSON.stringify(name)} twice: ${path}`);
+		seen.add(name);
+	}
+	return [...mcp];
+}
+
 /**
  * `run.waitFor` -- the conditions that must all clear before this trigger's job starts (issue #230).
  *
@@ -1544,10 +1616,11 @@ function normalizeLabel(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const mcp = validateMcp(on, run, at, path);
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1586,10 +1659,11 @@ function normalizeComment(on, run, index, path, state) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const mcp = validateMcp(on, run, at, path);
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1655,6 +1729,7 @@ function normalizeIssue(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const mcp = validateMcp(on, run, at, path);
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: {
@@ -1665,7 +1740,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1742,6 +1817,7 @@ function normalizePullRequest(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const mcp = validateMcp(on, run, at, path);
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: {
@@ -1757,7 +1833,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 

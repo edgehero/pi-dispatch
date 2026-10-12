@@ -4,8 +4,9 @@ pi can call tools on MCP servers. In pi-dispatch a job connects only the servers
 its trigger names. A repo's own `.pi/mcp.json` is never read for a job, and a server an extension registers is never
 connected.
 
-This page covers the overlay file, `import-pi` and `doctor`. Naming servers in a trigger (`run.mcp`) and connecting
-them in the job come next; until then an overlay `mcp.json` is staged and checked but not used.
+This page covers the overlay file, `import-pi`, `doctor` and naming servers in a trigger (`run.mcp`). Connecting them
+in the job comes next: until the job image declares the `mcp` capability, every job that names a server is refused
+before it costs anything.
 
 ## The overlay file
 
@@ -98,6 +99,43 @@ reference, and check what you stage: `import-pi` prints each server it staged.
 - `cwd`: a job runs its servers in the checkout.
 - The legacy SSE transport. Use the server's streamable HTTP URL.
 - Any other key. A key a newer pi adds is refused until pi-dispatch knows what it does in a job.
+
+## Naming servers in a trigger
+
+A trigger opts in by name, with `run.mcp` in `triggers.json`:
+
+```json
+{
+  "on": { "type": "label", "any": ["docs"] },
+  "run": { "kind": "github", "flow": "answer", "mcp": ["docs"], "secrets": { "DOCS_TOKEN": "op://ci/docs/token" } }
+}
+```
+
+A trigger without `run.mcp` connects no MCP server. Up to 8 names, each from the overlay's file. Before anything is
+spent, the worker checks each one and refuses the job when:
+
+| Reason | Why |
+|---|---|
+| `mcp-list-invalid` | the list the job carries is not one the loader writes (a service at another version, or a hand-added job) |
+| `mcp-config-invalid` | the overlay's `mcp.json` is missing or cannot be read whole |
+| `mcp-server-unknown` | the file does not offer that name, turns it off, or refuses it (`doctor` says why) |
+| `mcp-secret-reserved` | the server references a credential the job is set up to spend with (the key variables of its own provider and of each provider on its model list, or of every provider when it has no list, and every variable the overlay `models.json` references), the forge token, or the egress or runner variables. To hand a server a provider's variable on purpose (`HF_TOKEN` for a Hugging Face server), give the trigger a model list without that provider |
+| `mcp-secret-unmapped` | the server references a variable the job will not have: not in `run.secrets`, and not a `PI_FORWARD_ENV` name the worker holds a value for |
+| `mcp-egress-unreachable` | with the egress policy on, the proxy would not let the job reach the server (an `http://` url on port 443 included), or `egress-allowlist.conf` cannot be read |
+| `mcp-package-runner` | with the egress policy on, the registry a package runner fetches from is not allowlisted |
+| `job-image-mcp-unsupported` | the job image does not declare the `mcp` capability |
+| `trigger-skew` | the trigger names servers but the job arrived without them: the trigger changed after the job was queued, or the receiver is older than the worker |
+
+The comment on the issue names the server and the rule, never a host or a variable; the worker's log has the
+detail (`refused_mcp`). A read of the overlay's file or the allowlist that fails in a way that may pass (EIO, for
+one) is retried instead. The job gets its servers in `/job/mcp.json`, references and all, never a value.
+
+Upgrade the receiver and the worker together. A receiver older than `run.mcp` drops the field, and the worker then
+refuses each such job as `trigger-skew` rather than running it without its servers.
+
+The registry check reads the runner's name only. A server whose own arguments or environment point the runner at
+another registry (`--registry`, `--index-url`, `npm_config_registry`) passes it and fails when it starts, before the
+prompt: allowlist the registry it really uses.
 
 ## What doctor checks
 

@@ -2371,3 +2371,64 @@ test("a podman keeper that does not hold RETRIES pre-spend with the keeper's own
 	assert.ok(!calls.includes("run-container"));
 	assert.ok(logged.some(([e, f]) => e === "egress_keeper_not_holding" && f.proxy === "pi-dispatch-egress-proxy" && f.reason === keeper), "the whole sentence, logged");
 });
+
+// ---- REQ-MCP-OPERATOR-SERVERS: a trigger that named MCP servers its job cannot use.
+
+test("run.mcp: a refusal returns before the secrets resolver, the mint, the clone and the budget, and its comment names no host", async () => {
+	const redis = fakeRedis();
+	const posted = [];
+	const { deps: d, calls } = deps({
+		redis,
+		checkMcp: () => ({ refused: "mcp-egress-unreachable", name: "docs", why: "internal.corp.example is not in egress-allowlist.conf" }),
+		resolveSecrets: async () => (calls.push("resolve-secrets"), { ok: true, secrets: {} }),
+		comment: async (_j, t) => posted.push(t),
+	});
+	const r = await runJob({ ...ghJob, mcp: ["docs"] }, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "mcp-egress-unreachable");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(redis.incrCalls, 0);
+	assert.ok(!calls.includes("resolve-secrets") && !calls.includes("prepare") && !calls.some((c) => c.startsWith("mint")), JSON.stringify(calls));
+	assert.match(posted[0], /MCP server "docs"/);
+	assert.match(posted[0], /egress policy does not let a job reach that server/);
+	assert.doesNotMatch(posted[0], /internal\.corp|allowlist\.conf/, "the reason's detail is for the log, never the public thread");
+});
+
+test("run.mcp: an overlay that may read on a retry is retried (InfraRetry), never refused", async () => {
+	const { deps: d } = deps({ checkMcp: () => ({ unavailable: "EIO" }) });
+	await assert.rejects(runJob({ ...ghJob, mcp: ["docs"] }, d), (e) => e instanceof InfraRetry);
+});
+
+test("run.mcp: the passed document reaches prepare, and a job with none prepares exactly as before", async () => {
+	const document = { version: 1, servers: { docs: { type: "http", url: "https://h/mcp" } }, refs: { docs: [] } };
+	const seen = [];
+	const { deps: d } = deps({ checkMcp: () => ({ ok: true, document }), prepareWorkspace: async (_job, _token, options) => (seen.push(options), { workspaceDir: "/w", jobDir: "/j" }) });
+	assert.equal((await runJob({ ...ghJob, mcp: ["docs"] }, d)).outcome, "completed");
+	assert.equal(seen[0].mcp, document);
+	const plain = [];
+	const { deps: d2 } = deps({ prepareWorkspace: async (_job, _token, options) => (plain.push(options), { workspaceDir: "/w", jobDir: "/j" }) });
+	assert.equal((await runJob(ghJob, d2)).outcome, "completed");
+	assert.equal("mcp" in plain[0], false);
+});
+
+test("run.mcp: an unwired processor refuses a job that names a server, and passes one that names none", async () => {
+	const { deps: d } = deps({});
+	delete d.checkMcp;
+	assert.equal((await runJob({ ...ghJob, mcp: ["docs"] }, d)).reason, "mcp-config-invalid");
+	// Any list present, not only a well-formed one: a shape the loader never writes must not pass as "none".
+	for (const mcp of [null, "docs", { docs: true }, []]) assert.equal((await runJob({ ...ghJob, mcp }, d)).reason, "mcp-config-invalid", JSON.stringify(mcp));
+	assert.equal((await runJob(ghJob, d)).outcome, "completed");
+});
+
+test("run.mcp: prepare writes the document to the job folder, read-only, and nothing when there is none", async () => {
+	const jobsDir = tempDir("pi-dispatch-mcp-prep-");
+	const prepare = makePrepareWorkspace({ jobsDir, preparers: { github: async (_job, _token, { jobDir }) => ({ workspaceDir: jobDir, jobDir }) } });
+	const document = { version: 1, autoEnableCodemode: true, codemodeModels: false, servers: { docs: { type: "http", url: "https://h/mcp" } }, refs: { docs: ["T"] } };
+	const prepared = await prepare(ghJob, "tok", { mcp: document });
+	const file = `${prepared.jobDir}/mcp.json`;
+	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), document);
+	const { statSync } = await import("node:fs");
+	assert.equal(statSync(file).mode & 0o777, 0o444);
+	const none = await prepare(ghJob, "tok", {});
+	assert.ok(!readdirSync(none.jobDir).includes("mcp.json"));
+});

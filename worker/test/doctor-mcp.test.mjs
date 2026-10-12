@@ -30,6 +30,7 @@ test("egressRefusalFor: an allowlisted name on 443, or a declared endpoint's exa
 	const endpoints = [{ id: "lan", host: "192.168.1.5", port: 8080 }];
 	assert.equal(egressRefusalFor("https://mcp.example.com/mcp", { allowlist }), null);
 	assert.equal(egressRefusalFor("https://mcp.example.com:443/mcp", { allowlist }), null);
+	assert.match(egressRefusalFor("http://mcp.example.com:443/mcp", { allowlist }), /for TLS/, "plain http to the TLS port the proxy opens never connects");
 	assert.equal(egressRefusalFor("https://mcp.example.com./mcp", { allowlist }), null, "one trailing dot, as baseUrlTarget strips it");
 	assert.equal(egressRefusalFor("https://tools.corp.example/mcp", { allowlist }), null);
 	assert.equal(egressRefusalFor("http://192.168.1.5:8080/mcp", { allowlist, endpoints }), null);

@@ -62,7 +62,10 @@ import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, 
 import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
-import { resolveProviderCredential } from "./env-allowlist.mjs";
+import { piProviders, providerKeyCandidates, resolveProviderCredential } from "./env-allowlist.mjs";
+import { parseAllowlist } from "./egress-allowlist.mjs";
+import { MCP_TRANSIENT_READ_CODES, jobProviders, makeMcpCheck, providerKeyNames } from "./mcp-preflight.mjs";
+import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
@@ -2256,6 +2259,40 @@ export async function startWorker(
 			// injected env they were not, which is the divergence this file already calls out by name for
 			// sessionsDir. One deployment value, one place, same rule as the profiles below it.
 			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, forwardEnv: config.forwardEnv, hostEnv: env, log }),
+			// REQ-MCP-OPERATOR-SERVERS: the overlay's mcp.json read once per job that names a server, never at boot (an
+			// operator who re-runs import-pi must not have to restart the worker). The allowlist is the one the proxy
+			// mounts, this folder's egress-allowlist.conf on both venues (up.mjs, podman-stack.mjs), and the endpoints
+			// are the pickup's snapshot, so the check and the proxy read the same declarations.
+			checkMcp: makeMcpCheck({
+				globalPiDir: config.globalPiDir,
+				forwardEnv: config.forwardEnv,
+				hostEnv: env,
+				egress: config.egress,
+				// The credentials the job is set up to spend with (providerKeyNames). A read of the overlay models.json that
+				// may pass on a retry is thrown to the check, which retries the job; any other failure adds no overlay
+				// names, and the model gates, which ran first, refuse every job such a file breaks.
+				reserved: (job) => {
+					let overlayModels = null;
+					try {
+						overlayModels = readOverlayModels(config.globalPiDir);
+					} catch (error) {
+						if (MCP_TRANSIENT_READ_CODES.has(error?.code)) throw error;
+					}
+					const providers = jobProviders(job, { defaultProvider: config.provider, allowedModels: config.allowedModels, everyProvider: piProviders() });
+					return new Set([...RESERVED_ENV_NAMES, ...providerKeyNames({ providers, candidatesOf: providerKeyCandidates, overlayModels })]);
+				},
+				allowlist: () => {
+					try {
+						return parseAllowlist(readFileSync(join(process.cwd(), "egress-allowlist.conf"), "utf8"));
+					} catch (error) {
+						// No allowlist here: every server outside a declared endpoint is unreachable, which it is. Any other
+						// failure is the check's to classify (a transient errno is retried).
+						if (error?.code === "ENOENT") return [];
+						throw error;
+					}
+				},
+				endpoints: () => modelEndpoints.current,
+			}),
 			// #227. What PI_BACKENDS blessed, so a trigger naming an unblessed venue refuses pre-spend. The
 			// panel's picker is bounded by the same list, and this is the half that binds: the overlay is
 			// not the reviewed artifact (DES-PER-TRIGGER-SECRET-PROFILE).

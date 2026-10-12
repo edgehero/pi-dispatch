@@ -159,6 +159,16 @@ changes what code runs or what it costs.
   older image is refused before it costs anything. That image's runner would run the job with every tool
   you removed ([`docs/exclude-tools.md`](exclude-tools.md)).
 
+- `"mcp": ["docs", "files"]` names MCP servers from the overlay's `mcp.json` for that trigger's jobs to
+  connect ([`docs/mcp.md`](mcp.md)). Names only: the servers themselves, and the credentials they take, are the
+  operator's, in the overlay. A job that names a server it cannot use is refused before it costs anything: a name
+  the overlay does not offer, a credential the job will not have (passed neither in `secrets` nor by
+  `PI_FORWARD_ENV`), or, with the egress policy on, a server the proxy would not let the job reach. The job image
+  must declare the `mcp` capability. A chained child does not inherit `run.mcp`, and the admin's tools cannot set it.
+  Like `models`, adding `run.mcp` to a trigger refuses its jobs that were already queued (`trigger-skew`): re-run
+  them. A key under `run` or `on` that is not plain ASCII and holds no plain letter outside `mcpservers` is refused,
+  since one in another script can be drawn exactly like `mcp`.
+
 - `"skillsDir"` points at a directory of skills on the worker host. The layout is the same as your own
   `~/.pi/agent/skills`, which uses `<name>/SKILL.md`. They are copied into that trigger's jobs. They are
   layered under the repo's own `.pi/skills` and over the global overlay. A repo skill of the same name
@@ -455,7 +465,7 @@ that cannot read it cannot see the gap. The check is strict: adding `models` to 
 it that were already queued (`trigger-skew`), and the comment says so. Re-run them. The worker finds a job's
 trigger by its position in the file. Inserting a trigger with the same flow, kind and type ahead of others
 moves the ones after it down. A queued job of a moved trigger can then be checked against its neighbour, and
-refused as `trigger-skew` when that neighbour sets `models` or `maxCostUsd`. The comment says the trigger
+refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd` or `mcp`. The comment says the trigger
 changed after the job was queued. Re-run those jobs too. Upgrade the worker and the receiver together, and restart the
 receiver after editing the file.
 

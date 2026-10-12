@@ -13,6 +13,7 @@
  * a sufficient one: a NAME that resolves to this machine is refused by the proxy and not here, since this reads no DNS.
  */
 import { isIP } from "node:net";
+import { basename } from "node:path";
 import { isProxyLocalHost } from "./backends.mjs";
 import { baseUrlTarget } from "./model-endpoints.mjs";
 
@@ -50,8 +51,8 @@ function hostIsLocal(host) {
 
 /**
  * Why a job's CONNECT to `url` would be refused by the proxy, or null when it gets through: a declared endpoint's
- * exact host and port, or an allowlisted name on port 443 that is not this machine. The scheme does not decide it,
- * since both go as a CONNECT.
+ * exact host and port, or an allowlisted name on port 443, over https, that is not this machine. Both schemes go as
+ * a CONNECT, so the proxy itself does not tell them apart.
  */
 export function egressRefusalFor(url, { allowlist = [], endpoints = [] } = {}) {
 	const target = baseUrlTarget(url);
@@ -59,7 +60,22 @@ export function egressRefusalFor(url, { allowlist = [], endpoints = [] } = {}) {
 	if (endpoints.some((e) => e.host === target.host && e.port === target.port)) return null;
 	const entry = allowlistEntryFor(allowlist, target.host);
 	if (entry !== null && hostIsLocal(target.host)) return `${target.host} is the proxy's own machine, which it never opens; a server on this machine is declared in model-endpoints.json under host.docker.internal or host.containers.internal`;
+	// The proxy tunnels to 443 whatever speaks inside, so an `http://` url on 443 is plain HTTP to what is almost always
+	// a TLS port, carrying the server's headers in clear inside the tunnel: refused, with the fix.
+	if (entry !== null && target.port === 443 && new URL(url).protocol !== "https:") return `the egress proxy opens ${target.host} on port 443 for TLS, and this url is http://; use https://`;
 	if (entry !== null && target.port === 443) return null;
 	if (entry !== null) return `the egress proxy opens ${target.host} on port 443 only, and this is port ${target.port}; declare ${target.host}:${target.port} in model-endpoints.json to open exactly that port`;
 	return `${target.host} is not in egress-allowlist.conf${target.port === 443 ? "" : ", and port " + target.port + " opens only as a declared endpoint in model-endpoints.json"}`;
+}
+
+/**
+ * Every host a package runner fetches from at start, by name, since the proxy matches names: uv and pipx take the
+ * index from pypi.org and the files from files.pythonhosted.org, yarn's default registry is its own name, and the npm
+ * family reads registry.npmjs.org.
+ */
+export function packageRunnerHosts(command) {
+	const runner = basename(String(command));
+	if (["uv", "uvx", "pipx"].includes(runner)) return ["pypi.org", "files.pythonhosted.org"];
+	if (runner === "yarn") return ["registry.yarnpkg.com"];
+	return ["registry.npmjs.org"];
 }

@@ -43,6 +43,7 @@ export const CONTAINER_ENV_NAMES = new Set([
 	"PI_FLOW",
 	"PI_COMMAND",
 	"PI_EXCLUDE_TOOLS",
+	"PI_MCP_SERVERS",
 	// Issues #501, #502: the per-job dollar cap (written by the worker since #501, from the trigger's and the
 	// deployment's caps) and the allowed-model list (reserved until #502 writes it). Neither can be bound through
 	// `run.secrets`: a trigger setting its own cap, or its own list, would be the policy choosing itself.

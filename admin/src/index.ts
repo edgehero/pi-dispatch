@@ -129,7 +129,7 @@ import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // capability lost with no error anywhere. A narrowed one means the model proposes an entry, the operator
 // approves a confirm dialog, and writeTriggers rejects it: a wasted human approval. `blessedBackends`
 // below is the precedent, and its header is a post-mortem of the same mistake.
-import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
+import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
@@ -2009,26 +2009,37 @@ function sizeFieldsOf(f: any): Record<string, any> {
 }
 
 /**
- * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap) and
- * `run.models` (the models its jobs may call). Either one decides what a trigger's jobs can spend or reach, and
- * removing or widening it is a widening, so it is written by hand in the reviewed triggers file and never by a
- * model's call, even behind a confirm. Neither tool's schema names them, and that alone is not the guard: a schema
- * does not refuse extra keys, and a field silently dropped would let the model report a narrowing that never landed.
- * So a call that carries one is REFUSED, loudly, before any confirm, and so is a NEAR MISS of either (`MaxCostUsd`,
- * `max_cost_usd`, `allowedModels`, a homoglyph), at the top level and under a `run` or `on` object the model may
- * have nested: the loader's own sweep (`runModelFieldNearMiss`), so the console and the loader agree on what a near
- * miss is. An existing value is never touched: the add tool builds entries without these keys and the edit tool
- * spreads the entry's own `run` under the fields it sets.
+ * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap),
+ * `run.models` (the models its jobs may call) and `run.mcp` (the MCP servers they connect, below). Each one decides
+ * what a trigger's jobs can spend or reach, and removing or widening it is a widening, so it is written by hand in the
+ * reviewed triggers file and never by a model's call, even behind a confirm. Neither tool's schema names them, and
+ * that alone is not the guard: a schema does not refuse extra keys, and a field silently dropped would let the model
+ * report a narrowing that never landed. So a call that carries one is REFUSED, loudly, before any confirm, and so is
+ * a NEAR MISS of any of them (`MaxCostUsd`, `max_cost_usd`, `allowedModels`, a homoglyph), at the top level and
+ * under a `run` or `on` object the model may have nested: the loader's own sweeps (`runModelFieldNearMiss`, and
+ * `mcpFieldNearMiss` below), so the console and the loader agree on what a near miss is. An existing value is never
+ * touched: the add tool builds entries without these keys and the edit tool spreads the entry's own `run` under the
+ * fields it sets.
  */
-const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models"]);
+const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.mcp"]);
+/**
+ * `run.mcp` (REQ-MCP-OPERATOR-SERVERS) is tool-proof for the same reason: which outside systems a trigger's jobs act
+ * on, with which credentials, is the operator's to write. Its near misses are the loader's own (`isMcpNearMiss`: the
+ * ASCII spellings, and a key outside plain ASCII with no plain letter but the field's), and the field itself counts
+ * here too, since this sweep refuses the field and its spellings alike.
+ */
+function mcpFieldNearMiss(key: string): string | null {
+  return key === "mcp" || isMcpNearMiss(key) ? "run.mcp" : null;
+}
 function refuseWideningFields(params: any, tool: string): void {
   const objects: [string, any][] = [["", params], ["run.", params?.run], ["on.", params?.on]];
   for (const [label, source] of objects) {
     if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
     for (const key of Object.keys(source)) {
-      const meant = runModelFieldNearMiss(key);
+      const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key);
       if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
-      const what = meant === "run.models" ? "allowed-model list" : "per-job dollar cap";
+      const what =
+        meant === "run.models" ? "allowed-model list" : meant === "run.mcp" ? "list of MCP servers" : "per-job dollar cap";
       throw new Error(`${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${what} is set by hand in the triggers file, never by a tool`);
     }
   }

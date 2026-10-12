@@ -5432,6 +5432,50 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   allowlisted name that resolves to the proxy's own machine reads as reachable; doctor reads the allowlist in this
   folder, which is the file the proxy mounts on both venues.
 
+## DES-MCP-EGRESS-PREFLIGHT
+
+- **Decision**: A job's MCP servers are judged at pickup by one function (`worker/src/mcp-preflight.mjs`,
+  `makeMcpCheck`) that reads the overlay's `mcp.json` once for the job and either refuses before anything is spent or
+  returns the per-job document, which `prepare` writes to `/job/mcp.json`. One read serves both, so the servers the
+  job connects are the servers the check passed; an overlay edit between the two cannot change them. It sits with the
+  free refusals, after the skills folder and before the secrets resolver (the one pre-spend gate that spawns), the
+  mint, the clone and the budget (`CONST-BUDGET-BEFORE-TOKENS`). In order:
+  - the job's own list is one the loader writes: 1 to 8 unique valid names (`mcp-list-invalid`), since queue data is
+    not always the current receiver's, and a list that is not one must neither pass as none nor reach the comment;
+  - the file reads whole (`mcp-config-invalid`; an errno that may pass, such as EIO, is retried instead);
+  - each name is offered as the file's own entry, enabled and accepted (`mcp-server-unknown`);
+  - no reference, of any server, is one this deployment writes or pi reads for the job itself: a credential the job
+    is set up to spend with (the builtin key variables of its own provider and of each provider on its model list,
+    the trigger's else the deployment's, or of every builtin provider when there is no list, since the runner then
+    guards no call; and every variable the overlay models.json references in any value, since
+    pi reads a custom provider's key and headers from them), a minted forge token, the egress and runner variables
+    (`mcp-secret-reserved`). Asked of every reference before the next rule, since a server must never be handed the
+    job's own credentials. A builtin provider the job's list keeps it from calling is not counted, as in
+    `run.secrets`: its variable is one an operator may hand a server on purpose (`HF_TOKEN` for a Hugging Face
+    server, with a list). A read of models.json that may pass is retried;
+  - each reference is a name the job will hold: a `run.secrets` name, or a `PI_FORWARD_ENV` name the worker holds a
+    non-empty value for, as the container env is built (`mcp-secret-unmapped`);
+  - with the egress policy on, each streamable HTTP server is reachable through the proxy, read as squid reads the
+    allowlist (`egressRefusalFor`; an `http://` url on port 443 is refused, as it would speak plain HTTP to a TLS
+    port), and each package runner's registry hosts are allowlisted (`mcp-egress-unreachable`,
+    `mcp-package-runner`). An allowlist read that may pass is retried; any other failure to read it refuses.
+  A job whose authored trigger names servers but which arrived without `mcp` is refused as `trigger-skew`
+  (`AUTHORED_NARROWING_FIELDS`), the backstop for a receiver older than the worker.
+  The public comment is one fixed sentence per reason and the server's name: the reason's detail names hosts and
+  variables, which go to the worker's log, since the comment posts on a thread anyone can read. The capability gate
+  `mcp` refuses every such job on an image that does not declare it, which until the runner reads `/job/mcp.json` is
+  every image.
+- **Rejected**: checking at load (the loader is fs-free, and the overlay is re-staged by `import-pi` without a worker
+  restart); reading the overlay again in `prepare` (two reads of a file the operator may be editing could pass one
+  list and write another); letting a reference to the minted forge token through (a server would act with the job's
+  own forge identity, which an operator should choose explicitly rather than reach by naming a variable); inheriting
+  `run.mcp` into a chained child (the servers are reached with credentials granted to the parent's trigger, and the
+  child's task is agent-authored, `run.secrets`' reason).
+- **Residuals**: the allowlist is read from the worker's folder, which is the folder the proxy mounts; a name that
+  resolves to the proxy's own machine passes here and is refused by the proxy; a package runner's registry is judged
+  by the runner's name, so one pointed elsewhere by its own arguments or environment fails when it starts, before the
+  prompt; a custom provider whose models.json key is a `!command` names no variable the reserved check can see.
+
 ## DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS
 
 - **Decision**: `@playwright/cli` with Chromium bundled in the job image, with
@@ -9224,3 +9268,4 @@ a tunnel.
 | 2026-10-09 | Issue #599, the run mirror's start. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: the run mirror records when it started (`runs:since`, written with the member in the writer's one script, vouched for by a run of the index and trusted only while that run is held, handed on by a removal with its instant unchanged, expiring with the index), and the reader starts the mirror's coverage no earlier than a trusted start, at the index's oldest run without one, reading the index as one snapshot; a pruning reader records its cut in the horizon. Every earlier bound lived in keys lost with the runs, so after a flush and one more write a peer read the lost runs as idle with nothing missing, and a start that outlived its index under one an older worker recreated would have been believed. The rejected alternatives (inferring a loss from the index, starting at the record's own end, the horizon as a second proof) are recorded in the entry. The rest of the entry UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP in a job's pi children. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the preload and the nested runner inject `-e <child-meter.ts> --no-mcp`, so no pi child loads pi's built-in MCP (OQ-011 M6), and `hasChildMeter` recognises the three tokens. The decision and the residuals are otherwise UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `DES-MCP-OPERATOR-ONLY`**: one operator file in pi's shape and a strict subset of its keys, rewritten by `import-pi` (accepted servers only, each refused one named), references resolved by pi-dispatch and never by pi, per-server refusals, stdio commands from the image or the overlay, and doctor's egress reading of each HTTP server. `DES-OPERATOR-GLOBAL-OVERLAY` is UNCHANGED, checked. |
+| 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **NEW `DES-MCP-EGRESS-PREFLIGHT`**: one pickup check reads the overlay once, refuses before spend in a fixed order (the job's own list, file, name, references to a credential the job spends with, unmapped references, egress) and hands `prepare` the document it writes, and a dropped `run.mcp` is `trigger-skew`; the public comment is fixed text per reason. `DES-MCP-OPERATOR-ONLY` is UNCHANGED, checked. |

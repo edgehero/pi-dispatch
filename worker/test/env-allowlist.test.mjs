@@ -847,6 +847,12 @@ test("PI_EXCLUDE_TOOLS is emitted only when the job carries exclusions, and neve
 	assert.equal(buildContainerEnv({ ...args, excludeTools: ["bash", "edit"] }).PI_EXCLUDE_TOOLS, "bash,edit");
 });
 
+test("PI_MCP_SERVERS is emitted only when the job names servers, comma-joined, never empty (REQ-MCP-OPERATOR-SERVERS)", { skip }, () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	for (const mcpServers of [undefined, []]) assert.equal(buildContainerEnv({ ...args, mcpServers }).PI_MCP_SERVERS, undefined);
+	assert.equal(buildContainerEnv({ ...args, mcpServers: ["docs", "files-2"] }).PI_MCP_SERVERS, "docs,files-2");
+});
+
 test("PI_ALLOWED_MODELS is emitted only when the job has a list, comma-joined and verbatim, never empty (#502)", { skip }, () => {
 	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
 	// Null is unrestricted, and the runner refuses an EMPTY value as a config error: an empty allow list read

@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { ensureJobsDir } from "./config.mjs";
+import { JOB_MCP_FILE } from "./mcp-config.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { retainJobDir } from "./sandbox-store.mjs";
 import { prepareGithubWorkspace } from "./prepare-github.mjs";
@@ -84,7 +85,7 @@ export function makePrepareWorkspace({
 	removeDir = (dir) => rmSync(dir, { recursive: true, force: true }),
 }) {
 	ensureDir(jobsDir);
-	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false, size = null } = {}) {
+	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false, size = null, mcp = null } = {}) {
 		ensureDir(jobsDir);
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
 		// Issue #524: a THROW out of anything below leaves `jobDir` to nobody. The processor tears down only what
@@ -94,7 +95,7 @@ export function makePrepareWorkspace({
 		// covers the thrown ones, in one place for every kind, rather than in each preparer that can throw.
 		// A retry makes a fresh directory, so nothing is lost by removing this one.
 		try {
-			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size });
+			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size, mcp });
 		} catch (error) {
 			// GUARDED: a removal that fails (a busy mount, a permission flipped mid-job) must never replace the error
 			// that is the job's actual outcome. The directory is then left, which is what happened before this catch.
@@ -105,7 +106,7 @@ export function makePrepareWorkspace({
 		}
 	};
 
-	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size }) {
+	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size, mcp }) {
 		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
 		// mounted, and copied ONCE for every job kind because this is where local and forge converge.
 		//
@@ -125,6 +126,13 @@ export function makePrepareWorkspace({
 			// Counts only. `injected` carries no name and no path by construction, so this line cannot grow
 			// a host path by a later edit (the same shape packages.mjs's `dropped` record has).
 			log("trigger_skills_injected", { dirs: injected.dirs, files: injected.files, bytes: injected.bytes });
+		}
+		// The job's MCP servers (REQ-MCP-OPERATOR-SERVERS), as the processor's check passed them: written here, beside the
+		// injected skills, for their reason (no new mount, and fixed for the life of the job). References only, never a
+		// value (mcp-config.mjs `jobMcpDocument`), and read-only to the job like everything under /job.
+		if (mcp) {
+			writeFileSync(join(jobDir, JOB_MCP_FILE), `${JSON.stringify(mcp, null, 2)}\n`, { mode: 0o444 });
+			log("mcp_config_written", { servers: Object.keys(mcp.servers).length, refs: Object.values(mcp.refs).reduce((n, list) => n + list.length, 0) });
 		}
 		// What `cleanup` needs to retain this run's directory, stamped here because this is the only place
 		// that holds all of it at once. Applied to the RESULT rather than mutated in, so a preparer's

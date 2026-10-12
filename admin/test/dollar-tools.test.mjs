@@ -46,8 +46,9 @@ function tmpFile(name, value, envName) {
 
 const GUARDED = { triggers: [{ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", provider: "openai", model: "gpt-x", models: ["openai/gpt-x", "openai/gpt-y"], maxCostUsd: "1.50" } }] };
 
-for (const field of ["maxCostUsd", "models"]) {
-  const value = field === "models" ? ["openai/gpt-x"] : "0.50";
+// `mcp` (REQ-MCP-OPERATOR-SERVERS) rides the same guard: which outside systems a trigger's jobs reach is set by hand.
+for (const field of ["maxCostUsd", "models", "mcp"]) {
+  const value = field === "models" ? ["openai/gpt-x"] : field === "mcp" ? ["docs"] : "0.50";
 
   test(`dispatch_trigger_add refuses ${field} before any confirm, and writes nothing`, async () => {
     const path = tmpFile("triggers.json", { triggers: [] }, "PI_TRIGGERS_FILE");
@@ -328,4 +329,14 @@ test("readScopedBudget swallows ioredis' error events too", async () => {
   const out = await readScopedBudget({ url: "redis://127.0.0.1:1", limits: [{ scope: "acme/web", day: 3 }], redisFn: () => fake });
   assert.deepEqual(out, { rows: [{ day: 1 }] });
   assert.deepEqual(events, ["error"]);
+});
+
+test("dispatch_trigger_add refuses a near miss of run.mcp, nested or not, before any confirm (REQ-MCP-OPERATOR-SERVERS)", async () => {
+  for (const extra of [{ mcpServers: ["docs"] }, { run: { MCP: ["docs"] } }, { on: { mcp: ["docs"] } }, { ["m\u0441p"]: ["docs"] }, { run: { ["\uff4d\uff43\uff50"]: ["docs"] } }, { mcp: ["docs"] }]) {
+    const path = tmpFile("triggers.json", { triggers: [] }, "PI_TRIGGERS_FILE");
+    const { ctx, shown } = toolCtx({ answer: true });
+    await assert.rejects(() => toolByName("dispatch_trigger_add").execute("id", { kind: "label", flow: "fix", labels: ["bug"], ...extra }, undefined, undefined, ctx), /cannot set run\.mcp/, JSON.stringify(extra));
+    assert.equal(shown.length, 0);
+    assert.deepEqual(read(path), { triggers: [] });
+  }
 });

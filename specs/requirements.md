@@ -2314,13 +2314,16 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   already passes (`run.secrets`, `PI_FORWARD_ENV`), in a header, an env value, a url's path or query, or an argument;
   never a literal header, env or query value, never a `!command`, never an OAuth sign-in or pi's `mcp-auth.json`. A
   literal argument or url path is written as is, and the docs say so. A server the job cannot use is refused before anything is spent: one the overlay
-  does not offer, a reference the trigger does not map, and, with the egress policy on, a streamable HTTP server the
+  does not offer, a reference the job will not hold, a reference to a variable this deployment keeps for the job
+  itself (a credential the job spends with, the minted forge token), and, with the egress policy on, a streamable HTTP server the
   proxy would not let the job reach. A stdio server runs from the job image or the overlay, never from a folder the
   job writes, and one that fetches itself from a package registry at start is refused unless its entry allows it.
   `pi-dispatch import-pi` stages the host's `mcp.json` rewritten to the servers a job may connect and names each one
-  it left behind and why; `pi-dispatch doctor` checks the same rules on the overlay as a job's pickup will.
-  Delivered in parts: the overlay file, `import-pi` and `doctor` first; then `run.mcp` and the pickup's refusals;
-  then the job's session connecting the servers with pi 1.1.0's MCP, codemode and tool_search.
+  it left behind and why; `pi-dispatch doctor` checks the overlay's own rules as a job's pickup will (a trigger's
+  names and references are judged at the pickup, which logs why).
+  Delivered in parts: the overlay file, `import-pi` and `doctor` first; then `run.mcp` and the pickup's refusals,
+  which write the job's `/job/mcp.json` and refuse every such job on an image that does not declare the `mcp`
+  capability; then the job's session connecting the servers with pi 1.1.0's MCP, codemode and tool_search.
 - **Why**: pi connects MCP servers from files a job's repo controls and from servers its extensions register, and
   hands their tools to an agent reading adversarial input. Which outside systems a job may act on is a decision
   about money, data and blast radius, so it is the operator's, made once per deployment and opted into per trigger,
@@ -2334,6 +2337,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   import replaces the link and the host's file is unchanged. Given the egress policy on and a streamable HTTP server
   whose host is not allowlisted for 443 and whose host and port are not a declared endpoint, then doctor warns that
   no job can reach it. Given an `mcp-auth.json` in the overlay, then doctor fails and offers to delete it.
+  Given a trigger whose `run.mcp` names a server the overlay does not offer, or one whose reference the trigger
+  does not pass through `run.secrets` or `PI_FORWARD_ENV`, or one referencing a key the job spends with or a minted forge
+  token, or, with the egress policy on, one the proxy would not let the job reach, then the job is refused before
+  the secrets resolver, the mint, the clone and the budget, with a public comment that names the server and the
+  rule and never a host or a variable.
 - **Traces to**: `REQ-GLOBAL-PI-OVERLAY`, `REQ-EGRESS-ALLOWLIST`, `REQ-TRIGGER-SECRETS`, `CONST-TOKEN-SCOPED-PER-JOB`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `INT-OVERLAY-MCP-CONFIG`, `DES-MCP-OPERATOR-ONLY`.
 - **Code evidence**: worker/src/mcp-config.mjs -> parseOverlayMcp, readOverlayMcp, overlayMcpText;
@@ -2347,7 +2355,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   member is an allowlist proxy, reaching listed hosts by name and nothing else beyond this host, and a listed
   host only through a `CONNECT` tunnel to port 443 or a plain request to port 80 (issue #508); and a job
   whose policy cannot serve it shall be **refused before it spends**, with a reason naming what is wrong and no budget
-  slot consumed. `PI_EGRESS=0` is the opt-out and takes a deployment back to the prior behaviour exactly:
+  slot consumed; that includes a job whose `run.mcp` names a streamable HTTP server the proxy would not reach
+  (`REQ-MCP-OPERATOR-SERVERS`). `PI_EGRESS=0` is the opt-out and takes a deployment back to the prior behaviour exactly:
   no `--network`, no proxy variable, no preflight spawn, and a docker argv byte-identical to one built
   before this requirement existed. The polarity is an opt-OUT because a control that ships off is a control
   nobody enabled, which is the state `OQ-004` spent a year in: a disclosure with a dead end at the end of
@@ -2727,7 +2736,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   reference, and `run.secretsProfile`, the name of an operator-declared resolver profile. Before the job
   container starts, and before anything spends, the worker SHALL run the selected resolver once per
   reference with the reference as its first argument, take its standard output as the value, and inject the
-  resolved values into the closed container environment. The job container SHALL receive values only: it
+  resolved values into the closed container environment. A trigger's MCP servers (`REQ-MCP-OPERATOR-SERVERS`)
+  reference these names, or `PI_FORWARD_ENV`'s, and no other. The job container SHALL receive values only: it
   never receives the operator's manager credential, never reaches a vault, and cannot enumerate one. Absent,
   a job's environment, its `docker run` argv and its run record are byte-identical to one prepared before
   this existed.
@@ -3468,6 +3478,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the second part is delivered (a trigger's `run.mcp`, the pickup's refusals before any spend, the job's `/job/mcp.json`, every such job refused on an image without the `mcp` capability until the runner connects them), with acceptance for each refusal and its public comment. **`REQ-TRIGGER-SECRETS` AMENDED**: an MCP server's references are these names or `PI_FORWARD_ENV`'s. **`REQ-EGRESS-ALLOWLIST` AMENDED**: an MCP server the proxy would not reach is refused before spend like a job the policy cannot serve. **Code evidence**: worker/src/triggers.mjs -> validateMcp; worker/src/mcp-preflight.mjs -> makeMcpCheck; worker/src/processor.mjs; worker/src/prepare.mjs; worker/src/image-preflight.mjs -> the mcp row. |
 | 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `REQ-MCP-OPERATOR-SERVERS`**: a job uses only MCP servers the operator lists in the overlay's `mcp.json` and its trigger names, with credentials as `${NAME}` references only, refused before spend when it cannot use them; this part delivers the file, `import-pi` and `doctor`. **`REQ-GLOBAL-PI-OVERLAY` AMENDED** (the Statement): `import-pi` never copies `mcp-auth.json`, and rewrites `mcp.json` rather than copying it. The rest of `REQ-GLOBAL-PI-OVERLAY` is UNCHANGED, checked. **Code evidence**: worker/src/mcp-config.mjs, worker/src/import-pi.mjs -> stageMcp, worker/src/doctor.mjs -> overlayMcpChecks. |
 | 2026-10-09 | Issue #599, the run mirror's start. **`REQ-CAPACITY-INSIGHTS` AMENDED** (the Statement): a run mirror that started inside the window (a new deployment, or a Valkey that lost its keys) is named among what its sources hold, since the report now knows when the mirror started (`runs:since`, `INT-RUN-HISTORY-FILE-CONTRACT`). Before, losing the mirror's keys and one more write made a peer read every lost run as idle, breaking "missing history is never idle". The Acceptance is UNCHANGED, checked. **Code evidence**: worker/src/run-mirror.mjs -> TRIM_SCRIPT, PRUNE_SCRIPT, READ_SCRIPT, RUNS_SINCE; worker/src/capacity-records.mjs -> readMirrorWindow. |
 | 2026-10-09 | Issue #599, phase 5. **`REQ-CAPACITY-INSIGHTS` AMENDED** (the Statement): "history it cannot see is never shown as idle" was stronger than the report. Time before a host's sources start is missing, never idle, as it said; but inside history a source does hold, a host that is new or was down reads as idle for that time, because no record says a machine was absent, and the docs now say so (docs/insights.md, docs/multi-host.md, both READMEs, the operator skill and the `dispatch_capacity` description). No behaviour changed. **Code evidence**: worker/src/capacity.mjs -> computeCapacity (idle is covered time with no run). |
