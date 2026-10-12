@@ -120,6 +120,10 @@ image your own `.env` names is the image doctor's egress canary and in-image pro
 with the same pinned flags a job gets, as the service runs it; doctor checks the name against the worker's image
 rule first and hands the runtime nothing else from the file.
 
+An overlay MCP server's credentials ([`docs/mcp.md`](mcp.md)) are never in the overlay: each is a `${NAME}`
+reference that a trigger maps with `run.secrets` (or that `PI_FORWARD_ENV` forwards), resolved inside the job.
+A reference to a credential the job itself spends with, or to the forge token, is refused before the job starts.
+
 ## What actually holds a secret
 
 Everything else in `.env.example` is a dial, and dials are fine in plain sight.

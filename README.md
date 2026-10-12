@@ -250,8 +250,8 @@ it after one run. How spending works, and how to re-arm a rule:
 
 ### Optional `run` fields
 
-A trigger can have its own image, vault secrets, removed tools, standing instructions, replicas, a resumed
-session or a wait condition. Each one is a file edit only, never a panel key or an AI tool, because each
+A trigger can have its own image, vault secrets, MCP servers, removed tools, standing instructions, replicas, a
+resumed session or a wait condition. Each one is a file edit only, never a panel key or an AI tool, because each
 changes what code runs or what it costs: [`docs/triggers.md`](docs/triggers.md#optional-run-fields).
 
 ### Quiet hours
@@ -407,6 +407,10 @@ pi-dispatch import-pi   # stage a credential-free copy of ~/.pi/agent into ./pi-
 - **What a repo declares is never installed.** A repo's own `.pi/extensions` do run, because the checkout
   is the default branch and merging is the gate. But nothing installs packages because a repo asks,
   since that would put third party install code next to a live forge token ([`SECURITY.md`](SECURITY.md)).
+- **MCP servers are yours, not the repo's.** List them in the overlay's `mcp.json` (`import-pi` stages it from
+  your host, credentials as `${NAME}` references only), and a trigger names the ones its jobs connect with
+  `"mcp"`. A repo's own `.pi/mcp.json` is never read for a job, and every server is checked before anything is
+  spent ([`docs/mcp.md`](docs/mcp.md)).
 - **Sessions can continue.** `"resume": true` makes follow up jobs continue the session that opened the
   pull request. It saves the full transcript to disk, which is a real disclosure: read
   [`docs/sessions.md`](docs/sessions.md) before you turn it on.

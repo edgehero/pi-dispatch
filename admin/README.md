@@ -132,6 +132,9 @@ One command puts a live terminal view over the whole deployment:
   <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-09" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
 </p>
 
+- **MCP servers, read-only.** A trigger that names MCP servers says so on its row (`[mcp ...]`), and its
+  drill-in shows each one as the overlay offers it now: where it runs, how its tools are reached, and the
+  variable names it is handed, or why every job of it would be refused. No tool and no key changes them.
 - **Status and spend.** Queue and worker state, day, week and month spend meters, a daily token counter,
   and the run history with tokens and cost per job. `Enter` on a run opens its full record, `x` on a
   running job cancels it after asking, and `b` on an opened run reopens its workspace.

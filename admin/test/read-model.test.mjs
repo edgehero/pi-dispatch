@@ -2846,3 +2846,38 @@ test("writeSettings: with the env passed, a write that breaks the merged invaria
   // Without the env (every non-dollar key), no judgement at all.
   assert.deepEqual(Object.keys(writeSettings({ settingsFile: file, mutate: (o) => ({ ...o, dailyCap: 5 }) })), ["ok", "overlay"]);
 });
+
+test("readOverlayMcpView: names, where each runs, its exposure and the NAMES it references; never a value; never throws", async () => {
+  const { readOverlayMcpView } = await import("../src/read-model.mjs");
+  const overlay = tempDir("pi-global-mcp-");
+  const { writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  assert.deepEqual(readOverlayMcpView({ globalPiDir: overlay }), { servers: [], refused: [], unreadable: null }, "no file");
+  writeFileSync(join(overlay, "mcp.json"), JSON.stringify({ mcpServers: {
+    docs: { url: "https://mcp.example.com/mcp/${PATH_KEY}", headers: { Authorization: "Bearer ${DOCS_TOKEN}" }, description: "Docs" },
+    files: { command: "/opt/pi-global/mcp/files-server", args: ["--secret-arg"], env: { T: "${FILES_TOKEN}" }, description: "Files", exposure: "direct", enabled: false },
+    leaky: { url: "https://mcp.example.com/l", headers: { Authorization: "Bearer literal-secret" }, description: "Leaky" },
+  } }));
+  const view = readOverlayMcpView({ globalPiDir: overlay });
+  assert.deepEqual(view.servers, [
+    { name: "docs", transport: "http", where: "mcp.example.com", exposure: "codemode", enabled: true, refs: ["DOCS_TOKEN", "PATH_KEY"].sort() },
+    { name: "files", transport: "stdio", where: "files-server", exposure: "direct", enabled: false, refs: ["FILES_TOKEN"] },
+  ].map((s) => ({ ...s, refs: s.refs })), JSON.stringify(view));
+  assert.deepEqual(view.refused, ["leaky"]);
+  assert.doesNotMatch(JSON.stringify(view), /literal-secret|secret-arg|Bearer|PATH_KEY\}/);
+  writeFileSync(join(overlay, "mcp.json"), "{ not json");
+  assert.equal(readOverlayMcpView({ globalPiDir: overlay }).unreadable, "invalid");
+  assert.equal(readOverlayMcpView({ globalPiDir: overlay, read: () => { throw Object.assign(new Error("x"), { code: "EACCES" }); } }).unreadable, "EACCES");
+  assert.deepEqual(readOverlayMcpView({ globalPiDir: "" }), { servers: [], refused: [], unreadable: null });
+});
+
+test("normalizeTriggerForDisplay carries run.mcp names on every kind, and no key when the trigger names none", async () => {
+  const { normalizeTriggerForDisplay } = await import("../src/read-model.mjs");
+  for (const entry of [
+    { on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "f" } },
+    { on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/p", flow: "f", task: "t" } },
+  ]) {
+    assert.deepEqual(normalizeTriggerForDisplay({ ...entry, run: { ...entry.run, mcp: ["docs", "files"] } }).mcp, ["docs", "files"], entry.on.type);
+    assert.equal("mcp" in normalizeTriggerForDisplay(entry), false, entry.on.type);
+  }
+});

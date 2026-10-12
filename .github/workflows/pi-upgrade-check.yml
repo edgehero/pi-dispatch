@@ -995,6 +995,56 @@ jobs:
           cp admin/dist/index.mjs "$SCRATCH/admin-bundle.mjs"
           node .github/scripts/admin-pi-canary.mjs "$SCRATCH"
 
+  mcp-canary:
+    # The job's MCP (REQ-MCP-OPERATOR-SERVERS) rests on pi internals the runner drives directly: the MCP extension's
+    # events and options, the transports' options and exit hook, the connect order its readiness follows
+    # (image/runner/src/mcp.mjs). pinned-api.test.mjs and mcp.test.mjs hold those at the PIN, inside the required
+    # checks; this job runs the same two files against pi@LATEST, through a resolve hook that sends only the
+    # @earendil-works scope to a scratch install (.github/scripts/mcp-pi-canary.mjs), so a pi release that moves any of
+    # it shows up here before the daily bump pull request does.
+    #
+    # NOT a required check, deliberately: its red is drift in a release this repository does not run yet, and a
+    # required check could then block every unrelated pull request until the bump is done. Failure protocol: read the
+    # failing assertion, then fix image/runner/src/mcp.mjs (or the pin's copy) on the bump pull request, never the
+    # assertion. An install failure is infrastructure and says nothing either way.
+    name: the job's MCP survives latest pi (canary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      # The repository's own install, as every other job has it; pi@latest goes into a scratch dir outside it.
+      - run: npm ci --no-audit --no-fund
+
+      - name: Install pi@latest into a scratch dir (never the repo)
+        run: |
+          SCRATCH=$(mktemp -d)
+          echo "MCP_CANARY_PI=$SCRATCH" >> "$GITHUB_ENV"
+          cd "$SCRATCH"
+          npm init -y >/dev/null
+          if ! npm install @earendil-works/pi-coding-agent@latest --no-audit --no-fund; then
+            echo "::error::npm install of pi@latest failed -- an infrastructure failure, not a pi-drift verdict. Re-run before reading anything into it."
+            exit 1
+          fi
+          node -p "'canary pi: ' + require('$SCRATCH/node_modules/@earendil-works/pi-coding-agent/package.json').version"
+
+      - name: Run the job's MCP tests against the scratch pi
+        env:
+          PI_DISPATCH_REQUIRE_LOADER_TESTS: "1"
+        run: |
+          node --import ./.github/scripts/mcp-pi-canary.mjs --test image/runner/test/mcp.test.mjs \
+            || { echo "::error::The job's MCP does not hold against pi@latest: read the failing test, then fix image/runner/src/mcp.mjs on the bump pull request."; exit 1; }
+          node --import ./.github/scripts/mcp-pi-canary.mjs --test image/runner/test/codemode-models.integration.test.mjs \
+            || { echo "::error::codemode's models.* no longer reach the runner's meter on pi@latest: read the failing test before the bump pull request turns them on."; exit 1; }
+          # A renamed pin would match no name below and pass with nothing run, so the count is asked too.
+          node --import ./.github/scripts/mcp-pi-canary.mjs --test --test-reporter=tap --test-name-pattern="MCP|McpExtensionOptions|transports the runner|isTransientMcpError|pi-mcp is the copy|connect runs in the order" image/runner/test/pinned-api.test.mjs > pins.tap \
+            || { cat pins.tap; echo "::error::A pi internal the job's MCP rests on moved in pi@latest: read the failing pin, re-read that pi code, and fix the runner (or the pin's copy) on the bump pull request."; exit 1; }
+          PASSED=$(sed -n 's/^# pass //p' pins.tap)
+          if [ "${PASSED:-0}" -lt 6 ]; then cat pins.tap; echo "::error::Only ${PASSED:-0} of the MCP pins ran: a pin was renamed past the pattern above. Update the pattern."; exit 1; fi
+
   host-pi-canary:
     # `worker/src/host-pi.mjs` MIRRORS private pi internals (issue #102): where `pi install` puts a
     # package, and whether `pi config` disabled a resource. pi exports no public answer to either, which

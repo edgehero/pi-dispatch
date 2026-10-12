@@ -29,7 +29,7 @@ import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from 
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readProjects, readScopedLimits, readStagedPackages, scanRunRecords } from "./read-model.mjs";
+import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readProjects, readScopedLimits, readStagedPackages, readOverlayMcpView, scanRunRecords } from "./read-model.mjs";
 import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -530,6 +530,9 @@ export function createDashboardDeps(
         // read-model.mjs -- this module never touches the filesystem -- and it degrades to a safe empty
         // shape rather than throwing, so a broken overlay cannot take the whole snapshot down.
         stagedPackages: readStagedPackages({ globalPiDir: paths.globalPiDir }),
+        // The overlay's MCP servers (REQ-MCP-OPERATOR-SERVERS), for a trigger's `run.mcp` lines: the same plain,
+        // never-throw read, names and where each runs, never a header, an argument or a value.
+        overlayMcp: readOverlayMcpView({ globalPiDir: paths.globalPiDir }),
         // ONLY the id off the active Job -- a Job's `.data` holds issue title/body/username (PII), so it
         // never enters the snapshot (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT).
         activeJobId: activeList?.[0]?.id ?? null,
@@ -1471,7 +1474,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     const detailTitle = `trigger · ${scrubControl(String(t?.type ?? "?"))}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const sched = cronSchedInfo(t, snapshot);
-    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt, detailTrigger?.instructions);
+    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt, detailTrigger?.instructions, snapshot?.overlayMcp);
     if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", pendingDelete ? "delete this trigger? y/n" : "e edit · x delete · esc back"];
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: triggerDetailHints(dw - 4, styler, pendingDelete) });
     return centerBlock(boxed, Math.trunc(width), dw);
@@ -2213,6 +2216,9 @@ function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: a
   // can DO, this changes what it can REACH, and the drill-in's own secrets lines are amber for that reason.
   // The COUNT and the profile name, never the references (the reference list maps the operator's vault).
   const sec = t?.secrets > 0 ? rowBadge("warning", true, `[secrets ${t.secrets}${t.secretsProfile ? " via " : ""}`, t.secretsProfile ? cellOf(t.secretsProfile) : "", "]") : null;
+  // The MCP servers the jobs connect (REQ-MCP-OPERATOR-SERVERS), amber with [secrets] for its reason: what a job can
+  // REACH, set only in the triggers file. Names in full; the drill-in says what each one is.
+  const mcp = Array.isArray(t?.mcp) && t.mcp.length > 0 ? rowBadge("warning", true, "[mcp ", cellOf(t.mcp.join(", ")), "]") : null;
   // The one-shot badges (issue #231). [once] in `accent`, NOT `warning`: amber is this file's colour for
   // a risk badge, and a one-shot NARROWS spend to a single future run -- [x N]'s inverse, an override of
   // the fire-forever default, which is exactly what `accent` marks ([image], the pinned model). [spent]
@@ -2237,7 +2243,7 @@ function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: a
   // apply, which is `accent`'s meaning on this row. Not a risk badge, so a narrow row may drop it; the drill-in keeps
   // the fact on its own line. Cron only, absent otherwise, appended after the cap so every other row is byte-identical.
   const pfo = t?.portfolio === true ? rowBadge("accent", false, "[portfolio]") : null;
-  const badges = [pkgs, img, skl, ins, res, rep, sec, shot, mdl, cap, pfo, health].filter((b): b is RowBadge => b !== null);
+  const badges = [pkgs, img, skl, ins, res, rep, sec, mcp, shot, mdl, cap, pfo, health].filter((b): b is RowBadge => b !== null);
   const match = matchColored(t, styler);
   return fitTriggerRow(`${cursor} ${badge} `, match, targetColored(t, styler), badges, inner, styler, rowFloorMatch(t, match, styler));
 }
@@ -3141,7 +3147,7 @@ function settingsLines(settings: any, inner: number, styler: any): string[] {
  * no crammed "produces" line. Read-only; `e`/`x` drive edit/delete through the command loop. Every line is
  * `inner` cols.
  */
-function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number, instructionsText: any = null): string[] {
+function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number, instructionsText: any = null, overlayMcp: any = null): string[] {
   if (!raw) return [styler.cell("(no trigger)", inner, { color: "dim" })];
   const t = scrubTrigger(raw); // the rule at the door: see `scrubTrigger`
   const out: string[] = [];
@@ -3275,6 +3281,8 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
   // (REQ-REPLICA-RUNS). `warning` when armed: this row is a multiplier, and a multiplier that renders like
   // a preference is the polarity mistake 0.1.4 shipped a fix for on [packages].
   out.push(kv("replicas", t.replicas > 1 ? `${t.replicas} sandboxes race this flow` : "one run per delivery", t.replicas > 1 ? "warning" : "dim"));
+  // REQ-MCP-OPERATOR-SERVERS: the servers the jobs connect, by name, `warning` for the secrets row's reason.
+  kvWrap("mcp", Array.isArray(t.mcp) && t.mcp.length > 0 ? t.mcp.map((n: any) => cellOf(n)).join(", ") : "none", Array.isArray(t.mcp) && t.mcp.length > 0 ? "warning" : "dim");
 
   // TRUST MODEL — who authorizes it, how it dedups, which service owns it.
   blank();
@@ -3289,6 +3297,13 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
   // third-party pi packages into the job — name+version, so the operator sees exactly which pinned code this
   // trigger runs, plus the one-line consequence. Display only: declining is an edit to the reviewed triggers
   // file, never a panel key.
+  // Each MCP server the trigger names, as the overlay offers it now: where it runs, how its tools are reached, and the
+  // variable NAMES it is handed. A name the overlay does not offer, turns off or refuses is said here, before the
+  // pickup refuses the job for it.
+  if (Array.isArray(t.mcp) && t.mcp.length > 0) {
+    for (const name of t.mcp) bullet(mcpServerLine(name, overlayMcp), "warning");
+    bullet("an MCP server's tools and text are input the job did not write; a stdio server runs code with the variables it names", "warning");
+  }
   if (t.packages === true) {
     const loads = (text: string) => bullet(text, "warning");
     loads(`packages loaded · ${stagedNames(staged)}`);
@@ -3345,6 +3360,22 @@ function spentMark(disarmed: any): string {
   if (!disarmed) return "armed";
   const by = disarmed.jobId ? ` by ${cellOf(disarmed.jobId)}` : "";
   return `spent ${cellOf(disarmed.at ?? "-")}${by}`;
+}
+
+/** One `run.mcp` name as the overlay offers it, for the drill-in's trust model. */
+function mcpServerLine(name: any, overlayMcp: any): string {
+  const label = `mcp ${cellOf(name)}`;
+  // Only a file the reader refuses is a refusal of every job; an errno may pass, and the pickup retries a few of them.
+  if (overlayMcp?.unreadable === "invalid") return `${label} · the overlay's mcp.json cannot be used, so every job is refused`;
+  if (overlayMcp?.unreadable) return `${label} · the overlay's mcp.json cannot be read just now (${cellOf(overlayMcp.unreadable)})`;
+  const server = Array.isArray(overlayMcp?.servers) ? overlayMcp.servers.find((s: any) => s?.name === name) : undefined;
+  if (!server) {
+    const refused = Array.isArray(overlayMcp?.refused) && overlayMcp.refused.includes(name);
+    return `${label} · ${refused ? "refused by the overlay's mcp.json (pi-dispatch doctor says why)" : "not offered by the overlay"}, so every job is refused`;
+  }
+  if (server.enabled === false) return `${label} · turned off in the overlay, so every job is refused`;
+  const refs = Array.isArray(server.refs) && server.refs.length > 0 ? ` · handed ${server.refs.map((r: any) => cellOf(r)).join(", ")}` : "";
+  return `${label} · ${cellOf(server.transport)} ${cellOf(server.where)} · ${cellOf(server.exposure)}${refs}`;
 }
 
 /** The staged `name@version` list for the armed trust-model line, or the nothing-staged notice. */

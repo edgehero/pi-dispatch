@@ -3617,3 +3617,36 @@ test("ALLOCATION: with no seam the view says so; an unset envelope says why; `b 
   assert.match(stripAnsi(unset.render(100).join("\n")), /PI_ENVELOPE_FILE is unset/);
   await unset.dispose();
 });
+
+// --- overlay MCP servers (REQ-MCP-OPERATOR-SERVERS): which servers a trigger's jobs connect, read-only ---
+
+const mcpSnap = (mcp, overlayMcp) => ({ ...pkgSnap(false), triggers: { triggers: [{ type: "label", any: ["bug"], all: [], none: [], flow: "fix", packages: false, ...(mcp && { mcp }) }] }, overlayMcp });
+const OVERLAY_MCP = {
+  servers: [
+    { name: "docs", transport: "http", where: "mcp.example.com", exposure: "codemode", enabled: true, refs: ["DOCS_TOKEN"] },
+    { name: "files", transport: "stdio", where: "files-server", exposure: "direct", enabled: false, refs: [] },
+  ],
+  refused: ["leaky"],
+  unreadable: null,
+};
+
+test("a trigger naming MCP servers shows them on its row and in its drill-in, as the overlay offers each, read-only", async () => {
+  const { list, detail } = await openTrigger(mcpSnap(["docs", "files", "leaky", "gone"], OVERLAY_MCP));
+  assert.match(list, /\[mcp docs, files, leaky, gone\]/);
+  assert.match(detail, /mcp\s+docs, files, leaky, gone/);
+  assert.match(detail, /mcp docs · http mcp\.example\.com · codemode · handed DOCS_TOKEN/);
+  assert.match(detail, /mcp files · turned off in the overlay, so every job is refused/);
+  assert.match(detail, /mcp leaky · refused by the overlay's mcp\.json/);
+  assert.match(detail, /mcp gone · not offered by the overlay, so every job is refused/);
+  assert.match(detail, /input the job did not write/);
+  const none = await openTrigger(mcpSnap(undefined, OVERLAY_MCP));
+  assert.doesNotMatch(none.list, /\[mcp /);
+  assert.match(none.detail, /mcp\s+none/);
+  assert.doesNotMatch(none.detail, /mcp docs ·/);
+  const broken = await openTrigger(mcpSnap(["docs"], { servers: [], refused: [], unreadable: "invalid" }));
+  assert.match(broken.detail, /mcp docs · the overlay's mcp\.json cannot be used, so every job/);
+  // An errno is not a refusal of every job: the pickup retries the ones that may pass.
+  const flaky = await openTrigger(mcpSnap(["docs"], { servers: [], refused: [], unreadable: "EIO" }));
+  assert.match(flaky.detail, /mcp docs · the overlay's mcp\.json cannot be read just now \(EIO\)/);
+  assert.doesNotMatch(flaky.detail, /mcp docs ·[^\n]*refused/);
+});

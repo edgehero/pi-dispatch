@@ -81,6 +81,11 @@ calls an API you added, or installs from a private registry, reaches hosts that 
 `doctor` names what it can. The rest you have to know, and a browsing flow will drive an allowlist wider
 than everything else combined.
 
+MCP servers a job connects ([`docs/mcp.md`](mcp.md)) go through the same proxy: a streamable HTTP server is
+reachable when its host is here (on 443, over https) or is declared in `model-endpoints.json` with its exact
+host and port, and a job naming one that is neither is refused before it starts. A package runner (`npx`,
+`uvx`) needs its registry here too.
+
 ## Local model servers
 
 A job can reach a model server on your own machine or LAN (Ollama, vLLM, llama.cpp, LM Studio) through the
