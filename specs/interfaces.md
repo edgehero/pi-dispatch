@@ -1151,7 +1151,9 @@ refactor apart.
                                    { version: 1, autoEnableCodemode, codemodeModels, servers: { name: pi entry },
                                    refs: { name: [NAME...] } }, each entry in pi's shape with every reference still
                                    `${NAME}` and `toolExposure` led by "dispatch_*": "hidden". Present only when
-                                   the pickup's MCP check passed the job; never holds a value.
+                                   the pickup's MCP check passed the job; never holds a value. A `forge` entry
+                                   (DES-FORGE-MCP) is the worker's: a stdio server under /usr/local/bin whose one
+                                   ref is GH_TOKEN or GITLAB_TOKEN, plus literal settings in its env.
   ```
   **The guardrails are baked into the image** at a path outside `agentDir` and are **not** mounted.
 - **What the container additionally reads from `/workspace`, and why it is not a `/job` input.** A job's
@@ -1667,9 +1669,15 @@ refactor apart.
     no benefit of the doubt about what it contains — and neither costs an unflagged job anything.
     `verify-image.sh` greps the baked guardrails when the label claims `replicas`, so this label cannot lie
     any more than `forges` can. The token set at this version is `replicas`, `commands`, `excludeTools`,
-    `anyUid`, `costCap`, `modelPolicy`, `exitAuth` and `mcp` (REQ-MCP-OPERATOR-SERVERS: the runner reads
+    `anyUid`, `costCap`, `modelPolicy`, `exitAuth`, `mcp` (REQ-MCP-OPERATOR-SERVERS: the runner reads
     `/job/mcp.json`; its evidence is an offline run with a stub stdio server under a cost cap of 0, which must log
-    `mcp_servers_ready` and then stop `cost-cap`) -- the third (issue #291) declares that the baked runner reads
+    `mcp_servers_ready` and then stop `cost-cap`) and `forgeMcp` (`DES-FORGE-MCP`: the image carries the two forge
+    servers at their pins behind `/usr/local/bin/forge-mcp-github` and `/usr/local/bin/forge-mcp-gitlab`, which
+    withhold the forges' dedicated merge and approval tools and a few others, a convenience not handed out and not a
+    boundary; its evidence is both wrappers run as the job user with no network and a fake token, each answering
+    `initialize` and a `tools/list` with no withheld name and no `merge` or `approv` name outside a fixed list of the
+    other names that mention a merge request, and refusing a call to each withheld name as an unknown tool, and
+    github-mcp-server printing its release version) -- the third (issue #291) declares that the baked runner reads
     `PI_EXCLUDE_TOOLS`, and a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a "read-only"
     trigger with every tool the file says to remove: a permission quietly not enforced. `verify-image.sh` fails on any
@@ -1690,7 +1698,7 @@ refactor apart.
     network; one that could not enforce it would exit `model-policy-unenforceable`. The pi-upgrade-check workflow
     requires this repo's image to carry this token as well. The worker's `modelPolicy` row in `CAPABILITY_GATES`
     (below) is what reads it: a job with a list on an image without it is refused pre-spend. The worker's side of the
-    six job-feature tokens (`replicas`, `commands`, `excludeTools`, `modelPolicy`, `costCap`, `mcp`) is ONE table
+    seven job-feature tokens (each token above but `anyUid` and `exitAuth`, `forgeMcp` the seventh) is ONE table
     since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which jobs need
     it, the result key, the record reason, the log event and the comment. The preflight refuses the first row a job
     needs and the image lacks, in the order the branches had, so the behaviour is unchanged and a new image-gated
@@ -4167,7 +4175,11 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `mcpservers`) and `on.mcp` are refused, since a dropped list runs the job without its servers. Absent carries no
   key. File-only: the admin's tools cannot set it, and a chained child does not inherit it (its servers are reached
   with credentials granted to the parent's trigger). An image that does not declare the `mcp` capability is refused
-  pre-spend as `job-image-mcp-unsupported`.
+  pre-spend as `job-image-mcp-unsupported`. **`forge`** (`DES-FORGE-MCP`) is the one name that is not the overlay's:
+  the job's own forge through that forge's MCP server, whose entry the worker writes, accepted on a `github` or
+  `gitlab` trigger and refused at load on `local` (cron: no forge token of its own), `forgejo` and `azure` (no
+  verified forge MCP server). An image that does not declare the `forgeMcp` capability refuses a job naming it
+  pre-spend as `job-image-forge-mcp-unsupported`.
 - **`run.excludeTools` (ALL trigger kinds, optional non-empty array of pi tool names)**: the built-in pi
   tools this trigger's sessions must NOT have (`DES-PER-TRIGGER-TOOL-EXCLUSIONS`,
   `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, issue #291). The runner passes the list to `createAgentSession` as
@@ -4853,7 +4865,8 @@ validator rather than a second copy of it.
     each job's `/job/mcp.json` (`DES-MCP-CODEMODE-MODELS`);
   - `mcpServers`: an object of servers by name. A name is 1 to 32 of `a-z`, `0-9` and `-`: words of letters and
     digits joined by single `-` (no leading or trailing `-`, no `--`, since pi writes `-` as `_` in a tool's name and
-    either would let one server's tool name read as another's), holding no `dispatch`.
+    either would let one server's tool name read as another's), holding no `dispatch`, and not `forge`, which names
+    the worker's own forge server (`DES-FORGE-MCP`); an entry by that name is refused like any per-server problem.
 
   A server is streamable HTTP (`url`) or stdio (`command`), never both:
   - **both**: `description` (required, at most 300 characters with no control, format or line-separator character;
@@ -4900,7 +4913,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -8304,3 +8317,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-12 | No issue: MCP servers in jobs, the runner. **`INT-SDK-SESSION-OPTIONS` AMENDED** in (m): a job whose trigger names servers gets pi's MCP, codemode and tool_search as three named inline factories, with the runner's config, transports and guarded API; `builtin:` paths stay unknown, and a repository's `mcp.json` is still never read. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: seven rows, `mcp-config-mismatch`, `mcp-config-invalid`, `mcp-secret-missing`, `mcp-command-missing`, `mcp-shadowed` and `mcp-unavailable` under the policy code and `mcp-unreachable` under the infrastructure code; no new code. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the image declares `mcp`, proved by an offline stub-server run. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: a server name is words joined by single `-` (no trailing `-`, no `--`), so no two servers' tool names read alike once pi writes `-` as `_`. `INT-CONTAINER-JOB-INPUTS` is UNCHANGED, checked: the runner reads `/job/mcp.json` and `PI_MCP_SERVERS` as the worker writes them. `INT-RUN-HISTORY-FILE-CONTRACT` is UNCHANGED, checked: runner reasons ride the exit line, not the record's reason enum. |
 | 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: the top-level `codemodeModels` (boolean, default true). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: beside `run.mcp`, `run.excludeTools` takes codemode, tool_search, the three resource tools and `mcp__<server>__*`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `mcp-excluded`. **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits the parent's exclusions less the names of MCP tools. `INT-CONTAINER-JOB-INPUTS` is UNCHANGED, checked: `/job/mcp.json` already carried `codemodeModels`, and `PI_EXCLUDE_TOOLS` carries the new names as it carries any. |
 | 2026-10-12 | No issue: MCP servers in jobs, the operator's view. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the file's example entries show `run.mcp`, which the field's own bullet already described. `INT-OVERLAY-MCP-CONFIG` is UNCHANGED, checked: the admin reads it through the worker's own parser and writes nothing. |
+| 2026-10-12 | No issue: the forge's own MCP server. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.mcp` may name `forge` on a github or gitlab trigger, and a cron, forgejo or azure trigger naming it is refused at load. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: a server named `forge` is refused. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/mcp.json` may hold the worker's `forge` entry. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the token `forgeMcp` (github-mcp-server and mcp-gitlab baked at their pins behind wrappers that withhold the forges' dedicated merge and approval tools and a few others, a tool not handed out and not a boundary, proved offline as the job user), and `CAPABILITY_GATES` gains its row (seven job-feature tokens). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-forge-mcp-unsupported`. `INT-RUNNER-EXIT-CODE-PROTOCOL` is UNCHANGED, checked: the forge server fails at start with the reasons any stdio server has. |

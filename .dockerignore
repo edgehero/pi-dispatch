@@ -6,7 +6,9 @@
 # matches only ./docs, and matching node_modules at any depth needs the explicit `**/`.
 #
 # What must STAY in the context is defined by the Dockerfiles' COPY lines:
-#   image/Dockerfile:    package.json, package-lock.json, image/runner, image/entrypoint.sh, guardrails/
+#   image/Dockerfile:    package.json, package-lock.json, image/runner, image/entrypoint.sh, guardrails/,
+#                        image/forge-mcp/{withhold.mjs,forge-mcp-github.sh,forge-mcp-gitlab.sh},
+#                        image/forge-mcp/gitlab/{package.json,package-lock.json} (the forge MCP servers)
 #   receiver/Dockerfile: package.json, package-lock.json, .npmrc, worker/{package.json,src},
 #                        receiver/{package.json,src}
 # image/ is therefore NOT excluded wholesale -- the pi-job build copies image/runner verbatim (its test/

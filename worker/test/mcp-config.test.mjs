@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MCP_CONFIG_MAX_BYTES, MCP_PACKAGE_RUNNERS, MCP_SERVER_NAME_RE, mcpServerWhere, overlayMcpText, parseOverlayMcp, piEntry, readOverlayMcp, refValue } from "../src/mcp-config.mjs";
+import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, MCP_CONFIG_MAX_BYTES, MCP_PACKAGE_RUNNERS, MCP_SERVER_NAME_RE, forgeMcpEgressUrl, forgeMcpServer, gitlabApiV4, gitlabUrlProblem, jobMcpDocument, mcpServerWhere, overlayMcpText, parseOverlayMcp, piEntry, readOverlayMcp, refValue } from "../src/mcp-config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const doc = (mcpServers, extra = {}) => JSON.stringify({ ...extra, mcpServers });
@@ -252,4 +252,103 @@ test("codemodeModels is pi-dispatch's own top-level switch: a boolean, on unless
 	assert.equal(parseOverlayMcp(JSON.stringify({ codemodeModels: false, mcpServers: {} })).codemodeModels, false);
 	for (const value of ["no", 0, null]) assert.throws(() => parseOverlayMcp(JSON.stringify({ codemodeModels: value, mcpServers: {} })), /codemodeModels/, JSON.stringify(value));
 	assert.equal(JSON.parse(overlayMcpText(parseOverlayMcp(JSON.stringify({ codemodeModels: false, mcpServers: {} })))).codemodeModels, false);
+});
+
+// --- the forge's own server (DES-FORGE-MCP) ---
+
+test("parseOverlayMcp: `forge` is the worker's name, refused for an overlay server of either transport, and nothing else is", () => {
+	assert.equal(FORGE_MCP_SERVER_NAME, "forge");
+	for (const server of [http(), stdio()]) assert.match(problemOf(server, "forge"), /reserved for the worker's own forge server/);
+	const parsed = parseOverlayMcp(doc({ forge: http(), docs: http() }));
+	assert.deepEqual(Object.keys(parsed.servers), ["docs"], "the rest of the file is still offered");
+	assert.deepEqual(parsed.refused.map((r) => r.name), ["forge"]);
+	assert.equal(overlayMcpText(parsed).includes("forge"), false, "import-pi leaves it behind like any refused server");
+	for (const name of ["forges", "my-forge", "forge-docs"]) assert.equal(problemOf(http(), name), null, name);
+});
+
+test("forgeMcpServer: github runs github-mcp-server through its withholding wrapper with the job's GH_TOKEN, lockdown on and the default toolsets", () => {
+	const server = forgeMcpServer("github");
+	assert.deepEqual(piEntry(server), {
+		type: "stdio",
+		description: server.description,
+		command: "/usr/local/bin/forge-mcp-github",
+		env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GH_TOKEN}", GITHUB_LOCKDOWN_MODE: "1", GITHUB_TOOLSETS: "default" },
+	});
+	assert.deepEqual(server.refs, ["GH_TOKEN"]);
+	assert.doesNotMatch(server.env.GITHUB_TOOLSETS, /actions|all/, "the actions toolset (workflow runs and triggers) stays off");
+	assert.equal(forgeMcpEgressUrl("github"), "https://api.github.com/");
+});
+
+test("forgeMcpServer: gitlab runs mcp-gitlab through its withholding wrapper with the job's GITLAB_TOKEN against the configured instance's /api/v4, no version check", () => {
+	const server = forgeMcpServer("gitlab", { gitlabUrl: "https://gitlab.com" });
+	assert.deepEqual(piEntry(server), {
+		type: "stdio",
+		description: server.description,
+		command: "/usr/local/bin/forge-mcp-gitlab",
+		env: { GITLAB_PERSONAL_ACCESS_TOKEN: "${GITLAB_TOKEN}", GITLAB_API_URL: "https://gitlab.com/api/v4", GITLAB_DISABLE_VERSION_CHECK: "true" },
+	});
+	assert.deepEqual(server.refs, ["GITLAB_TOKEN"]);
+	// A self-hosted GitLab under a path keeps it, and a trailing slash is not doubled.
+	for (const [url, api] of [
+		["https://git.example.com/gitlab/", "https://git.example.com/gitlab/api/v4"],
+		["https://git.example.com/gitlab", "https://git.example.com/gitlab/api/v4"],
+		["https://git.example.com:8443//", "https://git.example.com:8443/api/v4"],
+	]) {
+		assert.equal(gitlabApiV4(url), api, url);
+		assert.equal(forgeMcpServer("gitlab", { gitlabUrl: url }).env.GITLAB_API_URL, api, url);
+		assert.equal(forgeMcpEgressUrl("gitlab", { gitlabUrl: url }), api, url);
+	}
+});
+
+test("forgeMcpServer: no entry for a kind without a verified forge server, and both entries are ones the overlay's own rules would accept but for the name", () => {
+	assert.deepEqual(FORGE_MCP_KINDS, ["github", "gitlab"]);
+	for (const kind of ["local", "forgejo", "azure", undefined, "__proto__"]) assert.equal(forgeMcpServer(kind), null, String(kind));
+	for (const kind of FORGE_MCP_KINDS) {
+		const { type, env, ...rest } = piEntry(forgeMcpServer(kind));
+		// The literals in env are the worker's, which the overlay's env grammar (references only) does not allow an
+		// operator to write; everything else is checked by the one parser.
+		const parsed = parseOverlayMcp(doc({ probe: { ...rest } }));
+		assert.equal(parsed.refused.length, 0, `${kind}: ${JSON.stringify(parsed.refused)}`);
+		assert.ok(forgeMcpServer(kind).description.length <= 300);
+	}
+});
+
+test("jobMcpDocument: the forge entry is written in run.mcp order beside the overlay's, with the same dispatch_* hide", () => {
+	const parsed = parseOverlayMcp(doc({ docs: http() }));
+	const document = jobMcpDocument({ ...parsed, servers: { ...parsed.servers, forge: forgeMcpServer("github") } }, ["forge", "docs"]);
+	assert.deepEqual(Object.keys(document.servers), ["forge", "docs"]);
+	assert.deepEqual(document.servers.forge.toolExposure, { "dispatch_*": "hidden" });
+	assert.deepEqual(document.refs, { forge: ["GH_TOKEN"], docs: [] });
+});
+
+test("gitlabApiV4 adds /api/v4 once, and gitlabUrlProblem refuses a GITLAB_URL the forge entry cannot carry", () => {
+	for (const [url, api] of [
+		["https://gitlab.com", "https://gitlab.com/api/v4"],
+		["https://git.example.com/gitlab/", "https://git.example.com/gitlab/api/v4"],
+		["https://gitlab.com/api/v4", "https://gitlab.com/api/v4"],
+		["https://gitlab.com/api/v4/", "https://gitlab.com/api/v4"],
+		["https://git.example.com/gitlab/api/v4//", "https://git.example.com/gitlab/api/v4"],
+		// Surrounding whitespace is dropped, as the worker's own clients drop it.
+		[" https://gitlab.com", "https://gitlab.com/api/v4"],
+		["https://gitlab.example.com/API/V4", "https://gitlab.example.com/api/v4"],
+		["https://gitlab.com\n", "https://gitlab.com/api/v4"],
+	]) {
+		assert.equal(gitlabApiV4(url), api, url);
+		assert.equal(gitlabUrlProblem(url), null, url);
+	}
+	for (const [url, why] of [
+		["", /not set/],
+		[undefined, /not set/],
+		["  ", /not set/],
+		["https://a.example.com,https://b.example.com", /comma/],
+		["gitlab.com", /not a URL/],
+		["ftp://gitlab.com", /not http or https/],
+		["https://user:pw@gitlab.com", /user name or password/],
+		["https://user@gitlab.com", /user name or password/],
+		["https://gitlab.com/?x=1", /query or a fragment/],
+		["https://gitlab.com/#top", /query or a fragment/],
+		["https://gitlab.com/?", /query or a fragment/],
+	]) {
+		assert.match(gitlabUrlProblem(url) ?? "", why, String(url));
+	}
 });

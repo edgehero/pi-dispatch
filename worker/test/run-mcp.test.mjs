@@ -66,3 +66,21 @@ test("run.excludeTools names the job's MCP tools only beside run.mcp: codemode, 
 		refuses(make({ mcp: ["my-files"], excludeTools: ["mcp__my-files__*"] }), /not a tool the pinned pi knows/);
 	}
 });
+
+test("run.mcp may name `forge`, the job's own forge server (DES-FORGE-MCP), on a github or gitlab trigger of every type, and on no other kind", () => {
+	for (const [type, make] of KINDS.slice(1)) {
+		for (const kind of ["github", "gitlab"]) {
+			const entry = make({ kind, mcp: ["forge", "docs"] });
+			if (kind === "gitlab" && type === "pull_request") entry.on.action = ["open"];
+			if (kind === "gitlab" && type === "issue") entry.on.action = ["close"];
+			assert.deepEqual(parse([entry])[0].run.mcp, ["forge", "docs"], `${kind} ${type}`);
+		}
+	}
+	refuses(KINDS[0][1]({ mcp: ["forge"] }), /run\.mcp names "forge".*a github or gitlab trigger may name and this one may not: a cron job holds no forge token of its own/);
+	refuses(KINDS[0][1]({ mcp: ["docs", "forge"] }), /no forge token/);
+	refuses({ on: { type: "label", any: ["pi"] }, run: { kind: "forgejo", flow: "f", mcp: ["forge"] } }, /run\.mcp names "forge".*forgejo has no forge MCP server this deployment has verified yet/);
+	refuses({ on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", flow: "f", mcp: ["forge"] } }, /run\.mcp names "forge".*azure has no forge MCP server this deployment has verified yet/);
+	// Only the exact name: an overlay server named like it is the overlay's, on any kind.
+	assert.deepEqual(parse([KINDS[0][1]({ mcp: ["forges", "my-forge"] })])[0].run.mcp, ["forges", "my-forge"]);
+	assert.deepEqual(parse([{ on: { type: "label", any: ["pi"] }, run: { kind: "forgejo", flow: "f", mcp: ["forge-docs"] } }])[0].run.mcp, ["forge-docs"]);
+});

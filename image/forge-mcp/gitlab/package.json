@@ -1,0 +1,10 @@
+{
+  "name": "pi-dispatch-forge-mcp-gitlab",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The GitLab MCP server baked into the job image for a gitlab job's run.mcp \"forge\", at an exact version from this lockfile.",
+  "license": "MIT",
+  "dependencies": {
+    "@zereight/mcp-gitlab": "2.1.67"
+  }
+}

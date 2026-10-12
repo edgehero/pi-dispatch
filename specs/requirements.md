@@ -2333,6 +2333,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   capability; then the job's session connecting the servers with pi 1.1.0's MCP, codemode and tool_search, before
   the prompt, with transports the runner builds and closes. A server that refuses the connection ends the job before
   its prompt; one that does not answer is retried as infrastructure.
+  **The one exception to "the operator's file" is the forge's own server** (`DES-FORGE-MCP`): a github or gitlab
+  trigger may name `forge` in `run.mcp`, and the WORKER writes that entry (the forge's own MCP server, baked in the
+  job image at an exact pin, started with the forge token the job already holds), so it needs no overlay entry and
+  the overlay may not define a server by that name. It is still the operator's choice per trigger, and it hands the
+  server no credential beyond the one the job's own CLI holds; it is the one server the pickup hands a forge token.
+  The forges' dedicated merge and approval tools are withheld in the image (`CONST-MERGE-NEVER-AUTOMATIC`), as a
+  tool not handed out rather than a boundary: the token's role and the branch's protection remain that.
 - **Why**: pi connects MCP servers from files a job's repo controls and from servers its extensions register, and
   hands their tools to an agent reading adversarial input. Which outside systems a job may act on is a decision
   about money, data and blast radius, so it is the operator's, made once per deployment and opted into per trigger,
@@ -2355,11 +2362,23 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and it is gone when the runner exits; given a server that exits, refuses the handshake or its tool list, or answers
   HTTP 401, then the job exits `2` with `mcp-unavailable` before its prompt; given a repository `.pi/mcp.json` or an
   extension's `registerMcpServer`, then neither server is started; given another extension that registers `codemode`,
-  then the job exits `2` with `mcp-shadowed`.
+  then the job exits `2` with `mcp-shadowed`. Given an overlay server named `forge`, then it is refused like any
+  other per-server problem. Given a cron, forgejo or azure trigger whose `run.mcp` names `forge`, then the triggers
+  file is refused at load. Given a github job whose `run.mcp` names only `forge` and a deployment with no overlay
+  `mcp.json`, then the pickup passes and `/job/mcp.json` holds github-mcp-server started with `GH_TOKEN` as its
+  token; given the egress policy on and `api.github.com` (for gitlab, the configured GitLab's host) not allowlisted,
+  then the job is refused `mcp-egress-unreachable`; given an image without the `forgeMcp` capability, then the job is
+  refused `job-image-forge-mcp-unsupported`; given an overlay server referencing `GH_TOKEN` beside `forge`, then that
+  server is still refused `mcp-secret-reserved`. Given either forge server, then its tool list holds none of the
+  forge's dedicated merge or approval tools and a call to one is refused before it reaches the server. Given a
+  `GITLAB_URL` that is not http or https, or carries a user name, a password, a query, a fragment or a comma, then
+  a gitlab job naming `forge` is refused `mcp-server-unknown`.
 - **Traces to**: `REQ-GLOBAL-PI-OVERLAY`, `REQ-EGRESS-ALLOWLIST`, `REQ-TRIGGER-SECRETS`, `CONST-TOKEN-SCOPED-PER-JOB`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `INT-OVERLAY-MCP-CONFIG`, `DES-MCP-OPERATOR-ONLY`,
-  `DES-MCP-TARGETED-LIFECYCLE`, `DES-MCP-TRANSPORTS-OWNED`.
-- **Code evidence**: worker/src/mcp-config.mjs -> parseOverlayMcp, readOverlayMcp, overlayMcpText;
+  `DES-MCP-TARGETED-LIFECYCLE`, `DES-MCP-TRANSPORTS-OWNED`, `DES-FORGE-MCP`.
+- **Code evidence**: worker/src/mcp-config.mjs -> parseOverlayMcp, readOverlayMcp, overlayMcpText, forgeMcpServer;
+  worker/src/mcp-preflight.mjs -> makeMcpCheck; image/Dockerfile (github-mcp-server, mcp-gitlab);
+  image/forge-mcp/withhold.mjs, forge-mcp-github.sh, forge-mcp-gitlab.sh;
   worker/src/import-pi.mjs -> stageMcp; worker/src/doctor.mjs -> overlayMcpChecks;
   worker/src/egress-allowlist.mjs -> egressRefusalFor; image/runner/src/mcp.mjs -> readJobMcp, createJobMcp,
   mcpShadow; image/runner/run-job.mjs.
@@ -3494,6 +3513,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-12 | No issue: the forge's own MCP server. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the worker-authored `forge` entry is the one exception to "the operator's file" (a github or gitlab trigger names it in `run.mcp`; the forge's own MCP server, pinned in the job image, runs as the token the job already holds; the overlay may not use the name); acceptance gains its cases (the forge servers' merge and approval tools withheld among them) and traces gain `DES-FORGE-MCP`. `REQ-GLOBAL-PI-OVERLAY`, `REQ-TRIGGER-SECRETS` and `REQ-EGRESS-ALLOWLIST` are UNCHANGED, checked. The statement says withholding those tools is not a boundary (the token's role and branch protection are), and acceptance names the `GITLAB_URL` shapes that refuse `forge`. |
 | 2026-10-12 | No issue: MCP servers in jobs, the operator's view. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a trigger's `run.mcp` shows as a row badge, on the `dispatch_triggers` record and in its drill-in with each server as the overlay offers it; read-only, names and where each runs, never a value. `REQ-UPSTREAM-CONTRACT-TESTS` gains an advisory companion: pi-upgrade-check's MCP canary runs the runner's MCP tests and pins against pi@latest, so a release that moves them shows before the bump. `REQ-MCP-OPERATOR-SERVERS` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: a codemode script's `models.*` reach the wrapped methods, proven end to end. **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED**: beside `run.mcp` the field takes the tools the job's MCP brings, and a chained child inherits the exclusions less those names. |
 | 2026-10-12 | No issue: MCP servers in jobs, the runner. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the third part is delivered (the job's session connects the servers before the prompt, with transports the runner builds and closes); acceptance gains the runner's cases, traces gain `DES-MCP-TARGETED-LIFECYCLE` and `DES-MCP-TRANSPORTS-OWNED`. |

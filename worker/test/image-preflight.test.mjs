@@ -319,14 +319,14 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
-test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501) and mcp, each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
+test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp and forgeMcp, each keyed once, each free for a job without its feature", async () => {
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
 	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
 	// A job carrying EVERY gated feature, on an image that declares none: the first row refuses.
-	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs"] };
+	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"] };
 	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("")) });
 	assert.deepEqual(await none(all), { replicaUnsupported: "i", declared: [] });
 	// Declare tokens one at a time: each declaration moves the refusal to the next row, then passes.
@@ -373,4 +373,21 @@ test("costCap (issue #501): any job carrying a dollar cap, 0 included, needs it;
 	assert.equal(row.reason, "job-image-cost-cap-unsupported");
 	assert.equal(row.event, "refused_image_cost_cap_unsupported");
 	assert.match(row.comment("img", "is absent"), /per-job dollar cap/);
+});
+
+test("forgeMcp (DES-FORGE-MCP): a job whose run.mcp names `forge` needs it beside mcp; a job naming only overlay servers never does", async () => {
+	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github,gitlab${FIELD_SEP}${caps}\n`;
+	const mcpOnly = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp")) });
+	const declared = ["replicas", "commands", "excludeTools", "anyUid", "costCap", "modelPolicy", "exitAuth", "mcp"];
+	assert.deepEqual(await mcpOnly({ kind: "github", mcp: ["forge"] }), { forgeMcpUnsupported: "i", declared });
+	assert.deepEqual(await mcpOnly({ kind: "gitlab", mcp: ["docs", "forge"] }), { forgeMcpUnsupported: "i", declared });
+	assert.equal((await mcpOnly({ kind: "github", mcp: ["docs", "forges"] })).ok, true, "an overlay server's name is not the forge's");
+	const row = CAPABILITY_GATES.find((gate) => gate.token === "forgeMcp");
+	assert.equal(row.reason, "job-image-forge-mcp-unsupported");
+	assert.equal(row.event, "refused_image_forge_mcp_unsupported");
+	const fresh = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("mcp,forgeMcp")) });
+	assert.equal((await fresh({ kind: "github", mcp: ["forge"] })).ok, true);
+	// The mcp row still asks first: an image older than run.mcp is refused for that, not for the forge server.
+	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("forgeMcp")) });
+	assert.deepEqual(await none({ kind: "github", mcp: ["forge"] }), { mcpUnsupported: "i", declared: ["forgeMcp"] });
 });

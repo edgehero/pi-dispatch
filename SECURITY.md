@@ -248,6 +248,21 @@ Stated openly rather than discovered later:
   token or the egress variables is refused before the job starts, and a stdio server never inherits the job's
   environment.
 
+- **The forge's own MCP server holds the job's forge token.** A github or gitlab trigger that names `forge` in
+  `run.mcp` gives its job github-mcp-server or mcp-gitlab, started with the token the worker minted for that job
+  ([`docs/mcp.md`](docs/mcp.md#the-forges-own-server)). It is the one server the pickup hands a forge token, and it
+  holds no power the job's `gh` or `glab` lacks with that token. The image's wrapper withholds each server's
+  dedicated merge and approval tools, so the harness does not hand the agent a ready made one
+  (`CONST-MERGE-NEVER-AUTOMATIC`), but that is not a boundary: GitLab runs a `/merge` or `/approve` quick action
+  written in a note or a description the listed tools post, and the job's CLI, or the server started from the
+  job's shell, act with the token's full role. The boundary is the one in the paragraph below: the token's role and
+  the branch's protection (on GitLab, a Developer token, never Maintainer, which could unprotect a branch or change
+  who may merge, through the server's settings tools as through `glab`). A GitHub installation token lives one hour,
+  and the server cannot outlive the job anyway. GitHub's lockdown mode is on, and it is best effort: it withholds
+  some content written by people without push access on a public repository, and it is not an authorization
+  boundary. Issue, pull request and comment text the server's tools return is untrusted prompt content, exactly like
+  the issue text that started the job.
+
 - **The agent's own token can merge, force-push, and delete branches — and no scope prevents it.**
   This is the sharpest thing on this page. Merging a pull request (`PUT /pulls/{n}/merge`), merging a
   branch directly (`POST /merges`), force-pushing (`PATCH /git/refs/{ref}`) and deleting a ref are **all

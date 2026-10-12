@@ -213,6 +213,73 @@ DOC
 				[ "$mcp_code" = 2 ] && echo "$mcp_out" | grep -q '"event":"mcp_servers_ready"' && echo "$mcp_exit" | grep -q '"reason":"cost-cap"' && [ "$mcp_took" -lt 60 ] \
 					|| fail "the image declares 'mcp' but a job naming a stdio server in /job/mcp.json did not connect it and stop cleanly (exit $mcp_code in ${mcp_took}s: $mcp_exit)"
 				;;
+			forgeMcp)
+				# DES-FORGE-MCP and CONST-MERGE-NEVER-AUTOMATIC. The claim is that the image carries the forge's own servers
+				# behind the wrappers the worker's `forge` entries name, runnable by the job user without the network, with
+				# the tools each wrapper withholds (the forges' dedicated merge and approval tools among them) out of reach.
+				# That keeps the harness from handing a job a ready made merge tool; it is not a boundary (a quick action in a
+				# note, the job's CLI), and the token's role and branch protection are. Proved by running each wrapper offline
+				# with a dummy token, as a job would: it must answer an MCP initialize and a tools/list in which no withheld
+				# name appears and no name matching /merge|approv/i appears outside the names below (tools named for a merge
+				# request that are not its dedicated merge or approval tools; some write notes, which can carry a quick
+				# action, which this does not claim to stop; a new such name in a later pin is read and added here, or
+				# withheld), and a tools/call of each withheld name, and of a tool the server never listed, must be refused
+				# as an unknown tool (an error from the call's empty arguments does not count: it means the server ran it).
+				# github-mcp-server must also print its release version (not `dev`, which a build without the release stamp
+				# prints).
+				docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges --entrypoint sh "$IMAGE_REF" \
+					-c '[ "$(id -u)" != 0 ] && [ -x /usr/local/bin/forge-mcp-github ] && [ -x /usr/local/bin/forge-mcp-gitlab ] && [ -x /usr/local/bin/github-mcp-server ]' >/dev/null 2>&1 \
+					|| fail "the image declares 'forgeMcp' but /usr/local/bin/forge-mcp-github, forge-mcp-gitlab or github-mcp-server is missing or not executable by the job user"
+				forge_gh=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges --entrypoint /usr/local/bin/github-mcp-server "$IMAGE_REF" --version 2>&1) \
+					&& echo "$forge_gh" | grep -Eqx 'Version: [0-9]+\.[0-9]+\.[0-9]+' \
+					|| fail "the image declares 'forgeMcp' but github-mcp-server does not print a release version offline ($forge_gh)"
+				forge_dir=$(mktemp -d)
+				cat >"$forge_dir/probe.mjs" <<'PROBE'
+import { spawn } from "node:child_process";
+const [command, withheldList, allowedList] = process.argv.slice(2);
+const withheld = withheldList.split(",");
+const allowed = new Set(allowedList.split(",").filter(Boolean));
+const child = spawn(command, [], { stdio: ["pipe", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: "/tmp", GITHUB_PERSONAL_ACCESS_TOKEN: "ghp-not-a-real-token", GITHUB_TOOLSETS: "default", GITHUB_LOCKDOWN_MODE: "1", GITHUB_EXCLUDE_TOOLS: "", GITLAB_PERSONAL_ACCESS_TOKEN: "glpat-not-a-real-token", GITLAB_API_URL: "https://gitlab.invalid/api/v4", GITLAB_DISABLE_VERSION_CHECK: "true", GITLAB_TOOL_POLICY_HIDDEN: "" } });
+const send = (m) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
+const done = (problem) => { console.log(problem ?? "ok"); child.kill(); process.exit(problem ? 1 : 0); };
+setTimeout(() => done("no answer within 60 seconds"), 60_000);
+const calls = [...withheld, "execute_graphql", "never_listed_tool"];
+const answers = new Map();
+let buffer = "";
+child.stdout.on("data", (chunk) => {
+	buffer += chunk;
+	let at;
+	while ((at = buffer.indexOf("\n")) >= 0) {
+		const message = JSON.parse(buffer.slice(0, at));
+		buffer = buffer.slice(at + 1);
+		if (message.id === 1) { send({ method: "notifications/initialized" }); send({ id: 2, method: "tools/list" }); }
+		if (message.id === 2) {
+			const names = message.result.tools.map((tool) => tool.name);
+			const seen = names.filter((name) => withheld.includes(name) || (/merge|approv/i.test(name) && !allowed.has(name)));
+			if (seen.length > 0) return done(`it lists ${seen.join(", ")}`);
+			calls.forEach((name, i) => send({ id: 10 + i, method: "tools/call", params: { name, arguments: {} } }));
+		}
+		if (message.id >= 10) {
+			answers.set(message.id, message);
+			// Refused as unknown, not failed: a server that runs the call fails it too, on its empty arguments.
+			if (!/unknown tool/i.test(message.error?.message ?? "")) return done(`a call of ${calls[message.id - 10]} was not refused as unknown`);
+			if (answers.size === calls.length) return done();
+		}
+	}
+});
+send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "verify", version: "1" } } });
+PROBE
+				chmod -R a+rX "$forge_dir"
+				forge_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$forge_dir:/probe:ro" --entrypoint /usr/local/bin/node "$IMAGE_REF" \
+					/probe/probe.mjs /usr/local/bin/forge-mcp-github merge_pull_request,pull_request_review_write,assign_copilot_to_issue,request_copilot_review "" 2>&1) && forge_gh_code=0 || forge_gh_code=$?
+				forge_gh_out=$forge_out
+				forge_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$forge_dir:/probe:ro" --entrypoint /usr/local/bin/node "$IMAGE_REF" \
+					/probe/probe.mjs /usr/local/bin/forge-mcp-gitlab merge_merge_request,approve_merge_request,unapprove_merge_request,approve_deployment,discover_tools,execute_graphql \
+					get_merge_request_approval_state,get_merge_request_conflicts,list_merge_request_pipelines,create_merge_request,get_merge_request,get_merge_request_diffs,list_merge_request_changed_files,list_merge_request_diffs,get_merge_request_file_diff,list_merge_request_versions,get_merge_request_version,update_merge_request,create_merge_request_thread,resolve_merge_request_thread,get_merge_request_discussion,delete_merge_request_discussion_note,update_merge_request_discussion_note,create_merge_request_discussion_note,create_merge_request_note,delete_merge_request_note,get_merge_request_note,get_merge_request_notes,update_merge_request_note,list_merge_request_emoji_reactions,list_merge_request_note_emoji_reactions,create_merge_request_emoji_reaction,delete_merge_request_emoji_reaction,create_merge_request_note_emoji_reaction,delete_merge_request_note_emoji_reaction,list_merge_requests,list_group_merge_requests 2>&1) && forge_gl_code=0 || forge_gl_code=$?
+				rm -rf "$forge_dir"
+				[ "$forge_gh_code" = 0 ] || fail "the image declares 'forgeMcp' but forge-mcp-github does not withhold its merge and approval tools offline ($forge_gh_out)"
+				[ "$forge_gl_code" = 0 ] || fail "the image declares 'forgeMcp' but forge-mcp-gitlab does not withhold its merge and approval tools offline ($forge_out)"
+				;;
 			exitAuth)
 				# Issue #545. Two claims, both checked by running them. First, the runner signs its exit line with the key the
 				# worker writes to its stdin: the same offline job as costCap's (a cap of 0 stops it before any call), handed a

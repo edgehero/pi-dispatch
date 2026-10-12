@@ -210,6 +210,29 @@ jobs:
           done
           echo "OK: tea pinned by version and verified by checksum"
 
+      - name: The forge's MCP servers are pinned by version AND checksum or lockfile
+        run: |
+          # DES-FORGE-MCP, and the reasoning glab's and tea's steps give: each runs inside a container holding the job's
+          # forge token. github-mcp-server is a release tarball, pinned by an exact version and both per-architecture
+          # digests; mcp-gitlab is an npm package, pinned by an exact version in its own package.json and installed with
+          # `npm ci` from the lockfile committed beside it. worker/test/forge-mcp-pins.test.mjs holds the same, and
+          # more.
+          for name in GITHUB_MCP_SERVER_VERSION GITHUB_MCP_SERVER_SHA256_AMD64 GITHUB_MCP_SERVER_SHA256_ARM64; do
+            if ! grep -qE "^ARG ${name}=[0-9a-f.]+$" image/Dockerfile; then
+              echo "::error::${name} is missing or not a literal pin in image/Dockerfile."
+              exit 1
+            fi
+          done
+          if ! grep -qE '"@zereight/mcp-gitlab": "[0-9]+\.[0-9]+\.[0-9]+"' image/forge-mcp/gitlab/package.json; then
+            echo "::error::image/forge-mcp/gitlab/package.json does not pin @zereight/mcp-gitlab to an exact version."
+            exit 1
+          fi
+          if [ ! -f image/forge-mcp/gitlab/package-lock.json ] || ! grep -q 'npm ci --omit=dev --ignore-scripts' image/Dockerfile; then
+            echo "::error::mcp-gitlab is not installed with npm ci from its committed lockfile."
+            exit 1
+          fi
+          echo "OK: github-mcp-server pinned by version and checksum, mcp-gitlab by version and lockfile"
+
       - name: The azure image variant pins the Azure CLI and declares its forges
         run: |
           # The variant is built from the default image, so it inherits the base digest, the pi pin and the
@@ -522,6 +545,15 @@ jobs:
           docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" | tr ',' '\n' | grep -qx "mcp" \
             || { echo "::error::the built image's capabilities label does not declare mcp -- a job whose trigger names MCP servers could not be admitted on this image."; exit 1; }
           echo "OK: the label declares mcp, and the CORE checklist ran its proof"
+
+      # --- INT-CONTAINER-RUNTIME-CONTRACT (forgeMcp, DES-FORGE-MCP) ---
+      # Same reason again: a github or gitlab trigger naming `forge` in run.mcp is refused on an image without the
+      # token, and the CORE checklist runs both baked servers offline as the job user to prove it.
+      - name: "RUNNER: the built image declares forgeMcp"
+        run: |
+          docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" | tr ',' '\n' | grep -qx "forgeMcp" \
+            || { echo "::error::the built image's capabilities label does not declare forgeMcp -- a job whose trigger names the forge's own MCP server could not be admitted on this image."; exit 1; }
+          echo "OK: the label declares forgeMcp, and the CORE checklist ran its proof"
 
       # --- INT-RUNNER-EXIT-CODE-PROTOCOL (resources and the supervisor, issue #596) ---
       # Two runs, each handed a key. The first is the real offline job (a cap of 0 stops it before any call, nothing is

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { imageRefProblem } from "./image-ref.mjs";
+import { FORGE_MCP_SERVER_NAME } from "./mcp-config.mjs";
 
 /**
  * Which image a job runs in, and whether it is on this host.
@@ -44,7 +45,8 @@ export function resolveJobImage(job, defaultImage) {
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
  *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
- *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported)
+ *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported,
+ *                            forgeMcpUnsupported)
  *                            => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
@@ -201,6 +203,17 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-mcp-unsupported",
 		event: "refused_image_mcp_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare MCP support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would not connect the servers \`run.mcp\` names. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// DES-FORGE-MCP: `forge` in run.mcp starts a server the IMAGE carries (github-mcp-server, mcp-gitlab), not one the
+	// overlay names. An image with `mcp` and without them would pass every gate, reserve the budget, and refuse at the
+	// container's start as mcp-command-missing; this row says so before anything is spent.
+	Object.freeze({
+		token: "forgeMcp",
+		needed: (job) => Array.isArray(job?.mcp) && job.mcp.includes(FORGE_MCP_SERVER_NAME),
+		result: "forgeMcpUnsupported",
+		reason: "job-image-forge-mcp-unsupported",
+		event: "refused_image_forge_mcp_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare the forge's own MCP server (\`dev.pi-dispatch.capabilities\` ${declared}), so it does not carry the server \`run.mcp\` names as \`forge\`. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

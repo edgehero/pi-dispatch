@@ -1940,6 +1940,16 @@ adversarial passes did.
   because of one of the above.
 - **Cross-links**: `REQ-CAPACITY-INSIGHTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-002`.
 
+## OQ-040: The forge's own MCP server on Forgejo and Azure DevOps
+
+- **Status**: `WATCH` (2026-10-12, `DES-FORGE-MCP`).
+- **Position**: `run.mcp` may name `forge` on a github or gitlab trigger only. No forge MCP server for Forgejo or
+  Azure DevOps has been read at a pinned version and run offline the way github-mcp-server 2.0.2 and
+  `@zereight/mcp-gitlab` 2.1.67 were, so a trigger naming `forge` on either is refused at load rather than handed an
+  unverified server. Adding one is a row in `forgeMcpServer`, a pin in the image, a wrapper that withholds its merge
+  and approval tools (`DES-FORGE-MCP`) and a proof in `verify-image.sh`, after the same reading.
+- **What would change it**: a forge MCP server for Forgejo or Azure DevOps worth pinning.
+
 ## Revision History
 
 | Date | Change |
@@ -2040,3 +2050,4 @@ adversarial passes did.
 | 2026-10-08 | Issue #599, phase 2. **`OQ-039` AMENDED**: "a job running now is not in the history until it ends" is gone, since the host rows now list running jobs; in its place, a running job is counted only as far as its row vouches for it (to now on a fresh row, to its last beat on one older than 30 s, not at all when its row does not list it or its host's history is not shared, counted in `liveNotCounted`), and an orphaned container's time after its failed stop is in no record and reads as idle, though it is named (`orphans`). The Position no longer counts its items (it said four and listed six). |
 | 2026-10-09 | Issue #599, the run mirror's start. **`OQ-039` AMENDED**: residuals of `runs:since`, the first three reachable only beside a worker from before it or by a hand on the keys: a run that ended before a loss and whose older writer's mirror write landed just after it reads as idle from its end to the loss; a start lost on its own beside a slow older run; a retry of exactly the vouching job id that an older writer mirrors into an index it recreated, which makes the stale start trusted again; and a failed mirror write, which is never retried and reads as idle to a peer. |
 | 2026-10-12 | No issue: MCP in a job's pi children. **`OQ-011` AMENDED** (M6): every pi CLI child gets `--no-mcp` beside its injected meter, since a child otherwise connects the MCP servers named by its agent dir's `mcp.json` and, when it trusts the project, the repo's `.pi/mcp.json`. The flag turns off pi's built-in MCP only; the residuals are a `pi mcp` subcommand, pi's MCP extension loaded as an ordinary extension, a process that imports pi's `main`, and a child the preload does not reach. |
+| 2026-10-12 | No issue: the forge's own MCP server. **NEW `OQ-040`** (`WATCH`): `forge` in `run.mcp` is github and gitlab only until a Forgejo or Azure DevOps forge MCP server is read, pinned and wrapped the same way. |

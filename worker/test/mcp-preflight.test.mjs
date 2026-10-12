@@ -185,3 +185,91 @@ test("makeMcpCheck: a server the trigger's own exclusions leave no way in is ref
 	const off = parseOverlayMcp(JSON.stringify({ autoEnableCodemode: false, mcpServers: { cm: { url: "https://mcp.example.com/a", description: "C" }, dd: { url: "https://mcp.example.com/b", description: "D", exposure: "deferred" } } }));
 	assert.equal(check({ read: () => off, allowlist: () => ["mcp.example.com"] })({ ...job(["cm", "dd"]), excludeTools: ["tool_search"] }).refused, "mcp-excluded", "with codemode not activated, tool_search was cm's only way");
 });
+
+// --- the forge's own server (DES-FORGE-MCP) ---
+
+const forgeJob = (mcp, kind = "github", secrets = {}) => ({ kind, mcp, secrets, provider: "anthropic" });
+
+test("makeMcpCheck: a github job naming only `forge` passes with no mcp.json and with no overlay at all, and the document holds the worker's entry", () => {
+	for (const seams of [{ read: () => null }, { globalPiDir: null, read: () => null }, { globalPiDir: "" }]) {
+		const result = check({ allowlist: () => ["api.github.com"], ...seams })(forgeJob(["forge"]));
+		assert.equal(result.ok, true, JSON.stringify(seams));
+		assert.deepEqual(Object.keys(result.document.servers), ["forge"]);
+		assert.equal(result.document.servers.forge.command, "/usr/local/bin/forge-mcp-github");
+		assert.deepEqual(result.document.servers.forge.env, { GITHUB_PERSONAL_ACCESS_TOKEN: "${GH_TOKEN}", GITHUB_LOCKDOWN_MODE: "1", GITHUB_TOOLSETS: "default" });
+		assert.deepEqual(result.document.refs, { forge: ["GH_TOKEN"] });
+		assert.equal(result.document.codemodeModels, true);
+	}
+	// A file that is there still governs it: its top-level switches are the deployment's.
+	const off = parseOverlayMcp(JSON.stringify({ mcpServers: {}, codemodeModels: false, autoEnableCodemode: false }));
+	const governed = check({ allowlist: () => ["api.github.com"], read: () => off })(forgeJob(["forge"])).document;
+	assert.deepEqual([governed.codemodeModels, governed.autoEnableCodemode], [false, false]);
+	// And one that is there and cannot be read refuses it, or retries a read that may pass.
+	assert.equal(check({ read: () => { throw Object.assign(new Error("x"), { mcpConfig: true }); } })(forgeJob(["forge"])).refused, "mcp-config-invalid");
+	assert.deepEqual(check({ read: () => { throw Object.assign(new Error("x"), { code: "EIO" }); } })(forgeJob(["forge"])), { unavailable: "EIO" });
+});
+
+test("makeMcpCheck: `forge` beside overlay servers keeps run.mcp order, and the other names still need the file", () => {
+	const result = check({ allowlist: () => ["mcp.example.com", "api.github.com"] })(forgeJob(["docs", "forge"], "github", { DOCS_TOKEN: "op://x" }));
+	assert.equal(result.ok, true);
+	assert.deepEqual(Object.keys(result.document.servers), ["docs", "forge"]);
+	assert.deepEqual(result.document.servers.forge.toolExposure, { "dispatch_*": "hidden" });
+	assert.equal(check({ read: () => null })(forgeJob(["forge", "docs"], "github", { DOCS_TOKEN: "op://x" })).refused, "mcp-config-invalid");
+	assert.equal(check({ allowlist: () => ["mcp.example.com", "api.github.com"] })(forgeJob(["forge", "nope"])).refused, "mcp-server-unknown");
+});
+
+test("makeMcpCheck: the forge entry alone is exempt from the secret rules; an overlay server naming GH_TOKEN is still refused", () => {
+	// GH_TOKEN is reserved (a minted forge token) and not mapped by the trigger, yet the forge entry passes.
+	assert.equal(check({ allowlist: () => ["api.github.com"] })(forgeJob(["forge"], "github", {})).ok, true);
+	const gl = check({ gitlabUrl: "https://gitlab.com", reserved: () => new Set(["GITLAB_TOKEN"]), allowlist: () => ["gitlab.com"] })(forgeJob(["forge"], "gitlab", {}));
+	assert.equal(gl.ok, true);
+	const theft = parseOverlayMcp(JSON.stringify({ mcpServers: { gh: { command: "/usr/local/bin/github-mcp-server", args: ["stdio"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GH_TOKEN}" }, description: "GitHub" } } }));
+	const stolen = check({ read: () => theft, allowlist: () => ["api.github.com"] })(forgeJob(["forge", "gh"], "github", { GH_TOKEN: "x" }));
+	assert.equal(stolen.refused, "mcp-secret-reserved");
+	assert.equal(stolen.name, "gh");
+	// The exemption is the forge entry's, not the job's: an unmapped reference of an overlay server beside it is refused.
+	assert.equal(check({ allowlist: () => ["mcp.example.com", "api.github.com"] })(forgeJob(["forge", "docs"], "github", {})).refused, "mcp-secret-unmapped");
+});
+
+test("makeMcpCheck: `forge` on a job that is not a github or gitlab one is refused as unknown, never handed another forge's entry", () => {
+	for (const kind of ["local", "forgejo", "azure", null, "__proto__", "GitHub"]) {
+		const result = check({ read: () => null, gitlabUrl: "https://gitlab.com" })(forgeJob(["forge"], kind));
+		assert.deepEqual(result, { refused: "mcp-server-unknown", name: "forge", why: "the forge's own server is offered to a github or gitlab job only" }, String(kind));
+	}
+	assert.equal(check({ read: () => null })(forgeJob(["forge"], "gitlab")).why, "this worker has no GitLab URL configured");
+});
+
+test("makeMcpCheck: with egress on, the forge server's API host must be allowlisted: api.github.com, or the configured GitLab's", () => {
+	const gh = check({ read: () => null, allowlist: () => ["mcp.example.com"] })(forgeJob(["forge"]));
+	assert.equal(gh.refused, "mcp-egress-unreachable");
+	assert.match(gh.why, /api\.github\.com is not in egress-allowlist\.conf/);
+	assert.equal(check({ read: () => null, allowlist: () => [".github.com"] })(forgeJob(["forge"])).ok, true, "a leading-dot entry holds it");
+	const self = { read: () => null, gitlabUrl: "https://git.example.com/gitlab/" };
+	const refused = check({ ...self, allowlist: () => ["gitlab.com"] })(forgeJob(["forge"], "gitlab"));
+	assert.equal(refused.refused, "mcp-egress-unreachable");
+	assert.match(refused.why, /git\.example\.com is not in egress-allowlist\.conf/);
+	const passed = check({ ...self, allowlist: () => ["git.example.com"] })(forgeJob(["forge"], "gitlab"));
+	assert.equal(passed.ok, true);
+	assert.equal(passed.document.servers.forge.env.GITLAB_API_URL, "https://git.example.com/gitlab/api/v4");
+	assert.equal(check({ read: () => null, gitlabUrl: "https://git.example.com:8443", allowlist: () => ["git.example.com"] })(forgeJob(["forge"], "gitlab")).refused, "mcp-egress-unreachable", "the proxy opens 443 only");
+	assert.equal(check({ read: () => null, egress: false, allowlist: () => assert.fail("not read") })(forgeJob(["forge"])).ok, true);
+});
+
+test("makeMcpCheck: run.excludeTools judges the forge server like any other", () => {
+	const job = { ...forgeJob(["forge"]), excludeTools: ["mcp__forge__*", "read_mcp_resource"] };
+	const result = check({ read: () => null, allowlist: () => ["api.github.com"] })(job);
+	assert.equal(result.refused, "mcp-excluded");
+	assert.equal(result.name, "forge");
+});
+
+test("makeMcpCheck: a GITLAB_URL the forge entry cannot carry refuses a gitlab job naming `forge`, saying why in the log only", () => {
+	for (const gitlabUrl of ["https://u:p@gitlab.com", "https://gitlab.com/?private_token=x", "https://a.example.com,https://b.example.com", "ftp://gitlab.com"]) {
+		const result = check({ read: () => null, gitlabUrl, allowlist: () => ["gitlab.com"] })(forgeJob(["forge"], "gitlab"));
+		assert.equal(result.refused, "mcp-server-unknown", gitlabUrl);
+		assert.match(result.why, /^GITLAB_URL cannot be handed to the forge server: /);
+		assert.doesNotMatch(result.why, /private_token|u:p/, "the URL itself never reaches the log line");
+	}
+	const ok = check({ read: () => null, gitlabUrl: "https://gitlab.com/api/v4", allowlist: () => ["gitlab.com"] })(forgeJob(["forge"], "gitlab"));
+	assert.equal(ok.document.servers.forge.env.GITLAB_API_URL, "https://gitlab.com/api/v4", "an /api/v4 already there is not doubled");
+	assert.equal(check({ read: () => null, gitlabUrl: "https://u:p@gitlab.com", allowlist: () => ["api.github.com"] })(forgeJob(["forge"])).ok, true, "a github job never reads GITLAB_URL");
+});

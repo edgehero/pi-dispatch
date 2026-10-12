@@ -3650,3 +3650,15 @@ test("a trigger naming MCP servers shows them on its row and in its drill-in, as
   assert.match(flaky.detail, /mcp docs · the overlay's mcp\.json cannot be read just now \(EIO\)/);
   assert.doesNotMatch(flaky.detail, /mcp docs ·[^\n]*refused/);
 });
+
+test("`forge` in run.mcp is the forge's own server (DES-FORGE-MCP), never read as an overlay server the panel cannot find", async () => {
+  // An overlay entry named forge is refused by the parser; the trigger's name is still the worker's server.
+  const { list, detail } = await openTrigger(mcpSnap(["forge", "docs"], { ...OVERLAY_MCP, refused: ["forge"] }));
+  assert.match(list, /\[mcp forge, docs\]/);
+  assert.match(detail, /mcp forge · the forge's own server, as the job's own token/);
+  assert.doesNotMatch(detail, /mcp forge · (refused|not offered)/);
+  assert.match(detail, /mcp docs · http mcp\.example\.com/);
+  const bare = await openTrigger(mcpSnap(["forge"], { servers: [], refused: [], unreadable: null }));
+  assert.match(bare.detail, /mcp forge · the forge's own server/);
+  assert.doesNotMatch(bare.detail, /every job is refused/);
+});

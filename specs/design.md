@@ -5470,6 +5470,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `mcp-package-runner`). An allowlist read that may pass is retried; any other failure to read it refuses.
   A job whose authored trigger names servers but which arrived without `mcp` is refused as `trigger-skew`
   (`AUTHORED_NARROWING_FIELDS`), the backstop for a receiver older than the worker.
+  The name `forge` is not the file's (`DES-FORGE-MCP`): its entry is the worker's, so the file is needed only for the
+  other names (a missing one passes a job naming only `forge`; one that cannot be read still refuses it), a job that
+  is not a github or gitlab one naming it is `mcp-server-unknown`, its one reference skips the two secret rules, and
+  the egress rule asks about its API host.
   The public comment is one fixed sentence per reason and the server's name: the reason's detail names hosts and
   variables, which go to the worker's log, since the comment posts on a thread anyone can read. The capability gate
   `mcp` refuses every such job on an image that does not declare it, which until the runner reads `/job/mcp.json` is
@@ -5477,7 +5481,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Rejected**: checking at load (the loader is fs-free, and the overlay is re-staged by `import-pi` without a worker
   restart); reading the overlay again in `prepare` (two reads of a file the operator may be editing could pass one
   list and write another); letting a reference to the minted forge token through (a server would act with the job's
-  own forge identity, which an operator should choose explicitly rather than reach by naming a variable); inheriting
+  own forge identity, which an operator should choose explicitly rather than reach by naming a variable; naming
+  `forge` is that explicit choice, of a server this repository pins, `DES-FORGE-MCP`); inheriting
   `run.mcp` into a chained child (the servers are reached with credentials granted to the parent's trigger, and the
   child's task is agent-authored, `run.secrets`' reason).
 - **Residuals**: the allowlist is read from the worker's folder, which is the folder the proxy mounts; a name that
@@ -5569,6 +5574,118 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the pin, and a refused call stops the job as any refused model call does (the meter's first refusal is its stop),
   so a capped or listed job cannot try a model and carry on; an image model pi's catalog prices at zero settles at
   zero on a job with no cap, since pi prices it from the catalog alone.
+
+## DES-FORGE-MCP
+
+- **Decision**: A github or gitlab trigger may name the reserved server `forge` in `run.mcp`, and its job gets its
+  forge's own MCP server as a stdio server, run as the forge token the job already holds. The worker writes the entry
+  (`forgeMcpServer` in `worker/src/mcp-config.mjs`); neither the trigger nor the overlay defines it, and the overlay
+  may not define a server by that name. Everything else about it is an ordinary server: it is named per trigger, it
+  goes into `/job/mcp.json` in `run.mcp` order with the same `dispatch_*` hide, `run.excludeTools` judges it like any
+  other, and the runner reads and starts it with no code of its own.
+  - **Two servers, both pinned in the job image.** github: `github-mcp-server` 2.0.2, GitHub's own, from its release
+    tarball (`github-mcp-server_Linux_x86_64.tar.gz`, `github-mcp-server_Linux_arm64.tar.gz`) checked against a
+    sha256 per architecture, run as `github-mcp-server stdio` with `GITHUB_PERSONAL_ACCESS_TOKEN=${GH_TOKEN}`,
+    `GITHUB_TOOLSETS=default` and `GITHUB_LOCKDOWN_MODE=1`. gitlab: `@zereight/mcp-gitlab` 2.1.67, installed with
+    `npm ci --ignore-scripts` from a lockfile committed in `image/forge-mcp/gitlab` (not a workspace, so a pi bump
+    never re-resolves it), started with `GITLAB_PERSONAL_ACCESS_TOKEN=${GITLAB_TOKEN}`, `GITLAB_API_URL` the
+    worker's configured GitLab URL with `/api/v4` added once (a literal: the deployment's, not a secret), and
+    `GITLAB_DISABLE_VERSION_CHECK=true`. A `GITLAB_URL` that is not plain `http` or `https`, or that carries a user
+    name, a password, a query, a fragment, or a comma (mcp-gitlab reads one as a list of instances; surrounding
+    whitespace is dropped, as the worker's own clients drop it), refuses `forge` at the pickup as `mcp-server-unknown`, the reason in the log. The entry names neither
+    server but its wrapper, `/usr/local/bin/forge-mcp-github` or `/usr/local/bin/forge-mcp-gitlab` (below). The
+    variable names were read in each pinned release's source (github-mcp-server's `cmd/github-mcp-server/main.go`,
+    viper with the `GITHUB_` prefix; mcp-gitlab's `build/config.js` and `build/index.js`), and both servers were run
+    offline with a fake token and answered an MCP `initialize`. The image declares them with the `forgeMcp`
+    capability, and a job naming `forge` on an image without it is refused before spend
+    (`job-image-forge-mcp-unsupported`): an image that had `mcp` and lacked the servers would otherwise reserve the
+    budget and then refuse at start as `mcp-command-missing`.
+  - **Some tools withheld, as a convenience not handed out, not as a boundary.** `CONST-MERGE-NEVER-AUTOMATIC` keeps
+    the harness from merging, and counts an approval as a merge by another name, so the harness does not hand the
+    agent a forge's dedicated merge or approval tool either. Each wrapper (`image/forge-mcp/forge-mcp-github.sh`,
+    `forge-mcp-gitlab.sh`) forces its list after anything the entry's env holds, ignores its caller's arguments, and
+    runs the server under `image/forge-mcp/withhold.mjs`, a stdio gate:
+    - every server message that carries a tool list (`result.tools`, whatever request it answers, so an id the
+      server reuses cannot carry an unfiltered list) loses the withheld names;
+    - a `tools/call` of a withheld name, or of any name not in the list the client was last shown, is refused before
+      it reaches the server;
+    - a client line is forwarded as the gate parsed and re-serialized it (no duplicate key or second object on a line
+      read two ways), and a batch or a line that does not parse is not forwarded;
+    - a pipe that closes under a write is not an error of the gate's: the server's exit decides the gate's.
+
+    github withholds `merge_pull_request`, `pull_request_review_write` (its review may be an APPROVE), and
+    `assign_copilot_to_issue` and `request_copilot_review`, which start Copilot's own agent or review and spend
+    outside the job's meter (`CONST-BUDGET-BEFORE-TOKENS`, in spirit); its own `GITHUB_EXCLUDE_TOOLS` and
+    `--exclude-tools` remove them too (measured: gone from the list, a call answered `unknown tool`). gitlab withholds
+    `merge_merge_request` (with its `auto_merge` and `merge_when_pipeline_succeeds`), `approve_merge_request`,
+    `unapprove_merge_request` and `approve_deployment`, the tools of its 263 named for merging or approving, and
+    `discover_tools`, which would turn on toolsets past the default list the image's proof saw (118 of its 263 tools
+    by default, measured), and `execute_graphql` by name, though no toolset lists it, so a later toolset setting
+    cannot list it. Its own `GITLAB_TOOL_POLICY_HIDDEN` and `GITLAB_DENIED_TOOLS_REGEX` only filter the list:
+    measured, a direct call of a hidden tool still runs, and so does one of `execute_graphql`, which no toolset lists
+    and whose mutations can merge; only its permission mode is checked at the call, and `readonly` would take every
+    write the job needs. So the gate's "listed or refused" rule is what holds on GitLab, and the hidden list is a
+    second layer. `verify-image.sh` runs both wrappers offline and fails on a withheld name in the list, on a `merge`
+    or `approv` name outside a fixed list of the other names that mention a merge request, and on a call of a
+    withheld or unlisted name that is not refused as unknown.
+
+    It is not a boundary, and nothing here claims one. GitLab runs quick actions (`/merge`, `/approve` and the rest)
+    written in a note or a description, and the listed tools post both (`create_merge_request_note`,
+    `create_note`, a thread, `update_merge_request`'s description); the job's `gh` or `glab`, or the server started
+    from the job's shell without its wrapper, act with the token's full role. A text filter on what the tools post
+    was rejected below. The boundary is the one `CONST-MERGE-NEVER-AUTOMATIC` has always relied on for the CLI: the
+    token's role and the branch's protection (on GitLab a Developer token, "Allowed to merge" left at Maintainers,
+    and approval rules that do not count the token's user; `docs/gitlab.md`).
+  - **Token reuse, not a new credential.** The server's one reference is the token the worker mints for this job
+    and writes under that name (`CONST-TOKEN-SCOPED-PER-JOB`), so the entry is exempt from `mcp-secret-reserved`
+    and `mcp-secret-unmapped`, the two rules that keep that token from every other server. It holds no more than
+    the job's `gh` or `glab` holds with that token; a GitHub installation token lives one hour, and the server stops
+    with the job. It gets only the token under the server's own name: the base environment of a stdio server
+    (`DES-MCP-TRANSPORTS-OWNED`) carries neither `GH_TOKEN` nor `GITHUB_TOKEN` nor a provider key. An empty token is
+    refused by the runner (`mcp-secret-missing`) before the server starts, which matters on GitHub: the release
+    binary falls back to its own OAuth client and a browser login with a local listener when its token is empty.
+  - **Lockdown and toolsets (GitHub).** `default` is context, repos, issues, pull requests and users: `actions`
+    (workflow runs and the tool that triggers them) stays off. Lockdown mode withholds, on a public repository,
+    content authored by someone without push access; upstream calls it a best-effort filter and not an
+    authorization boundary, and so does this entry: the token reads the same content through `gh`.
+  - **No browser, no listener (GitLab).** mcp-gitlab opens an HTTP listener only on `SSE` or `STREAMABLE_HTTP`
+    `true` and an OAuth flow only on `GITLAB_USE_OAUTH` `true`; a stdio server starts with `inheritEnv: false` and
+    only its own `env` over the runner's base names, so none of those can reach it, and the entry does not set them.
+  - **Egress.** With the policy on, the pickup asks the proxy's question of the server's API host, as it does of a
+    streamable HTTP server's url: `https://api.github.com/` for github, the GitLab `/api/v4` url for gitlab
+    (`mcp-egress-unreachable` otherwise). github-mcp-server also reads file contents from `raw.githubusercontent.com`;
+    that is not required, since a job reads its own checkout, and the docs say to allowlist it to use that tool.
+  - **The overlay is optional for `forge` alone.** A job naming only `forge` needs no `mcp.json` and no overlay at
+    all (the top-level switches then take their defaults); a file that is there governs it like any server, so one
+    that cannot be read whole refuses it too.
+  - **Refused on the other kinds, at load.** A cron trigger holds no forge token of its own (a `run.github` token is
+    a local job's option, not a forge job's identity); forgejo and Azure DevOps have no forge MCP server this
+    repository has verified. A job of another kind that arrives naming `forge` (queue data from elsewhere) is
+    refused at the pickup as `mcp-server-unknown`, never handed another forge's entry.
+- **Rejected**: GitLab's own MCP endpoint (`/api/v4/mcp`): it takes an OAuth token with the `mcp` scope, which a
+  project, group or personal access token cannot carry, and an OAuth flow is exactly what a job cannot finish
+  (`DES-MCP-OPERATOR-ONLY` refuses `oauth` for the same reason). GitHub's hosted server
+  (`api.githubcopilot.com/mcp`): its tool set is GitHub's to change under a pinned deployment, and the binary is
+  pinned by a digest. A filter on the text the tools post (a quick action in a note): it would be a boundary that
+  the job's own `glab` skips, and a grammar of quick actions to keep current; the role and the protection are the
+  boundary instead. Withholding the merge tools by the worker's `toolExposure` (`hidden`): that hides them only as
+  pi routes a call, nothing refuses one at the server, and the names would have to be written in `worker/src`, which
+  the merge grep forbids by design; the image is where the pin is, so the list sits beside the version it was read
+  against. mcp-gitlab's `GITLAB_PERMISSION_MODE=readonly`: the one setting it checks at the call, and it removes
+  every write a job exists to make. An operator-written overlay entry for the forge server: it would have to
+  reference the minted token, which the overlay rules refuse for every other server for good reason, and its pin
+  would be the operator's to keep. A separate trigger field (`run.forgeMcp`): one more field to sweep for near
+  misses, when `run.mcp` already names, orders, excludes and gates servers. Fetching either server at job start
+  (`npx`, `go run`): every job would run whatever the registry serves that day.
+- **Residuals**: the withheld tools are a convenience not handed out: a quick action in a note or a description, the
+  job's CLI, or the unwrapped server run from the job's shell act with the token's role. With a Maintainer GitLab
+  token, the server's settings tools (`unprotect_branch`, `protect_branch`, `update_project`,
+  `update_default_branch`, `create_commit_status`) can weaken the very protection the boundary rests on, as `glab`
+  can: they are not withheld, and `docs/gitlab.md` asks for a Developer token. The servers' other writes are the
+  token's (`SECURITY.md`, the agent's own token). A later pin may add a merge or approval tool, which
+  `verify-image.sh`'s name check catches only by name. What the tools return is untrusted prompt content
+  (`CONST-ISSUE-TEXT-IS-DATA`); lockdown is best effort; a self-hosted GitLab on a port other than 443 needs a
+  declared endpoint to pass egress. Forgejo and Azure DevOps are `OQ-040`.
 
 ## DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS
 
@@ -9366,3 +9483,4 @@ a tunnel.
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **NEW `DES-MCP-EGRESS-PREFLIGHT`**: one pickup check reads the overlay once, refuses before spend in a fixed order (the job's own list, file, name, references to a credential the job spends with, unmapped references, egress) and hands `prepare` the document it writes, and a dropped `run.mcp` is `trigger-skew`; the public comment is fixed text per reason. `DES-MCP-OPERATOR-ONLY` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, the runner. **NEW `DES-MCP-TARGETED-LIFECYCLE`**: the runner fires pi's MCP `session_start` and `session_shutdown` itself through a guarded API (no `bindExtensions`), waits for every server to finish pi's connect (its tools listed; 15 s, or a server's longer `timeout`, at most 120 s) before the prompt, holds every `tool_call` against a late shadow, and closes them, pipes included, before `dispose`. **NEW `DES-MCP-TRANSPORTS-OWNED`**: the runner builds every transport from `/job/mcp.json`, resolves references once itself, locks HTTP to the server's origin with no redirect and no sign-in, and starts a stdio server with only the environment it names. `DES-MCP-EGRESS-PREFLIGHT` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **NEW `DES-MCP-CODEMODE-MODELS`**: codemode's `models.*` are on unless the overlay turns them off, since they reach the meter, the model list and the cost guard like any call, proven through pi's real codemode tool. **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: the pickup also refuses a server the trigger's own exclusions take its last way in from, routed as pi routes it (either active discovery tool reaches every codemode and deferred tool) (`mcp-excluded`). **`DES-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED**: a chained child inherits the exclusions less the names of MCP tools. |
+| 2026-10-12 | No issue: the forge's own MCP server. **NEW `DES-FORGE-MCP`**: a github or gitlab trigger names the reserved `forge` in `run.mcp`; the worker writes the entry (github-mcp-server 2.0.2 from a sha256-checked release tarball, `@zereight/mcp-gitlab` 2.1.67 from a committed lockfile, both baked in the job image and declared as `forgeMcp`), run as the job's own forge token and exempt from the two secret rules for that reason only; the entry runs a wrapper that withholds the forges' dedicated merge and approval tools (and GitHub's two Copilot tools, GitLab's `discover_tools` and `execute_graphql`), dropped from every tool list and refused at the call by `withhold.mjs` since mcp-gitlab's own hidden list still runs a direct call, stated as a convenience not handed out and not a boundary (a GitLab quick action in a note, the job's CLI, the unwrapped server), the boundary being the token's role and the branch's protection, with a Maintainer GitLab token's settings tools a named residual; a `GITLAB_URL` the entry cannot carry refuses `forge`; lockdown and the default toolsets on GitHub, no listener and no OAuth on GitLab, egress judged on the API host, the overlay optional for `forge` alone, refused at load on cron, forgejo and azure; GitLab's own `/api/v4/mcp` rejected (an OAuth `mcp` scope no access token carries). **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: `forge` is not the file's (the file is needed only for the other names; another kind naming it is `mcp-server-unknown`; its one reference skips the two secret rules; egress asks about its API host), and the rejected forge-token reference names `forge` as the explicit choice it asked for. `DES-MCP-OPERATOR-ONLY` and `DES-MCP-TRANSPORTS-OWNED` are UNCHANGED, checked (the forge entry follows each as written). |

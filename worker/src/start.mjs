@@ -2268,6 +2268,8 @@ export async function startWorker(
 				forwardEnv: config.forwardEnv,
 				hostEnv: env,
 				egress: config.egress,
+				// DES-FORGE-MCP: the GitLab a gitlab job's forge server calls, the same URL its clone and its glab use.
+				gitlabUrl: config.gitlab?.apiUrl ?? null,
 				// The credentials the job is set up to spend with (providerKeyNames). A read of the overlay models.json that
 				// may pass on a retry is thrown to the check, which retries the job; any other failure adds no overlay
 				// names, and the model gates, which ran first, refuse every job such a file breaks.

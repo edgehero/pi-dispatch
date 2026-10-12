@@ -27,8 +27,10 @@ comment trigger on each.
 ## Set it up
 
 **1. Mint a project access token.** Project Settings → Access tokens. Scope it `api` (see
-[the scope trade-off](#the-scope-trade-off) below), give it the **Developer** role or above, and set the
-shortest expiry you will tolerate re-minting.
+[the scope trade-off](#the-scope-trade-off) below), give it the **Developer** role, and set the
+shortest expiry you will tolerate re-minting. Not Maintainer: a Maintainer token lets the job (and the forge's own
+MCP server, [mcp.md](mcp.md#the-forges-own-server)) unprotect a branch or change who may merge, which is the
+boundary the next steps rely on.
 
 ```bash
 GITLAB_TOKEN=glpat-xxxxxxxxxxxx
@@ -226,6 +228,9 @@ So on the credential axis, GitLab is weaker than GitHub's App path, and equal to
   here, because no GitLab mechanism enforces it for you.
 - **Protect your default branch.** The worker refuses a job whose default branch is unprotected, before
   spending anything — wildcard protection rules (`release/*`, `*`) count.
+- **Keep the token at Developer.** Leave "Allowed to merge" on the protected branch at Maintainers, and let no
+  approval rule count the token's bot user: then nothing the job runs (`glab`, a `/merge` quick action in a note,
+  the forge's MCP server) can merge into it.
 
 The token reaches the container as `GITLAB_TOKEN` / `GL_TOKEN` only, never under the GitHub names: `gh`
 would send a GitLab credential to github.com on its first invocation.
