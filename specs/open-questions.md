@@ -661,7 +661,27 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
     first without it, and `-ne` would take away the discovery a subagent package may rely on. pi 1.0.4 adds
     `--no-mcp`: the loader's final set then drops `builtin:mcp`, and only paths with the `builtin:` prefix, so
     every `-e` file path stays (re-checked in the 1.0.4 tarball, `core/resource-loader.js`, and run against the
-    bundle with `-ne --no-mcp`).
+    bundle with `-ne --no-mcp`). **Decided (2026-10-12): `--no-mcp` on every child.** Without it a child
+    connects the MCP servers its agent dir's `mcp.json` names and, when it trusts the project (`-a`, a trust
+    store entry, `defaultProjectTrust: always`, or an extension that answers `project_trust`; a headless child
+    does not by default), the repo's
+    `.pi/mcp.json`. Measured at 1.1.0: a `pi -p` child spawned the agent dir's stdio server, and with `-a` the
+    repo's too. No job is meant to connect a server its operator did not choose. The preload injects
+    `-e <meter> --no-mcp` in front, so the flag sits before any `--`, and a spawner's own `-e builtin:mcp` is
+    dropped by the same filter; the recognition is the three tokens, so a spawner's own `-e <meter>` gets the
+    flag too (pi drops the duplicate path). Pinned in child-meter.integration.test.mjs against the bundle,
+    `dist/cli.js` and the rpc entry, all with `-a`, and with controls (the bundle and the rpc entry run without
+    the preload) that spawn both servers. The flag turns off pi's BUILT-IN MCP, not MCP itself. Residuals,
+    each a thing the job's code chose to run, as it could run a server itself:
+    - a subcommand gets no injection (M7), so `pi mcp list` connects the agent dir's servers, and the repo's
+      when the trust store trusts the project;
+    - pi's MCP extension loaded as an ordinary extension: its file (`dist/extensions/mcp/index.js`) as an `-e`
+      path or a settings `extensions` entry (the agent dir is writable in a job), or an extension that runs
+      `createMcpExtension()`, is not a `builtin:` path, so `--no-mcp` does not drop it;
+    - a process that imports pi's `main` or an rpc entry instead of running an entry (the preload meters the
+      unbundled one, but injects no argument into it);
+    - a child the preload does not reach (a cleared `NODE_OPTIONS`, a renamed package), outside the flag as it
+      is outside the meter. Unlike spend, no detector backs this up.
   - **M7, subcommands.** pi dispatches eight subcommands on `args[0]` (`auth`, `config`, `install`, `list`,
     `mcp`, `remove`, `uninstall`, `update`). Three were run (`auth check`, `list`, `mcp list`): each ran as itself
     with no injection, and with `-e` forced in front each became a chat turn on the default model ("No API key
@@ -2019,3 +2039,4 @@ adversarial passes did.
 | 2026-10-08 | Issue #599, phase 1, last correction. **`OQ-039` AMENDED**: a stall of a later attempt is a named residual. `stalledCounter` never resets, so only a stall of the first attempt is counted as `stalledRepick`; a later attempt that stalled wrote no record, its slot time is counted nowhere, and the run that follows reads as an ordinary retry. |
 | 2026-10-08 | Issue #599, phase 2. **`OQ-039` AMENDED**: "a job running now is not in the history until it ends" is gone, since the host rows now list running jobs; in its place, a running job is counted only as far as its row vouches for it (to now on a fresh row, to its last beat on one older than 30 s, not at all when its row does not list it or its host's history is not shared, counted in `liveNotCounted`), and an orphaned container's time after its failed stop is in no record and reads as idle, though it is named (`orphans`). The Position no longer counts its items (it said four and listed six). |
 | 2026-10-09 | Issue #599, the run mirror's start. **`OQ-039` AMENDED**: residuals of `runs:since`, the first three reachable only beside a worker from before it or by a hand on the keys: a run that ended before a loss and whose older writer's mirror write landed just after it reads as idle from its end to the loss; a start lost on its own beside a slow older run; a retry of exactly the vouching job id that an older writer mirrors into an index it recreated, which makes the stale start trusted again; and a failed mirror write, which is never retried and reads as idle to a peer. |
+| 2026-10-12 | No issue: MCP in a job's pi children. **`OQ-011` AMENDED** (M6): every pi CLI child gets `--no-mcp` beside its injected meter, since a child otherwise connects the MCP servers named by its agent dir's `mcp.json` and, when it trusts the project, the repo's `.pi/mcp.json`. The flag turns off pi's built-in MCP only; the residuals are a `pi mcp` subcommand, pi's MCP extension loaded as an ordinary extension, a process that imports pi's `main`, and a child the preload does not reach. |

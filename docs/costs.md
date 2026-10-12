@@ -442,7 +442,9 @@ Since issue #500 the runner meters them from inside.
 extension. That meter counts every call the child makes, writes it to the child's ledger file before the call
 goes out, and applies the job's model list and cost cap. Every second, and when the job ends, the runner adds
 all the ledgers to the job's own numbers. So the per-job token cap, the cost cap and the model list hold for the
-job as a whole, and a stop reaches every child before its next call. This covers:
+job as a whole, and a stop reaches every child before its next call. The preload also turns pi's built-in MCP
+support off in the child (`--no-mcp`), so a child does not connect the MCP servers named in the repo's
+`.pi/mcp.json` or in its own agent folder. This covers:
 
 - a `pi` started from PATH or by path, in any of pi's session modes;
 - pi's stock subagent example. In a job it starts the runner itself; that child now runs as a metered `pi` and
@@ -489,7 +491,11 @@ the provider key and runs as the same user as the runner. Named gaps:
   reads. The run then settles at the floor;
 - children do not see the overlay `models.json` (issue #503). So when the overlay's `modelOverrides` changes the
   cost, compat or api of a builtin model, a child builds that model from the catalog, which differs from the
-  pinned table, and every capped call the child makes on it is refused as `unboundable`.
+  pinned table, and every capped call the child makes on it is refused as `unboundable`;
+- `--no-mcp` turns off only pi's built-in MCP support. A child can still connect MCP servers when the job's code
+  asks for it: `pi mcp list`, pi's MCP extension loaded by its file path or from a settings file, a program that
+  calls pi's `main` itself, or a child the preload never reaches. Nothing detects this the way the process scan
+  detects an unmetered child.
 
 **pi-subagents in a job.** It needs `PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT` set to pi's package folder, or it
 fails before any child runs. Its children do not see the overlay `models.json` (issue #503), so a model defined

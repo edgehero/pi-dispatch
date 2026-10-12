@@ -210,6 +210,61 @@ function rpcDriver(prompts, { between = () => {} } = {}) {
 	};
 }
 
+/**
+ * A world whose agent dir and project each name an MCP server (exposure direct, so the first prompt waits for it). The
+ * server is a node script that writes its marker and exits, so a spawned one is seen at once and fails fast. A headless
+ * child reads the project's `.pi/mcp.json` only when it trusts the project, so every run here passes `-a`.
+ */
+function mcpWorld() {
+	const w = world();
+	const marker = (name) => join(w.root, `${name}.spawned`);
+	const server = join(w.root, "marker-server.mjs");
+	writeFileSync(server, 'import { writeFileSync } from "node:fs"; writeFileSync(process.argv[2], "spawned"); process.exit(1);\n');
+	const config = (name) => JSON.stringify({ mcpServers: { [name]: { command: process.execPath, args: [server, marker(name)], exposure: "direct" } } });
+	mkdirSync(w.agentDir, { recursive: true });
+	writeFileSync(join(w.agentDir, "mcp.json"), config("user"));
+	mkdirSync(join(w.root, ".pi"), { recursive: true });
+	writeFileSync(join(w.root, ".pi", "mcp.json"), config("repo"));
+	return { ...w, spawned: () => ["user", "repo"].filter((name) => readdirSync(w.root).includes(`${name}.spawned`)) };
+}
+
+/** The world's environment without the preload: what a child the preload never reached runs with. */
+const unmetered = ({ NODE_OPTIONS, PI_DISPATCH_CHILD_LEDGER, ...env }) => env;
+
+test("a pi child loads no MCP server, from its agent dir or the repo, and is still metered (OQ-011 M6)", { skip }, async () => {
+	// The control: the same child without the preload spawns both servers, so the assertions below are about the
+	// injection and not about a config pi would ignore anyway.
+	const bare = mcpWorld();
+	await run([entry("dist/bundle/cli.js"), "-a", ...printArgs(bare), "hello"], { env: unmetered(bare.env), cwd: bare.root });
+	assert.deepEqual(bare.spawned(), ["user", "repo"], "the control spawns both servers");
+
+	for (const path of ["dist/bundle/cli.js", "dist/cli.js"]) {
+		const w = mcpWorld();
+		const result = await run([entry(path), "-a", ...printArgs(w), "hello"], { env: w.env, cwd: w.root });
+		assert.equal(result.code, 0, result.stderr);
+		assert.deepEqual(w.spawned(), [], `${path}: no MCP server is spawned in a child`);
+		assertMetered(w.ledger);
+	}
+	// A spawner that asks for the built-in by path gets it dropped by the same flag, and keeps its meter.
+	const asked = mcpWorld();
+	const result = await run([entry("dist/bundle/cli.js"), "-a", ...printArgs(asked, "-e", "builtin:mcp"), "hello"], { env: asked.env, cwd: asked.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.deepEqual(asked.spawned(), [], "-e builtin:mcp: no MCP server is spawned");
+	assertMetered(asked.ledger);
+});
+
+test("a pi child from the rpc entry loads no MCP server either (OQ-011 M6)", { skip }, async () => {
+	const rpcArgs = (w) => [entry("dist/rpc-entry.js"), "-a", "--no-session", "-e", w.provider, "--model", "fake/m1"];
+	const bare = mcpWorld();
+	await run(rpcArgs(bare), { env: unmetered(bare.env), cwd: bare.root, drive: rpcDriver(["hello"]) });
+	assert.deepEqual(bare.spawned(), ["user", "repo"], "the control spawns both servers");
+	const w = mcpWorld();
+	const result = await run(rpcArgs(w), { env: w.env, cwd: w.root, drive: rpcDriver(["hello"]) });
+	assert.equal(result.code, 0, result.stderr);
+	assert.deepEqual(w.spawned(), []);
+	assertMetered(w.ledger);
+});
+
 test("a pi child started from the rpc entry (dist/rpc-entry.js) leaves a ledger equal to its usage (issue #500)", { skip }, async () => {
 	const w = world();
 	const result = await run([entry("dist/rpc-entry.js"), "--no-session", "-e", w.provider, "--model", "fake/m1"], { env: w.env, cwd: w.root, drive: rpcDriver(["hello"]) });

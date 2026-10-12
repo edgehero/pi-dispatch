@@ -1870,6 +1870,10 @@ test("-ne keeps explicit -e paths, \"--\" ends option parsing, and the subcomman
 	assert.equal(parsed.noExtensions, true);
 	assert.deepEqual(parsed.extensions, ["first.mjs"]);
 	assert.deepEqual(parsed.messages, ["-e", "second.mjs"]);
+	// The preload injects `-e <meter> --no-mcp` (OQ-011 M6): --no-mcp is a plain flag before any "--", read wherever it
+	// sits, and after "--" it is a message like any other word.
+	assert.equal(parseArgs(["-e", "meter.ts", "--no-mcp", "--mode", "json", "-p"]).noMcp, true);
+	assert.equal(parseArgs(["-e", "meter.ts", "--", "--no-mcp"]).noMcp, undefined);
 	// -ne drops discovery and the built-ins but keeps the explicit -e paths, in both places the loader builds the set.
 	// Since 1.0.4 the final set also drops each `builtin:<name>` path that --no-mcp disables, and only those: a path
 	// that does not start with the builtin prefix passes the filter, so the injected meter (a file path) survives

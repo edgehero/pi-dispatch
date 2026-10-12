@@ -80,8 +80,10 @@ test("hasChildMeter and injectChildMeter: the injection is recognised in front, 
 	assert.equal(hasChildMeter(argv), false);
 	injectChildMeter(argv, "cli");
 	assert.equal(hasChildMeter(argv), true);
-	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "-p", "hi"]);
+	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--no-mcp", "-p", "hi"]);
 	assert.equal(hasChildMeter(["node", RUN_JOB_PATH, "-e", "/other.ts"]), false);
+	// The meter without --no-mcp is not the injection: a spawner's own `-e <meter>` still gets MCP turned off.
+	assert.equal(hasChildMeter(["node", RUN_JOB_PATH, "-e", CHILD_METER_PATH, "-p", "hi"]), false);
 });
 
 test("ledgerDirProblem: a writable directory is fine; unset, relative, missing, a file, a link or no write access is named by a code", () => {
@@ -111,14 +113,14 @@ test("runAsPiCli: a usable directory injects -e first (once) and loads pi's unbu
 	const argv = ["node", RUN_JOB_PATH, "--mode", "json", "-p", "hi"];
 	const options = { env: { [CHILD_LEDGER_ENV]: dir }, argv, warn: () => assert.fail("no warning"), setExitCode: (code) => codes.push(code), load: async (url) => loaded.push(url) };
 	assert.equal(await runAsPiCli(options), "cli");
-	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--mode", "json", "-p", "hi"]);
+	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--no-mcp", "--mode", "json", "-p", "hi"]);
 	assert.equal(loaded.length, 1);
 	assert.equal(loaded[0], new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
 	assert.ok(loaded[0].endsWith("/@earendil-works/pi-coding-agent/dist/cli.js"), "the unbundled CLI, not the bundle");
 	assert.deepEqual(codes, []);
 	// The preload made the injection already: not a second -e.
 	assert.equal(await runAsPiCli(options), "cli");
-	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--mode", "json", "-p", "hi"]);
+	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--no-mcp", "--mode", "json", "-p", "hi"]);
 	// A subcommand is passed through as pi gets it.
 	const sub = ["node", RUN_JOB_PATH, "list"];
 	await runAsPiCli({ ...options, argv: sub });
@@ -172,7 +174,7 @@ test("preload: a nested runner takes the pi CLI's route (stub, -e first) and reg
 	const env = { [CHILD_LEDGER_ENV]: dir, [RUNNER_PID_ENV]: "7" };
 	const result = await preload({ env, argv, pid: 30, global, realpath: (path) => path, registerHooks: () => assert.fail("one meter per process: no library hook in a nested runner"), loadMeter: () => usageMeter, onExit: () => {} });
 	assert.equal(result, "entry");
-	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--mode", "json", "-p", "hi"]);
+	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--no-mcp", "--mode", "json", "-p", "hi"]);
 	const [stub] = readdirSync(dir);
 	assert.match(stub, /^30\.[0-9a-f]{16}\.json$/);
 	assert.equal(JSON.parse(readFileSync(join(dir, stub), "utf8")).state, "starting");
