@@ -6515,6 +6515,36 @@ Considered and declined. Recorded so they are not re-proposed.
   bypasses classification. It is a useful interactive UX guard, not a boundary against adversarial
   input.
 - **Gondolin micro-VM** — see `CONST-ISOLATION-CONTAINER-PER-JOB`. Routes only built-in tools.
+- **`@earendil-works/pi-durable` as the runner's engine, or a durable-pi device network** (issue #622).
+  pi-durable is pi's durable agent harness: every model call and tool call is a checkpointed task in one
+  storage, an interrupted tool comes back as an `interrupted` result, and a reopened process continues.
+  `disler/durable-pi` builds on it a long-lived agent server per machine (bearer token, HTTP plus SSE) that a
+  web UI, a terminal or curl steer. Declined on facts read from the 1.1.0 tarball and upstream, not on taste:
+  - *Upstream is not moving the coding agent onto it.* Its announcement (earendil.com/posts/pi-durable) says it
+    "does not replace the Pi coding agent", no published `pi-coding-agent` has depended on it, and upstream
+    commit `7472cda` (2026-10-12) removed the coding agent's experimental durable stack and the `pi-server`,
+    `pi-client` and `pi-protocol` packages. Building on it is a second runtime, not a pin bump.
+  - *It is marked experimental and breaks often*: 16 versions in 23 days, a Breaking Changes section in every
+    release from 1.0.3 on, patch releases included. `CONST-PI-VERSION-PINNED` would turn each bump into a
+    re-verification of semantics, not of exports.
+  - *It loads none of what a job is steered by*: no `.pi/` skills, no pi extensions, no prompt templates, no MCP,
+    no codemode. `run.command`, staged packages (`INT-PI-PACKAGES-FILE-CONTRACT`), overlay and repository
+    extensions and `REQ-MCP-OPERATOR-SERVERS` would all be lost or rebuilt.
+  - *Its guards are weaker than the floor needs.* No hook can refuse a model request (`beforeRequest` only
+    rewrites the messages, and a hook that throws is logged while the request is still sent), and a hook applies
+    only to conversations that select its extension, which a child or a fork can drop. The one refusal point is
+    the host's injected `Models`, which `ModelRuntime` implements, so the meter and the model guard
+    (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`, `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`) would have
+    survived. That is the only part that would.
+  - *Durability buys little inside a throwaway container.* A retry re-clones the repository, so a resumed
+    transcript would describe edits that are gone, and continuing on retry is what `REQ-RESUMABLE-SESSION` and
+    `CONST-RETRY-INFRA-ONLY` already decline. Job-to-job continuity is `run.resume`'s, at the job boundary.
+  - *The device network is the shape this project rules out*: a token that is a shell on the host and a live
+    channel into a running agent, against `CONST-ISOLATION-CONTAINER-PER-JOB` and
+    `DES-SANDBOX-IS-A-FRESH-CONTAINER`.
+
+  What would reopen it is `OQ-041`. The one idea kept, an agent that asks and then waits, is built at the job
+  boundary instead (issue #625).
 
 ## Repo layout
 
@@ -9503,3 +9533,4 @@ a tunnel.
 | 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **NEW `DES-MCP-CODEMODE-MODELS`**: codemode's `models.*` are on unless the overlay turns them off, since they reach the meter, the model list and the cost guard like any call, proven through pi's real codemode tool. **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: the pickup also refuses a server the trigger's own exclusions take its last way in from, routed as pi routes it (either active discovery tool reaches every codemode and deferred tool) (`mcp-excluded`). **`DES-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED**: a chained child inherits the exclusions less the names of MCP tools. |
 | 2026-10-12 | No issue: the forge's own MCP server. **NEW `DES-FORGE-MCP`**: a github or gitlab trigger names the reserved `forge` in `run.mcp`; the worker writes the entry (github-mcp-server 2.0.2 from a sha256-checked release tarball, `@zereight/mcp-gitlab` 2.1.67 from a committed lockfile, both baked in the job image and declared as `forgeMcp`), run as the job's own forge token and exempt from the two secret rules for that reason only; the entry runs a wrapper that withholds the forges' dedicated merge and approval tools (and GitHub's two Copilot tools, GitLab's `discover_tools` and `execute_graphql`), dropped from every tool list and refused at the call by `withhold.mjs` since mcp-gitlab's own hidden list still runs a direct call, stated as a convenience not handed out and not a boundary (a GitLab quick action in a note, the job's CLI, the unwrapped server), the boundary being the token's role and the branch's protection, with a Maintainer GitLab token's settings tools a named residual; a `GITLAB_URL` the entry cannot carry refuses `forge`; lockdown and the default toolsets on GitHub, no listener and no OAuth on GitLab, egress judged on the API host, the overlay optional for `forge` alone, refused at load on cron, forgejo and azure; GitLab's own `/api/v4/mcp` rejected (an OAuth `mcp` scope no access token carries). **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: `forge` is not the file's (the file is needed only for the other names; another kind naming it is `mcp-server-unknown`; its one reference skips the two secret rules; egress asks about its API host), and the rejected forge-token reference names `forge` as the explicit choice it asked for. `DES-MCP-OPERATOR-ONLY` and `DES-MCP-TRANSPORTS-OWNED` are UNCHANGED, checked (the forge entry follows each as written). |
 | 2026-10-12 | No issue: a runner MCP refusal named in the run record, and doctor on an MCP endpoint. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: `TERMINAL_COMMENTS` gains six rows, quoted in the entry, the runner's exit-2 MCP refusals (`mcp-unavailable`, `mcp-config-invalid`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed`), each fixed and naming no server, host or variable, and the six join `RUNNER_POLICY_REASONS` (as `MCP_RUNNER_REASONS`), so the record and the panel name them and the hook pages for them; the pickup's free `mcp-config-invalid` keeps its own comment and pages nobody by `budgetReserved: false`. Rejected: one generic MCP token, and the server's name off the exit line in the comment. **`DES-MCP-EGRESS-PREFLIGHT` AMENDED**: one endpoint match, `endpointsAt`, for a model's baseUrl, the pickup's MCP egress check and doctor; doctor's `models` probe passes an endpoint only an enabled overlay MCP server dials on any answer through the tunnel, or on the socket an `https:` one closes. Rejected: skipping that probe, and an MCP handshake from doctor. `DES-MCP-TARGETED-LIFECYCLE` is UNCHANGED, checked: the runner's exit lines are as they were, so an image built before this change is read the same way. |
+| 2026-10-12 | Issue #622. **Rejected alternatives (whole-project) AMENDED**: `@earendil-works/pi-durable` as the runner's engine, and a durable-pi device network, are declined, with the facts read from the 1.1.0 tarball and upstream (the coding agent does not depend on it and upstream removed its experimental durable stack on 2026-10-12; experimental with breaking changes in every release since 1.0.3; no `.pi/`, extensions, MCP or codemode; no hook that can refuse a request and no registry-wide guard; a durable resume inside a re-cloned container describes edits that are gone; a long-lived agent server is what `CONST-ISOLATION-CONTAINER-PER-JOB` rules out). What would reopen it is the new `OQ-041`. **`DES-SANDBOX-IS-A-FRESH-CONTAINER`, `REQ-RESUMABLE-SESSION`, `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: each is cited as a reason, none moves. No code changes. |
