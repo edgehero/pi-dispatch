@@ -15,7 +15,7 @@
 import { isIP } from "node:net";
 import { basename } from "node:path";
 import { isProxyLocalHost } from "./backends.mjs";
-import { baseUrlTarget } from "./model-endpoints.mjs";
+import { baseUrlTarget, endpointsAt } from "./model-endpoints.mjs";
 
 /** The entries of an allowlist's text, lowercased, in order: one per line, a line with inner whitespace skipped. */
 export function parseAllowlist(text) {
@@ -57,7 +57,7 @@ function hostIsLocal(host) {
 export function egressRefusalFor(url, { allowlist = [], endpoints = [] } = {}) {
 	const target = baseUrlTarget(url);
 	if (target === null) return "it is not an http or https URL";
-	if (endpoints.some((e) => e.host === target.host && e.port === target.port)) return null;
+	if (endpointsAt(url, endpoints).length > 0) return null;
 	const entry = allowlistEntryFor(allowlist, target.host);
 	if (entry !== null && hostIsLocal(target.host)) return `${target.host} is the proxy's own machine, which it never opens; a server on this machine is declared in model-endpoints.json under host.docker.internal or host.containers.internal`;
 	// The proxy tunnels to 443 whatever speaks inside, so an `http://` url on 443 is plain HTTP to what is almost always

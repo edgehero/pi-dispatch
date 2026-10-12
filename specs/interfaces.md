@@ -793,6 +793,11 @@ refactor apart.
   | A server refused the connection (its command did not start, it exited or failed the handshake or its tool list, pi refused an answer, an HTTP error other than 408, 429 or a 5xx other than 501, a redirect, a body over 16 MiB, a control character in a resolved header; a server whose own `timeout` ran out before it answered) | `lifecycle.start`, before the command check and the prompt → tagged `configError` | `2` / `mcp-unavailable`: the next attempt would find it the same |
   | A server had not answered when the wait ran out (15 s, or its own longer `timeout`, at most 120 s: the network, a transient HTTP status pi kept retrying, a server still starting) | same → tagged `EXIT_INFRA` | `1` / `mcp-unreachable`: retried, as any infrastructure failure |
 
+  The six exit-`2` reasons are members of the worker's `RUNNER_POLICY_REASONS` (below), so each is the run record's
+  reason and has its own fixed status comment, which names no server, host or variable; `mcp-unreachable` is exit
+  `1` and never relabels. A worker test reads the runner's sources and requires every `configError` it tags with an
+  `mcp-` reason to be exactly that set, so a new refusal cannot read as `runner-policy` again unnoticed.
+
   **Command jobs (issue #189, `run.command`) add three named reasons under the EXISTING codes — never a
   new code and never a new worker-level outcome** (the admin surfaces bucket outcomes into a closed set
   and silently drop unknowns, so new vocabulary rides `reason` on the exit log line):
@@ -826,7 +831,8 @@ refactor apart.
   **The exit line's `reason` is read for one purpose and cannot move a job between classes** (issue #437).
   `parseExitReason` returns it only when it is a member of the worker's CLOSED `RUNNER_POLICY_REASONS`
   (`provider-auth-refused`, and since issues #501/#502 `cost-cap`, `model-not-allowed`,
-  `cost-cap-unenforceable` and `model-policy-unenforceable`) AND the same line, the decisive exit line (defined
+  `cost-cap-unenforceable` and `model-policy-unenforceable`, and the six exit-`2` MCP reasons in the table above,
+  `mcp-unavailable`, `mcp-config-invalid`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed`) AND the same line, the decisive exit line (defined
   below), says `code: 2`; anything else is `null`. The processor consults it only inside its container-exit-`2` branch, where it replaces the
   `runner-policy` label and nothing else: **the container exit code alone decides the retry class**, so a
   container exiting `1` while printing a refusal line is still an infra retry, and the worst a forged line
@@ -4913,7 +4919,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -5311,13 +5317,15 @@ validator rather than a second copy of it.
   turns, issue #449) is deliberately not recovered into the record (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
 
   **A container exit `2` records `runner-policy` unless the runner named a reason the worker keeps**
-  (issue #437). Five such reasons: `provider-auth-refused`, the provider refused the credential (a 401/403,
+  (issue #437). Eleven such reasons: `provider-auth-refused`, the provider refused the credential (a 401/403,
   or a Google or Bedrock refusal shape since issue #451); and since issues #501/#502 `cost-cap` and
   `model-not-allowed` (the runner's pre-call guard stopped a call: `cost-cap` live on an image that declares
   `costCap`, `model-not-allowed` live on an image that declares `modelPolicy`; the same token is also the
   worker's free pre-spend refusal, described below, which is not an exit 2) and
   `cost-cap-unenforceable` and `model-policy-unenforceable` (the runner refused, before any call, a cost cap
-  or a model list it could not enforce before a call). Each has its own fixed terminal comment and pages
+  or a model list it could not enforce before a call); and the runner's six refusals of a job's MCP servers before
+  its prompt, `mcp-unavailable`, `mcp-config-invalid`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed` (`INT-RUNNER-EXIT-CODE-PROTOCOL`; `mcp-config-invalid` is also the pickup's free refusal
+  of an overlay `mcp.json` it cannot read whole, which records `budgetReserved: false`). Each has its own fixed terminal comment and pages
   the operator like any other runner reason. The parse rule is
   `parseExitReason`'s: scan the bounded stdout tail from the end, take the LAST `exit` event, and return
   its `reason` only when that line's own `code` is `2` and the reason is a member of the closed
@@ -7272,7 +7280,15 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   - three probe containers on the egress canary's network, after its three, built as its are and named
     `pi-dispatch-egress-probe-endpoint-<probe>-<id>-<pid>`: `models`, the runner's tunnelled `GET
     http://<host>:<port>/v1/models`, must answer 200 (the server's own 401 or 403 is said apart: the route and the
-    rule are proved and the server wants a key; a timeout says the server took the connection and never answered);
+    rule are proved and the server wants a key; a timeout says the server took the connection and never answered).
+    An endpoint that an enabled streamable HTTP server's `url` in the overlay's `mcp.json` dials and no overlay
+    model's `baseUrl` does (a provider's or a model's, each matched to an endpoint by host and port as the pickup's
+    MCP egress check matches it) is not a model server: its lines are headed `MCP server endpoint <id>`, and any
+    answer through the tunnel passes, said as a proved route, not probed as a model server. When a server's url
+    there is `https:`, a socket the server closed (`blocked` with `UND_ERR_SOCKET` or `ECONNRESET`, measured: a TLS
+    server closes the probe's plain request) passes the same way; a timeout, another code and the proxy's 403 or 503
+    still fail. One that a model also dials is judged as above, and an overlay `models.json` that cannot be read
+    leaves every endpoint judged as above;
     `nextport`, the same to the nearest port above the declared one that no declaration for that host uses and that
     is neither 443 nor 80, which the allowlist opens for a listed host (wrapping below at 65535), must get the proxy's
     403 on the CONNECT; `plain`, a plain forward `GET` to the declared port, must get
@@ -8028,7 +8044,8 @@ this project never grows one.
   set -- BullMQ writes it on the non-retry branch alone, and the emit follows the move, so the guard
   reads the queue's own decision), and outcome `policy` with reason `worker-abort`, `runner-policy` or
   any member of the worker's `RUNNER_POLICY_REASONS` (`provider-auth-refused`, and since issues #501/#502
-  `cost-cap`, `model-not-allowed`, `cost-cap-unenforceable` and `model-policy-unenforceable`), or, since issue
+  `cost-cap`, `model-not-allowed`, `cost-cap-unenforceable` and `model-policy-unenforceable`, and the runner's six
+  exit-`2` MCP refusals, `INT-RUNNER-EXIT-CODE-PROTOCOL`), or, since issue
   #596, `oom-killed` (a paid run killed for memory, which only the operator can fix by its size) at the
   completed event (policy RETURNS, so a failed-only mount would miss them).
   `provider-auth-refused` (issue #437) is a container exit `2` whose runner named a provider's refusal
@@ -8040,7 +8057,8 @@ this project never grows one.
   label. Never for completions, pre-spend refusals, retried attempts, or `operator-cancel`. A policy result
   pages unless it says `budgetReserved: false` (issue #502): `model-not-allowed` is both the runner's
   paid stop and the worker's free pre-spend refusal of a main model off the job's list, and the reason token
-  alone cannot tell them apart. Every paid terminal carries `budgetReserved: true`.
+  alone cannot tell them apart; `mcp-config-invalid` is the same case, the runner's paid refusal and the
+  pickup's free one. Every paid terminal carries `budgetReserved: true`.
 - **At most once per job, best effort, and NOTHING flows back**: the hook cannot change an outcome
   (fired from listeners outside every deciding try, and `fire` never throws); its exit code and signal
   land in one `on_failure` log line -- pinned key set `{ jobId, code, detail }`, detail one of
@@ -8318,3 +8336,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: the top-level `codemodeModels` (boolean, default true). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: beside `run.mcp`, `run.excludeTools` takes codemode, tool_search, the three resource tools and `mcp__<server>__*`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `mcp-excluded`. **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits the parent's exclusions less the names of MCP tools. `INT-CONTAINER-JOB-INPUTS` is UNCHANGED, checked: `/job/mcp.json` already carried `codemodeModels`, and `PI_EXCLUDE_TOOLS` carries the new names as it carries any. |
 | 2026-10-12 | No issue: MCP servers in jobs, the operator's view. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the file's example entries show `run.mcp`, which the field's own bullet already described. `INT-OVERLAY-MCP-CONFIG` is UNCHANGED, checked: the admin reads it through the worker's own parser and writes nothing. |
 | 2026-10-12 | No issue: the forge's own MCP server. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.mcp` may name `forge` on a github or gitlab trigger, and a cron, forgejo or azure trigger naming it is refused at load. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: a server named `forge` is refused. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/mcp.json` may hold the worker's `forge` entry. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the token `forgeMcp` (github-mcp-server and mcp-gitlab baked at their pins behind wrappers that withhold the forges' dedicated merge and approval tools and a few others, a tool not handed out and not a boundary, proved offline as the job user), and `CAPABILITY_GATES` gains its row (seven job-feature tokens). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-forge-mcp-unsupported`. `INT-RUNNER-EXIT-CODE-PROTOCOL` is UNCHANGED, checked: the forge server fails at start with the reasons any stdio server has. |
+| 2026-10-12 | No issue: a runner MCP refusal named in the run record, and doctor on an MCP endpoint. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the six exit-2 MCP reasons (`mcp-unavailable`, `mcp-config-invalid`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed`) join the list `parseExitReason` keeps, so each relabels a container exit 2 and nothing else, and a worker test holds the runner's `mcp-` tagged `configError`s to exactly that set; `mcp-unreachable` stays exit 1. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `mcp-unavailable`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed` (`mcp-config-invalid` was there for the pickup), and the exit-2 paragraph counts eleven named reasons, `budgetReserved` telling the runner's `mcp-config-invalid` from the pickup's. **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: the six page as members of `RUNNER_POLICY_REASONS`, and the free `mcp-config-invalid` is the second token the `budgetReserved: false` guard tells apart. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: the `models` probe of an endpoint that an enabled overlay streamable HTTP MCP server's url dials and no overlay model's baseUrl does passes on any answer through the tunnel, or, for an `https:` server, on the socket it closes (`UND_ERR_SOCKET`, `ECONNRESET`), and its lines are headed `MCP server endpoint <id>`; an unreadable models.json keeps it judged as a model server. `INT-OVERLAY-MCP-CONFIG` is UNCHANGED, checked. **Code evidence**: worker/src/run-history.mjs -> MCP_RUNNER_REASONS, RUNNER_POLICY_REASONS; worker/src/processor.mjs -> TERMINAL_COMMENTS; worker/src/model-endpoints.mjs -> endpointsAt; worker/src/egress-allowlist.mjs -> egressRefusalFor; worker/src/doctor.mjs -> mcpOnlyEndpoints, endpointProbeCheck. |

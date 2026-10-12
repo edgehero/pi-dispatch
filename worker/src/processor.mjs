@@ -130,6 +130,16 @@ export const TERMINAL_COMMENTS = {
 	"model-not-allowed": "Stopped: the run tried to call an AI model this trigger does not allow, or to change an AI request in a way it does not allow, so the call was not made. Partial work may exist. Not retried.",
 	"cost-cap-unenforceable": "Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 	"model-policy-unenforceable": "Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
+	// The runner's refusals of the job's MCP servers, each before the prompt. Never the server's name, its host or a
+	// variable: the exit line carries the name and the cause in its message, which the worker never parses (it reaches
+	// the worker's log as the container's output). Each says what the operator can check; the issue's author can act on
+	// none of it.
+	"mcp-unavailable": "Stopped: an MCP server this trigger names could not be used (it did not start, failed its handshake or refused the connection, an authentication error among them), so the run ended before the agent started. The operator needs to check that server and the job image. Not retried.",
+	"mcp-config-invalid": "Stopped: the list of MCP servers the worker wrote for this job is not one the job image accepts, so the run ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",
+	"mcp-config-mismatch": "Stopped: the MCP servers the worker wrote for this job are not the ones it named for it, so the run ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",
+	"mcp-secret-missing": "Stopped: a credential an MCP server this trigger names needs was not set inside the job, so the run ended before the agent started. The operator needs to check the secrets this trigger passes. Not retried.",
+	"mcp-command-missing": "Stopped: the job image does not have the program an MCP server this trigger names runs, so the run ended before the agent started. The operator needs to install that server in the job image or the overlay. Not retried.",
+	"mcp-shadowed": "Stopped: another extension in this job registers a tool or command that only the job's MCP servers may, so the run ended before the agent started. The operator needs to remove that extension or this trigger's MCP servers. Not retried.",
 	// Issue #596. Never the size or the project: both are operator configuration, and the reader may be an issue author
 	// who can act on neither. The worker log and the run record carry them.
 	[EXIT_OOM_KILLED]: "Stopped: the job's container ran out of memory and was stopped. Partial work may exist. Not retried, because the same size would stop the same way. The operator can raise this job's memory size.",

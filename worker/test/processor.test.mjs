@@ -4,8 +4,9 @@ import { test } from "node:test";
 import { budgetCapsFor, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { readFileSync, readdirSync } from "node:fs";
 import { InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
-import { buildRecord, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
+import { buildRecord, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { makePrepareWorkspace } from "../src/prepare.mjs";
+import { MCP_REFUSAL_COMMENT } from "../src/mcp-preflight.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // The job-count ledger list the processor takes (issue #499 part B), from a `budgetCapsFor`-shaped object.
@@ -257,6 +258,54 @@ test("every RUNNER_POLICY_REASONS member has its own fixed comment and pages the
 	// The hook set is DERIVED from the same set, so a new member pages without a second edit.
 	const start = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
 	assert.match(start, /const HOOK_POLICY_REASONS = new Set\(\["worker-abort", "runner-policy", EXIT_OOM_KILLED, \.\.\.RUNNER_POLICY_REASONS\]\);/);
+});
+
+// The runner's refusals of a job's MCP servers read as runner-policy until the worker named them, which hid a server
+// that answered 401, or a command the image lacks, behind budget wording in the record, the panel and the comment.
+test("exit 2 with a runner MCP refusal records that reason and comments a fixed sentence naming no server, host or variable", async () => {
+	assert.deepEqual([...MCP_RUNNER_REASONS].sort(), ["mcp-command-missing", "mcp-config-invalid", "mcp-config-mismatch", "mcp-secret-missing", "mcp-shadowed", "mcp-unavailable"]);
+	for (const reason of MCP_RUNNER_REASONS) {
+		assert.ok(RUNNER_POLICY_REASONS.has(reason), `${reason} is a runner reason the worker keeps`);
+		const posted = [];
+		const { deps: d } = deps({
+			runContainer: async () => ({ code: 2, aborted: false, turns: 0, tokens: { total: 0 }, exitReason: reason }),
+			comment: async (_j, t) => posted.push(t),
+		});
+		const r = await runJob(ghJob, d);
+		assert.equal(r.outcome, "policy", "a determinate refusal RETURNS: never retried");
+		assert.equal(r.reason, reason);
+		assert.equal(r.budgetReserved, true, "the container ran, so it pages as runner-policy did");
+		assert.deepEqual(posted, [TERMINAL_COMMENTS[reason]]);
+		assert.match(posted[0], /MCP server/, "the sentence names the cause");
+		// No server name (quoted), no host (a dotted name or a port) and no variable (a capitalised name): the exit
+		// line's message carries those, and the worker never reads it.
+		assert.ok(!/["`]|\w\.\w|:\d|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/.test(posted[0]), posted[0]);
+		const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r, startedAt: null, endedAt: null });
+		assert.equal(record.reason, reason);
+	}
+	// On exit 1 an MCP reason relabels nothing: the exit code alone decides the class, so it is retried.
+	const { deps: d } = deps({ runContainer: async () => ({ code: 1, aborted: false, exitReason: "mcp-unavailable" }) });
+	await assert.rejects(runJob(ghJob, d), InfraRetry);
+});
+
+test("the six MCP sentences are quoted verbatim in REQ-JOB-STATUS-COMMENTS and DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK", () => {
+	for (const file of ["requirements.md", "design.md"]) {
+		const spec = readFileSync(new URL(`../../specs/${file}`, import.meta.url), "utf8");
+		for (const reason of MCP_RUNNER_REASONS) assert.ok(spec.includes(`\`${reason}\` ("${TERMINAL_COMMENTS[reason]}")`), `${file} quotes ${reason}'s sentence as it is`);
+	}
+});
+
+test("the pickup's free mcp-config-invalid posts its own refusal, never the runner's sentence, and reserves nothing", async () => {
+	const posted = [];
+	const { deps: d } = deps({ checkMcp: () => ({ refused: "mcp-config-invalid", name: null, why: "the overlay's mcp.json cannot be read whole" }), comment: async (_j, t) => posted.push(t) });
+	const r = await runJob({ ...ghJob, mcp: ["docs"] }, d);
+	assert.equal(r.reason, "mcp-config-invalid");
+	assert.equal(r.budgetReserved, false, "free, so it pages nobody");
+	assert.equal(posted.length, 1);
+	assert.match(posted[0], /^Refused: /);
+	assert.ok(posted[0].includes(MCP_REFUSAL_COMMENT["mcp-config-invalid"]), posted[0]);
+	assert.match(posted[0], /mcp\.json in the overlay/);
+	assert.notEqual(posted[0], TERMINAL_COMMENTS["mcp-config-invalid"]);
 });
 
 test("the exit-line reason never moves a job between classes: exit 1 with a forged provider-auth-refused is still InfraRetry", async () => {

@@ -363,7 +363,12 @@ export function modelEntryOf(models, provider, modelId) {
 	return { entry, defined, override: override !== null && typeof override === "object" ? override : null };
 }
 
-function matching(baseUrl, endpoints) {
+/**
+ * The declared endpoints a URL dials: those whose host AND port `baseUrlTarget` reads from it. The one match, for a
+ * model's baseUrl here, an MCP server's url at the pickup's egress check (`egressRefusalFor`) and doctor's endpoint
+ * probes alike, so the three cannot disagree on which endpoint a URL is.
+ */
+export function endpointsAt(baseUrl, endpoints) {
 	const target = baseUrlTarget(baseUrl);
 	if (target === null || !Array.isArray(endpoints)) return [];
 	return endpoints.filter((e) => e.host === target.host && e.port === target.port);
@@ -380,7 +385,7 @@ export function endpointsForModel({ models, provider, modelId, endpoints }) {
 	if (entry === null) return [];
 	const model = modelsOf(entry).find((m) => m.id === modelId);
 	const baseUrl = typeof model?.baseUrl === "string" ? model.baseUrl : entry.baseUrl;
-	return matching(baseUrl, endpoints);
+	return endpointsAt(baseUrl, endpoints);
 }
 
 /**
@@ -391,7 +396,7 @@ export function endpointsForModel({ models, provider, modelId, endpoints }) {
 export function endpointsForProvider({ models, provider, endpoints }) {
 	const entry = providerOf(models, provider);
 	if (entry === null) return [];
-	return modelsOf(entry).map((m) => ({ modelId: m.id, endpoints: matching(typeof m.baseUrl === "string" ? m.baseUrl : entry.baseUrl, endpoints) }));
+	return modelsOf(entry).map((m) => ({ modelId: m.id, endpoints: endpointsAt(typeof m.baseUrl === "string" ? m.baseUrl : entry.baseUrl, endpoints) }));
 }
 
 /**

@@ -66,7 +66,7 @@ import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
-import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, RENAMED_PROVIDERS, baseUrlTarget, keylessVerdict, loadModelEndpoints, providerRenameHint, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
+import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, RENAMED_PROVIDERS, baseUrlTarget, endpointsAt, keylessVerdict, loadModelEndpoints, providerRenameHint, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows, parseScopeString } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -6245,6 +6245,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	const { declaredEndpoints = ({ env: e, cwd, platform }) => declaredEndpointsIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform }), hostAddresses = () => lanIPv4Addresses(networkInterfaces()) } = seams;
 	const declared = declaredEndpoints({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform });
 	const endpoints = declared.length > 0 && !(!custom && inFolder && !needs.rulesInclude) ? declared : [];
+	const mcpOnly = endpoints.length > 0 ? mcpOnlyEndpoints({ endpoints, ...overlayEndpointUsers(env, seams) }) : new Map();
 	if (endpoints.length > 0) {
 		const runtime = routeRuntimeFromFacts(seams.readFactsOnce ? await seams.readFactsOnce() : null, seams.platform ?? process.platform);
 		const addresses = hostAddresses();
@@ -6351,7 +6352,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// script. docker's probes keep `runCmdCapture` (its 30 s bound, stderr merged, SIGTERM at the bound) rather than the
 	// bounded step runner, so docker's spawns, and what a probe that never launched leaves for the teardown, are exactly
 	// what they were: pinned in doctor.test.mjs against the output and argv captured before the move.
-	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid, gate, endpoints });
+	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid, gate, endpoints, mcpOnly });
 	// Through a stale proxy the canary reads THAT proxy's policy (exec round 3): a failure is the proxy's to fix, never
 	// this deployment's allowlist, which it may not even mount.
 	checks.push(...(staleRunning ? canary.checks.map((c) => (c.ok ? c : { ...c, fix: `the canary ran through ${proxy}, which is not this deployment's proxy (above), so this says nothing about egress-allowlist.conf: ${replaceFix}, then re-run doctor` })) : canary.checks));
@@ -6445,8 +6446,10 @@ const CANARY_NO_WORKSPACE = "/nonexistent/pi-dispatch-egress-canary-mounts-nothi
  *
  * `endpoints` (issue #503) are the declared model endpoints to prove on the same network after the three
  * (`runEndpointProbes`), `[]` by default, so the conformance script and a deployment with none run exactly the three.
+ * `mcpOnly` maps the ids of those only an overlay MCP server uses (`mcpOnlyEndpoints`), whose `models` probe proves
+ * the route and is not judged as a model server's answer.
  */
-export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, endpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }) }) {
+export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, endpoints = [], mcpOnly = new Map(), size = DEFAULT_JOB_SIZE, hostCpus = null, gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }) }) {
 	const venue = canaryVenueFor(bin);
 	const probe = probeRun ?? ((args) => run(args, { timeoutMs: bin === "podman" ? PODMAN_FIRST_START_TIMEOUT_MS : RUN_TIMEOUTS.cmd }));
 	const checks = [];
@@ -6601,7 +6604,7 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 			if (staleRunner) {
 				checks.push({ ok: false, warn: true, label: `${venue.prefix}Model endpoints: not probed, because the job image has no runner module (above), and their probes take the runner's route`, fix: "use a job image built after issue #427, then re-run doctor" });
 			} else {
-				checks.push(...(await runEndpointProbes({ probe, bin, pid, network: net, proxy, image, user, endpoints, venue, unfinished, size, hostCpus })));
+				checks.push(...(await runEndpointProbes({ probe, bin, pid, network: net, proxy, image, user, endpoints, mcpOnly, venue, unfinished, size, hostCpus })));
 			}
 		}
 	} finally {
@@ -6705,6 +6708,66 @@ function endpointsById(endpoints) {
 	return [...endpoints].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
+/**
+ * The declared endpoints that an overlay MCP server dials (an enabled streamable HTTP server's `url` in `mcp.json`, the
+ * servers doctor's own MCP check and the pickup judge) and no overlay model does (a provider's or a model's `baseUrl` in `models.json`), each matched by `endpointsAt`, as the
+ * pickup's egress check matches an MCP server to an endpoint. docs/egress.md has an operator declare an MCP server off
+ * port 443 there, and such a server does not serve `/v1/models`: it answers 404 or 405, and the `models` probe used to
+ * warn on every run that the port was not the model server's. Its tunnel is still opened and its route proved; only its
+ * answer is not judged as a model server's. An endpoint both use is probed as a model server, since a model needs that.
+ * A models.json that could not be read is not evidence that no model uses an endpoint, so nothing is MCP-only then.
+ * Returns a Map of endpoint id to `{ tls }`, `tls` when a server's url on it is `https:`: the probe's plain request then
+ * meets a TLS server, which closes the socket rather than answer (`endpointProbeCheck`).
+ */
+export function mcpOnlyEndpoints({ endpoints, mcp = null, models = null, modelsUnread = false }) {
+	if (modelsUnread || !Array.isArray(endpoints) || endpoints.length === 0) return new Map();
+	const idsAt = (urls) => new Set(urls.flatMap((url) => endpointsAt(url, endpoints).map((e) => e.id)));
+	const mcpUrls = Object.values(mcp?.servers ?? {})
+		.filter((server) => server.transport === "http" && server.enabled !== false)
+		.map((server) => server.url);
+	const modelUrls = [];
+	const providers = models?.providers;
+	for (const entry of providers !== null && typeof providers === "object" ? Object.values(providers) : []) {
+		if (entry === null || typeof entry !== "object") continue;
+		modelUrls.push(entry.baseUrl);
+		for (const model of Array.isArray(entry.models) ? entry.models : []) modelUrls.push(model?.baseUrl);
+	}
+	const byModels = idsAt(modelUrls);
+	const only = new Map();
+	for (const url of mcpUrls) {
+		for (const { id } of endpointsAt(url, endpoints)) {
+			if (byModels.has(id)) continue;
+			only.set(id, { tls: only.get(id)?.tls === true || new URL(url).protocol === "https:" });
+		}
+	}
+	return only;
+}
+
+/**
+ * The overlay's mcp.json and models.json for `mcpOnlyEndpoints`, through the readers the overlay section uses and its
+ * seams. An mcp.json that cannot be read offers no server here (its own line says why); a models.json that cannot be read
+ * is `modelsUnread`, which keeps every endpoint probed as a model server.
+ */
+function overlayEndpointUsers(env, seams) {
+	const overlay = env.PI_GLOBAL_PI_DIR;
+	if (typeof overlay !== "string" || !isAbsolute(overlay)) return {};
+	const io = { readFileSync: seams.readOverlayFile ?? ((p, enc) => readFileSync(p, enc)), ...(seams.lstatOverlayFile ? { lstatSync: seams.lstatOverlayFile } : {}) };
+	let mcp = null;
+	try {
+		mcp = readOverlayMcp(overlay, io);
+	} catch {
+		// Named by the overlay section's own line.
+	}
+	try {
+		return { mcp, models: readOverlayModels(overlay, io) };
+	} catch {
+		return { mcp, modelsUnread: true };
+	}
+}
+
+/** The `blocked` codes of a socket the far end closed: what an https server does with the probe's plain request. */
+const SOCKET_CLOSED_CODES = Object.freeze(["UND_ERR_SOCKET", "ECONNRESET"]);
+
 /** The exits each probe's script ends a READING with; any other exit is a container that did not run it. */
 const ENDPOINT_PROBE_READ_EXITS = Object.freeze({ models: [0, 3, 6], nextport: [0, 3, 6], plain: [0, 3] });
 
@@ -6717,8 +6780,8 @@ const ENDPOINT_PROBE_READ_EXITS = Object.freeze({ models: [0, 3, 6], nextport: [
  *   - `plain`: a 403 carrying squid's `X-Squid-Error: ERR_ACCESS_DENIED`. A bare 403 may be the server's own answer to a
  *     request the proxy forwarded.
  */
-function endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next }) {
-	const head = `${venue.prefix}Model endpoint ${endpoint.id}`;
+function endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next, mcpOnly = null }) {
+	const head = mcpOnly ? `${venue.prefix}MCP server endpoint ${endpoint.id}` : `${venue.prefix}Model endpoint ${endpoint.id}`;
 	const at = endpointAddress(endpoint.host, endpoint.port);
 	const reading = endpointProbeReading(answer);
 	const tag = { id: endpoint.id, probe: slug, kind: reading?.kind ?? null, status: reading?.status ?? null };
@@ -6733,6 +6796,19 @@ function endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next })
 	}
 	const reload = reloadCommand(bin, proxy);
 	if (slug === "models") {
+		// An endpoint only an overlay MCP server uses: any answer through the tunnel proves the route and the rule, and
+		// what it says to /v1/models is not a model server's answer (`mcpOnlyEndpoints`). Not reaching it still fails below.
+		if (mcpOnly && reading.kind === "reached") {
+			return { ok: true, warn: true, label: `${head}: the route through the proxy works (the tunnel to ${at} opened and the server answered ${reading.status}); no overlay model uses it, so it is not probed as a model server`, endpointProbe: tag };
+		}
+		// An https MCP server meets the probe's plain request as TLS servers do: it closes the socket (measured: undici reads
+		// UND_ERR_SOCKET, "other side closed"; a reset is the same fact). Only a CONNECT the proxy let through reaches the
+		// server to be closed by it, since a refused tunnel reads as `tunnel`, so the route is proved. Not a timeout, and
+		// not a code that says the proxy itself was not reached (ECONNREFUSED to it, a name it could not resolve).
+		if (mcpOnly?.tls && reading.kind === "blocked" && SOCKET_CLOSED_CODES.includes(reading.detail)) {
+			return { ok: true, warn: true, label: `${head}: the route through the proxy works (the tunnel to ${at} opened and the server closed a plain request, as a TLS server does: ${reading.detail}); no overlay model uses it, so it is not probed as a model server`, endpointProbe: tag };
+		}
+		const server = mcpOnly ? "MCP server" : "model server";
 		if (reading.kind === "reached" && reading.status === 200) return { ok: true, warn: true, label: `${head} answers through the proxy (GET http://${at}/v1/models through a CONNECT tunnel: 200)`, endpointProbe: tag };
 		// The SERVER refused the request for want of a key (vLLM --api-key, a gateway in front): the route and the rule are
 		// proved, since only an open tunnel carries the server's own answer. Said apart from a fault, still warn-tier.
@@ -6765,10 +6841,12 @@ function endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next })
 				: reading.kind === "reached"
 					? "check that this port is the model server's and that it serves the OpenAI-compatible API under /v1 (Ollama, llama-server, vLLM and LM Studio do)"
 					: timedOut
-						? "the server is there but stuck or busy (a model still loading, every slot taken): check its own log, then re-run doctor"
+						? mcpOnly
+							? "the server is there but stuck or busy: check its own log, then re-run doctor"
+							: "the server is there but stuck or busy (a model still loading, every slot taken): check its own log, then re-run doctor"
 						: bin === "podman"
-							? `start the model server, bound to this host's LAN address or 0.0.0.0 (never 127.0.0.1 alone), and declare a server on this host as host.containers.internal (docs/egress.md, "Local model servers"). A job meets this as "Connection error"`
-							: `start the model server, and check it listens where the proxy reaches it (docs/egress.md, "Local model servers"; on Docker Engine that is 172.17.0.1 or 0.0.0.0, never 127.0.0.1 alone). A job meets this as "Connection error"`;
+							? `start the ${server}, bound to this host's LAN address or 0.0.0.0 (never 127.0.0.1 alone), and declare a server on this host as host.containers.internal (docs/egress.md, "Local model servers"). A job meets this as "Connection error"`
+							: `start the ${server}, and check it listens where the proxy reaches it (docs/egress.md, "Local model servers"; on Docker Engine that is 172.17.0.1 or 0.0.0.0, never 127.0.0.1 alone). A job meets this as "Connection error"`;
 		return { ok: false, warn: true, label: `${head} does NOT answer: ${why}`, fix, endpointProbe: tag };
 	}
 	const wider = `the proxy's rules are wider than model-endpoints.conf renders: compare the include inside it (\`${bin} exec ${proxy} cat ${ENDPOINTS_INCLUDE_IN_PROXY}\`) with \`pi-dispatch egress render\`'s, check egress-allowlist.conf does not list ${endpoint.host}, then \`${reload}\``;
@@ -6817,7 +6895,7 @@ export function undeclaredPortNear(endpoint, endpoints) {
  * variable as well on docker: the runner's dispatcher sends an `http://` origin to HTTP_PROXY, which docker's canary
  * argv does not otherwise carry (podman's is a job's environment and has it).
  */
-async function runEndpointProbes({ probe, bin, pid, network, proxy, image, user, endpoints, venue, unfinished, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+async function runEndpointProbes({ probe, bin, pid, network, proxy, image, user, endpoints, mcpOnly = new Map(), venue, unfinished, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
 	const checks = [];
 	for (const endpoint of endpointsById(endpoints)) {
 		const next = undeclaredPortNear(endpoint, endpoints);
@@ -6832,7 +6910,7 @@ async function runEndpointProbes({ probe, bin, pid, network, proxy, image, user,
 			const name = egressEndpointProbe(slug, endpoint.id, pid);
 			const answer = await probe(egressCanaryProbeArgs({ bin, slug, name, pid, network, proxy, image, url, user, script, httpProxy: true, size, hostCpus }));
 			if (answer?.code === null && answer.ended !== "error") unfinished.push(name);
-			checks.push(endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next }));
+			checks.push(endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next, mcpOnly: mcpOnly.get(endpoint.id) ?? null }));
 		}
 	}
 	return checks;
@@ -8798,6 +8876,7 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 	// Issue #503: the declared model endpoints `--live` probes on this venue, `[]` for none; and whether the rules the
 	// proxy runs include their file (only the shipped proxy's account copy is read; another proxy must include it).
 	let endpoints = [];
+	let mcpOnly = new Map();
 	let endpointRulesInclude = true;
 	if (armed !== false) {
 		// `.State.Status` (issue #453): only `running` carries traffic; Podman reports paused and between-restarts states
@@ -8864,6 +8943,7 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 		const declaredList = declaredEndpoints({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform });
 		if (declaredList.length > 0 && endpointRulesInclude) {
 			endpoints = declaredList;
+			mcpOnly = mcpOnlyEndpoints({ endpoints, ...overlayEndpointUsers(env, seams) });
 			// The helper as Podman 5 names it in `podman info` (`rootlessNetworkCmd`), else as this account's running rootless
 			// network shows it (`observeRootlessNetns`, the record or the 4.x argv the worker's widening check reads), else
 			// not known, which the route row says as such.
@@ -8887,7 +8967,7 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 		if (keeperNetwork) checks.push(keeperNetwork);
 	}
 
-	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning, keeperBlocked, endpoints } };
+	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning, keeperBlocked, endpoints, mcpOnly } };
 	return { checks, observed, relabel, imagesReadable, imageDigest, forLive };
 }
 
@@ -9412,7 +9492,7 @@ async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, 
 	const endpoints = podman.egress.endpoints ?? [];
 	const more = endpoints.length > 0 ? `; then three per declared model endpoint (${endpointsById(endpoints).map((e) => e.id).join(", ")}), named ${EGRESS_ENDPOINT_PROBE_PREFIX}<probe>-<id>-${pid}, removed the same way` : "";
 	announce(`starting ${probes.slice(0, -1).join(", ")} and ${probes.at(-1)} from ${image} (as the job user ${podman.user}) on the --internal network ${egressCanaryNetwork(pid)}, with ${podman.egress.proxy} attached, to read the egress allowlist back; all three are removed when the canary ends${more}`);
-	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate, endpoints, size, hostCpus: again.info?.hostCpus ?? null });
+	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate, endpoints, mcpOnly: podman.egress.mcpOnly ?? new Map(), size, hostCpus: again.info?.hostCpus ?? null });
 	return { checks: [...checks, ...canary.checks], results: canary.results };
 }
 

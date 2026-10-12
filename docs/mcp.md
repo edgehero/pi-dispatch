@@ -183,6 +183,12 @@ server counts as answered once pi has listed its tools. It ends before its promp
 | `mcp-secret-missing` | 2 | a variable the server references is not set in the job |
 | `mcp-config-mismatch`, `mcp-config-invalid` | 2 | `/job/mcp.json` is not what the worker writes for this job (a hand-run container, or a worker and image at different versions) |
 
+Each reason with code 2 is the run's reason in its record and in the panel, and pages `PI_ON_FAILURE` as any paid
+stop does. The comment on the issue says which rule stopped the job in a fixed sentence that names no server, host or
+variable; the worker's log has the server and the cause, on the job's `exit` line. `mcp-config-invalid` is also the
+pickup's reason for an overlay file it cannot read; that refusal spends nothing (`budgetReserved: false` in the
+record) and pages nobody.
+
 MCP tool results, server instructions and resource text are content the model reads, like an issue's text: treat a
 server as you would any input the job did not write. A stdio server runs code inside the job's container with the
 secrets its entry names.
@@ -264,3 +270,7 @@ like the issue that started the job. Treat it as untrusted input, as you would a
   own machine (`localhost`, `127.0.0.1`). Doctor reads the allowlist as the proxy does, one host per line. It does
   not look names up, so a name that resolves to the proxy's own machine reads as reachable here and is refused by
   the proxy.
+- a server on a host and port declared in `model-endpoints.json` that no overlay model's `baseUrl` uses: doctor proves
+  the route to it through the proxy, as for any declared endpoint, and passes it once anything answers there (an
+  `https://` server closing the plain request included), without asking it to be a model server (`GET /v1/models`
+  answering 200).

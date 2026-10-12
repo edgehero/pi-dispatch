@@ -2672,6 +2672,10 @@ test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and polic
 		assert.equal(refused[0].jobId, `j3-${reason}`);
 	}
 	assert.ok(RUNNER_POLICY_REASONS.has("provider-auth-refused"));
+	// mcp-config-invalid is both the runner's paid refusal and the pickup's free one of an overlay mcp.json it cannot read
+	// whole; only the paid one pages, told apart by budgetReserved as model-not-allowed is.
+	assert.equal((await fired(() => handlers.completed({ id: "j3-mcp-paid" }, { outcome: "policy", reason: "mcp-config-invalid", budgetReserved: true }))).length, 1, "the runner's MCP refusal pages");
+	assert.equal((await fired(() => handlers.completed({ id: "j3-mcp-free" }, { outcome: "policy", reason: "mcp-config-invalid", budgetReserved: false }))).length, 0, "the pickup's free MCP refusal pages nobody");
 	// Issue #596: a job killed for memory is a paid stop only the operator can fix (its memory size), so it pages.
 	assert.equal((await fired(() => handlers.completed({ id: "j3-oom" }, { outcome: "policy", reason: "oom-killed", budgetReserved: true }))).length, 1, "a job killed for memory pages");
 	assert.equal((await fired(() => handlers.completed({ id: "j4" }, { outcome: "completed" }))).length, 0, "a completion pages nobody");

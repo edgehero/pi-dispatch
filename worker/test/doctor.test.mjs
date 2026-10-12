@@ -25,6 +25,8 @@ import { usdFingerprint } from "../src/dollar-fingerprint.mjs";
 import { projectsFingerprint } from "../src/projects.mjs";
 import { appliedSplitChecks, envelopeChecks, fleetEnvelopeChecks, loadEnvelopeAsTheWorker } from "../src/doctor.mjs";
 import { doctorJobSize, fleetSizeChecks, jobSizeChecks } from "../src/doctor.mjs";
+import { mcpOnlyEndpoints } from "../src/doctor.mjs";
+import { egressRefusalFor } from "../src/egress-allowlist.mjs";
 import { envelopeDigest, parseEnvelope } from "../src/envelope.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { quotedShown } from "../src/backend-local.mjs";
@@ -3877,7 +3879,7 @@ const declaredInclude = (endpoints) => renderEndpointsInclude(parseModelEndpoint
 const ENDPOINT_OK = { models: { code: 0, output: "reached 200\n" }, nextport: { code: 3, output: "tunnel 403\n" }, plain: { code: 3, output: "blocked 403 ERR_ACCESS_DENIED 0\n" } };
 const DESKTOP_FACTS = { ServerVersion: "27.4.0", OperatingSystem: "Docker Desktop", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true };
 const ENGINE_2913_FACTS = { ServerVersion: "29.1.3", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true };
-async function doctorEndpoints({ endpoints = [MAC], answers = {}, inside, insideAnswer, hostFile, includeSource, proxy = "pi-dispatch-egress-proxy", facts = DESKTOP_FACTS, rules = INCLUDE_503_RULES, cwd = folder503(rules, { endpoints: endpoints.length > 0 ? endpoints : null }), home = tempDir("pi-home-503-"), calls = [] } = {}) {
+async function doctorEndpoints({ endpoints = [MAC], answers = {}, inside, insideAnswer, hostFile, includeSource, proxy = "pi-dispatch-egress-proxy", facts = DESKTOP_FACTS, rules = INCLUDE_503_RULES, cwd = folder503(rules, { endpoints: endpoints.length > 0 ? endpoints : null }), home = tempDir("pi-home-503-"), calls = [], env = {} } = {}) {
 	writeFileSync(join(cwd, "model-endpoints.conf"), hostFile ?? declaredInclude(endpoints));
 	const probes = Object.fromEntries(endpoints.flatMap((e) => ENDPOINT_PROBE_SLUGS.map((slug) => [`${ENDPOINT_PROBE}${slug}-${e.id}-`, answers[slug] ?? ENDPOINT_OK[slug]])));
 	const plan = {
@@ -3886,7 +3888,7 @@ async function doctorEndpoints({ endpoints = [MAC], answers = {}, inside, inside
 		...egressPlan({ [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd, include: includeSource === undefined ? join(cwd, "model-endpoints.conf") : includeSource }), "gh auth status": { code: 0, output: ghStatusOutput } }),
 		"docker info": { code: 0, output: `${JSON.stringify(facts)}\n` },
 	};
-	const checks = await collectChecks(ghEnv({ PI_EGRESS: "1", ...(proxy === "pi-dispatch-egress-proxy" ? {} : { PI_EGRESS_PROXY: proxy }) }), { ...ghDeps(() => {}, plan, calls, { pid: 7, platform: "darwin", home, hostAddresses: () => undefined }), cwd });
+	const checks = await collectChecks(ghEnv({ PI_EGRESS: "1", ...(proxy === "pi-dispatch-egress-proxy" ? {} : { PI_EGRESS_PROXY: proxy }), ...env }), { ...ghDeps(() => {}, plan, calls, { pid: 7, platform: "darwin", home, hostAddresses: () => undefined }), cwd });
 	let text = "";
 	const failed = render(checks, (s) => (text += s));
 	return { checks, text, failed, calls, cwd };
@@ -3955,6 +3957,95 @@ test("doctor: an endpoint probe fails on a silent server, a rule that is not por
 	assert.equal(plain.label, "Model endpoint mac-ollama admits a plain forward request: GET http://host.docker.internal:11434/v1/models without a tunnel got 200, not the proxy's 403 ERR_ACCESS_DENIED");
 	// A bare 403, with no squid error header, may be the server's own answer to a request the proxy forwarded.
 	assert.match((await line({ plain: { code: 0, output: "reached 403 \n" } }, "plain")).label, /got 403, not the proxy's 403 ERR_ACCESS_DENIED/);
+});
+
+// docs/egress.md has an operator declare a streamable HTTP MCP server off port 443 in model-endpoints.json. Such a server
+// does not serve /v1/models, so the models probe warned on every run that the port was not the model server's.
+test("doctor: an endpoint only an overlay MCP server uses has its route proved, not its /v1/models answer judged", async () => {
+	const overlayWith = ({ mcp, models }) => {
+		const dir = tempDir("pi-doctor-mcp-endpoint-");
+		if (mcp !== undefined) writeFileSync(join(dir, "mcp.json"), JSON.stringify(mcp));
+		if (models !== undefined) writeFileSync(join(dir, "models.json"), typeof models === "string" ? models : JSON.stringify(models));
+		return dir;
+	};
+	const server = (url, extra = {}) => ({ mcpServers: { docs: { url, description: "Search the docs", ...extra } } });
+	const MCP = server("http://host.docker.internal:11434/mcp");
+	const probeLines = async (overlay, models) => {
+		const { checks, calls } = await doctorEndpoints({ answers: { models }, env: { PI_GLOBAL_PI_DIR: overlay } });
+		return { lines: checks.filter((c) => c.endpointProbe), runs: calls.filter((c) => c.args[0] === "run").length };
+	};
+	const only = overlayWith({ mcp: MCP });
+	for (const status of [405, 404, 200, 401]) {
+		const { lines, runs } = await probeLines(only, { code: 0, output: `reached ${status}\n` });
+		const models = lines.find((c) => c.endpointProbe.probe === "models");
+		assert.equal(models.ok, true, models.label);
+		assert.equal(models.warn, true, "warn-tier like every probe line");
+		assert.equal(models.label, `MCP server endpoint mac-ollama: the route through the proxy works (the tunnel to host.docker.internal:11434 opened and the server answered ${status}); no overlay model uses it, so it is not probed as a model server`);
+		// The tunnel and port checks stay: three probes, the port-exact and plain lines as for any endpoint.
+		assert.deepEqual(lines.map((c) => [c.endpointProbe.probe, c.ok]), [["models", true], ["nextport", true], ["plain", true]]);
+		assert.match(lines[1].label, /^MCP server endpoint mac-ollama's rule is port-exact /);
+		assert.equal(runs, 6, "the canary's three and the endpoint's three");
+	}
+	// A route that does not open still fails, and the fix names the server it is.
+	const { lines: down } = await probeLines(only, { code: 3, output: "tunnel 503\n" });
+	assert.equal(down[0].ok, false);
+	assert.equal(down[0].label, "MCP server endpoint mac-ollama does NOT answer: the proxy allowed the tunnel to host.docker.internal:11434 and answered 503, so nothing answered there");
+	assert.match(down[0].fix, /^start the MCP server, /);
+	assert.doesNotMatch((await probeLines(only, { code: 6, output: "blocked TimeoutError\n" })).lines[0].fix, /model/);
+	// An https server on a declared port closes the probe's plain request, as a TLS server does (measured: Node's https
+	// server gives undici UND_ERR_SOCKET). After an open tunnel that proves the route; for an http server it does not.
+	const tls = overlayWith({ mcp: server("https://host.docker.internal:11434/mcp") });
+	for (const code of ["UND_ERR_SOCKET", "ECONNRESET"]) {
+		const { lines } = await probeLines(tls, { code: 6, output: `blocked ${code}\n` });
+		assert.equal(lines[0].ok, true, lines[0].label);
+		assert.equal(lines[0].label, `MCP server endpoint mac-ollama: the route through the proxy works (the tunnel to host.docker.internal:11434 opened and the server closed a plain request, as a TLS server does: ${code}); no overlay model uses it, so it is not probed as a model server`);
+	}
+	for (const [overlay, reading, label] of [
+		[only, "blocked UND_ERR_SOCKET", "an http server that closes the socket did not answer"],
+		[tls, "blocked TimeoutError", "a timeout is not a closed socket"],
+		[tls, "blocked ECONNREFUSED", "the proxy itself was not reached"],
+	]) {
+		const { lines } = await probeLines(overlay, { code: 6, output: `${reading}\n` });
+		assert.equal(lines[0].ok, false, label);
+		assert.match(lines[0].label, /^MCP server endpoint mac-ollama does NOT answer/, label);
+	}
+	for (const answer of [{ code: 3, output: "tunnel 403\n" }, { code: 3, output: "tunnel 503\n" }]) assert.equal((await probeLines(tls, answer)).lines[0].ok, false, answer.output);
+	// An endpoint an overlay model also dials is a model server's, and is judged as one, whatever else uses it.
+	for (const models of [
+		{ providers: { local: { baseUrl: "http://host.docker.internal:11434/v1", api: "openai-completions", apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "m" }] } } },
+		{ providers: { local: { baseUrl: "https://elsewhere.example/v1", api: "openai-completions", apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "m", baseUrl: "http://host.docker.internal:11434/v1" }] } } },
+	]) {
+		const { lines } = await probeLines(overlayWith({ mcp: MCP, models }), { code: 0, output: "reached 405\n" });
+		assert.equal(lines[0].ok, false);
+		assert.match(lines[0].label, /^Model endpoint mac-ollama does NOT answer: the tunnel to host\.docker\.internal:11434 was let through, but GET \/v1\/models answered 405, not 200$/);
+	}
+	// Nothing to tell it apart by: a models.json that cannot be read, an MCP server on another port or turned off, no
+	// overlay at all.
+	for (const overlay of [overlayWith({ mcp: MCP, models: "{ not json" }), overlayWith({ mcp: server("http://host.docker.internal:11435/mcp") }), overlayWith({ mcp: server("http://host.docker.internal:11434/mcp", { enabled: false }) }), overlayWith({})]) {
+		const { lines } = await probeLines(overlay, { code: 0, output: "reached 405\n" });
+		assert.equal(lines[0].ok, false, overlay);
+		assert.match(lines[0].fix, /this port is the model server's/);
+	}
+});
+
+test("mcpOnlyEndpoints matches an MCP url to an endpoint as the pickup's egress check does, and a model's use wins", () => {
+	const endpoints = [{ id: "a", host: "10.0.0.5", port: 8080 }, { id: "b", host: "10.0.0.5", port: 11434 }, { id: "c", host: "gw.lan", port: 443 }];
+	const mcp = (...urls) => ({ servers: Object.fromEntries(urls.map((url, i) => [`s${i}`, { transport: "http", url }])) });
+	const ids = (args) => [...mcpOnlyEndpoints({ endpoints, ...args }).keys()].sort();
+	assert.deepEqual(ids({ mcp: mcp("http://10.0.0.5:8080/mcp", "https://gw.lan/mcp", "https://gw.lan.:443/x") }), ["a", "c"], "the default port and one trailing dot, as baseUrlTarget reads them");
+	for (const url of ["http://10.0.0.5:8080/mcp", "https://gw.lan/mcp"]) {
+		assert.equal(mcpOnlyEndpoints({ endpoints, mcp: mcp(url) }).size === 1, egressRefusalFor(url, { endpoints }) === null, `${url}: the same match the pickup makes`);
+	}
+	// `tls` when any server's url on the endpoint is https.
+	assert.deepEqual(Object.fromEntries(mcpOnlyEndpoints({ endpoints, mcp: mcp("http://10.0.0.5:8080/mcp", "https://10.0.0.5:11434/mcp", "http://10.0.0.5:11434/other") })), { a: { tls: false }, b: { tls: true } });
+	assert.deepEqual(ids({ mcp: mcp("http://10.0.0.5:9999/mcp") }), [], "another port is another endpoint, or none");
+	// Only the servers doctor's own MCP check and the pickup judge: an enabled streamable HTTP server.
+	assert.deepEqual(ids({ mcp: { servers: { s: { transport: "stdio", command: "/opt/x", url: "http://10.0.0.5:8080/mcp" } } } }), [], "a stdio server dials nothing");
+	assert.deepEqual(ids({ mcp: { servers: { s: { transport: "http", url: "http://10.0.0.5:8080/mcp", enabled: false } } } }), [], "a server turned off connects nowhere");
+	const models = { providers: { p: { baseUrl: "http://10.0.0.5:8080/v1", models: [{ id: "m", baseUrl: "https://gw.lan/v1" }] } } };
+	assert.deepEqual(ids({ mcp: mcp("http://10.0.0.5:8080/mcp", "https://gw.lan/mcp"), models }), [], "a provider's and a model's baseUrl both count");
+	assert.deepEqual(ids({ mcp: mcp("http://10.0.0.5:8080/mcp"), modelsUnread: true }), [], "an unread models.json proves nothing");
+	assert.deepEqual(ids({ mcp: null }), []);
 });
 
 test("doctor: the include is compared INSIDE the running proxy, so a stale copy there is ✗ even when this folder's file matches (#503)", async () => {
@@ -4237,6 +4328,35 @@ test("a podman endpoint that does not answer gets the podman venue's advice, not
 	assert.equal(down.label, "podman: Model endpoint hci does NOT answer: the proxy allowed the tunnel to host.containers.internal:11434 and answered 503, so nothing answered there");
 	assert.match(down.fix, /bound to this host's LAN address or 0\.0\.0\.0 \(never 127\.0\.0\.1 alone\), and declare a server on this host as host\.containers\.internal/);
 	assert.doesNotMatch(down.fix, /Docker Engine|172\.17\.0\.1/);
+});
+
+test("podman: an endpoint only an overlay MCP server uses is carried to --live and probed for its route alone", async () => {
+	const HCI = { id: "hci", host: "host.containers.internal", port: 11434, slots: 1 };
+	const rules = (p) => {
+		if (p === `${PODMAN_HOME}/.config/pi-dispatch/egress-proxy.conf`) return INCLUDE_503_RULES;
+		throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+	};
+	const overlay = tempDir("pi-doctor-mcp-podman-");
+	writeFileSync(join(overlay, "mcp.json"), JSON.stringify({ mcpServers: { docs: { url: "http://host.containers.internal:11434/mcp", description: "d" } } }));
+	const facts = {};
+	await collectChecks(podmanEnv({ PI_EGRESS: "1", PI_GLOBAL_PI_DIR: overlay }), {
+		...podmanDeps(() => {}, { "podman exec pi-dispatch-egress-proxy cat": { code: 0, output: declaredInclude([HCI]) }, ...podmanPlan({ proxy: "running", info: PODMAN_INFO({ rootlessNetworkCmd: "pasta" }) }) }, [], { platform: "linux", readProxyConf: rules, declaredEndpoints: () => [HCI], hostAddresses: () => undefined }),
+		cwd: tempDir("pi-doctor-mcp-podman-cwd-"),
+		agentDir: NO_AGENT_DIR,
+		runTimeouts: FAST_TIMEOUTS,
+		facts,
+	});
+	assert.deepEqual(Object.fromEntries(facts.podman.egress.mcpOnly), { hci: { tls: false } }, "the collection decides it, from the overlay the worker reads");
+	const probe = (slug, answer) => ({ [`podman run --name=pi-dispatch-egress-probe-endpoint-${slug}-hci-`]: answer });
+	const canary = { ...probe("models", { code: 0, output: "reached 405\n" }), ...probe("nextport", { code: 3, output: "tunnel 403\n" }), ...probe("plain", { code: 3, output: "blocked 403 ERR_ACCESS_DENIED 0\n" }), [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3 };
+	const env = liveEnv({ PI_EGRESS: "1", PI_BACKENDS: "podman" });
+	const held = await podmanLiveChecks(env, podmanEgressSeams(canary), podmanEgressFacts({ endpoints: [HCI], mcpOnly: facts.podman.egress.mcpOnly }));
+	const models = held.find((c) => c.endpointProbe?.probe === "models");
+	assert.equal(models.ok, true, models.label);
+	assert.equal(models.label, "podman: MCP server endpoint hci: the route through the proxy works (the tunnel to host.containers.internal:11434 opened and the server answered 405); no overlay model uses it, so it is not probed as a model server");
+	// Facts from a collection that predates the field read as none: probed as a model server, as before.
+	const before = await podmanLiveChecks(env, podmanEgressSeams(canary), podmanEgressFacts({ endpoints: [HCI] }));
+	assert.equal(before.find((c) => c.endpointProbe?.probe === "models").ok, false);
 });
 
 test("doctor: the leftover sweep removes a dead run's endpoint probes by their exact shape, and only those (#503)", async () => {
