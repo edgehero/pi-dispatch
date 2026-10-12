@@ -72,6 +72,8 @@ import { loadPauseWindows, parseScopeString } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
+import { mcpServerWhere, readOverlayMcp } from "./mcp-config.mjs";
+import { allowlistEntryFor, egressRefusalFor, parseAllowlist } from "./egress-allowlist.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
@@ -2728,6 +2730,23 @@ export async function collectChecks(shellVars, seams) {
 					},
 				},
 			});
+			// The overlay's MCP servers (REQ-MCP-OPERATOR-SERVERS), through the one parser (mcp-config.mjs).
+			let mcpAllowlist = [];
+			try {
+				mcpAllowlist = parseAllowlist(keylessIo.readFileSync(join(seams.cwd, "egress-allowlist.conf"), "utf8"));
+			} catch {
+				// No allowlist in this folder: every server outside a declared endpoint reads as unreachable, which it is.
+			}
+			checks.push(
+				...overlayMcpChecks({
+					overlay,
+					env,
+					fileExists,
+					read: () => readOverlayMcp(overlay, { readFileSync: seams.readOverlayFile ?? ((p, enc) => readFileSync(p, enc)), ...(seams.lstatOverlayFile ? { lstatSync: seams.lstatOverlayFile } : {}) }),
+					allowlist: mcpAllowlist,
+					endpoints: () => (seams.declaredEndpoints ?? ((a) => declaredEndpointsIn({ ...a, fs: keylessIo })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform, valkeyUrl: env.VALKEY_URL ?? DEFAULT_VALKEY_URL }),
+				}),
+			);
 			const modelsPath = join(overlay, "models.json");
 			// Through the one reader (`readOverlayModels`, PR #520): an exists test answered false for a file under an
 			// unreadable directory, so this line passed in silence on a file nobody had read. Absent is a pass (nothing to
@@ -5899,6 +5918,83 @@ export function forgeUrlEgressChecks(env, forges = []) {
 			warn: true,
 			label: `${key} (${urlShown(env[key])}) is ${why} (issue #508)`,
 			fix: `serve the forge over https:// on port 443 and point ${key} there, or set PI_EGRESS=0 if you accept jobs without the policy (docs/egress.md)`,
+		});
+	}
+	return checks;
+}
+
+/**
+ * The overlay's MCP servers (REQ-MCP-OPERATOR-SERVERS): whether `mcp.json` reads, each server a job may be offered,
+ * each one refused and why, no `mcp-auth.json` beside it, and, with the egress policy on, whether each streamable HTTP
+ * server is one the proxy lets a job reach. A refused server is one no job can use, so each is ✗; an unreachable one
+ * is ⚠, since the policy may be about to change.
+ * `read` throws the reader's errors; `endpoints` is called only when a server needs it.
+ */
+export function overlayMcpChecks({ overlay, env, fileExists, read, allowlist = [], endpoints = () => [] }) {
+	const checks = [];
+	const authPath = join(overlay, "mcp-auth.json");
+	if (fileExists(authPath)) {
+		checks.push({
+			ok: false,
+			label: "Overlay holds mcp-auth.json, pi's MCP sign-ins, which no job may hold",
+			fix: "delete mcp-auth.json from the overlay; a job's MCP server takes its credential as a ${NAME} reference from run.secrets: docs/mcp.md",
+			fixAction: {
+				tier: "prompt",
+				describe: `rm ${authPath}`,
+				run: async ({ rm }) => {
+					rm(authPath);
+					return { ok: true };
+				},
+			},
+		});
+	}
+	let parsed;
+	try {
+		parsed = read();
+	} catch (error) {
+		const why = error?.mcpConfig ? error.message : `cannot be read (${error?.code ?? "unreadable"})`;
+		checks.push({ ok: false, label: `Overlay mcp.json: ${why}`, fix: "re-run `pi-dispatch import-pi`, or fix the file: docs/mcp.md. Until it reads, no job can use an MCP server" });
+		return checks;
+	}
+	if (parsed === null) return checks;
+	const names = Object.keys(parsed.servers);
+	checks.push({ ok: true, label: names.length === 0 ? "Overlay mcp.json offers no MCP server" : `Overlay mcp.json offers ${names.length} MCP server${names.length === 1 ? "" : "s"} to triggers that name them (${names.join(", ")})` });
+	for (const { name, problem } of parsed.refused) {
+		checks.push({ ok: false, label: `Overlay mcp.json: server ${quotedShown(name)} is refused: ${problem}`, fix: "fix the entry and re-run `pi-dispatch import-pi`: docs/mcp.md. Until then no job can use it" });
+	}
+	let armed = false;
+	try {
+		armed = egressArmed(env) === true;
+	} catch {
+		// A malformed PI_EGRESS: the .env check reports it.
+	}
+	let declared = null;
+	for (const name of names) {
+		const server = parsed.servers[name];
+		if (server.packageRunner) {
+			// Every host the runner fetches from, by name, since the proxy matches names: uv and pipx take the index from
+			// pypi.org and the files from files.pythonhosted.org, and yarn's default registry is its own name.
+			const runner = mcpServerWhere(server);
+			const hosts = ["uv", "uvx", "pipx"].includes(runner) ? ["pypi.org", "files.pythonhosted.org"] : runner === "yarn" ? ["registry.yarnpkg.com"] : ["registry.npmjs.org"];
+			const missing = hosts.filter((host) => allowlistEntryFor(allowlist, host) === null);
+			const listed = missing.length === 0;
+			const registry = missing.join(" and ");
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `MCP server ${name} runs ${mcpServerWhere(server)}, which fetches the server from a package registry at the start of every job that uses it`,
+				fix: armed && !listed ? `install the server in the job image instead, or allowlist ${registry} in egress-allowlist.conf: docs/mcp.md` : "install the server in the job image instead, so every job runs the version you chose: docs/mcp.md",
+			});
+		}
+		if (!armed || server.transport !== "http" || server.enabled === false) continue;
+		declared ??= endpoints();
+		const refusal = egressRefusalFor(server.url, { allowlist, endpoints: declared });
+		if (refusal === null) continue;
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `MCP server ${name} (${mcpServerWhere(server)}) is not reachable with the egress policy on: ${refusal}`,
+			fix: "allowlist its host for https on 443, or declare its host and port in model-endpoints.json: docs/egress.md. Until then no job can reach it",
 		});
 	}
 	return checks;

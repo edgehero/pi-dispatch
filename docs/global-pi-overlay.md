@@ -18,7 +18,8 @@ pi-dispatch doctor             # verifies the overlay is credential-free
 
 `import-pi` reads your host agent dir (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) and copies a **curated,
 credential-free** subset into the overlay dir. Re-run it whenever you change your host setup. Flags:
-`--no-extensions` (see below), `--with-packages` / `--no-host-packages` / `--packages-file <path>`
+`--no-extensions` (see below), `--no-mcp` ([MCP servers](mcp.md)),
+`--with-packages` / `--no-host-packages` / `--packages-file <path>`
 (see below), `--from <agentDir>`, `--to <overlayDir>`. An unknown flag is refused rather than ignored,
 because a typo in `--no-host-packages` would otherwise silently widen what runs in every job container.
 `--with-extensions` and `--host-packages` are accepted as documented no-ops
@@ -70,6 +71,7 @@ refines but never removes the one above:
 | `models.json` (definitions; **refused if it embeds a literal key**) | `auth.json` — your credential stays in env/auth.json |
 | `skills/<name>/` | `settings.json`, `sessions/`, `themes/`, `prompts/`, `tools/` (`settings.json` is **read**, to learn what you installed and what you disabled; nothing from it is written) |
 | `APPEND_SYSTEM.md` (global persona) | anything holding a secret |
+| `mcp.json`, rewritten to the MCP servers a job may connect (credentials as `${NAME}` references only); skip with `--no-mcp`. See [mcp.md](mcp.md) | `mcp-auth.json` (pi's MCP sign-ins); a server with a literal credential, OAuth or a key a job cannot use (named with the reason) |
 | `extensions/` — by default; skip with `--no-extensions`, each one printed by name | the admin extension (hard-blocked) |
 | `packages/<dir>/` — only with `--with-packages`: what `pi-packages.json` declares **plus what you installed with `pi install`**, exact-pinned either way, staged from npm on **your host** | any package whose name looks like the dispatch admin (hard-blocked); a package a repo declares (never installed, see [`SECURITY.md`](../SECURITY.md)) |
 
