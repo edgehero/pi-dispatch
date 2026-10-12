@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
-import { authenticExitLines, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, AWAIT_INPUT_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -1419,6 +1419,12 @@ const exitLine = (fields) => `${JSON.stringify({ event: "exit", jobId: "gh-1", .
 
 test("parseExitReason returns a closed-set reason only off a LAST exit line that itself says code 2", () => {
 	assert.equal(parseExitReason(exitLine({ code: 2, reason: "provider-auth-refused", message: "401 x" })), "provider-auth-refused");
+	// Issue #625: the one completed reason the worker acts on, and only on a line that says code 0.
+	assert.equal(parseExitReason(exitLine({ code: 0, reason: "awaiting-input" })), "awaiting-input");
+	assert.equal(parseExitReason(exitLine({ code: 2, reason: "awaiting-input" })), null, "never as a policy label");
+	assert.equal(parseExitReason(exitLine({ code: 1, reason: "awaiting-input" })), null);
+	assert.equal(parseExitReason(exitLine({ code: 0, reason: "stop" })), null, "every other exit-0 reason is still dropped");
+	assert.equal(parseExitReason(exitLine({ code: 0, reason: "tool-terminated" })), null);
 	// Noise after the exit line, and a docker prefix glued onto it, change nothing.
 	assert.equal(parseExitReason(`noise\n${exitLine({ code: 2, reason: "provider-auth-refused" })}trailing docker noise\n`), "provider-auth-refused");
 	assert.equal(parseExitReason(`2026-09-26T00:00:00Z ${exitLine({ code: 2, reason: "provider-auth-refused" })}`), "provider-auth-refused");
@@ -1472,7 +1478,13 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	// The MCP refusals are thrown where the job's servers are read and started, as a tagged configError whose second
 	// argument is the reason, the shape `configError(message, reason)` in outcome.mjs gives the exit line.
 	const mcpSrc = ["../../image/runner/src/mcp.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
+	// The run.awaitInput refusals (issue #625) are thrown the same way, where the env is checked and the session built.
+	const awaitSrc = ["../../image/runner/src/config.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
 	for (const reason of RUNNER_POLICY_REASONS) {
+		if (AWAIT_INPUT_RUNNER_REASONS.includes(reason)) {
+			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(awaitSrc), `image/runner no longer throws a configError tagged "${reason}"`);
+			continue;
+		}
 		if (MCP_RUNNER_REASONS.includes(reason)) {
 			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(mcpSrc), `image/runner no longer throws a configError tagged "${reason}"`);
 			continue;
@@ -1487,6 +1499,10 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	const thrown = new Set([...mcpSrc.matchAll(/configError\(.*, "(mcp-[a-z-]+)"\)/g)].map((m) => m[1]));
 	assert.deepEqual([...thrown].sort(), [...MCP_RUNNER_REASONS].sort());
 	assert.match(mcpSrc, /"mcp-unreachable"/, "the one MCP reason left out is the retried one");
+	const awaitThrown = new Set([...awaitSrc.matchAll(/configError\(.*, "(await-input-[a-z-]+)"\)/g)].map((m) => m[1]));
+	assert.deepEqual([...awaitThrown].sort(), [...AWAIT_INPUT_RUNNER_REASONS].sort());
+	// The one completed reason the worker acts on is the runner's exported literal (issue #625).
+	for (const reason of RUNNER_COMPLETED_REASONS) assert.match(runnerSrc, new RegExp(`export const [A-Z_]+ = "${reason}";`));
 	for (const reason of ["cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]) {
 		assert.ok(RUNNER_POLICY_REASONS.has(reason), `${reason} is a runner reason the worker keeps`);
 	}

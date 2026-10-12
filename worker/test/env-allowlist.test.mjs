@@ -847,6 +847,12 @@ test("PI_EXCLUDE_TOOLS is emitted only when the job carries exclusions, and neve
 	assert.equal(buildContainerEnv({ ...args, excludeTools: ["bash", "edit"] }).PI_EXCLUDE_TOOLS, "bash,edit");
 });
 
+test("PI_AWAIT_INPUT is \"1\" only when the job is armed, and otherwise absent (issue #625)", { skip }, () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	for (const awaitInput of [undefined, false]) assert.equal(buildContainerEnv({ ...args, awaitInput }).PI_AWAIT_INPUT, undefined);
+	assert.equal(buildContainerEnv({ ...args, awaitInput: true }).PI_AWAIT_INPUT, "1");
+});
+
 test("PI_MCP_SERVERS is emitted only when the job names servers, comma-joined, never empty (REQ-MCP-OPERATOR-SERVERS)", { skip }, () => {
 	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
 	for (const mcpServers of [undefined, []]) assert.equal(buildContainerEnv({ ...args, mcpServers }).PI_MCP_SERVERS, undefined);

@@ -162,6 +162,9 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
+		// REQ-AWAIT-INPUT (issue #625): whether the job may end awaiting a person's answer. Present only when armed,
+		// resume's rule, so an unflagged job's data stays byte-identical.
+		...(resolved.awaitInput === true ? { awaitInput: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
 		// reasons filter.mjs states in full: receiver.mjs reads this to decide how many times to enqueue, and an
 		// unflagged job's data must stay byte-identical to today's.
@@ -204,6 +207,7 @@ function routeLabel(subset, triggers, targetType) {
 		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		awaitInput: rule.awaitInput,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(added, rule.predicate) },
 		target: buildTarget(subset, targetType),
@@ -269,6 +273,7 @@ function mrResult(subset, rule, matched) {
 		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		awaitInput: rule.awaitInput,
 		replicas: rule.replicas,
 		matched,
 		target: buildTarget(subset, "pull_request"),
@@ -316,6 +321,7 @@ function routeIssueClose(subset, triggers, authorized) {
 		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		awaitInput: rule.awaitInput,
 		replicas: rule.replicas,
 		// `once: true` rides `matched` ONLY when armed (spreading false is a no-op), so the enqueue path
 		// can see a disarm is owed without re-reading the rule table -- and a plain close rule's matched
@@ -351,6 +357,7 @@ function routeMergeRequestClose(subset, triggers, authorized) {
 		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		awaitInput: rule.awaitInput,
 		replicas: rule.replicas,
 		// No `number` on an MR close's matched record -- parallel to routeMergeRequest's, where the item
 		// number is the target's business; the issue route carries it because the github design does.
@@ -404,6 +411,7 @@ function routeNote(subset, triggers, knownFlows) {
 		waitFor: triggers.comment.waitFor,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
+		awaitInput: triggers.comment.awaitInput,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		target: buildTarget(subset, targetType),

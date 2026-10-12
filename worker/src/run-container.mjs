@@ -148,6 +148,10 @@ export function makeRunContainer({
 			excludeTools: Array.isArray(job.excludeTools) && job.excludeTools.length > 0 ? job.excludeTools : undefined,
 			// REQ-MCP-OPERATOR-SERVERS: the trigger's MCP server names, off `job` like excludeTools.
 			mcpServers: Array.isArray(job.mcp) && job.mcp.length > 0 ? job.mcp : undefined,
+			// Issue #625: whether the runner offers the tool a parked run ends on. Only beside a staged transcript: the
+			// runner refuses the flag without one (await-input-without-session), so a job whose resume degraded to no
+			// mount is not armed into that refusal.
+			awaitInput: job.awaitInput === true && prepared.session ? true : undefined,
 			// Issue #502: the effective allowed-model list, off `job` like excludeTools. index.mjs `effectiveJobOf` folds
 			// the deployment's PI_ALLOWED_MODELS in under the trigger's own, so `job.models` is already the one list.
 			allowedModels: Array.isArray(job.models) && job.models.length > 0 ? job.models : null,

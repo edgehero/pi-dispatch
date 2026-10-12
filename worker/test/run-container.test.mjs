@@ -237,6 +237,20 @@ test("the trigger's excludeTools reach the container env, and an unflagged job e
 	assert.ok(!junk.some((a) => String(a).startsWith("PI_EXCLUDE_TOOLS")));
 });
 
+test("run.awaitInput reaches the container as PI_AWAIT_INPUT=1 only beside a staged transcript (issue #625)", { skip }, async () => {
+	const withSession = async (job, prepared) => {
+		const rec = {};
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, packagePaths: STAGED, spawnFn: fakeSpawn(rec) });
+		await runContainer({ job, prepared, name: "j1", signal: new AbortController().signal });
+		return rec.args;
+	};
+	const session = { key: "k", hostDir: "/host/jobs/j1/session", resume: true, reason: "resumed" };
+	assert.ok((await withSession({ ...JOB, awaitInput: true }, { ...PREPARED, session })).includes("PI_AWAIT_INPUT=1"));
+	// No transcript staged (a fork, or a store that degraded): the runner would refuse the flag, so it is not armed.
+	assert.ok(!(await withSession({ ...JOB, awaitInput: true }, PREPARED)).some((a) => String(a).startsWith("PI_AWAIT_INPUT")));
+	assert.ok(!(await withSession(JOB, { ...PREPARED, session })).some((a) => String(a).startsWith("PI_AWAIT_INPUT")));
+});
+
 test("the trigger's run.mcp reaches the container env as PI_MCP_SERVERS, and a job without it emits none (REQ-MCP-OPERATOR-SERVERS)", { skip }, async () => {
 	assert.ok((await argvFor({ ...JOB, mcp: ["docs", "files"] })).includes("PI_MCP_SERVERS=docs,files"));
 	for (const job of [JOB, { ...JOB, mcp: [] }, { ...JOB, mcp: "docs" }]) {

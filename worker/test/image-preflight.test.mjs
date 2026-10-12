@@ -319,14 +319,14 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
-test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp and forgeMcp, each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
+test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp and awaitInput (#625), each keyed once, each free for a job without its feature", async () => {
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
 	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
 	// A job carrying EVERY gated feature, on an image that declares none: the first row refuses.
-	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"] };
+	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"], awaitInput: true };
 	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("")) });
 	assert.deepEqual(await none(all), { replicaUnsupported: "i", declared: [] });
 	// Declare tokens one at a time: each declaration moves the refusal to the next row, then passes.

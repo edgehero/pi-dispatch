@@ -91,6 +91,15 @@ const CONTEXT_FILE = "context";
  */
 const VENUE_FILE = "venue";
 /**
+ * The run that wrote the transcript beside it ended `awaiting-input` (REQ-AWAIT-INPUT, issue #625): it asked a person
+ * a question and ended so that the next run on this key resumes with the answer. One line, the promotion's
+ * `now()` in milliseconds. Keyed state written where the key already is, like `resume-chain`, so it is not the
+ * index `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` refuses: it answers one question about this key and nothing
+ * looks it up by anything else. Written and REMOVED by promotion alone, under the promotion lock: a parked run
+ * writes it, any other completed run on the key removes it, so it never outlives the transcript it describes.
+ */
+export const PARKED_FILE = "parked";
+/**
  * What the venue stamp reads while a promotion is swapping the transcript under it. It matches no venue:
  * parentheses are outside the charset every backend name is validated against (a test pins every name this
  * build knows to it), so a key left holding this cold-starts on every venue until a promotion completes.
@@ -540,7 +549,7 @@ export function makeSessionStore({
 		return st.isDirectory() ? `${st.dev}:${st.ino}` : null;
 	}
 
-	function promoteSession(session, { piVersion = null, context = null } = {}) {
+	function promoteSession(session, { piVersion = null, context = null, parked = false } = {}) {
 		// The second DI-seam backstop, and unreachable for the same reason as the `!sessionsDir` return
 		// above: sessionKeyFor is total and binary (null, or 32 hex chars), so resolveSession returns null
 		// rather than a keyless session, and processor.mjs only calls this when prepare handed it one. Kept
@@ -711,6 +720,7 @@ export function makeSessionStore({
 				// it is reporting.
 				writeSidecar(dir, RESUME_CHAIN_FILE, session.key, chainValue(session));
 				writeContextSidecar(dir, session, context);
+				writeParkedSidecar(dir, session, parked);
 			} finally {
 				fs.closeSync(fd);
 				try {
@@ -838,6 +848,20 @@ export function makeSessionStore({
 		// 32k window and 2.5% of a 1M one. A reading from another model is not a reading about this one.
 		const stamp = session.modelId ? ` ${session.modelId}` : "";
 		writeSidecar(dir, CONTEXT_FILE, session.key, `${context.tokens} ${context.window}${stamp}`);
+	}
+
+	// Issue #625: `parked` is set by a run that ended awaiting-input, and cleared by every other promotion, so the
+	// marker always describes the transcript beside it. Caught like its siblings: the promotion already happened.
+	function writeParkedSidecar(dir, session, parked) {
+		if (parked === true) {
+			writeSidecar(dir, PARKED_FILE, session.key, String(now()));
+			return;
+		}
+		try {
+			fs.unlinkSync(join(dir, PARKED_FILE));
+		} catch {
+			// Absent is the desired state, so failing to remove what is not there is success.
+		}
 	}
 
 	function keyDir(key) {

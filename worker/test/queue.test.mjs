@@ -936,3 +936,28 @@ test("enqueueTriggerRunReporting passes the schedule's data and options through 
 	assert.equal(again.id, id);
 	assert.deepEqual(again.existing, { queuedAt: 1000, state: "completed" });
 });
+
+test("awaitInput rides forge job data only when armed, and never moves a dedup key (issue #625)", async () => {
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	const base = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-ai", sender: { id: 42 }, matched: { index: 0, type: "label", label: "bug" } },
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+		resume: true,
+	};
+	await enqueueGitHubJob(fakeQueue, { ...base, awaitInput: true });
+	assert.equal(captured.data.awaitInput, true);
+	assert.equal("awaitInput" in captured.data.trigger, false, "an execution knob, never in /job/event.json");
+	const dedup = captured.opts.deduplication.id;
+	for (const awaitInput of [undefined, false]) {
+		await enqueueGitHubJob(fakeQueue, { ...base, awaitInput });
+		assert.equal("awaitInput" in captured.data, false);
+		assert.equal(captured.opts.deduplication.id, dedup);
+	}
+});
