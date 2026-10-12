@@ -11,7 +11,7 @@ import { test } from "node:test";
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
 import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, completionsOwnServer, IMAGE_RESIZE_MAX, piOwnPackageDir, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
 import * as catalogModels from "./helpers/catalog-models.mjs";
-import { classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
+import { captureTerminal, classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
 import { jobSettings } from "../src/config.mjs";
 import { createJobModelRuntime, jobModelRuntimeOptions, loadPiAuthStorage } from "../src/model-runtime.mjs";
 import { attachTokenBudget } from "../src/token-budget.mjs";
@@ -1215,7 +1215,7 @@ const STUB_ANSWERS = (() => {
 	};
 })();
 
-async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSession }) {
+async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSession, probeTerminates = false }) {
 	const requests = [];
 	const server = createServer((req, res) => {
 		req.resume();
@@ -1250,7 +1250,8 @@ async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSessi
 			parameters: { type: "object", properties: {} },
 			async execute(id) {
 				toolRuns.push(id);
-				return { content: [{ type: "text", text: `ran ${id}` }], details: {} };
+				// `probeTerminates` (issue #623): the tool asks pi to end the loop after its round.
+				return { content: [{ type: "text", text: `ran ${id}` }], details: {}, ...(probeTerminates ? { terminate: true } : {}) };
 			},
 		};
 		({ session } = await mod.createAgentSession({
@@ -1266,7 +1267,10 @@ async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSessi
 		const order = [];
 		// run-job.mjs's retry tracking, verbatim in effect: armed by auto_retry_start, cleared by auto_retry_end.
 		let retryInFlight = false;
+		// run-job.mjs's terminal capture, verbatim: the message the runner classifies, not session.messages.
+		let terminal;
 		session.subscribe((event) => {
+			terminal = captureTerminal(terminal, event);
 			order.push(event.type === "agent_end" ? `agent_end:${event.willRetry}` : event.type);
 			if (event.type === "auto_retry_start") retryInFlight = true;
 			if (event.type === "auto_retry_end") retryInFlight = false;
@@ -1293,6 +1297,7 @@ async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSessi
 			last,
 			rejection,
 			followUps: session.getFollowUpMessages().length,
+			terminal,
 			// The exit the runner takes, when the rejection is one it classifies; an unclassified rejection is
 			// run-job's rethrow to classifyThrow, reported here as `rejection` with `exit` null.
 			exit: rejection && !rejected ? null : decideExit({ budgetAborted: budget.state.aborted, budgetTurns: budget.state.turns, tokenAborted: tokenBudget?.state.aborted ?? false, terminal: last, rejected }),
@@ -1302,6 +1307,24 @@ async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSessi
 		server.close();
 	}
 }
+
+test("a tool that returns terminate ends pi's loop after its round, and the runner exits 0 as tool-terminated (loopback, no key)", { skip }, async () => {
+	// Issue #623. pi-agent-core agent-loop.js:167 and :466 at the pin: a batch whose every result carries
+	// `terminate: true` ends the loop without another model request, so the last message the runner captures is
+	// the tool result. The plan's "text" is there to be NOT requested.
+	const { requests, toolRuns, terminal, budget } = await runLoopbackSession({ plan: ["tool", "text"], maxTurns: 5, probeTerminates: true });
+	assert.deepEqual(requests, ["tool"], "pi made another model request after a terminating tool round");
+	assert.equal(toolRuns, 1);
+	assert.equal(terminal?.role, "toolResult", "agent_end's last message is no longer the tool result: re-read captureTerminal and classifyStopReason");
+	assert.deepEqual(
+		decideExit({ budgetAborted: budget.aborted, budgetTurns: budget.turns, tokenAborted: false, terminal }),
+		{ code: 0, reason: "tool-terminated" },
+	);
+	// The control: the same tool WITHOUT terminate goes on to the next request and ends on the assistant's text.
+	const control = await runLoopbackSession({ plan: ["tool", "text"], maxTurns: 5 });
+	assert.deepEqual(control.requests, ["tool", "text"]);
+	assert.equal(control.terminal?.stopReason, "stop");
+});
 
 test("pi emits auto_retry_start before the retry's own agent_start/turn_start, so a recovered 429 is one budget turn (loopback, no key)", { skip }, async () => {
 	const { budget, requests, order, last } = await runLoopbackSession({ plan: ["429", "text"] });
