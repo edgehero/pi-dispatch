@@ -164,8 +164,15 @@ export function parseExitTurns(text) {
  * it could not enforce before a call. The two refusals are live from the first image that knows the variables.
  * `cost-cap` is live from the image that declares `costCap`, whose runner carries the cost guard, and
  * `model-not-allowed` from the image that declares `modelPolicy`, whose runner carries the model guard.
+ *
+ * Then the runner's exit-2 refusals of a job's MCP servers (`MCP_RUNNER_REASONS`), each before the prompt. They read as
+ * `runner-policy` until they were named here, which hid an operator's fix (a server that answers 401, a command the
+ * image lacks) behind budget wording. `mcp-config-invalid` is also the pickup's FREE refusal of an overlay mcp.json it
+ * cannot read whole; that one returns `budgetReserved: false` and pages nobody, as the free `model-not-allowed` does.
+ * Live from the first image that declares `mcp`: an image built before the worker named them prints the same line.
  */
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]);
+export const MCP_RUNNER_REASONS = Object.freeze(["mcp-unavailable", "mcp-config-invalid", "mcp-config-mismatch", "mcp-secret-missing", "mcp-command-missing", "mcp-shadowed"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS]);
 
 /**
  * The reason off the decisive exit line (`decisiveExitLine`), or `null`: a member of `RUNNER_POLICY_REASONS`

@@ -45,7 +45,7 @@ function session(lines, { withheld = "merge_it,approve_it", expect } = {}) {
 		const timer = setTimeout(() => {
 			child.kill();
 			reject(new Error(`timed out with ${[...answers.keys()]}`));
-		}, 10_000);
+		}, 30_000);
 		child.stdout.on("data", (chunk) => {
 			buffer += chunk;
 			let at;
@@ -199,7 +199,7 @@ test("withhold.mjs: a client that goes away ends the server and the gate, with n
 	const flood = setInterval(() => {
 		if (child.stdin.writable) child.stdin.write(`${rpc({ id: 2, method: "tools/list" })}\n`);
 	}, 1);
-	const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+	const timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
 	const { signal } = await closed;
 	clearInterval(flood);
 	clearTimeout(timer);

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
-import { authenticExitLines, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -1430,6 +1430,12 @@ test("parseExitReason returns a closed-set reason only off a LAST exit line that
 	for (const reason of ["turn_budget", "token_budget", "config", "aborted", "runner-policy", "Provider-Auth-Refused", "provider-auth-refused ", "", null, 2, { x: 1 }]) {
 		assert.equal(parseExitReason(exitLine({ code: 2, reason })), null, `reason ${JSON.stringify(reason)}`);
 	}
+	// The runner's MCP refusals are named too, on the same terms.
+	for (const reason of MCP_RUNNER_REASONS) {
+		assert.equal(parseExitReason(exitLine({ code: 2, reason, message: 'MCP server "docs" cannot be used: HTTP 401' })), reason);
+		assert.equal(parseExitReason(exitLine({ code: 1, reason })), null, `${reason} on a line that says 1`);
+	}
+	assert.equal(parseExitReason(exitLine({ code: 2, reason: "mcp-unreachable" })), null, "the retried MCP reason is not one the worker keeps");
 	// Only the LAST exit event counts: an earlier refusal line is not what the runner exited on.
 	assert.equal(parseExitReason(exitLine({ code: 2, reason: "provider-auth-refused" }) + exitLine({ code: 2, reason: "turn_budget" })), null);
 	assert.equal(parseExitReason(exitLine({ code: 2, reason: "turn_budget" }) + exitLine({ code: 2, reason: "provider-auth-refused" })), "provider-auth-refused");
@@ -1463,16 +1469,44 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	// and every refusal would read as runner-policy again with nothing failing. So read the source.
 	const runnerSrc = readFileSync(new URL("../../image/runner/src/outcome.mjs", import.meta.url), "utf8");
 	assert.ok(RUNNER_POLICY_REASONS.size > 0);
+	// The MCP refusals are thrown where the job's servers are read and started, as a tagged configError whose second
+	// argument is the reason, the shape `configError(message, reason)` in outcome.mjs gives the exit line.
+	const mcpSrc = ["../../image/runner/src/mcp.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
 	for (const reason of RUNNER_POLICY_REASONS) {
+		if (MCP_RUNNER_REASONS.includes(reason)) {
+			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(mcpSrc), `image/runner no longer throws a configError tagged "${reason}"`);
+			continue;
+		}
 		// Either written inline, or (issues #501, #502) as an exported literal the runner's meter and policy
 		// check emit through, `export const NAME = "reason";`, which is the one spelling those use.
 		const exported = new RegExp(`export const [A-Z_]+ = "${reason}";`);
 		assert.ok(runnerSrc.includes(`reason: "${reason}"`) || exported.test(runnerSrc), `image/runner/src/outcome.mjs no longer emits reason "${reason}"`);
 	}
+	// And the other way: every exit-2 reason the runner tags an MCP refusal with is one the worker names, so a new one
+	// cannot read as runner-policy again unnoticed. mcp-unreachable is exit 1 (EXIT_INFRA) and retried, never named.
+	const thrown = new Set([...mcpSrc.matchAll(/configError\(.*, "(mcp-[a-z-]+)"\)/g)].map((m) => m[1]));
+	assert.deepEqual([...thrown].sort(), [...MCP_RUNNER_REASONS].sort());
+	assert.match(mcpSrc, /"mcp-unreachable"/, "the one MCP reason left out is the retried one");
 	for (const reason of ["cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]) {
 		assert.ok(RUNNER_POLICY_REASONS.has(reason), `${reason} is a runner reason the worker keeps`);
 	}
 	assert.ok(runnerSrc.includes('reason: "provider-auth-refused"'), "the runner's issue #437 literal moved");
+});
+
+test("docs/mcp.md's and INT-RUNNER-EXIT-CODE-PROTOCOL's exit-2 MCP reasons are MCP_RUNNER_REASONS, no more and no fewer", () => {
+	// Two hand-written tables restate the set, and a reason added on one side only would leave the operator reading
+	// a page that no longer says what the record can name.
+	const doc = readFileSync(new URL("../../docs/mcp.md", import.meta.url), "utf8");
+	const docRows = doc.split("\n").filter((l) => /^\| `mcp-[^|]*\| 2 \|/.test(l));
+	const fromDoc = docRows.flatMap((l) => [...l.split("|")[1].matchAll(/`(mcp-[a-z-]+)`/g)].map((m) => m[1]));
+	assert.deepEqual([...fromDoc].sort(), [...MCP_RUNNER_REASONS].sort());
+	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	// The record contract's reason enum (INT-RUN-HISTORY-FILE-CONTRACT) names every reason the record can carry.
+	const enumLine = spec.split("\n").find((l) => l.includes('"reason":    "<fixed enum:'));
+	const tokens = enumLine.slice(enumLine.indexOf("<fixed enum:") + "<fixed enum:".length, enumLine.indexOf(">")).split("|");
+	for (const reason of RUNNER_POLICY_REASONS) assert.ok(tokens.includes(reason), `${reason} is in the record's reason enum`);
+	const fromSpec = new Set([...spec.matchAll(/\| `2` \/ `(mcp-[a-z-]+)`/g)].map((m) => m[1]));
+	assert.deepEqual([...fromSpec].sort(), [...MCP_RUNNER_REASONS].sort());
 });
 
 // Issue #507: a cost-cap stop said only `cost-cap` with $0, because which rule of the guard refused reached the job log
