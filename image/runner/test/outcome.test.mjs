@@ -118,6 +118,38 @@ test("no abort defers to the stopReason classification", () => {
 	assert.equal(outcome.reason, "stop");
 });
 
+// --- a run a tool ended (issue #623) ---
+
+// pi-agent-core 1.1.0 agent-loop.js:167 and :182/:207: a batch whose every result carries `terminate: true` ends the
+// loop after the tool round, so agent_end's last message is the tool result.
+function toolResult(name = "await_human_input") {
+	return { role: "toolResult", toolCallId: "t1", toolName: name, content: [{ type: "text", text: "ok" }], isError: false };
+}
+
+test("a run a tool ended exits 0 as tool-terminated, not 1 as unknown-stop-reason:undefined", () => {
+	let terminal;
+	const assistant = { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "await_human_input", arguments: {} }], stopReason: "toolUse" };
+	const result = toolResult();
+	for (const event of [
+		{ type: "turn_end", message: assistant, toolResults: [result] },
+		{ type: "agent_end", messages: [assistant, result] },
+	]) terminal = captureTerminal(terminal, event);
+	assert.equal(terminal, result, "agent_end's last message is the tool result");
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal }), { code: EXIT_COMPLETED, reason: "tool-terminated" });
+});
+
+test("a tool-ended run still loses to every budget stop, and keeps its verdict on a command job", () => {
+	const terminal = toolResult();
+	assert.equal(decideExit({ budgetAborted: true, budgetTurns: 3, tokenAborted: false, terminal }).reason, "turn_budget");
+	assert.equal(decideExit({ budgetAborted: false, meterStop: COST_CAP, tokenAborted: false, terminal }).reason, COST_CAP);
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: true, terminal }).reason, TOKEN_BUDGET);
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal, command: { failed: false } }), { code: EXIT_COMPLETED, reason: "tool-terminated" });
+});
+
+test("only the toolResult role is read as tool-terminated: an assistant without a stopReason is still unknown", () => {
+	assert.deepEqual(classifyStopReason({ role: "assistant", content: [] }), { code: EXIT_INFRA, reason: "unknown-stop-reason:undefined" });
+});
+
 // --- decideExit for command jobs (issue #189, run.command) ---
 
 test("a headless command run exits 0 as command-completed -- not retried as no-terminal-message", () => {

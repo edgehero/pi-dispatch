@@ -141,8 +141,11 @@ export function classifyPromptRejection(error, { retryInFlight = false } = {}) {
  *
  * `agent_end` carries `messages: AgentMessage[]` and **no `message` field** (verified against
  * agent-session.d.ts at 0.99.1, which adds `willRetry`); `turn_end` carries `message`. Take whichever is present.
- * The runner asserts the result is an assistant message before classifying -- see REQ tests --
- * because a future pi that ended a turn on a ToolResultMessage would give it no stopReason.
+ *
+ * The last message is NOT always an assistant message (issue #623). pi 1.1.0 lets a tool end the loop: a batch
+ * whose every result carries `terminate: true` (pi-agent-core agent-loop.js:167, :466) breaks out after the tool
+ * round, so agent_end's last message is the ToolResultMessage, which has no stopReason. Nothing is filtered here:
+ * classifyStopReason reads the role, because "the run ended on a tool result" is itself the verdict.
  */
 export function captureTerminal(previous, event) {
 	if (event.type === "turn_end") return event.message ?? previous;
@@ -420,6 +423,15 @@ export function capExitMessage(outcome) {
 export function classifyStopReason(terminal, isRetryable = null) {
 	if (!terminal) {
 		return { code: EXIT_INFRA, reason: "no-terminal-message" };
+	}
+
+	// A run that ended on a tool result was ended ON PURPOSE by a tool (issue #623): pi's loop stops after a tool
+	// round only when every result in the batch asked it to (`terminate`) or a finishTurn hook said "end", and pi's
+	// own tools do neither, so it is an extension's decision. The agent ran, so this is a completed run with a
+	// name of its own. Before this branch the message's absent stopReason fell to the default below and the job
+	// was retried, and billed again, as `unknown-stop-reason:undefined` (CONST-RETRY-INFRA-ONLY).
+	if (terminal.role === "toolResult") {
+		return { code: EXIT_COMPLETED, reason: "tool-terminated" };
 	}
 
 	switch (terminal.stopReason) {
