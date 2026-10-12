@@ -24,7 +24,7 @@ import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensur
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
-import { mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
+import { FORGE_MCP_SERVER_NAME, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
@@ -2680,6 +2680,12 @@ export function readStagedPackages({ globalPiDir, fs = nodeFs, readManifest = re
     packages: entries.filter((p) => p && typeof p.name === "string").map(nameAtVersion),
   };
 }
+
+/**
+ * The `run.mcp` name that is not the overlay's: the job's own forge server (DES-FORGE-MCP), whose entry the worker
+ * writes. Re-exported from the worker's module so the panel names it by the same constant the pickup checks.
+ */
+export { FORGE_MCP_SERVER_NAME };
 
 /**
  * The overlay's MCP servers for display (REQ-MCP-OPERATOR-SERVERS): what a trigger's `run.mcp` names resolve to. Read

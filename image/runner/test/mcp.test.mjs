@@ -640,3 +640,45 @@ test("a real session: an excluded tool stays excluded inside codemode, and an ex
 		session.dispose();
 	}
 });
+
+test("the forge's own server (DES-FORGE-MCP) is an ordinary stdio server here: read with its token set, refused without, started with GITHUB_PERSONAL_ACCESS_TOKEN and no other credential", { skip }, async () => {
+	const { forgeMcpServer, jobMcpDocument } = await import("../../../worker/src/mcp-config.mjs");
+	const parsed = { autoEnableCodemode: true, codemodeModels: true, servers: { forge: forgeMcpServer("github") }, refused: [] };
+	const document = jobMcpDocument(parsed, ["forge"]);
+	// The image carries the command; here any executable path stands in for it, so the read is about the document.
+	const access = () => {};
+	const env = { PI_MCP_SERVERS: "forge", GH_TOKEN: "ghs_job", GITHUB_TOKEN: "ghs_job", ANTHROPIC_API_KEY: "sk-ant-x", PATH: "/usr/bin", HOME: "/home/pi" };
+	const readWith = (over) => mcp.readJobMcp({ env: { ...env, ...over }, read: () => JSON.stringify(document), access });
+	assert.deepEqual(readWith({}).servers.forge.env, { GITHUB_PERSONAL_ACCESS_TOKEN: "${GH_TOKEN}", GITHUB_LOCKDOWN_MODE: "1", GITHUB_TOOLSETS: "default" });
+	for (const missing of [{ GH_TOKEN: "" }, { GH_TOKEN: undefined }]) {
+		assert.throws(() => readWith(missing), (error) => error.piDispatchReason === "mcp-secret-missing" && !error.message.includes("ghs_job"), JSON.stringify(missing));
+	}
+	// The env the server is started with, through createJobMcp's own transport builder.
+	let options;
+	const built = [];
+	class StdioTransport {
+		constructor(opts) {
+			built.push(opts);
+		}
+		onMessage() {}
+		onClose() {}
+	}
+	const fakePi = {
+		createMcpExtension: (opts) => {
+			options = opts;
+			return () => {};
+		},
+		createCodemodeExtension: () => () => {},
+		createToolSearchExtension: () => () => {},
+	};
+	mcp.createJobMcp(readWith({}), { pi: fakePi, env, cwd: "/workspace", transports: { StdioTransport, StreamableHttpTransport: StdioTransport } });
+	options.createTransport({ name: "forge" });
+	const [started] = built;
+	assert.equal(started.command, "/usr/local/bin/forge-mcp-github", "the image's withholding wrapper, never the server itself");
+	assert.deepEqual(started.args, []);
+	assert.equal(started.inheritEnv, false);
+	assert.equal(started.env.GITHUB_PERSONAL_ACCESS_TOKEN, "ghs_job");
+	assert.equal(started.env.GITHUB_LOCKDOWN_MODE, "1");
+	assert.equal(started.env.GITHUB_TOOLSETS, "default");
+	for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "PI_MCP_SERVERS"]) assert.equal(name in started.env, false, `${name} never reaches the server`);
+});

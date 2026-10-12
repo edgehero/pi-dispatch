@@ -167,7 +167,10 @@ changes what code runs or what it costs.
   must declare the `mcp` capability. A chained child does not inherit `run.mcp`, and the admin's tools cannot set it.
   Like `models`, adding `run.mcp` to a trigger refuses its jobs that were already queued (`trigger-skew`): re-run
   them. A key under `run` or `on` that is not plain ASCII and holds no plain letter outside `mcpservers` is refused,
-  since one in another script can be drawn exactly like `mcp`.
+  since one in another script can be drawn exactly like `mcp`. On a github or gitlab trigger the list may also name
+  `forge`: the job's own GitHub or GitLab through that forge's MCP server, as the token the job already holds, with
+  no overlay entry ([`docs/mcp.md`](mcp.md#the-forges-own-server)). A cron, forgejo or azure trigger naming `forge`
+  is refused at load, and an image without the `forgeMcp` capability refuses its jobs before they cost anything.
 
 - `"skillsDir"` points at a directory of skills on the worker host. The layout is the same as your own
   `~/.pi/agent/skills`, which uses `<name>/SKILL.md`. They are copied into that trigger's jobs. They are

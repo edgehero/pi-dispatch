@@ -43,7 +43,7 @@ overlay's file either way.
 ### What a server may say
 
 - **A name** of lowercase letters and digits, words joined by a single `-`, up to 32 characters. A name holding
-  `dispatch` is reserved.
+  `dispatch` is reserved, and so is `forge`, the worker's own [forge server](#the-forges-own-server).
 - **`description`**, required: one line of at most 300 characters, with no control or invisible formatting
   character. pi puts it in the job's prompt, so you write the words the agent reads about the server, not the server.
 - **A streamable HTTP server** has `url` and optionally `headers`. **A stdio server** has `command`, and optionally
@@ -112,20 +112,22 @@ A trigger opts in by name, with `run.mcp` in `triggers.json`:
 }
 ```
 
-A trigger without `run.mcp` connects no MCP server. Up to 8 names, each from the overlay's file. Before anything is
-spent, the worker checks each one and refuses the job when:
+A trigger without `run.mcp` connects no MCP server. Up to 8 names, each from the overlay's file, or `forge` for the
+[forge's own server](#the-forges-own-server). Before anything is spent, the worker checks each one and refuses the
+job when:
 
 | Reason | Why |
 |---|---|
 | `mcp-list-invalid` | the list the job carries is not one the loader writes (a service at another version, or a hand-added job) |
-| `mcp-config-invalid` | the overlay's `mcp.json` is missing or cannot be read whole |
-| `mcp-server-unknown` | the file does not offer that name, turns it off, or refuses it (`doctor` says why) |
+| `mcp-config-invalid` | the overlay's `mcp.json` is missing or cannot be read whole (missing is fine when the only name is `forge`) |
+| `mcp-server-unknown` | the file does not offer that name, turns it off, or refuses it (`doctor` says why); or `forge` on a job that is not a github or gitlab one |
 | `mcp-secret-reserved` | the server references a credential the job is set up to spend with (the key variables of its own provider and of each provider on its model list, or of every provider when it has no list, and every variable the overlay `models.json` references), the forge token, or the egress or runner variables. To hand a server a provider's variable on purpose (`HF_TOKEN` for a Hugging Face server), give the trigger a model list without that provider |
 | `mcp-secret-unmapped` | the server references a variable the job will not have: not in `run.secrets`, and not a `PI_FORWARD_ENV` name the worker holds a value for |
-| `mcp-egress-unreachable` | with the egress policy on, the proxy would not let the job reach the server (an `http://` url on port 443 included), or `egress-allowlist.conf` cannot be read |
+| `mcp-egress-unreachable` | with the egress policy on, the proxy would not let the job reach the server (an `http://` url on port 443 included), or `egress-allowlist.conf` cannot be read; for `forge`, its API host is not allowlisted |
 | `mcp-package-runner` | with the egress policy on, the registry a package runner fetches from is not allowlisted |
 | `mcp-excluded` | the trigger's `run.excludeTools` leaves the server no way in ([exclude-tools.md](exclude-tools.md)) |
 | `job-image-mcp-unsupported` | the job image does not declare the `mcp` capability |
+| `job-image-forge-mcp-unsupported` | the trigger names `forge` and the job image does not declare the `forgeMcp` capability |
 | `trigger-skew` | the trigger names servers but the job arrived without them: the trigger changed after the job was queued, or the receiver is older than the worker |
 
 The comment on the issue names the server and the rule, never a host or a variable; the worker's log has the
@@ -160,7 +162,8 @@ The job loads pi's MCP, codemode and tool_search, as the pi CLI does, and connec
 - **stdio servers.** The server starts in `/workspace` with its own `env` over `PATH`, `HOME`, the locale, the time
   zone, the temp folder, the proxy variables and the job's usage meter (`NODE_OPTIONS`, `PI_DISPATCH_CHILD_LEDGER` and
   `PI_DISPATCH_RUNNER_PID`, so a pi it starts is metered; its `env` may not replace them). It never sees the
-  provider's key or the forge token: the pickup refuses an entry that names one. It is stopped when the job ends.
+  provider's key, and never the forge token unless it is the forge's own server: the pickup refuses an overlay entry
+  that names one. It is stopped when the job ends.
 - **Nothing else connects.** Not a repository's `.pi/mcp.json`, not a server an extension registers, and not a pi the
   job starts (it gets `--no-mcp`; `pi mcp`, the subcommand, is the one residual, open-questions OQ-011). There is no
   `/mcp` command. An extension that registers `codemode`, `tool_search`, a resource tool, an `mcp__` tool or `/mcp`
@@ -184,10 +187,75 @@ MCP tool results, server instructions and resource text are content the model re
 server as you would any input the job did not write. A stdio server runs code inside the job's container with the
 secrets its entry names.
 
+## The forge's own server
+
+A github or gitlab trigger can give its job the forge's own MCP server, with the token the job already holds for
+`gh` or `glab`. Name `forge` in `run.mcp`, alone or beside overlay servers:
+
+```json
+{
+  "on": { "type": "label", "any": ["pi"] },
+  "run": { "kind": "github", "flow": "fix", "mcp": ["forge", "docs"] }
+}
+```
+
+`forge` needs no entry in the overlay, and no overlay at all when it is the only name. The worker writes its entry
+itself (`forgeMcpServer` in `worker/src/mcp-config.mjs`), so neither a trigger nor the overlay can point it anywhere
+else, and an overlay server named `forge` is refused.
+
+| Job | Server | Started as | Token |
+|---|---|---|---|
+| github | [github-mcp-server](https://github.com/github/github-mcp-server) 2.0.2, GitHub's own | `/usr/local/bin/forge-mcp-github`, which runs `github-mcp-server stdio` with `GITHUB_TOOLSETS=default` and `GITHUB_LOCKDOWN_MODE=1` | `GITHUB_PERSONAL_ACCESS_TOKEN` from the job's `GH_TOKEN` |
+| gitlab | [@zereight/mcp-gitlab](https://www.npmjs.com/package/@zereight/mcp-gitlab) 2.1.67 | `/usr/local/bin/forge-mcp-gitlab`, which runs it with `GITLAB_API_URL` set to your `GITLAB_URL` plus `/api/v4` and `GITLAB_DISABLE_VERSION_CHECK=true` | `GITLAB_PERSONAL_ACCESS_TOKEN` from the job's `GITLAB_TOKEN` |
+
+- **Withheld tools.** The image's wrapper withholds each server's dedicated merge and approval tools, so the
+  harness does not hand the agent a ready made one (`CONST-MERGE-NEVER-AUTOMATIC`):
+  - github: `merge_pull_request`, and `pull_request_review_write`, which can submit an approving review; also
+    `assign_copilot_to_issue` and `request_copilot_review`, which start Copilot's own agent or review and would spend
+    outside the job's meter;
+  - gitlab: `merge_merge_request`, `approve_merge_request`, `unapprove_merge_request` and `approve_deployment`; also
+    `discover_tools`, which would turn on toolsets beyond the default ones, and `execute_graphql`, which no
+    toolset lists but whose mutations can merge.
+
+  They are left out of every tool list, and a call to one, or to any tool the server did not list, is refused before
+  it reaches the server. **This is not a boundary.** GitLab runs quick actions (`/merge`, `/approve`) written in a
+  note or a description, and the listed tools post notes and descriptions; the job's `gh` or `glab`, or the server
+  started from the job's shell, act with the token's full role. What bounds a merge is the token's role and the
+  branch's protection: on GitHub, branch protection ([SECURITY.md](../SECURITY.md)); on GitLab, a token with the
+  Developer role (not Maintainer) on a protected branch that only Maintainers may merge, and approval rules the bot
+  does not count toward ([gitlab.md](gitlab.md)).
+- **No new credential.** The server gets the token the worker minted for this job, and nothing else of the job's:
+  not the provider's key, and not the token under its CLI names. It can do no more than the job's `gh` or `glab` can
+  do with that token. A GitHub installation token lives one hour, and the server stops with the job anyway.
+- **GitHub's toolsets.** `default` is context, repos, issues, pull requests and users. `actions` (workflow runs and
+  their triggers) stays off.
+- **Lockdown** (GitHub). On a public repository, the server withholds issue, pull request and comment content written
+  by someone without push access. It is a filter that lowers the chance of a planted instruction reaching the model,
+  not an authorization boundary: the token reads the same things through `gh`, and so can the job.
+- **Pinned in the image.** Both servers are baked into the job image at exact versions: github-mcp-server from its
+  release tarball checked against a sha256 per architecture, mcp-gitlab with `npm ci` from a lockfile committed in
+  `image/forge-mcp/gitlab`, each behind its wrapper in `image/forge-mcp`. The image declares this with the
+  `forgeMcp` capability; on an image without it the job is refused before it costs anything
+  (`job-image-forge-mcp-unsupported`).
+- **Egress.** With the egress policy on, a github job's server needs `api.github.com` in `egress-allowlist.conf`, and
+  a gitlab job's needs the host of your `GITLAB_URL` (on port 443, or declared in `model-endpoints.json`). The pickup
+  refuses the job (`mcp-egress-unreachable`) otherwise. `GITLAB_URL` must be a plain `http` or `https` URL with no
+  user name, password, query, fragment or comma (a trailing `/api/v4` is fine); the pickup refuses `forge` on a gitlab
+  job otherwise (`mcp-server-unknown`, the reason in the worker's log). github-mcp-server reads a file's contents from
+  `raw.githubusercontent.com`; allowlist it too if the job reads files through the server rather than from its
+  checkout.
+- **Not on every kind.** A cron trigger is refused at load: a cron job holds no forge token of its own. Forgejo and
+  Azure DevOps triggers are refused too, until a forge MCP server for them has been checked the way these two were.
+- **Why not GitLab's own endpoint.** GitLab serves MCP itself at `/api/v4/mcp`, but it takes an OAuth token with the
+  `mcp` scope, and a project, group or personal access token cannot carry that scope.
+
+What the server's tools return (issue and pull request text, comments, file contents) is content the model reads,
+like the issue that started the job. Treat it as untrusted input, as you would any text a stranger can write.
+
 ## What doctor checks
 
 - that `mcp.json` reads, and which servers it offers;
-- each server it refuses, and why (a job that names it is refused);
+- each server it refuses, and why (a job that names it is refused), an overlay server named `forge` among them;
 - no `mcp-auth.json` in the overlay (it offers to delete one);
 - a server that uses a package runner;
 - with the egress policy on, each streamable HTTP server the proxy would not let a job reach. A job reaches a host in

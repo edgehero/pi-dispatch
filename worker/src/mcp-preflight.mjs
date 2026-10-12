@@ -12,8 +12,10 @@
  * The refusals, in the order they are asked:
  *   mcp-list-invalid         the job's own list is not one the loader writes (queue data from another version, or a
  *                            hand-added job);
- *   mcp-config-invalid       the overlay's mcp.json cannot be read whole (or there is no overlay, or no file);
- *   mcp-server-unknown       a name the file does not offer, offers disabled, or refuses (doctor names why);
+ *   mcp-config-invalid       the overlay's mcp.json cannot be read whole (or there is no overlay, or no file, when the
+ *                            job names a server other than `forge`);
+ *   mcp-server-unknown       a name the file does not offer, offers disabled, or refuses (doctor names why); or
+ *                            `forge` on a job that is not a github or gitlab one;
  *   mcp-secret-reserved      a reference to a variable this deployment writes or pi reads for the job itself (a
  *                            credential the job spends with, `providerKeyNames`; a minted forge token; the egress or
  *                            runner variables): a server must never be handed the job's own credentials. Asked of
@@ -22,11 +24,17 @@
  *                            name the worker's environment holds a value for;
  *   mcp-excluded             the trigger's own run.excludeTools leaves a server no way in that it had: its tools and
  *                            its resources reachable only through tools it removed (`mcpRouteProblem`);
- *   mcp-egress-unreachable   with the egress policy on, a streamable HTTP server the proxy would not let the job reach;
+ *   mcp-egress-unreachable   with the egress policy on, a streamable HTTP server the proxy would not let the job reach,
+ *                            or the forge server's API host (api.github.com, or the configured GitLab's) unlisted;
  *   mcp-package-runner       with the egress policy on, a package runner whose registry the allowlist does not hold.
+ *
+ * `forge` (DES-FORGE-MCP) is not read from the overlay: its entry is the worker's (`forgeMcpServer`), so a job naming
+ * only it needs no mcp.json at all, and it is exempt from the two secret rules, its one reference being the forge token
+ * the worker itself writes into the container for this job. The overlay's top-level switches still govern it when the
+ * file is there, so a file that is there and cannot be read refuses it like any other server.
  */
 import { allowlistEntryFor, egressRefusalFor, packageRunnerHosts } from "./egress-allowlist.mjs";
-import { jobMcpDocument, MCP_SERVER_NAME_RE, readOverlayMcp } from "./mcp-config.mjs";
+import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, forgeMcpEgressUrl, forgeMcpServer, gitlabUrlProblem, jobMcpDocument, MCP_SERVER_NAME_RE, readOverlayMcp } from "./mcp-config.mjs";
 import { MCP_SERVERS_MAX, mcpServerToolPattern } from "./triggers.mjs";
 
 /**
@@ -74,8 +82,10 @@ export function jobProviders(job, { defaultProvider = null, allowedModels = null
  * The check, bound to this deployment. `reserved(job)` is the set of variable names the job's own container holds for
  * itself; `hostEnv` is the worker's environment, which decides whether a PI_FORWARD_ENV name reaches the job at all;
  * `allowlist()` and `endpoints()` are read only when a server needs them, and `allowlist()` throws what its read threw.
+ * `gitlabUrl` is the worker's configured GitLab URL (null when it serves no GitLab), which a gitlab job's forge server
+ * calls.
  */
-export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egress = false, reserved = () => new Set(), allowlist = () => [], endpoints = () => [], read = readOverlayMcp }) {
+export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egress = false, reserved = () => new Set(), allowlist = () => [], endpoints = () => [], read = readOverlayMcp, gitlabUrl = null }) {
 	return (job) => {
 		const listed = job?.mcp;
 		if (listed === undefined) return { ok: true, document: null };
@@ -86,6 +96,7 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 			return { refused: "mcp-list-invalid", name: null, why: "the job's run.mcp is not a list of server names the loader accepts" };
 		}
 		const names = listed;
+		const overlayNames = names.filter((name) => name !== FORGE_MCP_SERVER_NAME);
 		let parsed;
 		try {
 			parsed = read(globalPiDir || "");
@@ -93,10 +104,24 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 			if (!error?.mcpConfig && MCP_TRANSIENT_READ_CODES.has(error?.code)) return { unavailable: error.code };
 			return { refused: "mcp-config-invalid", name: null, why: error?.mcpConfig ? "the overlay's mcp.json cannot be read whole" : `the overlay's mcp.json cannot be read (${error?.code ?? "unreadable"})` };
 		}
-		if (parsed === null) return { refused: "mcp-config-invalid", name: null, why: globalPiDir ? "the overlay holds no mcp.json" : "this deployment has no overlay (PI_GLOBAL_PI_DIR)" };
+		if (parsed === null) {
+			if (overlayNames.length > 0) return { refused: "mcp-config-invalid", name: null, why: globalPiDir ? "the overlay holds no mcp.json" : "this deployment has no overlay (PI_GLOBAL_PI_DIR)" };
+			// Only `forge`: the overlay's defaults, as an empty file reads.
+			parsed = { autoEnableCodemode: true, codemodeModels: true, servers: {}, refused: [] };
+		}
 		const refusedHere = new Map(parsed.refused.map((r) => [r.name, r.problem]));
-		for (const name of names) {
-			const server = Object.hasOwn(parsed.servers, name) ? parsed.servers[name] : undefined;
+		let servers = parsed.servers;
+		if (overlayNames.length !== names.length) {
+			// The kind is queue data like the list: a job from elsewhere naming `forge` on a kind with no forge server (or
+			// no forge token) is refused here, never handed another forge's entry.
+			if (!FORGE_MCP_KINDS.includes(job.kind)) return { refused: "mcp-server-unknown", name: FORGE_MCP_SERVER_NAME, why: "the forge's own server is offered to a github or gitlab job only" };
+			if (job.kind === "gitlab" && (typeof gitlabUrl !== "string" || gitlabUrl === "")) return { refused: "mcp-server-unknown", name: FORGE_MCP_SERVER_NAME, why: "this worker has no GitLab URL configured" };
+			const urlProblem = job.kind === "gitlab" ? gitlabUrlProblem(gitlabUrl) : null;
+			if (urlProblem !== null) return { refused: "mcp-server-unknown", name: FORGE_MCP_SERVER_NAME, why: `GITLAB_URL cannot be handed to the forge server: ${urlProblem}` };
+			servers = { ...parsed.servers, [FORGE_MCP_SERVER_NAME]: forgeMcpServer(job.kind, { gitlabUrl }) };
+		}
+		for (const name of overlayNames) {
+			const server = Object.hasOwn(servers, name) ? servers[name] : undefined;
 			if (!server) return { refused: "mcp-server-unknown", name, why: refusedHere.has(name) ? "the overlay's mcp.json refuses it" : "the overlay's mcp.json does not offer it" };
 			if (server.enabled === false) return { refused: "mcp-server-unknown", name, why: "the overlay's mcp.json turns it off" };
 		}
@@ -112,17 +137,19 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 			if (MCP_TRANSIENT_READ_CODES.has(error?.code)) return { unavailable: error.code };
 			throw error;
 		}
-		for (const name of names) {
-			for (const ref of parsed.servers[name].refs) {
+		// The forge server is exempt from both rules: its one reference is the token the worker mints for this job and
+		// writes under exactly that name, which is the reason every other server is refused it.
+		for (const name of overlayNames) {
+			for (const ref of servers[name].refs) {
 				if (own.has(ref)) return { refused: "mcp-secret-reserved", name, why: `it references ${ref}, which this deployment uses for the job's own credentials` };
 			}
 		}
-		for (const name of names) {
-			for (const ref of parsed.servers[name].refs) {
+		for (const name of overlayNames) {
+			for (const ref of servers[name].refs) {
 				if (!mapped.has(ref)) return { refused: "mcp-secret-unmapped", name, why: `it references ${ref}, which the trigger does not pass (run.secrets, or a PI_FORWARD_ENV name the worker holds a value for)` };
 			}
 		}
-		const cut = mcpRouteProblem(parsed.servers, names, new Set(Array.isArray(job.excludeTools) ? job.excludeTools : []), { autoEnableCodemode: parsed.autoEnableCodemode });
+		const cut = mcpRouteProblem(servers, names, new Set(Array.isArray(job.excludeTools) ? job.excludeTools : []), { autoEnableCodemode: parsed.autoEnableCodemode });
 		if (cut !== null) return { refused: "mcp-excluded", name: cut.name, why: cut.why };
 		if (egress) {
 			let list = null;
@@ -139,8 +166,14 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 			};
 			try {
 				for (const name of names) {
-					const server = parsed.servers[name];
-					if (server.transport === "http") {
+					const server = servers[name];
+					if (name === FORGE_MCP_SERVER_NAME) {
+						// Its API host, judged as a streamable HTTP server's url is: the proxy sees the same CONNECT either way.
+						list ??= readList();
+						declared ??= endpoints();
+						const refusal = egressRefusalFor(forgeMcpEgressUrl(job.kind, { gitlabUrl }), { allowlist: list, endpoints: declared });
+						if (refusal !== null) return { refused: "mcp-egress-unreachable", name, why: refusal };
+					} else if (server.transport === "http") {
 						list ??= readList();
 						declared ??= endpoints();
 						const refusal = egressRefusalFor(server.url, { allowlist: list, endpoints: declared });
@@ -157,7 +190,7 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 				throw error;
 			}
 		}
-		return { ok: true, document: jobMcpDocument(parsed, names) };
+		return { ok: true, document: jobMcpDocument({ ...parsed, servers }, names) };
 	};
 }
 

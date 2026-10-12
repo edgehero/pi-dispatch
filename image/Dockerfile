@@ -151,6 +151,52 @@ RUN playwright install --with-deps chromium \
 ENV PLAYWRIGHT_MCP_BROWSER=chromium \
     PLAYWRIGHT_MCP_SANDBOX=false
 
+# The forge's own MCP servers (DES-FORGE-MCP), which a github or gitlab trigger names in run.mcp as `forge`. Baked
+# here rather than fetched by the job (a package runner at start runs whatever version the registry holds that day),
+# and pinned like glab and tea: each is a program inside a container holding a repository credential, so an
+# unattended upstream change must never reach one. The worker starts each with the job's own forge token and nothing
+# else (worker/src/mcp-config.mjs, forgeMcpServer).
+#
+# github-mcp-server, GitHub's own, from its release tarball: an exact version and a per-architecture sha256 over the
+# release asset (github-mcp-server_Linux_x86_64.tar.gz, github-mcp-server_Linux_arm64.tar.gz). A static Go binary.
+# The version check runs it offline, as verify-image.sh does again.
+ARG GITHUB_MCP_SERVER_VERSION=2.0.2
+ARG GITHUB_MCP_SERVER_SHA256_AMD64=815e27d931c796af0c97f24fd211e14f8a4607d4528377719a5ad2352086b0b0
+ARG GITHUB_MCP_SERVER_SHA256_ARM64=73f5e76c6a3b5e0d731e1134a7c38575df6ec96c646192095a3be2d4d0d6c1fc
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) asset=x86_64; sha="$GITHUB_MCP_SERVER_SHA256_AMD64" ;; \
+      arm64) asset=arm64; sha="$GITHUB_MCP_SERVER_SHA256_ARM64" ;; \
+      *) echo "github-mcp-server: unsupported architecture $arch" >&2; exit 1 ;; \
+    esac; \
+    wget -nv -O /tmp/github-mcp-server.tgz "https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_SERVER_VERSION}/github-mcp-server_Linux_${asset}.tar.gz"; \
+    echo "${sha}  /tmp/github-mcp-server.tgz" | sha256sum -c -; \
+    mkdir /tmp/github-mcp-server; \
+    tar -xzf /tmp/github-mcp-server.tgz -C /tmp/github-mcp-server github-mcp-server; \
+    install -m 0755 /tmp/github-mcp-server/github-mcp-server /usr/local/bin/github-mcp-server; \
+    rm -rf /tmp/github-mcp-server.tgz /tmp/github-mcp-server; \
+    github-mcp-server --version | grep -qxF "Version: ${GITHUB_MCP_SERVER_VERSION}"
+
+# @zereight/mcp-gitlab for a gitlab job, at exactly the version image/forge-mcp/gitlab/package.json names and from that
+# folder's committed lockfile, so every package under it is the one the lockfile's integrity hash names. Its own
+# folder, not a workspace of the root: its tree is the server's, and a pi bump must not move it. No install script
+# runs (`--ignore-scripts`; none of its packages declares one, and none needs a build).
+COPY image/forge-mcp/gitlab/package.json image/forge-mcp/gitlab/package-lock.json /opt/forge-mcp/gitlab/
+RUN cd /opt/forge-mcp/gitlab \
+    && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && test "$(node -p 'require("./node_modules/@zereight/mcp-gitlab/package.json").version')" = "2.1.67"
+
+# What a job runs is never the server itself but its wrapper (CONST-MERGE-NEVER-AUTOMATIC): each one forces the list of
+# its server's merge and approval tools, which withhold.mjs drops from every tool list and refuses every call to, along
+# with a call to any tool the server did not list. The worker's `forge` entries name these two commands, and
+# verify-image.sh runs each offline and fails on a merge or approval tool it can see or call.
+COPY image/forge-mcp/withhold.mjs /opt/forge-mcp/withhold.mjs
+COPY image/forge-mcp/forge-mcp-github.sh /usr/local/bin/forge-mcp-github
+COPY image/forge-mcp/forge-mcp-gitlab.sh /usr/local/bin/forge-mcp-gitlab
+RUN chmod 0644 /opt/forge-mcp/withhold.mjs \
+    && chmod 0755 /usr/local/bin/forge-mcp-github /usr/local/bin/forge-mcp-gitlab
+
 # Non-root. CONST-ISOLATION-CONTAINER-PER-JOB.
 RUN useradd --create-home --shell /bin/bash --uid 1001 pi
 
@@ -293,7 +339,15 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # would ignore both and run the job without the servers its trigger names; the worker refuses that pairing pre-spend
 # (its `mcp` capability row, reason job-image-mcp-unsupported). verify-image.sh runs an offline job with a stub stdio
 # server to prove the claim.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp"
+# `forgeMcp` (DES-FORGE-MCP) tells the worker this image carries the forge's own MCP servers above behind their
+# wrappers, forge-mcp-github and forge-mcp-gitlab, at the paths the worker's `forge` entry names, with the forges'
+# dedicated merge and approval tools withheld (a tool not handed out, not a boundary: the token's role and branch
+# protection are). An image with `mcp` and without them would start a job whose run.mcp names `forge` and refuse it at
+# the container's start (mcp-command-missing), after the budget was reserved; the worker refuses that pairing
+# pre-spend instead (its `forgeMcp` capability row, reason job-image-forge-mcp-unsupported). verify-image.sh runs both
+# wrappers as the job user with no network: each must answer, list no withheld tool and no other merge or approval
+# name outside its known list, and refuse a call to each withheld one.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp"
 
 USER pi
 WORKDIR /workspace

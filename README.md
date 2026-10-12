@@ -410,7 +410,8 @@ pi-dispatch import-pi   # stage a credential-free copy of ~/.pi/agent into ./pi-
 - **MCP servers are yours, not the repo's.** List them in the overlay's `mcp.json` (`import-pi` stages it from
   your host, credentials as `${NAME}` references only), and a trigger names the ones its jobs connect with
   `"mcp"`. A repo's own `.pi/mcp.json` is never read for a job, and every server is checked before anything is
-  spent ([`docs/mcp.md`](docs/mcp.md)).
+  spent ([`docs/mcp.md`](docs/mcp.md)). A github or gitlab trigger can also name `"forge"`: that forge's own MCP
+  server, pinned in the job image and run as the token the job already holds.
 - **Sessions can continue.** `"resume": true` makes follow up jobs continue the session that opened the
   pull request. It saves the full transcript to disk, which is a real disclosure: read
   [`docs/sessions.md`](docs/sessions.md) before you turn it on.

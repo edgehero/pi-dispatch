@@ -25,6 +25,9 @@
  *
  * Pure apart from the one read (`readOverlayMcp`), which judges the file the way `readOverlayModels` judges the
  * overlay's `models.json`.
+ *
+ * The one server a job may connect that this file does not define is the forge's own (`forgeMcpServer`,
+ * DES-FORGE-MCP), whose name `forge` the overlay may therefore not use.
  */
 import { lstatSync as fsLstatSync, readFileSync as fsReadFileSync } from "node:fs";
 import { basename, isAbsolute, join, posix } from "node:path";
@@ -121,6 +124,9 @@ function checkServer(name, raw) {
 	const refuse = (problem) => ({ name, problem });
 	if (!MCP_SERVER_NAME_RE.test(name)) return refuse("the name must be lowercase letters and digits, words joined by single `-`, up to 32");
 	if (name.includes("dispatch")) return refuse("a name holding `dispatch` is reserved for the dispatch admin");
+	// Refused rather than shadowed: an overlay `forge` that won over the worker's would hand a github job's token to a
+	// server the operator wrote, and one that lost would be an entry that reads as offered and is never used.
+	if (name === FORGE_MCP_SERVER_NAME) return refuse("`forge` is reserved for the worker's own forge server (the job's GitHub or GitLab, as its own token), which a trigger names in run.mcp without an overlay entry");
 	if (!isRecord(raw)) return refuse("the entry is not an object");
 	for (const key of Object.keys(raw)) {
 		if (Object.hasOwn(MCP_REFUSED_KEYS, key)) return refuse(`\`${key}\` is not accepted: ${MCP_REFUSED_KEYS[key]}`);
@@ -267,6 +273,108 @@ export function parseOverlayMcp(text, path = MCP_CONFIG_FILE_NAME) {
 		else servers[name] = entry;
 	}
 	return { autoEnableCodemode: value.autoEnableCodemode ?? true, codemodeModels: value.codemodeModels ?? true, servers, refused };
+}
+
+/**
+ * The forge's own MCP server (DES-FORGE-MCP): the one server a job may connect that the overlay does not define. A
+ * github or gitlab trigger names it in `run.mcp` as `forge`, and the worker writes its entry here, so the server, its
+ * pin (baked in the job image) and the token it is handed are this repository's, never a trigger's or the overlay's.
+ * The token is the one the job already holds for its CLI (GH_TOKEN, GITLAB_TOKEN; env-allowlist.mjs
+ * `buildContainerEnv`): no new credential, and no power the job's `gh` or `glab` does not already have.
+ */
+export const FORGE_MCP_SERVER_NAME = "forge";
+/**
+ * The job kinds that may name it. Forgejo and Azure DevOps have no forge MCP server this repository has verified, and a
+ * cron job holds no forge token of its own (a `run.github` token is not a forge job's).
+ */
+export const FORGE_MCP_KINDS = Object.freeze(["github", "gitlab"]);
+/**
+ * The commands a `forge` entry runs: never a server itself, but the image's wrapper around it
+ * (image/forge-mcp/forge-mcp-github.sh, forge-mcp-gitlab.sh), which withholds the server's merge and approval tools
+ * (CONST-MERGE-NEVER-AUTOMATIC) from every list and refuses every call to them. The withheld names live in the image,
+ * beside the pin they were read against, and never here. github-mcp-server is baked from its release tarball at an
+ * exact version and per-architecture sha256, @zereight/mcp-gitlab from a committed lockfile (image/Dockerfile).
+ */
+export const GITHUB_MCP_COMMAND = "/usr/local/bin/forge-mcp-github";
+export const GITLAB_MCP_COMMAND = "/usr/local/bin/forge-mcp-gitlab";
+/** The host github-mcp-server calls for every tool (REST and GraphQL), which the egress allowlist must hold. */
+export const GITHUB_MCP_API_HOST = "api.github.com";
+
+/**
+ * The REST root of a GitLab instance URL as the worker is configured with it (`GITLAB_URL`): its path kept, trailing
+ * `/` dropped, and `/api/v4` added once (a URL already ending in it is not given a second).
+ */
+export function gitlabApiV4(gitlabUrl) {
+	return `${String(gitlabUrl).trim().replace(/\/+$/, "").replace(/\/api\/v4$/i, "").replace(/\/+$/, "")}/api/v4`;
+}
+
+/**
+ * Why `GITLAB_URL` cannot be written into the forge entry's GITLAB_API_URL, or null. mcp-gitlab splits that value on
+ * `,` into several instances, a query or a fragment would end up inside every path it builds, and a user name or
+ * password would be a credential written in the job's `/job/mcp.json`; the worker's own clients tolerate some of these,
+ * so the forge entry asks for itself rather than trusting that they were refused at load.
+ */
+export function gitlabUrlProblem(gitlabUrl) {
+	// Surrounding whitespace is not refused: the URL parser drops it, as it does for the worker's own clients, and
+	// gitlabApiV4 trims it, so a quoted .env value that works for them works here.
+	if (typeof gitlabUrl !== "string" || gitlabUrl.trim() === "") return "it is not set";
+	if (gitlabUrl.includes(",")) return "it holds a comma, which the server reads as a list of instances";
+	if (!URL.canParse(gitlabUrl)) return "it is not a URL";
+	const url = new URL(gitlabUrl);
+	if (url.protocol !== "https:" && url.protocol !== "http:") return "it is not http or https";
+	if (url.username !== "" || url.password !== "") return "it carries a user name or password";
+	if (gitlabUrl.includes("?") || gitlabUrl.includes("#")) return "it carries a query or a fragment";
+	return null;
+}
+
+/**
+ * The forge server's entry for a job of `kind`, in the normalised shape `checkServer` returns, or null for a kind that
+ * has none. `gitlabUrl` is the worker's configured GitLab URL (config.gitlab.apiUrl), written into the entry as a
+ * literal: it is the deployment's, not a secret, and the server would otherwise default to gitlab.com.
+ *
+ * github-mcp-server 2.0.2 reads its settings through viper with the `GITHUB_` prefix (cmd/github-mcp-server/main.go):
+ * GITHUB_PERSONAL_ACCESS_TOKEN is the token; GITHUB_TOOLSETS `default` is context, repos, issues, pull_requests and
+ * users, so `actions` (workflow runs and triggers) stays off; GITHUB_LOCKDOWN_MODE `1` (strconv.ParseBool) withholds
+ * content on a public repository from authors without push access, a best-effort filter and not an authorization
+ * boundary. With an EMPTY token the release binary falls back to its baked-in OAuth client and a browser login with a
+ * local callback listener; the runner refuses a reference the container holds empty (`mcp-secret-missing`) before
+ * the server starts, so that path is never reached.
+ *
+ * @zereight/mcp-gitlab 2.1.67 (build/config.js, build/index.js): GITLAB_PERSONAL_ACCESS_TOKEN is sent as a Bearer
+ * token; GITLAB_API_URL is the REST root; GITLAB_DISABLE_VERSION_CHECK must be exactly `true`, or it asks
+ * registry.npmjs.org for a newer release at every start. It starts an HTTP listener only on SSE or STREAMABLE_HTTP
+ * `true` and an OAuth flow only on GITLAB_USE_OAUTH `true`; a stdio server starts with only its own `env` and the
+ * runner's base names (`inheritEnv: false`, image/runner/src/mcp.mjs), so none of them can reach it.
+ */
+export function forgeMcpServer(kind, { gitlabUrl = "https://gitlab.com" } = {}) {
+	if (kind === "github") {
+		return {
+			name: FORGE_MCP_SERVER_NAME,
+			transport: "stdio",
+			description: "This job's GitHub repository host, through GitHub's own MCP server, as the job's own token: issues, pull requests, repositories and code.",
+			command: GITHUB_MCP_COMMAND,
+			env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GH_TOKEN}", GITHUB_LOCKDOWN_MODE: "1", GITHUB_TOOLSETS: "default" },
+			packageRunner: false,
+			refs: ["GH_TOKEN"],
+		};
+	}
+	if (kind === "gitlab") {
+		return {
+			name: FORGE_MCP_SERVER_NAME,
+			transport: "stdio",
+			description: "This job's GitLab instance, through a GitLab MCP server, as the job's own token: issues, merge requests, repositories and code.",
+			command: GITLAB_MCP_COMMAND,
+			env: { GITLAB_PERSONAL_ACCESS_TOKEN: "${GITLAB_TOKEN}", GITLAB_API_URL: gitlabApiV4(gitlabUrl), GITLAB_DISABLE_VERSION_CHECK: "true" },
+			packageRunner: false,
+			refs: ["GITLAB_TOKEN"],
+		};
+	}
+	return null;
+}
+
+/** The URL whose host and port the forge server calls, for the egress check: api.github.com, or the GitLab instance. */
+export function forgeMcpEgressUrl(kind, { gitlabUrl = "https://gitlab.com" } = {}) {
+	return kind === "github" ? `https://${GITHUB_MCP_API_HOST}/` : gitlabApiV4(gitlabUrl);
 }
 
 /** The entry as pi takes it: pi's keys only, with `type` written out. */

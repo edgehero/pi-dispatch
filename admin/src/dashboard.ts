@@ -29,7 +29,7 @@ import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from 
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readProjects, readScopedLimits, readStagedPackages, readOverlayMcpView, scanRunRecords } from "./read-model.mjs";
+import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readProjects, readScopedLimits, readStagedPackages, readOverlayMcpView, scanRunRecords, FORGE_MCP_SERVER_NAME } from "./read-model.mjs";
 import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -3365,6 +3365,9 @@ function spentMark(disarmed: any): string {
 /** One `run.mcp` name as the overlay offers it, for the drill-in's trust model. */
 function mcpServerLine(name: any, overlayMcp: any): string {
   const label = `mcp ${cellOf(name)}`;
+  // Not an overlay server: the worker writes its entry, the job's GitHub or GitLab through that forge's own MCP server,
+  // as the token the job already holds for gh or glab (DES-FORGE-MCP).
+  if (name === FORGE_MCP_SERVER_NAME) return `${label} · the forge's own server, as the job's own token`;
   // Only a file the reader refuses is a refusal of every job; an errno may pass, and the pickup retries a few of them.
   if (overlayMcp?.unreadable === "invalid") return `${label} · the overlay's mcp.json cannot be used, so every job is refused`;
   if (overlayMcp?.unreadable) return `${label} · the overlay's mcp.json cannot be read just now (${cellOf(overlayMcp.unreadable)})`;

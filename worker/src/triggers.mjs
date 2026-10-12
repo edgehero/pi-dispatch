@@ -33,7 +33,7 @@ import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 // The server-name rule, from the one module that parses the overlay's list (its body is import-inert).
-import { MCP_SERVER_NAME_RE } from "./mcp-config.mjs";
+import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE } from "./mcp-config.mjs";
 import { validateModelRef } from "./model-ref.mjs";
 import { parseUsdMicros } from "./money.mjs";
 import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
@@ -441,7 +441,7 @@ function normalizeCron(on, run, index, path, state) {
 	// A cron job's session narrows like any other: the field selects what the container's agent can do,
 	// which is orthogonal to what triggered it (issue #291).
 	const excludeTools = validateExcludeTools(on, run, `cron trigger "${id}"`, path);
-	const mcp = validateMcp(on, run, `cron trigger "${id}"`, path);
+	const mcp = validateMcp(on, run, `cron trigger "${id}"`, path, { kind: "local" });
 	// Validated since #502; before it these three were copied untouched, so `run.provider: 7` loaded.
 	const ref = validateRunModel(on, run, `cron trigger "${id}"`, path);
 	// Issue #505: the portfolio flag. Strictly boolean, the house rule (`run.github`'s reason: a truthy string must not
@@ -1454,8 +1454,13 @@ export function isMcpNearMiss(key) {
  * before anything is spent, and by doctor. Absent means none: a job connects no MCP server unless its trigger says
  * so. The near-miss sweep is excludeTools': a dropped `run.mcp` runs the job without the servers its flow was written
  * against, while the file reads as though it named them.
+ *
+ * One name is not the overlay's: `forge` (DES-FORGE-MCP) is the job's own forge, through that forge's MCP server and
+ * the job's own token, and the worker writes its entry. Accepted on a github or gitlab trigger only, and refused here
+ * on the rest, since whether it can ever work is a fact about the kind: a cron job holds no forge token of its own, and
+ * forgejo and azure have no forge MCP server this repository has verified.
  */
-function validateMcp(on, run, at, path) {
+function validateMcp(on, run, at, path, { kind }) {
 	for (const [label, source, exactIsLegal] of [
 		["run", run, true],
 		["on", on, false],
@@ -1485,6 +1490,10 @@ function validateMcp(on, run, at, path) {
 		}
 		if (seen.has(name)) throw configError(`${at}: run.mcp names ${JSON.stringify(name)} twice: ${path}`);
 		seen.add(name);
+		if (name === FORGE_MCP_SERVER_NAME && !FORGE_MCP_KINDS.includes(kind)) {
+			const why = kind === "local" ? "a cron job holds no forge token of its own for the server to use" : `${kind} has no forge MCP server this deployment has verified yet`;
+			throw configError(`${at}: run.mcp names "forge", the job's own forge server, which a ${FORGE_MCP_KINDS.join(" or ")} trigger may name and this one may not: ${why}: ${path}`);
+		}
 	}
 	return [...mcp];
 }
@@ -1647,7 +1656,7 @@ function normalizeLabel(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
-	const mcp = validateMcp(on, run, at, path);
+	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
@@ -1690,7 +1699,7 @@ function normalizeComment(on, run, index, path, state) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
-	const mcp = validateMcp(on, run, at, path);
+	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
@@ -1760,7 +1769,7 @@ function normalizeIssue(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
-	const mcp = validateMcp(on, run, at, path);
+	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: {
@@ -1848,7 +1857,7 @@ function normalizePullRequest(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
-	const mcp = validateMcp(on, run, at, path);
+	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: {
