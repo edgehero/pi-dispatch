@@ -3727,7 +3727,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     - When the realpath of `argv[1]` is one of the pinned pi's five session entries (`dist/bundle/cli.js`, the
       package bin; `dist/bundle/cli-runtime.js`, which the bin loads and which runs the CLI on its own;
       `dist/cli.js`; `dist/bundle/rpc-entry.js`; `dist/rpc-entry.js`), it writes the `starting` stub, puts
-      `-e <child-meter.ts>` FIRST in the arguments, and hands `usage-meter.mjs` over on `globalThis`. A CLI whose
+      `-e <child-meter.ts> --no-mcp` FIRST in the arguments (OQ-011 M6), and hands `usage-meter.mjs` over on `globalThis`. A CLI whose
       first argument is a subcommand (`auth config install list mcp remove uninstall update`, pinned) gets no `-e`.
       It gets a ledger written `done` with zeros at once instead (part E): once `setupCli` has run, its command line
       reads only `pi`, so the parent's detector cannot tell `pi list` from a session by its arguments.
@@ -3785,8 +3785,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
       not, one line on stderr naming a code (never the path) and exit code 2, set as the exit code so the line is
       flushed. pi is never loaded. A child that cannot be metered does not run. The preload applies the same rule
       to its `starting` stub, so a link in the variable leaves no orphan stub where it points.
-    - Otherwise it puts `-e child-meter.ts` first (`injectChildMeter`, the subcommand rule included), unless the
-      preload already did, and imports pi's UNBUNDLED `dist/cli.js` (`setupCli()`, then `main(process.argv.slice(2))`).
+    - Otherwise it puts `-e child-meter.ts --no-mcp` first (`injectChildMeter`, the subcommand rule included),
+      unless the preload already did (`hasChildMeter`: the three tokens, so a spawner's own `-e child-meter.ts`
+      gets a second one, which pi drops as a duplicate path), and imports pi's UNBUNDLED `dist/cli.js` (`setupCli()`, then `main(process.argv.slice(2))`).
       Unbundled, because the runner's own imports already loaded that copy of pi: the CLI runs on the same module
       graph, one copy of pi in the process, and the extension's bare imports reach the class the sessions use. The
       bundle would be a second copy of pi beside the first. With the preload missing (a spawner that replaced
@@ -3854,7 +3855,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     meter (above); a CommonJS preload loaded with `--require` (its hook broke every child that uses `module.register`
     or `--loader`); a load hook (it broke `node --import tsx`); `-ne` on the injected child (measured unnecessary: `-ne` keeps explicit `-e`
     paths, and front injection already loads the meter first). pi 1.0.4's `--no-mcp` drops only the
-    `builtin:mcp` path, so a child run with it keeps the meter too (pinned, and run against the bundle).
+    `builtin:mcp` path, so a child run with it keeps the meter too (pinned, and run against the bundle); the
+    preload injects it with the meter, `-e <meter> --no-mcp`, so no child loads pi's built-in MCP (OQ-011 M6).
   - **Residuals added**: a Node older than 18.19 in a job does not start (above); a renamed copy of the pi package
     run as a library, or a symlink to it under `--preserve-symlinks`, is neither metered nor detectable (a deliberate
     escape: every rule here matches the package's own directory name); a foreign pi version whose `model-runtime.js`
@@ -9165,3 +9167,4 @@ a tunnel.
 | 2026-10-09 | Issue #599, phase 5. **`DES-CAPACITY-FROM-RECORDS` AMENDED** (text only): the "missing history is never idle" decision now says what it does not cover: inside history a source holds, a host that is new or was down reads as idle, since no record says a machine was absent. No behaviour changed. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked.** |
 | 2026-10-09 | Issue #599, phase 5. **`DES-SIZE-SUGGESTIONS` AMENDED**: a run is a CPU sample on its CPU time alone, and the throttle FACT reads only the runs that report throttled time, and only when at least 10 of them do (one throttled run among twenty was worded as "the median run"): `evidenceOf` dropped a run's whole CPU sample unless both `cpuUsec` and `throttledUsec` were counts, and cgroup v2 writes `throttled_usec` only where the cpu controller is enabled, so every such venue read "not enough runs" for CPUs for ever. And "not enough runs" now says the runs counted at the current size and the smaller ones it did not (`notEnoughRunsText`, evidence `smaller`, CPU `throttledSamples`), where it read `(0)` above a chart of twenty points at an older size; the panel's PROJECTS view, the tool and the insights page word it through `notEnoughRunsText` (the page restating it), and doctor through `suggestionEvidence`. The PROJECTS view says "fits" only when both dimensions fit, and otherwise each dimension's verdict (it said "fits" while CPUs still lacked runs). **Code evidence**: worker/src/size-suggest.mjs -> evidenceOf, suggestCpus, suggestMemory, notEnoughRunsText, suggestionEvidence; admin/src/insights-html.mjs -> sizingNotEnoughText; admin/src/dashboard.ts; admin/src/index.ts. |
 | 2026-10-09 | Issue #599, the run mirror's start. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: the run mirror records when it started (`runs:since`, written with the member in the writer's one script, vouched for by a run of the index and trusted only while that run is held, handed on by a removal with its instant unchanged, expiring with the index), and the reader starts the mirror's coverage no earlier than a trusted start, at the index's oldest run without one, reading the index as one snapshot; a pruning reader records its cut in the horizon. Every earlier bound lived in keys lost with the runs, so after a flush and one more write a peer read the lost runs as idle with nothing missing, and a start that outlived its index under one an older worker recreated would have been believed. The rejected alternatives (inferring a loss from the index, starting at the record's own end, the horizon as a second proof) are recorded in the entry. The rest of the entry UNCHANGED, checked. |
+| 2026-10-12 | No issue: MCP in a job's pi children. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the preload and the nested runner inject `-e <child-meter.ts> --no-mcp`, so no pi child loads pi's built-in MCP (OQ-011 M6), and `hasChildMeter` recognises the three tokens. The decision and the residuals are otherwise UNCHANGED, checked. |

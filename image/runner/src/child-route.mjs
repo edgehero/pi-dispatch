@@ -80,19 +80,29 @@ export function isNestedRunner(env, pid, { pidNamespace = readPidNamespace } = {
 }
 
 /**
- * Insert `-e <meterPath>` first in a pi entry's arguments (argv[2] on), in place. False, and argv untouched, for a CLI
- * whose first argument is a subcommand. First, not last and not before the first `--`: everything after `--` is a
- * message, and in front of the spawner's own `-e`s is what loads the meter before them (measured in both CLIs).
+ * The flag a pi child gets beside its meter: pi's built-in MCP stays off in every child (OQ-011 M6). A child is a pi
+ * CLI the job's code started, and with it on the child connects the servers its agent dir's `mcp.json` names and,
+ * when it trusts the project, the repo's `.pi/mcp.json`; a job connects only the operator's servers, in its own
+ * session. The flag turns off the built-in only: MCP loaded as an ordinary extension is code the job chose to run.
+ */
+export const CHILD_NO_MCP = "--no-mcp";
+
+/**
+ * Insert `-e <meterPath> --no-mcp` first in a pi entry's arguments (argv[2] on), in place. False, and argv untouched,
+ * for a CLI whose first argument is a subcommand. First, not last and not before the first `--`: everything after `--`
+ * is a message, and in front of the spawner's own `-e`s is what loads the meter before them (measured in both CLIs).
+ * `--no-mcp` drops only the `builtin:mcp` path from the final set, so the meter still loads (pinned in
+ * child-meter.integration.test.mjs), and a spawner's own `-e builtin:mcp` is dropped with it.
  */
 export function injectChildMeter(argv, kind, meterPath = CHILD_METER_PATH) {
 	if (kind === "cli" && PI_SUBCOMMANDS.includes(argv[2])) return false;
-	argv.splice(2, 0, "-e", meterPath);
+	argv.splice(2, 0, "-e", meterPath, CHILD_NO_MCP);
 	return true;
 }
 
 /** Whether `argv` already carries the injection in front (the preload made it). */
 export function hasChildMeter(argv, meterPath = CHILD_METER_PATH) {
-	return argv[2] === "-e" && argv[3] === meterPath;
+	return argv[2] === "-e" && argv[3] === meterPath && argv[4] === CHILD_NO_MCP;
 }
 
 /**

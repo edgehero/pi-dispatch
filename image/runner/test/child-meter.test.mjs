@@ -417,10 +417,10 @@ test("injectChildMeter: -e goes FIRST, before the spawner's own -e and before an
 	const argv = (...rest) => ["/usr/local/bin/node", `${ROOT}/dist/bundle/cli.js`, ...rest];
 	const spawned = argv("--mode", "json", "-p", "-e", "theirs.ts", "--", "-e", "message");
 	assert.equal(injectChildMeter(spawned, "cli", "/m.ts"), true);
-	assert.deepEqual(spawned.slice(2), ["-e", "/m.ts", "--mode", "json", "-p", "-e", "theirs.ts", "--", "-e", "message"]);
+	assert.deepEqual(spawned.slice(2), ["-e", "/m.ts", "--no-mcp", "--mode", "json", "-p", "-e", "theirs.ts", "--", "-e", "message"]);
 	const bare = argv();
 	injectChildMeter(bare, "cli", "/m.ts");
-	assert.deepEqual(bare.slice(2), ["-e", "/m.ts"]);
+	assert.deepEqual(bare.slice(2), ["-e", "/m.ts", "--no-mcp"]);
 	for (const sub of PI_SUBCOMMANDS) {
 		const cmd = argv(sub, "x");
 		assert.equal(injectChildMeter(cmd, "cli", "/m.ts"), false, sub);
@@ -429,7 +429,7 @@ test("injectChildMeter: -e goes FIRST, before the spawner's own -e and before an
 	// rpc-entry prepends `--mode rpc` itself, so its args[0] is never a subcommand.
 	const rpc = argv("list");
 	assert.equal(injectChildMeter(rpc, "rpc", "/m.ts"), true);
-	assert.deepEqual(rpc.slice(2), ["-e", "/m.ts", "list"]);
+	assert.deepEqual(rpc.slice(2), ["-e", "/m.ts", "--no-mcp", "list"]);
 	assert.ok(CHILD_METER_PATH.endsWith("/image/runner/src/child-meter.ts"));
 	// The flags that exit before extensions load, read before any `--` only.
 	assert.equal(exitsBeforeExtensions(["--version"]), true);
@@ -499,7 +499,7 @@ test("preload: nothing without a ledger directory; an entry is injected and stub
 	const global = {};
 	const exits = [];
 	assert.equal(await preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv, pid: 77, global, packageDir, realpath, registerHooks: noHooks, loadMeter: () => usageMeter, onExit: (l) => exits.push(l) }), "entry");
-	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "-p", "hi"]);
+	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--no-mcp", "-p", "hi"]);
 	assert.equal(global[CHILD_METER_HANDOFF].meter, usageMeter, "the meter module is handed over");
 	assert.equal(exits.length, 0, "a session run has no exit rewrite: the meter's own exit write is the one");
 	const [stub] = readdirSync(dir);
