@@ -1964,6 +1964,17 @@ adversarial passes did.
   - pi-durable drops its experimental label and a minor release passes with no Breaking Changes section.
   - The run records show real spend lost to jobs that died mid-run on infrastructure and were paid for again.
 
+## OQ-042: Who may set the parked label
+
+- **Status**: `ACCEPTED RISK` (2026-10-12, issue #625).
+- **Position**: a reply without the phrase is routed on the forge label `pi-awaiting-input`, and on GitHub a
+  triage-role member may label an issue without the write access the comment trigger's author gate asks for. Setting
+  the label alone starts nothing: the reply's author still passes that gate, and the worker refuses the job before any
+  spend unless the key's `parked` sidecar exists. The worst a stray label does is route one admitted author's ordinary
+  comment to a free `not-parked` refusal, which also clears the label.
+- **What would change it**: a forge whose comment route does not run the author gate before this route, or a run of
+  `not-parked` refusals in the records that says labels are being set on purpose.
+
 ## Revision History
 
 | Date | Change |
@@ -2066,3 +2077,4 @@ adversarial passes did.
 | 2026-10-12 | No issue: MCP in a job's pi children. **`OQ-011` AMENDED** (M6): every pi CLI child gets `--no-mcp` beside its injected meter, since a child otherwise connects the MCP servers named by its agent dir's `mcp.json` and, when it trusts the project, the repo's `.pi/mcp.json`. The flag turns off pi's built-in MCP only; the residuals are a `pi mcp` subcommand, pi's MCP extension loaded as an ordinary extension, a process that imports pi's `main`, and a child the preload does not reach. |
 | 2026-10-12 | No issue: the forge's own MCP server. **NEW `OQ-040`** (`WATCH`): `forge` in `run.mcp` is github and gitlab only until a Forgejo or Azure DevOps forge MCP server is read, pinned and wrapped the same way. |
 | 2026-10-12 | Issue #622. **NEW `OQ-041`** (`WATCH`): jobs stay on `pi-coding-agent`; a durable harness for jobs is reopened by a published coding agent that depends on pi-durable, by pi-durable leaving experimental with a minor release free of breaking changes, or by recorded spend lost to infrastructure deaths mid-run. |
+| 2026-10-12 | Issue #625. **NEW `OQ-042`** (`ACCEPTED RISK`): the parked label can be set by a member who is not an admitted comment author; it routes, it never decides, and the author gate and the worker's sidecar check still run. |

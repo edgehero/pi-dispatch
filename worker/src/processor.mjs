@@ -151,7 +151,13 @@ export const TERMINAL_COMMENTS = {
 // Issue #625: the one comment the COMPLETED path posts, on a run that ended awaiting-input. The agent posted its own
 // question (the tool tells it to, before it ends); this says how the run continues. Fixed and path-free, the
 // TERMINAL_COMMENTS rule, and it carries no model text: the question never crosses the exit line.
-export const PARKED_COMMENT = "This run stopped to wait for an answer to the question above. Reply in a comment that starts with this repository's pi-dispatch comment phrase, and the next run continues from here.";
+// On an issue any reply continues it (the receiver routes it on the marker); a pull request's reply keeps the phrase,
+// since its session key needs a head branch that costs a token to read (parked.mjs).
+export const PARKED_COMMENT = "This run stopped to wait for an answer to the question above. Reply here, and the next run continues from here.";
+export const PARKED_COMMENT_PR = "This run stopped to wait for an answer to the question above. Reply in a comment that starts with this repository's pi-dispatch comment phrase, and the next run continues from here.";
+export function parkedComment(target) {
+	return target?.type === "pull_request" ? PARKED_COMMENT_PR : PARKED_COMMENT;
+}
 
 // Issue #502: the `model-unknown` refusal's comment. Names no model: the reader may be an issue author.
 export const MODEL_UNKNOWN_COMMENT = "Refused: this job names an AI model that this deployment does not know (it is in neither pi's model catalog nor the overlay models.json), so no container was started and nothing was spent. Ask the operator to check the trigger's model settings. Not run.";
@@ -290,6 +296,12 @@ export async function runJob(job, deps) {
 		// the store, on a COMPLETED exit only. Never throws. The default is a no-op so a wiring that omits
 		// it behaves exactly as before -- no store, no promotion, no session in the record.
 		promoteSession = () => null,
+		// (job) => boolean (issue #625): whether the job's session key holds a `parked` mark. Free and never throws. The
+		// default answers no, so a wiring without a store refuses every phrase-free reply rather than running one.
+		isParked = () => false,
+		// (job, on) => Promise<void> (issue #625): add or remove the forge's parked marker. Never throws; the marker is a
+		// hint for the receiver, and the sidecar decides. The default does nothing.
+		parkedLabel = async () => {},
 		// The session store's root, or null when the feature is unavailable (REQ-RESUMABLE-SESSION). Read
 		// ONLY to answer the fail-closed gate below -- nothing here opens it, and it never reaches the
 		// container env (docker-run.mjs mounts a per-job COPY, never the store).
@@ -969,6 +981,16 @@ export async function runJob(job, deps) {
 		// purpose: only forge jobs can arm the flag today (triggers.mjs refuses it on cron, and a CLI or
 		// chained job has no trigger entry that could set it), but a gate written as an enumeration of kinds
 		// is a gate the next kind skips silently.
+		// A reply that reached this job WITHOUT the trigger phrase (issue #625) was routed only because the forge said the
+		// issue carries the parked marker, and anyone who may label an issue can set that. The truth is the key's `parked`
+		// mark beside its transcript, and it is free to read, so it is asked here, before the mint and before any spend.
+		// Without it the reply is ordinary conversation on an issue: refused, silently (no comment, since the person was
+		// talking to people), and the stale marker is cleared so the next comment is not routed here again.
+		if (job.parkedReply === true && !isParked(job)) {
+			log("refused_not_parked", { kind: job.kind ?? null });
+			await parkedLabel(job, false);
+			return { outcome: "policy", reason: "not-parked", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
 		if (job.resume === true && !sessionsDir) {
 			await comment(job, "Refused: this trigger set `run.resume` but PI_SESSIONS_DIR is unset, so there is nowhere to persist the transcript -- the job would run with no session and still report success. Set PI_SESSIONS_DIR to a private directory outside every repo, or drop `run.resume` from this trigger. Not run.");
 			// The variable NAME, never a value: there is no path to print here (its absence IS the refusal),
@@ -1498,7 +1520,11 @@ export async function runJob(job, deps) {
 				// job is ignored, since that runner was never offered the tool.
 				const parked = exitReason === "awaiting-input" && job.awaitInput === true;
 				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked }) : null;
-				if (parked) await comment(job, PARKED_COMMENT);
+				if (parked) await comment(job, parkedComment(job.target));
+				// The forge marker the receiver routes a phrase-free reply on: set on a park, cleared when a run on a key that
+				// could park ends without parking. Never throws, and decides nothing: the sidecar promotion just wrote does.
+				if (parked) await parkedLabel(job, true);
+				else if (job.awaitInput === true || job.parkedReply === true) await parkedLabel(job, false);
 				return {
 					outcome: "completed",
 					...(parked ? { reason: "awaiting-input" } : {}),

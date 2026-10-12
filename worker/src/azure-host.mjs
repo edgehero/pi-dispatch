@@ -22,6 +22,7 @@
  */
 
 import { configError } from "./config.mjs";
+import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 import { isDeterminateFetchFailure } from "./transient.mjs";
@@ -201,7 +202,33 @@ export function makeAzureHost({ orgUrl, fetchFn = fetch } = {}) {
 		return { headRef: stripRefsHeads(pr?.sourceRefName), headRepo: sameRepo ? job?.repo : null };
 	}
 
-	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead };
+	/**
+	 * Add or remove the parked marker on a work item, as a TAG (issue #625, parked.mjs): Azure work items have
+	 * tags, not labels, and the receiver reads `System.Tags` into the same `[{ name }]` shape. A tags field is written
+	 * whole, so this reads it, edits the one tag and writes the result; Azure creates a tag the project lacks. The caller treats any throw as fail-open:
+	 * the session store's sidecar, not this label, decides whether a reply resumes anything.
+	 */
+	async function setParkedLabel(ref, target, on, token) {
+		const { project } = scopeOf(ref);
+		const path = `/${encodeURIComponent(project)}/_apis/wit/workitems/${encodeURIComponent(target?.number)}`;
+		const item = await get(`${path}?fields=System.Tags&api-version=${API_VERSION}`, token);
+		const tags = String(item?.fields?.["System.Tags"] ?? "").split(";").map((tag) => tag.trim()).filter((tag) => tag !== "" && tag !== PARKED_LABEL);
+		const value = (on ? [...tags, PARKED_LABEL] : tags).join("; ");
+		let res;
+		try {
+			res = await fetchFn(`${root}${path}?api-version=${API_VERSION}`, {
+				method: "PATCH",
+				headers: { Authorization: authHeader(token), "content-type": "application/json-patch+json" },
+				body: JSON.stringify([{ op: "add", path: "/fields/System.Tags", value }]),
+				redirect: "error",
+			});
+		} catch (err) {
+			throw new InfraRetry(`azure-host: PATCH ${path} failed (${fetchFailureReason(err)})`);
+		}
+		if (!res.ok) throw new InfraRetry(`azure-host: PATCH ${path} returned ${res.status}`);
+	}
+
+	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
 }
 
 /**
