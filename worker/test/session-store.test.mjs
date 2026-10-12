@@ -155,6 +155,26 @@ test("a parked run's promotion marks the key, and the next completed promotion o
 	assert.equal(existsSync(join(sessionsDir, key, PARKED_FILE)), false, "a run that did not park leaves no mark behind");
 });
 
+test("isParked answers from the key's own mark, issues only, and a planted link answers no (issue #625)", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	assert.equal(store.isParked(ghIssue), false, "no key directory yet");
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	store.promoteSession(s, { piVersion: PI, parked: true });
+	assert.equal(store.isParked(ghIssue), true);
+	assert.equal(store.isParked({ ...ghIssue, target: { type: "issue", number: 8 } }), false, "another issue's key");
+	assert.equal(store.isParked({ ...ghIssue, target: { type: "pull_request", number: 7 } }), false, "a pull request is never answered here");
+
+	// A key directory that is a symlink to a parked one is not this key's mark.
+	const other = { ...ghIssue, target: { type: "issue", number: 9 } };
+	symlinkSync(join(sessionsDir, key), join(sessionsDir, sessionKeyFor(other)));
+	assert.equal(store.isParked(other), false);
+
+	const unset = makeSessionStore({ sessionsDir: null, ttlDays: 14, maxBytes: 1_000_000, defaultBackend: "local", now: () => NOW });
+	assert.equal(unset.isParked(ghIssue), false);
+});
+
 test("a parked run whose promotion fails leaves no mark: the mark never describes a transcript that is not there", () => {
 	const { store, jobDir, sessionsDir } = fixture();
 	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });

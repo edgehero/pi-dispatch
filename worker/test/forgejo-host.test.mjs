@@ -170,3 +170,20 @@ test("the clone URL is tokenless, and refuses without an instance URL", () => {
 	assert.throws(() => forgejoRemoteUrl(null, "acme/widgets"), (e) => e.piDispatchConfig === true, "no default instance to guess");
 	assert.throws(() => forgejoRemoteUrl(API, ""), (e) => e.piDispatchConfig === true);
 });
+
+// -- setParkedLabel (issue #625) ------------------------------------------------------------------
+
+test("setParkedLabel creates the repository label (an existing one is fine), adds it by name, and removes it by name", async () => {
+	const fetchFn = fakeFetch({
+		"POST /api/v1/repos/acme/widgets/labels": 409,
+		"POST /api/v1/repos/acme/widgets/issues/7/labels": [],
+		"DELETE /api/v1/repos/acme/widgets/issues/7/labels/pi-awaiting-input": 404,
+	});
+	const host = makeForgejoHost({ apiUrl: API, fetchFn });
+	await host.setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok");
+	assert.deepEqual(fetchFn.calls.map((c) => c.key), ["POST /api/v1/repos/acme/widgets/labels", "POST /api/v1/repos/acme/widgets/issues/7/labels"]);
+	assert.deepEqual(JSON.parse(fetchFn.calls[1].init.body), { labels: ["pi-awaiting-input"] });
+	await host.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
+	const refused = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "POST /api/v1/repos/acme/widgets/labels": 201, "POST /api/v1/repos/acme/widgets/issues/7/labels": 403 }) });
+	await assert.rejects(() => refused.setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok"));
+});

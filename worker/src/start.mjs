@@ -2002,6 +2002,23 @@ export async function startWorker(
 		log("comment", { jobId: job?.id, text });
 	};
 
+	// Issue #625: the forge's parked marker, set on a park and cleared when it no longer applies. comment()'s shape and its
+	// rule: it NEVER throws, because the marker decides nothing (the session store's sidecar does) and a forge that refuses
+	// the label must not flip an outcome. A local job has no forge and no marker. Issues only: a pull request's reply is
+	// routed on the phrase (parked.mjs).
+	const parkedLabel = async (job, on) => {
+		const forge = forgeFor(job);
+		if (!forge?.host?.setParkedLabel || job?.target?.type !== "issue") return;
+		try {
+			const auth = forge.auth ?? (await ensureAuth(job.kind));
+			if (!auth) return;
+			const token = await auth.mintToken(job);
+			await forge.host.setParkedLabel(job, job.target, on, token);
+		} catch (err) {
+			log("parked_label_failed", { jobId: job?.id, on, reason: err?.message });
+		}
+	};
+
 	// The operator's failure hook (issue #288, INT-ON-FAILURE-HOOK-CONTRACT). Constructed ONLY when the
 	// knob is set: an unset PI_ON_FAILURE builds nothing, spawns nothing, and logs nothing -- the
 	// byte-identical guarantee. Fired from the two terminal listeners below, never from the processor:
@@ -2241,6 +2258,8 @@ export async function startWorker(
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
 			promoteSession: sessionStore.promoteSession,
+			isParked: sessionStore.isParked,
+			parkedLabel,
 			// The same value the store above was built from, passed explicitly so the processor's fail-closed
 			// `run.resume` gate answers from THIS config rather than from its own env default. Identical on the
 			// real path; the difference shows under an injected env, where the store would be built from the

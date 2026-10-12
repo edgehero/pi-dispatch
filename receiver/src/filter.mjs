@@ -47,6 +47,7 @@
  */
 import { findCloseRule } from "./close.mjs";
 import { escapeRegExp, firstMatchingRule, labelSet, matchedLabel, matchesRule } from "./predicate.mjs";
+import { hasParkedLabel } from "@edgehero/pi-dispatch/parked";
 
 const AUTHOR_ALLOWLIST = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const LABEL_ACTIONS = new Set(["opened", "labeled", "reopened"]);
@@ -188,6 +189,8 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 		// REQ-AWAIT-INPUT (issue #625): whether the job may end awaiting a person's answer. Present only when armed,
 		// resume's rule, so an unflagged job's data stays byte-identical.
 		...(resolved.awaitInput === true ? { awaitInput: true } : {}),
+		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
+		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level like the rest, never
 		// inside `trigger`, and for the sharpest version of that reason: this is the caller's fanout count --
 		// receiver.mjs reads it to decide how many times to enqueue -- and a descriptive context object copied
@@ -254,7 +257,14 @@ function routeComment(subset, triggers, knownFlows) {
 	}
 	const phrase = triggers.comment?.phrase;
 	const body = subset.comment?.body;
-	if (typeof phrase !== "string" || typeof body !== "string" || !body.includes(phrase)) {
+	const phraseHit = typeof phrase === "string" && typeof body === "string" && body.includes(phrase);
+	// A reply WITHOUT the phrase resumes a parked issue (issue #625, parked.mjs): only on an issue (a pull request's key
+	// needs its head branch, which costs a token to read, so its reply keeps the phrase), only when the comment
+	// trigger arms run.resume and is not a command, and only when the forge says the issue carries the marker. The
+	// author gate above already ran: this widens WHICH comments start a job, never WHO may. The marker is a hint; the
+	// worker refuses the job before any spend unless the key's `parked` sidecar exists.
+	const parkedReply = !phraseHit && typeof phrase === "string" && typeof body === "string" && triggers.comment?.resume === true && triggers.comment?.command === undefined && subset.issue?.pull_request !== true && hasParkedLabel(subset.issue?.labels);
+	if (!phraseHit && !parkedReply) {
 		return { enqueue: false, reason: "no-trigger-phrase" };
 	}
 	// On a COMMAND rule (issue #189) the whole flow-resolution block below -- default flow, the `<phrase>
@@ -300,6 +310,7 @@ function routeComment(subset, triggers, knownFlows) {
 		awaitInput: triggers.comment.awaitInput,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
+		...(parkedReply && { parkedReply: true }),
 		// The invoking comment rides on the trigger: body and author_association are both named by
 		// INT-WEBHOOK-PAYLOAD-SUBSET, and the body stays DATA all the way down (CONST-ISSUE-TEXT-IS-DATA).
 		comment: { body: subset.comment.body, author_association: subset.comment.author_association },

@@ -166,3 +166,14 @@ test("gitlabRemoteUrl keeps the nested path WHOLE and carries no credential", ()
 		assert.throws(() => gitlabRemoteUrl("https://gl.test", repo), (e) => e.piDispatchConfig === true);
 	}
 });
+
+// -- setParkedLabel (issue #625) ------------------------------------------------------------------
+
+test("setParkedLabel adds and removes the marker with one PUT on the issue, by name", async () => {
+	const fetchFn = fakeFetch({ "PUT /projects/42/issues/5": json({ iid: 5 }) });
+	const h = makeGitLabHost({ apiUrl: "https://gl.test", fetchFn });
+	await h.setParkedLabel(JOB, { type: "issue", number: 5 }, true, TOKEN);
+	await h.setParkedLabel(JOB, { type: "issue", number: 5 }, false, TOKEN);
+	assert.deepEqual(fetchFn.calls.map((c) => JSON.parse(c.init.body)), [{ add_labels: "pi-awaiting-input" }, { remove_labels: "pi-awaiting-input" }]);
+	await assert.rejects(() => host({ "PUT /projects/42/issues/5": json({}, 403) }).setParkedLabel(JOB, { type: "issue", number: 5 }, true, TOKEN));
+});

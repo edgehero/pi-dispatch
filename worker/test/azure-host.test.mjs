@@ -145,3 +145,16 @@ test("stripRefsHeads is idempotent and total", () => {
 	assert.equal(stripRefsHeads("main"), "main");
 	assert.equal(stripRefsHeads(undefined), undefined);
 });
+
+// -- setParkedLabel (issue #625) ------------------------------------------------------------------
+
+test("setParkedLabel rewrites the work item's tags whole: adds the marker beside the rest, and removes only it", async () => {
+	const item = "/Fabrikam/_apis/wit/workitems/7";
+	const fetchFn = fakeFetch({ [`GET ${item}`]: { fields: { "System.Tags": "triaged; pi-awaiting-input" } }, [`PATCH ${item}`]: {} });
+	const host = makeAzureHost({ orgUrl: ORG, fetchFn });
+	await host.setParkedLabel(JOB, { type: "issue", number: 7 }, true, "tok");
+	await host.setParkedLabel(JOB, { type: "issue", number: 7 }, false, "tok");
+	const patches = fetchFn.calls.filter((c) => c.key.startsWith("PATCH"));
+	assert.deepEqual(patches.map((c) => JSON.parse(c.init.body)[0].value), ["triaged; pi-awaiting-input", "triaged"], "never a second copy, never another tag lost");
+	assert.equal(patches[0].init.headers["content-type"], "application/json-patch+json");
+});
