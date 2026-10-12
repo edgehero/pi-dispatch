@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runImportPi, findLiteralSecret } from "../src/import-pi.mjs";
@@ -713,4 +713,118 @@ test("--host-packages is accepted as a no-op, the way --with-extensions is", asy
 
 	assert.equal(code, 0);
 	assert.equal(calls.length, 1);
+});
+
+/** A host agent dir with an mcp.json; `mcp` is the document, or a string written verbatim. */
+function hostWithMcp(mcp) {
+	const from = hostAgent();
+	writeFileSync(join(from, "mcp.json"), typeof mcp === "string" ? mcp : JSON.stringify(mcp));
+	writeFileSync(join(from, "mcp-auth.json"), JSON.stringify({ docs: { access_token: "oauth-secret" } }));
+	return from;
+}
+
+test("import-pi rewrites mcp.json to the servers a job may connect, names each one, and leaves the rest with why (REQ-MCP-OPERATOR-SERVERS)", async () => {
+	const from = hostWithMcp({
+		mcpServers: {
+			docs: { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer ${DOCS_TOKEN}" }, description: "Docs search" },
+			fs: { command: "uvx", args: ["mcp-fs==1.0"], allowPackageRunner: true, description: "File index" },
+			leaky: { url: "https://h/mcp", headers: { Authorization: "Bearer sk-literal-secret" }, description: "x" },
+			signin: { url: "https://h/mcp", oauth: { clientId: "c" }, description: "x" },
+		},
+	});
+	const to = overlayDir();
+	const { out, text } = capture();
+	assert.equal(await run(from, to, [], out), 0);
+	const staged = readFileSync(join(to, "mcp.json"), "utf8");
+	assert.deepEqual(Object.keys(JSON.parse(staged).mcpServers), ["docs", "fs"]);
+	assert.doesNotMatch(staged, /sk-literal-secret|oauth/);
+	assert.ok(!existsSync(join(to, "mcp-auth.json")), "pi's MCP sign-ins are never copied");
+	assert.match(text(), /mcp\.json\s+2 MCP servers offered to jobs/);
+	assert.match(text(), /- docs \(http, mcp\.example\.com\)/);
+	assert.match(text(), /- fs \(stdio, uvx, fetches its server from a registry at start\)/);
+	assert.match(text(), /2 servers not staged/);
+	assert.match(text(), /- "leaky": header "Authorization" must be `\$\{NAME\}`, or an auth scheme/);
+	assert.match(text(), /- "signin": `oauth` is not accepted/);
+	assert.doesNotMatch(text(), /sk-literal-secret/, "a secret is never printed either");
+});
+
+test("import-pi: --no-mcp, a host with no mcp.json, and an unreadable one each leave the overlay without one", async () => {
+	const doc = { mcpServers: { docs: { url: "https://mcp.example.com/mcp", description: "Docs search" } } };
+	const to = overlayDir();
+	assert.equal(await run(hostWithMcp(doc), to, [], capture().out), 0);
+	assert.ok(existsSync(join(to, "mcp.json")));
+	// --no-mcp removes the earlier import's file: a job would otherwise keep connecting a server no longer offered.
+	const skipped = capture();
+	assert.equal(await run(hostWithMcp(doc), to, ["--no-mcp"], skipped.out), 0);
+	assert.ok(!existsSync(join(to, "mcp.json")));
+	assert.match(skipped.text(), /skipped -- --no-mcp was passed/);
+	assert.match(skipped.text(), /mcp\.json \(overlay\) removed \(--no-mcp\)/);
+	// No mcp.json on the host: the same.
+	assert.equal(await run(hostWithMcp(doc), to, [], capture().out), 0);
+	const none = capture();
+	assert.equal(await run(hostAgent(), to, [], none.out), 0);
+	assert.ok(!existsSync(join(to, "mcp.json")));
+	assert.match(none.text(), /mcp\.json \(overlay\) removed \(no mcp\.json in your pi setup\)/);
+	// A file that cannot be read whole changes nothing: the last good list stands, and the rest of the import goes on.
+	for (const bad of ["{", '{"mcpServers":{"a":{"url":"https://x/m","description":"x"},"a":{"url":"https://y/m","description":"y"}}}', '{"mcpServers":{"a":{"headers":{"Authorization": Bearer sk-live-secret}}}}']) {
+		const t = overlayDir();
+		writeFileSync(join(t, "mcp.json"), "last good\n");
+		const c = capture();
+		assert.equal(await run(hostWithMcp(bad), t, [], c.out), 0);
+		assert.equal(readFileSync(join(t, "mcp.json"), "utf8"), "last good\n");
+		assert.match(c.text(), /mcp\.json\s+SKIPPED -- .*the overlay's file is kept as it was/);
+		assert.doesNotMatch(c.text(), /sk-live-secret/, "the parser's message, which quotes the file, is never shown");
+		assert.ok(existsSync(join(t, "models.json")), "the rest of the import is unaffected");
+	}
+	// Every server refused: no file.
+	const t = overlayDir();
+	assert.equal(await run(hostWithMcp({ mcpServers: { a: { url: "https://h/m", oauth: {}, description: "x" } } }), t, [], capture().out), 0);
+	assert.ok(!existsSync(join(t, "mcp.json")));
+});
+
+test("import-pi: --no-mcp is an accepted flag, and a near miss is refused", async () => {
+	const { out, text } = capture();
+	assert.equal(await run(hostAgent(), overlayDir(), ["--no-mcps"], out), 1);
+	assert.match(text(), /unknown flag "--no-mcps"/);
+});
+
+test("import-pi never writes through an overlay mcp.json that is a link, and reads no host mcp.json that is not a file", async () => {
+	const doc = { mcpServers: { docs: { url: "https://mcp.example.com/mcp", description: "Docs search" } } };
+	const from = hostWithMcp({ ...doc, mcpServers: { ...doc.mcpServers, signin: { url: "https://h/m", oauth: {}, description: "x" } } });
+	const hostText = readFileSync(join(from, "mcp.json"), "utf8");
+	// The overlay's file is a link to the host's own: the link is replaced, and the host's file keeps every server.
+	const to = overlayDir();
+	symlinkSync(join(from, "mcp.json"), join(to, "mcp.json"));
+	assert.equal(await run(from, to, [], capture().out), 0);
+	assert.equal(readFileSync(join(from, "mcp.json"), "utf8"), hostText);
+	assert.ok(!lstatSync(join(to, "mcp.json")).isSymbolicLink());
+	assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(to, "mcp.json"), "utf8")).mcpServers), ["docs"]);
+	// A dangling link is replaced too.
+	const dangling = overlayDir();
+	symlinkSync(join(dangling, "nowhere.json"), join(dangling, "mcp.json"));
+	assert.equal(await run(from, dangling, [], capture().out), 0);
+	assert.ok(lstatSync(join(dangling, "mcp.json")).isFile());
+	// A folder in its place is reported, never thrown over.
+	const folder = overlayDir();
+	mkdirSync(join(folder, "mcp.json"));
+	const f = capture();
+	assert.equal(await run(from, folder, [], f.out), 0);
+	assert.match(f.text(), /is a folder; remove it by hand/);
+	// A host mcp.json that is a folder (or, by the same test, a pipe or device) is not read.
+	const odd = hostAgent();
+	mkdirSync(join(odd, "mcp.json"));
+	const o = capture();
+	assert.equal(await run(odd, overlayDir(), [], o.out), 0);
+	assert.match(o.text(), /is not a regular file/);
+});
+
+test("import-pi: a write that fails leaves the last good overlay mcp.json and no temporary file", async () => {
+	const doc = { mcpServers: { docs: { url: "https://mcp.example.com/mcp", description: "Docs search" } } };
+	const to = overlayDir();
+	writeFileSync(join(to, "mcp.json"), "last good\n");
+	const fs = await import("node:fs");
+	const failing = { ...fs, renameSync: () => { throw Object.assign(new Error("no"), { code: "EACCES" }); } };
+	await assert.rejects(run(hostWithMcp(doc), to, [], capture().out, { fs: failing }), /no/);
+	assert.equal(readFileSync(join(to, "mcp.json"), "utf8"), "last good\n");
+	assert.deepEqual(readdirSync(to).filter((name) => name.endsWith(".tmp")), []);
 });

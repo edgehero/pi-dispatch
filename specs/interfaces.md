@@ -4796,6 +4796,43 @@ validator rather than a second copy of it.
   declared `{name, version, dir}` triples and each `dir` exists beside it; given a missing, unreadable, or
   garbage `packages.json` at job time, then the worker reads it as **no staged packages** and never throws.
 
+## INT-OVERLAY-MCP-CONFIG
+
+**operator → worker (host) and, from `run.mcp` on, → job.**
+
+- **Contract**: `<PI_GLOBAL_PI_DIR>/mcp.json`, optional. A regular file (never a link, a pipe or a device) of at
+  most 64 KiB, JSON with no duplicate key, an object of at most these top-level keys:
+  - `autoEnableCodemode`: boolean, default true (pi's own meaning);
+  - `mcpServers`: an object of servers by name. A name is 1 to 32 of `a-z`, `0-9` and `-`, starting with a letter
+    or digit, and holding no `dispatch`.
+
+  A server is streamable HTTP (`url`) or stdio (`command`), never both:
+  - **both**: `description` (required, at most 300 characters with no control, format or line-separator character;
+    pi puts it in the job's prompt), `type` (`http`, `streamable-http` or `stdio`, matching the transport),
+    `exposure` and `toolExposure` values from `codemode`, `deferred`, `direct`, `hidden` (pi's alias
+    `codemode-deferred` is not taken), `timeout` (whole seconds, 1 to 600), `enabled` (boolean);
+  - **HTTP**: `url` (http or https, written exactly as a URL parser writes it back (`new URL(...).href`, a bare
+    origin's trailing `/` optional), with any reference read as a plain word; no user name, password or fragment;
+    references allowed after the host and never in it, every query value exactly `${NAME}`), `headers` (RFC 9110 token names, not `__proto__`, `constructor` or `prototype`);
+  - **stdio**: `command` (a bare name on the job image's PATH, or an absolute path under `/usr`, `/bin`, `/sbin`,
+    `/opt` or `/app`; never starting with `~`, no `$`), `args` (strings, references allowed amid literal text; none
+    starting with `!` or `~`), `env` (variable names, not the three reserved ones), and pi-dispatch's own `allowPackageRunner` (boolean), required true for a package
+    runner (`npx`, `npm`, `pnpm`, `pnpx`, `yarn`, `bunx`, `bun`, `uvx`, `uv`, `pipx`), kept in the file and stripped
+    before a job hands the entry to pi.
+
+  A reference is `${NAME}`, NAME matching `[A-Z_][A-Z0-9_]*`, and every `${` opens a whole one. Every header, env and
+  query VALUE is a reference: an env or query value is exactly `${NAME}`, a header value is `${NAME}` or an auth
+  scheme and a space before it (`MCP_HEADER_SCHEMES`: Bearer, Basic, Token, Bot, ApiKey, Key, Splunk, SSWS, Digest,
+  without case). A literal argument or literal url path is written as is. Refused with a reason: `auth`,
+  `oauth`, `cwd`, `type: "sse"`, and any other key. A file that is not JSON (the parser's message, which quotes the
+  file, is never shown), holds a duplicate key, is not an object, has another top-level key, a non-object
+  `mcpServers` or a non-boolean `autoEnableCodemode` is refused whole; otherwise each server is accepted or refused
+  on its own. `mcp-auth.json` is never in the overlay.
+- **Producer**: the operator, through `pi-dispatch import-pi` (which writes only accepted servers, in pi's shape,
+  with `type: "http"` written out for a streamable HTTP server; each import replaces the file) or by hand.
+  **Consumers**: `pi-dispatch doctor`; from `run.mcp` on, the worker's pickup and the job.
+- **Location**: worker/src/mcp-config.mjs -> parseOverlayMcp, readOverlayMcp, MCP_* constants.
+
 ## INT-RUN-HISTORY-FILE-CONTRACT
 
 **worker → admin extension.**
@@ -8210,3 +8247,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-09 | Issue #599, phase 5. **`INT-CAPACITY-REPORT` AMENDED** (presentation only; the JSON report is unchanged): every surface prints a share of time through one helper (`shareText`), so a share that is there but rounds to nothing reads `under 0.1%` and one short of the whole `over 99.9%` ("full 0%" stood beside "peak 3 of 3"); idle is printed as the complement of the printed busy (`busyIdleText`), so the two sum to 100% (123.5 per mille printed 12.4% and 87.7%); and a history start inside the window reads `2026-10-01 09:29 UTC`, the minute format of the lines around it, not a raw ISO instant. **Code evidence**: worker/src/capacity-cli.mjs -> shareText, busyIdleText, hostFacts, historyNotes; worker/src/doctor.mjs -> capacityChecks; admin/src/dashboard.ts -> hostsView; admin/src/insights-html.mjs -> capShareText. |
 | 2026-10-09 | Issue #599, the run mirror's start. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the fleet copy gains `runs:since`, a hash of when the copy started (`at`) and a run of the index that vouches for it (`member`), written by the writer's one script together with the member (the `ZADD` moved into it): the write's time and its run when the index did not exist before it, else the index's oldest run when the start there is absent, not a hash, or no longer trusted; it is trusted only while its run is in the index, a removal of that run hands it to the oldest run left (`at` unchanged) or deletes it with the last, and it expires with the index. Every earlier bound lived in keys lost with the runs (a flushed or replaced Valkey, an expired index), so after one more write a peer read every lost run as idle with nothing missing; and a start can itself outlive its index (a 4.0.1 worker's 30 day index expiry, a pruning reader that empties the index) under an index an older worker recreates, so a start without a held run proves nothing. Rejected: trusting a start while the horizon is at or past it, since the horizon outlives a lost index too. A pruning reader now records its cut in `runs:horizon` (`PRUNE_SCRIPT`), where it erased the expired-body bound; the capacity reader reads the index as one snapshot (`READ_SCRIPT`). The Acceptance gains the start's and the pruning reader's cases. **`INT-CAPACITY-REPORT` AMENDED**: the mirror's coverage starts no earlier than a trusted `runs:since` (else the index's oldest run); `truncated` covers a mirror that started inside the window, and for a report with no covered host is the mirror's own cut; the fleet coverage gains `liveRowMissing` (the reading host with records and no live row; the other rows' `running` count stands); the CLI's coverage line says a truncated history and running jobs it could not count; an empty report says no host ran a job only with no reason, not local, not truncated and no unreadable or host-less record. The report's other fields UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP in a job's pi children. **`INT-SDK-SESSION-OPTIONS` AMENDED** in (m): a pi CLI child the job starts gets `--no-mcp` from the preload, so a repo's `mcp.json` is read neither in the job's session nor by pi's built-in MCP in a child (residuals in OQ-011 M6). The session's options are UNCHANGED, checked. |
+| 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `INT-OVERLAY-MCP-CONFIG`**: the overlay's `mcp.json`, its accepted keys per transport, the `${NAME}` reference grammar, the refusals, and its producer and consumers. `INT-PI-PACKAGES-FILE-CONTRACT` is UNCHANGED, checked. |

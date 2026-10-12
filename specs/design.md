@@ -5377,6 +5377,61 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED`,
   `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE`
 
+## DES-MCP-OPERATOR-ONLY
+
+- **Decision**: The MCP servers a job may connect are one operator file, the overlay's `mcp.json`, in pi's own
+  `mcpServers` shape and a strict subset of pi 1.1.0's keys (`INT-OVERLAY-MCP-CONFIG`), read by pi-dispatch on the
+  host (`worker/src/mcp-config.mjs`). `import-pi` REWRITES the host's file into the overlay, keeping only the servers
+  a job may connect, each in pi's shape, and lists every server it left behind with the reason; the overlay's file
+  follows the host's, so `--no-mcp` or a host without one removes an earlier import's file. Doctor reads the overlay
+  with the same parser as the pickup will, and checks streamable HTTP servers against the egress allowlist and the
+  declared endpoints the way the proxy reads them (`worker/src/egress-allowlist.mjs`: an allowlisted name on 443,
+  or a declared endpoint's exact host and port, since the runner sends every request as a CONNECT).
+  - **A credential is a reference, and references are resolved by pi-dispatch, never by pi.** A reference may sit
+    wherever servers take a key: a header value (`${NAME}` or an auth scheme before it, from a fixed list, so the
+    word cannot itself be a key), an env value (exactly `${NAME}`), a url's query value (exactly `${NAME}`), and amid
+    literal text in a url's path or an argument. Header, env and query VALUES are never literal: a rule that wanted a
+    reference only under credential-like names was measured letting `X-Goog-Key`, `GH_PAT`, `PRIVATE_KEY` and
+    `DATABASE_URL` through, and a list of names always has a next one. A literal argument or url path is written as
+    is: a second rule, refusing the argument after a credential-like flag, was measured refusing `--max-tokens 4096`
+    and `--token-file` while passing `--api_key=sk-...` and `-H "X-API-Key: sk"`, so the defence there is a reference
+    to write instead and docs that say plainly that every job reads the overlay. A url's host takes no reference,
+    since the egress check reads it before the job starts; the url is read whole by a URL parser, never cut as text,
+    and must be written exactly as the parser writes it back, because the parser also takes `https:/h`, a backslash
+    and a tab as the start of a host, and two readings of one url were how a reference reached the host. pi's resolver (`core/resolve-config-value.js`) runs a
+    value starting with `!` as a shell command and expands bare `$NAME`, with no switch to turn either off, and it
+    resolves only headers and env; so the job resolves every reference itself, and a secret value that starts with
+    `!` is sent as text.
+  - **Refused per server, not per file**, except for what makes the file unreadable as a whole (not JSON, a
+    duplicate key, not an object, an unknown top-level key, a non-object `mcpServers`, a non-boolean
+    `autoEnableCodemode`). A host file built for interactive pi often holds an OAuth server; one such entry should
+    not cost the deployment every other server. Nothing refused reaches the overlay, and the JSON parser's own
+    message, which quotes the file around the error, is never shown.
+  - **A stdio command runs from the image or the overlay**: a bare name on the image's PATH, or an absolute path
+    under `/usr`, `/bin`, `/sbin`, `/opt` or `/app`. Named roots rather than excluded ones, since the job's root
+    filesystem is writable and a list of the folders it writes (`/workspace`, `/tmp`, `/var/tmp`, `/dev/shm`)
+    always has a next one. Nothing starts with `~`, which pi expands to the job's home. A package runner (`npx`,
+    `uvx` and the like) needs `allowPackageRunner: true`, because such a server is fetched at the start of every job
+    at whatever version the registry serves, and reaches the registry only if it is allowlisted.
+  - **`import-pi` replaces, never writes through.** A new file is written beside the overlay's and renamed over it,
+    so a link from it to the host's own `mcp.json` cannot make the import rewrite the host file, and a write that
+    fails leaves the last good list; a host file that is not a regular
+    file is not read (a pipe would block, a device would never end); a host file that cannot be read whole changes
+    nothing in the overlay, since the last good list should stand while the operator edits.
+  - **The allowlist is read as squid reads it**: one entry per line, so a line with two words admits neither, and an
+    allowlisted host that is the proxy's own machine (`to_host_local`) is not reachable.
+- **Rejected**: a credential-name heuristic and a credential-flag heuristic (above); copying the host's `mcp.json` verbatim (a literal header, an OAuth server and pi keys a job cannot
+  honour would reach every job); refusing the whole import over one bad server (above); reading a repo's
+  `.pi/mcp.json` for a job (the repo is not the operator, and pi would connect what a merged change names, with the
+  job's secrets); a per-trigger server definition in `triggers.json` (the same server would be written once per
+  trigger, and a trigger edit could then point a credential at any host); letting pi resolve references (above).
+- **Residuals**: a credential written as a literal argument or url path segment is written in the overlay, which
+  the docs say plainly; the command rules read the command, not what it runs (`node` with a script, a
+  launcher such as `env` or `sh`); a server's own code is the operator's choice and runs with the references its
+  trigger maps, which the job's agent can read anyway (`run.secrets`, `SECURITY.md`); doctor reads no DNS, so an
+  allowlisted name that resolves to the proxy's own machine reads as reachable; doctor reads the allowlist in this
+  folder, which is the file the proxy mounts on both venues.
+
 ## DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS
 
 - **Decision**: `@playwright/cli` with Chromium bundled in the job image, with
@@ -9168,3 +9223,4 @@ a tunnel.
 | 2026-10-09 | Issue #599, phase 5. **`DES-SIZE-SUGGESTIONS` AMENDED**: a run is a CPU sample on its CPU time alone, and the throttle FACT reads only the runs that report throttled time, and only when at least 10 of them do (one throttled run among twenty was worded as "the median run"): `evidenceOf` dropped a run's whole CPU sample unless both `cpuUsec` and `throttledUsec` were counts, and cgroup v2 writes `throttled_usec` only where the cpu controller is enabled, so every such venue read "not enough runs" for CPUs for ever. And "not enough runs" now says the runs counted at the current size and the smaller ones it did not (`notEnoughRunsText`, evidence `smaller`, CPU `throttledSamples`), where it read `(0)` above a chart of twenty points at an older size; the panel's PROJECTS view, the tool and the insights page word it through `notEnoughRunsText` (the page restating it), and doctor through `suggestionEvidence`. The PROJECTS view says "fits" only when both dimensions fit, and otherwise each dimension's verdict (it said "fits" while CPUs still lacked runs). **Code evidence**: worker/src/size-suggest.mjs -> evidenceOf, suggestCpus, suggestMemory, notEnoughRunsText, suggestionEvidence; admin/src/insights-html.mjs -> sizingNotEnoughText; admin/src/dashboard.ts; admin/src/index.ts. |
 | 2026-10-09 | Issue #599, the run mirror's start. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: the run mirror records when it started (`runs:since`, written with the member in the writer's one script, vouched for by a run of the index and trusted only while that run is held, handed on by a removal with its instant unchanged, expiring with the index), and the reader starts the mirror's coverage no earlier than a trusted start, at the index's oldest run without one, reading the index as one snapshot; a pruning reader records its cut in the horizon. Every earlier bound lived in keys lost with the runs, so after a flush and one more write a peer read the lost runs as idle with nothing missing, and a start that outlived its index under one an older worker recreated would have been believed. The rejected alternatives (inferring a loss from the index, starting at the record's own end, the horizon as a second proof) are recorded in the entry. The rest of the entry UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP in a job's pi children. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the preload and the nested runner inject `-e <child-meter.ts> --no-mcp`, so no pi child loads pi's built-in MCP (OQ-011 M6), and `hasChildMeter` recognises the three tokens. The decision and the residuals are otherwise UNCHANGED, checked. |
+| 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `DES-MCP-OPERATOR-ONLY`**: one operator file in pi's shape and a strict subset of its keys, rewritten by `import-pi` (accepted servers only, each refused one named), references resolved by pi-dispatch and never by pi, per-server refusals, stdio commands from the image or the overlay, and doctor's egress reading of each HTTP server. `DES-OPERATOR-GLOBAL-OVERLAY` is UNCHANGED, checked. |

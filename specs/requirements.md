@@ -2141,8 +2141,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   skills enforcement, because pi merges package prompt paths first and path order alone cannot carry it);
   the baked `HARD_RULES.md` floor stays first and unremovable. The overlay is **credential-free by
   construction**: `pi-dispatch import-pi` stages the safe subset of `~/.pi/agent` (honoring
-  `PI_CODING_AGENT_DIR`), **refusing** a `models.json` with a literal key and **never** copying `auth.json`
-  or `settings.json`; `pi-dispatch doctor` re-verifies. Overlay **extensions are staged and loaded by
+  `PI_CODING_AGENT_DIR`), **refusing** a `models.json` with a literal key and **never** copying `auth.json`,
+  `settings.json` or `mcp-auth.json`; `pi-dispatch doctor` re-verifies. The overlay's `mcp.json` is the one list
+  of MCP servers a job may connect (`REQ-MCP-OPERATOR-SERVERS`), rewritten by `import-pi` rather than copied.
+  Overlay **extensions are staged and loaded by
   DEFAULT**: `import-pi` copies `extensions/` unless the operator passes `--no-extensions`, **prints every
   extension it staged by name** (the vetting step is a list the operator can read, not a flag they can
   forget), and still **hard-blocks the admin extension**; they then load in every job unless
@@ -2300,6 +2302,43 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   operator allowlist, not a per-repo opt-in, because the repo is the thing that is not trusted.
 
 ---
+
+## REQ-MCP-OPERATOR-SERVERS
+
+- **Statement**: A job shall be able to use MCP servers the OPERATOR chose, and no others. The overlay's `mcp.json`
+  (`INT-OVERLAY-MCP-CONFIG`) lists the servers a deployment offers, in pi's own `mcpServers` shape; a trigger opts
+  in by naming servers from it (`run.mcp`), and a job names none by default. A repo's `.pi/mcp.json`, a server an
+  extension registers, and a server a pi child would read are never connected for a job: the overlay is operator
+  deploy-time config, and the repo, its extensions and the job's own processes are not the operator. The overlay
+  carries no credential: a credential is a `${NAME}` reference, resolved in the job from the variables its trigger
+  already passes (`run.secrets`, `PI_FORWARD_ENV`), in a header, an env value, a url's path or query, or an argument;
+  never a literal header, env or query value, never a `!command`, never an OAuth sign-in or pi's `mcp-auth.json`. A
+  literal argument or url path is written as is, and the docs say so. A server the job cannot use is refused before anything is spent: one the overlay
+  does not offer, a reference the trigger does not map, and, with the egress policy on, a streamable HTTP server the
+  proxy would not let the job reach. A stdio server runs from the job image or the overlay, never from a folder the
+  job writes, and one that fetches itself from a package registry at start is refused unless its entry allows it.
+  `pi-dispatch import-pi` stages the host's `mcp.json` rewritten to the servers a job may connect and names each one
+  it left behind and why; `pi-dispatch doctor` checks the same rules on the overlay as a job's pickup will.
+  Delivered in parts: the overlay file, `import-pi` and `doctor` first; then `run.mcp` and the pickup's refusals;
+  then the job's session connecting the servers with pi 1.1.0's MCP, codemode and tool_search.
+- **Why**: pi connects MCP servers from files a job's repo controls and from servers its extensions register, and
+  hands their tools to an agent reading adversarial input. Which outside systems a job may act on is a decision
+  about money, data and blast radius, so it is the operator's, made once per deployment and opted into per trigger,
+  like the overlay's extensions and the staged packages. A credential in the overlay would be readable by every job;
+  a reference resolves only what the trigger already chose to hand that job.
+- **Acceptance**: Given a host `mcp.json` with a server whose header, env or url query value is a literal under any
+  name, then `import-pi` stages the others and names that one with the reason, and the overlay never holds the
+  literal; given a server with `oauth`, `auth` or `cwd`, or a value starting with `!`, or a `${` that does not open a
+  whole `${NAME}` reference, then it is refused the same way; given `--no-mcp`, or no `mcp.json` on the host, then the
+  overlay holds none, an earlier one removed; given an overlay `mcp.json` that is a link to the host's, then the
+  import replaces the link and the host's file is unchanged. Given the egress policy on and a streamable HTTP server
+  whose host is not allowlisted for 443 and whose host and port are not a declared endpoint, then doctor warns that
+  no job can reach it. Given an `mcp-auth.json` in the overlay, then doctor fails and offers to delete it.
+- **Traces to**: `REQ-GLOBAL-PI-OVERLAY`, `REQ-EGRESS-ALLOWLIST`, `REQ-TRIGGER-SECRETS`, `CONST-TOKEN-SCOPED-PER-JOB`,
+  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `INT-OVERLAY-MCP-CONFIG`, `DES-MCP-OPERATOR-ONLY`.
+- **Code evidence**: worker/src/mcp-config.mjs -> parseOverlayMcp, readOverlayMcp, overlayMcpText;
+  worker/src/import-pi.mjs -> stageMcp; worker/src/doctor.mjs -> overlayMcpChecks;
+  worker/src/egress-allowlist.mjs -> egressRefusalFor.
 
 ## REQ-EGRESS-ALLOWLIST
 
@@ -3429,6 +3468,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-12 | No issue: MCP servers in jobs, the overlay file. **NEW `REQ-MCP-OPERATOR-SERVERS`**: a job uses only MCP servers the operator lists in the overlay's `mcp.json` and its trigger names, with credentials as `${NAME}` references only, refused before spend when it cannot use them; this part delivers the file, `import-pi` and `doctor`. **`REQ-GLOBAL-PI-OVERLAY` AMENDED** (the Statement): `import-pi` never copies `mcp-auth.json`, and rewrites `mcp.json` rather than copying it. The rest of `REQ-GLOBAL-PI-OVERLAY` is UNCHANGED, checked. **Code evidence**: worker/src/mcp-config.mjs, worker/src/import-pi.mjs -> stageMcp, worker/src/doctor.mjs -> overlayMcpChecks. |
 | 2026-10-09 | Issue #599, the run mirror's start. **`REQ-CAPACITY-INSIGHTS` AMENDED** (the Statement): a run mirror that started inside the window (a new deployment, or a Valkey that lost its keys) is named among what its sources hold, since the report now knows when the mirror started (`runs:since`, `INT-RUN-HISTORY-FILE-CONTRACT`). Before, losing the mirror's keys and one more write made a peer read every lost run as idle, breaking "missing history is never idle". The Acceptance is UNCHANGED, checked. **Code evidence**: worker/src/run-mirror.mjs -> TRIM_SCRIPT, PRUNE_SCRIPT, READ_SCRIPT, RUNS_SINCE; worker/src/capacity-records.mjs -> readMirrorWindow. |
 | 2026-10-09 | Issue #599, phase 5. **`REQ-CAPACITY-INSIGHTS` AMENDED** (the Statement): "history it cannot see is never shown as idle" was stronger than the report. Time before a host's sources start is missing, never idle, as it said; but inside history a source does hold, a host that is new or was down reads as idle for that time, because no record says a machine was absent, and the docs now say so (docs/insights.md, docs/multi-host.md, both READMEs, the operator skill and the `dispatch_capacity` description). No behaviour changed. **Code evidence**: worker/src/capacity.mjs -> computeCapacity (idle is covered time with no run). |
 | 2026-10-08 | Issue #599, phase 4, second corrections. **`REQ-CAPACITY-INSIGHTS` AMENDED**, the Acceptance: a record whose `capacity` says more than any host can have keeps its busy time (that value is unknown, and such records are counted); it said the record was unreadable. The Statement is UNCHANGED. |

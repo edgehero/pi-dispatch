@@ -7,7 +7,8 @@
  * `auth.json` / env and reaches the container through the env allowlist, never a mounted file. So this
  * command copies only the safe subset and REFUSES a `models.json` that embeds a literal key.
  *
- * Copied:   models.json (definitions only, sanitized), skills/, APPEND_SYSTEM.md, and extensions/ (verbatim;
+ * Copied:   models.json (definitions only, sanitized), skills/, APPEND_SYSTEM.md, mcp.json (rewritten to the
+ *           servers a job may connect, references only; `--no-mcp` leaves it out), and extensions/ (verbatim;
  *           the admin extension is hard-blocked, and one the operator disabled in `pi config` is left behind).
  *           Extensions come along BY DEFAULT -- staging is the vetting step, and an overlay missing the
  *           operator's own extensions is not the setup they asked for -- with `--no-extensions` as the escape
@@ -19,17 +20,19 @@
  *           setup and staged at the exact version their host runs (issue #102); `pi-packages.json` becomes
  *           the override-and-addition layer rather than the only road in, and `--no-host-packages` restores
  *           the declared-only behaviour exactly.
- * Never:    auth.json, settings.json, sessions/, themes/, prompts/, tools/. Discovery READS settings.json to
- *           learn what pi has installed and what the operator turned off; reading is not copying, and no part
- *           of that file reaches the overlay.
+ * Never:    auth.json, settings.json, sessions/, themes/, prompts/, tools/, mcp-auth.json (pi's MCP sign-ins).
+ *           Discovery READS settings.json to learn what pi has installed and what the operator turned off;
+ *           reading is not copying, and no part of that file reaches the overlay.
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync, statSync, copyFileSync, renameSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync, statSync, copyFileSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { FROM_HOST, PACKAGES_SUBDIR, RESOURCE_DIRS, STAGE_MANIFEST, mergeHostPackages, parsePackagesFile } from "./packages.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { ENTRY_NAME_RE, copyDirContents, copySkillTree } from "./copy-tree.mjs";
+import { MCP_CONFIG_FILE_NAME, MCP_CONFIG_MAX_BYTES, mcpServerWhere, overlayMcpText, parseOverlayMcp } from "./mcp-config.mjs";
 
 /**
  * A valid skill/extension entry name. Defined in copy-tree.mjs, which is the module that enforces it,
@@ -46,7 +49,7 @@ export const ADMIN_RE = /pi-dispatch|dispatch-admin/i;
  * silently means "third-party code you did not expect runs in every job container". A typo must not be able
  * to widen what loads.
  */
-const BOOL_FLAGS = new Set(["--no-extensions", "--with-extensions", "--with-packages", "--host-packages", "--no-host-packages"]);
+const BOOL_FLAGS = new Set(["--no-extensions", "--with-extensions", "--with-packages", "--host-packages", "--no-host-packages", "--no-mcp"]);
 const VALUE_FLAGS = new Set(["--from", "--to", "--packages-file"]);
 
 const execFileAsync = promisify(execFile);
@@ -98,7 +101,7 @@ export async function runImportPi(argv = [], deps = {}) {
 		out = (s) => process.stdout.write(s),
 		// lstatSync rides along for the shared copier, whose symlink guard is the whole point of it: the
 		// walker this dir's copies used to go through guarded with statSync, which FOLLOWS links.
-		fs = { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync, statSync, copyFileSync, renameSync, rmSync },
+		fs = { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync, statSync, copyFileSync, renameSync, rmSync, unlinkSync },
 		exec = defaultExec,
 		// Injected like `fs`/`exec`/`out` so the win32 npm branch below is reachable from a test on any host;
 		// it is the branch that was dead on arrival precisely because nothing could exercise it here.
@@ -180,6 +183,13 @@ export async function runImportPi(argv = [], deps = {}) {
 		fs.copyFileSync(join(from, "APPEND_SYSTEM.md"), join(to, "APPEND_SYSTEM.md"));
 		results.push(["APPEND_SYSTEM.md", "global persona (layers under each repo's persona)"]);
 	}
+
+	// mcp.json -- the MCP servers jobs may connect (REQ-MCP-OPERATOR-SERVERS). REWRITTEN, never copied: only the servers
+	// a job may connect are written, each in pi's shape with every header and env value a reference, so a host entry
+	// with a literal value, an OAuth sign-in or a key this deployment does not take never reaches the overlay. Each one
+	// left behind is named with why. The overlay's file follows the host's (`stageMcp`), since a job would otherwise
+	// keep connecting servers the operator no longer offers.
+	results.push(...stageMcp({ fs, from, to, skip: argv.includes("--no-mcp") }));
 
 	// extensions/ -- the sharp edge, and copied BY DEFAULT: the operator staged this overlay to be their own
 	// setup, and one they have to arm twice more is not that. The admin extension stays hard-blocked (it can
@@ -268,9 +278,104 @@ export async function runImportPi(argv = [], deps = {}) {
 	// A note-less row is a list item under the row above it (the extension names), so it prints bare rather
 	// than padded out to a column that has nothing to hold.
 	for (const [name, note] of results) out(note ? `  ${name.padEnd(18)} ${note}\n` : `  ${name}\n`);
-	out(`\n  (auth.json, settings.json, sessions/ are never copied — your credential stays in env/auth.json.)\n`);
+	out(`\n  (auth.json, settings.json, sessions/ and mcp-auth.json are never copied: your credential stays in env/auth.json.)\n`);
 	out(nextSteps(to, withExtensions, withPackages, withHostPackages && hostPi.packages.length > 0));
 	return 0;
+}
+
+/**
+ * Stage the host's `mcp.json` into the overlay, rewritten to the servers a job may connect. Returns the result rows.
+ * The overlay's file follows the host's: it is replaced by each import, and removed when the host has none, when
+ * `--no-mcp` is passed, or when the host offers no server a job may connect, so a hand-written overlay file is
+ * replaced too (docs/mcp.md says so). One exception keeps what is there: a host file that cannot be read whole (not
+ * JSON, a duplicate key, too large) changes nothing, since the operator is mid-edit and the last good list stands.
+ * The overlay's file is never followed if it is a link: a new file is renamed over it, so a link back to the host's
+ * own file cannot make this command rewrite it.
+ */
+function stageMcp({ fs, from, to, skip }) {
+	const src = join(from, MCP_CONFIG_FILE_NAME);
+	const dst = join(to, MCP_CONFIG_FILE_NAME);
+	const rows = [];
+	const existing = () => {
+		try {
+			return fs.lstatSync(dst);
+		} catch {
+			return null;
+		}
+	};
+	const removeOld = (why) => {
+		const entry = existing();
+		if (entry === null) return true;
+		if (entry.isDirectory()) {
+			rows.push([`${MCP_CONFIG_FILE_NAME} (overlay)`, `WARN: ${dst} is a folder; remove it by hand`]);
+			return false;
+		}
+		// unlink, not rmSync: `force` skips a dangling link, which the write would then follow.
+		fs.unlinkSync(dst);
+		rows.push([`${MCP_CONFIG_FILE_NAME} (overlay)`, `removed (${why})`]);
+		return true;
+	};
+	if (skip) {
+		if (fs.existsSync(src)) rows.push([MCP_CONFIG_FILE_NAME, "skipped -- --no-mcp was passed (jobs are offered no MCP server)"]);
+		removeOld("--no-mcp");
+		return rows;
+	}
+	if (!fs.existsSync(src)) {
+		removeOld(`no ${MCP_CONFIG_FILE_NAME} in your pi setup`);
+		return rows;
+	}
+	let parsed;
+	try {
+		// statSync follows a link, so a link to a regular file is read and one to a pipe or device is not: a FIFO would
+		// block this read forever, and /dev/zero would never end.
+		const stat = fs.statSync(src);
+		if (!stat.isFile()) throw Object.assign(new Error(`${src}: is not a regular file`), { mcpConfig: true });
+		if (stat.size > MCP_CONFIG_MAX_BYTES) throw Object.assign(new Error(`${src}: is larger than ${MCP_CONFIG_MAX_BYTES} bytes`), { mcpConfig: true });
+		parsed = parseOverlayMcp(String(fs.readFileSync(src, "utf8")), src);
+	} catch (error) {
+		const kept = existing() === null ? "" : "; the overlay's file is kept as it was";
+		rows.push([MCP_CONFIG_FILE_NAME, `SKIPPED -- ${error?.mcpConfig ? error.message : `${src}: cannot be read (${error?.code ?? "unreadable"})`}${kept}`]);
+		return rows;
+	}
+	const names = Object.keys(parsed.servers);
+	if (names.length > 0) {
+		// Replaced, never written through: a link or an earlier file goes first, and a folder stops the write.
+		const entry = existing();
+		if (entry?.isDirectory()) {
+			rows.push([MCP_CONFIG_FILE_NAME, `WARN: ${dst} is a folder; remove it by hand, then re-run`]);
+		} else {
+			// A new file renamed over the old: the rename replaces a link rather than its target, and a write that fails
+			// leaves the last good list in place.
+			// A name no earlier run left, opened only if it does not exist (`wx`), so it is never a link to follow; removed
+			// again if the write or the rename fails, since every job mounts this folder.
+			const tmp = `${dst}.${randomBytes(6).toString("hex")}.tmp`;
+			try {
+				fs.writeFileSync(tmp, overlayMcpText(parsed), { flag: "wx", mode: 0o644 });
+				fs.renameSync(tmp, dst);
+			} catch (error) {
+				try {
+					fs.unlinkSync(tmp);
+				} catch {
+					// Never written.
+				}
+				throw error;
+			}
+			rows.push([MCP_CONFIG_FILE_NAME, `${names.length} MCP server${names.length === 1 ? "" : "s"} offered to jobs`]);
+			for (const name of names) {
+				const server = parsed.servers[name];
+				const runner = server.packageRunner ? ", fetches its server from a registry at start" : "";
+				rows.push([`  - ${name} (${server.transport}, ${mcpServerWhere(server)}${runner})`, ""]);
+			}
+		}
+	} else {
+		rows.push([MCP_CONFIG_FILE_NAME, "no MCP server a job may connect"]);
+		removeOld("nothing to offer");
+	}
+	if (parsed.refused.length > 0) {
+		rows.push([`${MCP_CONFIG_FILE_NAME} (left)`, `${parsed.refused.length} server${parsed.refused.length === 1 ? "" : "s"} not staged`]);
+		for (const { name, problem } of parsed.refused) rows.push([`  - ${JSON.stringify(name)}: ${problem}`, ""]);
+	}
+	return rows;
 }
 
 /**
