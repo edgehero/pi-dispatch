@@ -24,6 +24,7 @@ import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensur
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
+import { mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
@@ -2534,6 +2535,9 @@ export function normalizeTriggerForDisplay(entry) {
     // that sets neither keeps exactly its keys.
     ...(Array.isArray(run.models) && run.models.length > 0 && run.models.every((m) => typeof m === "string") && { models: [...run.models] }),
     ...((typeof run.maxCostUsd === "string" || typeof run.maxCostUsd === "number") && { maxCostUsd: String(run.maxCostUsd) }),
+    // The overlay MCP servers the jobs connect (REQ-MCP-OPERATOR-SERVERS), by name: the operator's own words, never a
+    // server's definition or a credential. Shown for `secrets`' reason: what a job can reach is set only in this file.
+    ...(Array.isArray(run.mcp) && run.mcp.length > 0 && run.mcp.every((name) => typeof name === "string") && { mcp: [...run.mcp] }),
   };
   switch (on.type) {
     case "cron":
@@ -2675,6 +2679,35 @@ export function readStagedPackages({ globalPiDir, fs = nodeFs, readManifest = re
     stagedAt: typeof manifest?.stagedAt === "string" ? manifest.stagedAt : null,
     packages: entries.filter((p) => p && typeof p.name === "string").map(nameAtVersion),
   };
+}
+
+/**
+ * The overlay's MCP servers for display (REQ-MCP-OPERATOR-SERVERS): what a trigger's `run.mcp` names resolve to. Read
+ * through the worker's OWN parser (`@edgehero/pi-dispatch/mcp-config`), so the panel and the pickup cannot disagree
+ * on which servers are offered. Per server its name, transport, where it runs (a url's host, or a command's
+ * basename), its exposure, whether it is on, and the variable NAMES it references; never a header, an argument, a
+ * value or a url's path. Never throws: `{ servers: [], refused: [], unreadable: null }` when there is no overlay or no
+ * file, `unreadable` set when there is one that cannot be read whole.
+ */
+export function readOverlayMcpView({ globalPiDir, read = readOverlayMcp } = {}) {
+  const empty = { servers: [], refused: [], unreadable: null };
+  if (typeof globalPiDir !== "string" || globalPiDir === "") return empty;
+  let parsed;
+  try {
+    parsed = read(globalPiDir);
+  } catch (err) {
+    return { ...empty, unreadable: err?.mcpConfig ? "invalid" : (err?.code ?? "unreadable") };
+  }
+  if (parsed === null) return empty;
+  const servers = Object.entries(parsed.servers ?? {}).map(([name, server]) => ({
+    name,
+    transport: server.transport === "http" ? "http" : "stdio",
+    where: mcpServerWhere(server),
+    exposure: typeof server.exposure === "string" ? server.exposure : "codemode",
+    enabled: server.enabled !== false,
+    refs: Array.isArray(server.refs) ? [...server.refs] : [],
+  }));
+  return { servers, refused: (parsed.refused ?? []).map((r) => r.name).filter((n) => typeof n === "string"), unreadable: null };
 }
 
 /** One manifest entry as `name@version`, or bare `name` when the entry pins no version string. */

@@ -527,3 +527,18 @@ test("/dispatch priorities shows - for a negative counter instead of throwing (#
   assert.ok(lines.includes("  unallocated $0.00 · deployment spent - of $100.00"), lines.join("\n"));
   assert.ok(lines.some((l) => /^ {2}shop +floor \$10\.00 +weight 1 +allocation \$100\.00 +spent -$/.test(l)), lines.join("\n"));
 });
+
+test("renderTriggers names a trigger's MCP servers on every kind, and nothing for one that names none (REQ-MCP-OPERATOR-SERVERS)", () => {
+  const out = renderTriggers({
+    schedulers: [],
+    triggers: { triggers: [
+      { type: "cron", id: "n", pattern: "0 3 * * *", folder: "/p", flow: "f", mcp: ["docs", "files"] },
+      { type: "label", any: ["bug"], all: [], none: [], flow: "fix", forge: "github", mcp: ["docs"] },
+      { type: "comment", phrase: "@pi", flow: "fix", forge: "github" },
+    ] },
+  });
+  const lines = out.split("\n");
+  assert.match(lines.find((l) => l.includes("cron")), /\[mcp docs, files\]/);
+  assert.match(lines.find((l) => l.includes("bug")), /\[mcp docs\]/);
+  assert.doesNotMatch(lines.find((l) => l.includes("@pi")), /\[mcp/);
+});

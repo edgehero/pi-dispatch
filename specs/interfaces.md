@@ -3666,6 +3666,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "skillsDir": "<optional: absolute WORKER-HOST dir of <name>/SKILL.md skills>",
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
+               "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>],
                "portfolio": <optional boolean; cron only, never beside command; reviewed-file-only> } },
     { "on": { "type": "label", "any": [...], "all": [...], "none": [...] },
       "run": { "kind": "github", "flow": "<flow name>",
@@ -3676,7 +3677,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only>,
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
-               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } },
+               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
+               "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
       "run": { "kind": "github", "flow": "<default flow>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
@@ -3686,7 +3688,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only>,
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
-               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } },
+               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
+               "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
     { "on": { "type": "pull_request",
               "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted"|"closed", ...],
                                                                     // the close word is close-ONLY:
@@ -3706,7 +3709,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only; never beside once: true>,
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
-               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } },
+               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
+               "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
     { "on": { "type": "issue", "action": ["closed"|"close", ...],   // per forge; azure refused at load
               "number": <optional int >= 1>,
               "once": <optional boolean; true requires number>,
@@ -8299,3 +8303,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.mcp` on all five kinds, names only, its near-miss sweep (ASCII spellings, and a key under `run` or `on` outside plain ASCII with no plain letter other than those of `mcpservers`), a `trigger-skew` row, file-only and not inherited by a chained child. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/job/mcp.json` (0444, references only, the admin's tool names hidden first). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-mcp-unsupported` and the seven `mcp-*` pickup refusals (`mcp-list-invalid` for a job's list the loader would not have written). **`INT-OVERLAY-MCP-CONFIG` AMENDED**: its consumers now include the pickup. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the env gains `PI_MCP_SERVERS`; `CAPABILITY_GATES` gains the `mcp` row (six job-feature tokens); the token is declared by no image until the runner reads `/job/mcp.json`, so the label's token set is unchanged. |
 | 2026-10-12 | No issue: MCP servers in jobs, the runner. **`INT-SDK-SESSION-OPTIONS` AMENDED** in (m): a job whose trigger names servers gets pi's MCP, codemode and tool_search as three named inline factories, with the runner's config, transports and guarded API; `builtin:` paths stay unknown, and a repository's `mcp.json` is still never read. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: seven rows, `mcp-config-mismatch`, `mcp-config-invalid`, `mcp-secret-missing`, `mcp-command-missing`, `mcp-shadowed` and `mcp-unavailable` under the policy code and `mcp-unreachable` under the infrastructure code; no new code. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the image declares `mcp`, proved by an offline stub-server run. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: a server name is words joined by single `-` (no trailing `-`, no `--`), so no two servers' tool names read alike once pi writes `-` as `_`. `INT-CONTAINER-JOB-INPUTS` is UNCHANGED, checked: the runner reads `/job/mcp.json` and `PI_MCP_SERVERS` as the worker writes them. `INT-RUN-HISTORY-FILE-CONTRACT` is UNCHANGED, checked: runner reasons ride the exit line, not the record's reason enum. |
 | 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **`INT-OVERLAY-MCP-CONFIG` AMENDED**: the top-level `codemodeModels` (boolean, default true). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: beside `run.mcp`, `run.excludeTools` takes codemode, tool_search, the three resource tools and `mcp__<server>__*`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `mcp-excluded`. **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits the parent's exclusions less the names of MCP tools. `INT-CONTAINER-JOB-INPUTS` is UNCHANGED, checked: `/job/mcp.json` already carried `codemodeModels`, and `PI_EXCLUDE_TOOLS` carries the new names as it carries any. |
+| 2026-10-12 | No issue: MCP servers in jobs, the operator's view. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the file's example entries show `run.mcp`, which the field's own bullet already described. `INT-OVERLAY-MCP-CONFIG` is UNCHANGED, checked: the admin reads it through the worker's own parser and writes nothing. |

@@ -388,6 +388,8 @@ function triggerLine(t) {
   // The COUNT and the profile name, never the references -- the reference list is the map of the operator's
   // vault. Appended last, absent when unbound, so every existing line is byte-identical.
   const sec = t?.secrets > 0 ? `  [secrets ${t.secrets}${t.secretsProfile ? ` via ${t.secretsProfile}` : ""}]` : "";
+  // REQ-MCP-OPERATOR-SERVERS: the MCP servers the jobs connect, beside the secrets they are handed.
+  const mcp = Array.isArray(t?.mcp) && t.mcp.length > 0 ? `  [mcp ${t.mcp.join(", ")}]` : "";
   // The two sides of a one-shot's life (issue #231), on the close-capable kinds only -- they are the
   // only records that can carry the fields. [once] on an ARMED one-shot: like [x N] it changes what a
   // rule can spend, here narrowing it to a single future run, so it must not render like a standing
@@ -407,18 +409,18 @@ function triggerLine(t) {
   const pfo = t?.portfolio === true ? "  [portfolio]" : "";
   switch (t?.type) {
     case "cron":
-      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}${pfo}`;
+      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${mcp}${pol}${pfo}`;
     case "label":
-      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}`;
+      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${mcp}${pol}`;
     case "comment":
-      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}`;
+      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${mcp}${pol}`;
     case "pull_request": {
       const clauses = ruleClauses(t);
       const action = `action[${(t.action ?? []).join(",")}]`;
       // A close-only rule's `#<n>` narrowing renders exactly as the issue arm's does (issue #231): a
       // one-shot on PR #40 that renders like "every close" hides exactly what the operator armed.
       const num = Number.isInteger(t.number) ? ` #${t.number}` : "";
-      return `pull_request  ${action}${num}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}${shot}`;
+      return `pull_request  ${action}${num}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${mcp}${pol}${shot}`;
     }
     case "issue": {
       // pull_request's shape with `#<n>` in the clause slot (issue #231): this plain line and the colored
@@ -427,7 +429,7 @@ function triggerLine(t) {
       // item number it may be narrowed to.
       const action = `action[${(t.action ?? []).join(",")}]`;
       const num = Number.isInteger(t.number) ? ` #${t.number}` : "";
-      return `issue  ${action}${num} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}${shot}`;
+      return `issue  ${action}${num} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${mcp}${pol}${shot}`;
     }
     default:
       return "(unknown trigger)";

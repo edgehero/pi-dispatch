@@ -691,7 +691,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   or `no budget slot`, from the record's `budgetReserved`; nothing for an older record), and its header names the
   record's `why` in parentheses after the reason (`cost-cap (over-cap)`, with `: see compat.maxTokensField` added for
   `cost-cap (unboundable)`; nothing when the record has no `why`), and a trigger with `run.portfolio: true` carries a `[portfolio]` badge on its row,
-  in `/dispatch triggers` and as a drill-in line, and a line in its insights tooltip.
+  in `/dispatch triggers` and as a drill-in line, and a line in its insights tooltip. A trigger with `run.mcp` carries
+  an `[mcp <names>]` badge on its row and in `/dispatch triggers`, the names on the `dispatch_triggers` record, and in
+  its drill-in one trust-model line per server as the overlay's `mcp.json` offers it (transport, where it runs, its
+  exposure and the variable NAMES it is handed, or why every job of it is refused); never a header, an argument, a
+  value or a url's path, and nothing writable (REQ-MCP-OPERATOR-SERVERS).
   `/dispatch priorities` shows the same without reasons and `/dispatch priorities set <id>=<weight> ...` applies a
   plan as `operator-session`; both are zero-spend. A `tool_call` handler blocks pi's built-in `write` and `edit` (and
   a `powershell` command naming one) whose target is the envelope, `projects.json`, `scoped-limits.json`,
@@ -3490,6 +3494,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-12 | No issue: MCP servers in jobs, the operator's view. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a trigger's `run.mcp` shows as a row badge, on the `dispatch_triggers` record and in its drill-in with each server as the overlay offers it; read-only, names and where each runs, never a value. `REQ-UPSTREAM-CONTRACT-TESTS` gains an advisory companion: pi-upgrade-check's MCP canary runs the runner's MCP tests and pins against pi@latest, so a release that moves them shows before the bump. `REQ-MCP-OPERATOR-SERVERS` is UNCHANGED, checked. |
 | 2026-10-12 | No issue: MCP servers in jobs, codemode's models and exclusions. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: a codemode script's `models.*` reach the wrapped methods, proven end to end. **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED**: beside `run.mcp` the field takes the tools the job's MCP brings, and a chained child inherits the exclusions less those names. |
 | 2026-10-12 | No issue: MCP servers in jobs, the runner. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the third part is delivered (the job's session connects the servers before the prompt, with transports the runner builds and closes); acceptance gains the runner's cases, traces gain `DES-MCP-TARGETED-LIFECYCLE` and `DES-MCP-TRANSPORTS-OWNED`. |
 | 2026-10-12 | No issue: MCP servers in jobs, `run.mcp`. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the second part is delivered (a trigger's `run.mcp`, the pickup's refusals before any spend, the job's `/job/mcp.json`, every such job refused on an image without the `mcp` capability until the runner connects them), with acceptance for each refusal and its public comment. **`REQ-TRIGGER-SECRETS` AMENDED**: an MCP server's references are these names or `PI_FORWARD_ENV`'s. **`REQ-EGRESS-ALLOWLIST` AMENDED**: an MCP server the proxy would not reach is refused before spend like a job the policy cannot serve. **Code evidence**: worker/src/triggers.mjs -> validateMcp; worker/src/mcp-preflight.mjs -> makeMcpCheck; worker/src/processor.mjs; worker/src/prepare.mjs; worker/src/image-preflight.mjs -> the mcp row. |

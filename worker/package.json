@@ -74,6 +74,7 @@
 		"./backend-conformance": "./src/backend-conformance.mjs",
 		"./live-probes": "./src/live-probes.mjs",
 		"./triggers": "./src/triggers.mjs",
+    "./mcp-config": "./src/mcp-config.mjs",
     "./triggers-file": "./src/triggers-file.mjs",
     "./packages": "./src/packages.mjs",
     "./pause-windows": "./src/pause-windows.mjs",

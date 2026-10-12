@@ -238,6 +238,16 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 
 Stated openly rather than discovered later:
 
+- **An MCP server is input, and a stdio one is code.** A job connects only the servers the operator lists in
+  the overlay's `mcp.json` and its trigger names (`run.mcp`, [`docs/mcp.md`](docs/mcp.md)): never a repository's
+  `.pi/mcp.json`, never one an extension registers, never one a pi the job starts reads (it gets `--no-mcp`;
+  `pi mcp`, the subcommand, is the residual OQ-011 records). But what a connected server returns (its tools'
+  results, its instructions, its resources) is text the model reads, as untrusted as an issue's body, and a
+  stdio server runs code inside the job's container with the variables its entry names. Its credentials are
+  `${NAME}` references the trigger maps; a reference to a credential the job itself spends with, the forge
+  token or the egress variables is refused before the job starts, and a stdio server never inherits the job's
+  environment.
+
 - **The agent's own token can merge, force-push, and delete branches — and no scope prevents it.**
   This is the sharpest thing on this page. Merging a pull request (`PUT /pulls/{n}/merge`), merging a
   branch directly (`POST /merges`), force-pushing (`PATCH /git/refs/{ref}`) and deleting a ref are **all
