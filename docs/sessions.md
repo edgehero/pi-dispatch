@@ -190,6 +190,39 @@ reason is the one that explains the *next* run's cold start rather than this one
 Two values are not cold starts at all and round out the enum: `resumed`, the transcript loaded and pi
 continued it, and `disabled`, which every job that did not arm `run.resume` records.
 
+## Parked jobs: the agent asks, then waits
+
+Some work needs a decision only a person can make: which of two fixes, whether a breaking change is fine,
+what a vague issue means. A trigger can let the agent stop and ask instead of guessing.
+
+```jsonc
+{ "on": { "type": "label", "any": ["pi:fix"] },
+  "run": { "kind": "github", "flow": "fix", "resume": true, "awaitInput": true } },
+{ "on": { "type": "comment", "phrase": "@pi" },
+  "run": { "kind": "github", "flow": "fix", "resume": true, "awaitInput": true } }
+```
+
+With `awaitInput` the job gets one more tool, `await_human_input`. The agent posts its question on the issue or
+pull request, then calls the tool, and the run ends. Nothing waits in a container and nothing is billed while you
+think. The run counts as completed (reason `awaiting-input` in the run record), so its transcript is saved like any
+completed run, and pi-dispatch adds one comment of its own saying how to continue.
+
+Answer in a comment that starts with the comment trigger's phrase (`@pi go with option B`). That starts a job
+which resumes the saved conversation with your answer, below the same data delimiter every comment gets. If its
+trigger also sets `awaitInput`, the agent can ask again.
+
+Rules:
+
+- `awaitInput` needs `"resume": true` beside it, and is refused wherever `resume` is (cron, `command`, `replicas`,
+  `secrets`).
+- The forge's comment trigger must set `"resume": true`, or the answer starts a fresh job that knows nothing of the
+  question.
+- Every question and answer counts as one resume against `PI_SESSION_MAX_RESUME_CHAIN`, like any other resumed job.
+- The job image must declare the `awaitInput` capability; an older one is refused before anything is spent
+  (`job-image-await-input-unsupported`).
+- Only the job's own tool can park a run. A repository extension that registers the same name stops the job before
+  its prompt (`await-input-shadowed`).
+
 ## Cost
 
 A resumed job starts with the whole prior conversation in its context, so its per-turn token cost is
@@ -208,6 +241,7 @@ that bounds how long a conversation accumulates.
 <PI_SESSIONS_DIR>/<hash>/venue           which backend wrote it; absent on keys from before venues were recorded
 <PI_SESSIONS_DIR>/<hash>/resume-chain    how many times in a row it has been resumed
 <PI_SESSIONS_DIR>/<hash>/context         how full the context was when it was last written
+<PI_SESSIONS_DIR>/<hash>/parked          present while the last run on this key is waiting for an answer
 <PI_SESSIONS_DIR>/<hash>/lock            the one-writer promotion lock; absent when free, and taken
                                          over by the next promotion once it is older than an hour
 ```

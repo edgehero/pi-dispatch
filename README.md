@@ -415,6 +415,9 @@ pi-dispatch import-pi   # stage a credential-free copy of ~/.pi/agent into ./pi-
 - **Sessions can continue.** `"resume": true` makes follow up jobs continue the session that opened the
   pull request. It saves the full transcript to disk, which is a real disclosure: read
   [`docs/sessions.md`](docs/sessions.md) before you turn it on.
+- **Jobs can ask and wait.** With `"awaitInput": true` beside `"resume": true`, the agent can post a question and end
+  its run; your reply on the issue continues it. Nothing runs or is billed while it waits
+  ([`docs/sessions.md`](docs/sessions.md#parked-jobs-the-agent-asks-then-waits)).
 
 ## Run as a service
 

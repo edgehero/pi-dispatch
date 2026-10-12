@@ -3,7 +3,7 @@ import * as realFs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { compactionSummaryIsEmpty, fileListSuffix, hasEmptyCompaction, makeSessionStore, SESSION_FILE_NAME } from "../src/session-store.mjs";
+import { compactionSummaryIsEmpty, fileListSuffix, hasEmptyCompaction, makeSessionStore, PARKED_FILE, SESSION_FILE_NAME } from "../src/session-store.mjs";
 import { sessionKeyFor } from "../src/session-key.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -137,6 +137,31 @@ test("promotion writes the transcript and stamps the pi version that produced it
 	const key = sessionKeyFor(ghIssue);
 	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8"), HEADER);
 	assert.equal(readFileSync(join(sessionsDir, key, "pi-version"), "utf8"), PI);
+});
+
+test("a parked run's promotion marks the key, and the next completed promotion on it clears the mark (issue #625)", () => {
+	const { store, jobDir, sessionsDir, root } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(s, { piVersion: PI, parked: true }).promoted, true);
+	assert.equal(readFileSync(join(sessionsDir, key, PARKED_FILE), "utf8"), String(NOW), "the promotion's own clock");
+
+	const nextDir = mkdtempSync(join(root, "job-"));
+	const next = store.resolveSession(ghIssue, { jobDir: nextDir, piVersion: PI });
+	assert.equal(next.resume, true);
+	writeFileSync(join(next.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(next, { piVersion: PI }).promoted, true);
+	assert.equal(existsSync(join(sessionsDir, key, PARKED_FILE)), false, "a run that did not park leaves no mark behind");
+});
+
+test("a parked run whose promotion fails leaves no mark: the mark never describes a transcript that is not there", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	// Nothing staged: the promotion is skipped before the swap, and so is every sidecar.
+	realFs.rmSync(join(s.hostDir, SESSION_FILE_NAME), { force: true });
+	assert.equal(store.promoteSession(s, { piVersion: PI, parked: true }).promoted, false);
+	assert.equal(existsSync(join(sessionsDir, sessionKeyFor(ghIssue), PARKED_FILE)), false);
 });
 
 test("a job with no key gets no mount at all -- byte-identical to a pre-feature job", () => {

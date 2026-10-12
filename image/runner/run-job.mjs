@@ -9,6 +9,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
+	assertAwaitInputHasSession,
 	assertJobInputsReadable,
 	assertPackagePathsExist,
 	assertSessionMountReady,
@@ -44,6 +45,7 @@ import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown, excludableToolNames } from "./src/tools.mjs";
 import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/mcp.mjs";
+import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-input.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
 // and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
@@ -146,6 +148,7 @@ async function main() {
 	// armed run.resume -- as a 0-byte file even on a cold start -- so an absent one means the /session
 	// bind mount did not land, not that there is nothing to resume. INT-SESSION-STORE-CONTRACT.
 	assertSessionMountReady(cfg.sessionFile);
+	assertAwaitInputHasSession(cfg);
 	// Same moment, same exit code, and for EVERY job, command jobs included (issue #341): a job user that cannot
 	// traverse /job loses its trigger skills without a word and would otherwise spend anyway.
 	// /workspace joins the list for READ only (issue #355). On an SELinux-enforcing host, an operator's local folder
@@ -318,12 +321,16 @@ async function main() {
 	// unattributable to a run.
 	const jobMcp = mcpDocument ? createJobMcp(mcpDocument, { pi: { createMcpExtension, createCodemodeExtension, createToolSearchExtension }, log }) : null;
 	if (jobMcp) stopMcp = () => jobMcp.lifecycle.stop();
+	// The tool a job armed with run.awaitInput may end on (issue #625). Null otherwise, so an unarmed job's loader
+	// options are byte-identical to before the feature.
+	const awaitInput = cfg.awaitInput ? createAwaitInput() : null;
+	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? [])];
 	const resourceLoader = await buildLoadedResourceLoader({
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
 		packagePaths: cfg.packages,
 		log,
-		...(jobMcp && { extensionFactories: jobMcp.factories }),
+		...(extensionFactories.length > 0 && { extensionFactories }),
 	});
 
 	// Read ONCE, unconditionally: the flow check below needs the loaded set whether or not packages
@@ -439,6 +446,12 @@ async function main() {
 	// meant for the job's servers, or reach servers of its own. Then they connect, and the runner waits for each to
 	// answer, before the command check (pi's /mcp is never registered in a job) and before the prompt. pi
 	// connects on session_start, which this runner never emits for every extension: lifecycle fires it for MCP alone.
+	// The tool a parked run ends on answers only for the job (issue #625): another extension registering its name would
+	// end the run in its name, or keep it from ending. Refused before the prompt, while nothing was spent on the task.
+	if (awaitInput) {
+		const shadow = awaitInputShadow(session.getAllTools());
+		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job may`, "await-input-shadowed");
+	}
 	if (jobMcp) {
 		const shadow = mcpShadow({ tools: session.getAllTools(), commands: session.extensionRunner.getRegisteredCommands() });
 		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job's MCP servers may`, "mcp-shadowed");
@@ -582,6 +595,8 @@ async function main() {
 		command: cfg.command ? { failed: commandFailed } : null,
 		isRetryable,
 		rejected,
+		// Armed AND ended on the tool's own result: a call batched with a tool that kept the loop going did not park.
+		parked: awaitInput !== null && parkedTerminal(terminal),
 	});
 	// `metered: true` on the process-wide snapshot is what tells the daily token counter that this
 	// total includes every in-process session, not just the root's turns.

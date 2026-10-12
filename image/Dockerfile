@@ -347,7 +347,12 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # pre-spend instead (its `forgeMcp` capability row, reason job-image-forge-mcp-unsupported). verify-image.sh runs both
 # wrappers as the job user with no network: each must answer, list no withheld tool and no other merge or approval
 # name outside its known list, and refuse a call to each withheld one.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp"
+# `awaitInput` (REQ-AWAIT-INPUT, issue #625) tells the worker this runner reads PI_AWAIT_INPUT, offers the job the
+# await_human_input tool, and ends a run on it as exit 0 / awaiting-input. An older runner handed the variable would
+# ignore it: the agent is never offered the tool, guesses or gives up, and the key is never marked parked. The worker
+# refuses that pairing pre-spend (its `awaitInput` capability row, reason job-image-await-input-unsupported).
+# verify-image.sh checks the baked runner reads the variable.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput"
 
 USER pi
 WORKDIR /workspace

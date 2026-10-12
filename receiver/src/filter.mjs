@@ -185,6 +185,9 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
+		// REQ-AWAIT-INPUT (issue #625): whether the job may end awaiting a person's answer. Present only when armed,
+		// resume's rule, so an unflagged job's data stays byte-identical.
+		...(resolved.awaitInput === true ? { awaitInput: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level like the rest, never
 		// inside `trigger`, and for the sharpest version of that reason: this is the caller's fanout count --
 		// receiver.mjs reads it to decide how many times to enqueue -- and a descriptive context object copied
@@ -232,6 +235,7 @@ function routeIssueLabel(subset, triggers) {
 		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		awaitInput: rule.awaitInput,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.issue?.number, title: subset.issue?.title, body: subset.issue?.body },
@@ -293,6 +297,7 @@ function routeComment(subset, triggers, knownFlows) {
 		waitFor: triggers.comment.waitFor,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
+		awaitInput: triggers.comment.awaitInput,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		// The invoking comment rides on the trigger: body and author_association are both named by
@@ -392,6 +397,7 @@ function routePullRequest(subset, triggers, action) {
 			waitFor: rule.waitFor,
 			instructions: rule.instructions,
 			resume: rule.resume,
+			awaitInput: rule.awaitInput,
 			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },
 			...(isReview ? { review: { id: review.id, body: review.body, state: review.state, author_association: review.author_association } } : {}),
@@ -509,6 +515,7 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		awaitInput: rule.awaitInput,
 		replicas: rule.replicas,
 		matched: matchedFor(rule),
 		target: targetFor(),

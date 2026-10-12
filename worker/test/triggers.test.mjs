@@ -1598,3 +1598,33 @@ test("run.portfolio absent stays ABSENT: an unflagged cron entry normalizes byte
 	assert.equal("portfolio" in t.run, false);
 	assert.equal(JSON.stringify(t.run), JSON.stringify({ kind: "local", folder: "/proj", flow: "tidy", task: "run the tidy pass", provider: undefined, model: undefined, maxTurns: undefined, github: undefined, packages: undefined, image: undefined, resume: undefined }));
 });
+
+// --- run.awaitInput (REQ-AWAIT-INPUT, issue #625) ---
+
+test("run.awaitInput is carried beside run.resume on every forge kind, and absent when not written", () => {
+	const [label, comment, pr] = parse([
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", resume: true, awaitInput: true } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", flow: "fix", resume: true, awaitInput: true } },
+		{ on: { type: "pull_request", action: ["synchronize"] }, run: { kind: "github", flow: "review", resume: true, awaitInput: false } },
+	]);
+	assert.equal(label.run.awaitInput, true);
+	assert.equal(comment.run.awaitInput, true);
+	assert.equal(pr.run.awaitInput, false, "false is the documented default and is carried, run.resume's rule");
+	const [plain] = parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } }]);
+	assert.equal("awaitInput" in plain.run, false, "an unflagged trigger normalizes byte-identically");
+});
+
+test("run.awaitInput: true needs run.resume: true, and a non-boolean is refused", () => {
+	assert.throws(
+		() => parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", awaitInput: true } }]),
+		(e) => isConfigError(e) && /run\.awaitInput needs run\.resume: true/.test(e.message) && e.message.includes(PATH),
+	);
+	assert.throws(
+		() => parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", resume: true, awaitInput: "false" } }]),
+		(e) => isConfigError(e) && /run\.awaitInput must be true or false/.test(e.message),
+	);
+	// Cron cannot arm run.resume, so it cannot arm this either; the refusal names the missing resume.
+	assert.throws(() => parse([withRun(CRON, { awaitInput: true })]), (e) => isConfigError(e) && /run\.awaitInput needs run\.resume/.test(e.message));
+	const [cron] = parse([withRun(CRON, { awaitInput: false })]);
+	assert.equal("awaitInput" in cron.run, false, "a cron entry never carries the key");
+});

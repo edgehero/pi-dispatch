@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import {
+	AWAITING_INPUT,
 	capExitMessage,
 	captureTerminal,
 	classifyPromptRejection,
@@ -148,6 +149,20 @@ test("a tool-ended run still loses to every budget stop, and keeps its verdict o
 
 test("only the toolResult role is read as tool-terminated: an assistant without a stopReason is still unknown", () => {
 	assert.deepEqual(classifyStopReason({ role: "assistant", content: [] }), { code: EXIT_INFRA, reason: "unknown-stop-reason:undefined" });
+});
+
+// --- a parked run (issue #625, run.awaitInput) ---
+
+test("a parked run exits 0 as awaiting-input, below every budget stop and a classified rejection", () => {
+	const terminal = { role: "toolResult", toolName: "await_human_input", content: [], isError: false };
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal, parked: true }), { code: EXIT_COMPLETED, reason: AWAITING_INPUT });
+	assert.equal(decideExit({ budgetAborted: true, budgetTurns: 4, tokenAborted: false, terminal, parked: true }).reason, "turn_budget");
+	assert.equal(decideExit({ budgetAborted: false, meterStop: COST_CAP, tokenAborted: false, terminal, parked: true }).reason, COST_CAP);
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: true, terminal, parked: true }).reason, TOKEN_BUDGET);
+	const rejected = { code: EXIT_POLICY, reason: "retry-unresumable" };
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal, rejected, parked: true }), rejected);
+	// Unparked, the same terminal is a run a tool ended (issue #623), never a park.
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal }), { code: EXIT_COMPLETED, reason: "tool-terminated" });
 });
 
 // --- decideExit for command jobs (issue #189, run.command) ---
@@ -573,7 +588,7 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
 	assert.match(src, /const capped = capExitMessage\(outcome\);\s*exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
-	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\trejected,\n\t\}\);/, "decideExit must receive isRetryable, and the classified rejection");
+	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\trejected,\n[\s\S]*?\n\t\tparked: awaitInput !== null && parkedTerminal\(terminal\),\n\t\}\);/, "decideExit must receive isRetryable, the classified rejection, and whether the run parked (issue #625)");
 });
 
 test("run-job.mjs classifies a prompt() rejection only through classifyPromptRejection, and rethrows the rest (issue #509)", () => {
