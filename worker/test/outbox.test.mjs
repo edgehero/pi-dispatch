@@ -470,6 +470,20 @@ test("a chained child inherits the PARENT'S excludeTools, and the request file c
 	assert.equal(JSON.stringify(args).includes("MARKER-read"), false, "the request file's key is never read");
 });
 
+test("a chained child does NOT inherit the parent's run.mcp, and the request file cannot set one (REQ-MCP-OPERATOR-SERVERS)", async () => {
+	// The servers are reached with credentials the parent's trigger maps, a grant to that trigger like run.secrets,
+	// and the child's task is agent-authored. A child without them connects nothing: the narrowing direction.
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", mcp: ["MARKER-server"] }) } } });
+	const cap = makeCapture();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+	const parent = localJob();
+	parent.data = { ...parent.data, mcp: ["docs"] };
+	await collect({ job: parent, prepared: PREPARED });
+	const { args } = cap.enqueued[0];
+	assert.equal(args.mcp, undefined);
+	assert.equal(JSON.stringify(args).includes("MARKER-server"), false);
+});
+
 test("a parent with no excludeTools chains a child whose data carries none either (#291)", async () => {
 	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it" }) } } });
 	const cap = makeCapture();

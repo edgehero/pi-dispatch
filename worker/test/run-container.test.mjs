@@ -237,6 +237,13 @@ test("the trigger's excludeTools reach the container env, and an unflagged job e
 	assert.ok(!junk.some((a) => String(a).startsWith("PI_EXCLUDE_TOOLS")));
 });
 
+test("the trigger's run.mcp reaches the container env as PI_MCP_SERVERS, and a job without it emits none (REQ-MCP-OPERATOR-SERVERS)", { skip }, async () => {
+	assert.ok((await argvFor({ ...JOB, mcp: ["docs", "files"] })).includes("PI_MCP_SERVERS=docs,files"));
+	for (const job of [JOB, { ...JOB, mcp: [] }, { ...JOB, mcp: "docs" }]) {
+		assert.ok(!(await argvFor(job)).some((a) => String(a).startsWith("PI_MCP_SERVERS")));
+	}
+});
+
 test("the job's dollar cap reaches the container env as PI_MAX_COST_MICROS, 0 included, and an uncapped job emits none (#501)", { skip }, async () => {
 	// The hop from the effective job to buildContainerEnv. Dropped here, every capped job would pass the costCap
 	// gate and then run with NO cap on Docker and Podman alike, so this asserts the argv itself.

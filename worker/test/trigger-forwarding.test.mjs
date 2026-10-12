@@ -25,6 +25,8 @@ const BASE = {
 	secretsProfile: "ci",
 	backend: "local",
 	excludeTools: ["bash"],
+	// REQ-MCP-OPERATOR-SERVERS: the overlay MCP servers the job connects.
+	mcp: ["docs"],
 	provider: "openai",
 	model: "gpt-5.4",
 	maxTurns: 9,
@@ -65,4 +67,16 @@ test("cron absent stays absent: no model or cap named serializes to job data wit
 	const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
 	const wire = JSON.parse(JSON.stringify(schedule.data));
 	for (const k of ["provider", "model", "maxTurns", "models", "maxCostUsd"]) assert.equal(k in wire, false, k);
+});
+
+test("cron: each field ALONE reaches the schedule's job data (one folded into a neighbour's conditional is dropped only without it)", () => {
+	const needs = { secretsProfile: { secrets: BASE.secrets }, models: { provider: BASE.provider, model: BASE.model } };
+	for (const [field, value] of Object.entries(BASE)) {
+		if (field === "folder") continue;
+		const run = { kind: "local", folder: "/proj", flow: "tidy", task: "t", ...(needs[field] ?? {}), [field]: value };
+		const json = JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run }] });
+		const [normalized] = parseTriggers(json, "/t.json");
+		const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
+		assert.deepEqual(JSON.parse(JSON.stringify(schedule.data))[field], JSON.parse(JSON.stringify(normalized.run))[field], `run.${field} alone was dropped`);
+	}
 });

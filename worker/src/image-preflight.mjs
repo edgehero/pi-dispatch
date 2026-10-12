@@ -44,7 +44,8 @@ export function resolveJobImage(job, defaultImage) {
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
  *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
- *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported) => POLICY
+ *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported)
+ *                            => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
  * so the failure path disambiguates POSITIVELY with `docker info` rather than by matching docker's stderr.
@@ -190,6 +191,16 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-cost-cap-unsupported",
 		event: "refused_image_cost_cap_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare cost-cap support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore the per-job dollar cap and run this job with no cap at all. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// REQ-MCP-OPERATOR-SERVERS: a runner that predates run.mcp reads no /job/mcp.json, so the job would run without
+	// the servers its flow was written against and record a clean exit while the file reads as though it named them.
+	Object.freeze({
+		token: "mcp",
+		needed: (job) => Array.isArray(job?.mcp) && job.mcp.length > 0,
+		result: "mcpUnsupported",
+		reason: "job-image-mcp-unsupported",
+		event: "refused_image_mcp_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare MCP support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would not connect the servers \`run.mcp\` names. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

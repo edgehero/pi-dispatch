@@ -219,6 +219,9 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// `portfolio` (issue #505) is ABSENT for the same reason, and more plainly: it is budget authority, granted
 					// to one cron trigger the operator reviewed. A child is an agent's request, so inheriting the flag would let
 					// a portfolio job queue a second plan writer of its own choosing.
+					// `mcp` (REQ-MCP-OPERATOR-SERVERS) is ABSENT for the secrets' reason: a server is reached with the
+					// credentials its trigger maps, a capability granted to the trigger the operator reviewed. A child
+					// without it connects no server, which is the narrowing direction.
 					chainDepth: childDepth,
 					parentJobId: job.id,
 					// chainedJobId deliberately does NOT take the image: the child's identity is (parent, flow, task).

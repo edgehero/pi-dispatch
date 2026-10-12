@@ -1108,6 +1108,38 @@ test("the free credential gate resolves against the SAME inputs buildContainerEn
 	assert.deepEqual(gate({ provider: "local-ollama" }, { modelEndpoints: { ...snapshot, models: null, modelsUnreadable: { code: "EIO" } } }), { ok: false, unavailable: "EIO" });
 });
 
+test("the MCP check is wired into the processor, reads the boot's overlay per job, and keeps the provider's key from a server (REQ-MCP-OPERATOR-SERVERS)", { skip }, async () => {
+	// Driven rather than read: the processor's own default refuses every job that names a server, so a wiring that
+	// dropped this dep (or put it on a backend bundle the processor never sees) would refuse each run.mcp job as
+	// mcp-config-invalid with nothing else failing.
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const overlay = tempDir("pi-global-");
+	try {
+		const { deps } = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay, PI_AUTH_FROM_PI: "0" }, makeAuth, makeHost: () => fakeHost() });
+		assert.equal(typeof deps.checkMcp, "function", "the processor is wired with the check at all");
+		assert.equal(deps.checkMcp({ mcp: ["docs"], provider: "anthropic" }).refused, "mcp-config-invalid", "no mcp.json yet");
+		// Written after boot: the file is read at each pickup, so a re-run of import-pi needs no restart.
+		const servers = { docs: { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer ${DOCS_TOKEN}" }, description: "Docs" }, keyed: { url: "https://mcp.example.com/k", headers: { Authorization: "Bearer ${ANTHROPIC_API_KEY}" }, description: "Keyed" } };
+		writeFileSync(join(overlay, "mcp.json"), JSON.stringify({ mcpServers: servers }));
+		const docs = { mcp: ["docs"], provider: "anthropic", secrets: { DOCS_TOKEN: "op://x" } };
+		// The egress policy is on by default, and the allowlist read is the deployment's own file, which holds no such host.
+		assert.equal(deps.checkMcp(docs).refused, "mcp-egress-unreachable");
+		assert.equal(deps.checkMcp({ mcp: ["keyed"], provider: "anthropic", secrets: { ANTHROPIC_API_KEY: "op://x" } }).refused, "mcp-secret-reserved", "the provider's key is the job's own");
+		assert.equal(deps.checkMcp({ mcp: ["keyed"], provider: "openai", models: ["openai/gpt-5.4", "anthropic/claude-haiku-4-5"], secrets: { ANTHROPIC_API_KEY: "op://x" } }).refused, "mcp-secret-reserved", "and so is every provider's on the job's model list, which pi reads on a model switch");
+		assert.equal(deps.checkMcp({ mcp: ["keyed"], provider: "openai", models: ["openai/gpt-5.4"], secrets: { ANTHROPIC_API_KEY: "op://x" } }).refused, "mcp-egress-unreachable", "a provider the job's list keeps it from calling is the operator's to hand a server");
+		assert.equal(deps.checkMcp({ mcp: ["keyed"], provider: "openai", secrets: { ANTHROPIC_API_KEY: "op://x" } }).refused, "mcp-secret-reserved", "with no list the job may call any provider, so every builtin key is its own");
+		// The deployment's model list counts when the trigger names none: its providers' keys are the job's to spend with.
+		const listed = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay, PI_AUTH_FROM_PI: "0", PI_ALLOWED_MODELS: "openai/gpt-5.4,anthropic/claude-haiku-4-5" }, makeAuth, makeHost: () => fakeHost() });
+		assert.equal(listed.deps.checkMcp({ mcp: ["keyed"], provider: "openai", secrets: { ANTHROPIC_API_KEY: "op://x" } }).refused, "mcp-secret-reserved");
+		const off = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay, PI_AUTH_FROM_PI: "0", PI_EGRESS: "0" }, makeAuth, makeHost: () => fakeHost() });
+		const passed = off.deps.checkMcp(docs);
+		assert.equal(passed.ok, true, JSON.stringify(passed));
+		assert.deepEqual(Object.keys(passed.document.servers), ["docs"]);
+	} finally {
+		rmSync(overlay, { recursive: true, force: true });
+	}
+});
+
 test("the secrets resolver and the container builder are handed the SAME host env and forward list", { skip }, async () => {
 	// Issue #309. `hostEnv` is what the resolver SUBPROCESS runs in; the same `env` is what buildContainerEnv
 	// reads to assemble the container. They were not the same object: makeSecretsResolver was constructed

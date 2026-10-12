@@ -49,6 +49,8 @@ const MAX_RUN = {
 	secretsProfile: "ci",
 	backend: "local",
 	excludeTools: ["bash"],
+	// REQ-MCP-OPERATOR-SERVERS: the overlay MCP servers the job connects.
+	mcp: ["docs"],
 	provider: "openai",
 	model: "gpt-5.4",
 	maxTurns: 9,
@@ -231,6 +233,28 @@ test("absent stays absent: a trigger naming no model or cap enqueues a job with 
 			for (const k of ["provider", "model", "maxTurns", "models", "maxCostUsd"]) assert.equal(k in r.job, false, `${forge} ${entry.route}: ${k}`);
 			const data = await enqueuedData(forge, r.job);
 			for (const k of ["provider", "model", "maxTurns", "models", "maxCostUsd"]) assert.equal(k in data, false, `${forge} ${entry.route}: ${k} in stored data`);
+		}
+	}
+});
+
+test("each field ALONE reaches the job: one folded into a neighbour's conditional spread is dropped only without that neighbour", async () => {
+	// The maximal fixture sets every field at once, so a field spread inside another's conditional (as `run.mcp` could
+	// be, under `excludeTools`) passes it while a trigger naming that field alone loses it. Each field here is the
+	// trigger's only optional one, with the companions the loader requires of it and nothing else.
+	const needs = { secretsProfile: { secrets: MAX_RUN.secrets }, models: { provider: MAX_RUN.provider, model: MAX_RUN.model } };
+	for (const [field, value] of Object.entries(MAX_RUN)) {
+		for (const [forge, entries] of Object.entries(ENTRIES)) {
+			for (const entry of entries) {
+				const raw = { on: entry.on, run: { kind: forge, flow: "work", ...(needs[field] ?? {}), [field]: value, ...(entry.extra ?? {}) } };
+				const json = JSON.stringify({ triggers: [raw] });
+				const [normalized] = parseTriggers(json, "/t.json");
+				const cfg = {};
+				assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json }), { ok: true }, `${forge} ${entry.route}: ${field} alone must load`);
+				const r = drive(forge, entry.route, cfg.triggers);
+				assert.equal(r.enqueue, true, `${forge} ${entry.route}: ${r.reason}`);
+				const data = await enqueuedData(forge, r.job);
+				assert.deepEqual(data[field], normalized.run[field], `${forge} ${entry.route}: run.${field} alone was dropped on the way to the job`);
+			}
 		}
 	}
 });

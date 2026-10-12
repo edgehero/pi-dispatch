@@ -269,7 +269,7 @@ const skewFile = (run) => ({ readFileSync: () => JSON.stringify({ triggers: [{ o
 const arrived = (extra = {}) => ({ trigger: { matched: { index: 0, type: "label" } }, kind: "github", flow: "fix", ...extra });
 
 test("the skew check refuses a job whose AUTHORED trigger lists models it arrived without, and reads one row per field", async () => {
-	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["models", "maxCostUsd"], "a new narrowing field is one row here");
+	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["models", "maxCostUsd", "mcp"], "a new narrowing field is one row here");
 	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ models: ["openai/gpt-x"] }) });
 	assert.deepEqual(await check(arrived()), { skewed: true, field: "models" }, "a stale receiver dropped the list");
 	assert.deepEqual(await check(arrived({ models: null })), { skewed: true, field: "models" }, "null is absent");
@@ -297,6 +297,13 @@ test("the skew check refuses a job whose AUTHORED trigger sets maxCostUsd it arr
 	// The identity guard and the unreadable file fail OPEN, as for every row.
 	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ maxCostUsd: "1" }) });
 	assert.deepEqual(await check(arrived({ flow: "other" })), { ok: true });
+});
+
+test("the skew check refuses a job whose AUTHORED trigger names MCP servers it arrived without (REQ-MCP-OPERATOR-SERVERS)", async () => {
+	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ mcp: ["docs"] }) });
+	assert.deepEqual(await check(arrived()), { skewed: true, field: "mcp" }, "a stale receiver dropped the list");
+	assert.deepEqual(await check(arrived({ mcp: ["docs"] })), { ok: true });
+	assert.deepEqual(await check(arrived({ flow: "other" })), { ok: true }, "the identity guard fails open");
 });
 
 test("the processor hands the skew check maxCostUsd as the job ARRIVED, and refuses a dropped cap as trigger-skew (#501)", { skip }, async () => {

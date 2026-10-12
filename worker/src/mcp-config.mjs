@@ -267,6 +267,37 @@ export function piEntry(server) {
 	return { type: transport === "http" ? "http" : "stdio", ...rest };
 }
 
+/** The per-job document's name in the job's folder, read in the container as `/job/mcp.json`. */
+export const JOB_MCP_FILE = "mcp.json";
+/** The per-job document's version: the runner refuses one it does not know. */
+export const JOB_MCP_VERSION = 1;
+
+/**
+ * The per-job document the worker writes to `/job/mcp.json` (INT-CONTAINER-JOB-INPUTS) for the servers a job's
+ * trigger names, in that order: each in pi's shape with every reference still a reference, `toolExposure` gaining
+ * `"dispatch_*": "hidden"` (an MCP tool by that name is never offered, the admin's tools being the one recursion
+ * vector), and the names each server references, so the runner resolves those and no other. Never a value: the
+ * worker holds the trigger's resolved secrets, and none of them reaches this file. `codemodeModels` is false until
+ * the job's spend through codemode's `models.*` is proven metered and capped.
+ */
+export function jobMcpDocument(parsed, names) {
+	const servers = {};
+	const refs = {};
+	for (const name of names) {
+		const server = parsed.servers[name];
+		const entry = piEntry(server);
+		// pi takes an exact tool name before any pattern, and the patterns in order (core/mcp-servers.js
+		// `getMcpToolExposure`), so the hide goes FIRST and a key of the operator's that names only such tools (an exact
+		// `dispatch_` name, which would beat the pattern, or a narrower pattern) goes. Any other key stays as written: a
+		// `dispatch*` pattern still governs `dispatcher_run`, and the hide, being first, still governs `dispatch_run`.
+		const kept = Object.entries(entry.toolExposure ?? {}).filter(([key]) => !key.startsWith("dispatch_"));
+		entry.toolExposure = Object.fromEntries([["dispatch_*", "hidden"], ...kept]);
+		servers[name] = entry;
+		refs[name] = [...server.refs];
+	}
+	return { version: JOB_MCP_VERSION, autoEnableCodemode: parsed.autoEnableCodemode, codemodeModels: false, servers, refs };
+}
+
 /** The text of an overlay `mcp.json` holding exactly `parsed`'s accepted servers, as import-pi writes it. */
 export function overlayMcpText(parsed) {
 	const mcpServers = {};
