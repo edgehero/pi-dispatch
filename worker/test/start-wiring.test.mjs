@@ -860,7 +860,7 @@ test("runtime settings: getSettings is a top-level createWorker arg resolving ef
 		captured.getSettings(),
 		{
 			provider: "anthropic",
-			model: "claude-sonnet-4-5-20250929",
+			model: "claude-sonnet-5-5",
 			maxTurns: 30,
 			dailyCap: 25,
 			weeklyCap: null,
@@ -4549,7 +4549,7 @@ test("the host row's fpUsd is the dollar fingerprint of the live settings and sc
 	writeFileSync(limitsFile, JSON.stringify({ version: 2, limits: [{ scope: "acme/web", dayUsd: "5" }, { scope: "model:openai/gpt-4o", weekUsd: "9" }] }));
 	let fields = null;
 	await runStart({
-		env: { VALKEY_URL, PI_WORKER_NAME: "fp-usd-1", PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "20", PI_SETTINGS_FILE: settingsFile, PI_SCOPED_LIMITS_FILE: limitsFile, PI_ALLOWED_MODELS: "anthropic/claude-sonnet-4-5-20250929" },
+		env: { VALKEY_URL, PI_WORKER_NAME: "fp-usd-1", PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "20", PI_SETTINGS_FILE: settingsFile, PI_SCOPED_LIMITS_FILE: limitsFile, PI_ALLOWED_MODELS: "anthropic/claude-sonnet-5-5" },
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 		makeHost: () => fakeHost(),
 		makeHostRegistry: (args) => {
@@ -4559,7 +4559,7 @@ test("the host row's fpUsd is the dollar fingerprint of the live settings and sc
 	});
 	assert.equal(typeof fields?.fpUsd, "function", "a thunk, so a peer compares against what this host believes now");
 	const rows = parseScopedLimits(readFileSync(limitsFile, "utf8"), limitsFile);
-	const LIST = ["anthropic/claude-sonnet-4-5-20250929"];
+	const LIST = ["anthropic/claude-sonnet-5-5"];
 	assert.equal(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, rows, LIST), "env settings and the dollar rows");
 	assert.notEqual(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, []), "the rows are in it");
 	assert.notEqual(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, rows, null), "and the env list: with it, a job without its own list reserves in no model row here");
