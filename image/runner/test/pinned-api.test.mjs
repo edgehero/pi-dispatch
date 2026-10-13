@@ -1827,8 +1827,9 @@ test("review of #534: the samplingParams merge comes after the output cap, and p
 	// PR #534's review: the box pi fits an image into before it enters the conversation, the per-image ceiling's input.
 	const resize = agentDistFile("utils", "image-resize-core.js");
 	assert.match(resize, new RegExp(`maxWidth: ${IMAGE_RESIZE_MAX.width},\\s*maxHeight: ${IMAGE_RESIZE_MAX.height},`), "pi's default image resize box moved -- IMAGE_RESIZE_MAX must follow it");
-	// And a model may declare its own box, which callCostBound reads off the model object.
-	assert.match(nestedPiAi("types.d.ts"), /export interface ModelImageResizeOptions \{\s*maxWidth\?: number;\s*maxHeight\?: number;/);
+	// And a model may declare its own box, which callCostBound reads off the model object. Since 1.2.0 the type is a
+	// TypeBox schema in providers/model-schema, and the two sides are integers, a subset of what callCostBound accepts.
+	assert.match(nestedPiAi("providers", "model-schema.d.ts"), /export declare const ModelImageResizeOptionsSchema: Type\.TObject<\{\s*maxWidth: Type\.TOptional<Type\.TInteger>;\s*maxHeight: Type\.TOptional<Type\.TInteger>;/);
 });
 
 // ── Issue #500: the seams subprocess metering needs ──────────────────────────────────────────────────────────
@@ -2105,10 +2106,13 @@ test("the runner's pi-mcp is the copy pi's MCP extension uses, so a StdioTranspo
 	assert.equal(runner, fromPi);
 });
 
-test("pi's connect runs in the order the runner's readiness observes: initialize, initialized, then the tool and resource lists", { skip }, () => {
+test("pi's connect runs in the order the runner's readiness observes: initialize, initialized, then the tool list", { skip }, () => {
 	const client = mcpDistFile("client.js");
 	assert.match(client, /await transport\.start\(\);[\s\S]*?this\.requestInternal\("initialize",[\s\S]*?SUPPORTED_PROTOCOL_VERSIONS\.includes[\s\S]*?await this\.notifyInternal\("notifications\/initialized"/, "the client's connect order changed");
 	assert.match(client, /catch \(error\) \{\n\s*await this\.close\(\)\.catch\(\(\) => \{ \}\);\n\s*throw error;/, "a failed connect no longer closes the transport, which the runner reads as a refusal");
 	const runtime = agentDistFile("extensions", "mcp", "runtime.js");
-	assert.match(runtime, /await client\.connect\(transport\);[\s\S]*?client\.serverCapabilities\?\.tools \? client\.listTools\(\) : \[\],[\s\S]*?this\.onTools\(this\);/, "pi no longer lists a server's tools before registering them");
+	// pi 1.2.0 lists only the tools at connect; the resource lists moved to the resource tools, on demand (pi #10526).
+	assert.match(runtime, /await client\.connect\(transport\);[\s\S]*?const tools = client\.serverCapabilities\?\.tools \? await client\.listTools\(\) : \[\];[\s\S]*?this\.onTools\(this\);/, "pi no longer lists a server's tools before registering them");
+	// The transport's send takes the client's `{ signal }` (pi-mcp 1.2.0), which the runner's observed subclass forwards.
+	assert.match(client, /\.send\(message, \{ signal: entry\.sendController\.signal \}\)/, "pi-mcp no longer hands send a signal: re-read the observed transport's send (src/mcp.mjs)");
 });

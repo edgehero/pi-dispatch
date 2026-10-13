@@ -519,7 +519,9 @@ test("readiness holds pi's own verdict: a tool list pi refuses is mcp-unavailabl
 	const hung = await startOutcome("reshang", {}, { timeout: 2 });
 	assert.equal(hung.ready, true, JSON.stringify(hung));
 	assert.deepEqual(hung.tools, ["mcp__files__echo"]);
-	assert.ok(Date.now() - began < 10_000, "ready once pi stopped waiting for the resource list, not at the end of the wait");
+	// pi 1.2.0 asks no resource list at connect, so this case now holds by pi never asking; up to 1.1.0 it held by pi's
+	// cancel of the list it stopped waiting for. Kept: either way the server is ready without that list.
+	assert.ok(Date.now() - began < 10_000, "ready without the resource list, not at the end of the wait");
 });
 
 test("the runner's server-name rule is the overlay's", { skip }, async () => {

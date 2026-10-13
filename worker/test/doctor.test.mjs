@@ -402,10 +402,12 @@ test("doctor: a literal key in the overlay models.json is a hard failure", async
 });
 
 test("doctor: an overlay entry pi will not compose is ✗ naming the provider; a dropped file's fix names the public endpoint (issue #539)", async () => {
-	const uncomposable = overlay({ models: JSON.stringify({ providers: { openai: { baseUrl: "http://proxy.lan:8080/v1", models: [{ id: "my-ft", maxTokens: 0 }] }, ollama: { baseUrl: "http://gpu.lan:11434/v1", api: "openai-completions", models: [{ id: "q" }] } } }) });
+	// pi 1.2.0's schema refuses a token count of 0 or below, so `maxTokens: 0` (this fixture until then) drops the whole
+	// file now; for a builtin provider the composition failure left is `oauth` without a baseUrl of its own.
+	const uncomposable = overlay({ models: JSON.stringify({ providers: { openai: { oauth: "radius", headers: { "x-team": "a" } }, ollama: { baseUrl: "http://gpu.lan:11434/v1", api: "openai-completions", models: [{ id: "q" }] } } }) });
 	const a = capture();
 	assert.equal(await runDoctor(overlayEnv(uncomposable), overlayDeps(a.out)), 1);
-	assert.match(a.text(), /✗ Overlay models\.json entry "openai" is one pi will not compose \(maxTokens\), so pi drops all of it, its baseUrl and headers included\n {4}→ every job that runs or lists a model of "openai" is refused as model-unknown \(overlay-provider-invalid\)/);
+	assert.match(a.text(), /✗ Overlay models\.json entry "openai" is one pi will not compose \(oauth-without-baseUrl\), so pi drops all of it, its baseUrl and headers included\n {4}→ every job that runs or lists a model of "openai" is refused as model-unknown \(overlay-provider-invalid\)/);
 	assert.doesNotMatch(a.text(), /entry "ollama"/, "an entry pi composes has no line");
 	assert.match(a.text(), /✓ Overlay models\.json is credential-free/, "the file itself loads");
 	for (const [text, fix] of [

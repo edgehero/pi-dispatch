@@ -294,6 +294,22 @@ Any trigger type can name the model its jobs run on, and how many turns a job ma
     `stepfun/step-3.5-flash`.
 
   180 models changed price, most of them on `openrouter` (101) and `vercel-ai-gateway` (48).
+
+  pi 1.2.0 removed these ids:
+  - `google-vertex`: `gemini-flash-latest` and `gemini-flash-lite-latest`.
+  - `opencode`: `fledge-alpha-free`.
+  - `openrouter`: `inclusionai/ling-3.0-flash-sante:free` (`inclusionai/ling-3.0-flash-sante` is new),
+    `qwen/qwen-plus-2025-07-28`, `qwen/qwen3-235b-a22b`, `qwen/qwen3-30b-a3b-thinking-2507`, `qwen/qwen3-8b`,
+    `qwen/qwen3-coder-plus`, `qwen/qwen3-max`, `qwen/qwen3-max-thinking`, `qwen/qwen3-vl-235b-a22b-thinking`,
+    `qwen/qwen3-vl-32b-instruct`, `qwen/qwen3-vl-8b-thinking`, `qwen/qwen3.6-max-preview` and
+    `sao10k/l3.1-euryale-70b`.
+  - `vercel-ai-gateway`: `alibaba/qwen-3.6-max-preview`, `alibaba/qwen3-235b-a22b-thinking`,
+    `alibaba/qwen3-coder-plus`, `alibaba/qwen3-max`, `alibaba/qwen3-max-preview`,
+    `alibaba/qwen3-vl-235b-a22b-instruct`, `alibaba/qwen3-vl-thinking`, `anthropic/claude-3-haiku` and
+    `anthropic/claude-opus-4`.
+
+  54 models changed price, most of them on `openrouter` (42); on `anthropic`, `claude-sonnet-5-5`'s cache read
+  halved. `anthropic/claude-sonnet-4-5` (and its dated id) now has a context window of 200k tokens, down from 1M.
 - `"model"` is that provider's model id. Case is kept as you wrote it.
 - `"maxTurns"` is a whole number of 1 or more.
 

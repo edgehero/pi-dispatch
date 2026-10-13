@@ -39,6 +39,7 @@ const skip = ModelConfig ? false : `pi-coding-agent not installed at the workspa
 // A maximal valid document: every object in pi's schema appears, so a mutation of any leaf is a case.
 const COST = { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 };
 const MAXIMAL = {
+	$schema: "https://pi.dev/schemas/models.schema.json",
 	providers: {
 		ollama: {
 			name: "Ollama",
@@ -51,11 +52,17 @@ const MAXIMAL = {
 				supportsStore: false,
 				maxTokensField: "max_tokens",
 				thinkingFormat: "qwen",
-				chatTemplateKwargs: { enable_thinking: { $var: "thinking.enabled", omitWhenOff: true }, temp: 1, flag: null },
+				chatTemplateKwargs: { enable_thinking: { $var: "thinking.enabled", omitWhenOff: true }, budget: { $var: "thinking.budget" }, temp: 1, flag: null },
 				openRouterRouting: { allow_fallbacks: true, data_collection: "deny", order: ["a"], sort: { by: "price", partition: null }, max_price: { prompt: 1, completion: "2" }, preferred_min_throughput: { p50: 1 }, preferred_max_latency: 3 },
 				vercelGatewayRouting: { only: ["x"] },
 				sessionAffinityFormat: "openrouter",
 				vllmPriority: 2,
+				// pi 1.2.0's merged compat (issue #587's bump procedure): keys new in 1.2.0, each mutated by the corpus.
+				zaiToolStream: false,
+				thinkingTokenBudgetField: "thinking_budget",
+				supportsThinkingTokenBudget: false,
+				supportsMidConvoSystemMessages: false,
+				supportsMidConvoToolAdditions: false,
 			},
 			models: [
 				{
@@ -74,10 +81,10 @@ const MAXIMAL = {
 					samplingParams: { temperature: 0.2, anything: [1, { x: 2 }] },
 					samplingParamsByThinkingLevel: { off: { temperature: 0 }, high: { max_tokens: 100, anything: [1] }, max: {} },
 					headers: { "x-m": "n" },
-					compat: { supportsEagerToolInputStreaming: true, allowedFallbackModels: [{ provider: "anthropic", model: "claude-x", cost: COST }] },
+					compat: { supportsEagerToolInputStreaming: true, supportsMidConvoToolChanges: false, allowedFallbackModels: [{ provider: "anthropic", model: "claude-x", cost: COST }] },
 				},
 			],
-			modelOverrides: { "qwen2.5:0.5b": { name: "Q", cost: { input: 1 }, contextWindow: 1, samplingParamsByThinkingLevel: { low: { top_p: 0.5 } }, compat: { supportsMaxOutputTokens: true } } },
+			modelOverrides: { "qwen2.5:0.5b": { name: "Q", cost: { input: 1 }, contextWindow: 1, samplingParamsByThinkingLevel: { low: { top_p: 0.5 } }, compat: { supportsMaxOutputTokens: true, supportsAdditionalTools: false, supportsToolSearch: false, supportsExplicitPromptCacheMode: false } } },
 		},
 		radius: { oauth: "radius" },
 	},
@@ -85,6 +92,8 @@ const MAXIMAL = {
 
 // Files that pass pi's SCHEMA and then fail, or not, at pi's provider COMPOSITION (provider-composer.js
 // applyModelsJson/modelFromJson). pi keeps the provider's builtin models and drops every model the overlay added.
+// Since 1.2.0 the token-count cases (a contextWindow or maxTokens of 0 or below) fail at the schema instead, which
+// drops the whole file; they stay, as files both readers must refuse.
 const COMPOSITION = {
 	"custom provider, no api": { providers: { ollama: { baseUrl: "http://gpu:11434/v1", apiKey: "k", models: [{ id: "qwen" }] } } },
 	"custom provider, no baseUrl": { providers: { ollama: { api: "openai-completions", apiKey: "k", models: [{ id: "qwen" }] } } },
@@ -163,8 +172,12 @@ function corpus() {
  * samplingParamsByThinkingLevel under models[] and modelOverrides; provider-composer.js merges it per level.
  */
 const MIRRORED_PI_FILES = Object.freeze({
-	"dist/core/model-config.js": "24a0e0f98672766e16e00d9f61587f50f9481915581156ae71a14e48ee912e4c",
+	"dist/core/model-config.js": "602795a0db074909e325e65c6b34c9120d0d2eb39f678e453a5ceffbbb37984b",
 	"dist/core/provider-composer.js": "b088d1babb75360da6bf1bcbe8e140ce600e1db15f51345f1965d3d1e9f267ef",
+	// Since 1.2.0 model-config.js imports its compat, cost, prompt-cache, input-limit and thinking-map schemas from
+	// pi-ai, so the two files they live in are part of what the mirror transcribes. Relative to PI: the hoisted pi-ai.
+	"../pi-ai/dist/providers/compat-schema.js": "424a688c89282b3f27d6648d0b7c55ccd13c896950496caded1ae42a26b65c9c",
+	"../pi-ai/dist/providers/model-schema.js": "0205aa9edd78ce9c4c3590fac2937ad7fbfcd54b325ee5c546501759dd0cfe69",
 });
 
 test("the mirror is transcribed from the pinned pi's own files: a file that changed must be re-transcribed, then its hash moved", { skip }, () => {
@@ -240,7 +253,9 @@ test("pi drops a provider entry it cannot compose, endpoint included, and the wo
 		const runtime = await ModelRuntime.create({ modelsPath: file, authPath: join(dir, "auth.json"), refreshOnCreate: false });
 		const model = runtime.getModel("openai", "gpt-4o");
 		assert.equal(model?.baseUrl === proxy, routed, `${label}: pi ${routed ? "routes" : "does not route"} gpt-4o through the entry's baseUrl`);
-		const verdict = checkModelsKnown([{ provider: "openai", id: "gpt-4o", main: true }], { readOverlay: () => parseModelsJson(JSON.stringify(doc)).value });
+		// Read the way a job's gate reads it. Since 1.2.0 the schema refuses `maxTokens: 0` (a token count must be above
+		// zero), so pi drops the whole file rather than this one entry; the verdict is the same refusal, by another reason.
+		const verdict = checkModelsKnown([{ provider: "openai", id: "gpt-4o", main: true }], { readOverlay: () => readOverlayModels(dir) });
 		assert.equal(verdict.ok === true, routed, `${label}: the worker admits the job exactly when pi keeps the entry (${JSON.stringify(verdict)})`);
 	}
 });

@@ -247,6 +247,9 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   `tools`: a list made only of `+name` and `-name` entries now changes the default selection instead of replacing
   it. The runner never passes `tools`, and a trigger's `excludeTools` entry still has to be one of the eight names,
   so neither form reaches a job.
+- **Re-checked at the pi 1.2.0 bump (2026-10-13, pull request #633)**: the Action on bump below was carried out
+  against the 1.2.0 tarball. `sdk.d.ts`, `allToolNames` and the exclusion matcher are byte-identical to 1.1.0's, so
+  nothing moved.
 - **From the automated bump on (issue #587)**: the Action on bump below is the review checklist in the body of every
   pull request `.github/workflows/pi-bump.yml` opens, so it is read at the moment it applies rather than remembered.
 - **Not a question — a scheduled landmine.** pi's changelog carries the breaking change under
@@ -2078,3 +2081,4 @@ adversarial passes did.
 | 2026-10-12 | No issue: the forge's own MCP server. **NEW `OQ-040`** (`WATCH`): `forge` in `run.mcp` is github and gitlab only until a Forgejo or Azure DevOps forge MCP server is read, pinned and wrapped the same way. |
 | 2026-10-12 | Issue #622. **NEW `OQ-041`** (`WATCH`): jobs stay on `pi-coding-agent`; a durable harness for jobs is reopened by a published coding agent that depends on pi-durable, by pi-durable leaving experimental with a minor release free of breaking changes, or by recorded spend lost to infrastructure deaths mid-run. |
 | 2026-10-12 | Issue #625. **NEW `OQ-042`** (`ACCEPTED RISK`): the parked label can be set by a member who is not an admitted comment author; it routes, it never decides, and the author gate and the worker's sidecar check still run. |
+| 2026-10-13 | The pi 1.2.0 bump (pull request #633). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.2.0 tarball; the session options, `allToolNames` and the exclusion matcher are byte-identical to 1.1.0's. |

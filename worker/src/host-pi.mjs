@@ -72,11 +72,14 @@ export const PINNED_PI_NEEDLES = {
 		"const path = `${BUILTIN_PATH_PREFIX}${name}`;",
 	],
 	"dist/core/source-info.js": ['export const BUILTIN_PATH_PREFIX = "builtin:";'],
-	"dist/core/settings-manager.d.ts": [
-		"export type PackageSource = string | {",
-		"    autoload?: boolean;",
-		"    packages?: PackageSource[];",
-		"    extensions?: string[];",
+	// The settings shape parseHostSettings reads. Since pi 1.2.0 it is a TypeBox schema in settings-schema (the same
+	// union: a string, or an object with `source` and an optional `autoload`), and pi still loads the file without
+	// validating it, which is why the parse here stays lenient.
+	"dist/core/settings-schema.d.ts": [
+		"declare const PackageSourceSchema: Type.TUnion<[Type.TString, Type.TObject<{",
+		"    autoload: Type.TOptional<Type.TBoolean>;",
+		"    packages: Type.TOptional<Type.TArray<Type.TUnion<[Type.TString, Type.TObject<{",
+		"    extensions: Type.TOptional<Type.TArray<Type.TString>>;",
 	],
 };
 

@@ -342,13 +342,14 @@ function readiness(names) {
 /**
  * Report a transport's connection to `track` as pi's own connect runs it (pi-mcp client.js `connect`, then the MCP
  * extension's runtime.js `connectOnce`): initialize, its answer checked, `notifications/initialized`, then `tools/list`
- * (when the server declares tools, every page) and the resource lists, and only then the tools registered. So the
+ * (when the server declares tools, every page), and only then the tools registered. Since pi 1.2.0 no resource list is
+ * asked at connect (the resource tools list them on demand); one an older pi asked was an outstanding request like any. So the
  * server is READY once `notifications/initialized` has been sent, `tools/list` has answered when the server declares
  * tools, and no request of that connect is still unanswered, one turn of the event loop later (pi's own continuation
  * registers the tools in between, and a next page or list would be asked by then). An answer is matched to its request
  * by id AND by being a response (no `method`), since a server may send requests of its own with the same ids. FAILED on
- * an error answer to `initialize` or `tools/list` (pi gives up the connection on either; a resource list that fails pi
- * tolerates), on a start or send that throws, or on a close before ready. A close that follows a transient failure on
+ * an error answer to `initialize` or `tools/list` (pi gives up the connection on either; any other request that fails
+ * pi tolerates), on a start or send that throws, or on a close before ready. A close that follows a transient failure on
  * the same transport is pi closing it before its next attempt, and leaves the server pending. A subclass, not a
  * wrapper, since pi treats a `StdioTransport` instance specially (its stderr tail, its close on exit).
  */
@@ -405,22 +406,24 @@ function observed(Base, name, track, live, { network = false } = {}) {
 				throw error;
 			}
 		}
-		async send(message) {
+		// pi-mcp 1.2.0 passes `{ signal }`, aborted once the sender stops waiting, so a transport does not dispatch a request
+		// already given up on (streamable-http checks it before each try). Forwarded: a subclass that drops it sends anyway.
+		async send(message, options) {
 			const request = message?.id !== undefined && typeof message.method === "string";
 			if (request) this.#requests.set(message.id, message.method);
-			// A request pi gave up on (its timeout, a resource list it tolerates failing) is answered by nothing.
+			// A request pi gave up on (its timeout, or one it tolerates failing) is answered by nothing.
 			if (message?.method === "notifications/cancelled" && this.#requests.delete(message.params?.requestId)) this.#check();
 			try {
-				const sent = await super.send(message);
+				const sent = await super.send(message, options);
 				if (message?.method === "notifications/initialized") {
 					this.#initialized = true;
 					this.#check();
 				}
 				return sent;
 			} catch (error) {
-				// pi gives up the connection only when initialize, initialized or the tool list cannot be sent; a resource
-				// list, its reply to a server's request or a cancel notice that fails it tolerates (runtime.js
-				// fetchResources, client.js handleRequest), so those are dropped, not failed.
+				// pi gives up the connection only when initialize, initialized or the tool list cannot be sent; any other
+				// request, its reply to a server's request or a cancel notice that fails it tolerates (client.js
+				// handleRequest), so those are dropped, not failed.
 				if (CONNECT_SENDS.has(message?.method)) this.#fail(error);
 				else if (request && this.#requests.delete(message.id)) this.#check();
 				throw error;
