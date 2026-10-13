@@ -186,7 +186,7 @@ works with most providers pi supports: Anthropic, OpenAI, Google, Groq and about
 
 ```bash
 PI_PROVIDER=anthropic
-PI_MODEL=claude-sonnet-4-5-20250929   # a dated id keeps cost predictable
+PI_MODEL=claude-sonnet-5-5            # an exact model version keeps cost predictable
 ANTHROPIC_API_KEY=...
 ```
 

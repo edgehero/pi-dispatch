@@ -20,7 +20,7 @@
 # Required repo secret: NPM_TOKEN — an npm *automation* (or granular, "bypass 2FA") token that can publish to
 #   the @edgehero scope. Interactive 2FA cannot run in CI; the token is how publishing works here.
 # Optional repo secret: ANTHROPIC_API_KEY — enables AI-written release notes; without it, each release falls
-#   back to a plain commit list. Optional repo variable: RELEASE_MODEL (default: claude-sonnet-5).
+#   back to a plain commit list. Optional repo variable: RELEASE_MODEL (default: claude-sonnet-5-5).
 
 name: release
 

@@ -385,7 +385,7 @@ line.
 ```json
 { "on": { "type": "label", "any": ["pi:triage"] },
   "run": { "kind": "github", "flow": "triage", "provider": "openai", "model": "gpt-5.4-mini",
-           "models": ["openai/gpt-5.4-mini", "anthropic/claude-haiku-4-5"] } }
+           "models": ["openai/gpt-5.4-mini", "anthropic/claude-haiku-5-5"] } }
 ```
 
 - Each entry is `provider/model`. It is split at the first `/`, so a model id may carry more slashes

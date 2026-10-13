@@ -18,7 +18,7 @@ test("loads conservative defaults with an empty-ish env", () => {
 	assert.equal(c.maxTokens, null, "the per-job token budget defaults to disabled");
 	assert.equal(c.dailyTokenCap, null, "the daily token cap defaults to disabled");
 	assert.equal(c.provider, "anthropic");
-	assert.equal(c.model, "claude-sonnet-4-5-20250929"); // dated, deterministic
+	assert.equal(c.model, "claude-sonnet-5-5"); // an exact model version, deterministic
 	assert.equal(c.maxTurns, 30);
 	assert.equal(c.valkeyUrl, "redis://127.0.0.1:6379");
 	assert.equal(c.jobImage, "pi-job:latest");

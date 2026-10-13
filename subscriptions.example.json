@@ -8,7 +8,7 @@
       "models": ["*"],
       "price": { "amount": 99, "currency": "USD", "per": "month" },
       "sharedWithOtherProducts": true,
-      "counterfactualModel": { "provider": "anthropic", "id": "claude-sonnet-4-5" },
+      "counterfactualModel": { "provider": "anthropic", "id": "claude-sonnet-5-5" },
       "windows": [
         { "per": "5h", "rolling": true, "unit": null, "limit": null },
         { "per": "7d", "rolling": true, "unit": null, "limit": null }

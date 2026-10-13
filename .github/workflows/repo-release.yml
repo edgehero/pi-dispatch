@@ -9,7 +9,7 @@
 # green, admins included), so a push here is an already-gated merge — nothing here merges anything
 # (CONST-MERGE-NEVER-AUTOMATIC). No secret is required to tag a release; the optional
 # repo secret ANTHROPIC_API_KEY enables AI-written notes, and without it the release falls back to a plain
-# commit list. Optional repo variable RELEASE_MODEL (default: claude-sonnet-5).
+# commit list. Optional repo variable RELEASE_MODEL (default: claude-sonnet-5-5).
 
 name: repo-release
 
