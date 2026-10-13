@@ -62,5 +62,8 @@ export async function loadRenderer() {
  * The sha256 of pinned pi-tui's `dist/utils.js`, where `visibleWidth`, `graphemeWidth` and `sliceByColumn` live.
  * Re-verified at 1.0.3: the width logic is byte-identical to 0.99.1's; the file gained `flattenLines` and
  * `sliceByColumn` now keeps an escape code that precedes the cut range ahead of one at its boundary.
+ * Re-verified at 1.2.0: the one change is in `extractSegments` (overlay compositing), which keeps a zero-width APC
+ * marker such as CURSOR_MARKER at the "after" boundary; the width functions are byte-identical, and the panel draws
+ * no APC sequence.
  */
-export const PI_TUI_UTILS_SHA256 = "6c187576b9a2f29b156a0f6cf140fdf6617a5606203db2769760a32a01f3d595";
+export const PI_TUI_UTILS_SHA256 = "275c8400c37c09a7cc106445e27f676aa320c6a024dc89b540b97e1357e90e55";

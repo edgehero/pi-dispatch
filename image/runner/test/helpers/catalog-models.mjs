@@ -19,7 +19,7 @@ export const CODEX_SPARK = Object.freeze({"id":"gpt-5.3-codex-spark","api":"open
 /** azure.json azure-openai-responses chat:gpt-5.4 */
 export const AZURE_GPT_5_4 = Object.freeze({"id":"gpt-5.4","api":"azure-openai-responses","provider":"azure","baseUrl":"","cost":{"input":2.5,"output":15,"cacheRead":0.25,"cacheWrite":0},"contextWindow":1050000,"maxTokens":128000});
 /** anthropic.json anthropic-messages chat:claude-sonnet-4-5-20250929 */
-export const SONNET_4_5 = Object.freeze({"id":"claude-sonnet-4-5-20250929","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://api.anthropic.com","cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},"contextWindow":1000000,"maxTokens":64000});
+export const SONNET_4_5 = Object.freeze({"id":"claude-sonnet-4-5-20250929","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://api.anthropic.com","cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},"contextWindow":200000,"maxTokens":64000});
 /** anthropic.json anthropic-messages chat:claude-fable-5 */
 export const FABLE_5 = Object.freeze({"id":"claude-fable-5","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://api.anthropic.com","cost":{"input":10,"output":50,"cacheRead":1,"cacheWrite":12.5},"contextWindow":1000000,"maxTokens":128000,"compat":{"allowedFallbackModels":[{"provider":"anthropic","model":"claude-opus-4-8","cost":{"input":5,"output":25,"cacheRead":0.5,"cacheWrite":6.25}},{"provider":"anthropic","model":"claude-opus-5","cost":{"input":5,"output":25,"cacheRead":0.5,"cacheWrite":6.25}}]}});
 /** Each fixture's row in the pinned catalog, as [provider, api, id]. CATALOG_ROWS is hand-written: the input. */

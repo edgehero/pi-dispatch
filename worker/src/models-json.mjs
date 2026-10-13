@@ -121,8 +121,13 @@ const T = {
 const opt = (check) => [check, true];
 const req = (check) => [check, false];
 
-// The schema, transcribed from model-config.js at the pin (1.0.3; worker/test/models-json.test.mjs holds the file's
-// content hash), in its order.
+// The schema, transcribed at the pin (1.2.0; worker/test/models-json.test.mjs holds each file's content hash). Since
+// 1.2.0 model-config.js builds it from two pi-ai modules, `providers/model-schema.js` (cost, prompt cache, input
+// limits, thinking map, modalities) and `providers/compat-schema.js` (compat), so all three are pinned.
+//
+// The change that matters in 1.2.0: `compat` was a UNION of three object schemas that each admit extra keys, so a value
+// one api's schema refused passed through another (`supportsStore: "x"` loaded). It is now ONE object, the superset of
+// five apis' properties, so every known compat key is type-checked wherever `compat` appears.
 const PercentileCutoffs = T.obj({ p50: opt(T.num()), p75: opt(T.num()), p90: opt(T.num()), p99: opt(T.num()) });
 const numOrStr = T.union(T.num(), T.str());
 const OpenRouterRouting = T.obj({
@@ -141,70 +146,76 @@ const OpenRouterRouting = T.obj({
 	preferred_max_latency: opt(T.union(T.num(), PercentileCutoffs)),
 });
 const VercelGatewayRouting = T.obj({ only: opt(T.arr(T.str())), order: opt(T.arr(T.str())) });
+// model-schema.js: `Partial(Record(Enum(levels), String | Null))`, which checks the seven level keys and admits others.
 const ThinkingValue = T.union(T.str(), T.nul());
 const ThinkingLevelMap = T.obj({ off: opt(ThinkingValue), minimal: opt(ThinkingValue), low: opt(ThinkingValue), medium: opt(ThinkingValue), high: opt(ThinkingValue), xhigh: opt(ThinkingValue), max: opt(ThinkingValue) });
 // pi 1.0.2 (issue #587): a model's sampling parameters, and the same per thinking level, merged per call over them.
 const SamplingParams = T.rec(T.unknown());
 const SamplingParamsByThinkingLevel = T.obj({ off: opt(SamplingParams), minimal: opt(SamplingParams), low: opt(SamplingParams), medium: opt(SamplingParams), high: opt(SamplingParams), xhigh: opt(SamplingParams), max: opt(SamplingParams) });
-const KwargScalar = T.union(T.str(), T.num(), T.bool(), T.nul());
-const KwargVariable = T.obj({ $var: req(T.union(T.lit("thinking.enabled"), T.lit("thinking.effort"))), omitWhenOff: opt(T.bool()) });
-const Kwarg = T.union(KwargScalar, KwargVariable);
+const KwargValue = T.union(T.str(), T.num(), T.bool(), T.nul(), T.obj({ $var: req(T.union(T.lit("thinking.enabled"), T.lit("thinking.effort"), T.lit("thinking.budget"))), omitWhenOff: opt(T.bool()) }));
 const affinity = T.union(T.lit("openai"), T.lit("openai-nosession"), T.lit("openrouter"));
-const OpenAICompletionsCompat = T.obj({
-	supportsStore: opt(T.bool()),
-	supportsDeveloperRole: opt(T.bool()),
-	supportsReasoningEffort: opt(T.bool()),
-	supportsUsageInStreaming: opt(T.bool()),
-	supportsFinishReason: opt(T.bool()),
-	maxTokensField: opt(T.union(T.lit("max_completion_tokens"), T.lit("max_tokens"))),
-	requiresToolResultName: opt(T.bool()),
-	requiresAssistantAfterToolResult: opt(T.bool()),
-	requiresThinkingAsText: opt(T.bool()),
-	requiresReasoningContentOnAssistantMessages: opt(T.bool()),
-	thinkingFormat: opt(T.union(...["openai", "openrouter", "together", "baseten", "deepseek", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"].map((x) => T.lit(x)))),
-	chatTemplateKwargs: opt(T.rec(Kwarg)),
-	chatTemplateArgs: opt(T.rec(Kwarg)),
-	cacheControlFormat: opt(T.lit("anthropic")),
-	openRouterRouting: opt(OpenRouterRouting),
-	vercelGatewayRouting: opt(VercelGatewayRouting),
-	supportsOpenAIGrammarTools: opt(T.bool()),
-	supportsStrictMode: opt(T.bool()),
-	sendSessionAffinityHeaders: opt(T.bool()),
-	sessionAffinityFormat: opt(affinity),
-	supportsLongCacheRetention: opt(T.bool()),
-	vllmPriority: opt(T.num()),
-});
-const OpenAIResponsesCompat = T.obj({
-	supportsDeveloperRole: opt(T.bool()),
-	sessionAffinityFormat: opt(affinity),
-	supportsLongCacheRetention: opt(T.bool()),
-	supportsStrictMode: opt(T.bool()),
-	supportsOpenAIGrammarTools: opt(T.bool()),
-	supportsMaxOutputTokens: opt(T.bool()),
-});
 const costRates = { input: req(T.num()), output: req(T.num()), cacheRead: req(T.num()), cacheWrite: req(T.num()) };
 const ModelCostTier = T.obj({ inputTokensAbove: req(T.num()), ...costRates });
 const ModelCost = T.obj({ ...costRates, tiers: opt(T.arr(ModelCostTier)) });
+// `Partial(Record(Enum(["short", "long"]), Number > 0))`, like the thinking map.
 const ModelPromptCache = T.obj({ short: opt(T.num({ exclusiveMinimum: 0 })), long: opt(T.num({ exclusiveMinimum: 0 })) });
 const posInt = T.int({ minimum: 1 });
 const ImageResize = T.obj({ maxWidth: opt(posInt), maxHeight: opt(posInt), maxBytes: opt(posInt), jpegQuality: opt(T.int({ minimum: 1, maximum: 100 })) });
 const ModelInputLimits = T.obj({ maxRequestBytes: opt(posInt), images: opt(T.obj({ resize: opt(ImageResize), maxPerMessage: opt(posInt), maxPerRequest: opt(posInt) })) });
-const AnthropicMessagesCompat = T.obj({
-	supportsEagerToolInputStreaming: opt(T.bool()),
-	supportsLongCacheRetention: opt(T.bool()),
-	sendSessionAffinityHeaders: opt(T.bool()),
-	supportsCacheControlOnTools: opt(T.bool()),
-	supportsTemperature: opt(T.bool()),
-	forceAdaptiveThinking: opt(T.bool()),
-	allowEmptySignature: opt(T.bool()),
-	supportsStrictTools: opt(T.bool()),
-	supportsMidConvoEffort: opt(T.bool()),
+// compat-schema.js's ProviderCompatSchema: the merged properties of the OpenAI completions, OpenAI responses, Anthropic
+// messages, Bedrock and Mistral schemas. A key two of them share takes pi's generic override, which for every shared
+// key here is the same type as each api's own (a boolean, or the three-way affinity format), so the superset is exact.
+const bool = opt(T.bool());
+const ProviderCompat = T.obj({
+	// OpenAI completions
+	supportsStore: bool,
+	supportsDeveloperRole: bool,
+	supportsReasoningEffort: bool,
+	supportsUsageInStreaming: bool,
+	supportsFinishReason: bool,
+	maxTokensField: opt(T.union(T.lit("max_completion_tokens"), T.lit("max_tokens"))),
+	requiresToolResultName: bool,
+	requiresAssistantAfterToolResult: bool,
+	requiresThinkingAsText: bool,
+	requiresReasoningContentOnAssistantMessages: bool,
+	thinkingFormat: opt(T.union(...["openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"].map((x) => T.lit(x)))),
+	chatTemplateKwargs: opt(T.rec(KwargValue)),
+	chatTemplateArgs: opt(T.rec(KwargValue)),
+	openRouterRouting: opt(OpenRouterRouting),
+	vercelGatewayRouting: opt(VercelGatewayRouting),
+	zaiToolStream: bool,
+	thinkingTokenBudgetField: opt(T.union(T.lit("thinking_token_budget"), T.lit("thinking_budget"), T.lit("thinking_budget_tokens"))),
+	supportsThinkingTokenBudget: bool,
+	supportsOpenAIGrammarTools: bool,
+	supportsMidConvoSystemMessages: bool,
+	supportsMidConvoToolAdditions: bool,
+	supportsStrictMode: bool,
+	cacheControlFormat: opt(T.lit("anthropic")),
+	sendSessionAffinityHeaders: bool,
+	sessionAffinityFormat: opt(affinity),
+	supportsLongCacheRetention: bool,
+	vllmPriority: opt(T.num()),
+	// OpenAI responses
+	supportsAdditionalTools: bool,
+	supportsToolSearch: bool,
+	supportsExplicitPromptCacheMode: bool,
+	supportsMaxOutputTokens: bool,
+	// Anthropic messages
+	supportsEagerToolInputStreaming: bool,
+	supportsCacheControlOnTools: bool,
+	supportsTemperature: bool,
+	forceAdaptiveThinking: bool,
+	allowEmptySignature: bool,
+	supportsStrictTools: bool,
+	supportsMidConvoEffort: bool,
+	supportsMidConvoToolChanges: bool,
 	allowedFallbackModels: opt(T.arr(T.obj({ provider: req(T.str({ minLength: 1 })), model: req(T.str({ minLength: 1 })), cost: req(ModelCost) }), { maxItems: 3 })),
 });
-const ProviderCompat = T.union(OpenAICompletionsCompat, OpenAIResponsesCompat, AnthropicMessagesCompat);
 const nonEmpty = T.str({ minLength: 1 });
 const inputKinds = T.arr(T.union(T.lit("text"), T.lit("image")));
 const headers = T.rec(T.str());
+// 1.2.0: a token count must be above zero, where any number passed before.
+const tokenCount = T.num({ exclusiveMinimum: 0 });
 const ModelDefinition = T.obj({
 	id: req(nonEmpty),
 	name: opt(nonEmpty),
@@ -216,8 +227,8 @@ const ModelDefinition = T.obj({
 	inputLimits: opt(ModelInputLimits),
 	cost: opt(ModelCost),
 	promptCache: opt(ModelPromptCache),
-	contextWindow: opt(T.num()),
-	maxTokens: opt(T.num()),
+	contextWindow: opt(tokenCount),
+	maxTokens: opt(tokenCount),
 	samplingParams: opt(SamplingParams),
 	samplingParamsByThinkingLevel: opt(SamplingParamsByThinkingLevel),
 	headers: opt(headers),
@@ -231,8 +242,8 @@ const ModelOverride = T.obj({
 	inputLimits: opt(ModelInputLimits),
 	cost: opt(T.obj({ input: opt(T.num()), output: opt(T.num()), cacheRead: opt(T.num()), cacheWrite: opt(T.num()), tiers: opt(T.arr(ModelCostTier)) })),
 	promptCache: opt(ModelPromptCache),
-	contextWindow: opt(T.num()),
-	maxTokens: opt(T.num()),
+	contextWindow: opt(tokenCount),
+	maxTokens: opt(tokenCount),
 	samplingParams: opt(SamplingParams),
 	samplingParamsByThinkingLevel: opt(SamplingParamsByThinkingLevel),
 	headers: opt(headers),
@@ -250,7 +261,8 @@ const ProviderConfig = T.obj({
 	models: opt(T.arr(ModelDefinition)),
 	modelOverrides: opt(T.rec(ModelOverride)),
 });
-const ModelsConfig = T.obj({ providers: req(T.rec(ProviderConfig)) });
+// 1.2.0: a `$schema` key (the published https://pi.dev/schemas/models.schema.json) is declared, as a string.
+const ModelsConfig = T.obj({ $schema: opt(T.str()), providers: req(T.rec(ProviderConfig)) });
 
 /**
  * Parse overlay `models.json` TEXT as pi does. `{ value }` when pi would load it, else `{ error }` with a fixed

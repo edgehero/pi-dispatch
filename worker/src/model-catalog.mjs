@@ -125,6 +125,8 @@ export function overlayProviderProblem(config, providerId) {
 		if (!api) return "no-api";
 		const baseUrl = def.baseUrl ?? config.baseUrl ?? defaults?.baseUrl;
 		if (!baseUrl) return "no-baseUrl";
+		// pi 1.2.0's schema refuses both first (a token count must be above zero), so a file reaching here holds none; kept
+		// because provider-composer.js still checks them, and the mirror follows that file, not the schema in front of it.
 		if (def.contextWindow !== undefined && def.contextWindow <= 0) return "contextWindow";
 		if (def.maxTokens !== undefined && def.maxTokens <= 0) return "maxTokens";
 		const composed = { id: def.id, api, baseUrl };
