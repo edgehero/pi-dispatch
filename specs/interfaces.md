@@ -4042,7 +4042,9 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `pi-awaiting-input` (an Azure tag) to the comment trigger when that trigger arms `run.resume` and is not a command,
   with `parkedReply: true` at job level, and the worker refuses it before the mint unless the key's `parked` sidecar
   exists (`not-parked`, `budgetReserved: false`, no comment, the label removed). A pull request's reply keeps the
-  phrase. The worker adds the label on a park and removes it when a run on an armed key ends without parking.
+  phrase. The worker adds the label on a park and removes it when a run on an armed key ends without parking. A job
+  whose authored trigger arms it but which arrived without it (a receiver older than #625 drops the key) is refused
+  pre-spend as `trigger-skew`, a row of `AUTHORED_NARROWING_FIELDS`.
 - **`run.packages` (ALL FOUR trigger kinds, optional boolean) — an opt-OUT**: absent or `true` = the
   worker emits `PI_PACKAGES` with the container paths of the pi packages the operator staged into the
   global overlay (`INT-PI-PACKAGES-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`), so the flow gets
@@ -4591,7 +4593,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `:ro` mount sees an older file) would enqueue the job WITHOUT its list, and the job would run on the
   deployment's list or on none while every record reads like a correct run. The worker's own read of the
   triggers file catches it, `run.waitFor`'s skew check generalised to a table of authored NARROWING fields
-  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, and `mcp`): when
+  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, `mcp`, and since #625 `awaitInput` when `true`): when
   the entry at the job's matched index (identity-checked on flow, command, kind and on-type) sets the field and
   the job ARRIVED without it (`job.data.models` or `job.data.maxCostUsd`, read before the env fill), the job is refused pre-spend as
   `trigger-skew`, naming the field. The same limits as the wait check: it reads `PI_TRIGGERS_FILE`, else
@@ -8370,3 +8372,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-12 | Issue #625 (parked jobs, the reply half). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: on an issue, a reply without the phrase reaches the comment trigger when the issue carries the `pi-awaiting-input` label (an Azure tag) and the trigger arms `run.resume` and is not a command; the job carries `parkedReply: true` at job level. **`INT-SESSION-STORE-CONTRACT` AMENDED**: `isParked` reads the `parked` sidecar for an issue key, the key directory `lstat`'d as a real directory first. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `not-parked` (outcome `policy`, `budgetReserved: false`). **`INT-WEBHOOK-PAYLOAD-SUBSET`, `INT-GITLAB-PAYLOAD-SUBSET`, `INT-FORGEJO-PAYLOAD-SUBSET`, `INT-AZURE-PAYLOAD-SUBSET` UNCHANGED, checked**: each comment subset already keeps the target's labels or tags. |
 | 2026-10-13 | The pi 1.2.0 bump (pull request #633). **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: the overlay `models.json` mirror is re-transcribed from pi 1.2.0. pi now builds its schema from pi-ai's `compat-schema.js` and `model-schema.js`, and its `compat` is one merged object of the OpenAI completions, OpenAI responses, Anthropic, Bedrock and Mistral properties, where 1.1.0's union of three admitted a value one api refused through another (`supportsStore: "x"` loaded); a token count must be above zero; `$schema` is declared. So a file 1.1.0 loaded may be one 1.2.0 drops, and the worker refuses it as `overlay-unparseable` before any spend, as pi drops it. The differential corpus gained the keys new in 1.2.0, and the two pi-ai files joined the content-hash pin. |
 | 2026-10-13 | No issue: the default model moves to `claude-sonnet-5-5`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED** (text only): the `modelPolicy` evidence names the model its smoke run sets, `claude-sonnet-4-5-20250929`, rather than calling it the default; the image's smoke runs keep it, since they pin a catalog row for a zero-spend run and move with no default. |
+| 2026-10-13 | Issue #625, found before release. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `awaitInput` joins `AUTHORED_NARROWING_FIELDS` (authored when `true`), so a job whose trigger arms `run.awaitInput` but which arrived without it, from a receiver older than #625 that drops the key as unknown, is refused pre-spend as `trigger-skew` instead of running without the tool on a clean record. The `run.awaitInput` bullet and the skew paragraph name it. `REQ-AWAIT-INPUT` UNCHANGED, checked: what a parked run is does not move. |

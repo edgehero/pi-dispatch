@@ -478,6 +478,10 @@ export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	// REQ-MCP-OPERATOR-SERVERS: the MCP servers a trigger's jobs connect. Not a widening when dropped but the same
 	// silent outcome: the job runs its flow without the servers it was written against, on a clean record.
 	Object.freeze({ key: "mcp", authored: (v) => Array.isArray(v) && v.length > 0 }),
+	// REQ-AWAIT-INPUT: the tool a run ends on to wait for a person. Dropped by a receiver from before #625 (which tolerates
+	// the key as unknown), the job runs without it: the agent cannot ask, and the record reads like a clean run. Only
+	// `true` arms it, and the job data carries it only then, so `false` is nothing authored.
+	Object.freeze({ key: "awaitInput", authored: (v) => v === true }),
 ]);
 
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {

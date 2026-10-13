@@ -227,6 +227,9 @@ Rules:
   removed.
 - Only the job's own tool can park a run. A repository extension that registers the same name stops the job before
   its prompt (`await-input-shadowed`).
+- Upgrade the worker and the receiver together. A receiver from before this feature drops `awaitInput`, and the
+  worker then refuses the job before it spends (`trigger-skew`) rather than run it without the tool. Adding
+  `awaitInput` to a trigger does the same to its jobs that were already queued: re-run them.
 
 ## Cost
 

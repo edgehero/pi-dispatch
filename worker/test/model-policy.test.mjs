@@ -269,7 +269,7 @@ const skewFile = (run) => ({ readFileSync: () => JSON.stringify({ triggers: [{ o
 const arrived = (extra = {}) => ({ trigger: { matched: { index: 0, type: "label" } }, kind: "github", flow: "fix", ...extra });
 
 test("the skew check refuses a job whose AUTHORED trigger lists models it arrived without, and reads one row per field", async () => {
-	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["models", "maxCostUsd", "mcp"], "a new narrowing field is one row here");
+	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["models", "maxCostUsd", "mcp", "awaitInput"], "a new narrowing field is one row here");
 	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ models: ["openai/gpt-x"] }) });
 	assert.deepEqual(await check(arrived()), { skewed: true, field: "models" }, "a stale receiver dropped the list");
 	assert.deepEqual(await check(arrived({ models: null })), { skewed: true, field: "models" }, "null is absent");
@@ -282,6 +282,15 @@ test("the skew check refuses a job whose AUTHORED trigger lists models it arrive
 	// A wait skew keeps its own answer when both dropped.
 	const both = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ models: ["openai/gpt-x"], waitFor: [{ profile: "jira" }] }) });
 	assert.deepEqual(await both(arrived()), { skewed: true, conditions: 1 });
+});
+
+test("the skew check refuses a job whose AUTHORED trigger arms run.awaitInput it arrived without (#625)", async () => {
+	// A receiver from before #625 drops the key as unknown: the job would run without the tool a run ends on to ask.
+	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ resume: true, awaitInput: true }) });
+	assert.deepEqual(await check(arrived()), { skewed: true, field: "awaitInput" }, "a stale receiver dropped it");
+	assert.deepEqual(await check(arrived({ awaitInput: true })), { ok: true });
+	assert.deepEqual(await makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ resume: true, awaitInput: false }) })(arrived()), { ok: true }, "false arms nothing");
+	assert.deepEqual(await check(arrived({ flow: "other" })), { ok: true }, "the identity guard fails open, as for every row");
 });
 
 test("the skew check refuses a job whose AUTHORED trigger sets maxCostUsd it arrived without (#501)", async () => {

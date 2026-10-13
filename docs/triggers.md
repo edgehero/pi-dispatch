@@ -484,7 +484,7 @@ that cannot read it cannot see the gap. The check is strict: adding `models` to 
 it that were already queued (`trigger-skew`), and the comment says so. Re-run them. The worker finds a job's
 trigger by its position in the file. Inserting a trigger with the same flow, kind and type ahead of others
 moves the ones after it down. A queued job of a moved trigger can then be checked against its neighbour, and
-refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd` or `mcp`. The comment says the trigger
+refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd`, `mcp` or `awaitInput`. The comment says the trigger
 changed after the job was queued. Re-run those jobs too. Upgrade the worker and the receiver together, and restart the
 receiver after editing the file.
 
