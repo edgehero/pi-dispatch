@@ -5596,7 +5596,7 @@ test("doctor names, end to end: a cron trigger's unknown model, a cap below the 
 	const env = { VALKEY_URL: "redis://x", PI_TRIGGERS_FILE: path, PI_MAX_COST_USD: "1", PI_SETTINGS_FILE: noOverlay() };
 	const checks = await collectChecks(env, fleetSeams([]));
 	assert.ok(checks.some((c) => c.warn === true && /^1 trigger\(s\) name a model this deployment does not know.*cron "nightly": openai\/gpt-9-turbo \(not-in-catalog\)/.test(c.label)), "cron is judged");
-	assert.ok(checks.some((c) => c.warn === true && /^The per-job cost cap is below one full-output call.*anthropic\/claude-sonnet-4-5-20250929 \(the main model, so such a job makes no call at all\) needs at least \$1\.00608 a call under a \$1\.00 cap \(the deployment default\)/.test(c.label)));
+	assert.ok(checks.some((c) => c.warn === true && /^The per-job cost cap is below one full-output call.*anthropic\/claude-sonnet-5-5 \(the main model, so such a job makes no call at all\) needs at least \$1\.31072 a call under a \$1\.00 cap \(the deployment default\)/.test(c.label)));
 	const second = await collectChecks({ ...env, PI_TRIGGERS_FILE: listed, PI_MAX_COST_USD: "50" }, fleetSeams([]));
 	assert.ok(second.some((c) => c.warn === true && /no credential this deployment hands its jobs.*openai \(label trigger #0; looked for OPENAI_API_KEY\)/.test(c.label)));
 	assert.ok(!second.some((c) => /per-job cost cap is below/.test(c.label)), "a $50 cap fits");

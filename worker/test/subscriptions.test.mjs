@@ -29,7 +29,7 @@ test("the committed subscriptions.example.json parses, with defaults applied per
 	assert.equal(kimi.provider, "kimi-coding");
 	assert.equal(kimi.sharedWithOtherProducts, true);
 	assert.equal(kimi.hypothetical, false, "an owned plan defaults hypothetical off");
-	assert.deepEqual(kimi.counterfactualModel, { provider: "anthropic", id: "claude-sonnet-4-5" });
+	assert.deepEqual(kimi.counterfactualModel, { provider: "anthropic", id: "claude-sonnet-5-5" });
 	assert.deepEqual(kimi.windows[0], { per: "5h", rolling: true, unit: null, limit: null, scope: null });
 
 	assert.equal(considered.hypothetical, true, "a plan being considered, not owned");

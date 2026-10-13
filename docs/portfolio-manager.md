@@ -71,7 +71,7 @@ moves 25/31.25 of the way, to shop $25.00, platform $60.00 and ops $15.00.
   "run": { "kind": "local", "folder": "/home/me/pm",
            "flow": "portfolio-manager",
            "task": "Plan this week's budget split and report it. Follow the steps of the flow in order.",
-           "portfolio": true, "model": "claude-haiku-4-5", "maxTurns": 15,
+           "portfolio": true, "model": "claude-haiku-5-5", "maxTurns": 15,
            "excludeTools": ["edit"],
            "secrets": { "REPORT_GH_TOKEN": "op://ops/pm-report/token",
                         "REPORT_WEBHOOK_URL": "op://ops/pm-report/webhook" } } }

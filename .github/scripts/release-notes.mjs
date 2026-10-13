@@ -24,7 +24,7 @@ const commits = (process.env.COMMITS || "").trim();
 const version = process.env.VERSION || "";
 const product = process.env.PRODUCT || "pi-dispatch";
 const productDesc = process.env.PRODUCT_DESC || "a self-hosted service that runs pi coding-agent jobs";
-const model = process.env.RELEASE_MODEL || "claude-sonnet-5";
+const model = process.env.RELEASE_MODEL || "claude-sonnet-5-5";
 
 if (!key) { console.error("release-notes: ANTHROPIC_API_KEY not set"); process.exit(1); }
 if (!commits) { console.error("release-notes: no commits provided"); process.exit(1); }
