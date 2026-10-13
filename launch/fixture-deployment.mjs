@@ -109,7 +109,7 @@ export function writeDeployment(dir, { git = false } = {}) {
 	if (git) for (const folder of [paths.site, paths.pm]) gitInit(folder, dir);
 
 	const json = (p, v) => writeFileSync(p, `${JSON.stringify(v, null, 2)}\n`);
-	json(paths.settings, { model: "claude-sonnet-4-5", provider: "anthropic", maxTurns: 30, maxTokens: 400000, dailyCap: 40, weeklyCap: 200, monthlyCap: 600, dailyTokenCap: 8000000, concurrency: 4, softHoldPct: 80, maxCostUsd: "2", dailyCostUsd: "25", weeklyCostUsd: "120" });
+	json(paths.settings, { model: "claude-sonnet-5-5", provider: "anthropic", maxTurns: 30, maxTokens: 400000, dailyCap: 40, weeklyCap: 200, monthlyCap: 600, dailyTokenCap: 8000000, concurrency: 4, softHoldPct: 80, maxCostUsd: "2", dailyCostUsd: "25", weeklyCostUsd: "120" });
 	json(paths.projects, {
 		version: 1,
 		projects: [
@@ -127,7 +127,7 @@ export function writeDeployment(dir, { git = false } = {}) {
 			{ scope: "project:api", memory: "2g", cpus: 1 },
 			{ scope: "project:ops", memory: "2g", cpus: 1 },
 			{ scope: "project:web", weekUsd: "45" },
-			{ scope: "model:anthropic/claude-sonnet-4-5", weekUsd: "80" },
+			{ scope: "model:anthropic/claude-sonnet-5-5", weekUsd: "80" },
 		],
 	});
 	json(paths.envelope, {
@@ -147,7 +147,7 @@ export function writeDeployment(dir, { git = false } = {}) {
 			{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", packages: false, instructions: "the tests run with pnpm here" } },
 			{ on: { type: "pull_request", action: ["open", "update"] }, run: { kind: "gitlab", flow: "review", packages: false } },
 			{ on: { type: "issue", action: ["closed"], number: 40, once: true }, run: { kind: "github", flow: "deploy", packages: false } },
-			{ on: { type: "cron", id: "pm-weekly", pattern: "0 6 * * 1" }, run: { kind: "local", folder: paths.pm, flow: "portfolio-manager", packages: false, task: "Plan this week's budget split and report it.", portfolio: true, model: "claude-haiku-4-5", maxTurns: 15 } },
+			{ on: { type: "cron", id: "pm-weekly", pattern: "0 6 * * 1" }, run: { kind: "local", folder: paths.pm, flow: "portfolio-manager", packages: false, task: "Plan this week's budget split and report it.", portfolio: true, model: "claude-haiku-5-5", maxTurns: 15 } },
 		],
 	});
 	return paths;
@@ -174,7 +174,10 @@ function gitInit(folder, dir) {
 }
 
 // ---- run records -------------------------------------------------------------------------------------------------
-const RATES = { "claude-sonnet-4-5": [3, 15, 0.3], "claude-haiku-4-5": [1, 5, 0.1], "kimi-for-coding": [0.95, 4, 0.19] };
+// Input, output and cache-read dollars per million tokens, as pi's catalog has them. Haiku 5.5 bills the whole request
+// at its second tier once the input passes 100,000 tokens.
+const RATES = { "claude-sonnet-5-5": [2, 10, 0.1], "claude-haiku-5-5": [0.1, 0.5, 0.01], "kimi-for-coding": [0.95, 4, 0.19] };
+const TIERS = { "claude-haiku-5-5": { above: 100000, rates: [0.5, 2.5, 0.05] } };
 /** Each project's size, as its scoped-limits row sets it (web has none, so the default). */
 const SIZES = { small: { memMiB: 2048, cpuCenti: 100, source: "project" }, normal: { memMiB: 4096, cpuCenti: 200, source: "default" }, build: { memMiB: 8192, cpuCenti: 400, source: "project" } };
 const iso = (ms) => new Date(ms).toISOString();
@@ -291,7 +294,7 @@ function bullJob(j) {
 }
 
 /** The one model the deployment caps by itself (its `model:` scoped row), so the one whose window a job reserves in. */
-const CAPPED_MODEL = "anthropic/claude-sonnet-4-5";
+const CAPPED_MODEL = "anthropic/claude-sonnet-5-5";
 
 /**
  * A run's `dollars` as the processor settles it, through the worker's own `dollar-budget.mjs` (`D`): the job reserved
@@ -308,13 +311,14 @@ function dollarsOf(D, { tokens, usage, provider, model, trusted }) {
 
 /** The runner's outcome for a completed run: tokens, the usage ledger, dollars and what the container used. */
 function outcomeOf(g, j, D) {
-	const model = j.model ?? "claude-sonnet-4-5";
+	const model = j.model ?? "claude-sonnet-5-5";
 	const provider = j.provider ?? "anthropic";
 	const scale = j.scale ?? 1;
 	const input = Math.round((30000 + g.next() * 90000) * scale);
 	const output = Math.round((3000 + g.next() * 9000) * scale);
 	const cacheRead = Math.round(input * 0.6);
-	const [ri, ro, rc] = RATES[model];
+	const tier = TIERS[model];
+	const [ri, ro, rc] = tier && input > tier.above ? tier.rates : RATES[model];
 	const cost = Math.round(input * ri + output * ro + cacheRead * rc) / 1e6;
 	const total = input + output + cacheRead;
 	const wallUsec = (j.endMs - j.startMs) * 1000;
@@ -362,7 +366,7 @@ const CANCELLED = { host: "build3", id: "gh-4a7e", kind: "github", repo: "acme/b
  */
 function cancelledOutcome(D) {
 	const provider = "anthropic";
-	const model = "claude-sonnet-4-5";
+	const model = "claude-sonnet-5-5";
 	return { outcome: "policy", reason: "operator-cancel", exitCode: 137, turns: null, tokens: null, provider, model, session: null, budgetReserved: true, dollars: dollarsOf(D, { tokens: null, usage: null, provider, model, trusted: false }) };
 }
 
@@ -399,7 +403,7 @@ export const PM_RUNS = [Date.UTC(2026, 8, 21, 6), Date.UTC(2026, 8, 28, 6), Date
 
 /** A portfolio manager run as a planned job, for `buildRecords`' shape. */
 export function pmJob(run) {
-	return { host: "mini1", id: run.id, kind: "local", folder: "pm", flow: "portfolio-manager", queuedMs: run.at, startMs: run.at + 2_000, endMs: run.at + 2_000 + 2 * MIN, mins: 2, model: "claude-haiku-4-5", project: "ops", turns: 7, scale: 0.6, size: SIZES.small };
+	return { host: "mini1", id: run.id, kind: "local", folder: "pm", flow: "portfolio-manager", queuedMs: run.at, startMs: run.at + 2_000, endMs: run.at + 2_000 + 2 * MIN, mins: 2, model: "claude-haiku-5-5", project: "ops", turns: 7, scale: 0.6, size: SIZES.small };
 }
 
 /** A pm run's record with the plan it wrote. */
@@ -553,7 +557,7 @@ export async function seedDeployment({ url, paths, mods }) {
 				pred = (r) => r.project === "web";
 				livePred = (e) => e.project === "web";
 			}
-			if (spec.ledger === "model") pred = (r) => r.model === "claude-sonnet-4-5";
+			if (spec.ledger === "model") pred = (r) => r.model === "claude-sonnet-5-5";
 			await redis.set(spec.key, settled(pred, from) + held(livePred));
 		}
 		// The envelope's own counters (each project's week), the same rule.

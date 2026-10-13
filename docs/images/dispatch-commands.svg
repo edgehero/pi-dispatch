@@ -26,7 +26,7 @@
   <text x="16" y="370" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">Scoped limits:</tspan></text>
   <text x="16" y="389" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  github:acme/web: day 2/10 · week 4/40 · &lt;=1 at once</tspan></text>
   <text x="16" y="408" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  project:shop: week $6.340917/$45.00</tspan></text>
-  <text x="16" y="427" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  model:anthropic/claude-sonnet-4-5: week $7.966101/$80.00</tspan></text>
+  <text x="16" y="427" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  model:anthropic/claude-sonnet-5-5: week $7.966101/$80.00</tspan></text>
   <text x="16" y="446" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
   <text x="16" y="465" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="rgb(88,166,255)">› /dispatch runs 5</tspan></text>
   <text x="16" y="484" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">JOB ID                             TARGET        FLOW          OUTCOME    REASON          TURNS  TOKENS  COST     CHAIN  REPLICA  ENDED</tspan></text>
