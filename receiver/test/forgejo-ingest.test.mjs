@@ -229,6 +229,27 @@ test("404 is a determinate non-collaborator; every other failure is indeterminat
 	assert.ok((await network("acme/widgets", "alice")).indeterminate);
 });
 
+test("a 403 names the repair (the harness must be a repo admin), stays indeterminate, and never carries the body", async () => {
+	// Measured on Forgejo 14.0.5 with the harness account a `write` collaborator: the permission lookup
+	// answered 403 with this body, every trigger failed closed, and the log said only "returned 403".
+	const body = { message: "Only admins can query all permissions, repo admins can query all repo permissions, collaborators can query only their own" };
+	const resolve = makeResolveForgejoAuthority({ apiUrl: "http://192.168.68.52:3700", token: "t", fetchFn: async () => okResponse(body, 403) });
+	const verdict = await resolve("human/parked-lab", "human");
+	assert.equal(verdict.authorized, undefined, "a 403 is not a refusal of the actor: it says nothing about them");
+	assert.match(verdict.indeterminate, /returned 403/);
+	assert.match(verdict.indeterminate, /admin of the repository/, "the reason names the fix, so the operator does not chase the trigger");
+	assert.equal(verdict.indeterminate.includes("Only admins"), false, "the body is never read into a log line");
+	// And a 403 still ends as 503 at the edge, so Forgejo records the delivery as failed rather than delivered.
+	const logs = [];
+	const { handler, calls } = build({ resolve, logs });
+	const res = mockRes();
+	await drive(handler, mockReq({ raw: LABELLED }), res, LABELLED);
+	assert.equal(res.statusCode, 503);
+	assert.equal(calls.length, 0);
+	assert.equal(logs.at(-1).event, "forgejo_permission_lookup_failed");
+	assert.match(logs.at(-1).reason, /admin of the repository/);
+});
+
 test("a 200 with no permission string is indeterminate, never a refusal", async () => {
 	// Answering false would turn an upstream schema change into a silent, permanent refusal of every trigger.
 	for (const permission of [40, null, undefined, {}, ["write"]]) {

@@ -16,6 +16,9 @@
  *   - host-held           YES; it lives in the worker's env and reaches a container only as an env value.
  *   - env-injected        YES; never written to /workspace, .git/config, argv, or a log.
  *   - not merge-capable   YES in practice; branch protection is the barrier and no merge API is called.
+ *                         But the author gate makes the account a repository ADMIN (Forgejo answers a lookup
+ *                         of another user's permission only to an admin), and an admin's write:repository
+ *                         token can lift that protection. OQ-043 records it, and what would close it.
  *   - short-lived         NO. The operator mints it by hand. Forgejo offers no installation-token
  *                         equivalent, so there is no path to a bounded expiry at all.
  *

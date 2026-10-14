@@ -1978,6 +1978,25 @@ adversarial passes did.
 - **What would change it**: a forge whose comment route does not run the author gate before this route, or a run of
   `not-parked` refusals in the records that says labels are being set on purpose.
 
+## OQ-043: A Forgejo harness account must be a repository admin
+
+- **Status**: `ACCEPTED RISK` (2026-10-14, found in a live lab on Forgejo 14.0.5).
+- **Position**: the author gate resolves the actor's permission through
+  `GET /repos/{owner}/{repo}/collaborators/{user}/permission`, and Forgejo answers that about another user only to a
+  site admin or a repository admin; a `write` collaborator's token gets 403. So the harness account is a repository
+  admin, and its `write:repository` token then reaches the settings, webhook, collaborator and branch protection
+  endpoints, which sit in the same scope category behind the admin check. Forgejo has no per-job mint, so that token is
+  in every forgejo job's container, where an agent reading issue text could lift the default branch's protection.
+  Deleting or transferring the repository still needs the owner.
+- **What bounds it meanwhile**: a repository-scoped token reaches only the repositories selected at minting, so the
+  admin grant is per repository, not per instance; `docs/forgejo.md` says to grant it only where this deployment
+  serves and names the cost; doctor prints the requirement and its cost whenever forgejo triggers are armed; the
+  receiver's 403 reason names the repair, so a missing grant is loud rather than an unexplained outage.
+- **What would close it**: a lookup credential separate from the job's: a token of an admin account carrying only
+  `read:repository` (Forgejo needs only read scope for this GET, and a read scope cannot reach any write endpoint),
+  read by the receiver alone, while the job keeps a `write` collaborator's token. That is a new variable, a receiver
+  change and a doctor change, and it is not built yet.
+
 ## Revision History
 
 | Date | Change |
@@ -2082,3 +2101,4 @@ adversarial passes did.
 | 2026-10-12 | Issue #622. **NEW `OQ-041`** (`WATCH`): jobs stay on `pi-coding-agent`; a durable harness for jobs is reopened by a published coding agent that depends on pi-durable, by pi-durable leaving experimental with a minor release free of breaking changes, or by recorded spend lost to infrastructure deaths mid-run. |
 | 2026-10-12 | Issue #625. **NEW `OQ-042`** (`ACCEPTED RISK`): the parked label can be set by a member who is not an admitted comment author; it routes, it never decides, and the author gate and the worker's sidecar check still run. |
 | 2026-10-13 | The pi 1.2.0 bump (pull request #633). **`OQ-005` AMENDED** (still CLOSED): re-checked against the 1.2.0 tarball; the session options, `allToolNames` and the exclusion matcher are byte-identical to 1.1.0's. |
+| 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **NEW `OQ-043`** (`ACCEPTED RISK`): the Forgejo harness account must be a repository admin for the author gate's lookup to answer (a `write` collaborator's token gets 403), and on an admin account the `write:repository` token every forgejo job carries reaches the repository's settings and branch protection. Closed by a separate read-only lookup token for the receiver, not built. **`OQ-013` UNCHANGED, checked**: it is GitLab's gate and its lookup; the Forgejo lookup's loud 503 posture is the same and unchanged. |
