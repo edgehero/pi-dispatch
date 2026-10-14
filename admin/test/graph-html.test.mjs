@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildGraphScene, clip, clipColumns, drawnColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS, SPEND_BADGE_DY } from "../src/graph-html.mjs";
+import { buildGraphScene, clip, escapeHtml, clipColumns, drawnColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS, SPEND_BADGE_DY } from "../src/graph-html.mjs";
 import { columnsOf } from "../src/panel.mjs";
 import { buildInsightsHtml } from "../src/insights-html.mjs";
 import { buildGraphModel, findLoopHints, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS, parseSkillMeta } from "../src/graph-model.mjs";
@@ -1655,4 +1655,19 @@ test("a portfolio trigger's tip says what it writes, the chip is unchanged, and 
   assert.equal(svgOf(page), svgOf(plain), "no chip, glyph or badge changes on the scene");
   model.nodes.find((n) => n.id === "trigger:0").portfolio = "yes";
   assert.ok(!pageOf(model).includes("portfolio: its jobs write the budget split"), "a non-boolean is no flag at the allowlist");
+});
+
+test("escapeHtml turns control and bidi characters into spaces, so a hostile repo name cannot reorder or hide a label (issue #641)", () => {
+  const hostile = "acme/\u001b[31mweb\u0007\u009b2J‮gnp.exe⁦x⁩\u007f";
+  const out = escapeHtml(hostile);
+  assert.equal(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F؜‎‏‪-‮⁦-⁩]/.test(out), false, JSON.stringify(out));
+  assert.equal(out, "acme/ [31mweb  2J gnp.exe x  ");
+  // ordinary text, tabs and newlines are untouched, and escaping still happens
+  assert.equal(escapeHtml("a\tb\nc <d>"), "a\tb\nc &lt;d&gt;");
+});
+
+test("escapeHtml: NUL and the Arabic letter mark become spaces too, each on its own", () => {
+  assert.equal(escapeHtml("a\u0000b"), "a b");
+  assert.equal(escapeHtml("a\u061Cb"), "a b");
+  assert.equal(escapeHtml("\u0000\u061C"), "  ");
 });

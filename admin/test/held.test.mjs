@@ -253,8 +253,9 @@ test("the panel's held reader and the tool's cannot diverge on the four things t
 	// exists for a real reason (it reuses a client the panel already holds) so it cannot simply be deleted --
 	// which makes the two copies agreeing the property to pin.
 	const { readFileSync } = await import("node:fs");
-	const panel = readFileSync(new URL("../src/dashboard.ts", import.meta.url), "utf8");
-	const panelFn = panel.slice(panel.indexOf("async function heldJobs("), panel.indexOf("export function createDashboardDeps"));
+	// The panel's copy moved with the fleet reader into read-model.mjs (issue #641); it is still the twin this pins.
+	const panel = readFileSync(new URL("../src/read-model.mjs", import.meta.url), "utf8");
+	const panelFn = panel.slice(panel.indexOf("async function heldJobs("), panel.indexOf("export function createFleetReader"));
 	const tool = readFileSync(new URL("../src/read-model.mjs", import.meta.url), "utf8");
 	const toolFn = tool.slice(tool.indexOf("export async function readHeldJobs("), tool.indexOf("export async function cancelHeldJob("));
 

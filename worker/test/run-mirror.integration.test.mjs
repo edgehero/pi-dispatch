@@ -287,3 +287,64 @@ test("a start that is not a hash (a stray string) is read as absent and replaced
 		await redis.cleanup();
 	}
 });
+
+/** Every key under the client's prefix with its type, its value as DUMP bytes, and whether it carries an expiry. */
+async function keyState(redis) {
+	const prefix = redis.options.keyPrefix;
+	const out = {};
+	for (const full of (await redis.keys(`${prefix}*`)).sort()) {
+		const k = full.slice(prefix.length);
+		const dumped = await redis.dumpBuffer(k);
+		out[k] = { dump: dumped === null ? null : dumped.toString("hex"), expires: (await redis.pttl(k)) > 0 };
+	}
+	return out;
+}
+
+test("prune: false writes nothing (issue #641): every key byte-identical with an expired member present, while a pruning read removes it", { skip }, async () => {
+	const { makeRunMirror, readMirroredRuns, readMirroredPage } = await import("../src/run-mirror.mjs");
+	const redis = await prefixed("readonly");
+	const T0 = Date.parse("2026-10-14T12:00:00.000Z");
+	try {
+		const writer = makeRunMirror({ redis, retentionDays: 30, now: () => T0 });
+		for (let i = 0; i < 5; i++) await writer.mirror({ jobId: `r${i}`, host: "hosta", endedAt: new Date(T0 - (5 - i) * 60_000).toISOString() }, `r${i}`);
+		await redis.del("runs:rec:r2"); // a body expired under its member
+		const before = await keyState(redis);
+		assert.equal(await redis.zcard("runs:index"), 5);
+		const read = await readMirroredRuns(redis, { limit: 50, prune: false });
+		assert.deepEqual(read.runs.map((r) => r.jobId), ["r4", "r3", "r1", "r0"]);
+		const page = await readMirroredPage(redis, { limit: 50 });
+		assert.deepEqual([page.fetched, page.runs.length], [5, 4]);
+		assert.deepEqual(await keyState(redis), before, "no key changed: not the index, the horizon, the start or a body");
+		assert.equal(await redis.zcard("runs:index"), 5);
+		await readMirroredRuns(redis, { limit: 50 });
+		assert.equal(await redis.zcard("runs:index"), 4, "the default read still prunes, so the comparison can fail");
+		assert.notDeepEqual(await keyState(redis), before);
+	} finally {
+		await redis.cleanup();
+	}
+});
+
+test("readMirroredPage pages below an exclusive score cursor, by offset under one cursor, and reports how deep it read", { skip }, async () => {
+	const { makeRunMirror, readMirroredPage } = await import("../src/run-mirror.mjs");
+	const redis = await prefixed("page");
+	const T0 = Date.parse("2026-10-14T12:00:00.000Z");
+	const at = (i) => T0 - (10 - i) * 60_000;
+	try {
+		const writer = makeRunMirror({ redis, retentionDays: 30, now: () => T0 });
+		for (let i = 0; i < 10; i++) await writer.mirror({ jobId: `r${i}`, host: "hosta", endedAt: new Date(at(i)).toISOString() }, `r${i}`);
+		const first = await readMirroredPage(redis, { limit: 3 });
+		assert.deepEqual([first.runs.map((r) => r.jobId), first.fetched, first.frontier, first.degraded], [["r9", "r8", "r7"], 3, at(7), "ok"]);
+		const below = await readMirroredPage(redis, { before: at(7), limit: 3 });
+		assert.deepEqual(below.runs.map((r) => r.jobId), ["r6", "r5", "r4"], "exclusive: r7 is not repeated");
+		// A run that lands now scores above the cursor and moves nothing under it.
+		await writer.mirror({ jobId: "late", host: "hostb", endedAt: new Date(T0).toISOString() }, "late");
+		const offset = await readMirroredPage(redis, { before: at(7), offset: 3, limit: 3 });
+		assert.deepEqual(offset.runs.map((r) => r.jobId), ["r3", "r2", "r1"]);
+		const tail = await readMirroredPage(redis, { before: at(1), limit: 3 });
+		assert.deepEqual([tail.runs.map((r) => r.jobId), tail.fetched, tail.frontier], [["r0"], 1, at(0)]);
+		const empty = await readMirroredPage(redis, { before: at(0), limit: 3 });
+		assert.deepEqual(empty, { runs: [], fetched: 0, frontier: null, degraded: "ok" });
+	} finally {
+		await redis.cleanup();
+	}
+});

@@ -290,8 +290,13 @@ export function makeRunMirror({ redis, retentionDays, now = () => Date.now(), lo
  *
  * Two round trips regardless of how many runs come back: one `ZREVRANGEBYSCORE` for the ids, one `MGET`
  * for the bodies. Never one read per run.
+ *
+ * `prune: false` makes the read READ-ONLY (issue #641): the console's pages read the mirror on every request, and a
+ * read that writes is a read that needs a writer's care (a page refresh that moves the horizon is a page refresh that
+ * changes what capacity reports). An expired body is then skipped and left in the index for a pruning reader or the
+ * writer's own trim; the row it stood for is not shown either way.
  */
-export async function readMirroredRuns(redis, { limit = 50, sinceMs = 0, now = () => Date.now(), timeoutMs = OP_TIMEOUT_MS } = {}) {
+export async function readMirroredRuns(redis, { limit = 50, sinceMs = 0, prune = true, now = () => Date.now(), timeoutMs = OP_TIMEOUT_MS } = {}) {
 	if (!redis) return { runs: [], degraded: "off" };
 	let ids;
 	try {
@@ -326,7 +331,7 @@ export async function readMirroredRuns(redis, { limit = 50, sinceMs = 0, now = (
 			stale.push(ids[i]); // unparseable is indistinguishable from gone, and equally not showable
 		}
 	}
-	if (stale.length > 0) {
+	if (stale.length > 0 && prune !== false) {
 		try {
 			// Removed with the cut recorded (`PRUNE_SCRIPT`): the time up to a pruned run is no longer whole.
 			await bounded(redis.eval(PRUNE_SCRIPT, 3, RUNS_INDEX, RUNS_HORIZON, RUNS_SINCE, mirrorWindowMs(0), RUNS_HORIZON_MEMBER, ...stale), timeoutMs);
@@ -335,6 +340,54 @@ export async function readMirroredRuns(redis, { limit = 50, sinceMs = 0, now = (
 		}
 	}
 	return { runs, degraded: runs.length >= limit ? "truncated" : "ok" };
+}
+
+/**
+ * One PAGE of the index below a score cursor, READ-ONLY (issue #641): the console's runs screen. Returns
+ * `{ runs, fetched, frontier, degraded }` and never throws.
+ *
+ * `before` is an EXCLUSIVE score (millis) or null for the newest; `offset` skips that many members under the same
+ * cursor, so a caller fetching in batches under ONE cursor reads a stable sequence while new runs land above it (a new
+ * run scores at its own end, which is after any cursor a page handed out). `fetched` is how many members the range
+ * returned, expired ones included, and `frontier` the lowest score among them (null when none): together they tell a
+ * caller how deep it has read, which the runs alone cannot, since an expired body leaves no run behind. Nothing is
+ * pruned and nothing is written: two reads, the range WITHSCORES and one MGET.
+ */
+export async function readMirroredPage(redis, { before = null, offset = 0, limit = 50, timeoutMs = OP_TIMEOUT_MS } = {}) {
+	if (!redis) return { runs: [], fetched: 0, frontier: null, degraded: "off" };
+	const max = Number.isFinite(before) ? `(${before}` : "+inf";
+	let flat;
+	try {
+		flat = await bounded(redis.zrevrangebyscore(RUNS_INDEX, max, "-inf", "WITHSCORES", "LIMIT", Math.max(0, Math.floor(offset) || 0), Math.max(1, Math.floor(limit) || 1)), timeoutMs);
+	} catch (err) {
+		return { runs: [], fetched: 0, frontier: null, degraded: `unreachable (${err?.message ?? "?"})` };
+	}
+	const ids = [];
+	let frontier = null;
+	for (let i = 0; Array.isArray(flat) && i + 1 < flat.length; i += 2) {
+		ids.push(flat[i]);
+		const score = Number(flat[i + 1]);
+		if (Number.isFinite(score)) frontier = frontier === null ? score : Math.min(frontier, score);
+	}
+	if (ids.length === 0) return { runs: [], fetched: 0, frontier: null, degraded: "ok" };
+	let bodies;
+	try {
+		bodies = await bounded(redis.mget(...ids.map(runRecordKey)), timeoutMs);
+	} catch (err) {
+		return { runs: [], fetched: 0, frontier: null, degraded: `unreachable (${err?.message ?? "?"})` };
+	}
+	const runs = [];
+	for (let i = 0; i < ids.length; i++) {
+		const raw = bodies?.[i];
+		if (typeof raw !== "string" || raw === "") continue;
+		try {
+			const rec = JSON.parse(raw);
+			if (rec && typeof rec === "object" && !Array.isArray(rec)) runs.push(rec);
+		} catch {
+			// unparseable is not showable, and this read prunes nothing
+		}
+	}
+	return { runs, fetched: ids.length, frontier, degraded: "ok" };
 }
 
 /**
