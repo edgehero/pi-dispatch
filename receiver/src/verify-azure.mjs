@@ -28,7 +28,7 @@
  */
 
 import { timingSafeEqual } from "node:crypto";
-import { isJsonContentType, readRawBody, respond } from "./http-body.mjs";
+import { isJsonContentType, readRawBody, respond } from "@edgehero/pi-dispatch/http-body";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 

@@ -46,6 +46,7 @@
     "./exit-code": "./src/exit-code.mjs",
     "./entry": "./src/entry.mjs",
     "./git-hardening": "./src/git-hardening.mjs",
+    "./http-body": "./src/http-body.mjs",
     "./env-file": "./src/env-file.mjs",
     "./service-env": "./src/service-env.mjs",
     "./podman-stack": "./src/podman-stack.mjs",

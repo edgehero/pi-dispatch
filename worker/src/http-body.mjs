@@ -10,6 +10,11 @@
  *
  * Nothing here reads a header that identifies a forge, and nothing here decides whether a request is
  * trusted. A caller must still verify before parsing a single field (CONST-HMAC-OVER-RAW-BODY).
+ *
+ * Moved from the receiver to the worker's exports (issue #640) for the same reason it was extracted: the operator
+ * console reads request bodies too, and the console must not import the receiver (its only export is `./start`, and an
+ * admin surface on the receiver is the rejected option `DES-OPERATOR-CONSOLE` keeps). `respond` sets no security
+ * headers; the console wraps every response in its own header set and never calls it directly.
  */
 
 /** Accept `application/json`, ignoring any parameters and case. */

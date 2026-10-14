@@ -19,7 +19,7 @@
  */
 
 import { Webhooks } from "@octokit/webhooks";
-import { isJsonContentType, readRawBody, respond } from "./http-body.mjs";
+import { isJsonContentType, readRawBody, respond } from "@edgehero/pi-dispatch/http-body";
 
 /**
  * Thin wrapper delegating to `webhooks.verify(rawBody, signature)`. `rawBody` is the raw UTF-8
