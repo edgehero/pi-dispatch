@@ -6073,8 +6073,35 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - *Rejected: phrase-free replies on pull requests.* A pull request's key is its head branch, which only a minted
     token can read, so the free check would have to move past the mint (`CONST-BUDGET-BEFORE-TOKENS`). A pull
     request's reply keeps the phrase, and the fixed comment says so.
+- **A park closes the job's semantic window.** The answer arrives on the parked run's own semantic key
+  (`REQ-DEDUP-BY-DELIVERY-GUID`: same target, same comment flow), and BullMQ keeps a ttl-mode key after the job
+  finishes, so an answer inside ten minutes of the delivery that STARTED the run was swallowed against the finished
+  run: `deduplicated`, `202`, nothing run, the label left on (found live against Forgejo 14 on 4.3.0; every forge has
+  it). The window exists to coalesce duplicates into one ACTIVE job, and after a park the next delivery is a
+  deliberate answer. So the processor's parked branch, AFTER the promotion and BEFORE the fixed comment and the label,
+  calls `releaseParkedWindow`, which the wiring binds to the real BullMQ job: `Job.removeDeduplicationKey()` with the
+  `deid` the add stored. After the promotion, so an answer that gets in finds the `parked` mark and the transcript;
+  before the comment and the label, because those are what invite an answer (the label routes a phrase-free reply,
+  the comment tells a pull request's author to reply). A resumed run that parks again takes the same branch. It fails
+  open with `parked_window_release_failed`: a failure only restores the old behaviour, the answer waiting out the
+  window.
+  - *Rejected: rebuilding the key from the job data* (a shared id function in `queue.mjs`). It would work, but the job
+    already carries the id its add stored; a rebuild is a second reading of the format that must agree with the
+    add's for every job ever queued, and it would need every field the key encodes (target type, `closed:`, `cmd:`,
+    `:r<n>`) carried to the worker's processor, where the matched rule's close discriminant is not even data.
+  - *Rejected: `Queue.removeDeduplicationKey(id)`.* A bare `DEL`. The job's own call is a compare-and-delete that
+    frees the key only while it still names this job, so it can never free a window a later job holds.
+  - *Rejected: the receiver skipping the window for a reply.* It cannot tell an answer from a duplicate (it cannot
+    read the store), the phrase reply on a pull request carries no marker at all, and a receiver that skips dedup on
+    a label anyone can set reopens the spam the window exists for.
+  - *Rejected: the window in non-ttl mode for every job* (BullMQ then frees the key when the job finishes). That
+    changes coalescing for every trigger to fix one feature.
+  - *Residual:* an answer that lands while the parked run is still finishing, before the release, is still
+    swallowed. On an issue it cannot be routed then (the label is set after the release); on a pull request the
+    person would have to answer the agent's question before the fixed comment appears.
 - **Traces to**: `REQ-AWAIT-INPUT`, `REQ-RESUMABLE-SESSION`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
-  `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`.
+  `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`,
+  `REQ-DEDUP-BY-DELIVERY-GUID`, `DES-QUEUE-BULLMQ-OVER-CUSTOM`.
 
 ## DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED
 
@@ -9577,3 +9604,4 @@ a tunnel.
 | 2026-10-12 | Issue #625 (parked jobs, the reply half). **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**: a reply without the phrase resumes a parked issue; the forge label `pi-awaiting-input` routes it in the receiver and the key's `parked` sidecar decides it in the worker, before the mint. Rejected: an index of parked issues, the receiver reading the session store, and phrase-free replies on pull requests (their key costs a token to read). **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the label is forge state and the sidecar is keyed state beside the transcript; nothing is looked up by anything but the derived key. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: `not-parked` is decided from a local file before the mint. **`CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the gate runs first on every forge; the route widens which comments start a job, never who may. The residual, a labeler who is not an admitted author, is `OQ-042`. |
 | 2026-10-13 | The pi 1.2.0 bump (pull request #633). **`DES-MCP-TARGETED-LIFECYCLE` AMENDED**: pi 1.2.0's connect lists only the tools (no resource list at connect, pi #10526), which the readiness rule already reads as written, since it waits for no request by name but `tools/list`; and pi-mcp 1.2.0 hands `transport.send` a `{ signal }` aborted once the sender stops waiting, which the runner's observed transport dropped and now forwards, so the HTTP transport does not dispatch a request pi gave up on. **`DES-DOLLAR-RESERVE-AND-SETTLE` UNCHANGED, checked**: `calculateCost` is byte-identical to 1.1.0's; pi-ai's `models.js` changed only in passing a provider's baseUrl to its model refresh, so its content hash moves. OpenRouter's per-key model lists and prices never reach a job: the runner forces `PI_OFFLINE=1` and passes `allowModelNetwork: false`, so pi refreshes no catalog from the network. pi-tui's `utils.js` changed only in `extractSegments` (a zero-width APC marker kept at an overlay boundary); the width functions are byte-identical, so the panel's width table stands and its hash moves. |
 | 2026-10-13 | No issue: the default model moves to `claude-sonnet-5-5`. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED** (text only): its worked example names `claude-sonnet-4-5-20250929` as the model it prices rather than as the default, so the figures stay true. Its Why (one call on the default model can cost several dollars) is UNCHANGED, checked: Sonnet 5.5's worst call is larger in output (128,000 tokens at $10 a million) and smaller in input rates, still dollars, and doctor's cap warning prices it at $1.31072 under a $1.00 cap with the bound's minimal input. |
+| 2026-10-14 | No issue, found in a live lab on 4.3.0: a quick answer to a parked run was swallowed by the semantic window of the delivery that started that run. **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**: a park closes the job's semantic window, after the promotion and before the fixed comment and the label, through the real BullMQ job's compare-and-delete with the id its add stored; fail-open with `parked_window_release_failed`. Rejected: rebuilding the key from the job data, the queue's bare `DEL`, the receiver skipping the window for a reply, and the non-ttl window for every job. The residual (an answer that lands before the release) is recorded. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` UNCHANGED, checked**: the dedup layers and their visibility stay as they are; one more BullMQ call is used, at the pin. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the semantic key is the queue's, not the session store's, and nothing new is looked up. |

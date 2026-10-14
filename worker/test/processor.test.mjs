@@ -1486,6 +1486,46 @@ test("a parked run sets the marker, and its comment says how to continue by targ
 	assert.notEqual(PARKED_COMMENT, PARKED_COMMENT_PR);
 });
 
+test("a park closes the semantic window after the promotion and before the comment and the marker, a resumed park too, and only a park (DES-AWAIT-INPUT-ENDS-THE-JOB)", async () => {
+	const run = async (job, exitReason, releaseParkedWindow) => {
+		const order = [];
+		const { deps: d } = deps({
+			prepareWorkspace: async () => ({ workspace: "/w", jobDir: "/j", session: { key: "abc", hostDir: "/j/session", resume: true, reason: "resumed", bytes: 1 } }),
+			promoteSession: (_s, opts) => (order.push(`promote:${opts.parked}`), { promoted: true, reason: "promoted", bytes: 1 }),
+			parkedLabel: async (_j, on) => order.push(`label:${on}`),
+			comment: async () => order.push("comment"),
+			isParked: () => true,
+			sessionsDir: "/srv/pi-sessions",
+			imagePreflight: async () => ({ ok: true, piVersion: "0.80.7", capabilities: ["awaitInput"] }),
+			runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: true, reason: "resumed" }, exitReason }),
+			releaseParkedWindow: releaseParkedWindow ?? (async () => order.push("release")),
+		});
+		const r = await runJob(job, d);
+		return { r, order };
+	};
+	const armed = { ...ghJob, target: { type: "issue", number: 7 }, resume: true, awaitInput: true };
+
+	const first = await run(armed, "awaiting-input");
+	assert.deepEqual(first.order, ["promote:true", "release", "comment", "label:true"]);
+
+	// The answer's own run parks again: the same path, so its window closes too, or the second answer is swallowed.
+	const again = await run({ ...armed, parkedReply: true }, "awaiting-input");
+	assert.deepEqual(again.order, ["promote:true", "release", "comment", "label:true"]);
+
+	// A run that did not park keeps its window: coalescing rapid duplicates is what the window is for.
+	const done = await run(armed, null);
+	assert.equal(done.order.includes("release"), false);
+	const unarmed = await run({ ...armed, awaitInput: undefined }, "awaiting-input");
+	assert.equal(unarmed.order.includes("release"), false, "a park line on a job never offered the tool is ignored");
+
+	// Fail open: a seam that throws anyway costs neither the comment nor the marker, and the run stays completed.
+	const faulty = await run(armed, "awaiting-input", async () => {
+		throw new Error("valkey went away");
+	});
+	assert.equal(faulty.r.outcome, "completed");
+	assert.deepEqual(faulty.order, ["promote:true", "comment", "label:true"]);
+});
+
 test("PARKED_COMMENT is fixed, path-free and carries no model text", () => {
 	assert.equal(typeof PARKED_COMMENT, "string");
 	assert.doesNotMatch(PARKED_COMMENT, /\/|\$\{/);

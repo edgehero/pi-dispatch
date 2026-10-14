@@ -644,6 +644,77 @@ test("two different GUIDs, same repo#issue:flow within the window -> one active 
 	}
 });
 
+// --- a parked run's window (DES-AWAIT-INPUT-ENDS-THE-JOB) ---
+
+test("releaseSemanticWindow asks the job's own compare-and-delete, fails open with a named line, and skips a job with no key", async () => {
+	const { releaseSemanticWindow } = await import("../src/queue.mjs");
+	const lines = [];
+	const log = (event, fields) => lines.push({ event, ...fields });
+	let asked = 0;
+	const job = { id: "gh-a", deduplicationId: "o/r#7:fix", removeDeduplicationKey: async () => (asked++, true) };
+	assert.equal(await releaseSemanticWindow(job, log), true);
+	assert.equal(asked, 1);
+	assert.deepEqual(lines, [{ event: "parked_window_released", jobId: "gh-a", released: true }], "the id is logged, never the key: it carries the repo");
+
+	lines.length = 0;
+	assert.equal(await releaseSemanticWindow({ ...job, removeDeduplicationKey: async () => false }, log), false, "a lapsed window is not an error");
+	assert.deepEqual(lines, [{ event: "parked_window_released", jobId: "gh-a", released: false }]);
+
+	lines.length = 0;
+	const failing = { ...job, removeDeduplicationKey: async () => Promise.reject(Object.assign(new Error("down"), { code: "ECONNREFUSED" })) };
+	assert.equal(await releaseSemanticWindow(failing, log), false, "never throws");
+	assert.deepEqual(lines, [{ event: "parked_window_release_failed", jobId: "gh-a", code: "ECONNREFUSED" }]);
+
+	lines.length = 0;
+	assert.equal(await releaseSemanticWindow({ id: "local-1", removeDeduplicationKey: async () => assert.fail("no key to free") }, log), false, "a local job carries no window");
+	assert.equal(await releaseSemanticWindow({ id: "x", deduplicationId: "k" }, log), false, "a plain object (a test's fake) is no BullMQ job");
+	assert.equal(await releaseSemanticWindow(undefined, log), false);
+	assert.deepEqual(lines, []);
+});
+
+test("a parked run's window, against a real Valkey: the key outlives completion, and once released the answer is a new job", { skip }, async () => {
+	const { Worker } = await import("bullmq");
+	const { parseConnection } = await import("../src/connection.mjs");
+	const { enqueueGitHubJob, releaseSemanticWindow } = await import("../src/queue.mjs");
+	const q = await freshGitHubQueue();
+	const delivery = (number, id) => ({ repo: "owner/repo", target: { type: "issue", number, title: "t", body: "b" }, flow: "ask", provider: "anthropic", model: "m", maxTurns: 5, resume: true, awaitInput: true, trigger: { event: "issue_comment", action: "created", deliveryId: id, sender: { id: 1 } } });
+	// The run releases on the ACTIVE job, as the processor's parked branch does, then completes. Completions are
+	// collected from the start, so a job that finishes before its waiter is attached is not missed.
+	let release = false;
+	const released = [];
+	const done = new Set();
+	const worker = new Worker(q.name, async (job) => {
+		if (release) released.push(await releaseSemanticWindow(job));
+		return null;
+	}, { connection: parseConnection(url) });
+	worker.on("completed", (job) => done.add(job.id));
+	const completed = async (jobId) => {
+		for (let i = 0; i < 200 && !done.has(jobId); i++) await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.ok(done.has(jobId), `${jobId} completed`);
+	};
+	try {
+		// The defect, pinned: a run that finished without releasing still holds its key, and swallows the answer.
+		const first = await enqueueGitHubJob(q, delivery(3, "guid-ask-1"));
+		await completed(first.jobId);
+		const swallowed = await enqueueGitHubJob(q, delivery(3, "guid-reply-1"));
+		assert.equal(swallowed.deduplicated, true, "bullmq keeps a ttl-mode key past completion");
+		assert.equal(swallowed.survivingJobId, first.jobId);
+
+		// The fix: a parked run releases its own key, and the answer within the window becomes a job.
+		release = true;
+		const parked = await enqueueGitHubJob(q, delivery(4, "guid-ask-2"));
+		await completed(parked.jobId);
+		assert.deepEqual(released, [true], "the job freed the key it held");
+		const answer = await enqueueGitHubJob(q, delivery(4, "guid-reply-2"));
+		assert.equal(answer.deduplicated, false, "the answer is not swallowed against the parked run");
+		assert.ok(await q.getJob(answer.jobId), "and it made a job");
+	} finally {
+		await worker.close();
+		await q.obliterate({ force: true }).catch(() => {});
+		await q.close();
+	}
+});
+
 // --- replica runs: two distinct ids on BOTH dedup layers (REQ-REPLICA-RUNS) ---
 
 test("two replicas of one delivery get two jobIds and two dedup ids, and neither suppresses the other", async () => {
