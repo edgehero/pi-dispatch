@@ -90,6 +90,9 @@ Practical consequences:
 - A work item **created** already carrying the tag fires: it changed from having none.
 - Tags are one semicolon-separated string on the wire (`"performance;urgent"`); spacing is trimmed, so
   `a; b` and `a;b` behave the same.
+- The `pi-awaiting-input` tag of a parked job ([sessions](sessions.md#parked-jobs-the-agent-asks-then-waits)) is
+  written the same way: read `System.Tags`, add or remove that one tag, write the list back. These calls are tested
+  against recorded Azure responses only, not a live organisation.
 
 ## A work item does not name a repository
 

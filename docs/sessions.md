@@ -234,6 +234,10 @@ Rules:
   that name on every park (Forgejo accepts a duplicate label name). Later releases attach one label by id and remove
   every copy an issue carries, so those issues clear on their next run. The extra repository labels stay until you
   delete them (Issues, Labels): keep the one with the lowest id, which is the one pi-dispatch uses.
+- On Azure DevOps the waiting mark is a work item tag, written by reading `System.Tags`, adding or removing the one
+  tag and writing the list back. Those calls are tested against recorded Azure responses only, not a live
+  organisation. If the tag is not set or not cleared on yours, please open an issue with the worker's
+  `parked_label_failed` line.
 - Only the job's own tool can park a run. A repository extension that registers the same name stops the job before
   its prompt (`await-input-shadowed`).
 - Upgrade the worker and the receiver together. A receiver from before this feature drops `awaitInput`, and the
