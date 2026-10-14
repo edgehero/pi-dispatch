@@ -3662,3 +3662,18 @@ test("`forge` in run.mcp is the forge's own server (DES-FORGE-MCP), never read a
   assert.match(bare.detail, /mcp forge · the forge's own server/);
   assert.doesNotMatch(bare.detail, /every job is refused/);
 });
+
+test("a parked run's row names its reason, where a finished one says done (REQ-AWAIT-INPUT)", async () => {
+  // A completed run with the reason `awaiting-input` asked a person a question and ended to wait for the answer. The
+  // row said "✔ done" for it, so the LIST told the operator nothing waited on them while `/dispatch runs` and the
+  // drill-in both named the reason.
+  const parked = { ...SNAPSHOT.runs[0], jobId: "j2", target: "o/r#6", reason: "awaiting-input", endedAt: "2026-07-21T00:01:00.000Z" };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [parked, SNAPSHOT.runs[0]] }) }) });
+  await flush();
+  const lines = stripAnsi(comp.render(80).join("\n")).split("\n");
+  await comp.dispose();
+  const row = (id) => lines.find((l) => l.includes(`${id} · `)) ?? "";
+  assert.match(row("j2"), /fix · ✔ awaiting-input · 4t/, row("j2"));
+  assert.doesNotMatch(row("j2"), /done/, "a parked run is not done");
+  assert.match(row("j1"), /fix · ✔ done · 4t/, "a completed run without a reason still reads done");
+});

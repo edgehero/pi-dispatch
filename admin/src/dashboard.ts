@@ -3121,8 +3121,12 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
 function outcomeColored(outcome: any, reason: any, styler: any): string {
   // Compared against the RAW values and rendered from scrubbed ones, so a control byte can change what a
   // row looks like but never what it says a run did.
-  if (outcome === "completed") return styler.fg("success", "✔ done");
   const shown = (v: any): string => scrubControl(String(v));
+  // A completed run WITH a reason is not done: the only one the worker writes is `awaiting-input` (REQ-AWAIT-INPUT), a
+  // run that asked a person a question and ended to wait for the answer. "✔ done" told the operator nothing waited on
+  // them, while `/dispatch runs` and the drill-in both name the reason. The glyph stays (it completed, it is promoted,
+  // it is never retried); the word is the reason, in warning, since a person has to act.
+  if (outcome === "completed") return reason ? styler.fg("warning", `✔ ${shown(reason)}`) : styler.fg("success", "✔ done");
   if (outcome === "policy") return styler.fg("warning", `⚠ ${shown(reason ?? "policy")}`);
   return styler.fg("error", `✘ ${shown(reason ?? outcome ?? "failed")}`);
 }
