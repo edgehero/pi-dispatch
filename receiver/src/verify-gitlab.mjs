@@ -24,7 +24,7 @@
  */
 
 import { createHmac, timingSafeEqual, createHash } from "node:crypto";
-import { isJsonContentType, readRawBody, respond } from "./http-body.mjs";
+import { isJsonContentType, readRawBody, respond } from "@edgehero/pi-dispatch/http-body";
 
 /**
  * Standard Webhooks' replay window. The dedup layer already refuses a repeated delivery id, but that
