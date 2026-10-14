@@ -30,7 +30,12 @@ test("with no deployment, a repository's own triggers.json, scoped-limits.json a
     process.env.PI_TRIGGERS_FILE = join(repo, "triggers.json");
     assert.equal((await write("triggers.json"))?.block, true, "a configured key makes it the deployment's file");
     assert.equal(await write("scoped-limits.json"), undefined, "and only that one");
+    // Issue #640: the console tokens file likewise, only once its key names it (resolved against the session folder).
+    assert.equal(await write("console-tokens.json"), undefined, "no deployment, no key: a repository's own file");
+    process.env.PI_CONSOLE_TOKENS_FILE = "console-tokens.json";
+    assert.match((await write("console-tokens.json"))?.reason ?? "", /the console tokens file \(PI_CONSOLE_TOKENS_FILE\)/);
   } finally {
+    delete process.env.PI_CONSOLE_TOKENS_FILE;
     delete process.env.PI_TRIGGERS_FILE;
     process.chdir(saved);
   }
@@ -43,7 +48,7 @@ test("an init scaffold folder (its four files there) guards the panel's own cwd 
   try {
     process.chdir(dep);
     const at = (p) => handlers[0]({ type: "tool_call", toolName: "write", toolCallId: "c", input: { path: p, content: "x" } }, { cwd: dep });
-    for (const p of ["triggers.json", "scoped-limits.json", "projects.json", ".env", "envelope.json", "conf/settings.json"]) assert.equal((await at(p))?.block, true, p);
+    for (const p of ["triggers.json", "scoped-limits.json", "projects.json", ".env", "envelope.json", "conf/settings.json", "console-tokens.json"]) assert.equal((await at(p))?.block, true, p);
     assert.equal(await at("pause-windows.json"), undefined, "a file no guarded tool or key names passes");
     // The .env named the envelope, but configuration is untouched: the panel still reads no envelope from it.
     assert.equal(indexMod.guardedFiles().some((g) => g.path.endsWith("/envelope.json")), true);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
@@ -2522,7 +2522,7 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	assert.equal(constructions[0].intervalMs, 24 * 3600000, "24h by default, in ms");
 	// The allocation audit files (issue #504 part B) second: boot reaps them right after the logs, and a tick re-runs that
 	// same closure in the same place.
-	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "sandbox", "session"], "boot's own order");
+	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "sandbox", "session"], "boot's own order");
 	assert.equal(captured.extraClosers.length, 3, "runtimeQueue + registry + the sweep (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
@@ -2557,6 +2557,29 @@ test("the sweep re-runs the SAME closures boot already built, so one config read
 	const before = logReaperCalls.length + sandboxReaperCalls.length;
 	for (const r of handed.reapers) await r.reap();
 	assert.equal(logReaperCalls.length + sandboxReaperCalls.length, before, "a sweep constructs nothing");
+});
+
+test("boot itself reaps the allocation and console audit month files past retention, keeping the console chain's head", { skip }, async () => {
+	// The sweep is held inert so only boot's own calls can reap. The old mtime is fixed far in the past and the files are
+	// judged against the subject's real clock: that only grows MORE true as the clock moves, so it is no fuse.
+	const logsDir = tempDir("pi-boot-reap-");
+	const old = 1_000_000_000;
+	const seed = (sub, names) => {
+		mkdirSync(join(logsDir, sub), { recursive: true });
+		for (const name of names) {
+			writeFileSync(join(logsDir, sub, name), "");
+			utimesSync(join(logsDir, sub, name), old, old);
+		}
+	};
+	seed("console-audit", ["2024-01.jsonl", "2024-02.jsonl"]);
+	seed("allocations", ["2024-01.jsonl"]);
+	const { logs } = await runStart({
+		env: { PI_LOGS_DIR: logsDir, PI_LOG_RETENTION_DAYS: "30" },
+		makeRetentionSweep: () => ({ start() {}, sweepOnce: async () => {}, close: async () => {} }),
+	});
+	assert.deepEqual(readdirSync(join(logsDir, "console-audit")), ["2024-02.jsonl"], "the old month goes; the newest holds the chain's head and stays, however old");
+	assert.deepEqual(readdirSync(join(logsDir, "allocations")), []);
+	assert.ok(logs.some((l) => l.event === "reaped_console_audit" && l.file === "2024-01.jsonl"));
 });
 
 test("settleWithin clears its fuse when the read wins, and still answers when it does not", async () => {

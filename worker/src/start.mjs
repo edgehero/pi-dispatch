@@ -49,6 +49,7 @@ import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScoped
 import { escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
 import { NO_ENVELOPE_FINGERPRINT, makeAllocationAudit, makeAllocationLogReaper, makeAllocationState } from "./allocation.mjs";
+import { makeConsoleAuditReaper } from "./console-audit.mjs";
 import { optionalUsdMicros } from "./money.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
@@ -1216,6 +1217,11 @@ export async function startWorker(
 	// reaper above never reaches (it reaps the top-level `.log` and `.json` only). Never throws, so no double wrap.
 	const reapAllocationLogs = makeAllocationLogReaper({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
 	reapAllocationLogs();
+	// Issue #640: the operator console's audit files (`console-audit/YYYY-MM.jsonl`) on the same retention. The worker
+	// runs it, not the console, because the worker always runs and the console may never; it never reaps the newest file
+	// (the chain's head). Never throws.
+	const reapConsoleAudit = makeConsoleAuditReaper({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
+	reapConsoleAudit();
 
 	// REQ-RESURRECTABLE-SANDBOX: sweep retained per-job directories past their window, so what `cleanup`
 	// kept for re-opening stays bounded. Third in the row and deliberately its own sweep -- a different
@@ -2573,6 +2579,7 @@ export async function startWorker(
 					{ name: "log", reap: reapLogs },
 					// Issue #504 part B: where boot runs it, right after the run history it sits beside.
 					{ name: "allocation_log", reap: reapAllocationLogs },
+					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "sandbox", reap: reapSandboxes },
 					{ name: "session", reap: () => sessionStore.reapSessions() },
 				],

@@ -240,6 +240,8 @@ test("envNamedFiles reads every way a loader might take a value: comment, quotes
   assert.deepEqual(at("PI_PROJECTS_FILE=/a/projects.json\nPI_PROJECTS_FILE=/b/projects.json"), ["/b/projects.json"], "the last assignment, as the loaders take it");
   assert.deepEqual(at("\uFEFFexport PI_ENVELOPE_FILE=/dep/envelope.json\r\n"), ["/dep/envelope.json"], "a BOM, export and CRLF");
   assert.deepEqual(at("# PI_PROJECTS_FILE=/dep/projects.json\nPI_OTHER_FILE=/x"), [], "a comment and an unguarded key name nothing");
+  // Issue #640: a console tokens file moved by the deployment's .env is guarded where it really is, not only at its default.
+  assert.deepEqual(at("PI_CONSOLE_TOKENS_FILE=/dep/secret/console-tokens.json"), ["/dep/secret/console-tokens.json"], "the console tokens file");
 });
 
 test("powershell: trailing dots and spaces (stripped by Windows) still name the file; .env.example still does not", () => {

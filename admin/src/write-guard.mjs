@@ -172,6 +172,8 @@ export const GUARDED_ENV_KEYS = Object.freeze({
   PI_SCOPED_LIMITS_FILE: { label: "scoped-limits.json (PI_SCOPED_LIMITS_FILE)", tool: "dispatch_limit_add, _edit or _delete" },
   PI_TRIGGERS_FILE: { label: "triggers.json (PI_TRIGGERS_FILE)", tool: "dispatch_trigger_add, _edit or _delete" },
   PI_SETTINGS_FILE: { label: "the settings overlay (PI_SETTINGS_FILE)", tool: "dispatch_set" },
+  // Issue #640: a token here is a login to the operator console, which no tool of this session may mint.
+  PI_CONSOLE_TOKENS_FILE: { label: "the console tokens file (PI_CONSOLE_TOKENS_FILE)", tool: "`pi-dispatch-console token add`, `revoke` or `rotate`, in the operator's own shell" },
 });
 
 /** The most of a `.env` the guard reads: far above any real one, far below what a device or a huge file could cost. */

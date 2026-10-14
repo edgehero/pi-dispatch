@@ -137,6 +137,7 @@ import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@ed
 import { runDollars } from "./dollar-windows.mjs";
 import { coverageNotes, historyNotes, hostCaveats, hostFacts, noRunText, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
+import { tokensFilePath } from "@edgehero/pi-dispatch/console-tokens";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
 import { windowState } from "@edgehero/pi-dispatch/budget";
@@ -347,6 +348,8 @@ function registerWriteGuard(pi: ExtensionAPI): void {
  * that has no deployment. The settings overlay's default is the worker's own per-account file, so it is always
  * guarded. A deployment the panel cannot see at all (no pointer, no key, not the folder pi started in) is not.
  */
+const CONSOLE_TOKENS_GUARD = { label: "the console tokens file (PI_CONSOLE_TOKENS_FILE)", tool: "`pi-dispatch-console token add`, `revoke` or `rotate`, in the operator's own shell" };
+
 export function guardedFiles(): { path: string; label: string; tool: string }[] {
   const env = deploymentEnv();
   const paths = resolvePaths(deploymentEnv());
@@ -360,6 +363,10 @@ export function guardedFiles(): { path: string; label: string; tool: string }[] 
     { path: paths.settingsFile, label: "the settings overlay (PI_SETTINGS_FILE)", tool: "dispatch_set" },
     { path: typeof dir === "string" && dir !== "" ? join(dir, ".env") : null, label: "the deployment's .env, which names these files (PI_*_FILE)", tool: "the operator's own editor" },
     { path: pointerPath(process.env), label: "the deployment pointer (PI_DISPATCH_DEPLOYMENT_FILE)", tool: "/dispatch setup" },
+    // Issue #640: the console's tokens file. A model that could write it could add a token of its own and sign in to
+    // the console as an operator. Its default lives in the deployment folder, so it is guarded wherever the folder is
+    // known (the pointer's here, an init scaffold folder below) and, with the key set, wherever that key resolves.
+    { path: typeof dir === "string" && dir !== "" ? tokensFilePath(env, dir) : set("PI_CONSOLE_TOKENS_FILE") ? tokensFilePath(env, process.cwd()) : null, ...CONSOLE_TOKENS_GUARD },
   ];
   if (!(typeof dir === "string" && dir !== "")) {
     // No pointer: the session folder may BE the deployment (`init` then `up`, pi started there, nothing exported). Its
@@ -375,6 +382,7 @@ export function guardedFiles(): { path: string; label: string; tool: string }[] 
         { path: paths.triggersPath, label: "triggers.json (PI_TRIGGERS_FILE)", tool: "dispatch_trigger_add, _edit or _delete" },
         { path: paths.scopedLimitsPath, label: "scoped-limits.json (PI_SCOPED_LIMITS_FILE)", tool: "dispatch_limit_add, _edit or _delete" },
         { path: paths.projectsPath, label: "projects.json (PI_PROJECTS_FILE)", tool: "dispatch_project_add, _edit or _delete" },
+        { path: tokensFilePath(env, cwd), ...CONSOLE_TOKENS_GUARD },
       );
     }
   }
