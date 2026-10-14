@@ -33,6 +33,9 @@
   },
   "bugs": "https://github.com/edgehero/pi-dispatch/issues",
   "type": "module",
+  "bin": {
+    "pi-dispatch-console": "./dist/console.mjs"
+  },
   "files": [
     "dist",
     "skills"
