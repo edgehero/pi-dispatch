@@ -129,7 +129,7 @@ Four things to know before you build on it:
 One command puts a live terminal view over the whole deployment:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-14" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-14-641" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
 </p>
 
 - **MCP servers, read-only.** A trigger that names MCP servers says so on its row (`[mcp ...]`), and its
@@ -222,10 +222,12 @@ One command puts a live terminal view over the whole deployment:
   The bundled `operate-pi-dispatch` skill teaches the agent these gates.
 - **Logs stay put.** Raw container output shows only in the panel's viewer, never in model context.
 
-**A web console as well.** The same package installs `pi-dispatch-console`, a separate process that serves a web page
-for the deployment on loopback or on a private unix socket, behind a named token per person. Every write is previewed,
-confirmed and recorded in an audit log, and nothing listens unless you start it. Today it holds sign in and the pause
-windows; the screens follow. See
+**A web console as well.** The same package installs `pi-dispatch-console`, a separate process that serves a live web
+console for the deployment on loopback or on a private unix socket, behind a named token per person. It shows the
+whole fleet as it changes: an overview, every run with filters and paging, the runs waiting for an answer, spend and
+insights by range, queues, hosts and schedules, the configuration and its own audit log, plus `/api/state` as JSON for
+scripts. It reads through the same code as the panel, so the two never disagree; the panel shows the waiting runs too.
+Every write is previewed, confirmed and recorded in an audit log, and nothing listens unless you start it. See
 [`docs/console.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/console.md).
 
 ## More than one machine

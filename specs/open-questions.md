@@ -2006,7 +2006,7 @@ adversarial passes did.
 
 ## OQ-044: Where the console shows a run's transcript
 
-- **Status**: `OPEN` (2026-10-14, issue #640), handed to #643.
+- **Status**: `OPEN` (2026-10-14, issue #640), handed to #643; #641 checked it and shows no transcript.
 - **Question**: a run's `.log` (`PI_CAPTURE_JOB_LOGS`) and its session transcript live only on the host that ran the
   job, and `docs/multi-host.md` keeps them there on purpose: they are the artifacts that hold issue text, comment text
   and tool output. A console on one host of a fleet, or on a machine that is not a worker, can show run records for
@@ -2015,6 +2015,11 @@ adversarial passes did.
 - **What #640 already decides**: run text reaches a console page only for the operator role, always escaped after
   the control-byte scrub (`REQ-CONSOLE-SECURITY` (e), `DES-OPERATOR-CONSOLE`), and never in a list view. Nothing in
   #640 shows a transcript.
+- **What #641 adds, and what it leaves open**: the run detail page shows a run's record, from this host's file or
+  from the Valkey mirror, and says which, and shows no transcript and no `.log`, for any host's run. The one free
+  text the screens show is BullMQ's `failedReason`, to the operator only, in a detail view only
+  (`REQ-CONSOLE-SECURITY` (l)). The question is still #643's, unchanged: the record is fleet-wide because the mirror
+  is, the transcript is not.
 - **Why it matters**: shipping moves the most PII-bearing bytes this system holds off the machine the operator chose
   to keep them on, and adds a store with its own retention; showing only local runs leaves a fleet operator a page
   that answers "not on this host" for most runs.
@@ -2130,3 +2135,4 @@ adversarial passes did.
 | 2026-10-14 | No issue: the lab's Forgejo follow-up. **`OQ-043` AMENDED, still `ACCEPTED RISK` and now mitigated**: the receiver's own `FORGEJO_PERMISSION_TOKEN` (a `read:repository` token of an admin account, kept out of every job) answers the author gate, so the job's token stays a `write` collaborator's. The source evidence that a read scope suffices and that the admin check is against the token's user is cited in the row. The residual is the fallback to `FORGEJO_TOKEN` when the variable is unset. **`OQ-013` UNCHANGED, checked.** |
 | 2026-10-14 | No issue. **`OQ-043` UNCHANGED, checked**, and the check found a second admin dependency it had not named: the Forgejo host's branch protection check listed `/branch_protections`, an admin route, so a `write` collaborator's job token failed every job with 403. That check now reads the branch object's `protected` (`REQ-BRANCH-PROTECTION-PRECONDITION`), and nothing a job does needs an admin's token any more; the lookup fallback stays the only residual. |
 | 2026-10-14 | Issue #640. **NEW `OQ-044`** (`OPEN`, handed to #643): where the console shows a run's transcript, given that `.log` files and session transcripts stay on the host that ran the job; #640 fixes only that run text reaches a page for the operator role alone, always escaped, never in a list. UNCHANGED, checked: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-INSIGHTS-HTML-EXPORT`, and `constitution.md` (no port clause, checked). |
+| 2026-10-14 | Issue #641, the console's screens. **`OQ-044` AMENDED, still `OPEN`, still #643's**: #641's run detail shows the record (from this host's file or the mirror, saying which) and no transcript or `.log` for any run, so nothing in it decides where transcripts are shown; the one free text the screens show is BullMQ's `failedReason`, to the operator only and in a detail view only (`REQ-CONSOLE-SECURITY` (l)). **`OQ-035` UNCHANGED, checked**: `failedReason` is still a bounded channel, not a classified one; the console shows it through the same belt, to the operator only, which narrows who reads it and changes nothing about what it may hold. |

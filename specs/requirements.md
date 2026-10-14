@@ -852,19 +852,23 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   read-only, and confirmed by a single-use ticket bound to the diff the operator saw; shall make every write through
   the read model's existing funnels; shall send the same security headers on every response and escape every value
   it renders; shall record every write, every write a guard refuses and every sign-in in a hash-chained audit log
-  (refusals of requests that carry no session one row each up to a rate, and counted past it); and shall
-  never put a token, a login code, a cookie value or a request body in a log line, an audit row or a page.
+  (refusals of requests that carry no session one row each up to a rate, and counted past it); shall
+  never put a token, a login code, a cookie value or a request body in a log line, an audit row or a page; and,
+  since #641, shall end every event stream when its session ends without a stream ever extending one, and shall show
+  free run text (BullMQ `failedReason`) and the audit log to the operator role alone.
 - **Scope**: the console process and its CLI. The pi extension is unchanged and still binds no port
-  (`REQ-ADMIN-VIA-PI-EXTENSION`). In #640 the console serves login, logout, `whoami`, a signed-in placeholder and
-  one reference write, the pause windows; the screens are #641's, the other writes #642's, the live logs #643's,
-  and each of those meets this requirement as it lands. `REQ-INSIGHTS-HTML-EXPORT` is unchanged: the static file
-  keeps zero external requests and binds nothing.
+  (`REQ-ADMIN-VIA-PI-EXTENSION`). #640 built login, logout, `whoami` and one reference write, the pause windows; #641
+  added the read screens, `/api/state` and the event streams (`REQ-OPERATOR-CONSOLE-SCREENS`), which meet this
+  requirement through clauses (e), (k) and (l); the other writes are #642's and the live logs #643's, and each of
+  those meets this requirement as it lands. `REQ-INSIGHTS-HTML-EXPORT` is unchanged: the static file keeps zero
+  external requests and binds nothing.
 - **Why**: the console is the most powerful surface after a shell on the host, and a loopback port is reachable by
   every local account, by any page the operator's browser opens and, on Docker Desktop, by a job container
   (`DES-OPERATOR-CONSOLE`'s six threats). Each clause below closes one route, and each is held by a named test,
   because a security property nobody runs is a sentence, not a control.
 - **Traces to**: `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
-  `INT-CONSOLE-AUDIT-LOG`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`.
+  `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`,
+  `REQ-OPERATOR-CONSOLE-SCREENS`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`.
 - **Acceptance**:
   - (a) **Where it listens, and what it refuses to start on.** Given no `PI_CONSOLE_LISTEN`, the console listens on
     `127.0.0.1:4790`; given a non-loopback IP literal without `PI_CONSOLE_BIND_PUBLIC=1`, a hostname, or a unix
@@ -927,6 +931,126 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     directory that gives nothing to group or other and belongs to the console's account, and `serve` refuses a
     parent directory that does not; a stale socket nobody answers on is replaced, and a live one is not. Test:
     `admin/test/console-listen.test.mjs`.
+  - (k) **An event stream ends with its session and never extends it** (issue #641). Given an open stream, when its
+    session is logged out, its stream ends at once with `event: end`; when its token is revoked or rotated, its role
+    changes, `sessions end-all` runs, or the session passes its idle or absolute limit, its stream ends with
+    `event: end` within one tick (about a second) without any request arriving; given a session whose only activity
+    is an open stream, it still ends at `PI_CONSOLE_IDLE_MINUTES`, because re-judging a stream (`sessions.peek`)
+    never moves `lastSeen`; given a token already holding `PI_CONSOLE_MAX_STREAMS` streams across its sessions, a
+    process already holding 32, or viewer streams already holding the 24 the 8-slot operator reserve leaves, a new
+    stream is answered 429 and opens nothing, and a closed stream frees its slot; given `HEAD /api/events`, it is
+    405 before any slot is taken; given a stream
+    open past `requestTimeout` and `headersTimeout` (short limits injected), it is still open; given the last
+    stream closed, the poll loop stops; given a client more than 2 MiB behind, it is ended. Tests:
+    `admin/test/console-sessions.test.mjs` (`peek`), `admin/test/console-live.test.mjs`,
+    `admin/test/console-server.test.mjs` (the caps, the 429 and the timeout-survival cases are in
+    `console-live.test.mjs`).
+  - (l) **The role and run-text rule, per page** (issue #641). Given a viewer's session, then no page, panel, event
+    or `/api/state` body carries BullMQ `failedReason` text, and `/audit` is refused 403 by the role guard; given an
+    operator's session, `failedReason` appears only in a per-job `<details>` element below the fleet page's failed
+    jobs, scrubbed and escaped, and never in a list row (the failed-jobs list, the runs list, the overview); given
+    a run record whose `jobId`, `target` or `parentJobId` holds markup, quotes, control bytes or a bidi override,
+    every page that shows it, as either role, shows it escaped after the control-byte scrub; given a forge link, it is
+    built from the deployment's own instance URL for its kind or not drawn, never from a guessed host, and never
+    with a scheme other than http or https. A test walks every page in `PAGES` as a viewer with hostile fixture
+    values (the table, not a hand list). Tests: `admin/test/console-pages.test.mjs`,
+    `admin/test/console-panels.test.mjs`, `admin/test/console-server.test.mjs`,
+    `admin/test/read-model-pages.test.mjs` (`forgeLinkOf`), `admin/test/console-live.test.mjs` (a viewer's stream);
+    the walk over every page for both roles, with a hostile-value variant, is `admin/test/console-pages.test.mjs`.
+
+## REQ-OPERATOR-CONSOLE-SCREENS
+
+- **Statement**: The operator console shall show the whole deployment on eight read pages (overview, runs, run
+  detail, parked inbox, insights, fleet, configuration and audit) and as one JSON snapshot (`GET /api/state`); shall
+  read all of it through the read model's one fleet reader (`createFleetReader`), the same reader the `/dispatch`
+  panel uses; shall keep every open live page current within about two seconds of a change in Valkey by sending only
+  the panels that changed; and shall bound every query a page accepts. The `/dispatch` panel shall show the parked
+  runs too.
+- **Scope**: reads only. Every write and action, answering a parked run included, is #642's; live logs, progress and
+  transcripts are #643's and #644's (`OQ-044`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
+  (e), (k) and (l) above all. `insights.html` stays the offline artifact, unchanged (`REQ-INSIGHTS-HTML-EXPORT`).
+- **Why**: before #641 the operator's live surfaces were the panel and a static insights file whose reload re-read
+  the same file. Parked runs were shown nowhere in the admin, the run list stopped at 50 records with no search, only
+  one active job was fetched, and nothing a script could read existed. A second reader for the console would have
+  been a second answer to "what is the deployment doing", free to disagree with the panel's; so the panel's reader
+  moved into the read model and both surfaces use it.
+- **Traces to**: `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `REQ-CONSOLE-SECURITY`,
+  `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`,
+  `REQ-AWAIT-INPUT`, `REQ-DURABLE-RUN-HISTORY`, `REQ-INSIGHTS-HTML-EXPORT`, `REQ-MULTI-HOST-COORDINATION`, `OQ-044`.
+- **Acceptance**:
+  - (a) **Overview** (`/`). Given the fixture deployment, the page shows the paused state (a partial pause named as
+    such), the queue counts, the hosts online with the age of each one's last beat, today's spend against its caps,
+    the number of parked runs waiting, and the failures of the last 24 hours; given a run window that does not reach
+    back a day, the failure count is shown as a floor ("at least"), never as an exact number; given Valkey down, the
+    page renders and says the fleet is unreachable rather than showing zeros. Tests:
+    `admin/test/console-pages.test.mjs`, `admin/test/read-model-pages.test.mjs` (`failures24h`).
+  - (b) **Runs** (`/runs`). Given the filters `repo`, `kind`, `flow`, `trigger`, `project`, `host`, `outcome`,
+    `reason`, `model` and `q` (a target substring), each alone returns exactly the runs whose field matches (the test
+    is exhaustive per field); given a value outside its field's charset or longer than its bound, or a field given
+    twice, the page refuses it by field name, reads nothing, and does not echo the value; given more runs than one page,
+    `before` pages on with no run shown twice or skipped, also when a new run lands between two pages; given runs that
+    share one instant at a page's edge, the page takes the whole group; given a filter that matches nothing in 2000
+    records, the page answers with what it found and a link that continues from where it stopped, rather than reading
+    on without bound; given the mirror unreachable, the page shows this host's runs and says so; given a mirror read,
+    nothing in Valkey is written (no prune). Each row shows its outcome, host, model, tokens, its cost (classified as
+    the cost fold classifies it) and the dollar cap the job was held to. Tests:
+    `admin/test/read-model-pages.test.mjs`, `worker/test/run-mirror.test.mjs`,
+    `worker/test/run-mirror.integration.test.mjs`, `admin/test/console-pages.test.mjs`.
+  - (c) **Run detail** (`/run?id=`). Given a job id whose record is on this host, the page shows the record's fields
+    and says it came from this host; given one only in the mirror, it shows that record and says so; given an unknown
+    id, the answer is 404; given an id outside the job id charset, it is refused before any path or key is built from
+    it; given a forge run, its link is built from the deployment's own instance URL for that forge (GitHub on
+    `github.com`), and given no such URL, or a target that does not parse, no link is drawn; a run record carries no
+    free text, so neither role sees any here (BullMQ's `failedReason` is on the fleet page, operator only). No log
+    and no transcript is shown
+    (`OQ-044`). Tests: `admin/test/read-model-pages.test.mjs` (`readRunById`, `forgeLinkOf`),
+    `admin/test/console-pages.test.mjs`, `admin/test/console-server.test.mjs`.
+  - (d) **Parked inbox** (`/parked`). Given runs that ended `completed` with `awaiting-input`, each shows its target,
+    its forge link where one can be built, its age and its session chain count, newest first; given a later run on the
+    same kind and target, the parked run shows as answered; given `PI_SESSIONS_DIR` not on the console's host, a key
+    with no directory there, a pull request (whose key the record cannot rebuild) or an unreadable counter, the chain
+    count shows as unknown, never 0. No answer box (#642). Tests: `admin/test/read-model-pages.test.mjs`
+    (`readParkedRuns`), `admin/test/console-pages.test.mjs`.
+  - (e) **Insights** (`/insights?range=`). Given `range` `7d`, `30d` or `mtd`, the page shows the insights sections
+    for that window, built by the same assembly `/dispatch insights` uses (`assembleInsights`, now pi-free in
+    `admin/src/insights-assembly.mjs`), with no inline style and no inline script; given any other range, it is
+    refused; given no range, the last 7 days; a second request within 30 seconds for the same
+    window reuses the assembly. `/dispatch insights` and its tests are unchanged. Tests:
+    `admin/test/insights-assembly.test.mjs`, `admin/test/insights-html.test.mjs`, `admin/test/console-pages.test.mjs`.
+  - (f) **Fleet** (`/fleet`). The page shows BullMQ counts per state for each queue and summed, the held waits, each
+    host with its slots, budget, running jobs and last beat, every active job (not only the first), the job
+    schedulers with their next and last run and stall state, and the failed jobs as a list of job id, attempts, queue
+    and end time, with no reason text in the list. Tests: `admin/test/console-pages.test.mjs`,
+    `admin/test/console-panels.test.mjs`.
+  - (g) **Configuration** (`/config`). The page shows the triggers, the settings overlay, the pause windows, the
+    scoped limits, the projects, the envelope and allocation, the MCP servers and the staged packages, and the secret
+    profiles by NAME only: no page and no `/api/state` body carries a resolver path, a secret's value or a secret's
+    reference. Tests: `admin/test/read-model-pages.test.mjs` (`secretProfileNames`),
+    `admin/test/console-pages.test.mjs`.
+  - (h) **Audit** (`/audit`). For the operator role, the page shows the console audit rows newest first, pages with
+    `before`, and shows a line that is not a row as broken, in its place, rather than skipping it; for a viewer, it is
+    refused (`REQ-CONSOLE-SECURITY` (l)). Tests: `worker/test/console-audit.test.mjs` (`readConsoleAudit`),
+    `admin/test/console-pages.test.mjs`, `admin/test/console-server.test.mjs`.
+  - (i) **Byte-pinned pages.** Given the fixture deployment (`launch/fixture-deployment.mjs`) seeded into Valkey, every
+    page renders byte-identical to its fixture in `admin/test/fixtures/console/`, twice in a row; no page holds an ESC
+    byte, a host path or an email address; a hostile-value variant renders escaped. Test:
+    `admin/test/console-pages.test.mjs` (fixtures regenerated with `UPDATE_CONSOLE_FIXTURES=1`).
+  - (j) **Live updates.** Given a live page open, its stream first sends every panel of the page, then only the panels
+    whose content changed; given a reconnect whose `Last-Event-ID` is the current id, nothing is resent, and any other
+    id gets every panel again; given no change, a `: ping` arrives every 15 seconds; given a job added, a host beat or
+    a run parked in Valkey, the open page shows it within about two seconds with no reload; given no stream open, the
+    console does not poll. Tests: `admin/test/console-live.test.mjs`, `admin/test/console-server.test.mjs`.
+  - (k) **`/api/state`.** Given a session, it answers the JSON of `INT-CONSOLE-STATE-API`; given a viewer, the body
+    carries no `failedReason`; given no session, it answers 401 JSON, never a redirect. Test:
+    `admin/test/console-server.test.mjs`.
+  - (l) **One reader.** Given the panel's existing test suite, it passes unchanged after the snapshot code moved into
+    `createFleetReader`; the console and the panel both build their snapshot from that function. Tests:
+    `admin/test/dashboard.test.mjs`, `admin/test/held.test.mjs`, `admin/test/read-model-pages.test.mjs`.
+  - (m) **The panel's parked view.** Given parked runs in the snapshot, the `/dispatch` overlay's PARKED view, reached
+    from LIST with `k`, lists each with its target, forge, age and chain count (`?` when unknown), opens a row's run
+    detail with Enter (reading the record by id when it is older than the panel's 50 runs), says "parked runs unknown"
+    rather than "nothing parked" when the list could not be read, and writes nothing. Test:
+    `admin/test/dashboard-parked.test.mjs`.
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -3890,3 +4014,4 @@ instead of drifting.
 | 2026-10-14 | No issue: the lab's Forgejo follow-up, `OQ-043`. **`REQ-TRIGGER-SECRETS` AMENDED**, one name in its Acceptance: the reserved set gains `RECEIVER_ONLY_VARS` (the forge table's new column, today `FORGEJO_PERMISSION_TOKEN`), so a trigger cannot bind the receiver's admin lookup token into a job. **`REQ-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: who may trigger does not move; only which token asks Forgejo about them. |
 | 2026-10-14 | No issue: found in the live lab once the Forgejo job token was a `write` collaborator's (`OQ-043`). **`REQ-BRANCH-PROTECTION-PRECONDITION` AMENDED**, in the Why and the Acceptance: Forgejo's answer is the branch object's `protected` (`GET /repos/{o}/{r}/branches/{b}`, read access to code), which Forgejo computes with its own glob match (`GetBranch` calls `GetFirstMatchProtectedBranchRule`, and `convert.ToBranch` sets `protected: true` for a matched rule, at v14.0.5). The worker used to list `/branch_protections`, an admin route: measured on 14.0.5 a `write` collaborator's token got 403 `{"message":"user should be an owner or a collaborator with admin write of a repository"}`, so every job failed before spending, and the check had quietly required the admin job token `OQ-043` keeps out of jobs. The listing is dropped with no fallback: `protected` is in Gitea's Branch object since 1.11 and Forgejo forked from 1.18. A non-2xx or a non-boolean `protected` stays retryable, never "unprotected". The Statement is UNCHANGED, checked. |
 | 2026-10-14 | Issue #640, the operator console's security model. **NEW `REQ-CONSOLE-SECURITY`**: the console is a separate process on loopback or a 0600 unix socket; every request but `/healthz` and login needs a named token's session; a write is same-origin, JSON, by the operator role, on a console that is not read-only, behind a single-use ticket bound to the previewed diff, through the read model's funnels; one header set on every response and every value escaped; every write, refusal and sign-in in a hash-chained audit log; no token, code, cookie or body in a log, a row or a page. Acceptance clauses (a) to (j) each name the test files that hold them (`admin/test/console-*.test.mjs`, `worker/test/console-tokens.test.mjs`, `worker/test/console-audit.test.mjs`, `worker/test/doctor-console.test.mjs`). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, one sentence in the confirm rule: the console's equivalent of the confirm dialog is the single-use, diff-bound ticket (`REQ-CONSOLE-SECURITY` (g)); the model-callable tool list is untouched. UNCHANGED, checked: `REQ-INSIGHTS-HTML-EXPORT` (the static file keeps zero external requests and binds nothing), `REQ-TOPOLOGY-GRAPH` (its "no port" is the graph surface's, which is still the artifact), `REQ-SCOPED-PAUSE-WINDOWS` (the console's pause-window write reaches the same validated `writePauseWindows`), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, and `constitution.md` (no port clause, checked). |
+| 2026-10-14 | Issue #641, the operator console's screens and live updates. **NEW `REQ-OPERATOR-CONSOLE-SCREENS`**: eight read pages and `/api/state`, all read through the one fleet reader the `/dispatch` panel uses (`createFleetReader`, moved from `dashboard.ts`), with acceptance per screen: the overview (failures in 24 hours shown as a floor when the window is short), the runs with ten exact filters plus a target substring, a score cursor stable while runs land and a 2000 record examine cap, the run detail (404 for an unknown id, a forge link from the deployment's own instance URL or none), the parked inbox (answered derived from a later run, the chain count unknown rather than 0), insights by range, the fleet (every active job, failed jobs listed without reason text), the configuration (secret profiles by name only) and the audit (operator only, broken lines shown in place); byte-pinned render fixtures; live updates within about two seconds; and the panel's new PARKED view. **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement gains the stream and role rules, the Scope no longer calls the screens future work, and two clauses are added: (k) an event stream ends with its session (logout at once; revoke, rotate, role change, end-all and expiry within a tick) and never extends one, with the per-session and global stream caps answered 429; (l) the role and run-text rule per page, held by a test that walks every page as a viewer with hostile values. Clauses (a) to (j) UNCHANGED, checked. **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: the file and its zero external requests stay; the console renders the same sections from the same assembly. **`REQ-AWAIT-INPUT` UNCHANGED, checked**: parked runs are read, never changed. |
