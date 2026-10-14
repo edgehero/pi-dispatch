@@ -187,3 +187,23 @@ test("setParkedLabel creates the repository label (an existing one is fine), add
 	const refused = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "POST /api/v1/repos/acme/widgets/labels": 201, "POST /api/v1/repos/acme/widgets/issues/7/labels": 403 }) });
 	await assert.rejects(() => refused.setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok"));
 });
+
+test("clearing the marker in a repository that never had the label is already-gone, not a failure", async () => {
+	// Measured on Forgejo 14.0.5: DELETE /repos/{o}/{r}/issues/{n}/labels/pi-awaiting-input answers 422
+	// {"message":"label does not exist [label_id: 0, repo_id: 1]"} when the repository has no such label, so every
+	// completed non-parked run on an awaitInput trigger logged parked_label_failed ... returned 422.
+	const fetchFn = async (url, init = {}) => {
+		fetchFn.calls.push(`${init.method} ${String(url).replace(/^https?:\/\/[^/]+/, "")}`);
+		return { ok: false, status: 422, json: async () => ({ message: "label does not exist [label_id: 0, repo_id: 1]" }) };
+	};
+	fetchFn.calls = [];
+	const host = makeForgejoHost({ apiUrl: API, fetchFn });
+	await host.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
+	assert.deepEqual(fetchFn.calls, ["DELETE /api/v1/repos/acme/widgets/issues/7/labels/pi-awaiting-input"]);
+	// Only the removal reads 422 as done: adding the marker to an issue still refuses on it.
+	const adding = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "POST /api/v1/repos/acme/widgets/labels": 201, "POST /api/v1/repos/acme/widgets/issues/7/labels": 422 }) });
+	await assert.rejects(() => adding.setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok"), /returned 422/);
+	// And any other refusal of the removal still throws, so a real failure is still logged.
+	const refused = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "DELETE /api/v1/repos/acme/widgets/issues/7/labels/pi-awaiting-input": 403 }) });
+	await assert.rejects(() => refused.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok"), /returned 403/);
+});
