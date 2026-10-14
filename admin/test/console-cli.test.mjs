@@ -4,8 +4,11 @@ import { request } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { runCli, USAGE } from "../src/console/cli.mjs";
+import { cachedPerWindow, INSIGHTS_CACHE_MS, readSideOf, runCli, USAGE } from "../src/console/cli.mjs";
+import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
+import * as realPages from "../src/console/pages.mjs";
+import * as server from "../src/console/server.mjs";
 
 // `pi-dispatch-console` (issue #640) on injected modules: the token, session, code, ticket and audit modules are fakes
 // here, so these tests pin the command's own rules (exit codes, what it prints and where, the startup refusals, the
@@ -19,9 +22,38 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
   const rows = [];
   const calls = [];
   const file = { version: 1, generation: 0, tokens };
+  // The #641 read side, faked: one fleet reader the serve tests can watch being built and disposed.
+  const fleet = {
+    built: [],
+    disposed: 0,
+    snapshots: 0,
+    async snapshot() {
+      fleet.snapshots += 1;
+      return { queue: { pausedState: false, pausedPartial: false, counts: { waiting: 2, active: 1 } }, failed: { rows: [{ jobId: "j1", queue: "pi", attemptsMade: 1, endedAt: 1, failedReason: "boom" }], more: 0 } };
+    },
+    async dispose() {
+      fleet.disposed += 1;
+    },
+  };
+  const pageDepsSeen = [];
+  const insightCalls = [];
   return {
     rows,
     calls,
+    fleet,
+    pageDepsSeen,
+    insightCalls,
+    server,
+    live,
+    pages: {
+      ...realPages,
+      loadPageData: async (name, query, deps) => (pageDepsSeen.push(deps), { snap: await deps.fleet.snapshot() }),
+      pagePanels: async (name, ctx) => [{ id: "p-main", html: `<p>${name} ${ctx.session.role}</p>` }],
+      renderPage: async (name) => ({ status: 200, html: `<!doctype html><title>${name}</title>` }),
+    },
+    insights: { assembleInsights: async (paths, window, opts) => (insightCalls.push({ paths, window, opts }), { window }) },
+    pricing: { listPricedModels() {}, getPricedModel() {}, isZeroRated() {}, reprice() {}, piAiVersion() {}, other() {} },
+    connection: { useValkeyContext: (fn) => calls.push(["valkey-context", typeof fn, fn]) },
     tokens: {
       TOKEN_ROLES: ["operator", "viewer"],
       tokensFilePath: (env, dir) => join(dir, env.PI_CONSOLE_TOKENS_FILE || "console-tokens.json"),
@@ -63,7 +95,14 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
       consumeLoginCode: () => ({ refusal: "unknown" }),
     },
     confirm: { makeConfirmTickets: () => ({ issue: () => ({ ticket: "t" }), redeem: () => ({ refusal: "no" }) }) },
-    readModel: { writePauseWindows: () => ({ ok: true }) },
+    readModel: {
+      writePauseWindows: () => ({ ok: true }),
+      panelEnv: ({ env }) => ({ env: { ...env }, dir: null, notice: undefined }),
+      panelValkeyContext: (args) => (calls.push(["panel-context", args.pointerDir]), {}),
+      resolvePaths: (env) => ({ valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379", logsDir: env.PI_LOGS_DIR ?? "./logs", triggersPath: env.PI_TRIGGERS_FILE ?? "./triggers.json", subscriptionsPath: "./subscriptions.json" }),
+      createFleetReader: (paths, seams) => (fleet.built.push({ paths, seams }), fleet),
+      readSubscriptions: (args) => (calls.push(["subscriptions", args.subscriptionsPath]), { version: 1, subscriptions: [] }),
+    },
   };
 }
 
@@ -288,4 +327,181 @@ test("serve refuses to start, exit 2, when its start cannot be audited, and rele
   assert.equal(res.code, 2);
   assert.match(res.err.join("\n"), /audit log cannot be written .*ENOSPC/);
   assert.equal(existsSync(consoleLockPath(join(dep.dir, "logs"))), false, "the lock is released");
+});
+
+// ---- issue #641: the read side, the hub and the pages wired by serve ----
+
+/** One raw request; resolves `{status, headers, text}`. */
+function http(port, { method = "GET", path, headers = {}, body = null }) {
+  return new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port, method, path, headers: { host: `127.0.0.1:${port}`, ...headers }, setHost: false }, (res) => {
+      let text = "";
+      res.on("data", (c) => (text += c));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, text }));
+    });
+    req.on("error", reject);
+    req.end(body ?? undefined);
+  });
+}
+
+test("serve wires one fleet reader on the deployment, answers /api/state and a live stream, and disposes reader, hub and context on stop", async (t) => {
+  const dep = deployment();
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  t.after(() => stop());
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  modules.sessions = await import("../src/console/sessions.mjs");
+  modules.tokens.findToken = (f, presented) => (presented === TOKEN ? f.tokens[0] : null);
+  const auditReads = [];
+  modules.audit.readConsoleAudit = (args) => (auditReads.push(args), { rows: [], next: null });
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
+  const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  const port = srv.address().port;
+
+  assert.equal(modules.fleet.built.length, 1, "one reader for the whole serve");
+  const { paths, seams } = modules.fleet.built[0];
+  assert.equal(paths.logsDir, join(dep.dir, "logs"));
+  assert.equal(paths.triggersPath, join(dep.dir, "triggers.json"), "a relative default is the deployment folder's, not the shell's cwd");
+  assert.equal(typeof seams.dollarEnvFn, "function");
+  assert.equal(seams.readOnly, true, "the console's reader is read-only");
+  assert.equal(seams.activeLimit, 50, "the console reads at most 50 active jobs per snapshot");
+  const installed = modules.calls.filter((c) => c[0] === "valkey-context");
+  assert.deepEqual(installed.map((c) => c[1]), ["function"]);
+  assert.equal(modules.calls.some((c) => c[0] === "panel-context"), false, "the context is read per client, not at install");
+  installed[0][2]();
+  assert.deepEqual(modules.calls.find((c) => c[0] === "panel-context"), ["panel-context", dep.dir], "from THIS deployment's .env, not the pointer's");
+
+  const login = await http(port, { method: "POST", path: "/login", headers: { origin: `http://127.0.0.1:${port}`, "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: JSON.stringify({ token: TOKEN }) });
+  assert.equal(login.status, 200, login.text);
+  const cookie = login.headers["set-cookie"][0].split(";")[0];
+
+  const state = await http(port, { path: "/api/state", headers: { cookie } });
+  assert.equal(state.status, 200);
+  const body = JSON.parse(state.text);
+  assert.equal(body.counts.waiting, 2);
+  assert.equal(body.failed.rows[0].failedReason, "boom", "alice is an operator");
+
+  // The page deps the CLI built: the reader, a 30 s insights cache over the real assembler's call shape, the audit read.
+  const page = await http(port, { path: "/fleet", headers: { cookie } });
+  assert.equal(page.status, 200);
+  const deps = modules.pageDepsSeen.at(-1);
+  assert.equal(deps.fleet, modules.fleet);
+  await deps.insights("7d");
+  await deps.insights("7d");
+  await deps.insights("30d");
+  assert.deepEqual(modules.insightCalls.map((c) => c.window), ["7d", "30d"], "one assembly per window inside the cache");
+  assert.deepEqual(Object.keys(modules.insightCalls[0].opts.pricing).sort(), ["getPricedModel", "isZeroRated", "listPricedModels", "piAiVersion", "reprice"]);
+  assert.equal(modules.insightCalls[0].paths, paths);
+  await deps.audit({ limit: 5, before: null });
+  assert.deepEqual(auditReads.map((a) => [a.logsDir, a.limit]), [[join(dep.dir, "logs"), 5]]);
+  assert.deepEqual(deps.subscriptions(), { version: 1, subscriptions: [] });
+  assert.deepEqual(modules.calls.find((c) => c[0] === "subscriptions"), ["subscriptions", join(dep.dir, "subscriptions.json")]);
+
+  // A live stream: its first panel arrives, and stopping serve ends it rather than holding the close open.
+  const streamEnded = new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port, path: "/api/events?page=overview", headers: { host: `127.0.0.1:${port}`, cookie }, setHost: false }, (res) => {
+      assert.equal(res.headers["content-type"], "text/event-stream; charset=utf-8");
+      let text = "";
+      res.on("data", (c) => {
+        text += c;
+        if (text.includes("event: panel")) stop();
+      });
+      res.on("end", () => resolve(text));
+      res.on("error", () => resolve(text));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  const text = await streamEnded;
+  assert.match(text, /event: panel\ndata: \{"id":"p-main","html":"<p>overview operator<\/p>"\}/);
+  assert.match(text, /event: end/, "the hub said goodbye on stop");
+  assert.equal(await running, 0);
+  assert.equal(modules.fleet.disposed, 1, "the reader is disposed on stop");
+  assert.deepEqual(modules.calls.filter((c) => c[0] === "valkey-context").at(-1).slice(0, 2), ["valkey-context", "object"], "the context is put back");
+});
+
+test("cachedPerWindow: one call per window within the TTL on the injected clock, a new one after, and a rejection is not kept", async () => {
+  let t = T0;
+  const seen = [];
+  let fail = true;
+  const cached = cachedPerWindow(async (w) => {
+    seen.push(w);
+    if (w === "bad" && fail) throw new Error("x");
+    return `v-${w}-${seen.length}`;
+  }, { now: () => t });
+  assert.equal(await cached("7d"), "v-7d-1");
+  t += INSIGHTS_CACHE_MS - 1;
+  assert.equal(await cached("7d"), "v-7d-1");
+  t += 1;
+  assert.equal(await cached("7d"), "v-7d-2");
+  await assert.rejects(cached("bad"));
+  fail = false;
+  assert.equal(await cached("bad"), "v-bad-4", "a failed assembly is tried again, not served for 30 s");
+});
+
+test("readSideOf: the deployment .env fills the read side's keys, relative paths are the deployment folder's, PI_SESSIONS_DIR turns on sessionsDir", async () => {
+  const [readModel, serviceEnv, forges] = await Promise.all([import("../src/read-model.mjs"), import("@edgehero/pi-dispatch/service-env"), import("@edgehero/pi-dispatch/forges")]);
+  const m = { readModel, serviceEnv, forges };
+  const dir = tempDir("console-side-");
+  writeFileSync(join(dir, ".env"), "PI_LOGS_DIR=runlogs\nPI_SESSIONS_DIR=sess\nGITLAB_HOST=https://gl.example.test\nFORGEJO_URL=https://code.example.test\nAZURE_ORG_URL=https://dev.azure.com/acme\n", { mode: 0o600 });
+  const side = readSideOf({ m, env: { HOME: dir }, dir, fs: await import("node:fs"), platform: process.platform, uid: process.geteuid?.() });
+  assert.equal(side.notice, undefined, String(side.notice));
+  assert.equal(side.paths.logsDir, join(dir, "runlogs"));
+  assert.equal(side.paths.sessionsDir, join(dir, "sess"));
+  assert.equal(side.paths.triggersPath, join(dir, "triggers.json"));
+  assert.equal(side.env.GITLAB_HOST, "https://gl.example.test", "forge host variables reach forgeLinkOf");
+  // and the names a deployment .env actually sets for its forges, which forgeLinkOf reads first
+  assert.equal(side.env.FORGEJO_URL, "https://code.example.test");
+  assert.equal(side.env.AZURE_ORG_URL, "https://dev.azure.com/acme");
+  assert.equal(readModel.forgeLinkOf({ kind: "forgejo", target: "acme/web#7" }, side.env), "https://code.example.test/acme/web/issues/7");
+  const bare = tempDir("console-side-");
+  const none = readSideOf({ m, env: { HOME: bare }, dir: bare, fs: await import("node:fs"), platform: process.platform, uid: process.geteuid?.() });
+  assert.equal(none.paths.sessionsDir, undefined, "no PI_SESSIONS_DIR, no chain counts");
+});
+
+test("readSideOf: this shell's environment outranks the deployment .env (panelEnv's rule), the .env fills the rest, and a panel key they disagree on is named, never valued", async () => {
+  const [readModel, serviceEnv, forges] = await Promise.all([import("../src/read-model.mjs"), import("@edgehero/pi-dispatch/service-env"), import("@edgehero/pi-dispatch/forges")]);
+  const m = { readModel, serviceEnv, forges };
+  const dir = tempDir("console-side-");
+  writeFileSync(join(dir, ".env"), "PI_LOGS_DIR=file-logs\nPI_TRIGGERS_FILE=file-triggers.json\nPI_SESSIONS_DIR=file-sess\nFORGEJO_URL=https://file.example.test\n", { mode: 0o600 });
+  const shell = { HOME: dir, PI_LOGS_DIR: "/shell/logs", PI_SESSIONS_DIR: "/shell/sess", FORGEJO_URL: "https://shell.example.test" };
+  const side = readSideOf({ m, env: shell, dir, fs: await import("node:fs"), platform: process.platform, uid: process.geteuid?.() });
+  assert.equal(side.paths.logsDir, "/shell/logs", "the shell's panel key wins");
+  assert.equal(side.paths.sessionsDir, "/shell/sess", "and so does its PI_SESSIONS_DIR");
+  assert.equal(side.env.FORGEJO_URL, "https://shell.example.test", "and its forge host");
+  assert.equal(side.paths.triggersPath, join(dir, "file-triggers.json"), "the .env fills what the shell leaves unset");
+  assert.match(String(side.notice), /PI_LOGS_DIR/, "the disagreement is said by name");
+  assert.ok(!String(side.notice).includes("/shell/logs") && !String(side.notice).includes("file-logs"), "never by value");
+});
+
+test("the console bundle does not reach the pi runtime (@earendil-works/pi-coding-agent), directly or through any import", async (t) => {
+  const pagesFile = new URL("../src/console/pages.mjs", import.meta.url);
+  if (!existsSync(pagesFile)) {
+    t.skip("pages.mjs is not in this tree yet");
+    return;
+  }
+  const { build } = await import("esbuild");
+  const result = await build({
+    entryPoints: [new URL("../src/console/cli.mjs", import.meta.url).pathname],
+    bundle: true,
+    write: false,
+    format: "esm",
+    platform: "node",
+    target: "node22",
+    external: ["@earendil-works/pi-coding-agent", "bullmq", "ioredis"],
+    metafile: true,
+    logLevel: "silent",
+  });
+  const inputs = Object.keys(result.metafile.inputs);
+  assert.ok(inputs.some((p) => p.endsWith("src/console/live.mjs")), "the walk saw the console's own modules");
+  for (const [path, input] of Object.entries(result.metafile.inputs)) {
+    assert.ok(!path.includes("pi-coding-agent"), path);
+    for (const imp of input.imports) assert.ok(!imp.path.includes("@earendil-works/pi-coding-agent"), `${path} imports ${imp.path}`);
+  }
+  for (const output of Object.values(result.metafile.outputs)) {
+    for (const imp of output.imports) assert.ok(!imp.path.includes("@earendil-works/pi-coding-agent"), `the bundle imports ${imp.path}`);
+  }
 });

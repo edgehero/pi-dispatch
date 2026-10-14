@@ -32,14 +32,35 @@ import { readRawBody } from "@edgehero/pi-dispatch/http-body";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 import { contentTypeRefusal, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
-import { loginCodePage, loginPage, signedInPage } from "./html.mjs";
+import { loginCodePage, loginPage } from "./html.mjs";
+import { STATE_VERSION, stateOf as defaultStateOf } from "./live.mjs";
+import * as realPages from "./pages.mjs";
 import { CONSOLE_SCRIPT } from "./script.mjs";
+import { CONSOLE_CSS } from "./style.mjs";
 
 /** The largest request body a write may send. A pause-windows file is a few hundred bytes; 64 KiB is generous. */
 export const BODY_LIMIT = 64 * 1024;
 
 /** node:http limits: slow-header and slow-body clients are cut off, and connections are capped. */
 export const SERVER_LIMITS = Object.freeze({ headersTimeout: 10_000, requestTimeout: 30_000, maxConnections: 64, connectionsCheckingInterval: 1_000 });
+
+/**
+ * The live event streams the whole console holds at once (issue #641), whatever the per-session cap: half of
+ * `maxConnections`, so open tabs can never take every connection and lock everyone out of signing in.
+ */
+export const STREAMS_TOTAL_MAX = 32;
+
+/**
+ * Of `STREAMS_TOTAL_MAX`, the slots only an operator's stream may take: viewer streams stop at the rest (24), so viewer
+ * tokens, however many sign-ins they make, can never leave an operator without a live page.
+ */
+export const STREAMS_OPERATOR_RESERVE = 8;
+
+/** How long a refused stream is asked to wait before the browser's EventSource tries again. */
+const STREAM_RETRY_AFTER_SEC = 5;
+
+// A Last-Event-ID the hub could have written (`<epoch>-<n>`); anything else is no id at all.
+const EVENT_ID_RE = /^[0-9a-f]{1,16}-[0-9]{1,15}$/;
 
 /** Unauthenticated refusals written one row each, per minute (burst twice that); the rest are counted. */
 export const REFUSAL_ROWS_PER_MINUTE = 60;
@@ -159,6 +180,8 @@ async function postLogout(ctx) {
   const { deps, res, session } = ctx;
   const actor = actorOf(ctx);
   deps.sessions.destroy(session.id);
+  // The session's open streams end now, not at the hub's next tick.
+  deps.hub?.endSession(session.id);
   // Signing out is never refused: a failed audit append is logged, and the session is gone either way.
   ctx.record({ actor, action: "logout", outcome: "ok" });
   return sendJson(res, 200, { ok: true }, { "set-cookie": deps.cookies.clearSessionCookie() });
@@ -282,6 +305,106 @@ async function postPauseConfirm(ctx) {
   return sendJson(res, 200, { ok: true, beforeDigest: entry.beforeDigest, afterDigest: entry.afterDigest });
 }
 
+// ---- pages, state and the live stream (issue #641) ----
+
+/** `{query}` for page `name` from the request's query string, or null after answering 400. */
+function pageQueryOr400(ctx, name, searchParams) {
+  const parsed = ctx.deps.pages.parsePageQuery(name, searchParams);
+  if (parsed?.refusal || !parsed || !("query" in parsed)) {
+    sendError(ctx.res, 400, `${parsed?.refusal ?? "this page's query is not valid"}`);
+    return null;
+  }
+  return parsed;
+}
+
+/** One screen: read its data, render it whole. HEAD runs the same and node sends no body. */
+function pageHandler(name) {
+  return async (ctx) => {
+    const parsed = pageQueryOr400(ctx, name, ctx.searchParams);
+    if (!parsed) return;
+    const { pages, pageDeps, config } = ctx.deps;
+    const data = await pages.loadPageData(name, parsed.query, pageDeps);
+    const out = await pages.renderPage(name, { query: parsed.query, session: { name: ctx.session.name, role: ctx.session.role }, data, readOnly: Boolean(config.readOnly) });
+    return sendHtml(ctx.res, out?.status ?? 200, out?.html ?? "");
+  };
+}
+
+/** What `/api/state` answers, 503, when the snapshot cannot be read at all: a fixed sentence, never the error's text. */
+export const STATE_UNREADABLE = "the fleet could not be read (is Valkey reachable?); try again";
+
+/**
+ * The snapshot as JSON, projected by `stateOf` for the session's role. A snapshot that rejects (Valkey down) is 503
+ * `{version, error}` with `STATE_UNREADABLE`: a script tells "the fleet is unreadable" from "the console failed", and
+ * the caught error (which can name a host and port) goes to the console's log by its code alone.
+ */
+async function getState(ctx) {
+  const { deps, res, session } = ctx;
+  const fleet = deps.pageDeps?.fleet;
+  if (!fleet) return sendError(res, 503, "this console has no fleet reader; see its log");
+  let snapshot;
+  try {
+    snapshot = await fleet.snapshot();
+  } catch (e) {
+    deps.log(`console: /api/state could not read the fleet (${typeof e?.code === "string" && /^[A-Z0-9_]{1,40}$/.test(e.code) ? e.code : "error"})`);
+    return sendJson(res, 503, { version: STATE_VERSION, error: STATE_UNREADABLE });
+  }
+  return sendJson(res, 200, deps.stateOf(snapshot, session.role, { now: deps.now() }));
+}
+
+/**
+ * The live stream for one page (`/api/events?page=<name>&<that page's query>`). Refused before any header is sent:
+ * an unknown or non-live page or a bad query (400), a page above the session's role (403), and a stream over the
+ * token's cap (`PI_CONSOLE_MAX_STREAMS`, shared by every sign-in of the token), the console's (`STREAMS_TOTAL_MAX`)
+ * or, for a viewer, the console's less the operators' reserve (`STREAMS_OPERATOR_RESERVE`) (429 with Retry-After). Once open,
+ * the hub writes it; `close` gives both slots back, however the stream ended.
+ */
+async function getEvents(ctx) {
+  const { deps, req, res, session } = ctx;
+  const { PAGES } = deps.pages;
+  // One `page`, as every other parameter is one: a second would open a stream for a page the URL also names otherwise.
+  if (ctx.searchParams.getAll("page").length > 1) return sendError(res, 400, "page is given more than once");
+  const name = ctx.searchParams.get("page") ?? "";
+  const spec = Object.hasOwn(PAGES, name) ? PAGES[name] : null;
+  if (!spec || !spec.live) return sendError(res, 400, "page must name a live page of this console");
+  const role = roleRefusal(session, spec.auth);
+  if (role) return sendError(res, 403, role);
+  const rest = new URLSearchParams(ctx.searchParams);
+  rest.delete("page");
+  const parsed = pageQueryOr400(ctx, name, rest);
+  if (!parsed) return;
+  if (!deps.hub) return sendError(res, 503, "this console has no live updates; see its log");
+  const busy = (sentence) => sendError(res, 429, sentence, { "retry-after": String(STREAM_RETRY_AFTER_SEC) });
+  if (deps.streams.open >= deps.limits.streamsTotal) return busy("the console holds as many live streams as it allows; close a tab and try again");
+  if (session.role !== "operator" && deps.streams.open >= deps.limits.streamsTotal - deps.limits.streamsOperatorReserve) {
+    return busy("the console holds as many viewer streams as it allows (the rest are kept for operators); close a tab and try again");
+  }
+  if (!deps.sessions.streamAcquire(session.id)) return busy("this token's sign-ins hold as many live streams as it allows; close a tab and try again");
+  deps.streams.open += 1;
+  let released = false;
+  let unsubscribe = () => {};
+  const release = () => {
+    if (released) return;
+    released = true;
+    unsubscribe();
+    deps.sessions.streamRelease(session.id);
+    deps.streams.open -= 1;
+  };
+  res.on("close", release);
+  // The security headers are already set (the dispatcher's first step); these are the stream's own.
+  res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" });
+  // The first bytes, so the browser sees the stream open before the first panel is rendered.
+  res.write("retry: 2000\n\n");
+  const presented = req.headers["last-event-id"];
+  const lastEventId = typeof presented === "string" && EVENT_ID_RE.test(presented) ? presented : null;
+  if (!released) unsubscribe = deps.hub.subscribe({ res, sessionId: session.id, session: { name: session.name, role: session.role }, page: name, query: parsed.query, lastEventId });
+  if (released) unsubscribe();
+}
+
+/** One GET route per screen, from the pages' own table, so a screen cannot exist without its auth. */
+function pageRoutes(PAGES) {
+  return Object.entries(PAGES).map(([name, spec]) => ({ method: "GET", path: spec.path, auth: spec.auth, write: false, page: name, handler: pageHandler(name) }));
+}
+
 /**
  * The route table. `write: true` means: Origin and Sec-Fetch-Site checked, JSON only, body read and bounded, refusals
  * audited. `readOnlyExempt` is for signing in and out only: a read-only console still has to let people in.
@@ -296,23 +419,33 @@ export const ROUTES = Object.freeze([
   { method: "GET", path: "/login/code", auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, loginCodePage()) },
   { method: "POST", path: "/login/code", auth: "none", write: true, readOnlyExempt: true, handler: postLoginCode },
   { method: "POST", path: "/logout", auth: "viewer", write: true, readOnlyExempt: true, handler: postLogout },
-  { method: "GET", path: "/", auth: "viewer", write: false, handler: (ctx) => sendHtml(ctx.res, 200, signedInPage({ name: ctx.session.name, role: ctx.session.role, readOnly: ctx.deps.config.readOnly })) },
+  ...pageRoutes(realPages.PAGES),
   { method: "GET", path: "/api/whoami", auth: "viewer", write: false, handler: (ctx) => sendJson(ctx.res, 200, { name: ctx.session.name, role: ctx.session.role, readOnly: Boolean(ctx.deps.config.readOnly) }) },
   { method: "GET", path: "/static/console.js", auth: "none", write: false, handler: (ctx) => {
     ctx.res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
     ctx.res.end(CONSOLE_SCRIPT);
   } },
+  { method: "GET", path: "/static/console.css", auth: "none", write: false, handler: (ctx) => {
+    ctx.res.writeHead(200, { "content-type": "text/css; charset=utf-8" });
+    ctx.res.end(CONSOLE_CSS);
+  } },
+  { method: "GET", path: "/api/state", auth: "viewer", write: false, handler: getState },
+  // `noHead`: a HEAD would take a stream slot and hold it with no body ever sent, so it is 405 before anything runs.
+  { method: "GET", path: "/api/events", auth: "viewer", write: false, noHead: true, handler: getEvents },
   { method: "POST", path: "/api/pause-windows/preview", auth: "operator", write: true, handler: postPausePreview },
   { method: "POST", path: "/api/pause-windows/confirm", auth: "operator", write: true, handler: postPauseConfirm },
 ].map((route) => Object.freeze(route)));
 
-/** `{route}`, `{allow}` (the path exists under other methods) or null. HEAD is served by the GET route. */
+/**
+ * `{route}`, `{allow}` (the path exists under other methods) or null. HEAD is served by the GET route, except a route
+ * marked `noHead` (the event stream), which answers HEAD with 405 and `Allow: GET`.
+ */
 export function lookupRoute(method, pathname) {
   const want = method === "HEAD" ? "GET" : method;
   const onPath = ROUTES.filter((r) => r.path === pathname);
   if (onPath.length === 0) return null;
-  const route = onPath.find((r) => r.method === want);
-  return route ? { route } : { allow: [...new Set(onPath.flatMap((r) => (r.method === "GET" ? ["GET", "HEAD"] : [r.method])))] };
+  const route = onPath.find((r) => r.method === want && !(method === "HEAD" && r.noHead));
+  return route ? { route } : { allow: [...new Set(onPath.flatMap((r) => (r.method === "GET" ? (r.noHead ? ["GET"] : ["GET", "HEAD"]) : [r.method])))] };
 }
 
 /** The session behind the request's cookie, or null. Reads the tokens file each time, so a rotate or revoke bites at once. */
@@ -350,12 +483,15 @@ async function dispatch(req, res, deps) {
   applySecurityHeaders(res);
   const method = req.method ?? "GET";
   let pathname;
+  let searchParams;
   // Origin-form only (`/path`): an absolute-form target (`http://other/…`) or a scheme-relative one (`//other/…`) names
   // an authority the Host check never judges, so it is refused rather than resolved.
   const target = req.url ?? "";
   if (!target.startsWith("/") || target.startsWith("//")) return sendError(res, 400, "the request line is not a path on this console");
   try {
-    pathname = new URL(target, "http://console.invalid").pathname;
+    const url = new URL(target, "http://console.invalid");
+    pathname = url.pathname;
+    searchParams = url.searchParams;
   } catch {
     return sendError(res, 400, "the request line is not a valid path");
   }
@@ -398,7 +534,7 @@ async function dispatch(req, res, deps) {
   if (!found) return sendError(res, 404, "there is no such page on this console");
   if (found.allow) return sendError(res, 405, `${method} is not accepted here; use ${found.allow.join(" or ")}`, { allow: found.allow.join(", ") });
   const route = found.route;
-  const ctx = { req, res, deps, route, session: null, body: null, record };
+  const ctx = { req, res, deps, route, session: null, body: null, record, searchParams };
 
   if (route.write) {
     const checks = [
@@ -448,6 +584,11 @@ async function dispatch(req, res, deps) {
  *   - `audit.append(row)`: synchronous, throws on failure.
  *   - `writePauseWindows({pauseWindowsPath, mutate, fs, expect})` -> `{ok}` | `{invalid}`.
  *   - `limiter` (default: `makeLoginLimiter({now})`), `log(line)`, `fs`, `now`.
+ *   - issue #641: `pages` (default: `pages.mjs`; its `PAGES` builds the routes, the rest renders), `pageDeps` (what
+ *     `loadPageData` reads with: `{fleet, insights, audit, env, now}`), `hub` (`live.mjs`'s `makeLiveHub`), and
+ *     `stateOf` (default: `live.mjs`'s).
+ *   - `limits`: TESTS ONLY, overrides `SERVER_LIMITS`, `streamsTotal` (default `STREAMS_TOTAL_MAX`) and
+ *     `streamsOperatorReserve` (default `STREAMS_OPERATOR_RESERVE`).
  */
 export function createConsoleServer({
   config,
@@ -464,18 +605,24 @@ export function createConsoleServer({
   findToken,
   consumeLoginCode,
   writePauseWindows,
+  pages = realPages,
+  pageDeps = null,
+  hub = null,
+  stateOf = defaultStateOf,
+  limits: limitsOverride = {},
 }) {
+  const limits = { ...SERVER_LIMITS, streamsTotal: STREAMS_TOTAL_MAX, streamsOperatorReserve: STREAMS_OPERATOR_RESERVE, ...limitsOverride };
   const refusalRows = makeLoginLimiter({ now, perMinute: REFUSAL_ROWS_PER_MINUTE, burst: 2 * REFUSAL_ROWS_PER_MINUTE });
-  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, consumeLoginCode, writePauseWindows, refusalRows, quieted: { count: 0 } };
+  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, consumeLoginCode, writePauseWindows, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, limits, streams: { open: 0 } };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
-  const server = createServer({ headersTimeout: SERVER_LIMITS.headersTimeout, requestTimeout: SERVER_LIMITS.requestTimeout, connectionsCheckingInterval: SERVER_LIMITS.connectionsCheckingInterval }, (req, res) => {
+  const server = createServer({ headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval }, (req, res) => {
     dispatch(req, res, deps).catch((e) => {
       log(`console: internal error (${e?.code ?? e?.name ?? "error"})`);
       if (!res.headersSent) sendError(res, 500, "the console failed on this request; see its log");
       else res.destroy();
     });
   });
-  server.maxConnections = SERVER_LIMITS.maxConnections;
+  server.maxConnections = limits.maxConnections;
   return server;
 }

@@ -10,8 +10,18 @@
  *     `history.replaceState` BEFORE posting it (so the back button and a session restore cannot replay it), then posts
  *     it. The code travels in the fragment because a fragment never reaches the server's request line, a log or a
  *     Referer.
- *   - `home`: the sign-out button.
- * Server text is shown with `textContent`, never as markup.
+ *   - every signed-in page: the sign-out button (`#logout`).
+ *   - a LIVE page (issue #641; `data-live` on the body): opens `/api/events?page=<data-live>&<data-query>` with
+ *     `EventSource`. An `event: panel` carries `{id, html}`, and its html replaces the inner HTML of the element with
+ *     that id ONLY when that element carries `data-panel`: the server renders and escapes the fragment (the same
+ *     renderer as the page load), and the guard keeps a message from aiming at any other element. `event: end` (the
+ *     session ended, was revoked or expired) closes the stream and goes to `/login`. `#live-status` says "live" or
+ *     "reconnecting", through `textContent`; `EventSource` reconnects by itself and resends `Last-Event-ID`.
+ *   - the spend screen's chart tooltips: the insights renderers mark each bar with `data-tip="<n>"` and the page lists
+ *     the texts in `#insights-tips` (escaped by the server). Each marked element gets its text as an SVG `<title>`
+ *     child (or a `title` attribute off SVG), set through `textContent`, so a tooltip is the browser's own and no
+ *     markup is built here.
+ * Server text is shown with `textContent`, never as markup; the one `innerHTML` is the panel swap above.
  */
 export const CONSOLE_SCRIPT = `"use strict";
 (function () {
@@ -58,10 +68,63 @@ export const CONSOLE_SCRIPT = `"use strict";
         else failed(r);
       }, function () { say("The console could not be reached."); });
     }
-  } else if (page === "home") {
-    var out = document.getElementById("logout");
-    if (out) out.addEventListener("click", function () {
-      post("/logout", {}).then(function () { location.assign("/login"); }, function () { location.assign("/login"); });
+  }
+  var out = document.getElementById("logout");
+  if (out) out.addEventListener("click", function () {
+    post("/logout", {}).then(function () { location.assign("/login"); }, function () { location.assign("/login"); });
+  });
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function applyTips() {
+    var list = document.getElementById("insights-tips");
+    if (!list) return;
+    var items = list.getElementsByTagName("li");
+    var marked = document.querySelectorAll("[data-tip]");
+    for (var k = 0; k < marked.length; k++) {
+      var el = marked[k];
+      var i = parseInt(el.getAttribute("data-tip"), 10);
+      // The index rides an attribute, so it is bounds-checked before it is used; a bad one is skipped.
+      if (!(i >= 0 && i < items.length)) continue;
+      var text = items[i].textContent;
+      if (el.namespaceURI === SVG_NS) {
+        var t = document.createElementNS(SVG_NS, "title");
+        t.textContent = text;
+        el.appendChild(t);
+      } else {
+        el.setAttribute("title", text);
+      }
+    }
+  }
+  applyTips();
+  var live = document.body ? document.body.getAttribute("data-live") : null;
+  if (live && typeof EventSource === "function") {
+    var query = document.body.getAttribute("data-query") || "";
+    var status = document.getElementById("live-status");
+    var mark = function (text, cls) {
+      if (!status) return;
+      status.textContent = text;
+      status.className = cls;
+    };
+    var es = new EventSource("/api/events?page=" + encodeURIComponent(live) + (query ? "&" + query : ""));
+    es.addEventListener("open", function () { mark("live", "on"); });
+    // A refused stream (429 over the stream limit, 401 signed out) is CLOSED by the browser and never retried; only a
+    // dropped one reconnects. Say which, so a still page is not mistaken for a live one.
+    es.addEventListener("error", function () {
+      if (es.readyState === 2) mark("not live: reload after closing another console tab", "off");
+      else mark("reconnecting", "off");
+    });
+    es.addEventListener("panel", function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (!msg || typeof msg.id !== "string" || typeof msg.html !== "string") return;
+      var el = document.getElementById(msg.id);
+      if (!el || !el.hasAttribute("data-panel")) return;
+      el.innerHTML = msg.html;
+      mark("live", "on");
+    });
+    es.addEventListener("end", function () {
+      es.close();
+      mark("signed out", "off");
+      location.assign("/login");
     });
   }
 })();
