@@ -17,9 +17,31 @@ dedup transfers unchanged for the same reason.
 
 ## Set it up
 
-**1. Mint a token.** Use a **repository-scoped** token ("Specific repositories") carrying only
-`write:repository` and `write:issue`. That is genuinely narrower than GitLab's equivalent — there is no
-all-or-nothing `api` scope to fall back to.
+**1. Make the harness account an admin of each repository, then mint its token.** The author gate asks
+Forgejo for the permission of whoever triggered the job
+(`GET /repos/{owner}/{repo}/collaborators/{user}/permission`), and Forgejo answers that question about
+another user only to a site admin or an admin of the repository. A `write` collaborator gets 403 ("Only
+admins can query all permissions, repo admins can query all repo permissions, collaborators can query only
+their own"), every trigger then fails closed, and nothing ever runs. So add the harness account to each
+repository with **Administrator** access. A site admin account also works, but it reaches every repository
+on the instance, which is far more than this needs.
+
+Then mint the token: **repository-scoped** ("Specific repositories"), carrying only `write:repository` and
+`write:issue`. That is genuinely narrower than GitLab's equivalent: there is no all-or-nothing `api` scope
+to fall back to.
+
+**Know what admin costs, because the scopes do not narrow it.** Forgejo checks a token twice: its scope by
+category and method (any write under `/repos/{owner}/{repo}` needs `write:repository`), and the account's
+access to the repository. The settings, webhook, collaborator and branch protection endpoints all sit in the
+`repository` category behind a repository admin check (`routers/api/v1/api.go` at Forgejo 14.0.5). So an
+admin account's `write:repository` token can edit the repository's settings, add webhooks and
+collaborators, and change or delete branch protection. Only deleting or transferring the repository needs
+the owner. Forgejo has no per-job mint, so this same token is in every forgejo job's container, held by an
+agent that reads issue text anyone can write. Branch protection on the default branch is what stands
+between that agent and your default branch (`REQ-BRANCH-PROTECTION-PRECONDITION`), and on an admin account
+the token can take it off. pi-dispatch has no separate, read-only token for the permission lookup today, so
+this is the price of Forgejo triggers: give the account admin only on the repositories this deployment
+services, rotate the token, and weigh it before arming triggers on a repository that matters.
 
 **2. Tell the harness who it is.** A repository-scoped token **cannot call `GET /user`**, because
 `read:user` is not among the four permissions such a token may carry. So set the harness account's numeric
@@ -145,12 +167,15 @@ A lookup that **could not be completed** — a 5xx, a dead socket, a revoked tok
 work during an outage behind a response indistinguishable from a stranger being correctly refused.
 
 **Know what that looks like, because 403 lands there too.** Only two answers from the permission endpoint
-are determinate: a 200 carrying a permission string, and a 404 (no such collaborator here), which is the
-refusal. Every other status, **403 included**, is indeterminate. So if the harness token cannot read another
-user's permission on that endpoint, nothing fires and nothing is silently dropped either: the receiver logs
-`forgejo_permission_lookup_failed` with the status in the reason, answers **503**, and Forgejo redelivers,
-for as long as its retry policy allows. Repeated 503s against one delivery id are the signature. Look at the
-token's permissions before you look at the trigger.
+are determinate: a 200 carrying a permission string, and a 404 (no such user or repository), which is the
+refusal. Every other status, **403 included**, is indeterminate. A 403 is almost always setup: the harness
+account is not an admin of the repository (step 1), or its token lacks `write:repository`. Nothing fires and
+nothing is silently dropped: the receiver logs `forgejo_permission_lookup_failed` with the reason
+`collaborator permission lookup returned 403 (the harness account must be an admin of the repository, and
+its token must carry write:repository)` and answers **503**, so the delivery shows as failed in the
+webhook's delivery history rather than as delivered. That is deliberate. A retry cannot fix a 403, but it
+costs nothing (nothing is minted or spent before this answer), while answering 204 would record every
+trigger as delivered while none ran. Fix the account, then trigger again whatever you still want run.
 
 ## The scope trade-off
 

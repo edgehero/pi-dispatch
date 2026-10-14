@@ -72,6 +72,23 @@ export function makeResolveForgejoAuthority({ apiUrl, token, fetchFn = fetch }) 
 			// a refusal rather than a failure.
 			return { authorized: false };
 		}
+		if (res.status === 403) {
+			// A CONFIGURATION error, named as one. Forgejo lets only a site admin, a repository admin, or the
+			// user themselves read a permission (measured on 14.0.5: a `write` collaborator's token gets 403
+			// {"message":"Only admins can query all permissions, repo admins can query all repo permissions,
+			// collaborators can query only their own"}; the same account raised to repo admin gets 200). The
+			// other 403s this route can give are the token's scope (`token does not have at least one of
+			// required scope(s)`, `token scope is limited to public repos`), so the reason names both repairs.
+			// Still indeterminate, and that is a decision, not an oversight. A retry cannot heal it, but the
+			// retry costs nothing (no token is minted and nothing spends before this answer), while the
+			// alternative is worse in the way this file's header names: a determinate refusal answers 204, which
+			// Forgejo records as a successful delivery, so the one place the operator looks would show every
+			// trigger "delivered" while nothing ran. A 503 marks each delivery failed there, the log line below
+			// names the repair, and a delivery that failed this way still describes real work to redo once the
+			// account is fixed. The body is still not read: the fixed reason is enough, and a body is not ours
+			// to log.
+			return { indeterminate: "collaborator permission lookup returned 403 (the harness account must be an admin of the repository, and its token must carry write:repository)" };
+		}
 		if (!res.ok) {
 			// Note what is NOT here: the response body. A Forgejo error body can echo the request, and the
 			// request carried the token.

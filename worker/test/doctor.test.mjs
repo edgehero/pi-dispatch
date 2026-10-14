@@ -10907,6 +10907,16 @@ test("the GitLab token scope is a FACT LINE whose advice is in the label, since 
 	assert.equal(scope.failed, false);
 });
 
+test("forgejo triggers print the repo-admin requirement as a FACT LINE, measured on Forgejo 14.0.5", async () => {
+	// A `write` collaborator's token got 403 {"message":"Only admins can query all permissions, repo admins can query all
+	// repo permissions, collaborators can query only their own"} from the author gate's lookup, so nothing ever ran.
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("forgejo"), FORGEJO_URL: "https://code.example.org", FORGEJO_WEBHOOK_SECRET: "s", FORGEJO_TOKEN: "fj_token_val" }), adviceSeams());
+	const line = renderedOne(checks, /must be an ADMIN of every repository/);
+	assert.match(line.text, /^✓ the Forgejo harness account must be an ADMIN of every repository its triggers serve: .*\(403\).*branch protection.*\(docs\/forgejo\.md\)\n$/);
+	assert.equal(line.failed, false, "advice, never a failure: doctor cannot know which repositories deliveries will name");
+	assert.equal(line.text.includes("fj_token_val"), false);
+});
+
 test("persisted transcripts and a context bound that may be inert are FACT LINES whose advice is in the label (#462)", async () => {
 	const env = imgEnv({ PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture", PI_SESSION_MAX_CONTEXT_PCT: "80" });
 	const checks = await collectChecks(env, adviceSeams({ fileExists: () => true }));

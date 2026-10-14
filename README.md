@@ -553,7 +553,9 @@ forge's token is set, setting one to `app` gets a clear refusal at boot rather t
   `api` scope. Every trigger checks that the person who fired it is Developer or higher. Needs GitLab 17.4
   or newer for dedup that survives retries. Self hosted works through `GITLAB_URL`.
 - **Forgejo and Gitea** ([`docs/forgejo.md`](docs/forgejo.md)): webhook at `/forgejo`. Every trigger checks
-  that the person has permission on that repository.
+  that the person has permission on that repository. Forgejo only lets a repository admin read someone
+  else's permission, so the harness account must be an admin of each repository; the doc says what that
+  costs.
 - **Azure DevOps** ([`docs/azure-devops.md`](docs/azure-devops.md)): a Service Hook at `/azure`. It is the
   weakest transport of the four (no HMAC signature, no signed timestamp), and the doc explains what that
   means. It needs a dedicated identity, `run.repository` on triggers, and its own job image

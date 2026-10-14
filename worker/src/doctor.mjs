@@ -2005,6 +2005,16 @@ export async function collectChecks(shellVars, seams) {
 		} else {
 			checks.push({ ok: true, label: `forgejo triggers configured (${urlShown(env.FORGEJO_URL)})` });
 		}
+		// Measured on Forgejo 14.0.5: the author gate's permission lookup answers 403 unless the token's account is a site
+		// admin, a repository admin, or the actor themselves, so a harness that is only a `write` collaborator fails every
+		// trigger closed (503). Doctor cannot ask: forgejo triggers name no repository (each delivery does), and the lookup
+		// it would need is the one in question. So, like the GitLab scope line above (issue #462), a FACT LINE with the
+		// advice in the label, printed whenever forgejo triggers are armed. It names the cost as well as the rule, because
+		// the same token reaches every forgejo job.
+		checks.push({
+			ok: true,
+			label: "the Forgejo harness account must be an ADMIN of every repository its triggers serve: Forgejo refuses a write collaborator's lookup of another user's permission (403), and every trigger then fails closed with 503. Its token keeps write:repository and write:issue only, but on an admin account that scope reaches repository settings, webhooks and branch protection, and every forgejo job carries it (docs/forgejo.md)",
+		});
 	}
 
 	// Issue #508: with the egress policy on, a job reaches a forge only over https on port 443.
