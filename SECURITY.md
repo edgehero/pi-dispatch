@@ -552,8 +552,8 @@ Stated openly rather than discovered later:
   provider needs. In particular `ANTHROPIC_OAUTH_TOKEN`, and at the pinned pi `ANTHROPIC_AUTH_TOKEN` ahead
   of it, silently take precedence over `ANTHROPIC_API_KEY`, so a stray variable in the host environment can quietly redirect which credential
   a job spends. Every minted-token name is refused in `PI_FORWARD_ENV` at config load, across all four
-  forges: `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `FORGEJO_TOKEN`, `GITEA_SERVER_TOKEN`,
-  `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN`. The worker sets them from the per-job mint, and a
+  forges: `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `FORGEJO_TOKEN`, `GITEA_TOKEN`,
+  `GITEA_SERVER_TOKEN`, `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN`. The worker sets them from the per-job mint, and a
   forwarded operator token would silently override it. That list is derived from one row per forge rather
   than hand-maintained, so a forge added to the mint cannot be missed here. If a secrets manager supplies
   the worker's environment, its own credential belongs on the host and never in `PI_FORWARD_ENV`: a token

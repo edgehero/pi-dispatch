@@ -757,6 +757,27 @@ test("a gitlab job's token lands in GITLAB_TOKEN/GL_TOKEN and NEVER in the githu
 	assert.equal("GH_TOKEN" in env, false);
 });
 
+test("a forgejo job hands tea the instance's full URL and the token, under the names tea logs in from", { skip }, () => {
+	// Measured with the image's tea 0.15.0 against Forgejo 14.0.5 (worker/test/forges.test.mjs has the table):
+	// only GITEA_INSTANCE_URL + GITEA_TOKEN log in from the environment, and the URL needs its scheme.
+	const env = buildContainerEnv({
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+		jobId: "j1",
+		githubToken: "fj-minted",
+		forgeKind: "forgejo",
+		forgeHosts: { forgejo: "http://192.168.68.52:3700" },
+		hostEnv: { ANTHROPIC_API_KEY: "k" },
+	});
+	assert.equal(env.GITEA_TOKEN, "fj-minted", "without it every `tea` the forgejo envelope names fails \"Error: no available login\"");
+	assert.equal(env.GITEA_INSTANCE_URL, "http://192.168.68.52:3700", "the configured FORGEJO_URL verbatim, scheme included");
+	assert.equal(env.GITEA_SERVER_TOKEN, "fj-minted", "the default of `tea login add --token`");
+	assert.equal(env.FORGEJO_TOKEN, "fj-minted");
+	assert.equal(env.FORGEJO_HOST, "http://192.168.68.52:3700", "kept for any skill that already reads it");
+	for (const name of ["GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "GL_TOKEN", "GITLAB_HOST"]) assert.equal(name in env, false, name);
+});
+
 test("a github job is unchanged: the github names only, and no gitlab ones", () => {
 	const env = buildContainerEnv({
 		provider: "anthropic",

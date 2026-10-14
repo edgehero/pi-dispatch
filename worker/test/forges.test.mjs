@@ -23,9 +23,9 @@ test("every forge describes every field, so a half-filled row cannot reach a cal
 		assert.equal(typeof spec.deliveryIdName, "string", `${kind}: the name an operator has to go and look at when an id is missing`);
 		assert.equal(typeof spec.pullRequestSep, "string", `${kind}: the separator is load-bearing in the dedup key and the run record`);
 		assert.ok(Array.isArray(spec.tokenVars) && spec.tokenVars.length > 0, `${kind}: a forge with no token variable would mint into nothing`);
-		// hostVar is legitimately null for a forge with no self-hosted instance concept, so only its TYPE
-		// is pinned -- asserting a string would forbid the honest answer.
-		assert.ok(spec.hostVar === null || typeof spec.hostVar === "string", `${kind}: hostVar is a name or an explicit null`);
+		// hostVars is legitimately empty for a forge with no self-hosted instance concept, so only its SHAPE
+		// is pinned -- asserting a member would forbid the honest answer.
+		assert.ok(Array.isArray(spec.hostVars) && spec.hostVars.every((n) => typeof n === "string" && n !== ""), `${kind}: hostVars is a list of names, possibly empty`);
 	}
 });
 
@@ -131,4 +131,30 @@ test("requirements.md's Scope names every forge this build ships -- the sentence
 		assert.ok(name, `no display name mapped for forge kind ${JSON.stringify(kind)} -- add it here AND to requirements.md's Scope`);
 		assert.ok(region.includes(name), `requirements.md's Scope does not name ${name} -- the tree services what the sentence does not say`);
 	}
+});
+
+/**
+ * The names `tea` actually logs in from, pinned to the tea the job image installs. Measured on 2026-10-14
+ * with tea 0.15.0 inside ghcr.io/edgehero/pi-job:4.3.0 against a live Forgejo 14.0.5 (API version
+ * "14.0.5+gitea-1.22.0"). The binary's own strings name GITEA_INSTANCE_URL, GITEA_INSTANCE_INSECURE,
+ * GITEA_INSTANCE_SSH_HOST, GITEA_TOKEN, GITEA_LOGIN_VIA_ENV, GITEA_SERVER_URL, GITEA_SERVER_TOKEN,
+ * GITEA_SERVER_USER, GITEA_SERVER_PASSWORD, GITEA_SERVER_OTP and GITEA_SCOPES, and only one pair worked:
+ *
+ *   GITEA_INSTANCE_URL=http://host:3700 GITEA_TOKEN=<t> tea issues ls --repo o/r          lists the issues
+ *   GITEA_SERVER_URL + GITEA_SERVER_TOKEN (and again with GITEA_LOGIN_VIA_ENV=1)       "Error: no available login"
+ *   FORGEJO_HOST + GITEA_SERVER_TOKEN (what every forgejo job carried since be1cc42e)   "Error: no available login"
+ *   GITEA_TOKEN alone, inside a clone with an http remote                              "Error: no available login"
+ *
+ * The GITEA_SERVER_* names are the defaults of `tea login add`'s flags (`--token ... [$GITEA_SERVER_TOKEN]`),
+ * which is why GITEA_SERVER_TOKEN stays in the row. The tea pin is part of this test: a different tea may read
+ * different names, and this is the line that makes a bump re-measure rather than trust the old answer.
+ */
+test("a forgejo job carries the exact pair tea 0.15.0 logs in from, and the pin is that tea", () => {
+	const dockerfile = readFileSync(fileURLToPath(new URL("../../image/Dockerfile", import.meta.url)), "utf8");
+	const pin = dockerfile.match(/^ARG TEA_VERSION=(\S+)$/m);
+	assert.ok(pin, "image/Dockerfile no longer pins tea with ARG TEA_VERSION");
+	assert.equal(pin[1], "0.15.0", "tea moved: re-measure which variables it logs in from (see this test's comment), then move this pin");
+	assert.ok(FORGES.forgejo.tokenVars.includes("GITEA_TOKEN"), "tea 0.15.0 reads its environment login's token from GITEA_TOKEN and nothing else");
+	assert.ok(FORGES.forgejo.hostVars.includes("GITEA_INSTANCE_URL"), "tea 0.15.0 reads its environment login's URL from GITEA_INSTANCE_URL and nothing else");
+	assert.ok(MINTED_TOKEN_VARS.has("GITEA_TOKEN"), "and so a forwarded host GITEA_TOKEN would shadow the job's token");
 });
