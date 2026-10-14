@@ -2,8 +2,9 @@
 /**
  * Render the README's panel images from the shipped code over one canned deployment (`launch/fixture-deployment.mjs`).
  *
- *   node launch/render-images.mjs           docs/images/dispatch-dashboard.svg and dispatch-hosts.svg
- *   node launch/render-images.mjs --png     the same, plus their .png copies and docs/images/insights-view.png
+ *   node launch/render-images.mjs           docs/images/dispatch-{dashboard,hosts,allocation,run-detail,commands}.svg
+ *   node launch/render-images.mjs --png     the same, plus the .png copies the npm page shows (dashboard, hosts,
+ *                                           allocation) and docs/images/insights-view.png
  *
  *   --out <dir>   write there instead of docs/images
  *   --url <url>   use this Valkey instead of starting one; its database must be empty, and is emptied again at the end
@@ -12,13 +13,19 @@
  * persistence and its files in a temporary directory, removed with everything else when the script ends. The fixture
  * writes the deployment's files there and seeds the server through the worker's own writers. The images are then drawn
  * by the real code: `makeDashboard` with the real `createDashboardDeps` against the seeded server, rendered at width 80
- * (the LIST, and the HOSTS view after `u`, whose 7 days come from the real `readCapacity`), and drawn as framed SVGs by
- * `launch/transcript-svg.mjs`. With `--png`, the insights page is written by the real `insightsCommand` (no browser
+ * and driven by its own keys (the LIST; the HOSTS view after `u`, whose 7 days come from the real `readCapacity`; the
+ * ALLOCATION view after `b`, read as index.ts's `allocationInfo` reads it; and, after Esc, the cursor moved down to the
+ * parked run and Enter, its RUN_DETAIL), and drawn as framed SVGs by `launch/transcript-svg.mjs`. The commands
+ * transcript is what `/dispatch status`, `budget`, `runs 5`, `triggers` and `priorities` send, assembled from the same
+ * reads and `render.mjs` functions index.ts uses, at `COMMANDS_WIDTH` columns, with the deployment's temporary folder
+ * shown as `~/pi-work`. With `--png`, the insights page is written by the real `insightsCommand` (no browser
  * opened) and shot in headless Chrome at 1240 px and device scale 2, full page, and the two SVGs are rasterised for the
  * npm page, which cannot show an SVG from raw.githubusercontent.com. Chrome is never needed without `--png`.
  *
- * Only the queue's live state is canned (its counts, its workers, the active job and the failed one): a running fleet is
- * the only thing that produces them. The fixture says which values those are.
+ * Only live state is canned: the queue's (its counts, its workers, the active job and the failed one), which a running
+ * fleet is the only thing that produces, and the run detail's sandbox (`SANDBOX`: a retained directory on the worker's
+ * disk and this shell's egress posture, which `readSandboxInfo` reads from the machine) with the `b` and `y` seams
+ * present but never pressed. The fixture says which values those are.
  *
  * NO NETWORK, NO SPEND, NOTHING OF THIS MACHINE. The environment is emptied before any project module loads, so no forge
  * or provider key, no deployment pointer and no home directory of the operator is read; every child process (the
@@ -27,17 +34,18 @@
  *
  * DETERMINISTIC. `Date` is frozen at the fixture's instant for every reader, and the time zone is UTC, so two runs
  * write byte-identical SVGs (`admin/test/render-images.test.mjs` holds that). Each SVG is checked against the
- * renderer's lines before it is written: the same rows, and every framed row 80 columns. The PNGs are Chrome's
+ * renderer's lines before it is written: the same rows, every framed row 80 columns, and no transcript line wider
+ * than `COMMANDS_WIDTH` (so none wraps). The PNGs are Chrome's
  * rendering and are not held to bytes.
  */
 import { spawn } from "node:child_process";
-import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { findOnPath } from "./server-binary.mjs";
-import { NOW, QUEUE_STATE, WORKERS, FAILED, RUNNING, LOCAL_HOST, seedDeployment, writeDeployment } from "./fixture-deployment.mjs";
+import { NOW, QUEUE_STATE, WORKERS, FAILED, RUNNING, LOCAL_HOST, PARKED, seedDeployment, writeDeployment } from "./fixture-deployment.mjs";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -47,6 +55,12 @@ const WIDTH = 80;
 const CDP_STEP_MS = 30_000;
 /** The longest the first command to a `--url` Valkey may take before the run fails. */
 const URL_CONNECT_MS = 3_000;
+/** The commands transcript's width in columns: its widest line (the runs table, 131) with a little room. */
+const COMMANDS_WIDTH = 134;
+/** The terminal images the npm page shows (admin/README.md), so the ones `--png` rasterises. */
+const PNG_IMAGES = ["dispatch-dashboard", "dispatch-hosts", "dispatch-allocation"];
+/** What the commands transcript shows for the deployment's temporary folder. */
+const SHOWN_DEPLOYMENT = "~/pi-work";
 /** The terminal images' rasterising scale: 680 px wide becomes 1700, sharp at the 820 px the npm page shows on a 2x screen. */
 const SVG_PNG_SCALE = 2.5;
 
@@ -296,6 +310,9 @@ function cannedQueues(W) {
 	return { fn, close: () => Promise.all(opened.map((q) => q.close())) };
 }
 
+/** The parked run's retained sandbox, as `readSandboxInfo` reports one: a day's window, egress on through the proxy. */
+const SANDBOX = { retained: true, expiresIn: "23h", egress: { armed: true, proxy: "pi-dispatch-egress-proxy", source: "this shell" }, runtime: "docker" };
+
 /** Wait, by count of turns rather than by the clock, until `ok(lines)` holds. */
 async function settle(comp, ok, what) {
 	for (let i = 0; i < 400; i++) {
@@ -325,6 +342,20 @@ async function renderPanel({ url, env, W, RM }) {
 			now: () => NOW,
 			// index.ts's own wiring of the HOSTS view: the report `pi-dispatch capacity` and `dispatch_capacity` print.
 			capacityInfo: ({ window = "7d" } = {}) => RM.readCapacity({ url, env, window }),
+			// index.ts's `allocationInfo`, the ALLOCATION view's read (key `b`): the envelope as the worker reads it, and the
+			// split with its plan's reasons.
+			allocationInfo: async () => {
+				const read = RM.readEnvelope({ envelopeFile: paths.envelopeFile, projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, maxCostMicros: RM.envelopeJobCap({ settingsFile: paths.settingsFile, env }) });
+				if (!read.envelope) throw new Error(`the fixture's envelope does not read: ${JSON.stringify(read)}`);
+				const alloc = await RM.readAllocations({ url, envelope: read.envelope, projects: read.projects, now: new Date(NOW), withReasons: true });
+				return { envelope: read.envelope, digest: read.digest, alloc };
+			},
+			// Canned, like the queues: a retained sandbox is a directory on the worker's disk, and its egress posture is the
+			// panel's own shell's (index.ts `readSandboxInfo`). The parked run's is kept, every other one swept.
+			sandboxInfo: ({ jobId }) => (jobId === PARKED.id ? { ...SANDBOX } : { retained: false, reason: "swept" }),
+			// Present so the run detail offers `b` and `y` as a wired panel does; never pressed here.
+			launchSandbox: async () => {},
+			copyText: () => {},
 			terminalRows: () => null,
 		},
 	});
@@ -332,7 +363,20 @@ async function renderPanel({ url, env, W, RM }) {
 		const list = await settle(comp, (ls) => ls.some((l) => /RUNS/.test(l)) && ls.some((l) => /gh-/.test(l)), "its runs");
 		comp.handleInput("u");
 		const hosts = await settle(comp, (ls) => ls.some((l) => /hosts · \d+ live/.test(l)) && !ls.some((l) => /reading the last 7 days/.test(l)), "the HOSTS view with its 7 days");
-		return { list, hosts };
+		// Esc backs out of a view to the LIST (on the LIST itself it would close the panel, so it is pressed only in one).
+		comp.handleInput("\x1b");
+		await settle(comp, (ls) => ls.some((l) => /RUNS/.test(l)), "the LIST again after the HOSTS view");
+		comp.handleInput("b");
+		const allocation = await settle(comp, (ls) => ls.some((l) => /allocation · week/.test(l)) && ls.some((l) => /history, newest first/.test(l)), "the ALLOCATION view with its history");
+		comp.handleInput("\x1b");
+		await settle(comp, (ls) => ls.some((l) => /RUNS/.test(l)), "the LIST again after the ALLOCATION view");
+		// Down the LIST to the parked run's row (the cursor's row is the one marked ›), then Enter on it.
+		const onParked = (ls) => ls.some((l) => /^│ ›/.test(l) && l.includes(PARKED.id));
+		for (let i = 0; i < 200 && !onParked(comp.render(WIDTH).map(strip)); i++) comp.handleInput("\x1b[B");
+		await settle(comp, onParked, `the cursor on ${PARKED.id}`);
+		comp.handleInput("\r");
+		const detail = await settle(comp, (ls) => ls.some((l) => l.includes(`run ${PARKED.id}`)) && ls.some((l) => /awaiting-input/.test(l)), "the parked run's detail");
+		return { list, hosts, allocation, detail };
 	} finally {
 		await comp.dispose();
 		await queues.close();
@@ -347,6 +391,59 @@ function terminalSvg(lines, title, { renderTranscript, svgRows, columnsOf }) {
 	const svg = renderTranscript(lines.join("\n"), { cols: WIDTH, title, dashRefs: true });
 	const rows = svgRows(svg);
 	if (rows.length !== plain.length || rows.some((r, i) => r !== plain[i])) throw new Error(`${title}: the SVG's text is not the renderer's lines`);
+	return svg;
+}
+
+/**
+ * What `/dispatch status`, `budget`, `runs 5`, `triggers` and `priorities` send, each assembled exactly as index.ts's
+ * `dispatch()` and `prioritiesCommand` assemble it from the same reads and the same `render.mjs` functions, under the
+ * line that typed it. The deployment's temporary folder is shown as `~/pi-work`, a folder an operator would have.
+ */
+async function commandsTranscript({ url, env, W, RM, deployment }) {
+	const R = await import("../admin/src/render.mjs");
+	const { scrubControlsPerLine } = await import("../admin/src/panel.mjs");
+	const paths = RM.resolvePaths(env);
+	const queues = cannedQueues(W);
+	const blocks = [];
+	try {
+		// status
+		const [queue, budget, held] = await Promise.all([RM.readQueueState({ url, makeQueueFn: queues.fn }), RM.readBudget({ url }), RM.readHeldJobs({ url })]);
+		const settings = RM.readSettingsView({ settingsFile: paths.settingsFile });
+		const heldCount = Array.isArray(held?.rows) ? held.rows.length + (Number(held.more) || 0) : undefined;
+		blocks.push(["status", `${R.renderStatus(queue, { heldCount, cronNext: queue?.cronNext ?? undefined })}\n${R.renderBudget({ budget, settings })}`]);
+		// budget
+		const limits = RM.readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+		const scopedBudget = Array.isArray(limits?.limits) && limits.limits.length > 0 ? await RM.readScopedBudget({ url, limits: limits.limits }) : { rows: [] };
+		const scopedText = R.renderScopedLimits({ limits, scopedBudget });
+		blocks.push(["budget", `${R.renderBudget({ budget: await RM.readBudget({ url }), settings })}${scopedText ? `\n${scopedText}` : ""}`]);
+		// runs 5
+		blocks.push(["runs 5", R.renderRuns(RM.listRuns({ logsDir: paths.logsDir, limit: 5 }))]);
+		// triggers
+		const schedulers = await RM.readSchedulers({ url, makeQueueFn: queues.fn });
+		blocks.push(["triggers", R.renderTriggers({ schedulers, triggers: RM.readTriggers({ triggersPath: paths.triggersPath }) })]);
+		// priorities, the bare form
+		const read = RM.readEnvelope({ envelopeFile: paths.envelopeFile, projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, maxCostMicros: RM.envelopeJobCap({ settingsFile: paths.settingsFile, env }) });
+		if (!read.envelope) throw new Error(`the fixture's envelope does not read: ${JSON.stringify(read)}`);
+		const alloc = await RM.readAllocations({ url, envelope: read.envelope, projects: read.projects, now: new Date(NOW), withReasons: false });
+		blocks.push(["priorities", R.renderAllocations({ envelope: read.envelope, digest: read.digest, problem: null, alloc })]);
+	} finally {
+		await queues.close();
+	}
+	const accent = (t) => `\x1b[38;2;${PALETTE.accent.join(";")}m${t}\x1b[39m`;
+	// `send` scrubs every message per line before pi shows it; the same here.
+	let text = blocks.map(([sub, body]) => `${accent(`› /dispatch ${sub}`)}\n${scrubControlsPerLine(body)}`).join("\n\n");
+	for (const dir of new Set([deployment, realpathSync(deployment)])) text = text.split(dir).join(SHOWN_DEPLOYMENT);
+	return text.split("\n");
+}
+
+/** The transcript's SVG at `COMMANDS_WIDTH` columns, after checking no line would wrap and the SVG holds the lines. */
+function transcriptSvg(lines, title, { renderTranscript, svgRows, columnsOf }) {
+	const plain = lines.map(strip);
+	const wide = plain.filter((l) => columnsOf(l) > COMMANDS_WIDTH);
+	if (wide.length > 0) throw new Error(`${title}: ${wide.length} lines are wider than ${COMMANDS_WIDTH} columns:\n${wide.join("\n")}`);
+	const svg = renderTranscript(lines.join("\n"), { cols: COMMANDS_WIDTH, title, dashRefs: true });
+	const rows = svgRows(svg);
+	if (rows.length !== plain.length || rows.some((r, i) => r !== plain[i])) throw new Error(`${title}: the SVG's text is not the commands' lines`);
 	return svg;
 }
 
@@ -558,15 +655,20 @@ async function main() {
 			PI_ENVELOPE_FILE: paths.envelope,
 			PI_SUBSCRIPTIONS_FILE: paths.subs,
 			PI_GRAPH_DIR: paths.graph,
+			PI_GLOBAL_PI_DIR: paths.overlay,
 		};
 		Object.assign(process.env, env);
 		await seedDeployment({ url, paths, mods: { W, RM, DW, version } });
 
-		const { list, hosts } = await renderPanel({ url, env, W, RM });
+		const { list, hosts, allocation, detail } = await renderPanel({ url, env, W, RM });
 		const helpers = { renderTranscript, svgRows, columnsOf };
+		const commands = await commandsTranscript({ url, env, W, RM, deployment });
 		const images = [
 			["dispatch-dashboard", terminalSvg(list, "pi · /dispatch dashboard (live overlay)", helpers)],
 			["dispatch-hosts", terminalSvg(hosts, "pi · /dispatch hosts (u)", helpers)],
+			["dispatch-allocation", terminalSvg(allocation, "pi · /dispatch budget split (b)", helpers)],
+			["dispatch-run-detail", terminalSvg(detail, `pi · /dispatch run detail (↵ on ${PARKED.id})`, helpers)],
+			["dispatch-commands", transcriptSvg(commands, "pi · /dispatch status · budget · runs · triggers · priorities", helpers)],
 		];
 		mkdirSync(opts.out, { recursive: true });
 		for (const [name, svg] of images) writeFileSync(join(opts.out, `${name}.svg`), svg);
@@ -578,7 +680,7 @@ async function main() {
 			const browser = await openChrome();
 			try {
 				await browser.shoot({ url: pathToFileURL(page).href, out: join(opts.out, "insights-view.png"), width: 1240, scale: 2, fullPage: true, clockMs: NOW + 60_000 });
-				for (const [name, svg] of images) {
+				for (const [name, svg] of images.filter(([n]) => PNG_IMAGES.includes(n))) {
 					const [, w, h] = /width="(\d+)" height="(\d+)"/.exec(svg);
 					await browser.shoot({ url: pathToFileURL(join(opts.out, `${name}.svg`)).href, out: join(opts.out, `${name}.png`), width: Number(w), height: Number(h), scale: SVG_PNG_SCALE });
 				}
@@ -587,7 +689,7 @@ async function main() {
 			}
 		}
 		for (const [name] of images) console.log(join(opts.out, `${name}.svg`));
-		if (opts.png) for (const name of ["dispatch-dashboard", "dispatch-hosts", "insights-view"]) console.log(join(opts.out, `${name}.png`));
+		if (opts.png) for (const name of [...PNG_IMAGES, "insights-view"]) console.log(join(opts.out, `${name}.png`));
 	} finally {
 		if (opts.url && seeded) await admin.flushdb().catch(() => {});
 		admin.disconnect();

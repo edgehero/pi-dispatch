@@ -27,16 +27,17 @@ const BASE = process.env.VALKEY_TEST_URL;
 const URL_ARGS = BIN ? [] : BASE ? ["--url", `${BASE.replace(/\/\d*$/, "")}/7`] : null;
 const skip = URL_ARGS === null ? "needs valkey-server or redis-server on PATH, or VALKEY_TEST_URL" : false;
 const run = promisify(execFile);
+const FILES = ["dispatch-dashboard.svg", "dispatch-hosts.svg", "dispatch-allocation.svg", "dispatch-run-detail.svg", "dispatch-commands.svg"];
 
 async function render() {
   const out = tempDir("render-images-");
   // The child's environment is the PATH (to find the server) and the TMPDIR (the suite's own) alone; the script empties
   // its environment anyway before any project module loads.
   await run(process.execPath, [SCRIPT, "--out", out, ...URL_ARGS], { env: { PATH: process.env.PATH ?? "", ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) }, timeout: 120_000 });
-  return Object.fromEntries(["dispatch-dashboard.svg", "dispatch-hosts.svg"].map((f) => [f, readFileSync(join(out, f), "utf8")]));
+  return Object.fromEntries(FILES.map((f) => [f, readFileSync(join(out, f), "utf8")]));
 }
 
-test("render-images: two runs draw byte-identical SVGs of the LIST and the HOSTS view, with synthetic names only", { skip, timeout: 240_000 }, async () => {
+test("render-images: two runs draw byte-identical SVGs of the panel's views and the commands, with synthetic names only", { skip, timeout: 240_000 }, async () => {
   const first = await render();
   // The committed images ARE this render: a change to the panel, the fixture or the clock shows up here, and the fix is
   // to re-render them (and look at them), not to edit this test.
@@ -53,11 +54,26 @@ test("render-images: two runs draw byte-identical SVGs of the LIST and the HOSTS
     assert.doesNotMatch(svg, /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}/, `${file} holds no email address`);
     const host = hostname().split(".")[0];
     if (host.length >= 3) assert.ok(!svg.toLowerCase().includes(host.toLowerCase()), `${file} does not name this machine`);
-    for (const name of ["mini1", "mini2", "build3"]) assert.ok(text.includes(name) || file === "dispatch-dashboard.svg", `${file} shows ${name}`);
+    const fleetWide = ["dispatch-hosts.svg", "dispatch-commands.svg"];
+    for (const name of ["mini1", "mini2", "build3"]) assert.ok(text.includes(name) || !fleetWide.includes(file), `${file} shows ${name}`);
   }
   const list = svgRows(first["dispatch-dashboard.svg"]).join("\n");
   assert.match(list, /j projects · u hosts/, "the LIST announces the HOSTS view on the runs divider");
   const hosts = svgRows(first["dispatch-hosts.svg"]).join("\n");
   assert.match(hosts, /hosts · 3 live · last 7d/);
   assert.match(hosts, /Jobs only: a machine busy with other work reads as idle/);
+  const allocation = svgRows(first["dispatch-allocation.svg"]).join("\n");
+  assert.match(allocation, /allocation · week · total \$100\.00/);
+  assert.match(allocation, /history, newest first \(alloc:log\)/);
+  assert.match(allocation, /refused plan-too-soon/, "the history holds a refused plan");
+  const detail = svgRows(first["dispatch-run-detail.svg"]).join("\n");
+  assert.match(detail, /run gh-2f6a/);
+  assert.match(detail, /✔ completed · awaiting-input/, "the run detail shows the parked run");
+  assert.match(detail, /b sandbox/, "and offers its retained sandbox");
+  assert.match(list, /triage · ✔ awaiting-input/, "the LIST names the parked run's reason");
+  const commands = svgRows(first["dispatch-commands.svg"]).join("\n");
+  for (const sub of ["status", "budget", "runs 5", "triggers", "priorities"]) assert.ok(commands.includes(`› /dispatch ${sub}\n`), `the transcript runs /dispatch ${sub}`);
+  assert.match(commands, /\[mcp linear\]/, "the triggers list shows the MCP trigger");
+  assert.match(commands, /completed +awaiting-input/, "the runs table shows the parked run");
+  assert.match(commands, /~\/pi-work\/work\/site\/tidy/, "a local folder is shown under the display path");
 });

@@ -12,7 +12,8 @@
  * SYNTHETIC BY CONSTRUCTION. Hosts `mini1`, `mini2` and `build3`; projects `web`, `api`, `billing` and `ops`; repos
  * under the placeholder owner `acme`; job ids from a seeded generator. No person, machine, account or address of the
  * maintainer's appears, and the only paths are under the temporary directory the caller passes (the panel and the
- * insights page print a local folder by its basename).
+ * insights page print a local folder by its basename; the commands transcript's caller shows the directory as
+ * `~/pi-work`).
  *
  * DETERMINISTIC. No `Math.random`, no wall clock (every instant derives from `NOW`; the caller freezes `Date` for the
  * code that reads it), and every list is built in a fixed order, so two runs seed the same bytes.
@@ -89,6 +90,7 @@ export function writeDeployment(dir, { git = false } = {}) {
 		envelope: join(dir, "envelope.json"),
 		subs: join(dir, "subscriptions.json"),
 		graph: join(dir, "graph"),
+		overlay: join(dir, "pi-global"),
 	};
 	const files = (root, entries) => {
 		for (const [rel, text] of Object.entries(entries)) {
@@ -138,16 +140,23 @@ export function writeDeployment(dir, { git = false } = {}) {
 		defaultWeights: { web: 1, api: 1, billing: 1, ops: 1, _other: 1 },
 		delegation: { enabled: true, writers: ["operator-session", "portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 },
 	});
+	// The overlay's one MCP server, which the triage trigger's jobs connect (`run.mcp`): its key is a reference the
+	// deployment's PI_FORWARD_ENV fills in, never a value (worker/src/mcp-config.mjs).
+	mkdirSync(paths.overlay, { recursive: true });
+	json(join(paths.overlay, "mcp.json"), { mcpServers: { linear: { url: "https://mcp.example.com/linear", headers: { Authorization: "Bearer ${LINEAR_API_KEY}" }, description: "Look up and update the team's Linear issues", exposure: "codemode" } } });
 	json(paths.subs, { version: 1, subscriptions: [{ id: "kimi", vendor: "Moonshot AI", provider: "kimi-coding", models: ["*"], price: { amount: 19, currency: "USD", per: "month" } }] });
 	json(paths.pause, { windows: [{ scope: "github:acme/web", from: "22:00", to: "06:00", tz: "Europe/Amsterdam", days: ["mon", "tue", "wed", "thu", "fri"] }] });
 	json(paths.triggers, {
 		triggers: [
 			{ on: { type: "cron", id: "nightly-tidy", pattern: "0 3 * * *" }, run: { kind: "local", folder: paths.site, flow: "tidy", packages: false, task: "run the nightly tidy", provider: "kimi-coding", model: "kimi-for-coding" } },
 			{ on: { type: "label", any: ["pi:frontend"] }, run: { kind: "github", flow: "frontend-fix", packages: false, skillsDir: paths.skills, replicas: 2 } },
-			{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", packages: false, instructions: "the tests run with pnpm here" } },
+			// resume: the comment trigger is what continues a parked run (docs/sessions.md, "Parked jobs").
+			{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", packages: false, resume: true, instructions: "the tests run with pnpm here" } },
 			{ on: { type: "pull_request", action: ["open", "update"] }, run: { kind: "gitlab", flow: "review", packages: false } },
 			{ on: { type: "issue", action: ["closed"], number: 40, once: true }, run: { kind: "github", flow: "deploy", packages: false } },
 			{ on: { type: "cron", id: "pm-weekly", pattern: "0 6 * * 1" }, run: { kind: "local", folder: paths.pm, flow: "portfolio-manager", packages: false, task: "Plan this week's budget split and report it.", portfolio: true, model: "claude-haiku-5-5", maxTurns: 15 } },
+			// Triage that may stop and ask (run.awaitInput needs run.resume), with the overlay's Linear server: PARKED's.
+			{ on: { type: "label", any: ["pi:triage"] }, run: { kind: "github", flow: "triage", packages: false, resume: true, awaitInput: true, mcp: ["linear"] } },
 		],
 	});
 	return paths;
@@ -309,6 +318,17 @@ function dollarsOf(D, { tokens, usage, provider, model, trusted }) {
 	return D.dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis });
 }
 
+/** The triggers whose jobs keep a session (`run.resume`), by their index in `triggers.json`: the comment and the triage. */
+const RESUME_TRIGGERS = new Set([2, 6]);
+
+/**
+ * A resumable run's `session` as the processor merges it (`mergeSession`): the first run on its issue finds no
+ * transcript (`absent`) and, completed, promotes one of `bytes`. Null for a trigger without run.resume.
+ */
+function sessionOf(j, input, output) {
+	return RESUME_TRIGGERS.has(j.triggerIndex) ? { resumed: false, reason: "absent", bytes: Math.round((input + output) * 3.4) } : null;
+}
+
 /** The runner's outcome for a completed run: tokens, the usage ledger, dollars and what the container used. */
 function outcomeOf(g, j, D) {
 	const model = j.model ?? "claude-sonnet-5-5";
@@ -333,6 +353,7 @@ function outcomeOf(g, j, D) {
 		usage,
 		provider,
 		model,
+		session: sessionOf(j, input, output),
 		budgetReserved: true,
 		dollars: dollarsOf(D, { tokens, usage, provider, model, trusted: true }),
 		resources: {
@@ -360,6 +381,13 @@ const RETRY_2 = { ...RETRY, attempt: 2, startMs: NOW - 2 * DAY - 9 * H, endMs: N
 const CANCELLED = { host: "build3", id: "gh-4a7e", kind: "github", repo: "acme/billing", number: 290, flow: "fix", queuedMs: NOW - 5 * H - 2 * MIN, startMs: NOW - 5 * H, endMs: NOW - 4 * H - 40 * MIN, project: "billing", turns: 6, scale: 1.6, size: SIZES.build, triggerIndex: 2, triggerType: "comment" };
 
 /**
+ * The parked run (REQ-AWAIT-INPUT): the triage trigger's job on an api issue asked its question through the tool and
+ * ended, completed with reason `awaiting-input`, its transcript promoted for the reply to resume. The run-detail
+ * image shows it.
+ */
+export const PARKED = { host: "mini1", id: "gh-2f6a", kind: "github", repo: "acme/api", number: 131, flow: "triage", queuedMs: NOW - 47 * MIN, startMs: NOW - 47 * MIN + 3_000, endMs: NOW - 26 * MIN, project: "api", turns: 11, size: SIZES.small, triggerIndex: 6, triggerType: "label" };
+
+/**
  * What the processor returns for the cancelled job (processor.mjs, the aborted branch): the stop did not take, so
  * `boundAfterAbort` (index.mjs) answered for the container with `{ code: 137, aborted: true }` and no exit line, so no
  * turns, tokens, usage or resources, and the dollars settle at the floor, the whole reservation.
@@ -367,31 +395,36 @@ const CANCELLED = { host: "build3", id: "gh-4a7e", kind: "github", repo: "acme/b
 function cancelledOutcome(D) {
 	const provider = "anthropic";
 	const model = "claude-sonnet-5-5";
-	return { outcome: "policy", reason: "operator-cancel", exitCode: 137, turns: null, tokens: null, provider, model, session: null, budgetReserved: true, dollars: dollarsOf(D, { tokens: null, usage: null, provider, model, trusted: false }) };
+	// The trigger keeps sessions, so the host's read stands with no runner line beside it (`mergeSession`): nothing was
+	// promoted, so no bytes.
+	return { outcome: "policy", reason: "operator-cancel", exitCode: 137, turns: null, tokens: null, provider, model, session: { resumed: false, reason: "absent", bytes: null }, budgetReserved: true, dollars: dollarsOf(D, { tokens: null, usage: null, provider, model, trusted: false }) };
 }
 
-/** What is placed before the month is scheduled: the runs now, the retry's attempts, the cancelled job and its hold. */
+/** What is placed before the month is scheduled: the runs now, the retry's attempts, the cancelled job and its hold, the parked run. */
 function placedFirst() {
 	const live = Object.entries(RUNNING).flatMap(([host, list]) => list.map((e) => ({ host, id: e.id, repo: e.repo, startMs: e.at, endMs: NOW, size: { memMiB: e.memMiB, cpuCenti: e.cpuCenti } })));
 	const orphanHold = { host: CANCELLED.host, id: CANCELLED.id, repo: CANCELLED.repo, startMs: CANCELLED.endMs, endMs: NOW, size: CANCELLED.size, slot: false };
 	const pm = PM_RUNS.map((run) => pmJob(run));
-	return [...live, RETRY, RETRY_2, CANCELLED, orphanHold, ...pm];
+	return [...live, RETRY, RETRY_2, CANCELLED, orphanHold, PARKED, ...pm];
 }
 
 /**
  * Every run record of the month, through `buildRecord`: the scheduled runs, the retry (its second attempt's record,
- * carrying the first in `earlier` the way the processor carries it), and the cancelled job. The portfolio manager's
+ * carrying the first in `earlier` the way the processor carries it), the cancelled job and the parked run. The portfolio manager's
  * runs are `pmRecord`'s.
  */
 export function buildRecords({ buildRecord, earlierFrom, dollarBudget: D }) {
 	const g = generator(599);
-	const taken = new Set(["gh-5d10", "gh-77c1", RETRY.id, CANCELLED.id, ...Object.values(RUNNING).flat().map((e) => e.id)]);
+	const taken = new Set(["gh-5d10", "gh-77c1", RETRY.id, CANCELLED.id, PARKED.id, ...Object.values(RUNNING).flat().map((e) => e.id)]);
 	const runs = scheduled(plannedJobs(g, taken), placedFirst());
 	const record = (j, result, { earlier = null } = {}) => buildRecord({ job: bullJob(j), result, startedAt: iso(j.startMs), endedAt: iso(j.endMs), host: j.host, defaultBackend: "docker", project: j.project, size: j.size, capacity: HOSTS[j.host], earlier });
 	const records = runs.map((j) => record(j, outcomeOf(g, j, D)));
-	const failed = record(RETRY, { ...outcomeOf(g, RETRY, D), outcome: "failed", reason: "container-lost", exitCode: null });
+	// An infrastructure exit promotes nothing, so its session is the cold read alone.
+	const failed = record(RETRY, { ...outcomeOf(g, RETRY, D), outcome: "failed", reason: "container-lost", exitCode: null, session: { resumed: false, reason: "absent", bytes: null } });
 	records.push(record(RETRY_2, outcomeOf(g, RETRY_2, D), { earlier: earlierFrom(failed) }));
 	records.push(record(CANCELLED, cancelledOutcome(D)));
+	// Last, so the generator's sequence for every run before it is what it was before the parked run existed.
+	records.push(record(PARKED, { ...outcomeOf(g, PARKED, D), reason: "awaiting-input" }));
 	return records;
 }
 
