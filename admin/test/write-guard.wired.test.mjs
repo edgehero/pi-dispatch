@@ -39,6 +39,8 @@ test("the deployment's .env and the pointer are guarded, beside the five files t
   assert.equal(env?.block, true, "an edit of .env, which names every guarded path");
   assert.match(env.reason, /the deployment's \.env/);
   assert.equal((await guard(pointer))?.block, true, "the pointer, which names the deployment");
+  // Issue #640: the console tokens file at its default place in the deployment folder (a write could add a token).
+  assert.match((await guard(join(dep, "console-tokens.json")))?.reason ?? "", /the console tokens file \(PI_CONSOLE_TOKENS_FILE\)/);
   assert.equal(await guard(join(dep, "notes.md")), undefined, "an unrelated file beside them passes");
 });
 

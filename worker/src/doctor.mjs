@@ -52,6 +52,8 @@
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
+import { BlockList, isIPv4, isIPv6 } from "node:net";
+import * as nodeFs from "node:fs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, proxyConfCopyPath, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
 import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,7 +62,7 @@ import { randomBytes } from "node:crypto";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
-import { EMPTY_PROJECTS_FINGERPRINT, loadProjects, projectsFingerprint } from "./projects.mjs";
+import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectsFingerprint } from "./projects.mjs";
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
@@ -117,7 +119,9 @@ import { DOLLAR_KEY_PREFIX } from "./dollar-budget.mjs";
 import { dayKey, monthKey, weekKey } from "./budget.mjs";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
 import { cronPlacement, envelopeJobPaths } from "./schedules.mjs";
-import { envelopeDigest, loadEnvelopeChecked } from "./envelope.mjs";
+import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
+import { operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.mjs";
+import { verifyConsoleAudit } from "./console-audit.mjs";
 import { OTHER } from "./priorities.mjs";
 import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
 
@@ -709,6 +713,13 @@ export const STEERING_SERVICE_KEYS = Object.freeze({
 });
 
 /**
+ * The operator console's environment (issue #640): the keys `pi-dispatch-console` reads, resolved by the console's own
+ * rule (this shell's value where it sets one, else the deployment `.env`'s, as `panelEnv` does for the panel). Not
+ * service keys: no service reads them, so they are kept out of SERVICE_ENV_KEYS and its "set in this shell only" line.
+ */
+export const CONSOLE_ENV_KEYS = Object.freeze(["PI_CONSOLE_LISTEN", "PI_CONSOLE_TOKENS_FILE", "PI_CONSOLE_ALLOWED_HOSTS", "PI_CONSOLE_READ_ONLY", "PI_CONSOLE_BIND_PUBLIC", "PI_CONSOLE_IDLE_MINUTES", "PI_CONSOLE_MAX_HOURS", "PI_CONSOLE_MAX_STREAMS"]);
+
+/**
  * Issue #471: the variables doctor reads from THIS shell on purpose, each with why, so the bolt test can tell a read
  * that went back to the shell from one that was always meant to be there. A name read as `env.NAME` in doctor.mjs is in
  * `SERVICE_ENV_KEYS` or here, never neither.
@@ -723,6 +734,7 @@ export const DOCTOR_SHELL_KEYS = Object.freeze({
 	PI_MODEL_ENDPOINTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #503",
 	PI_ENVELOPE_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #504",
 	[VALKEY_SHARED_KEY]: "read from .env ONLY (#464); a value in this shell is named as ignored",
+	...Object.fromEntries(CONSOLE_ENV_KEYS.map((k) => [k, "the operator console's, not a service's: resolved by the console's own rule (this shell, else the deployment .env) apart from the service record, #640"])),
 });
 
 /** Issue #471: the service keys whose values a disagreement line never prints (set or unset only); URLs print as
@@ -3772,6 +3784,13 @@ export async function collectChecks(shellVars, seams) {
 	const envelopeFactsHere = readEnvelopeFacts(env);
 	if (envelopeFactsHere.envelope) checks.push(...envelopeChecks(envelopeFactsHere.envelope, envelopeFactsHere.projects, envelopeFactsHere.maxCostMicros));
 
+	// Issue #640: the operator console, judged with its keys resolved by the console's own rule (this shell's value, else
+	// the deployment `.env`'s; DOCTOR_SHELL_KEYS). This shell's values are the ones `env` already carries (the resolution
+	// starts from a copy of this shell), so nothing here reads the shell a second way; and the resolution is apart from the
+	// service record, so a console key is never reported as a service's.
+	const consoleShell = Object.fromEntries(CONSOLE_ENV_KEYS.filter((k) => Object.hasOwn(env, k)).map((k) => [k, env[k]]));
+	checks.push(...consoleChecks({ ...env, ...resolveServiceEnv({ env: consoleShell, file: serviceEnvFile, keys: CONSOLE_ENV_KEYS }).env }, { cwd, home, platform, folders, skillsDirs }));
+
 	// Issue #498: a BARE repo scope (`acme/web`) matches that repo on every forge, so with triggers on more than one forge
 	// kind a bare row is one cap (one lease, one count) shared by GitHub's acme/web and Forgejo's, and a bare pause window
 	// pauses both. That may be meant, so this is a WARNING naming the qualified spellings, never a failure: refusing bare
@@ -4635,6 +4654,127 @@ function readProjectFacts(env, fileExists) {
 		return { projects: loadProjects({ projectsFile: path }, { readFileSync, existsSync: fileExists }), parseError: null };
 	} catch (e) {
 		return { projects: [], parseError: e?.message ?? String(e) };
+	}
+}
+
+// `sun_path` sizes, NUL terminator included, as the console's own `parseListen` (admin/src/console/listen.mjs) holds
+// them; doctor-console.test.mjs compares the two parsers' verdicts, since the worker cannot import the admin.
+const CONSOLE_SUN_PATH = { darwin: 104, freebsd: 104, openbsd: 104, netbsd: 104, linux: 108 };
+const CONSOLE_LOOPBACK = new BlockList();
+CONSOLE_LOOPBACK.addSubnet("127.0.0.0", 8, "ipv4");
+CONSOLE_LOOPBACK.addAddress("::1", "ipv6");
+
+/**
+ * PI_CONSOLE_LISTEN as the console parses it: `{ shown, loopback }` or `{ refusal }`. IP literals only (`ip:port`,
+ * `[ipv6]:port`) or `unix:/abs/path` within the platform's socket path size; loopback is 127.0.0.0/8 and ::1. Unset or
+ * empty is the default, 127.0.0.1:4790. The non-loopback refusal is the caller's (it depends on PI_CONSOLE_BIND_PUBLIC).
+ */
+export function consoleListenOf(value, platform = process.platform) {
+	const text = typeof value === "string" ? value.trim() : "";
+	if (text === "") return { shown: "127.0.0.1:4790 (the default)", loopback: true };
+	if (text.startsWith("unix:")) {
+		const path = text.slice("unix:".length);
+		if (!isAbsolute(path)) return { refusal: "a unix socket path must be absolute: write unix:/abs/path" };
+		const limit = CONSOLE_SUN_PATH[platform] ?? 108;
+		if (Buffer.byteLength(path) >= limit) return { refusal: `the unix socket path is ${Buffer.byteLength(path)} bytes, and this platform allows at most ${limit - 1}: choose a shorter path` };
+		return { shown: text, loopback: true };
+	}
+	const m = /^(?:\[([^\]]*)\]|([^:[\]]*)):([0-9]{1,5})$/.exec(text);
+	if (!m || Number(m[3]) > 65535) return { refusal: "it is not ip:port, [ipv6]:port or unix:/abs/path (the port a number from 0 to 65535)" };
+	const host = m[1] ?? m[2];
+	if (m[1] !== undefined ? !isIPv6(host) : !isIPv4(host)) return { refusal: `${host} is not an IP literal; a hostname can resolve anywhere, so write 127.0.0.1 or [::1]` };
+	const loopback = CONSOLE_LOOPBACK.check(host, m[1] !== undefined ? "ipv6" : "ipv4");
+	return { shown: text, loopback };
+}
+
+/**
+ * The console's lines (issue #640, REQ-CONSOLE-SECURITY). NONE for a deployment that never set the console up: no
+ * tokens file at the resolved path (nothing at all there, by lstat) and no PI_CONSOLE_* key set. Otherwise:
+ *   - the tokens file as the console reads it (`readTokensFile`: owner-only regular file, valid), ✗ with its own fix;
+ *   - at least one operator token, ✗ (with none, nobody can change anything from the console);
+ *   - the tokens file outside every path a job container can see, ✗: a local trigger's run.folder is bind-mounted
+ *     read-write, so a job there could read the file or add a token of its own. Judged by `envelopeInsideJobPaths`, the
+ *     envelope's identity-based containment check (a firmlink or bind alias of a folder is caught), on the file's real
+ *     path, with the local folders, skills dirs, absolute run roots and the overlay;
+ *   - PI_CONSOLE_LISTEN parseable (✗, the console refuses to start) and PI_CONSOLE_BIND_PUBLIC=1 (⚠, plain HTTP);
+ *   - the audit chain (`verifyConsoleAudit`), ⚠ when broken, nothing while the log holds no row.
+ * `env` must already carry the console keys resolved (`collectChecks` does it). Seams: `cwd` (the deployment folder),
+ * `fs`, `uid`, `home`, `platform`, `folders` (canonical local run.folders), `skillsDirs`, `realpath`.
+ */
+export function consoleChecks(env, { cwd = process.cwd(), fs = nodeFs, uid = process.geteuid?.(), home, platform = process.platform, folders = [], skillsDirs = [], realpath = realpathSync.native } = {}) {
+	const path = tokensFilePath({ PI_CONSOLE_TOKENS_FILE: env.PI_CONSOLE_TOKENS_FILE }, cwd);
+	let present = true;
+	try {
+		fs.lstatSync(path);
+	} catch {
+		present = false;
+	}
+	const keysSet = CONSOLE_ENV_KEYS.filter((k) => typeof env[k] === "string" && env[k] !== "");
+	if (!present && keysSet.length === 0) return [];
+	const checks = [];
+	const shownPath = quotedShown(path);
+	const read = readTokensFile({ path, fs, uid });
+	if (read.refusal) {
+		checks.push({ ok: false, label: `console: the tokens file ${shownPath} cannot be used, so \`pi-dispatch-console serve\` refuses to start`, fix: escapeControls(read.refusal) });
+	} else {
+		const operators = operatorCount(read.file);
+		const viewers = read.file.tokens.length - operators;
+		if (operators === 0) {
+			checks.push({ ok: false, label: `console: the tokens file ${shownPath} holds no operator token, so nobody can make a change from the console`, fix: "run `pi-dispatch-console token add --name <you> --role operator`" });
+		}
+		const inside = consoleTokensInsideJobPaths(path, env, { cwd, fs, folders, skillsDirs, realpath });
+		if (inside.problem) {
+			checks.push({ ok: false, label: `console: the tokens file ${shownPath} ${inside.problem}`, fix: inside.fix });
+		} else if (operators > 0) {
+			checks.push({ ok: true, label: `console: tokens file ${shownPath} is owner-only and outside every job folder (${operators} operator${operators === 1 ? "" : "s"}, ${viewers} viewer${viewers === 1 ? "" : "s"})` });
+		}
+	}
+	const listen = consoleListenOf(env.PI_CONSOLE_LISTEN, platform);
+	const bindPublic = env.PI_CONSOLE_BIND_PUBLIC === "1";
+	if (listen.refusal) {
+		checks.push({ ok: false, label: `console: PI_CONSOLE_LISTEN ${quotedShown(env.PI_CONSOLE_LISTEN)} cannot be used, so \`pi-dispatch-console serve\` refuses to start: ${listen.refusal}`, fix: "write 127.0.0.1:4790, [::1]:4790 or unix:/abs/path, or unset PI_CONSOLE_LISTEN for the default" });
+	} else if (!listen.loopback && !bindPublic) {
+		checks.push({ ok: false, label: `console: PI_CONSOLE_LISTEN ${quotedShown(env.PI_CONSOLE_LISTEN)} is not a loopback address, so \`pi-dispatch-console serve\` refuses to start`, fix: "listen on 127.0.0.1, [::1] or a unix: socket and reach it with ssh -L; or, to accept plain HTTP on a network, set PI_CONSOLE_BIND_PUBLIC=1" });
+	} else {
+		checks.push({ ok: true, label: `console: listens on ${escapeControls(listen.shown)}` });
+	}
+	if (bindPublic) {
+		checks.push({ ok: false, warn: true, label: "console: PI_CONSOLE_BIND_PUBLIC=1 lets the console listen on a non-loopback address, where tokens and session cookies cross the network in plain HTTP", fix: "keep it only behind a TLS proxy on a network you trust; otherwise unset PI_CONSOLE_BIND_PUBLIC, listen on 127.0.0.1, [::1] or a unix: socket, and reach it with ssh -L" });
+	}
+	const logsDir = logsDirPath(env, home);
+	const audit = verifyConsoleAudit({ logsDir, fs });
+	if (!audit.ok) {
+		const where = audit.broken.file === null ? "" : ` at ${audit.broken.file} line ${audit.broken.line}`;
+		checks.push({ ok: false, warn: true, label: `console: the audit log chain is broken${where}: ${escapeControls(audit.broken.reason)}`, fix: `a row was changed, removed or moved after it was written, or the file was damaged. Keep a copy of ${join(logsDir, "console-audit")} for review; \`pi-dispatch-console audit verify\` names the same link, and a damaged LAST line makes the console refuse every write until that file is moved aside` });
+	} else if (audit.rows > 0) {
+		const start = audit.startsAt ? `, starting at seq ${audit.startsAt.seq} in ${audit.startsAt.file} (older rows reaped)` : "";
+		checks.push({ ok: true, label: `console: audit log chain intact (${audit.rows} row${audit.rows === 1 ? "" : "s"}${start})` });
+	}
+	return checks;
+}
+
+/**
+ * Whether a job container can see the console tokens file: `{}` or `{ problem, fix }`. The file's REAL path is judged
+ * (the containment check requires a canonical path, and the console reads whatever the configured one resolves to). A
+ * second hard link is refused as the envelope's is: another name of the file could sit in a job folder unseen. A
+ * relative run root is skipped here (the envelope refuses one; the console has no such rule to borrow), and a path
+ * that cannot be judged is said, not passed.
+ */
+function consoleTokensInsideJobPaths(path, env, { cwd, fs, folders, skillsDirs, realpath }) {
+	const fix = "move the tokens file out of every local trigger's run.folder and run.skillsDir, every PI_DISPATCH_RUN_ROOTS root and PI_GLOBAL_PI_DIR, and point PI_CONSOLE_TOKENS_FILE at its new path";
+	try {
+		const st = fs.statSync(path);
+		if (st.nlink > 1) return { problem: `has ${st.nlink} hard links: another name of the file could sit inside a folder a job can see, so keep exactly one`, fix: `remove the other names (\`find / -samefile ${path}\` lists them)` };
+		const real = realpath(path);
+		const runRoots = delimitedList(env.PI_DISPATCH_RUN_ROOTS).filter((r) => isAbsolute(r));
+		const globalPiDir = typeof env.PI_GLOBAL_PI_DIR === "string" && env.PI_GLOBAL_PI_DIR !== "" ? env.PI_GLOBAL_PI_DIR : null;
+		// PWD comes from the process environment inside the check, as on doctor's envelope load (`loadEnvelopeChecked`).
+		const inside = envelopeInsideJobPaths(real, { cronFolders: folders, runRoots, skillsDirs, globalPiDir }, { cwd });
+		if (inside === null) return {};
+		const what = { "cron-folder": "a local trigger's run.folder", "run-root": "a PI_DISPATCH_RUN_ROOTS root", "skills-dir": "a trigger's run.skillsDir", "global-pi-dir": "PI_GLOBAL_PI_DIR" }[inside.kind] ?? inside.kind;
+		return { problem: `lies inside ${what} (${quotedShown(inside.path)}), which a job container can see: a job there could read the token hashes or add a token of its own`, fix };
+	} catch (err) {
+		return { problem: `could not be judged against the folders a job can see (${escapeControls(err?.code ?? "the path could not be resolved")})`, fix: `make ${path} and the trigger folders readable here, then run doctor again` };
 	}
 }
 
