@@ -1,0 +1,392 @@
+/**
+ * The console's screens (issue #641, REQ-OPERATOR-CONSOLE-SCREENS): which screens exist, what each one's query may say,
+ * what each one reads, and how each one is drawn from its panels.
+ *
+ * THREE STEPS, KEPT APART so the live stream and the page load cannot disagree:
+ *
+ *   1. `parsePageQuery(name, searchParams)` judges the query: every parameter named, bounded and charset-checked, and a
+ *      value that fails is REFUSED, never trimmed into one that passes (`run-filter.mjs`'s rule, which the runs screen
+ *      uses for its filters). A refusal names the parameter and its rule, never the value.
+ *   2. `loadPageData(name, query, deps)` is the ONLY function here that reads. It calls the fleet reader's `snapshot()`
+ *      at most once, and nothing else on a screen that needs only the snapshot. The live hub calls it once per tick for
+ *      each distinct screen and query, and hands the result to every stream showing that screen.
+ *   3. `renderPage(name, ctx)` and `pagePanels(name, ctx)` draw from that data and nothing else: pure, with `now` taken
+ *      from the data, so the same data draws the same bytes. `renderPage` places each panel in
+ *      `<section id="p-…" data-panel>`; `pagePanels` returns the same panels' inner HTML for the stream to swap in.
+ *
+ * THE ROLE RULE lives in the panels (`panels.mjs` header): the operator alone sees a failure reason and the audit log.
+ * Data is read once for both roles, and the role decides only what is drawn, so a stream must be rendered per role.
+ */
+import { CONSOLE_AUDIT_CURSOR_RE } from "@edgehero/pi-dispatch/console-audit";
+import { FORGES } from "@edgehero/pi-dispatch/forges";
+import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
+import { html, page } from "./html.mjs";
+import {
+  auditLog,
+  configMcp,
+  configPackages,
+  configPauseWindows,
+  configProjects,
+  configScopedLimits,
+  configSecretProfiles,
+  configSettings,
+  configTriggers,
+  fleetActive,
+  fleetFailed,
+  fleetHeld,
+  fleetHosts,
+  fleetQueues,
+  fleetSchedulers,
+  INSIGHTS_RANGES,
+  insightsPanel,
+  insightsRange,
+  navHtml,
+  overviewActive,
+  overviewFailures,
+  overviewHosts,
+  overviewParked,
+  overviewSpend,
+  overviewState,
+  parkedInbox,
+  runChain,
+  runCostPanel,
+  runResources,
+  runSession,
+  runSummary,
+  runsFilter,
+  runsTable,
+  RUN_ID_RE,
+} from "./panels.mjs";
+
+/**
+ * The screens. `path` is the route, `auth` the least role that may open it, `live` whether the page opens the event
+ * stream (a screen whose data changes while it is open), `title` the heading, `nav` the navigation label (none for
+ * the run detail, which is reached from a run). Insights is not live: its assembly is the expensive read (cached 30 s
+ * by the caller), and the range picker is its refresh. Configuration and the audit log change by a person's hand.
+ */
+export const PAGES = Object.freeze({
+  overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview" }),
+  runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs" }),
+  run: Object.freeze({ path: "/run", auth: "viewer", live: false, title: "Run", nav: null }),
+  parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked" }),
+  insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: "Spend and insights", nav: "Spend" }),
+  fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet" }),
+  config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration" }),
+  audit: Object.freeze({ path: "/audit", auth: "operator", live: false, title: "Audit log", nav: "Audit" }),
+});
+
+/** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
+const PAGE_PANELS = Object.freeze({
+  overview: [["p-state", overviewState], ["p-spend", overviewSpend], ["p-hosts", overviewHosts], ["p-parked", overviewParked], ["p-failures", overviewFailures], ["p-active", overviewActive]],
+  runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
+  run: [["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
+  parked: [["p-parked", parkedInbox]],
+  insights: [["p-range", insightsRange], ["p-insights", insightsPanel]],
+  fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
+  config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles]],
+  audit: [["p-audit", auditLog]],
+});
+
+/** The panel ids of a screen, in page order (for the stream's tests and the hub). */
+export function panelIds(name) {
+  return (PAGE_PANELS[name] ?? []).map(([id]) => id);
+}
+
+// ---- the query -------------------------------------------------------------------------------------------------------
+
+/** The parameters each screen takes; any other refuses the request. */
+const PAGE_PARAMS = Object.freeze({
+  overview: [],
+  runs: [...RUN_FILTER_FIELDS, "before"],
+  run: ["id"],
+  parked: [],
+  insights: ["range"],
+  fleet: [],
+  config: [],
+  audit: ["before"],
+});
+
+/** The most parameters, and the longest value, a query may carry before anything looks at what they say. */
+export const QUERY_LIMITS = Object.freeze({ params: 16, valueLength: 256 });
+
+/** A runs cursor: millis, a whole number (`readRunsPage`'s `before`). */
+const RUNS_BEFORE_RE = /^\d{1,16}$/;
+
+/** `searchParams` as a URLSearchParams, or null for something that is not a query. */
+function asParams(searchParams) {
+  if (searchParams instanceof URLSearchParams) return searchParams;
+  if (searchParams === null || searchParams === undefined) return new URLSearchParams();
+  if (typeof searchParams === "string") return new URLSearchParams(searchParams);
+  if (typeof searchParams === "object") {
+    const out = new URLSearchParams();
+    for (const [k, v] of Object.entries(searchParams)) {
+      if (typeof v !== "string") return null;
+      out.append(k, v);
+    }
+    return out;
+  }
+  return null;
+}
+
+/**
+ * Judge a screen's query: `{ query }` (frozen) or `{ refusal }` (a sentence naming the parameter and its rule).
+ *
+ *   - runs: the filter (`parseRunFilter`) and `before` (a cursor in millis); `{ filter, before }`.
+ *   - run: `id`, required, in the read model's run-id charset; `{ id }`.
+ *   - insights: `range`, one of 7d, 30d, mtd, default 7d; `{ range }`.
+ *   - audit: `before` (an audit position, `YYYY-MM:<line>`, `readConsoleAudit`'s cursor); `{ before }`.
+ *   - every other screen: no parameter at all; `{}`.
+ *
+ * Bounded first: at most `QUERY_LIMITS.params` parameters, each value at most `QUERY_LIMITS.valueLength` characters,
+ * and a parameter the screen does not take refuses, as does one given twice.
+ */
+export function parsePageQuery(name, searchParams) {
+  if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) return { refusal: "there is no such page on this console" };
+  const params = asParams(searchParams);
+  if (params === null) return { refusal: "the query is not readable" };
+  const allowed = PAGE_PARAMS[name];
+  let n = 0;
+  for (const [key, value] of params) {
+    n += 1;
+    if (n > QUERY_LIMITS.params) return { refusal: `a query carries at most ${QUERY_LIMITS.params} parameters` };
+    // The key is checked against the screen's own list before it is named, so a refusal never echoes a stranger's key.
+    if (!allowed.includes(key)) return { refusal: allowed.length === 0 ? `the ${name} page takes no query parameters` : `the ${name} page takes only ${allowed.join(", ")}` };
+    if (value.length > QUERY_LIMITS.valueLength) return { refusal: `${key} is longer than ${QUERY_LIMITS.valueLength} characters` };
+  }
+  for (const key of allowed) if (params.getAll(key).length > 1) return { refusal: `${key} is given more than once` };
+  const one = (key) => {
+    const v = params.get(key);
+    return v === null || v === "" ? null : v;
+  };
+  switch (name) {
+    case "runs": {
+      const f = parseRunFilter(params);
+      if (f.refusal) return { refusal: f.refusal };
+      const raw = one("before");
+      let before = null;
+      if (raw !== null) {
+        if (!RUNS_BEFORE_RE.test(raw) || !Number.isSafeInteger(Number(raw))) return { refusal: "before must be a whole number of milliseconds" };
+        before = Number(raw);
+      }
+      return { query: Object.freeze({ filter: f.filter, before }) };
+    }
+    case "run": {
+      const id = one("id");
+      if (id === null) return { refusal: "the run page needs ?id= with a run's job id" };
+      if (!RUN_ID_RE.test(id)) return { refusal: "id must be a run id (letters, digits and . _ : -, at most 200 characters)" };
+      return { query: Object.freeze({ id }) };
+    }
+    case "insights": {
+      const range = one("range") ?? "7d";
+      if (!INSIGHTS_RANGES.includes(range)) return { refusal: `range must be one of ${INSIGHTS_RANGES.join(", ")}` };
+      return { query: Object.freeze({ range }) };
+    }
+    case "audit": {
+      const raw = one("before");
+      if (raw === null) return { query: Object.freeze({ before: null }) };
+      // Exactly `readConsoleAudit`'s cursor (`YYYY-MM:<line>`, its own regex), so a refused cursor never reaches a read.
+      const m = CONSOLE_AUDIT_CURSOR_RE.exec(raw);
+      if (m === null || !Number.isSafeInteger(Number(m[2]))) return { refusal: "before must be an audit position (YYYY-MM:line, as the Older rows link gives it)" };
+      return { query: Object.freeze({ before: raw }) };
+    }
+    default:
+      return { query: Object.freeze({}) };
+  }
+}
+
+/**
+ * A parsed query as the canonical query string (no leading `?`): what a live page carries in `data-query` for the
+ * script to reopen its stream with, and what the stream's `page=` request passes back through `parsePageQuery`.
+ */
+export function pageQueryString(name, query) {
+  const p = new URLSearchParams();
+  const q = query ?? {};
+  if (name === "runs") {
+    for (const k of RUN_FILTER_FIELDS) if (q.filter?.[k] !== undefined) p.set(k, q.filter[k]);
+    if (q.before !== null && q.before !== undefined) p.set("before", String(q.before));
+  } else if (name === "run" && q.id) p.set("id", q.id);
+  else if (name === "insights" && q.range) p.set("range", q.range);
+  else if (name === "audit" && q.before !== null && q.before !== undefined) p.set("before", String(q.before));
+  return p.toString();
+}
+
+// ---- reading ---------------------------------------------------------------------------------------------------------
+
+/** What each screen reads beside the clock. */
+const PAGE_READS = Object.freeze({
+  overview: ["snapshot"],
+  runs: ["runsPage", "subscriptions"],
+  run: ["run", "subscriptions"],
+  parked: ["snapshot"],
+  insights: ["insights"],
+  fleet: ["snapshot"],
+  config: ["snapshot"],
+  audit: ["audit"],
+});
+
+/** The runs a screen shows per page, and how far the run detail looks for a run's children. */
+export const RUNS_PER_PAGE = 50;
+const CHILD_SEARCH = Object.freeze({ pageSize: 100, pages: 3 });
+/** The audit rows per page. */
+export const AUDIT_PER_PAGE = 50;
+
+/**
+ * The deployment env's forge instance variables alone (the ones `forgeLinkOf` reads): the page data never carries the
+ * rest of the env, which holds tokens and keys, so nothing that serializes the data can leak them.
+ */
+function forgeEnvOf(env) {
+  const names = new Set(["GITLAB_URL", "FORGEJO_URL", "AZURE_ORG_URL"]);
+  for (const forge of Object.values(FORGES)) for (const n of forge?.hostVars ?? []) names.add(n);
+  const out = {};
+  for (const n of [...names].sort()) if (typeof env?.[n] === "string" && env[n] !== "") out[n] = env[n];
+  return Object.freeze(out);
+}
+
+/** The subscriptions the cost classifier knows plans by: an array, from `deps.subscriptions()` when wired, else none. */
+async function subscriptionsOf(deps) {
+  if (typeof deps.subscriptions !== "function") return [];
+  try {
+    const got = await deps.subscriptions();
+    if (Array.isArray(got)) return got;
+    return Array.isArray(got?.subscriptions) ? got.subscriptions : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A run's children: runs whose `parentJobId` is its id, among the newest `CHILD_SEARCH.pages` pages of runs (a child
+ * starts after its parent, so the search stops at the first page older than the parent's start). `{ children,
+ * searched }`, `searched` the number of runs examined, which the page states rather than claiming none exist.
+ */
+async function childrenOf(fleet, record) {
+  const startMs = Date.parse(record.startedAt ?? record.endedAt ?? "");
+  const children = [];
+  let searched = 0;
+  let before = null;
+  for (let i = 0; i < CHILD_SEARCH.pages; i += 1) {
+    let pageRead;
+    try {
+      pageRead = await fleet.runsPage({ before, limit: CHILD_SEARCH.pageSize });
+    } catch {
+      break;
+    }
+    if (!Array.isArray(pageRead?.runs)) break;
+    searched += pageRead.runs.length;
+    for (const r of pageRead.runs) if (r?.parentJobId === record.jobId) children.push({ jobId: r.jobId ?? null, outcome: r.outcome ?? null, startedAt: r.startedAt ?? null });
+    if (pageRead.next === null || pageRead.next === undefined || (Number.isFinite(startMs) && pageRead.next <= startMs)) break;
+    before = pageRead.next;
+  }
+  children.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)) || String(a.jobId).localeCompare(String(b.jobId)));
+  return { children, searched };
+}
+
+/**
+ * Read what screen `name` shows for `query` (a `parsePageQuery` result's `query`). `deps`:
+ *
+ *   - `fleet`: a `createFleetReader` instance (`snapshot`, `runsPage`, `runById`). `snapshot()` is called at most once.
+ *   - `insights(window)`: the assembled insights payload for a window (the caller caches it: it is the expensive read).
+ *   - `audit({ limit, before })`: `readConsoleAudit` bound to the deployment's logs directory.
+ *   - `subscriptions()` (optional): the subscriptions file's entries, for the cost class of a plan-covered run.
+ *   - `env`: the deployment's env, of which only the forge instance variables are kept (`forgeEnvOf`).
+ *   - `now`: the clock (a function or a number), read ONCE; every panel draws from this instant.
+ *
+ * Never throws for a read that fails: the field is null (or carries a sentence), and the panel says so.
+ */
+export async function loadPageData(name, query, deps = {}) {
+  if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
+  const now = typeof deps.now === "function" ? deps.now() : Number.isFinite(deps.now) ? deps.now : Date.now();
+  const q = query ?? {};
+  const data = { page: name, now, env: forgeEnvOf(deps.env) };
+  const reads = PAGE_READS[name];
+  if (reads.includes("snapshot")) {
+    try {
+      data.snapshot = await deps.fleet.snapshot();
+    } catch {
+      data.snapshot = null;
+    }
+  }
+  if (reads.includes("subscriptions")) data.subscriptions = await subscriptionsOf(deps);
+  if (reads.includes("runsPage")) {
+    try {
+      data.runsPage = await deps.fleet.runsPage({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter ?? null });
+    } catch {
+      data.runsPage = null;
+    }
+  }
+  if (reads.includes("run")) {
+    try {
+      data.run = await deps.fleet.runById(q.id);
+    } catch {
+      data.run = { missing: true };
+    }
+    if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record).then(({ children, searched }) => ({ children, childrenSearched: searched })));
+  }
+  if (reads.includes("insights")) {
+    try {
+      data.insights = await deps.insights(q.range ?? "7d");
+    } catch {
+      data.insights = null;
+      data.insightsError = "The spend history could not be assembled. The console's log has the reason.";
+    }
+  }
+  if (reads.includes("audit")) {
+    try {
+      data.audit = await deps.audit({ limit: AUDIT_PER_PAGE, before: q.before ?? null });
+    } catch {
+      data.audit = null;
+    }
+  }
+  return data;
+}
+
+// ---- drawing ---------------------------------------------------------------------------------------------------------
+
+/** What a panel renderer is handed. */
+function viewOf(name, ctx) {
+  const data = ctx?.data ?? {};
+  return { page: name, data, role: ctx?.session?.role ?? null, query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now };
+}
+
+/** Each panel of screen `name` as `{ id, fragment }`. */
+function panelFragments(name, ctx) {
+  const view = viewOf(name, ctx);
+  return PAGE_PANELS[name].map(([id, render]) => ({ id, fragment: render(view) }));
+}
+
+/**
+ * The panels of screen `name`, `[{ id, html }]`: the inner HTML of each `<section id="<id>" data-panel>` that
+ * `renderPage` draws, from the same renderers, for the live stream to swap in. `ctx` is `renderPage`'s.
+ */
+export async function pagePanels(name, ctx) {
+  if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
+  return panelFragments(name, ctx).map(({ id, fragment }) => ({ id, html: String(fragment) }));
+}
+
+/** The signed-in header: the console's name, the screens, who is signed in, the live state and sign-out. */
+function headerHtml(name, ctx) {
+  const s = ctx?.session ?? {};
+  return html`<header class="top"><a class="brand" href="/">pi-dispatch console</a>${navHtml(PAGES, name, s.role)}<span class="who">${s.name ?? "-"} (${s.role ?? "-"})${ctx?.readOnly ? ", read-only console" : ""}</span>${PAGES[name].live ? html`<span id="live-status" role="status" aria-live="polite"></span>` : null}<button id="logout" type="button">Sign out</button></header>`;
+}
+
+/**
+ * The whole page for screen `name`: `{ status, html }`. `ctx = { query, session: { name, role }, data, readOnly }`.
+ * Status 200; 404 for a run that does not exist (the panels say so); 403 for the audit log asked by a viewer (the route
+ * table refuses that first; this is the belt, and it draws no panel).
+ */
+export async function renderPage(name, ctx) {
+  if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
+  const meta = PAGES[name];
+  const role = ctx?.session?.role ?? null;
+  const live = meta.live ? name : null;
+  const query = pageQueryString(name, ctx?.query);
+  if (meta.auth === "operator" && role !== "operator") {
+    const body = html`${headerHtml(name, ctx)}<main><h1>${meta.title}</h1><p class="warn">This page is for operators only.</p></main>`;
+    return { status: 403, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body }) };
+  }
+  const panels = panelFragments(name, ctx);
+  const heading = name === "run" && ctx?.query?.id ? html`${meta.title} <span class="mono">${ctx.query.id}</span>` : meta.title;
+  const body = html`${headerHtml(name, ctx)}<main><h1>${heading}</h1>${panels.map(({ id, fragment }) => html`<section id="${id}" data-panel>${fragment}</section>`)}</main>`;
+  const status = name === "run" && !ctx?.data?.run?.record ? 404 : 200;
+  return { status, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, live, query }) };
+}

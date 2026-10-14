@@ -59,3 +59,33 @@ test("no page carries inline script, inline style or an event handler; each load
   // the sign-in form has no action: a plain submit would be form-encoded, which the server refuses
   assert.ok(!/action=/.test(String(loginPage())));
 });
+
+// ---- issue #641: the page shell's live attributes and the insights renderers' one entry ----
+
+test("a live page carries data-live and its query, escaped; a static page carries neither", async () => {
+  const { page } = await import("../src/console/html.mjs");
+  const live = String(page({ title: "t", name: "runs", body: html`<main></main>`, live: "runs", query: 'repo=a"b&q=<x>' }));
+  assert.match(live, /<body data-page="runs" data-live="runs" data-query="repo=a&quot;b&amp;q=&lt;x&gt;">/);
+  assert.match(live, /<link rel="stylesheet" href="\/static\/console\.css">/);
+  const still = String(page({ title: "t", name: "config", body: html`<main></main>` }));
+  assert.match(still, /<body data-page="config">/);
+});
+
+test("trustedRenderer admits a renderer's escaped output and refuses script, style, handlers and javascript: links", async () => {
+  const { trustedRenderer } = await import("../src/console/html.mjs");
+  assert.ok(isSafeHtml(trustedRenderer('<div class="kpi"><svg><rect data-tip="3" fill="#58a6ff"/></svg></div>')));
+  // Escaped text that merely READS like markup is text, and stays (a hostile target must not take a screen down).
+  assert.equal(String(trustedRenderer("<text>acme/web&quot; onload=x javascript:alert(1)</text>")), "<text>acme/web&quot; onload=x javascript:alert(1)</text>");
+  for (const bad of ["<script>x</script>", "<SCRIPT src=a>", "<style>a{}</style>", '<div style="color:red">', "<rect onclick=\"x\"/>", '<g onMouseOver="x">', '<a href="javascript:alert(1)">', "<a href = ' javascript:x'>", '<image xlink:href="javascript:x"/>']) {
+    assert.throws(() => trustedRenderer(bad), /refuses/, bad);
+  }
+  assert.throws(() => trustedRenderer(html`<b>`), TypeError, "a fragment is not a renderer's string");
+  assert.throws(() => trustedRenderer(null), TypeError);
+});
+
+test("trustedRenderer scrubs control bytes a renderer passed through, keeping its newlines", async () => {
+  const { trustedRenderer } = await import("../src/console/html.mjs");
+  const out = String(trustedRenderer(`<text>a${ESC}[31mb${RLO}c</text>\n<text>d${BEL}</text>`));
+  for (const ch of [ESC, RLO, BEL]) assert.ok(!out.includes(ch), `code ${ch.charCodeAt(0)}`);
+  assert.match(out, /^<text>a ?\[31mb ?c<\/text>\n<text>d ?<\/text>$/);
+});

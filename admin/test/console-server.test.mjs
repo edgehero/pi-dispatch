@@ -7,7 +7,10 @@ import { after, test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { SECURITY_HEADERS } from "../src/console/headers.mjs";
-import { BODY_LIMIT, createConsoleServer, lookupRoute, REFUSAL_ROWS_PER_MINUTE, ROUTES, SERVER_LIMITS } from "../src/console/server.mjs";
+import { html, page } from "../src/console/html.mjs";
+import * as realPages from "../src/console/pages.mjs";
+import { BODY_LIMIT, createConsoleServer, lookupRoute, REFUSAL_ROWS_PER_MINUTE, ROUTES, SERVER_LIMITS, STATE_UNREADABLE, STREAMS_TOTAL_MAX } from "../src/console/server.mjs";
+import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { writePauseWindows as realWritePauseWindows } from "../src/read-model.mjs";
 
 // The console's dispatcher over a real node:http server on 127.0.0.1:0 (issue #640, REQ-CONSOLE-SECURITY). Requests
@@ -56,9 +59,31 @@ function fakeSessions() {
       }
       return { ...s };
     },
+    peek(id, file) {
+      const s = live.get(id);
+      return s && file.tokens.some((t) => t.sha256 === s.tokenHash && t.role === s.role) ? { ...s } : null;
+    },
     destroy(id) {
       live.delete(id);
     },
+    streamAcquire: (id) => live.has(id),
+    streamRelease() {},
+  };
+}
+
+/**
+ * The pages module as the server sees it (issue #641): the REAL table and query parser, so the routes and refusals
+ * under test are the shipped ones, and a renderer that stands in for the screens (their own tests are C's).
+ */
+function fakePages(loads = []) {
+  return {
+    ...realPages,
+    loadPageData: async (name, query, deps) => (loads.push({ name, query, deps }), { name }),
+    pagePanels: async () => [],
+    renderPage: async (name, ctx) => ({
+      status: 200,
+      html: page({ title: name, name, body: html`<main><p>Signed in as <strong>${ctx.session.name}</strong> (${ctx.session.role}).</p>${ctx.readOnly ? html`<p>read-only</p>` : null}</main>` }),
+    }),
   };
 }
 
@@ -132,6 +157,7 @@ async function start(overrides = {}) {
   const codes = new Map(overrides.codes ?? []);
   for (const [code] of codes) secrets.add(code);
   const codesTried = [];
+  const loads = [];
   const config = { allowedHosts: [], readOnly: false, maxMs: 12 * 3600000, pauseWindowsPath: join(dir, "pause-windows.json"), ...overrides.config };
   const server = createConsoleServer({
     config,
@@ -154,6 +180,10 @@ async function start(overrides = {}) {
       writes.push(args);
       return (overrides.writePauseWindows ?? realWritePauseWindows)(args);
     },
+    pages: overrides.pages ?? fakePages(loads),
+    pageDeps: overrides.pageDeps ?? { fleet: { snapshot: async () => overrides.snapshot ?? {} } },
+    hub: overrides.hub ?? null,
+    ...(overrides.limits && { limits: overrides.limits }),
   });
   servers.push(server);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -185,7 +215,7 @@ async function start(overrides = {}) {
     const cookie = res.headers["set-cookie"]?.[0]?.split(";")[0] ?? null;
     return { res, cookie };
   }
-  return { server, port, host, dir, config, audit, sessions, tickets, writes, codes, codesTried, send, post, login, writeHeaders, advance: (ms) => (t += ms) };
+  return { server, port, host, dir, config, audit, sessions, tickets, writes, codes, codesTried, loads, send, post, login, writeHeaders, advance: (ms) => (t += ms) };
 }
 
 // ---- Host (REQ-CONSOLE-SECURITY b) ----
@@ -329,6 +359,22 @@ test("the route table: every route declares auth and write, writes are POST, and
   assert.equal(lookupRoute("HEAD", "/healthz").route.path, "/healthz");
   assert.equal(lookupRoute("GET", "/missing"), null);
   assert.deepEqual(SERVER_LIMITS, { headersTimeout: 10000, requestTimeout: 30000, maxConnections: 64, connectionsCheckingInterval: 1000 });
+  // Issue #641: one GET route per screen, its auth taken from the pages' own table (derived, never restated), and
+  // the overview is `/`.
+  for (const [name, spec] of Object.entries(realPages.PAGES)) {
+    const found = lookupRoute("GET", spec.path);
+    assert.equal(found?.route?.page, name, spec.path);
+    assert.equal(found.route.auth, spec.auth, `${spec.path}: the page's own auth`);
+    assert.equal(lookupRoute("HEAD", spec.path).route, found.route, `${spec.path}: HEAD is served by the GET route`);
+  }
+  assert.equal(lookupRoute("GET", "/").route.page, "overview");
+  assert.equal(realPages.PAGES.audit.auth, "operator");
+  const fixed = Object.fromEntries(ROUTES.filter((r) => !r.page).map((r) => [`${r.method} ${r.path}`, r.auth]));
+  assert.equal(fixed["GET /api/state"], "viewer");
+  assert.equal(fixed["GET /api/events"], "viewer");
+  assert.equal(fixed["GET /static/console.css"], "none");
+  assert.equal(STREAMS_TOTAL_MAX, 32);
+  assert.ok(STREAMS_TOTAL_MAX < SERVER_LIMITS.maxConnections, "streams can never take every connection");
 });
 
 test("the server carries its limits", async () => {
@@ -497,7 +543,7 @@ test("sign-out destroys the session, clears the cookie and is audited", async ()
   assert.equal((await c.send({ path: "/api/whoami", headers: { cookie } })).status, 401);
 });
 
-test("a signed-in page escapes and shows the name, and serves its script from a URL, never inline", async () => {
+test("a signed-in page escapes and shows the name, and serves its script and stylesheet from URLs, never inline", async () => {
   const c = await start();
   const { cookie } = await c.login();
   const res = await c.send({ path: "/", headers: { cookie } });
@@ -506,6 +552,7 @@ test("a signed-in page escapes and shows the name, and serves its script from a 
   assert.match(res.text, /Signed in as <strong>alice<\/strong> \(operator\)/);
   assert.match(res.text, /<script src="\/static\/console.js" defer><\/script>/);
   assert.equal((res.text.match(/<script/g) ?? []).length, 1);
+  assert.equal(c.loads.at(-1).name, "overview", "/ is the overview page");
   const js = await c.send({ path: "/static/console.js" });
   assert.match(js.headers["content-type"], /^text\/javascript/);
   assert.match(js.text, /history\.replaceState/);
@@ -513,6 +560,122 @@ test("a signed-in page escapes and shows the name, and serves its script from a 
   // The fragment leaves history BEFORE the code is posted, so neither a failed post nor the back button can replay it.
   const codeBranch = js.text.slice(js.text.indexOf('page === "login-code"'));
   assert.ok(codeBranch.indexOf("history.replaceState") < codeBranch.indexOf('post("/login/code"'), "replaceState runs before the post");
+  const css = await c.send({ path: "/static/console.css" });
+  assert.equal(css.status, 200);
+  assert.match(css.headers["content-type"], /^text\/css/);
+  assert.equal(css.text, CONSOLE_CSS);
+  assertSecurityHeaders(css, "the stylesheet");
+});
+
+// ---- issue #641: the screens, /api/state and the stream's refusals ----
+
+test("every page: signed out it redirects to /login; signed in it loads its data with the console's deps and renders; HEAD sends no body", async () => {
+  const pageDeps = { fleet: { snapshot: async () => ({}) }, marker: "the-deps" };
+  const c = await start({ pageDeps });
+  const { cookie } = await c.login();
+  for (const [name, spec] of Object.entries(realPages.PAGES)) {
+    const anon = await c.send({ path: spec.path });
+    assert.equal(anon.status, 303, spec.path);
+    assert.equal(anon.headers.location, "/login");
+    // `run` needs an id; every other page renders bare.
+    const path = name === "run" ? `${spec.path}?id=job-1` : spec.path;
+    const res = await c.send({ path, headers: { cookie } });
+    assert.equal(res.status, 200, `${path}: ${res.text.slice(0, 200)}`);
+    assert.equal(c.loads.at(-1).name, name);
+    assert.equal(c.loads.at(-1).deps, pageDeps, "loadPageData reads with the deps the CLI built");
+    const head = await c.send({ method: "HEAD", path, headers: { cookie } });
+    assert.equal(head.status, 200, `HEAD ${path}`);
+    assert.equal(head.text, "", `HEAD ${path} has no body`);
+    assertSecurityHeaders(head, `HEAD ${path}`);
+  }
+});
+
+test("a viewer is refused an operator page 403, and gets every viewer page", async () => {
+  const c = await start();
+  const { cookie } = await c.login(VIEW_TOKEN);
+  for (const [name, spec] of Object.entries(realPages.PAGES)) {
+    const path = name === "run" ? `${spec.path}?id=job-1` : spec.path;
+    const res = await c.send({ path, headers: { cookie } });
+    assert.equal(res.status, spec.auth === "operator" ? 403 : 200, path);
+  }
+});
+
+test("a page query the page refuses is 400 with the security headers, before any data is read", async () => {
+  const c = await start();
+  const { cookie } = await c.login();
+  const before = c.loads.length;
+  for (const path of ["/?zz%00=1", "/insights?range=forever", `/run?id=${"x".repeat(5000)}`, "/run?id=a%0Ab"]) {
+    const res = await c.send({ path, headers: { cookie } });
+    assert.equal(res.status, 400, path);
+    assertSecurityHeaders(res, path);
+    assert.equal(typeof res.json().error, "string");
+  }
+  assert.equal(c.loads.length, before, "a refused query reads nothing");
+});
+
+test("/api/state: role-aware JSON of the fleet snapshot; a viewer never gets failedReason, signed out is 401", async () => {
+  const snapshot = {
+    queue: { pausedState: true, counts: { waiting: 5 } },
+    failed: { rows: [{ jobId: "j1", queue: "pi", attemptsMade: 2, endedAt: 7, failedReason: "free text from a job" }], more: 0 },
+    parked: [{ target: "o/r#1", kind: "github", jobId: "j2", ageMs: 10, chainCount: null, answered: false }],
+  };
+  const c = await start({ snapshot });
+  assert.equal((await c.send({ path: "/api/state" })).status, 401);
+  const op = await c.login();
+  const viewer = await c.login(VIEW_TOKEN);
+  const a = await c.send({ path: "/api/state", headers: { cookie: op.cookie } });
+  const b = await c.send({ path: "/api/state", headers: { cookie: viewer.cookie } });
+  assert.equal(a.status, 200);
+  assert.match(a.headers["content-type"], /^application\/json/);
+  assertSecurityHeaders(b, "/api/state");
+  assert.equal(a.json().paused.state, true);
+  assert.equal(a.json().counts.waiting, 5);
+  assert.deepEqual(a.json().parked, [{ target: "o/r#1", kind: "github", ageMs: 10, chainCount: null }]);
+  assert.equal(a.json().failed.rows[0].failedReason, "free text from a job");
+  assert.equal(b.json().role, "viewer");
+  assert.equal(a.json().version, 1);
+  assert.ok(!b.text.includes("free text from a job"));
+  assert.equal(b.json().failed.rows[0].jobId, "j1");
+});
+
+test("/api/state: a snapshot that rejects (Valkey down) is 503 {version, error} with a fixed sentence and the security headers, never the error's text", async () => {
+  const c = await start({ pageDeps: { fleet: { snapshot: async () => Promise.reject(Object.assign(new Error("connect ECONNREFUSED 10.9.8.7:6379 secret-host"), { code: "ECONNREFUSED" })) } } });
+  const { cookie } = await c.login();
+  const res = await c.send({ path: "/api/state", headers: { cookie } });
+  assert.equal(res.status, 503, res.text);
+  assert.match(res.headers["content-type"], /^application\/json/);
+  assertSecurityHeaders(res, "/api/state 503");
+  assert.deepEqual(res.json(), { version: 1, error: STATE_UNREADABLE });
+  assert.ok(!res.text.includes("10.9.8.7") && !res.text.includes("secret-host"), "no error text leaves the process");
+  assert.ok(seen.logs.some((l) => l.includes("/api/state could not read the fleet (ECONNREFUSED)")), "the log names the code alone");
+  assert.ok(!seen.logs.some((l) => l.includes("10.9.8.7")));
+});
+
+test("/api/events: a Last-Event-ID of the hub's shape reaches the hub; any other shape reaches it as no id at all (so the whole view is sent)", async () => {
+  const seenIds = [];
+  const c = await start({ hub: { subscribe: (args) => (seenIds.push(args.lastEventId), () => {}), endSession() {} } });
+  const { cookie } = await c.login();
+  const open = (id) =>
+    new Promise((resolve, reject) => {
+      const headers = { host: `127.0.0.1:${c.port}`, cookie, ...(id !== undefined && { "last-event-id": id }) };
+      const req = request({ host: "127.0.0.1", port: c.port, path: "/api/events?page=overview", headers, setHost: false }, (res) => {
+        res.once("data", () => (req.destroy(), resolve(res.statusCode)));
+      });
+      req.on("error", (e) => (e.code === "ECONNRESET" ? null : reject(e)));
+      req.end();
+    });
+  const ids = ["cafebabe-12", "cafebabe-12x", "CAFEBABE-12", "cafebabe_12", "12", "cafebabe-", "-12", `${"a".repeat(17)}-1`, `cafebabe-${"1".repeat(16)}`];
+  for (const id of [...ids, undefined]) assert.equal(await open(id), 200, String(id));
+  assert.deepEqual(seenIds, ["cafebabe-12", null, null, null, null, null, null, null, null, null]);
+});
+
+test("sign-out ends the session's live streams at once through the hub", async () => {
+  const ended = [];
+  const c = await start({ hub: { endSession: (id) => ended.push(id), subscribe: () => () => {} } });
+  const { cookie } = await c.login();
+  const id = cookie.split("=")[1];
+  assert.equal((await c.post("/logout", {}, { cookie })).status, 200);
+  assert.deepEqual(ended, [id]);
 });
 
 // ---- the reference write ----

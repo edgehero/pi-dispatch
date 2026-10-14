@@ -9,10 +9,12 @@
  * screen passes run text to.
  *
  * No page carries inline script or style (the CSP forbids both). Behaviour lives in `/static/console.js`, which reads
- * the page's `data-page` attribute; values the script needs are never embedded in a script element.
+ * the page's `data-page` attribute; values the script needs are never embedded in a script element. The one exception
+ * to "only `html` builds a fragment" is `trustedRenderer`, for the insights renderers' already-escaped output (issue
+ * #641), and it checks what it admits.
  */
 import { escapeHtml } from "../graph-html.mjs";
-import { scrubControls } from "../panel.mjs";
+import { scrubControls, scrubControlsPerLine } from "../panel.mjs";
 
 /** An already-escaped HTML fragment. Only `html` makes one. */
 class SafeHtml {
@@ -55,8 +57,14 @@ export function isSafeHtml(value) {
   return value instanceof SafeHtml;
 }
 
-/** The page shell: one stylesheet-free document, the script by URL, `data-page` for the script to dispatch on. */
-export function page({ title, name, body }) {
+/**
+ * The page shell: the stylesheet and the script by URL, `data-page` for the script to dispatch on. A live page (issue
+ * #641) also carries `data-live` (the page name the event stream is opened for) and `data-query` (its query string,
+ * encoded here like any value), so the script can reopen the stream with exactly what rendered the page. Neither is
+ * ever read as markup: the script passes them to `EventSource` as a URL.
+ */
+export function page({ title, name, body, live = null, query = "" }) {
+  const liveAttrs = live ? html` data-live="${live}" data-query="${query ?? ""}"` : null;
   return html`<!doctype html>
 <html lang="en">
 <head>
@@ -64,13 +72,45 @@ export function page({ title, name, body }) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>${title}</title>
+<link rel="stylesheet" href="/static/console.css">
 <script src="/static/console.js" defer></script>
 </head>
-<body data-page="${name}">
+<body data-page="${name}"${liveAttrs}>
 ${body}
 </body>
 </html>
 `;
+}
+
+/**
+ * What `trustedRenderer` refuses: a `<script` or `<style` element, and inside any tag an `on…=` handler, a `style=`
+ * attribute or a `javascript:` URL in a link or source attribute. The console's CSP would block each at the browser;
+ * this check makes a regression in a renderer fail at the server, loudly, before any page carries it. The attribute
+ * checks look INSIDE TAGS only (`<[^>]*`): the renderers escape every value, so text never holds a `<`, and a run's
+ * target that merely reads "onload=" or "javascript:" stays text instead of taking the whole screen down.
+ */
+const RENDERER_REFUSED = [/<\s*(?:script|style)\b/i, /<[^>]*\s(?:on[a-z]+|style)\s*=/i, /<[^>]*\s(?:href|src|xlink:href|action|formaction)\s*=\s*["']?\s*javascript:/i];
+
+/**
+ * Admit the output of ONE family of renderers as a fragment: the insights section renderers (`insights-html.mjs`,
+ * `graph-html.mjs`), which escape every value they interpolate with their own `escapeHtml` and are pinned by their own
+ * tests (issue #641). Nothing else may be passed here: a page's own markup is built with `html`, and run text never
+ * reaches this function. The string is still checked (`RENDERER_REFUSED`), and a match THROWS rather than being
+ * cleaned, so a renderer that starts emitting script or inline style breaks the page instead of shipping it.
+ *
+ * Control bytes ARE cleaned, line by line (`scrubControlsPerLine`, the panel's class, newlines kept): the renderers
+ * escape markup but not controls, and a run record's target can carry one into the topology's labels (measured with
+ * this module's hostile fixture: a repository name with an ESC reached the SVG text). A control byte is inert in HTML,
+ * so substituting it changes no structure, and the console's every-value-scrubbed rule then holds here too.
+ */
+export function trustedRenderer(input) {
+  if (typeof input !== "string") throw new TypeError("trustedRenderer() takes an insights renderer's string output");
+  const str = scrubControlsPerLine(input);
+  for (const rule of RENDERER_REFUSED) {
+    const hit = rule.exec(str);
+    if (hit) throw new Error(`an insights renderer emitted markup the console refuses (${JSON.stringify(hit[0].slice(0, 60))})`);
+  }
+  return new SafeHtml(str);
 }
 
 /** The sign-in form. Submitted by the script as JSON; a plain form POST would be form-encoded and is refused. */

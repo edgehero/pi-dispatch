@@ -15,18 +15,19 @@
  * holds a token only where the operator asked for one. `link` prints a one-time code inside a URL, which is its
  * purpose; the code is not the token and dies in 60 seconds or at first use.
  *
- * The real collaborators (tokens, sessions, codes, tickets, audit, the pause-windows writer) are loaded here and
- * nowhere else, by `loadModules`; `runCli` takes them injected, so its tests run on fakes.
+ * The real collaborators (tokens, sessions, codes, tickets, audit, the pause-windows writer, and for #641 the server
+ * with its pages, the fleet reader, the insights assembler and its pricing, and the live hub) are loaded here and
+ * nowhere else, by `loadModules`; `runCli` takes them injected, so its tests run on fakes, and `--help` loads none.
  */
 import * as nodeFs from "node:fs";
 import { realpathSync } from "node:fs";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
 import { makeLoginLimiter } from "./guards.mjs";
 import { listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
-import { createConsoleServer } from "./server.mjs";
 
 export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
 
@@ -48,7 +49,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -56,8 +57,77 @@ export async function loadModules() {
     import("./confirm.mjs"),
     import("../read-model.mjs"),
     import("@edgehero/pi-dispatch/connection"),
+    import("./server.mjs"),
+    import("./live.mjs"),
+    import("./pages.mjs"),
+    import("../insights-assembly.mjs"),
+    import("@edgehero/pi-dispatch/pricing"),
+    import("@edgehero/pi-dispatch/service-env"),
+    import("@edgehero/pi-dispatch/forges"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges };
+}
+
+/** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
+export const INSIGHTS_CACHE_MS = 30_000;
+
+/** `fn(window)` memoised per window for `ttlMs` on `now`; a rejection is not kept, so the next call tries again. */
+export function cachedPerWindow(fn, { now = () => Date.now(), ttlMs = INSIGHTS_CACHE_MS } = {}) {
+  const held = new Map();
+  return (window) => {
+    const key = String(window);
+    const t = now();
+    const hit = held.get(key);
+    if (hit && t >= hit.at && t - hit.at < ttlMs) return hit.promise;
+    const promise = Promise.resolve().then(() => fn(window));
+    held.set(key, { at: t, promise });
+    promise.catch(() => {
+      if (held.get(key)?.promise === promise) held.delete(key);
+    });
+    return promise;
+  };
+}
+
+/** The most active jobs one console snapshot reads (issue #641); the TUI's reader keeps its own default. */
+export const CONSOLE_ACTIVE_LIMIT = 50;
+
+// The path fields `resolvePaths` hands back that a deployment's `.env` (or its default) may leave relative: relative to
+// the deployment folder, the service's working directory, never to wherever this command was started.
+const RELATIVE_PATH_FIELDS = Object.freeze(["logsDir", "settingsFile", "triggersPath", "pauseWindowsPath", "scopedLimitsPath", "projectsPath", "projectsFile", "envelopeFile", "subscriptionsPath", "globalPiDir"]);
+
+/**
+ * The environment and paths the read side runs on (issue #641): this shell's environment with the deployment `.env`
+ * filling the panel's keys (`panelEnv`, the TUI's own resolver, so the console reads the queue, logs and files the
+ * service does), plus the forge host variables `forgeLinkOf` builds links from and `PI_SESSIONS_DIR`, which turns on
+ * the parked runs' chain counts. Returns `{env, paths, notice}`.
+ *
+ * Precedence, the TUI's own (`panelEnv`): a key this shell's environment sets WINS over the deployment `.env`, which
+ * only fills what the shell leaves unset; the forge host variables and `PI_SESSIONS_DIR` follow the same rule. A panel
+ * key the two set differently is named in `notice` (never its value), so the operator who started the console from a
+ * shell exporting another deployment's VALKEY_URL or PI_LOGS_DIR is told the console reads the shell's, not the
+ * service's.
+ */
+export function readSideOf({ m, env, dir, fs, platform, uid }) {
+  const panel = m.readModel.panelEnv({ env, pointerDir: dir, owned: [], fs, platform, uid });
+  // The deployment's own forge URL variables (GITLAB_URL, FORGEJO_URL, AZURE_ORG_URL) are what a `.env` sets; the
+  // job-container names after them only exist where the worker derived them.
+  const extraKeys = [...Object.values(m.readModel.FORGE_HOST_ENV ?? {}).flat(), ...(m.forges?.FORGE_HOST_VARS ?? []), "PI_SESSIONS_DIR"];
+  const extra = m.serviceEnv ? m.serviceEnv.deploymentServiceEnv({ env, dir, keys: extraKeys, platform, fs, uid }).env : {};
+  const merged = { ...panel.env };
+  for (const key of extraKeys) if (extra?.[key] !== undefined && merged[key] === undefined) merged[key] = extra[key];
+  const paths = { ...m.readModel.resolvePaths(merged) };
+  for (const field of RELATIVE_PATH_FIELDS) {
+    if (typeof paths[field] === "string" && paths[field] !== "" && !isAbsolute(paths[field])) paths[field] = resolvePath(dir, paths[field]);
+  }
+  const sessions = typeof merged.PI_SESSIONS_DIR === "string" ? merged.PI_SESSIONS_DIR.trim() : "";
+  if (sessions !== "") paths.sessionsDir = isAbsolute(sessions) ? sessions : resolvePath(dir, sessions);
+  return { env: merged, paths, notice: panel.notice };
+}
+
+/** The pricing facade `assembleInsights` takes, from the worker's pricing module. */
+function pricingOf(pricing) {
+  const { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVersion } = pricing;
+  return { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVersion };
 }
 
 function parse(argv) {
@@ -225,7 +295,14 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
   if (lock.refusal) throw new Refusal(lock.refusal);
   let server = null;
   let redis = null;
+  let fleet = null;
+  let hub = null;
   try {
+    // Every Valkey client of this process (the audit copy's, the fleet reader's) takes its password and its facts
+    // about the deployment's Valkey from THIS deployment's `.env`, through the panel's one reader, as the pi extension
+    // does for the pointer's deployment (`installPanelValkeyContext`); the console names its deployment itself.
+    const shellEnv = io.env ?? process.env;
+    m.connection?.useValkeyContext?.(() => m.readModel.panelValkeyContext({ env: shellEnv, pointerDir: config.dir, owned: [], fs, uid }));
     // The Valkey copy of the audit log (`console:audit`, INT-CONSOLE-AUDIT-LOG) is a view for a console elsewhere, never
     // the record: each row serve writes is pushed after the file holds it, a down or refusing Valkey costs nothing but
     // the copy, and no Valkey error reaches the log or refuses a request.
@@ -248,21 +325,54 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       : audit;
     const withRandom = (args) => (random ? { ...args, random } : args);
     const codesDir = m.loginCodes.loginCodesDir(config.tokensPath);
-    server = createConsoleServer({
+    const log = io.log ?? ((line) => io.err(line));
+    const sessions = m.sessions.makeSessionStore(withRandom({ now, idleMs: config.idleMs, maxMs: config.maxMs, maxStreams: config.maxStreams }));
+
+    // The read side (issue #641): one fleet reader for every page, stream and /api/state, held for serve's life.
+    const side = readSideOf({ m, env: shellEnv, dir: config.dir, fs, platform: io.platform ?? process.platform, uid });
+    if (side.notice) io.err(`pi-dispatch-console: ${side.notice}`);
+    // Read-only (the console never writes through its reader) and at most CONSOLE_ACTIVE_LIMIT active rows per
+    // snapshot: a browser is told "and N more", never handed the whole active list. The TUI keeps the defaults.
+    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT });
+    const pricing = pricingOf(m.pricing);
+    const pageDeps = {
+      fleet,
+      insights: cachedPerWindow((window) => m.insights.assembleInsights(side.paths, window, { pricing, nowMs: now(), envFn: () => side.env }), { now }),
+      audit: ({ limit, before } = {}) => m.audit.readConsoleAudit({ logsDir: config.logsDir, limit, before, fs }),
+      // The subscriptions file, for a run's cost class (a plan-covered run is not a dollar run).
+      subscriptions: () => m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs }),
+      env: side.env,
+      now,
+    };
+    hub = m.live.makeLiveHub({
+      loadPageData: (page, query) => m.pages.loadPageData(page, query, pageDeps),
+      pagePanels: (page, ctx) => m.pages.pagePanels(page, ctx),
+      queryKeyOf: (page, query) => m.pages.pageQueryString(page, query),
+      peekSession: (id, file) => sessions.peek(id, file),
+      readTokens,
+      readOnly: config.readOnly,
+      now,
+      log,
+    });
+    server = m.server.createConsoleServer({
       config,
       fs,
       now,
       random,
       audit,
-      sessions: m.sessions.makeSessionStore(withRandom({ now, idleMs: config.idleMs, maxMs: config.maxMs, maxStreams: config.maxStreams })),
+      sessions,
       cookies: m.sessions,
       tickets: m.confirm.makeConfirmTickets(withRandom({ now })),
       limiter: makeLoginLimiter({ now }),
-      log: io.log ?? ((line) => io.err(line)),
+      log,
       readTokens,
       findToken: m.tokens.findToken,
       consumeLoginCode: (code) => m.loginCodes.consumeLoginCode({ dir: codesDir, code, fs, now }),
       writePauseWindows: m.readModel.writePauseWindows,
+      pages: m.pages,
+      pageDeps,
+      hub,
+      stateOf: m.live.stateOf,
     });
     const bound = await listenOn(server, config.listen, { fs, uid });
     if (bound.refusal) throw new Refusal(bound.refusal);
@@ -286,6 +396,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     await (io.until ?? untilSignal());
     return 0;
   } finally {
+    // The streams first, so closing the server is not held open by them; then the listener, the reader, the copy.
+    hub?.close();
     if (server?.listening) {
       await new Promise((resolve) => {
         server.close(() => resolve());
@@ -293,10 +405,16 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       });
     }
     try {
+      await fleet?.dispose();
+    } catch {
+      // best-effort teardown
+    }
+    try {
       redis?.disconnect?.();
     } catch {
       // the copy is best effort, its client too
     }
+    m.connection?.useValkeyContext?.(null);
     lock.release();
   }
 }

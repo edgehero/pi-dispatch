@@ -139,14 +139,14 @@ test("create forgets expired sessions, so abandoned browsers do not accumulate",
   assert.ok(s.get(fresh.id, FILE));
 });
 
-test("streamAcquire caps live streams per session at maxStreams; release frees a slot; a gone session gets none", () => {
+test("streamAcquire caps live streams per token at maxStreams; release frees a slot; a gone session gets none", () => {
   const s = store();
   const a = s.create({ name: "rob", role: "operator", tokenHash: H("a"), generation: 0 });
-  const b = s.create({ name: "rob", role: "operator", tokenHash: H("a"), generation: 0 });
+  const b = s.create({ name: "vic", role: "viewer", tokenHash: H("b"), generation: 0 });
   assert.equal(s.streamAcquire(a.id), true);
   assert.equal(s.streamAcquire(a.id), true);
   assert.equal(s.streamAcquire(a.id), false);
-  assert.equal(s.streamAcquire(b.id), true, "the cap is per session");
+  assert.equal(s.streamAcquire(b.id), true, "another token has its own budget");
   s.streamRelease(a.id);
   assert.equal(s.streamAcquire(a.id), true);
   s.streamRelease(b.id);
@@ -158,6 +158,20 @@ test("streamAcquire caps live streams per session at maxStreams; release frees a
   assert.equal(s.streamAcquire("unknown"), false);
   s.destroy(a.id);
   assert.equal(s.streamAcquire(a.id), false);
+});
+
+test("every session of one token shares its maxStreams budget; an ended session's streams hold their slots until they close", () => {
+  const s = store();
+  const sessions = Array.from({ length: 4 }, () => s.create({ name: "vic", role: "viewer", tokenHash: H("b"), generation: 0 }));
+  assert.equal(s.streamAcquire(sessions[0].id), true);
+  assert.equal(s.streamAcquire(sessions[1].id), true);
+  for (const x of sessions) assert.equal(s.streamAcquire(x.id), false, "signing in again buys no more streams");
+  s.destroy(sessions[0].id);
+  assert.equal(s.streamAcquire(sessions[2].id), false, "the ended session's stream is still open, so its slot is still taken");
+  s.streamRelease(sessions[0].id);
+  assert.equal(s.streamAcquire(sessions[2].id), true, "its close gives the token's slot back");
+  s.streamRelease(sessions[0].id);
+  assert.equal(s.streamAcquire(sessions[3].id), false, "an extra release of a closed session frees nothing");
 });
 
 test("sessionCookie sets HttpOnly, SameSite=Strict and Path=/, and refuses an id that could split the header", () => {
@@ -197,4 +211,53 @@ test("sessionDigest is the first 12 hex of the id's SHA-256, never the id", () =
   assert.equal(sessionDigest(id), createHash("sha256").update(id).digest("hex").slice(0, 12));
   assert.match(sessionDigest(id), /^[0-9a-f]{12}$/);
   assert.notEqual(sessionDigest(id), sessionDigest(Buffer.alloc(32, 8).toString("base64url")));
+});
+
+test("peek applies every check get does (unknown, idle, max age, generation, revoked hash, changed role) and returns a copy", () => {
+  const now = clock();
+  const s = store(now);
+  const { id } = s.create({ name: "rob", role: "operator", tokenHash: H("a"), generation: 0 });
+  const copy = s.peek(id, FILE);
+  assert.deepEqual(copy, { id, name: "rob", role: "operator", tokenHash: H("a"), generation: 0, createdAt: T0, lastSeen: T0 });
+  copy.role = "viewer";
+  assert.equal(s.peek(id, FILE).role, "operator", "a copy, not the stored session");
+  assert.equal(s.peek("x".repeat(43), FILE), null);
+  assert.equal(s.peek(undefined, FILE), null);
+  assert.equal(s.peek(id, tokensFile([["rob", "operator", H("a")]], 1)), null, "another generation");
+  assert.equal(s.peek(id, tokensFile([["rob", "operator", H("c")]])), null, "revoked or rotated");
+  assert.equal(s.peek(id, tokensFile([["rob", "viewer", H("a")]])), null, "a role change");
+  assert.equal(s.peek(id, null), null, "no usable file");
+  assert.ok(s.peek(id, FILE), "and none of those refusals deleted it");
+  const busy = store(now);
+  const b = busy.create({ name: "rob", role: "operator", tokenHash: H("a"), generation: 0 });
+  now.advance(11 * 60 * MIN);
+  busy.get(b.id, FILE);
+  now.advance(60 * MIN + 1);
+  assert.equal(busy.peek(b.id, FILE), null, "older than maxMs, however busy");
+});
+
+test("peek never moves lastSeen: a session only peeked for longer than idleMs is over at the next get", () => {
+  const now = clock();
+  const s = store(now);
+  const { id } = s.create({ name: "rob", role: "operator", tokenHash: H("a"), generation: 0 });
+  for (let i = 0; i < 60; i += 1) {
+    now.advance(MIN);
+    assert.ok(s.peek(id, FILE), `minute ${i + 1}: still within idleMs of the last request`);
+    assert.equal(s.peek(id, FILE).lastSeen, T0, "unchanged");
+  }
+  now.advance(1);
+  assert.equal(s.peek(id, FILE), null, "an hour and a millisecond of peeks is still an hour idle");
+  assert.equal(s.size(), 0, "and the next sweep forgets it");
+  assert.equal(s.get(id, FILE), null);
+});
+
+test("peek does not delete a failing session: it is gone at the next get, not before, and a streamed session keeps its slots until then", () => {
+  const s = store();
+  const { id } = s.create({ name: "rob", role: "operator", tokenHash: H("a"), generation: 0 });
+  assert.equal(s.streamAcquire(id), true);
+  assert.equal(s.peek(id, tokensFile([["rob", "operator", H("c")]])), null);
+  assert.ok(s.peek(id, FILE), "peek left it in place");
+  assert.equal(s.get(id, tokensFile([["rob", "operator", H("c")]])), null);
+  assert.equal(s.peek(id, FILE), null, "get deleted it");
+  assert.equal(s.streamAcquire(id), false);
 });

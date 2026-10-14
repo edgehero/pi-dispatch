@@ -26,11 +26,17 @@ const SESSION_ID_RE = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * The store. `idleMs` (no request for this long ends a session), `maxMs` (no session outlives this, however busy),
- * `maxStreams` (the live event streams one session may hold, for #641). `now` and `random` are the seams.
+ * `maxStreams` (the live event streams one TOKEN may hold, for #641: every session signed in with the same token name
+ * shares the one budget, so signing in eight times does not buy eight times the streams). `now` and `random` are the
+ * seams.
  */
 export function makeSessionStore({ now = () => Date.now(), random = randomBytes, idleMs = 60 * 60000, maxMs = 12 * 3600000, maxStreams = 4 } = {}) {
   const sessions = new Map();
+  // Open stream slots: per session id `{name, count}`, and per token name the sum. A session that ends keeps its entry
+  // until its streams close and give their slots back (the hub ends them within a tick), so the token's count is never
+  // forgotten while those streams still run.
   const streams = new Map();
+  const byName = new Map();
 
   function expired(session, t) {
     return t - session.lastSeen > idleMs || t - session.createdAt > maxMs;
@@ -38,7 +44,19 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
 
   function drop(id) {
     sessions.delete(id);
-    streams.delete(id);
+  }
+
+  /** The stored session `id` names when every check passes against `file` now, else null. Changes nothing. */
+  function judge(id, file) {
+    if (typeof id !== "string") return null;
+    const session = sessions.get(id);
+    if (!session) return null;
+    const tokens = Array.isArray(file?.tokens) ? file.tokens : [];
+    const valid =
+      !expired(session, now()) &&
+      file?.generation === session.generation &&
+      tokens.some((entry) => entry?.sha256 === session.tokenHash && entry?.role === session.role);
+    return valid ? session : null;
   }
 
   /** Forget every session past its idle or absolute limit, so an abandoned browser does not hold memory forever. */
@@ -63,21 +81,24 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
      * AND its role. A live one has its `lastSeen` moved to now; a copy is returned.
      */
     get(id, file) {
-      if (typeof id !== "string") return null;
-      const session = sessions.get(id);
-      if (!session) return null;
-      const t = now();
-      const tokens = Array.isArray(file?.tokens) ? file.tokens : [];
-      const valid =
-        !expired(session, t) &&
-        file?.generation === session.generation &&
-        tokens.some((entry) => entry?.sha256 === session.tokenHash && entry?.role === session.role);
-      if (!valid) {
-        drop(id);
+      const session = judge(id, file);
+      if (!session) {
+        if (typeof id === "string") drop(id);
         return null;
       }
-      session.lastSeen = t;
+      session.lastSeen = now();
       return { ...session };
+    },
+
+    /**
+     * `get`'s every check without its two side effects (issue #641): `lastSeen` is NOT moved and a failing session is
+     * NOT deleted. The live hub re-judges each open event stream with this every tick, so an open tab cannot keep an
+     * idle session alive (only a request does), and a stream that dies leaves the session for the next request to end
+     * the ordinary way. A copy or null.
+     */
+    peek(id, file) {
+      const session = judge(id, file);
+      return session ? { ...session } : null;
     },
 
     /** End a session (logout). */
@@ -91,20 +112,32 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
       return sessions.size;
     },
 
-    /** Take one of the session's event-stream slots: true when it was free, false at `maxStreams` or for no session. */
+    /**
+     * Take one event-stream slot for the session's token: true when the token (every session signed in with its name)
+     * holds fewer than `maxStreams`, false at the cap or for no session.
+     */
     streamAcquire(id) {
-      if (!sessions.has(id)) return false;
-      const held = streams.get(id) ?? 0;
+      const session = sessions.get(id);
+      if (!session) return false;
+      const name = String(session.name);
+      const held = byName.get(name) ?? 0;
       if (held >= maxStreams) return false;
-      streams.set(id, held + 1);
+      byName.set(name, held + 1);
+      const own = streams.get(id) ?? { name, count: 0 };
+      own.count += 1;
+      streams.set(id, own);
       return true;
     },
 
-    /** Give a slot back. Never below zero, and a no-op for a session already gone. */
+    /** Give a slot back, to the session and its token. Never below zero; it works for a session already ended too. */
     streamRelease(id) {
-      const held = streams.get(id) ?? 0;
-      if (held <= 1) streams.delete(id);
-      else streams.set(id, held - 1);
+      const own = streams.get(id);
+      if (!own) return;
+      own.count -= 1;
+      if (own.count <= 0) streams.delete(id);
+      const held = (byName.get(own.name) ?? 0) - 1;
+      if (held <= 0) byName.delete(own.name);
+      else byName.set(own.name, held);
     },
   };
 }
