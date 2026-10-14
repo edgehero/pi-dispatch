@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { UNREADABLE_RECORD } from "../src/run-history.mjs";
-import { MIRROR_MAX_DAYS, PRUNE_SCRIPT, RUNS_HORIZON, RUNS_INDEX, RUNS_SINCE, TRIM_SCRIPT, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
+import { MIRROR_MAX_DAYS, PRUNE_SCRIPT, RUNS_HORIZON, RUNS_INDEX, RUNS_SINCE, TRIM_SCRIPT, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredPage, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -255,6 +255,26 @@ test("an id whose body expired is pruned by the READER", async () => {
 	const { runs } = await readMirroredRuns(redis, { limit: 10 });
 	assert.deepEqual(runs.map((r) => r.jobId), ["alive"]);
 	assert.deepEqual([...redis.zset.keys()], ["alive"], "and the straggler is gone from the index");
+});
+
+test("prune: false skips an expired body and leaves the index alone (issue #641): a read that writes nothing", async () => {
+	const redis = fakeRedis();
+	await anchored({ redis, retentionDays: 7 }).mirror(record("alive", "2026-08-30T12:00:00.000Z"), "alive");
+	redis.zset.set("gone", Date.parse("2026-08-30T11:00:00.000Z"));
+	const before = redis.calls.length;
+	const { runs } = await readMirroredRuns(redis, { limit: 10, prune: false });
+	assert.deepEqual(runs.map((r) => r.jobId), ["alive"]);
+	assert.deepEqual([...redis.zset.keys()].sort(), ["alive", "gone"], "the straggler stays");
+	assert.deepEqual(redis.calls.slice(before), [], "no write was sent");
+});
+
+test("readMirroredPage: no client is off, an unreachable one says so, and it never throws", async () => {
+	assert.deepEqual(await readMirroredPage(null), { runs: [], fetched: 0, frontier: null, degraded: "off" });
+	const dead = await readMirroredPage(fakeRedis({ fail: true }));
+	assert.match(dead.degraded, /^unreachable \(ECONNREFUSED\)/);
+	assert.deepEqual([dead.runs, dead.fetched, dead.frontier], [[], 0, null]);
+	const hung = await readMirroredPage(fakeRedis({ hang: true }), { timeoutMs: 20 });
+	assert.match(hung.degraded, /^unreachable \(mirror timeout\)/);
 });
 
 test("OFF and UNREACHABLE are different facts and must not collapse", async () => {

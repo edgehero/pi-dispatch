@@ -319,6 +319,93 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs }) {
 	return { ok: true, rows, startsAt };
 }
 
+/** The most rows one `readConsoleAudit` call returns, whatever it is asked for. */
+export const CONSOLE_AUDIT_READ_MAX = 500;
+
+/**
+ * An audit cursor, `YYYY-MM:<line>`: the month file's name without `.jsonl` and a 1-based line number in it (see
+ * `readConsoleAudit`). The line is at most 16 digits and must be a safe integer.
+ */
+export const CONSOLE_AUDIT_CURSOR_RE = /^(\d{4}-\d{2}):([1-9]\d{0,15})$/;
+
+/**
+ * The newest audit rows first, for the console's audit screen (issue #641): `{ rows, next }`, or `{ rows: [], next: null,
+ * unreadable }` when the directory cannot be listed or `before` is not a cursor. Never throws.
+ *
+ * Each line is parsed and returned as it is stored. A line that is not an audit row (not JSON, not an object, no
+ * positive integer `seq`) is NOT skipped: it comes back as `{ broken: true, file, line }` (`line` 1-based in `file`), in
+ * its place, because an audit screen that quietly drops a damaged line hides exactly what `verifyConsoleAudit` exists to
+ * name. A file that cannot be read (or stops being readable part-way) is one such entry with `line: 0`.
+ *
+ * THE CURSOR IS A PLACE IN THE FILES, NOT A ROW: `YYYY-MM:<line>` (`CONSOLE_AUDIT_CURSOR_RE`), the month file and the
+ * 1-based line an entry was read from (a read failure's entry sits one line past the last line read). `before` returns
+ * only entries above it in file order (an older month file, or the same file at a lower line), and `next` is the last
+ * returned entry's cursor, or null when nothing older exists. Every entry has its own place, so a page can end on any
+ * one of a run of damaged lines and the next page starts at the line under it. A place stays put because the files only
+ * ever grow at the end of the newest one (the reaper takes whole files). The seq was the cursor once, with a damaged
+ * line at a half step beside the good row before it; it was refuted, because two damaged lines in a row shared one half
+ * step (a page ending on the first skipped the second) and a file's leading damaged line shared it with the previous
+ * file's trailing one.
+ *
+ * BOUNDED MEMORY: files are walked newest first, each through the chunked `fileLines`, and only the newest `limit`
+ * qualifying entries of a file are held (a ring buffer), so a month file of any size costs `limit` entries of memory. A
+ * file newer than the cursor is not opened, and the cursor's own file is read only up to the cursor's line.
+ */
+export function readConsoleAudit({ logsDir, limit = 100, before = null, fs = nodeFs } = {}) {
+	const cap = Math.min(CONSOLE_AUDIT_READ_MAX, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 100));
+	let bound = null; // { file, line }: entries strictly above this place
+	if (before !== null && before !== undefined) {
+		const m = typeof before === "string" ? CONSOLE_AUDIT_CURSOR_RE.exec(before) : null;
+		if (m === null || !Number.isSafeInteger(Number(m[2]))) return { rows: [], next: null, unreadable: "the cursor is not an audit position (YYYY-MM:line)" };
+		bound = { file: `${m[1]}.jsonl`, line: Number(m[2]) };
+	}
+	const dir = join(logsDir, CONSOLE_AUDIT_DIR);
+	let files;
+	try {
+		files = monthFiles(dir, fs);
+	} catch (err) {
+		return { rows: [], next: null, unreadable: `the audit directory cannot be read (${err?.code ?? "error"})` };
+	}
+	const out = []; // newest first, each { entry, pos }
+	let more = false;
+	for (let f = files.length - 1; f >= 0 && !more; f--) {
+		const file = files[f];
+		if (bound !== null && file > bound.file) continue;
+		// The first line that is NOT this page's: the cursor's own line in its file, none in an older one.
+		const stop = bound !== null && file === bound.file ? bound.line : Infinity;
+		const want = cap - out.length;
+		const ring = new Array(want);
+		let held = 0; // qualifying entries seen in this file
+		const keep = (entry, line) => {
+			ring[held % want] = { entry, pos: `${file.slice(0, 7)}:${line}` };
+			held += 1;
+		};
+		let i = 0;
+		try {
+			for (const line of fileLines(fs, join(dir, file))) {
+				i += 1;
+				if (i >= stop) break;
+				let row;
+				try {
+					row = JSON.parse(line);
+				} catch {
+					row = null;
+				}
+				if (row === null || typeof row !== "object" || Array.isArray(row) || !Number.isInteger(row.seq) || row.seq < 1) keep({ broken: true, file, line: i }, i);
+				else keep(row, i);
+			}
+		} catch (err) {
+			if (i + 1 < stop) keep({ broken: true, file, line: 0, reason: err?.code ?? "error" }, i + 1);
+		}
+		const n = Math.min(held, want);
+		for (let k = 1; k <= n; k++) out.push(ring[(held - k) % want]);
+		if (held > want) more = true;
+		// A page that filled exactly at the end of a file: an older file may still hold rows, so say there is more.
+		else if (out.length === cap && f > 0) more = true;
+	}
+	return { rows: out.map((x) => x.entry), next: more && out.length > 0 ? out[out.length - 1].pos : null };
+}
+
 /**
  * The lines of `path`, read a chunk at a time, never the whole file at once: a month file can grow past what one
  * string holds (V8's limit is about 512 MiB), and verify must still walk it rather than call it broken. A line is cut

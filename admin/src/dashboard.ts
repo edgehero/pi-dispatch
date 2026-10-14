@@ -13,8 +13,8 @@
  * fields; LIVE_TAIL -- a tail of a running job's `.log`; TRIGGER_DETAIL -- one trigger's trust model;
  * FAILED (`f`) and HELD_LIST (`h`) -- the failed and held jobs; ALLOCATION (`b`) -- the budget split;
  * PROJECTS (`j`) -- the projects with their spend and sizes; and HOSTS (`u`) -- each live host's slots,
- * budget and running jobs, with its last 7 days. Analytics live on the insights page (issue #181): the `i`
- * key writes and opens it.
+ * budget and running jobs, with its last 7 days; PARKED (`k`) -- the runs waiting for an answer on their issue
+ * (issue #641). Analytics live on the insights page (issue #181): the `i` key writes and opens it.
  *
  * PII discipline (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT): LIST and RUN_DETAIL surface only
  * PII-free run records, counts, budget, schedulers and the settings overlay. LIVE_TAIL renders tail bytes
@@ -22,23 +22,17 @@
  * touches the filesystem -- the bytes reach the overlay alone, never `snapshot`, never a shared renderer,
  * never a message.
  */
-import { dayKey, weekKey, monthKey, tokenDayKey, windowState } from "@edgehero/pi-dispatch/budget";
-import { ranBefore, requestCancel } from "@edgehero/pi-dispatch/cancel-state";
-import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
-import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
-import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
-import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
+import { windowState } from "@edgehero/pi-dispatch/budget";
+import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readProjects, readScopedLimits, readStagedPackages, readOverlayMcpView, scanRunRecords, FORGE_MCP_SERVER_NAME } from "./read-model.mjs";
-import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs, renderDollarWindows } from "./dollar-windows.mjs";
+import { cancelHeldJob, createFleetReader, listRuns, FORGE_MCP_SERVER_NAME } from "./read-model.mjs";
+import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
-import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { LIVE_FRESH_MS } from "@edgehero/pi-dispatch/capacity";
 import { basisNote, durationText, fleetRecordNotes, historyNotes, hostCaveats, milliText, noRunText, notSharedWhy, percentText, share, shareText } from "@edgehero/pi-dispatch/capacity-cli";
-import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
@@ -46,9 +40,8 @@ import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls,
 import { makeStyler, frame, RULE } from "./style.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
-// Fetch the read-model's full window (listRuns clamps at 50) but render a cursor-following viewport of
+// The read model fetches the full window (listRuns clamps at 50); the list renders a cursor-following viewport of
 // RUNS_VIEWPORT rows -- runs 11..50 must be reachable without the frame growing 40 rows taller.
-const RUNS_ON_DASHBOARD = 50;
 const RUNS_VIEWPORT = 10;
 // The runs-list orderings `o` cycles through. "time" is listRuns' own endedAt-descending order; the other
 // three re-sort the records already in the snapshot and never re-read.
@@ -77,35 +70,13 @@ function centerBlock(lines: string[], overlayWidth: number, blockWidth: number):
   return lines.map((l) => prefix + l);
 }
 
-/**
- * Build the read/act/close deps for a live dashboard from resolved paths: ONE failFast queue and ONE
- * redis client, both created here and closed once in `dispose`. `fetchSnapshot` reads the whole panel in
- * one pass off those held connections; `pause`/`resume` flip the durable paused state on the same queue.
- * `getWorkers` is EMPTY on Redis providers without CLIENT SETNAME, so an error or empty list degrades to
- * "unknown" rather than reporting zero live workers.
- */
-/** How many held rows the panel will hold at once. The section shows fewer; the rest are counted, not lost. */
-const HELD_LIMIT = 20;
-
-// The FAILED surface's bounds (issue #289): how many failed jobs each queue is asked for, how many the
-// drill view shows fleet-wide, and how many rows the section spends before counting the rest -- the
-// held section's own posture, one surface over.
-const FAILED_PER_QUEUE = 20;
-const FAILED_LIMIT = 20;
+// How many failed rows the LIST section spends before counting the rest (issue #289); the read model's fleet reader
+// bounds what the FAILED drill view gets.
 const FAILED_ON_DASHBOARD = 3;
-
-/**
- * The belt over a failedReason before it may enter the snapshot (issue #289). The reason is the error
- * message the WORKER itself threw -- the sources were de-payloaded at their sites (branch.mjs answers
- * with a type, prepare-local basenames its path) -- but this renderer must hold the property locally
- * rather than by trusting every future throw site: control bytes (ANSI included) become spaces, and the
- * length is capped at the `job_failed` line's own 120 (start.mjs's precedent). Applied in the deps
- * layer, so the raw string never reaches the component.
- */
-function scrubReason(reason: any): string {
-  if (typeof reason !== "string" || reason === "") return "-";
-  return scrubControl(reason).slice(0, 120);
-}
+// How many parked runs the LIST section shows before counting the rest, and the PARKED view's viewport (issue #641): the
+// fleet reader folds parked runs from a window of up to 1000 records, so the view scrolls rather than growing.
+const PARKED_ON_DASHBOARD = 3;
+const PARKED_VIEWPORT = 12;
 
 /**
  * The control-byte class for text this pane renders (issue #337, widened under #402).
@@ -127,7 +98,7 @@ function scrubReason(reason: any): string {
  * `allowC1Printable` precisely because it does read them), and the project had already answered the
  * question in `panel.mjs` years earlier.
  *
- * `scrubReason` applies it in the DEPS layer to one field, which is where it started and where
+ * `scrubReason` (the read model's fleet reader, since issue #641) applies it in the DEPS layer to one field, which is where it started and where
  * `DES-ADMIN-VIA-PI-EXTENSION` argues the injection boundary holds by placement. RUN_DETAIL applies it
  * again at RENDER time to every record string it prints, and that is belt-and-braces rather than a second
  * boundary: the record is PII-free and its fields are worker-written, so this is not a trust judgement
@@ -217,362 +188,33 @@ function cellOf(v: any): string {
   return v === null || v === undefined ? "-" : scrubControl(String(v));
 }
 
-/** The hydration ceiling, matching read-model.mjs: past it the count is a floor and the caller says so. */
-const HELD_HYDRATE_MAX = 200;
-
-/**
- * The held-jobs read, on the panel's own held client. A thin twin of `read-model.mjs`'s `readHeldJobs` --
- * duplicated for the reason `readScopedBudget` is duplicated here: that module opens its own connection per
- * call, and the panel refreshes every second off one it already holds. Field-for-field identical to it
- * apart from `checks`, which no row renders.
- */
-async function heldJobs(redis: any) {
-  const ids: string[] = await redis.smembers("wait:held");
-  const at = Date.now();
-  const hydrated = await Promise.all(
-    ids.slice(0, HELD_HYDRATE_MAX).map(async (jobId: string) => {
-      try {
-        const h = await redis.hgetall(`wait:job:${jobId}`);
-        if (!h || !h.since) {
-          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire.
-          await redis.srem("wait:held", jobId).catch(() => {});
-          return null;
-        }
-        const since = Number(h.since);
-        return {
-          jobId,
-          target: h.target || null,
-          label: h.label || null,
-          waitedMs: Number.isFinite(since) && since > 0 ? Math.max(0, at - since) : null,
-        };
-      } catch {
-        return null; // one unreadable member degrades one row, never the section
-      }
-    }),
-  );
-  const rows = hydrated.filter(Boolean) as any[];
-  rows.sort((a: any, b: any) => (b.waitedMs ?? -1) - (a.waitedMs ?? -1));
-  return { rows: rows.slice(0, HELD_LIMIT), more: Math.max(0, rows.length - HELD_LIMIT), truncated: ids.length > HELD_HYDRATE_MAX };
-}
-
-/**
- * How long the panel keeps one scan of the run records for the dollar windows (issue #501, part 7). A month window
- * folds up to a month of records, which is a directory walk, and the panel refreshes every second: the counters are
- * read every tick (they are what the next job is admitted against), the records' side at most this often.
- */
-const DOLLAR_RECORDS_TTL_MS = 15_000;
-
-/**
- * A registry row as the snapshot carries it (issue #596 phase 3, issue #599 phase 3): the budget pair and what its jobs
- * hold (the PROJECTS view), and the slot count, the budget's running and waiting counts, the running jobs, the row's
- * age and whether it routes (the HOSTS view). Projected to these keys, so nothing else a row carries reaches the panel.
- * The jobs go through the worker's own allowlist again (`parseLiveJobs`, which takes the reader's parsed list too): a
- * row is another host's text, and a reader handed in by a caller may not have parsed it. An entry the allowlist drops
- * joins `jobsMore`, and a value that is there and is not a list is `jobsUnreadable`, never an empty list.
- */
-function hostRowOf(h: any): any {
-  const live = parseLiveJobs(h?.jobs);
-  const more = parseJobsMore(h?.jobsMore);
-  return {
-    name: h?.name,
-    budgetMemMiB: h?.budgetMemMiB,
-    budgetCpuCenti: h?.budgetCpuCenti,
-    usedMemMiB: h?.usedMemMiB,
-    usedCpuCenti: h?.usedCpuCenti,
-    concurrency: h?.concurrency,
-    budgetRunning: h?.budgetRunning,
-    waiters: h?.waiters,
-    jobs: live.jobs,
-    jobsMore: live.jobs === null ? more : (more ?? 0) + live.dropped,
-    jobsUnreadable: h?.jobsUnreadable === true || (live.jobs === null && h?.jobs !== undefined && h?.jobs !== null && h?.jobs !== ""),
-    staleMs: Number.isSafeInteger(h?.staleMs) && h.staleMs >= 0 ? h.staleMs : null,
-    routes: h?.routes,
-  };
-}
-
 /**
  * The longest the HOSTS view waits for its capacity read (issue #599): well above `readCapacity`'s own bounds (2 s per
  * Valkey read, plus a bounded local file scan), so it only ever ends a read that would otherwise never settle.
  */
 const CAPACITY_READ_BOUND_MS = 30_000;
 
-/** How long the panel waits on the registry before drawing the fleet it last knew. */
-const FLEET_READ_TIMEOUT_MS = 2_000;
-
 /**
- * The panel's REAL plumbing. Every module-level dependency it uses to talk to Valkey is injectable through
- * the second parameter, defaulting to the real one, because this factory had no test at all -- and that is
- * exactly how it came to build its own single queue and do its own pausing while the fleet-aware readers
- * sat unused beside it. The panel's kill switch is the last place a silent no-op should be able to hide.
+ * The panel's REAL plumbing: the read model's fleet reader (`createFleetReader`, issue #641), which this file held as
+ * its own code until the console needed the same snapshot -- ONE queue pool and ONE redis client for the overlay's
+ * lifetime, closed once in `dispose`. The seams pass straight through, so every test of this factory tests the reader.
+ * `cancelHeld` stays a read-model one-shot: it owns its own connections and 2.5s timeout envelope, so a slow cancel
+ * cannot sit in front of the refresh tick's reads.
  */
-export function createDashboardDeps(
-  paths: any,
-  {
-    makeQueueFn = makeQueue,
-    parseConnectionFn = parseConnection,
-    redisFn = makeRedisClient,
-    readLiveHostsFn = readLiveHosts,
-    discoverHostQueuesFn = discoverHostQueues,
-    // The env the deployment's dollar caps are read from (issue #501, part 7): the console's `deploymentEnv()`, whose
-    // pointer reads the deployment's `.env`. Empty by default, so a test or a caller that passes none sees the
-    // overlay's caps alone.
-    dollarEnvFn = () => ({}),
-    scanRecordsFn = scanRunRecords,
-    nowFn = () => Date.now(),
-  }: any = {},
-) {
-  const queue = makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }));
-  const redis = redisFn(paths.valkeyUrl);
-
-  // EVERY named host drains a queue of its own, so the four things this panel does with a queue -- count,
-  // list schedulers, pause, resume -- have to span them. Doing it here rather than through read-model's
-  // fleet-aware readers because this panel is connection-first: it holds its clients for the life of the
-  // overlay and a per-tick open/close of N queues is the quiet load a dashboard must not add.
-  const pool = new Map<string, any>([[queue.name, queue]]);
-  // The last set we successfully resolved. On an unreachable registry the fleet does NOT shrink to the
-  // shared queue: that would silently pause half a deployment and print success, which is the failure this
-  // whole surface exists to prevent. We keep what we last saw and mark the snapshot degraded instead.
-  let lastNames: string[] = [queue.name];
-  let fleetDegraded: string | null = null;
-  // The registry rows last read (issue #596, phase 3): each live host's published budget and what its jobs hold, for
-  // the PROJECTS view's size suggestions and its budget line. Kept like `lastNames` on an unreachable registry.
-  let lastHosts: any[] = [];
-
-  const fleetQueues = async () => {
-    const fleet: any = await readLiveHostsFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((err: any) => ({
-      unreachable: err?.message ?? String(err),
-    }));
-    if (fleet?.unreachable || !Array.isArray(fleet?.hosts)) {
-      fleetDegraded = fleet?.unreachable ?? "registry unreadable";
-    } else {
-      fleetDegraded = null;
-      lastNames = fleetQueueNames(fleet.hosts);
-      lastHosts = fleet.hosts;
-    }
-    for (const name of lastNames) {
-      if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
-    }
-    // A host that left keeps its queue open until dispose. Closing it here would race a pause already in
-    // flight against it, and an idle BullMQ Queue costs one connection -- cheaper than that race.
-    return lastNames.map((n) => pool.get(n));
-  };
-
-  // The KILL SWITCH's set, which is not the per-tick set. A registry row is a lease that expires ninety
-  // seconds after a host stops writing, while that host's queue and its paused flag are permanent -- so
-  // pausing off the registry alone misses a host that has gone quiet but is still draining, and resuming
-  // off it leaves that host's queue paused forever with nothing able to name it. The union adds a SCAN of
-  // BullMQ's own meta keys, which is far too expensive for a reader that runs every second and entirely
-  // affordable for a keypress.
-  const killSwitchQueues = async () => {
-    const existing = await discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
-    for (const name of unionQueueNames(lastNames, existing)) {
-      if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
-    }
-    return unionQueueNames(lastNames, existing).map((n) => pool.get(n));
-  };
-
-  // The last records scan for the dollar windows, `{ at, sinceMs, records }`, reused for DOLLAR_RECORDS_TTL_MS.
-  let dollarRecords: any = null;
-  const dollarWindows = async (overlay: any, limits: any[]) => {
-    const now = new Date(nowFn());
-    const { caps, jobCapMicros, invalid } = deploymentDollarCaps(overlay ?? {}, dollarEnvFn() ?? {});
-    const specs = dollarWindowSpecs({ caps, limits, now });
-    if (specs.length === 0) return invalid.length > 0 ? { rows: [], invalid } : null;
-    // The COUNTERS every tick, in ONE MGET on the held client: spent and held, what the worker admits against.
-    const counters = await redis.mget(...specs.map((s: any) => s.key)).then(
-      (values: any[]) => Object.fromEntries(specs.flatMap((s: any, i: number) => (values?.[i] === null || values?.[i] === undefined ? [] : [[s.key, Number(values[i])]]))),
-      (err: any) => ({ unreachable: err?.message ?? String(err) }),
-    );
-    const sinceMs = dollarWindowsSinceMs(specs, now);
-    if (!dollarRecords || dollarRecords.sinceMs !== sinceMs || now.getTime() - dollarRecords.at >= DOLLAR_RECORDS_TTL_MS) {
-      const scanned = scanRecordsFn({ logsDir: paths.logsDir, sinceMs, nowMs: now.getTime() });
-      dollarRecords = { at: now.getTime(), sinceMs, records: Array.isArray(scanned) ? scanned : [] };
-    }
-    return { rows: dollarWindowRows({ specs, counters, records: dollarRecords.records, jobCapMicros }), ...(invalid.length > 0 && { invalid }) };
-  };
-
+export function createDashboardDeps(paths: any, seams: any = {}) {
+  const reader = createFleetReader(paths, seams);
   return {
-    async fetchSnapshot() {
-      const queues = await fleetQueues();
-      // Awaited alongside the queue reads rather than before them: it is two Valkey round trips and the
-      // panel already pays for several, so it costs no extra tick.
-      const merged = await mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
-      // The cron ids this deployment declares, read from the triggers file the same tick already reads
-      // SYNCHRONOUSLY. Since issue #267 each scheduler's stall count is its own key, so the reader has to
-      // name them -- and naming them from config is the repo's own doctrine for exactly this shape
-      // (`scoped-limits.json` enumerates every scope that can carry a claim; `no KEYS, no SCAN, and no index
-      // set to leak`). A keyspace scan was measured and refused for `wait:held` and `host:h:*` because the
-      // panel reads every second and a scan walks hardest when nothing is registered.
-      // With the instructions TEXT beside the view rather than inside it (issue #482): the view's records
-      // are the model-callable `dispatch_triggers` result, and the words belong to this overlay alone.
-      const { view: triggersView, instructions: triggerInstructions }: any = readTriggersWithInstructions({ triggersPath: paths.triggersPath });
-      const cronIds: string[] = Array.isArray(triggersView?.triggers)
-        ? triggersView.triggers.filter((t: any) => t?.type === "cron" && typeof t?.id === "string" && t.id !== "").map((t: any) => t.id)
-        : [];
-      const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
-        Promise.all(queues.map((q: any) => q.isPaused())),
-        Promise.all(queues.map((q: any) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed"))),
-        queue.getWorkers().catch(() => []),
-        redis.get(dayKey()),
-        redis.get(weekKey()),
-        redis.get(monthKey()),
-        redis.get(tokenDayKey()), // issue #25 daily token spend (budget:t:YYYY-MM-DD)
-        // The shared queue's failure is UNCAUGHT (the panel must not draw a scheduler list it could not
-        // read), a host queue's is caught: one unreachable host degrades one host's triggers, never the view.
-        Promise.all(queues.map((q: any, i: number) => (i === 0 ? q.getJobSchedulers(0, -1, true) : q.getJobSchedulers(0, -1, true).catch(() => [])))),
-        Promise.all(queues.map((q: any) => q.getActive(0, 0).catch(() => []))),
-        // Per-scheduler stall counts (money backstop) for the cron drill-in; reuses the held client like the
-        // budget GETs. ONE MGET for every declared cron id, so this stays one round trip however many
-        // schedulers exist. An absent key reads as an honest 0 -- a scheduler that has never stalled -- which
-        // is the same posture `readScopedBudget` takes for a scope that has never run.
-        cronIds.length > 0 ? redis.mget(...cronIds.map((id) => stallKey(id))).catch(() => []) : Promise.resolve([]),
-      ]);
-      const workers = Array.isArray(workerList) && workerList.length > 0 ? workerList.length : "unknown";
-      // Summed across the fleet, because a count of one queue is not a count of the deployment.
-      const counts: any = {};
-      for (const c of countsPer) for (const [k, v] of Object.entries(c ?? {})) counts[k] = (counts[k] ?? 0) + Number(v ?? 0);
-      // A HALF-paused deployment must read as neither whole one: `every` is the honest AND, and `some`
-      // carries the disagreement out so the header can name it rather than rounding it to one side.
-      const pausedState = pausedStates.every(Boolean);
-      const pausedPartial = !pausedState && pausedStates.some(Boolean);
-      const schedulerList = schedulerLists.flat();
-      const activeList = activeLists.flat();
-      // The scoped limits + their live counters (issue #242): GET only the windows a row caps, each cell
-      // caught individually so one bad read degrades one cell, never the snapshot. Keys recomputed from
-      // the shared scopeKeyPrefix, so this reader and the worker's writer cannot drift.
-      const scopedLimits: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
-      const limitRows: any[] = Array.isArray(scopedLimits?.limits) ? scopedLimits.limits : [];
-      const scopedNow = new Date();
-      const scopedBudget = {
-        rows: await Promise.all(
-          limitRows.map(async (l: any) => {
-            const prefix = scopeKeyPrefix(l.scope);
-            const cell = (key: string) => redis.get(key).then((v: any) => Number(v ?? 0), () => null);
-            const row: any = {};
-            if (Number.isInteger(l.day)) row.day = await cell(dayKey(scopedNow, prefix));
-            if (Number.isInteger(l.week)) row.week = await cell(weekKey(scopedNow, prefix));
-            if (Number.isInteger(l.month)) row.month = await cell(monthKey(scopedNow, prefix));
-            return row;
-          }),
-        ),
-      };
-      // Jobs the worker is holding on run.waitFor (issue #230). Caught individually like the scoped cells
-      // above, so a dead key or a slow SCAN degrades one section rather than the whole snapshot. Reads the
-      // worker's own `wait:job:*` hashes and never a delayed Job: a delayed job's `.data` holds the issue
-      // title and body, which is why the only queue-job read in this function takes an id and nothing else.
-      const held = await heldJobs(redis).catch((err: any) => ({ unreachable: err?.message ?? String(err) }));
-
-      // The failed set's first surface (issue #289). This is the FIRST display code in the tree to
-      // hydrate queue Jobs, and the admissibility argument is `getActive(0,0)`'s one paragraph down:
-      // each Job lives for one statement and ONLY host-chosen fields enter the snapshot -- id, attempt
-      // count, the worker's own scrubbed throw message, the queue name and the finish instant. `.data`
-      // (issue title/body/username) never crosses; a key-set pin holds the projection closed. Caught as
-      // a unit like `held` above, so an unreadable failed set degrades one section, never the snapshot.
-      const failed = await (async () => {
-        const lists = await Promise.all(queues.map((q: any) => q.getFailed(0, FAILED_PER_QUEUE - 1)));
-        const rows = lists
-          .flatMap((list: any[], qi: number) =>
-            (Array.isArray(list) ? list : []).map((j: any) => ({
-              jobId: j?.id ?? "-",
-              attemptsMade: Number(j?.attemptsMade ?? 0),
-              failedReason: scrubReason(j?.failedReason),
-              queue: queues[qi]?.name ?? "-",
-              endedAt: Number(j?.finishedOn ?? 0),
-            })),
-          )
-          .sort((a: any, b: any) => b.endedAt - a.endedAt)
-          .slice(0, FAILED_LIMIT);
-        const total = counts.failed ?? 0;
-        return { rows, more: Math.max(0, Number(total) - rows.length) };
-      })().catch((err: any) => ({ unreachable: err?.message ?? String(err) }));
-
-      // The dollar windows (issue #501, part 7): null when no dollar window is set, so a deployment without one
-      // renders exactly the panel it always did. Caught as a unit, like `held`.
-      const settings = readSettingsView({ settingsFile: paths.settingsFile });
-      const dollars = await dollarWindows((settings as any)?.overlay, limitRows).catch((err: any) => ({ rows: [], unreachable: err?.message ?? String(err) }));
-
-      return {
-        held,
-        failed,
-        scopedLimits,
-        scopedBudget,
-        dollars,
-        queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
-        // Issue #596, phase 3: each live host's budget and use, as the registry publishes them (integers as text, `off`,
-        // or "" while unknown). Read by the PROJECTS view; nothing here judges them. Issue #599, phase 3: with what the
-        // HOSTS view's live lines read off the same rows (`hostRowOf`), so that view adds no read to this tick.
-        hostBudgets: lastHosts.map(hostRowOf),
-        budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
-        schedulers: mapSchedulers(schedulerList, Date.now()),
-        // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so
-        // neither reader changes.
-        schedulerStalls: Object.fromEntries(cronIds.map((id, i) => [id, Number((stallCounts as any[])?.[i] ?? 0) || 0])),
-        schedulerStallMax: paths.schedulerStallMax,
-        // Merged across the fleet (issue #57, Gap 3). This host's files stay the truth and the single-host
-        // path; the mirror adds the other hosts' records. On a shared `PI_LOGS_DIR` the local read is
-        // already the merged read and the mirror adds nothing, which is why there is no second code path.
-        runs: merged.runs,
-        runHosts: merged.hosts,
-        runMirror: merged.mirror,
-        settings,
-        triggers: triggersView,
-        triggerInstructions,
-        pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
-        // The projects as the WORKER reads them (issue #499 part C): `{ unset }` when PI_PROJECTS_FILE is unset. A plain
-        // file read like the ones above, whose fs access lives in read-model.mjs. For the projects view and for the
-        // limits view's project rows; a `name` in it is escaped and isolated wherever a pane draws it.
-        projects: readProjects({ projectsPath: paths.projectsFile }),
-        // Issue #504 part C: whether the deployment names an allocation envelope, for the `b split` hint alone. The view
-        // reads the envelope and the split itself, through `allocationInfo`, when it opens.
-        envelopeSet: typeof paths.envelopeFile === "string" && paths.envelopeFile !== "",
-        // The operator's staged third-party pi packages (REQ-GLOBAL-PI-OVERLAY), for the armed triggers'
-        // trust model. Like the four reads above it is a plain file read whose fs access lives entirely in
-        // read-model.mjs -- this module never touches the filesystem -- and it degrades to a safe empty
-        // shape rather than throwing, so a broken overlay cannot take the whole snapshot down.
-        stagedPackages: readStagedPackages({ globalPiDir: paths.globalPiDir }),
-        // The overlay's MCP servers (REQ-MCP-OPERATOR-SERVERS), for a trigger's `run.mcp` lines: the same plain,
-        // never-throw read, names and where each runs, never a header, an argument or a value.
-        overlayMcp: readOverlayMcpView({ globalPiDir: paths.globalPiDir }),
-        // ONLY the id off the active Job -- a Job's `.data` holds issue title/body/username (PII), so it
-        // never enters the snapshot (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT).
-        activeJobId: activeList?.[0]?.id ?? null,
-      };
-    },
-    async pause() {
-      await fleetQueues(); // refresh `lastNames` from the registry before unioning the keyspace onto it
-      for (const q of await killSwitchQueues()) await q.pause();
-    },
-    async resume() {
-      // Resume spans the same set, and it is the direction that strands a deployment: a queue paused while
-      // its host was live, then resumed while that host is down, stays paused with nothing naming it.
-      await fleetQueues();
-      for (const q of await killSwitchQueues()) await q.resume();
-    },
-    async cancelActive({ jobId }: any) {
-      // The CLI's channel, byte for byte (issue #287, worker/src/cancel-state.mjs): a request key the
-      // owning worker answers, carried on the panel's own held client -- `cancelJob` lives in the worker
-      // process and nothing here can raise it directly.
-      return requestCancel({ redis, jobId });
-    },
+    fetchSnapshot: () => reader.snapshot(),
+    pause: () => reader.pause(),
+    resume: () => reader.resume(),
+    cancelActive: ({ jobId }: any) => reader.cancelActive({ jobId }),
+    // The PARKED view's Enter (issue #641): a parked run can be older than the 50 runs the snapshot carries, so its
+    // record is read by id, off the reader's own client (the local file first, then the fleet mirror).
+    runById: (jobId: string) => reader.runById(jobId),
     async cancelHeld({ jobId }: any) {
-      // The read-model one-shot owns its own connections and 2.5s timeout envelope; the panel's held
-      // clients stay out of it so a slow cancel cannot sit in front of the refresh tick's reads.
       return cancelHeldJob({ url: paths.valkeyUrl, jobId });
     },
-    async dispose() {
-      for (const q of pool.values()) {
-        try {
-          await q.close();
-        } catch {
-          // best-effort teardown
-        }
-      }
-      try {
-        redis.disconnect();
-      } catch {
-        // best-effort teardown
-      }
-    },
+    dispose: () => reader.dispose(),
   };
 }
 
@@ -646,6 +288,14 @@ export function makeDashboard({
   let pendingCancel: any = null; // { jobId, kind: "active" | "held", target? } | null
   let actionNote: any = null;
   let heldSelected = 0;
+  // The PARKED view (issue #641, key `k`): its cursor over the snapshot's `parked` rows, the note Enter leaves when the
+  // run's record cannot be opened, and `parkedSeq`, which numbers each by-id read so an answer that lands after a cursor
+  // move, a second Enter or a reopening `k` is never drawn (after Esc, the view check drops it). `detailFrom` is the
+  // view RUN_DETAIL returns to on Esc: PARKED when opened from it.
+  let parkedSelected = 0;
+  let parkedNote: any = null;
+  let parkedSeq = 0;
+  let detailFrom = "LIST";
   // The PROJECTS view (issue #499 part C): its cursor, and the spend read ONCE on entry through the injected
   // `projectsInfo` seam (the month's fold by project; index.ts does the records scan), never per tick. `runProject`
   // filters the runs list: ALL_RUNS for every run, null for runs recorded under no project, or a project id.
@@ -794,6 +444,8 @@ export function makeDashboard({
         pendingCancel,
         actionNote,
         heldSelected,
+        parkedSelected,
+        parkedNote,
         runSort,
         runProject,
         projectsSelected,
@@ -853,7 +505,8 @@ export function makeDashboard({
       if (view === "RUN_DETAIL") {
         // Escape backs out to the list only; it never closes the overlay or disposes the held clients.
         if (matchesKey(data, "escape")) {
-          view = "LIST";
+          view = detailFrom;
+          detailFrom = "LIST";
           detailSandbox = null;
           tui?.requestRender?.();
           return;
@@ -1071,6 +724,80 @@ export function makeDashboard({
         }
         return;
       }
+      if (view === "PARKED") {
+        // The parked inbox (issue #641): read-only, a cursor over the snapshot's `parked` rows. Enter opens the cursor
+        // row's run in RUN_DETAIL, whose Esc returns here; Esc backs out to the list; everything else is inert. Answering
+        // is not a key here: the run waits for a reply on its issue (issue #642 adds actions).
+        const rows: any[] = Array.isArray(snapshot?.parked) ? snapshot.parked : [];
+        if (parkedSelected > rows.length - 1) parkedSelected = Math.max(0, rows.length - 1);
+        parkedNote = null;
+        // Esc leaves the view, and a by-id answer that lands after it is dropped by the `view` check alone; every way
+        // back to PARKED (`k`, or RUN_DETAIL's Esc after an Enter) numbers a new read, which the `seq` check then holds.
+        if (matchesKey(data, "escape")) {
+          view = "LIST";
+          parkedSelected = 0;
+          tui?.requestRender?.();
+          return;
+        }
+        // A cursor move abandons a by-id read still in flight, so a slow answer cannot open a row the cursor has left.
+        if (matchesKey(data, "up")) {
+          parkedSeq++;
+          parkedSelected = Math.max(0, parkedSelected - 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "down")) {
+          parkedSeq++;
+          parkedSelected = Math.min(Math.max(0, rows.length - 1), parkedSelected + 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (data === "\r" || data === "\n") {
+          const jobId = rows[parkedSelected]?.jobId;
+          if (typeof jobId !== "string" || jobId === "") return;
+          const open = (record: any) => {
+            detailRun = record;
+            detailFrom = "PARKED";
+            // The Enter rule on the LIST: sandbox state read once on entry, through the seam.
+            detailSandbox = typeof deps?.sandboxInfo === "function" ? deps.sandboxInfo({ jobId: record?.jobId }) : null;
+            view = "RUN_DETAIL";
+            tui?.requestRender?.();
+          };
+          // The snapshot's own runs first (no read); a parked run older than those 50 is read by id when the deps
+          // carry the reader's `runById`, and otherwise the row is all there is, which the note says.
+          const known = (Array.isArray(snapshot?.runs) ? snapshot.runs : []).find((r: any) => r?.jobId === jobId);
+          if (known) {
+            parkedSeq++;
+            open(known);
+            return;
+          }
+          if (typeof deps?.runById !== "function") {
+            parkedNote = "this run is older than the runs list, and this panel cannot read it by id";
+            tui?.requestRender?.();
+            return;
+          }
+          const seq = ++parkedSeq;
+          parkedNote = "reading the run...";
+          tui?.requestRender?.();
+          void (async () => {
+            let res: any;
+            try {
+              res = await deps.runById(jobId);
+            } catch (err: any) {
+              res = { unreachable: err?.message ?? String(err) };
+            }
+            if (seq !== parkedSeq || disposed || view !== "PARKED") return;
+            if (res?.record && typeof res.record === "object") {
+              parkedNote = null;
+              open(res.record);
+              return;
+            }
+            parkedNote = res?.unreachable ? `the run could not be read (${cellOf(res.unreachable)})` : res?.invalid ? `the run id is not readable (${cellOf(res.invalid)})` : "no record of this run on this host or in the mirror";
+            tui?.requestRender?.();
+          })();
+        }
+        return;
+      }
       if (view === "HELD_LIST") {
         // The held drill-in (issue #287): rows are the snapshot's own PII-free projections (target,
         // label, waited), a cursor, and `x` arming the shared cancel confirm on the CURSOR row's stored
@@ -1225,6 +952,7 @@ export function makeDashboard({
           void refresh();
         } else {
           detailRun = row.record;
+          detailFrom = "LIST";
           // One read on entry, through the seam whose fs access lives in index.ts.
           detailSandbox = typeof deps?.sandboxInfo === "function" ? deps.sandboxInfo({ jobId: row.record?.jobId }) : null;
           view = "RUN_DETAIL";
@@ -1326,6 +1054,18 @@ export function makeDashboard({
           projectsInfo = { unreachable: err?.message ?? String(err) };
         }
         view = "PROJECTS";
+        tui?.requestRender?.();
+        return;
+      }
+      // `k` opens the PARKED view (issue #641), the parked inbox the console's /parked page shows: its LIST section names
+      // the key when something is parked. It opens on an empty inbox too, which then says so: unlike `h` and `f`, a
+      // parked run is the one an operator comes looking for, and "none" is the answer. Not `p` (pause) or `a` (add);
+      // `k` is the free letter of parKed.
+      if (data === "k" || data === "K") {
+        parkedSelected = 0;
+        parkedNote = null;
+        parkedSeq++;
+        view = "PARKED";
         tui?.requestRender?.();
         return;
       }
@@ -1577,6 +1317,20 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     return centerBlock(boxed, Math.trunc(width), dw);
   }
 
+  if (view === "PARKED") {
+    const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
+    const iw = framed ? dw - 4 : 24;
+    const { title: detailTitle, lines } = parkedView(snapshot, state.parkedSelected ?? 0, iw, styler);
+    // The note (a by-id read in flight, or why the run cannot be opened) is a BODY line, wrapped, so its reason is
+    // never the part a footer clip takes.
+    if (state.parkedNote) lines.push(...wrapColumns(cellOf(state.parkedNote), iw, styler).map((l) => styler.cell(l, iw, { color: "warning" })));
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "↑↓ select · ↵ open run · esc back"];
+    const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
+    const footer = fitLine([k("↑↓", "select"), k("↵", "open run"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
+    const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer });
+    return centerBlock(boxed, Math.trunc(width), dw);
+  }
+
   if (view === "HELD_LIST") {
     // The held drill-in (issue #287): the section's rows with a cursor and the shared in-frame confirm.
     // Same PII posture as the section -- every cell is the worker's own projection, never a queue job.
@@ -1662,6 +1416,9 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   if (dollarText) sections.splice(2, 0, { title: "DOLLAR WINDOWS", lines: toLines(dollarText) });
   const heldText = renderHeldJobs({ held: snapshot.held });
   if (heldText) sections.push({ title: "HELD", lines: toLines(heldText) });
+  // The parked runs (issue #641), only when one waits: the framed section's facts, plain.
+  const parked: any[] = Array.isArray(snapshot.parked) ? snapshot.parked : [];
+  if (parked.length > 0) sections.push({ title: `PARKED · ${parked.length} · k view`, lines: parked.slice(0, PARKED_ON_DASHBOARD).map(parkedPlain).concat(parked.length > PARKED_ON_DASHBOARD ? [`${parked.length - PARKED_ON_DASHBOARD} more`] : []) });
   const plain = [title];
   for (const section of sections) plain.push(section.title, ...section.lines);
   // The degraded path carries the same armed question / outcome note the framed footer does -- a narrow
@@ -1786,6 +1543,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     { key: "limits", head: ["scoped limits", `${sl.count} · m manage`], body: sl.lines, priority: 0, viewKey: "m" },
     ...heldSection(snapshot.held, inner, styler),
     ...failedSection(snapshot.failed, inner, styler),
+    ...parkedSection(snapshot.parked, inner, styler),
     // `u hosts` rides here beside `j` (issue #599 phase 3), last: a long project filter then clips the hint, never its id.
     { key: "runs", head: ["runs", `last ${runCount} · o ${runSort} · j ${runProject === ALL_RUNS ? "projects" : `project ${runProject ?? "(none)"}`} · u hosts`], body: runLines(runRows, selected - trg.count, inner, styler) },
     { key: "settings", head: ["settings", "s edit"], body: settingsLines(snapshot.settings, inner, styler), priority: 2, viewKey: "s" },
@@ -1999,6 +1757,73 @@ function failedRow(r: any, inner: number, styler: any): string {
     styler.fg("dim", cellOf(r.failedReason)),
   ];
   return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
+}
+
+/**
+ * The parked-runs section (issue #641), or NOTHING when no run waits for an answer: the held section's rules (conditional,
+ * so a deployment that never parks renders byte-identically; self-bounding at PARKED_ON_DASHBOARD with the rest counted).
+ * Its divider is the count badge and names `k`. Priority 7, the last to fold: a parked run waits on a person.
+ */
+function parkedSection(parked: any, inner: number, styler: any): any[] {
+  const rows: any[] = Array.isArray(parked) ? parked : [];
+  if (rows.length === 0) return [];
+  const body = rows.slice(0, PARKED_ON_DASHBOARD).map((r: any) => parkedRow(r, false, false, inner, styler));
+  if (rows.length > PARKED_ON_DASHBOARD) body.push(styler.cell(`↓ ${rows.length - PARKED_ON_DASHBOARD} more`, inner, { color: "dim" }));
+  return [{ key: "parked", priority: 7, viewKey: "k", head: ["parked", `${rows.length} waiting for an answer · k view`], body }];
+}
+
+/** A parked run's resume-chain count, or `?` when this host cannot see the session store (never a fabricated 0). */
+function chainText(n: any): string {
+  return Number.isInteger(n) && n >= 0 ? String(n) : "?";
+}
+
+/**
+ * One parked row: `◇ acme/web#7 · github · waiting 2h0m · chain 1`, and in the view a cursor and the job id. Every cell
+ * through `cellOf`: a target and a job id are derived from forge data (issue #367's rule).
+ */
+function parkedRow(r: any, inView: boolean, sel: boolean, inner: number, styler: any): string {
+  const lead = inView ? (sel ? styler.fg("accent", "›") : " ") : styler.fg("warning", "◇");
+  const bits = [
+    `${lead} ${styler.fg("accent", cellOf(r?.target ?? r?.jobId))}`,
+    styler.fg("muted", cellOf(r?.kind)),
+    styler.fg("dim", `waiting ${fmtDuration(r?.ageMs)}`),
+    styler.fg("dim", `chain ${chainText(r?.chainCount)}`),
+  ];
+  if (inView) bits.push(styler.fg("dim", cellOf(r?.jobId)));
+  return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
+}
+
+/** The degraded LIST's plain twin of `parkedRow`. */
+function parkedPlain(r: any): string {
+  return `${cellOf(r?.target ?? r?.jobId)} · ${cellOf(r?.kind)} · waiting ${fmtDuration(r?.ageMs)} · chain ${chainText(r?.chainCount)}`;
+}
+
+/**
+ * The PARKED view's title and body (issue #641): a hint saying what the runs wait for, then a cursor-following viewport
+ * of the snapshot's `parked` rows, or the loading, unreachable or empty state. The rows are the fleet reader's
+ * unanswered ones. A reader that could not fold them says so in `parkedUnreachable`, shown in place of the empty state, so
+ * "nothing parked" is never claimed for a list nobody could read.
+ */
+function parkedView(snapshot: any, selected: number, iw: number, styler: any): { title: string; lines: string[] } {
+  if (snapshot === null || snapshot === undefined) return { title: "parked", lines: [styler.cell("loading", iw, { color: "dim" })] };
+  if (snapshot.unreachable) return { title: "parked", lines: [styler.cell(`unreachable (${cellOf(snapshot.unreachable)})`, iw, { color: "error" })] };
+  if (snapshot.parkedUnreachable) return { title: "parked", lines: [styler.cell(`parked runs unknown (${cellOf(snapshot.parkedUnreachable)})`, iw, { color: "error" })] };
+  const rows: any[] = Array.isArray(snapshot.parked) ? snapshot.parked : [];
+  const title = `parked · ${rows.length} waiting for an answer`;
+  const hint = "each run asked a question on its issue and resumes when someone answers there; answer it on the forge";
+  const lines = wrapColumns(hint, iw, styler).map((l) => styler.cell(l, iw, { color: "dim" }));
+  if (rows.length === 0) {
+    lines.push(styler.cell("(nothing parked)", iw));
+    return { title, lines };
+  }
+  const sel = Math.min(Math.max(0, selected), rows.length - 1);
+  const count = Math.min(rows.length, PARKED_VIEWPORT);
+  const top = Math.min(Math.max(0, sel - Math.floor(PARKED_VIEWPORT / 2)), rows.length - count);
+  if (top > 0) lines.push(styler.cell(`↑ ${top} more`, iw, { color: "dim" }));
+  for (let i = top; i < top + count; i++) lines.push(parkedRow(rows[i], true, i === sel, iw, styler));
+  const below = rows.length - top - count;
+  if (below > 0) lines.push(styler.cell(`↓ ${below} more`, iw, { color: "dim" }));
+  return { title, lines };
 }
 
 /** One held row: `○ owner/repo#7  after 2026-09-01T09:00Z + jira  waited 2h14m`. */

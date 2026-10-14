@@ -20,7 +20,7 @@ system. pi-dispatch adds exactly that layer and nothing else. It is not another 
 the one you use. It is the queue, the budget and the box around the pi you already run, steered by the
 `.pi/` setup your repo already has.
 
-![The /dispatch dashboard: live queue state, day, week and month job meters with a daily token counter, the dollar windows, the triggers pane with a portfolio trigger, pause windows, scoped limits with a project row and a model row showing their dollar caps, held and failed jobs, and the interactive runs list with each run's project and the u hosts key on its divider, in one framed terminal view](docs/images/dispatch-dashboard.svg?v=2026-10-14)
+![The /dispatch dashboard: live queue state, day, week and month job meters with a daily token counter, the dollar windows, the triggers pane with a portfolio trigger, pause windows, scoped limits with a project row and a model row showing their dollar caps, held and failed jobs, and the interactive runs list with each run's project and the u hosts key on its divider, in one framed terminal view](docs/images/dispatch-dashboard.svg?v=2026-10-14-641)
 
 What you get:
 

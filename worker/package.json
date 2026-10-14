@@ -100,6 +100,7 @@
     "./runtime-settings": "./src/runtime-settings.mjs",
     "./run-history": "./src/run-history.mjs",
     "./run-mirror": "./src/run-mirror.mjs",
+    "./session-key": "./src/session-key.mjs",
     "./sandbox": "./src/sandbox.mjs",
     "./sandbox-store": "./src/sandbox-store.mjs",
     "./subscriptions": "./src/subscriptions.mjs",

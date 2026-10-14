@@ -79,8 +79,10 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	assert.match(at("worker/src/connection.mjs"), /return new Redis\(\{ \.\.\.parseConnection\(url,/);
 	assert.equal((at("worker/src/connection.mjs").match(/new Redis\(/g) ?? []).length, 1);
 	// Non-vacuity: the sites that DO connect are there to be found, in all three packages.
+	// (admin/src/dashboard.ts was on this list until issue #641 moved the panel's reader, and its clients, into
+	// read-model.mjs's `createFleetReader`.)
 	const users = files.filter((f) => /\b(parseConnection|makeRedisClient)\b/.test(f.code)).map((f) => f.path);
-	for (const expected of ["worker/src/start.mjs", "worker/src/cli.mjs", "worker/src/cancel-cli.mjs", "worker/src/doctor.mjs", "worker/src/service.mjs", "receiver/src/start.mjs", "receiver/src/route.mjs", "receiver/src/poller.mjs", "admin/src/read-model.mjs", "admin/src/dashboard.ts"]) {
+	for (const expected of ["worker/src/start.mjs", "worker/src/cli.mjs", "worker/src/cancel-cli.mjs", "worker/src/doctor.mjs", "worker/src/service.mjs", "receiver/src/start.mjs", "receiver/src/route.mjs", "receiver/src/poller.mjs", "admin/src/read-model.mjs"]) {
 		assert.ok(users.includes(expected), `${expected} opens its Valkey clients through connection.mjs`);
 	}
 	for (const rule of RULES) assert.equal(rule.re.test(""), false);

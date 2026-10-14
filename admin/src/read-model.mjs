@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensureAccountTempRoot, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
+import { sanitizeJobId, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { FORGE_MCP_SERVER_NAME, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
@@ -40,7 +40,7 @@ import { ENVELOPE_VERSION, envelopeDigest, parseEnvelope } from "@edgehero/pi-di
 import { OTHER, PLAN_VERSION, envelopeEntries, scopeRef } from "@edgehero/pi-dispatch/priorities";
 import { ALLOC_EXPECTED_KEY, ALLOC_LOG_KEY, ALLOC_PLAN_KEY, makeAllocationAudit, makeAllocationState, parseState } from "@edgehero/pi-dispatch/allocation";
 import { DOLLAR_KEY_PREFIX } from "@edgehero/pi-dispatch/dollar-budget";
-import { removeHeldJob } from "@edgehero/pi-dispatch/cancel-state";
+import { removeHeldJob, requestCancel } from "@edgehero/pi-dispatch/cancel-state";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
@@ -56,7 +56,10 @@ import { projectBudgetRow, publishedBudget } from "@edgehero/pi-dispatch/host-bu
 import { peakSeries, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "@edgehero/pi-dispatch/size-suggest";
 import { readSizingRecords } from "@edgehero/pi-dispatch/size-records";
 import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
-import { hostsIn, mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
+import { RUNS_INDEX, RUNS_INDEX_MAX, hostsIn, mergeRuns, readMirroredPage, readMirroredRecord, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
+import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
+import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
+import { sessionKeyFor } from "@edgehero/pi-dispatch/session-key";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty, localRepoProblem } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
@@ -65,7 +68,9 @@ import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packa
 // keepOnlyDeclaredSkills drops a subtree that declares no SKILL.md -- re-deriving either here is how
 // the graph would show a skill the job path can never materialise.
 import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/materialize";
-import { isForgeKind } from "@edgehero/pi-dispatch/forges";
+import { FORGES, isForgeKind } from "@edgehero/pi-dispatch/forges";
+import { hasControls, scrubControls } from "./panel.mjs";
+import { runMatches } from "./run-filter.mjs";
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
 import { parseSkillMeta, findSiblingMentions, findLoopHints, triggerMatchLabel } from "./graph-model.mjs";
@@ -459,12 +464,19 @@ const DISPATCH_RUN_TTL_SECONDS = 2 * 60 * 60;
  * to the commit BEFORE the agent runs, so an agent cannot self-authorize by committing its own SKILL.md
  * (DES-AI-TRIGGER-FLOW-GATE). `exec` is injectable for tests.
  */
+/**
+ * The stdio of every git read here: stdin closed, stdout and stderr captured. Inherited, git's stderr reached the
+ * caller's own: "fatal: not a git repository" on every insights assembly in the console's log (with the folder's host
+ * path in it), and over the TUI's screen inside pi. The exit status still says what failed; the words are not shown.
+ */
+const GIT_READ_STDIO = Object.freeze(["ignore", "pipe", "pipe"]);
+
 export function revParseHead(folder, { exec = execFileSync } = {}) {
   try {
     // Hardened like every other host-side read. `rev-parse` does not refresh the index, so it does not
     // invoke fsmonitor and nothing here was reachable -- but "this particular subcommand is harmless" is
     // the reasoning that left `git-dirty.mjs` unhardened while `status` sat one module over.
-    const out = exec("git", [...GIT_READ_FLAGS, "-C", folder, "rev-parse", "HEAD"], { encoding: "utf8" });
+    const out = exec("git", [...GIT_READ_FLAGS, "-C", folder, "rev-parse", "HEAD"], { encoding: "utf8", stdio: GIT_READ_STDIO });
     const sha = out.trim();
     return sha.length > 0 ? sha : null;
   } catch {
@@ -2188,8 +2200,11 @@ function withTimeout(promise, ms, fallback) {
  * single-host deployment and a fleet still below the version floor look like), `"ok"`, `"truncated"`, or
  * `"unreachable (...)"`. `"off"` and `"unreachable"` must not collapse -- a new panel meeting old workers
  * has to read "off", not "error".
+ *
+ * `prune` (default true) is handed to `readMirroredRuns`: false makes this read write nothing (the fleet reader's
+ * `readOnly`, issue #641), at the cost of an expired id staying in the index until a pruning reader passes.
  */
-export async function mergedRunsOn(redis, { logsDir, limit = 10, fs = nodeFs, timeoutMs = 2500 } = {}) {
+export async function mergedRunsOn(redis, { logsDir, limit = 10, fs = nodeFs, timeoutMs = 2500, prune = true } = {}) {
   const local = listRuns({ logsDir, limit, fs });
   // A local read that FAILED is passed straight through. The mirror is a view of OTHER hosts' work; it
   // cannot stand in for this host's own history, and reporting a partial list as if it were whole is the
@@ -2199,7 +2214,7 @@ export async function mergedRunsOn(redis, { logsDir, limit = 10, fs = nodeFs, ti
     // Asked for MORE than the display cap, because the merge dedups and the two sources overlap on every
     // run this host both wrote and mirrored: cutting each source at the cap first would let a duplicate
     // pair squeeze a real run off the end.
-    const { runs: mirrored, degraded } = await readMirroredRuns(redis, { limit: Math.max(limit * 2, 50), timeoutMs });
+    const { runs: mirrored, degraded } = await readMirroredRuns(redis, { limit: Math.max(limit * 2, 50), timeoutMs, prune });
     const runs = mergeRuns(local, mirrored, { limit });
     return { runs, hosts: hostsIn(runs), mirror: degraded };
   } catch (err) {
@@ -2980,7 +2995,7 @@ export function readFolderSkills({ folder, exec = execFileSync } = {}) {
     listing = exec(
       "git",
       [...GIT_READ_FLAGS, "-C", folder, "ls-tree", "-r", "-l", "-z", head, ".pi/"],
-      { encoding: "utf8", maxBuffer: GRAPH_LS_TREE_MAX_BYTES },
+      { encoding: "utf8", maxBuffer: GRAPH_LS_TREE_MAX_BYTES, stdio: GIT_READ_STDIO },
     );
   } catch {
     return { head, skills: [], truncated: false, unreachable: "ls-tree-failed" };
@@ -3021,7 +3036,7 @@ export function readFolderSkills({ folder, exec = execFileSync } = {}) {
       const buf = exec(
         "git",
         [...GIT_READ_FLAGS, "-C", folder, "cat-file", "blob", entry.oid],
-        { maxBuffer: GRAPH_LIMITS.maxSkillBytes },
+        { maxBuffer: GRAPH_LIMITS.maxSkillBytes, stdio: GIT_READ_STDIO },
       );
       text = buf.toString("utf8");
     } catch {
@@ -3277,4 +3292,815 @@ function clampLimit(limit) {
 function clampLines(lines) {
   const n = Number.isFinite(lines) ? Math.floor(lines) : 200;
   return Math.min(2000, Math.max(1, n));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// THE FLEET READER (issue #641): the one 1 s snapshot of the deployment, shared by the `/dispatch` TUI and the console.
+//
+// MOVED here from `dashboard.ts` (`createDashboardDeps` and its `fetchSnapshot`), not rewritten: the TUI's tests pass
+// unchanged against it, which is the proof. It lives in the read model because a second surface needed it, and a copy
+// in the console would have been a third reader of the same keys (the precedent `heldJobs` below already paid for once,
+// with a source-text parity test to police the copy). Everything below the move is additive: fields the TUI does not
+// read, and the console's page readers.
+// ---------------------------------------------------------------------------------------------------------------------
+
+// Fetch the read-model's full window (listRuns clamps at 50); the TUI renders a cursor-following viewport of it.
+const RUNS_ON_DASHBOARD = 50;
+
+/** How many held rows the panel will hold at once. The section shows fewer; the rest are counted, not lost. */
+const HELD_LIMIT = 20;
+
+// The FAILED surface's bounds (issue #289): how many failed jobs each queue is asked for, and how many the drill view
+// shows fleet-wide. The held section's own posture, one surface over.
+const FAILED_PER_QUEUE = 20;
+const FAILED_LIMIT = 20;
+
+/**
+ * The most active jobs a reader may ask each queue for (issue #641), the console's `activeLimit`. The TUI reads one
+ * (`activeLimit` 1, its old `getActive(0, 0)`: it shows the first id alone); the console lists every running job,
+ * bounded so a queue with a runaway concurrency cannot turn a 1 s tick into an unbounded hydration.
+ */
+const ACTIVE_PER_QUEUE_MAX = 50;
+
+/**
+ * The belt over a failedReason before it may enter the snapshot (issue #289). The reason is the error message the
+ * WORKER itself threw -- the sources were de-payloaded at their sites (branch.mjs answers with a type, prepare-local
+ * basenames its path) -- but the reader must hold the property locally rather than by trusting every future throw
+ * site: control bytes (ANSI included) become spaces (`panel.mjs`'s class, see `scrubControl` in `dashboard.ts`), and
+ * the length is capped at the `job_failed` line's own 120 (start.mjs's precedent). Applied in the reader, so the raw
+ * string never reaches a surface.
+ */
+function scrubReason(reason) {
+  if (typeof reason !== "string" || reason === "") return "-";
+  return scrubControls(reason).slice(0, 120);
+}
+
+/**
+ * The held-jobs read, on the reader's own held client. A thin twin of `readHeldJobs` above -- duplicated because that
+ * one opens its own connection per call, and the reader refreshes every second off one it already holds. Field-for-field
+ * identical to it apart from `checks`, which no row renders. (`HELD_HYDRATE_MAX` is that reader's own ceiling.)
+ */
+async function heldJobs(redis, { prune = true } = {}) {
+  const ids = await redis.smembers("wait:held");
+  const at = Date.now();
+  const hydrated = await Promise.all(
+    ids.slice(0, HELD_HYDRATE_MAX).map(async (jobId) => {
+      try {
+        const h = await redis.hgetall(`wait:job:${jobId}`);
+        if (!h || !h.since) {
+          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire. Not on a
+          // read-only reader (the console's): the row is skipped the same and left for the TUI or the worker to prune.
+          if (prune) await redis.srem("wait:held", jobId).catch(() => {});
+          return null;
+        }
+        const since = Number(h.since);
+        return {
+          jobId,
+          target: h.target || null,
+          label: h.label || null,
+          waitedMs: Number.isFinite(since) && since > 0 ? Math.max(0, at - since) : null,
+        };
+      } catch {
+        return null; // one unreadable member degrades one row, never the section
+      }
+    }),
+  );
+  const rows = hydrated.filter(Boolean);
+  rows.sort((a, b) => (b.waitedMs ?? -1) - (a.waitedMs ?? -1));
+  return { rows: rows.slice(0, HELD_LIMIT), more: Math.max(0, rows.length - HELD_LIMIT), truncated: ids.length > HELD_HYDRATE_MAX };
+}
+
+/**
+ * How long the reader keeps one scan of the run records for the dollar windows (issue #501, part 7). A month window
+ * folds up to a month of records, which is a directory walk, and the reader refreshes every second: the counters are
+ * read every tick (they are what the next job is admitted against), the records' side at most this often. The local
+ * run index below (issue #641) is cached for the same span and the same reason.
+ */
+const DOLLAR_RECORDS_TTL_MS = 15_000;
+
+/**
+ * A registry row as the snapshot carries it (issue #596 phase 3, issue #599 phase 3): the budget pair and what its jobs
+ * hold (the PROJECTS view), and the slot count, the budget's running and waiting counts, the running jobs, the row's
+ * age and whether it routes (the HOSTS view). Projected to these keys, so nothing else a row carries reaches the panel.
+ * The jobs go through the worker's own allowlist again (`parseLiveJobs`, which takes the reader's parsed list too): a
+ * row is another host's text, and a reader handed in by a caller may not have parsed it. An entry the allowlist drops
+ * joins `jobsMore`, and a value that is there and is not a list is `jobsUnreadable`, never an empty list.
+ */
+function hostRowOf(h) {
+  const live = parseLiveJobs(h?.jobs);
+  const more = parseJobsMore(h?.jobsMore);
+  return {
+    name: h?.name,
+    budgetMemMiB: h?.budgetMemMiB,
+    budgetCpuCenti: h?.budgetCpuCenti,
+    usedMemMiB: h?.usedMemMiB,
+    usedCpuCenti: h?.usedCpuCenti,
+    concurrency: h?.concurrency,
+    budgetRunning: h?.budgetRunning,
+    waiters: h?.waiters,
+    jobs: live.jobs,
+    jobsMore: live.jobs === null ? more : (more ?? 0) + live.dropped,
+    jobsUnreadable: h?.jobsUnreadable === true || (live.jobs === null && h?.jobs !== undefined && h?.jobs !== null && h?.jobs !== ""),
+    staleMs: Number.isSafeInteger(h?.staleMs) && h.staleMs >= 0 ? h.staleMs : null,
+    routes: h?.routes,
+  };
+}
+
+/** How long the reader waits on the registry before drawing the fleet it last knew. */
+const FLEET_READ_TIMEOUT_MS = 2_000;
+
+/**
+ * The wide window the fleet reader folds `parked` and `failures24h` from (issue #641): the newest runs of the local
+ * index and the mirror, merged, at most this many. Wider than the TUI's 50 because a parked run waits for a person and
+ * may be days old; bounded because it is read on the tick (at most once per `DOLLAR_RECORDS_TTL_MS`).
+ */
+const WIDE_RUNS = 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The deployment's live snapshot, on ONE redis client and a pool of failFast queues, both created here and closed once
+ * in `dispose` (the `/dispatch` panel's reader since issue #57, moved here by issue #641). `snapshot()` reads the whole
+ * fleet in one pass off those held connections; `pause`/`resume` flip the durable paused state on the same pool, and
+ * `cancelActive` raises the CLI's cancel request on the same client, so a surface holding a reader holds no second
+ * connection for its kill switch. `getWorkers` is EMPTY on Redis providers without CLIENT SETNAME, so an error or empty
+ * list degrades to "unknown" rather than reporting zero live workers.
+ *
+ * Every module-level dependency it uses to talk to Valkey is injectable, defaulting to the real one, because this
+ * factory had no test at all -- and that is exactly how it came to build its own single queue and do its own pausing
+ * while the fleet-aware readers sat unused beside it. The kill switch is the last place a silent no-op should hide.
+ * `fs` (issue #641) reads the local run index and the session store's chain counter; `paths.sessionsDir` (optional) is
+ * the worker's `PI_SESSIONS_DIR` when it is on this host.
+ *
+ * Two behaviour options sit beside the seams (issue #641), both defaulting to the TUI's behaviour:
+ *   - `readOnly` (default false): `snapshot()` issues NO Valkey write. The three reads that prune as they go (the
+ *     registry's stale members, the run mirror's expired ids and its horizon, the held index's stale members) skip the
+ *     stale entry the same and leave it for a pruning reader (the TUI, the worker). The console passes true, because
+ *     a page view that writes is a read that needs a writer's care. What it does NOT cover: BullMQ's own `Queue`
+ *     constructor writes the queue's meta hash (`version`, `opts.maxLenEvents`) once per queue built, which
+ *     `makeQueue` does not let a caller turn off; and `pause`, `resume` and `cancelActive` are writes by definition.
+ *   - `activeLimit` (default 1, at most `ACTIVE_PER_QUEUE_MAX`): how many active jobs each queue is asked for. One is
+ *     the TUI's old cost (it shows the first id); the console passes 50 to list them all.
+ */
+export function createFleetReader(
+  paths,
+  {
+    makeQueueFn = makeQueue,
+    parseConnectionFn = parseConnection,
+    redisFn = makeRedisClient,
+    readLiveHostsFn = readLiveHosts,
+    discoverHostQueuesFn = discoverHostQueues,
+    // The env the deployment's dollar caps are read from (issue #501, part 7): the console's `deploymentEnv()`, whose
+    // pointer reads the deployment's `.env`. Empty by default, so a test or a caller that passes none sees the
+    // overlay's caps alone.
+    dollarEnvFn = () => ({}),
+    scanRecordsFn = scanRunRecords,
+    nowFn = () => Date.now(),
+    fs = nodeFs,
+    readOnly = false,
+    activeLimit = 1,
+  } = {},
+) {
+  const prune = readOnly !== true;
+  const activePerQueue = Number.isSafeInteger(activeLimit) ? Math.min(Math.max(activeLimit, 1), ACTIVE_PER_QUEUE_MAX) : 1;
+  const queue = makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }));
+  const redis = redisFn(paths.valkeyUrl);
+
+  // EVERY named host drains a queue of its own, so the four things this reader does with a queue -- count, list
+  // schedulers, pause, resume -- have to span them. Doing it here rather than through the fleet-aware one-shots above
+  // because this reader is connection-first: it holds its clients for its whole life and a per-tick open/close of N
+  // queues is the quiet load a dashboard must not add.
+  const pool = new Map([[queue.name, queue]]);
+  // The last set we successfully resolved. On an unreachable registry the fleet does NOT shrink to the shared queue:
+  // that would silently pause half a deployment and print success, which is the failure this whole surface exists to
+  // prevent. We keep what we last saw and mark the snapshot degraded instead.
+  let lastNames = [queue.name];
+  let fleetDegraded = null;
+  // The registry rows last read (issue #596, phase 3): each live host's published budget and what its jobs hold, for
+  // the PROJECTS view's size suggestions and its budget line. Kept like `lastNames` on an unreachable registry.
+  let lastHosts = [];
+
+  const fleetQueues = async () => {
+    const fleet = await readLiveHostsFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS, prune }).catch((err) => ({
+      unreachable: err?.message ?? String(err),
+    }));
+    if (fleet?.unreachable || !Array.isArray(fleet?.hosts)) {
+      fleetDegraded = fleet?.unreachable ?? "registry unreadable";
+    } else {
+      fleetDegraded = null;
+      lastNames = fleetQueueNames(fleet.hosts);
+      lastHosts = fleet.hosts;
+    }
+    for (const name of lastNames) {
+      if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
+    }
+    // A host that left keeps its queue open until dispose. Closing it here would race a pause already in flight
+    // against it, and an idle BullMQ Queue costs one connection -- cheaper than that race.
+    return lastNames.map((n) => pool.get(n));
+  };
+
+  // The KILL SWITCH's set, which is not the per-tick set. A registry row is a lease that expires ninety seconds after a
+  // host stops writing, while that host's queue and its paused flag are permanent -- so pausing off the registry alone
+  // misses a host that has gone quiet but is still draining, and resuming off it leaves that host's queue paused
+  // forever with nothing able to name it. The union adds a SCAN of BullMQ's own meta keys, which is far too expensive
+  // for a reader that runs every second and entirely affordable for a keypress.
+  const killSwitchQueues = async () => {
+    const existing = await discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    for (const name of unionQueueNames(lastNames, existing)) {
+      if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
+    }
+    return unionQueueNames(lastNames, existing).map((n) => pool.get(n));
+  };
+
+  // The last records scan for the dollar windows, `{ at, sinceMs, records }`, reused for DOLLAR_RECORDS_TTL_MS.
+  let dollarRecords = null;
+  const dollarWindows = async (overlay, limits) => {
+    const now = new Date(nowFn());
+    const { caps, jobCapMicros, invalid } = deploymentDollarCaps(overlay ?? {}, dollarEnvFn() ?? {});
+    const specs = dollarWindowSpecs({ caps, limits, now });
+    if (specs.length === 0) return invalid.length > 0 ? { rows: [], invalid } : null;
+    // The COUNTERS every tick, in ONE MGET on the held client: spent and held, what the worker admits against.
+    const counters = await redis.mget(...specs.map((s) => s.key)).then(
+      (values) => Object.fromEntries(specs.flatMap((s, i) => (values?.[i] === null || values?.[i] === undefined ? [] : [[s.key, Number(values[i])]]))),
+      (err) => ({ unreachable: err?.message ?? String(err) }),
+    );
+    const sinceMs = dollarWindowsSinceMs(specs, now);
+    if (!dollarRecords || dollarRecords.sinceMs !== sinceMs || now.getTime() - dollarRecords.at >= DOLLAR_RECORDS_TTL_MS) {
+      const scanned = scanRecordsFn({ logsDir: paths.logsDir, sinceMs, nowMs: now.getTime() });
+      dollarRecords = { at: now.getTime(), sinceMs, records: Array.isArray(scanned) ? scanned : [] };
+    }
+    return { rows: dollarWindowRows({ specs, counters, records: dollarRecords.records, jobCapMicros }), ...(invalid.length > 0 && { invalid }) };
+  };
+
+  // Issue #641: this host's run records, indexed once per DOLLAR_RECORDS_TTL_MS (the dollar records' rhythm), for the
+  // wide window here and for `runsPage` below, so neither walks the logs directory on every tick or every request.
+  const localIndex = makeLocalRunIndex({ logsDir: paths.logsDir, fs, now: nowFn });
+  // The wide window, `{ at, runs, mirror }`, refreshed at the same rhythm. The mirror is read READ-ONLY (`prune:
+  // false`) on every reader: the TUI's per-tick `mergedRunsOn` already prunes, and a second pruning read would only
+  // race it.
+  let wide = null;
+  const wideRuns = async () => {
+    const at = nowFn();
+    if (wide && at >= wide.at && at - wide.at < DOLLAR_RECORDS_TTL_MS) return wide;
+    const local = localIndex.records();
+    const { runs: mirrored, degraded } = await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS });
+    const runs = mergeRuns(Array.isArray(local?.records) ? local.records : [], mirrored, { limit: WIDE_RUNS });
+    // Either side unread makes the window partial: a parked run on that side would be missing without a word.
+    const partial = local?.unreachable ?? (typeof degraded === "string" && degraded.startsWith("unreachable") ? "the run mirror could not be read" : null);
+    wide = { at, runs, mirror: degraded, partial };
+    return wide;
+  };
+
+  return {
+    async snapshot() {
+      const queues = await fleetQueues();
+      // Awaited alongside the queue reads rather than before them: it is two Valkey round trips and the panel already
+      // pays for several, so it costs no extra tick.
+      const merged = await mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD, prune }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
+      // The cron ids this deployment declares, read from the triggers file the same tick already reads SYNCHRONOUSLY.
+      // Since issue #267 each scheduler's stall count is its own key, so the reader has to name them -- and naming them
+      // from config is the repo's own doctrine for exactly this shape (`scoped-limits.json` enumerates every scope that
+      // can carry a claim; `no KEYS, no SCAN, and no index set to leak`). A keyspace scan was measured and refused for
+      // `wait:held` and `host:h:*` because the panel reads every second and a scan walks hardest when nothing is
+      // registered. With the instructions TEXT beside the view rather than inside it (issue #482): the view's records
+      // are the model-callable `dispatch_triggers` result, and the words belong to the overlay alone.
+      const { view: triggersView, instructions: triggerInstructions } = readTriggersWithInstructions({ triggersPath: paths.triggersPath });
+      const cronIds = Array.isArray(triggersView?.triggers)
+        ? triggersView.triggers.filter((t) => t?.type === "cron" && typeof t?.id === "string" && t.id !== "").map((t) => t.id)
+        : [];
+      const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
+        Promise.all(queues.map((q) => q.isPaused())),
+        Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed"))),
+        queue.getWorkers().catch(() => []),
+        redis.get(dayKey()),
+        redis.get(weekKey()),
+        redis.get(monthKey()),
+        redis.get(tokenDayKey()), // issue #25 daily token spend (budget:t:YYYY-MM-DD)
+        // The shared queue's failure is UNCAUGHT (the panel must not draw a scheduler list it could not read), a host
+        // queue's is caught: one unreachable host degrades one host's triggers, never the view.
+        Promise.all(queues.map((q, i) => (i === 0 ? q.getJobSchedulers(0, -1, true) : q.getJobSchedulers(0, -1, true).catch(() => [])))),
+        // The active jobs, `activePerQueue` per queue (issue #641): one for the TUI, the console's bound for the console.
+        Promise.all(queues.map((q) => q.getActive(0, activePerQueue - 1).catch(() => []))),
+        // Per-scheduler stall counts (money backstop) for the cron drill-in; reuses the held client like the budget
+        // GETs. ONE MGET for every declared cron id, so this stays one round trip however many schedulers exist. An
+        // absent key reads as an honest 0 -- a scheduler that has never stalled -- which is the same posture
+        // `readScopedBudget` takes for a scope that has never run.
+        cronIds.length > 0 ? redis.mget(...cronIds.map((id) => stallKey(id))).catch(() => []) : Promise.resolve([]),
+      ]);
+      const workers = Array.isArray(workerList) && workerList.length > 0 ? workerList.length : "unknown";
+      // Summed across the fleet, because a count of one queue is not a count of the deployment.
+      const counts = {};
+      for (const c of countsPer) for (const [k, v] of Object.entries(c ?? {})) counts[k] = (counts[k] ?? 0) + Number(v ?? 0);
+      // A HALF-paused deployment must read as neither whole one: `every` is the honest AND, and `some` carries the
+      // disagreement out so the header can name it rather than rounding it to one side.
+      const pausedState = pausedStates.every(Boolean);
+      const pausedPartial = !pausedState && pausedStates.some(Boolean);
+      const schedulerList = schedulerLists.flat();
+      // ONLY the id, the queue and the start off each active Job -- a Job's `.data` holds issue title/body/username
+      // (PII), so it never enters the snapshot (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT). The host is read off
+      // the registry rows this tick already holds (a host publishes the ids it runs), never off the Job.
+      const hostOfJob = new Map();
+      for (const h of lastHosts) for (const j of parseLiveJobs(h?.jobs).jobs ?? []) if (typeof h?.name === "string") hostOfJob.set(j.id, h.name);
+      const active = activeLists.flatMap((list, qi) =>
+        (Array.isArray(list) ? list : []).map((j) => ({
+          jobId: typeof j?.id === "string" ? j.id : j?.id === undefined || j?.id === null ? null : String(j.id),
+          queue: queues[qi]?.name ?? "-",
+          startedAt: Number.isSafeInteger(j?.processedOn) && j.processedOn > 0 ? j.processedOn : null,
+          host: hostOfJob.get(String(j?.id)) ?? null,
+        })),
+      );
+      // The scoped limits + their live counters (issue #242): GET only the windows a row caps, each cell caught
+      // individually so one bad read degrades one cell, never the snapshot. Keys recomputed from the shared
+      // scopeKeyPrefix, so this reader and the worker's writer cannot drift.
+      const scopedLimits = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+      const limitRows = Array.isArray(scopedLimits?.limits) ? scopedLimits.limits : [];
+      const scopedNow = new Date();
+      const scopedBudget = {
+        rows: await Promise.all(
+          limitRows.map(async (l) => {
+            const prefix = scopeKeyPrefix(l.scope);
+            const cell = (key) => redis.get(key).then((v) => Number(v ?? 0), () => null);
+            const row = {};
+            if (Number.isInteger(l.day)) row.day = await cell(dayKey(scopedNow, prefix));
+            if (Number.isInteger(l.week)) row.week = await cell(weekKey(scopedNow, prefix));
+            if (Number.isInteger(l.month)) row.month = await cell(monthKey(scopedNow, prefix));
+            return row;
+          }),
+        ),
+      };
+      // Jobs the worker is holding on run.waitFor (issue #230). Caught individually like the scoped cells above, so a
+      // dead key or a slow SCAN degrades one section rather than the whole snapshot. Reads the worker's own
+      // `wait:job:*` hashes and never a delayed Job: a delayed job's `.data` holds the issue title and body.
+      const held = await heldJobs(redis, { prune }).catch((err) => ({ unreachable: err?.message ?? String(err) }));
+
+      // The failed set's first surface (issue #289). Each Job lives for one statement and ONLY host-chosen fields enter
+      // the snapshot -- id, attempt count, the worker's own scrubbed throw message, the queue name and the finish
+      // instant. `.data` (issue title/body/username) never crosses; a key-set pin holds the projection closed. Caught
+      // as a unit like `held` above, so an unreadable failed set degrades one section, never the snapshot.
+      const failed = await (async () => {
+        const lists = await Promise.all(queues.map((q) => q.getFailed(0, FAILED_PER_QUEUE - 1)));
+        const rows = lists
+          .flatMap((list, qi) =>
+            (Array.isArray(list) ? list : []).map((j) => ({
+              jobId: j?.id ?? "-",
+              attemptsMade: Number(j?.attemptsMade ?? 0),
+              failedReason: scrubReason(j?.failedReason),
+              queue: queues[qi]?.name ?? "-",
+              endedAt: Number(j?.finishedOn ?? 0),
+            })),
+          )
+          .sort((a, b) => b.endedAt - a.endedAt)
+          .slice(0, FAILED_LIMIT);
+        const total = counts.failed ?? 0;
+        return { rows, more: Math.max(0, Number(total) - rows.length) };
+      })().catch((err) => ({ unreachable: err?.message ?? String(err) }));
+
+      // The dollar windows (issue #501, part 7): null when no dollar window is set, so a deployment without one renders
+      // exactly the panel it always did. Caught as a unit, like `held`.
+      const settings = readSettingsView({ settingsFile: paths.settingsFile });
+      const dollars = await dollarWindows(settings?.overlay, limitRows).catch((err) => ({ rows: [], unreachable: err?.message ?? String(err) }));
+
+      // Issue #641: the parked runs and the day's failures, off the wide window (cached, so at most one read of it per
+      // DOLLAR_RECORDS_TTL_MS). Caught as a unit: a failure here costs these two fields, never the snapshot.
+      const nowMs = nowFn();
+      const fold = await wideRuns().then(
+        (w) => ({
+          // Answered runs are dropped BEFORE the chain counter is read, so a run nobody waits on costs no fs call.
+          parked: readParkedRuns({ runs: w.runs, now: nowMs, sessionsDir: paths.sessionsDir ?? null, fs, unansweredOnly: true }),
+          failures24h: w.runs.filter((r) => r?.outcome === "failed" && runAt(r) >= nowMs - DAY_MS && runAt(r) <= nowMs).length,
+          // A floor when the window ended before the day did: every one of WIDE_RUNS runs is inside the day.
+          failures24hFloor: w.runs.length >= WIDE_RUNS && runAt(w.runs[w.runs.length - 1]) >= nowMs - DAY_MS,
+          parkedUnreachable: w.partial ? scrubReason(w.partial) : null,
+        }),
+        // An empty `parked` alone would read as "nobody is waiting"; `parkedUnreachable` says the list is not known.
+        (err) => ({ parked: [], failures24h: null, failures24hFloor: false, parkedUnreachable: scrubReason(err?.message ?? String(err)) || "the runs could not be read" }),
+      );
+
+      return {
+        held,
+        failed,
+        scopedLimits,
+        scopedBudget,
+        dollars,
+        queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
+        // Issue #641: each queue's own counts beside the summed ones, so a surface can say which host's queue is deep.
+        queueCounts: queues.map((q, i) => ({ queue: q?.name ?? "-", paused: Boolean(pausedStates[i]), counts: Object.fromEntries(Object.entries(countsPer[i] ?? {}).map(([k, v]) => [k, Number(v ?? 0)])) })),
+        // Issue #596, phase 3: each live host's budget and use, as the registry publishes them (integers as text, `off`,
+        // or "" while unknown). Read by the PROJECTS view; nothing here judges them. Issue #599, phase 3: with what the
+        // HOSTS view's live lines read off the same rows (`hostRowOf`), so that view adds no read to this tick.
+        hostBudgets: lastHosts.map(hostRowOf),
+        budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
+        schedulers: mapSchedulers(schedulerList, Date.now()),
+        // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so neither reader
+        // changes.
+        schedulerStalls: Object.fromEntries(cronIds.map((id, i) => [id, Number(stallCounts?.[i] ?? 0) || 0])),
+        schedulerStallMax: paths.schedulerStallMax,
+        // Merged across the fleet (issue #57, Gap 3). This host's files stay the truth and the single-host path; the
+        // mirror adds the other hosts' records. On a shared `PI_LOGS_DIR` the local read is already the merged read and
+        // the mirror adds nothing, which is why there is no second code path.
+        runs: merged.runs,
+        runHosts: merged.hosts,
+        runMirror: merged.mirror,
+        settings,
+        triggers: triggersView,
+        triggerInstructions,
+        pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
+        // The projects as the WORKER reads them (issue #499 part C): `{ unset }` when PI_PROJECTS_FILE is unset.
+        projects: readProjects({ projectsPath: paths.projectsFile }),
+        // Issue #504 part C: whether the deployment names an allocation envelope, for the `b split` hint alone.
+        envelopeSet: typeof paths.envelopeFile === "string" && paths.envelopeFile !== "",
+        // The operator's staged third-party pi packages (REQ-GLOBAL-PI-OVERLAY), for the armed triggers' trust model.
+        // A plain file read that degrades to a safe empty shape rather than throwing.
+        stagedPackages: readStagedPackages({ globalPiDir: paths.globalPiDir }),
+        // The overlay's MCP servers (REQ-MCP-OPERATOR-SERVERS), for a trigger's `run.mcp` lines: names and where each
+        // runs, never a header, an argument or a value.
+        overlayMcp: readOverlayMcpView({ globalPiDir: paths.globalPiDir }),
+        // ONLY the id off the first active Job, for the TUI's ACTIVE row; `active` below is the whole list.
+        activeJobId: active[0]?.jobId ?? null,
+        active,
+        parked: fold.parked,
+        parkedUnreachable: fold.parkedUnreachable,
+        failures24h: fold.failures24h,
+        failures24hFloor: fold.failures24hFloor,
+      };
+    },
+    /** This reader's held client, local index and clock, for `readRunsPage`/`readRunById` off the same connection. */
+    async runsPage(opts = {}) {
+      return readRunsPage(redis, { ...opts, logsDir: paths.logsDir, fs, now: nowFn, localIndex });
+    },
+    async runById(jobId) {
+      return readRunById(redis, { logsDir: paths.logsDir, jobId, fs });
+    },
+    async pause() {
+      await fleetQueues(); // refresh `lastNames` from the registry before unioning the keyspace onto it
+      for (const q of await killSwitchQueues()) await q.pause();
+    },
+    async resume() {
+      // Resume spans the same set, and it is the direction that strands a deployment: a queue paused while its host
+      // was live, then resumed while that host is down, stays paused with nothing naming it.
+      await fleetQueues();
+      for (const q of await killSwitchQueues()) await q.resume();
+    },
+    async cancelActive({ jobId }) {
+      // The CLI's channel, byte for byte (issue #287, worker/src/cancel-state.mjs): a request key the owning worker
+      // answers, carried on the reader's own held client -- `cancelJob` lives in the worker process and nothing here
+      // can raise it directly.
+      return requestCancel({ redis, jobId });
+    },
+    async dispose() {
+      for (const q of pool.values()) {
+        try {
+          await q.close();
+        } catch {
+          // best-effort teardown
+        }
+      }
+      try {
+        redis.disconnect();
+      } catch {
+        // best-effort teardown
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The console's page readers (issue #641). Each takes a client the caller owns and never disconnects it (the
+// `mergedRunsOn` split), and none writes: the mirror is read with `prune: false` or through the read-only page read.
+// (The fleet reader's `snapshot()` writes nothing only when it was built `readOnly`: see `createFleetReader`.)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** A record's instant in millis, `endedAt` else `startedAt`, as the mirror scores it; -Infinity when it has neither. */
+function runAt(r) {
+  const t = Date.parse(r?.endedAt ?? r?.startedAt ?? "");
+  return Number.isFinite(t) ? t : -Infinity;
+}
+
+/** Newest first; a stable order for equal instants (job id), so a page cut is the same cut on every read. */
+function byRunAtDesc(a, b) {
+  const d = runAt(b) - runAt(a);
+  if (d !== 0 && !Number.isNaN(d)) return d > 0 ? 1 : -1;
+  const ai = String(a?.jobId ?? "");
+  const bi = String(b?.jobId ?? "");
+  return ai < bi ? -1 : ai > bi ? 1 : 0;
+}
+
+/**
+ * This host's run records, newest first, read at most once per `ttlMs` (issue #641; the dollar records' 15 s rhythm).
+ * `records()` returns `{ records, capped }` or `{ unreachable }` (an unreadable directory, never a throw; a missing one
+ * is an empty history). At most `RUNS_INDEX_MAX` records are kept, the mirror's own cap, so the index costs what the
+ * fleet view already does; `capped` says older ones exist on disk that no page reaches.
+ */
+export function makeLocalRunIndex({ logsDir, fs = nodeFs, now = () => Date.now(), ttlMs = DOLLAR_RECORDS_TTL_MS, max = RUNS_INDEX_MAX } = {}) {
+  let cache = null;
+  return {
+    records() {
+      const at = now();
+      if (cache && at >= cache.at && at - cache.at < ttlMs) return cache.value;
+      let names;
+      let value;
+      try {
+        names = fs.readdirSync(logsDir);
+      } catch (err) {
+        names = null;
+        value = err?.code === "ENOENT" ? { records: [], capped: false } : { unreachable: `logs dir unreadable (${err?.code ?? "read-error"})` };
+      }
+      if (names !== null) {
+        const records = [];
+        for (const name of names) {
+          if (!name.endsWith(".json")) continue;
+          const record = readJsonFile(join(logsDir, name), fs);
+          if (record && typeof record === "object" && !Array.isArray(record)) records.push(record);
+        }
+        records.sort(byRunAtDesc);
+        value = { records: records.slice(0, max), capped: records.length > max };
+      }
+      cache = { at, value };
+      return value;
+    },
+  };
+}
+
+/** The most records one `readRunsPage` examines, both sources together, before it answers with what it has. */
+export const RUNS_PAGE_EXAMINE_MAX = 2000;
+const RUNS_PAGE_BATCH = 200;
+
+/**
+ * One page of the merged run history, newest first (issue #641): `{ runs, next, mirror, truncated, examined }`, or
+ * `{ refusal }` for a cursor or limit it will not take, or `{ runs: [], next: null, mirror, unreachable }` when this
+ * host's logs directory is unreadable (the `mergedRunsOn` posture: the mirror cannot stand in for this host's own
+ * history).
+ *
+ * THE CURSOR IS A SCORE, NOT AN OFFSET. `before` (millis, exclusive) is the instant of the last run the previous page
+ * showed, so a run that lands while an operator pages lands ABOVE every cursor already handed out and moves nothing: an
+ * offset would shift every later page by one and show one run twice. A page never ends inside a group of runs that share
+ * one instant (it takes the whole group), because `(before` would otherwise skip the rest of it.
+ *
+ * FILTERED AFTER FETCHING, so it fetches in batches (`RUNS_PAGE_BATCH` from each source) until `limit` runs match or
+ * both sources are exhausted, and stops at `examineMax` records examined. Stopping there reports `truncated: true` with
+ * a `next` that resumes exactly where the examination stopped (`floor + 1`: every run above the floor was examined, the
+ * runs AT it may not have been). A run is final only once both sources have been read past it: the mirror's batch and
+ * the local batch each end somewhere, and a run between the two ends could still be outranked by one not yet fetched.
+ *
+ * The mirror side is the read-only `readMirroredPage` (no prune, nothing written); the local side is `localIndex` (a
+ * `makeLocalRunIndex`, which the fleet reader holds across requests; a fresh one is read when none is passed). Merged
+ * by the worker's `mergeRuns`, so a retry on another host shows the later attempt exactly as the TUI does. Named
+ * residual: a job whose two attempts straddle a page boundary can show its earlier attempt on the later page.
+ */
+export async function readRunsPage(redis, { logsDir, before = null, limit = 50, filter = null, fs = nodeFs, now = () => Date.now(), timeoutMs = 2500, localIndex = null, examineMax = RUNS_PAGE_EXAMINE_MAX } = {}) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) return { refusal: "limit must be a whole number from 1 to 100" };
+  if (before !== null && before !== undefined && !(Number.isSafeInteger(before) && before >= 0)) return { refusal: "before must be a non-negative whole number of milliseconds" };
+  const bound = before === null || before === undefined ? null : before;
+  const index = localIndex ?? makeLocalRunIndex({ logsDir, fs, now });
+  const read = index.records();
+  if (!Array.isArray(read?.records)) return { runs: [], next: null, mirror: "off", ...read };
+  const local = bound === null ? read.records : read.records.filter((r) => runAt(r) < bound);
+
+  let mirror = redis ? null : "off";
+  let mirrored = [];
+  let mirrorFetched = 0;
+  let mirrorFrontier = null;
+  let mirrorDone = !redis;
+  let localTaken = 0;
+  let examined = 0;
+  for (;;) {
+    if (!mirrorDone) {
+      const page = await readMirroredPage(redis, { before: bound, offset: mirrorFetched, limit: RUNS_PAGE_BATCH, timeoutMs });
+      if (page.degraded !== "ok") {
+        // Unreachable part-way is unreachable: what was fetched is dropped rather than merged as if it were whole,
+        // and the page is this host's own history, saying so.
+        mirror = page.degraded;
+        mirrored = [];
+        mirrorDone = true;
+      } else {
+        if (mirror === null) mirror = "ok";
+        mirrored.push(...page.runs);
+        mirrorFetched += page.fetched;
+        examined += page.fetched;
+        if (page.fetched < RUNS_PAGE_BATCH) mirrorDone = true;
+        else mirrorFrontier = page.frontier;
+      }
+    }
+    const takeTo = Math.min(local.length, localTaken + RUNS_PAGE_BATCH);
+    examined += takeTo - localTaken;
+    localTaken = takeTo;
+    const localFrontier = localTaken >= local.length ? null : runAt(local[localTaken - 1]);
+    const frontiers = [mirrorDone ? null : mirrorFrontier, localFrontier].filter((f) => f !== null);
+    // Every run strictly above the floor has been read from both sources; null means everything has.
+    const floor = frontiers.length === 0 ? null : Math.max(...frontiers);
+    const merged = mergeRuns(local.slice(0, localTaken), mirrored, { limit: Infinity }).sort(byRunAtDesc);
+    const final = floor === null ? merged : merged.filter((r) => runAt(r) > floor);
+    const matched = filter ? final.filter((r) => runMatches(r, filter)) : final;
+    if (matched.length > limit || floor === null || examined >= examineMax) {
+      let runs = matched.slice(0, limit);
+      if (matched.length > limit) {
+        const lastAt = runAt(runs[runs.length - 1]);
+        let k = limit;
+        while (k < matched.length && runAt(matched[k]) === lastAt) k += 1;
+        runs = matched.slice(0, k);
+      }
+      let next = null;
+      let truncated = false;
+      if (matched.length > runs.length) next = runAt(runs[runs.length - 1]);
+      else if (floor !== null) {
+        truncated = true;
+        next = floor + 1;
+      }
+      if (next !== null && !Number.isFinite(next)) next = null;
+      // An empty first range is either an index that does not exist (a single host, or a fleet below the floor:
+      // "off", exactly as `readMirroredRuns` says it) or one that holds nothing older than the cursor ("ok").
+      if (mirror === "ok" && mirrorFetched === 0) {
+        const exists = await withTimeout(Promise.resolve().then(() => redis.exists(RUNS_INDEX)).catch(() => null), timeoutMs, null);
+        if (exists === 0) mirror = "off";
+      }
+      return { runs, next, mirror: mirror ?? "off", truncated, examined };
+    }
+  }
+}
+
+/** A job id this reader will look up: the shapes the worker mints (`gh-…`, `repeat:<id>:<ms>`, a uuid), bounded. */
+const RUN_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
+
+/**
+ * One run by its job id (issue #641): `{ record, source }` with `source` "local" or "mirror", `{ missing: true }`, or
+ * `{ invalid }` for an id outside the charset (checked FIRST, before any path or key is built from it). This host's file
+ * first, because the file is the record and the mirror a view of it; then the mirror's by-id GET, the one the lost-lock
+ * check already uses. A mirrored value that is not a record is reported missing, never shown.
+ */
+export async function readRunById(redis, { logsDir, jobId, fs = nodeFs, timeoutMs = 2500 } = {}) {
+  if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { invalid: "a run id is letters, digits and . _ : -, at most 200 characters" };
+  const local = readRun({ logsDir, jobId, fs });
+  if (local && typeof local === "object" && !Array.isArray(local)) return { record: local, source: "local" };
+  if (!redis) return { missing: true };
+  const mirrored = await readMirroredRecord(redis, sanitizeJobId(jobId), { timeoutMs });
+  if (mirrored && typeof mirrored === "object" && mirrored !== UNREADABLE_RECORD && !Array.isArray(mirrored)) return { record: mirrored, source: "mirror" };
+  return { missing: true };
+}
+
+/**
+ * The session store's chain counter's file name (`RESUME_CHAIN_FILE` in worker/src/session-store.mjs, which does not
+ * export it). A copy, so it is PINNED: admin/test/read-model-pages.test.mjs reads the worker's source for it.
+ */
+const RESUME_CHAIN_FILE = "resume-chain";
+const SIDECAR_MAX_BYTES = 4096;
+
+/**
+ * A parked run's session key, re-derived the way the worker derives it (`sessionKeyFor`, DES-SESSION-KEY-IS-DERIVED-
+ * NOT-INDEXED): a forge ISSUE from kind + repo + its number, a cron run from its scheduler id. Null where the record
+ * cannot say: a pull or merge request's key needs its head ref, which the record deliberately does not carry.
+ */
+function parkedSessionKey(record) {
+  const kind = record?.kind;
+  if (kind === "local") {
+    const m = typeof record?.jobId === "string" ? /^(?:repeat|manual):(.+):\d+$/.exec(record.jobId) : null;
+    return m ? sessionKeyFor({ kind: "local", trigger: { id: m[1] } }) : null;
+  }
+  if (!isForgeKind(kind) || typeof record?.target !== "string") return null;
+  const m = /^(.+)#(\d+)$/.exec(record.target);
+  if (!m) return null;
+  // `#` is the issue separator on every forge; GitHub and Forgejo also spell a pull request with it, and only the
+  // trigger type can say which (a `pull_request` trigger); a comment on a pull request stays ambiguous, so a key that
+  // names no directory reads as unknown below, never as a chain of zero.
+  if (record.triggerType === "pull_request") return null;
+  return sessionKeyFor({ kind, repo: m[1], target: { type: "issue", number: Number(m[2]) } });
+}
+
+/** The chain counter for `key` under `sessionsDir`: an integer (0 for a key with no counter), or null when unknown. */
+function readChainCount(sessionsDir, key, fs) {
+  if (typeof sessionsDir !== "string" || sessionsDir === "" || typeof key !== "string") return null;
+  const dir = join(sessionsDir, key);
+  try {
+    if (!fs.lstatSync(dir).isDirectory()) return null;
+  } catch {
+    return null; // no directory for this key on this host: nothing to count, and not a count of zero
+  }
+  const file = join(dir, RESUME_CHAIN_FILE);
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (err) {
+    return err?.code === "ENOENT" ? 0 : null;
+  }
+  // The store's own guard: regular files only (a planted link is not followed), size-bounded.
+  if (!st.isFile() || st.size === 0 || st.size > SIDECAR_MAX_BYTES) return null;
+  let raw;
+  try {
+    raw = String(fs.readFileSync(file, "utf8")).trim();
+  } catch {
+    return null;
+  }
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n >= 0 && String(n) === raw ? n : null;
+}
+
+/**
+ * The parked runs in `runs` (issue #641; REQ-AWAIT-INPUT, issue #625): a run that ended `completed` with reason
+ * `awaiting-input` asked a person a question. `[{ target, kind, jobId, parkedAt, ageMs, answered, chainCount }]`, newest
+ * first. PURE over the runs it is handed, apart from the optional session-store read.
+ *
+ * `answered` is the rule the processor implies and nothing records: a LATER run on the same kind + target (an answer is
+ * a new delivery on the same issue, which resumes the parked transcript). `chainCount` is the session store's
+ * `resume-chain` counter for the run's re-derived key when `sessionsDir` is on this host and the key has a directory,
+ * else null ("unknown"), never 0 for a store this host cannot see. `unansweredOnly` drops the answered runs BEFORE that
+ * read, so a caller that shows only the waiting ones (the fleet reader) pays no fs call for a run nobody waits on.
+ */
+export function readParkedRuns({ runs, now = Date.now(), sessionsDir = null, fs = nodeFs, unansweredOnly = false } = {}) {
+  const list = Array.isArray(runs) ? runs.filter((r) => r && typeof r === "object") : [];
+  const nowMs = typeof now === "function" ? now() : now;
+  const latest = new Map(); // kind + target -> the newest run's instant
+  for (const r of list) {
+    if (typeof r.target !== "string" || typeof r.kind !== "string") continue;
+    const k = `${r.kind}\u0000${r.target}`;
+    const at = runAt(r);
+    if (!latest.has(k) || at > latest.get(k)) latest.set(k, at);
+  }
+  const out = [];
+  for (const r of list) {
+    if (r.outcome !== "completed" || r.reason !== "awaiting-input") continue;
+    const at = runAt(r);
+    const known = typeof r.target === "string" && typeof r.kind === "string";
+    const answered = known && Number.isFinite(at) && latest.get(`${r.kind}\u0000${r.target}`) > at;
+    if (answered && unansweredOnly) continue;
+    out.push({
+      target: typeof r.target === "string" ? r.target : null,
+      kind: typeof r.kind === "string" ? r.kind : null,
+      jobId: r.jobId ?? null,
+      parkedAt: Number.isFinite(at) ? at : null,
+      ageMs: Number.isFinite(at) && Number.isFinite(nowMs) ? Math.max(0, nowMs - at) : null,
+      answered,
+      chainCount: readChainCount(sessionsDir, parkedSessionKey(r), fs),
+    });
+  }
+  out.sort((a, b) => (b.parkedAt ?? -Infinity) - (a.parkedAt ?? -Infinity));
+  return out;
+}
+
+/** The secret profiles' NAMES in a settings view (`readSettingsView`), sorted; never a resolver path. */
+export function secretProfileNames(settingsView) {
+  const profiles = settingsView?.overlay?.secretProfiles;
+  if (profiles === null || typeof profiles !== "object" || Array.isArray(profiles)) return [];
+  // The worker's profile-name charset (secret-profiles.mjs): a key outside it is not a profile the worker loads.
+  return Object.keys(profiles).filter((n) => /^[A-Za-z0-9._-]{1,64}$/.test(n)).sort();
+}
+
+/**
+ * Where a forge's instance lives, per kind: the deployment's own variable (what the worker's config reads) first, then
+ * the job-container names the worker derives from it (`FORGES[kind].hostVars`). GitHub has one host and needs none.
+ */
+export const FORGE_HOST_ENV = Object.freeze({ gitlab: ["GITLAB_URL"], forgejo: ["FORGEJO_URL"], azure: ["AZURE_ORG_URL"] });
+
+/** A repository path per forge: GitHub `owner/repo`, GitLab `group[/sub...]/project`, Forgejo `owner/repo`, Azure `project/repo`. */
+const FORGE_REPO_RE = Object.freeze({
+  github: /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/,
+  forgejo: /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/,
+  gitlab: /^[A-Za-z0-9._-]{1,100}(?:\/[A-Za-z0-9._-]{1,100}){1,20}$/,
+  azure: /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/,
+});
+
+/** The base URL a forge kind's links are built on, or null: http(s) only, no credentials, query or fragment. */
+function forgeBase(kind, env) {
+  for (const name of [...(FORGE_HOST_ENV[kind] ?? []), ...(FORGES[kind]?.hostVars ?? [])]) {
+    const raw = env?.[name];
+    if (typeof raw !== "string" || raw === "") continue;
+    if (hasControls(raw) || /\s/.test(raw)) return null;
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      return null;
+    }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") return null;
+    return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+  }
+  return null;
+}
+
+/**
+ * The browsable URL of a run record's target, or null (issue #641). GitHub as `targetUrl` in dashboard.ts has always
+ * built it (`https://github.com/<repo>/issues/<n>`, which GitHub redirects to the pull request when it is one); GitLab,
+ * Forgejo and Azure on the DEPLOYMENT's own instance URL (`forgeBase`), with the target's separator choosing an issue or
+ * a merge/pull request. Refused (null) on a control byte anywhere, a repository outside its forge's charset, an
+ * instance URL that is not http(s), or an unknown host. Never a guessed host: a link an operator clicks to the wrong
+ * place is worse than none.
+ */
+export function forgeLinkOf(record, env = {}) {
+  const kind = record?.kind;
+  const target = record?.target;
+  if (!isForgeKind(kind) || typeof target !== "string" || target.length > 300 || hasControls(target)) return null;
+  const m = /^(.+)([#!])(\d{1,12})$/.exec(target);
+  if (!m) return null;
+  const [, repo, sep, n] = m;
+  // A `.` or `..` segment would walk the link's path out of the repository on the forge's own host.
+  if (!FORGE_REPO_RE[kind]?.test(repo) || repo.split("/").some((seg) => seg === "." || seg === "..")) return null;
+  const request = sep === "!";
+  if (request && FORGES[kind].pullRequestSep !== "!") return null; // a separator this forge never writes
+  if (kind === "github") return `https://github.com/${repo}/issues/${n}`;
+  const base = forgeBase(kind, env);
+  if (base === null) return null;
+  if (kind === "gitlab") return `${base}/${repo}/-/${request ? "merge_requests" : "issues"}/${n}`;
+  if (kind === "forgejo") return `${base}/${repo}/issues/${n}`;
+  if (kind === "azure") {
+    const [project, name] = repo.split("/");
+    return request ? `${base}/${project}/_git/${name}/pullrequest/${n}` : `${base}/${project}/_workitems/edit/${n}`;
+  }
+  return null;
 }

@@ -179,10 +179,15 @@ export const GLYPH = Object.freeze({
 // The 5-entity escape, byte-for-byte the worker's buildFormPage helper: every string interpolated
 // into markup goes through this, operator-authored or not, because "charset-bound upstream" is an
 // assumption and an entity is a guarantee.
+// Characters that change what a reader SEES without being visible themselves: C0 controls (tab and line breaks
+// aside), DEL, C1 controls, and the bidi formatting marks. A run's `target` carries the forge's repo text, so one
+// reaching an SVG label could reorder it or hide what follows; each becomes a space, as the panel's scrub does.
+const UNSEEN_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
 export function escapeHtml(s) {
   // WELL-FORMED FIRST (issue #418): half a surrogate pair that arrived in the data would otherwise reach
-  // the page as it came, and a cut is not the only way to get one.
-  return String(s).toWellFormed().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  // the page as it came, and a cut is not the only way to get one. Then the unseen characters (issue #641).
+  return String(s).toWellFormed().replace(UNSEEN_RE, " ").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // JSON destined for the inline script: `<` becomes < so no value can spell `</script>` and

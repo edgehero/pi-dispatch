@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { join } from "node:path";
-import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_FIELD_MAX, CONSOLE_AUDIT_KEY, CONSOLE_AUDIT_OUTCOMES, makeConsoleAudit, makeConsoleAuditReaper, mirrorRow, verifyConsoleAudit } from "../src/console-audit.mjs";
+import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_FIELD_MAX, CONSOLE_AUDIT_KEY, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, makeConsoleAudit, makeConsoleAuditReaper, mirrorRow, readConsoleAudit, verifyConsoleAudit } from "../src/console-audit.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // The console's audit log (issue #640, INT-CONSOLE-AUDIT-LOG). Every test drives an injected clock: rows land in the
@@ -357,4 +357,173 @@ test("verify walks a file larger than its read chunk, rows with multi-byte chara
 	const res = verifyConsoleAudit({ logsDir });
 	assert.equal(res.ok, false);
 	assert.equal(res.broken.line, 4323, "the row after the edited one breaks, at its 1-based line");
+});
+
+// --- readConsoleAudit (issue #641) ---------------------------------------------------------------------------------
+
+test("readConsoleAudit: newest first across month files, paged by a file-and-line cursor, each row as stored", () => {
+	const { logsDir, audit, clock } = setup(Date.UTC(2026, 8, 30, 12, 0, 0));
+	for (let i = 0; i < 3; i++) audit.append(row({ target: `sep-${i}` }));
+	clock.set(T0);
+	for (let i = 0; i < 4; i++) audit.append(row({ target: `oct-${i}` }));
+	const all = readConsoleAudit({ logsDir });
+	assert.deepEqual(all.rows.map((r) => r.seq), [7, 6, 5, 4, 3, 2, 1]);
+	assert.equal(all.next, null);
+	assert.equal(all.rows[0].target, "oct-3");
+	assert.equal(all.rows[0].prev.length, 64, "the stored row, prev and all");
+	const p1 = readConsoleAudit({ logsDir, limit: 3 });
+	assert.deepEqual([p1.rows.map((r) => r.seq), p1.next], [[7, 6, 5], "2026-10:2"]);
+	const p2 = readConsoleAudit({ logsDir, limit: 3, before: p1.next });
+	assert.deepEqual([p2.rows.map((r) => r.seq), p2.next], [[4, 3, 2], "2026-09:2"], "across the month boundary");
+	const p3 = readConsoleAudit({ logsDir, limit: 3, before: p2.next });
+	assert.deepEqual([p3.rows.map((r) => r.seq), p3.next], [[1], null]);
+	// A row appended while an operator pages lands above every cursor handed out.
+	audit.append(row({ target: "late" }));
+	assert.deepEqual(readConsoleAudit({ logsDir, limit: 3, before: p1.next }).rows.map((r) => r.seq), [4, 3, 2]);
+	assert.equal(readConsoleAudit({ logsDir, limit: 1 }).rows[0].target, "late");
+});
+
+test("readConsoleAudit returns a damaged line in its place as broken, never skipping it, and a page can end on one", () => {
+	const { logsDir, dir, audit } = setup();
+	for (let i = 0; i < 4; i++) audit.append(row({ target: `t${i}` }));
+	const path = join(dir, "2026-10.jsonl");
+	const lines = fs.readFileSync(path, "utf8").split("\n").filter((l) => l !== "");
+	// line 1 good (seq 1), a junk line, seq 2, a JSON value that is not a row, seq 3, seq 4
+	fs.writeFileSync(path, [lines[0], "not json {", lines[1], "[1,2]", lines[2], lines[3]].join("\n") + "\n");
+	const all = readConsoleAudit({ logsDir });
+	assert.deepEqual(all.rows.map((r) => (r.broken ? `broken:${r.line}` : r.seq)), [4, 3, "broken:4", 2, "broken:2", 1]);
+	assert.deepEqual(all.rows[2], { broken: true, file: "2026-10.jsonl", line: 4 });
+	// Every page size walks the same sequence exactly once.
+	for (const limit of [1, 2, 3, 4]) {
+		const seen = [];
+		let before = null;
+		for (let i = 0; i < 10; i++) {
+			const page = readConsoleAudit({ logsDir, limit, before });
+			seen.push(...page.rows.map((r) => (r.broken ? `broken:${r.line}` : r.seq)));
+			if (page.next === null) break;
+			before = page.next;
+		}
+		assert.deepEqual(seen, [4, 3, "broken:4", 2, "broken:2", 1], `limit ${limit}`);
+	}
+	// A file whose first line is damaged: it sorts before that file's first good row.
+	fs.writeFileSync(path, ["{oops", lines[0], lines[1]].join("\n") + "\n");
+	assert.deepEqual(readConsoleAudit({ logsDir }).rows.map((r) => (r.broken ? `broken:${r.line}` : r.seq)), [2, 1, "broken:1"]);
+});
+
+test("readConsoleAudit: bounded limit, a cursor that is not a number, no directory, an unreadable file", () => {
+	const { logsDir, audit } = setup();
+	assert.deepEqual(readConsoleAudit({ logsDir }), { rows: [], next: null }, "no directory yet: no rows");
+	for (let i = 0; i < 3; i++) audit.append(row());
+	assert.equal(readConsoleAudit({ logsDir, limit: 0 }).rows.length, 1, "at least one");
+	assert.equal(readConsoleAudit({ logsDir, limit: 10_000 }).rows.length, 3);
+	assert.equal(CONSOLE_AUDIT_READ_MAX, 500);
+	// Not a cursor: the old numeric seq cursor, a line 0, a padded line, a month without its line, a line too large.
+	for (const bad of ["x", 5, "5", 12.5, "2026-10", "2026-10:0", "2026-10:01", "2026-10:-1", " 2026-10:1", "2026-10:1 ", "2026-1:1", `2026-10:${"9".repeat(16)}`, `2026-10:${"9".repeat(17)}`]) {
+		assert.match(readConsoleAudit({ logsDir, before: bad }).unreadable, /cursor/, JSON.stringify(bad));
+	}
+	assert.equal(readConsoleAudit({ logsDir, before: "2026-10:3" }).rows.length, 2, "a cursor is taken");
+	const failing = { ...fs, openSync: (p, ...a) => (String(p).endsWith(".jsonl") ? (() => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); })() : fs.openSync(p, ...a)) };
+	assert.deepEqual(readConsoleAudit({ logsDir, fs: failing }).rows, [{ broken: true, file: "2026-10.jsonl", line: 0, reason: "EACCES" }]);
+	const blind = { ...fs, readdirSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } };
+	assert.match(readConsoleAudit({ logsDir, fs: blind }).unreadable, /cannot be read \(EACCES\)/);
+});
+
+test("readConsoleAudit: a cursor deep in a long file returns the rows just below it, through the ring buffer", () => {
+	const { logsDir, audit } = setup();
+	for (let i = 0; i < 1200; i++) audit.append(row({ action: "refused", outcome: "refused" }));
+	const page = readConsoleAudit({ logsDir, limit: 5, before: "2026-10:600" });
+	assert.deepEqual(page.rows.map((r) => r.seq), [599, 598, 597, 596, 595]);
+	assert.equal(page.next, "2026-10:595");
+});
+
+// Month files written by hand: the reader judges only whether a line is a row, never the chain, so a fixture can place a
+// damaged line exactly where a page edge falls.
+function auditFiles(months) {
+	const logsDir = tempDir("pd-console-audit-read-");
+	const dir = join(logsDir, "console-audit");
+	fs.mkdirSync(dir, { recursive: true });
+	for (const [month, lines] of Object.entries(months)) {
+		const text = lines.map((l) => (typeof l === "number" ? JSON.stringify({ at: `${month}-01T00:00:00.000Z`, seq: l, prev: null, actor, action: "login", outcome: "ok" }) : l));
+		fs.writeFileSync(join(dir, `${month}.jsonl`), text.join("\n") + "\n");
+	}
+	return logsDir;
+}
+const label = (r) => (r.broken ? `${r.file.slice(0, 7)}:broken:${r.line}` : r.seq);
+function walk(logsDir, limit) {
+	const seen = [];
+	const cursors = [];
+	let before = null;
+	for (let i = 0; i < 50; i++) {
+		const page = readConsoleAudit({ logsDir, limit, before });
+		seen.push(...page.rows.map(label));
+		if (page.next === null) break;
+		cursors.push(page.next);
+		before = page.next;
+	}
+	return { seen, cursors };
+}
+
+test("readConsoleAudit: every entry has its own place, so a page ending inside a run of damaged lines skips none (#641)", () => {
+	// Two damaged lines trailing September's last row and two leading October's first: the old half-step cursor gave
+	// each pair one position, and gave the two pairs the SAME one (seq 2 + 0.5 and seq 3 - 0.5).
+	const logsDir = auditFiles({ "2026-09": [1, 2, "junk a", "junk b"], "2026-10": ["{oops", "[1]", 3, 4] });
+	const want = [4, 3, "2026-10:broken:2", "2026-10:broken:1", "2026-09:broken:4", "2026-09:broken:3", 2, 1];
+	assert.deepEqual(readConsoleAudit({ logsDir }).rows.map(label), want);
+	for (let limit = 1; limit <= want.length; limit++) assert.deepEqual(walk(logsDir, limit).seen, want, `limit ${limit}`);
+	// The page edge exactly between the two leading damaged lines, and the cursor it hands out.
+	const p1 = readConsoleAudit({ logsDir, limit: 3 });
+	assert.deepEqual([p1.rows.map(label), p1.next], [[4, 3, "2026-10:broken:2"], "2026-10:2"]);
+	assert.deepEqual(readConsoleAudit({ logsDir, limit: 1, before: p1.next }).rows.map(label), ["2026-10:broken:1"], "the second of the pair, not skipped");
+});
+
+test("readConsoleAudit: a leading damaged line's place is its own line, so the next page starts in the older file", () => {
+	const logsDir = auditFiles({ "2026-09": [1, 2], "2026-10": ["not json", 3] });
+	const p1 = readConsoleAudit({ logsDir, limit: 2 });
+	assert.deepEqual([p1.rows.map(label), p1.next], [[3, "2026-10:broken:1"], "2026-10:1"]);
+	const p2 = readConsoleAudit({ logsDir, limit: 2, before: p1.next });
+	assert.deepEqual([p2.rows.map(label), p2.next], [[2, 1], null]);
+});
+
+test("readConsoleAudit: a page that fills exactly at the end of a month file still says there is more", () => {
+	const logsDir = auditFiles({ "2026-08": [1], "2026-09": [2, 3, 4], "2026-10": [5, 6, 7] });
+	// Said WITHOUT opening the older file: learning whether it holds a line would read it whole, for a page with no room.
+	const opened = [];
+	const watching = { ...fs, openSync: (p, ...a) => (opened.push(String(p).slice(-13)), fs.openSync(p, ...a)) };
+	const p1 = readConsoleAudit({ logsDir, limit: 3, fs: watching });
+	assert.deepEqual([p1.rows.map(label), p1.next], [[7, 6, 5], "2026-10:1"], "October filled the page exactly");
+	assert.deepEqual(opened, ["2026-10.jsonl"]);
+	const p2 = readConsoleAudit({ logsDir, limit: 3, before: p1.next });
+	assert.deepEqual([p2.rows.map(label), p2.next], [[4, 3, 2], "2026-09:1"], "and September did too");
+	const p3 = readConsoleAudit({ logsDir, limit: 3, before: p2.next });
+	assert.deepEqual([p3.rows.map(label), p3.next], [[1], null]);
+	// The oldest file filling a page exactly is the end.
+	assert.equal(readConsoleAudit({ logsDir, limit: 1, before: "2026-08:2" }).next, null);
+});
+
+test("readConsoleAudit: never more than CONSOLE_AUDIT_READ_MAX rows, and a long run of damaged lines costs one page of memory", () => {
+	const many = auditFiles({ "2026-10": Array.from({ length: 600 }, (_, i) => i + 1) });
+	const big = readConsoleAudit({ logsDir: many, limit: 10_000 });
+	assert.equal(big.rows.length, CONSOLE_AUDIT_READ_MAX);
+	assert.deepEqual([big.rows[0].seq, big.rows[499].seq, big.next], [600, 101, "2026-10:101"]);
+	// A thousand damaged lines before the file's first row: the newest five, then the five under them.
+	const junk = auditFiles({ "2026-10": [...Array.from({ length: 1000 }, (_, i) => `junk ${i}`), 1] });
+	const p1 = readConsoleAudit({ logsDir: junk, limit: 5 });
+	assert.deepEqual([p1.rows.map(label), p1.next], [[1, "2026-10:broken:1000", "2026-10:broken:999", "2026-10:broken:998", "2026-10:broken:997"], "2026-10:997"]);
+	const p2 = readConsoleAudit({ logsDir: junk, limit: 5, before: p1.next });
+	assert.deepEqual(p2.rows.map(label), ["2026-10:broken:996", "2026-10:broken:995", "2026-10:broken:994", "2026-10:broken:993", "2026-10:broken:992"]);
+	assert.equal(walk(junk, 97).seen.length, 1001, "paged to the end, every line once");
+});
+
+test("readConsoleAudit: a file newer than the cursor is never opened, and one that fails part-way is a damaged entry in its place", () => {
+	const logsDir = auditFiles({ "2026-09": [1, 2], "2026-10": [3, 4] });
+	const opened = [];
+	const watching = { ...fs, openSync: (p, ...a) => (opened.push(String(p).slice(-13)), fs.openSync(p, ...a)) };
+	assert.deepEqual(readConsoleAudit({ logsDir, before: "2026-09:3", fs: watching }).rows.map(label), [2, 1]);
+	assert.deepEqual(opened, ["2026-09.jsonl"]);
+	// A read that fails after the first chunk: the line it read, then the failure one line under it.
+	let reads = 0;
+	const flaky = { ...fs, readSync: (...a) => (++reads > 1 ? (() => { throw Object.assign(new Error("EIO"), { code: "EIO" }); })() : fs.readSync(...a)) };
+	const res = readConsoleAudit({ logsDir: auditFiles({ "2026-10": [1, 2] }), fs: flaky });
+	assert.deepEqual(res.rows.map(label), ["2026-10:broken:0", 2, 1]);
+	assert.equal(res.rows[0].reason, "EIO");
 });
