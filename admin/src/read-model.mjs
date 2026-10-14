@@ -178,11 +178,11 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 // The dollar settings (issue #501) are among them: `dispatch_set`'s confirm states a dollar key's effective value, and
 // in a pointer deployment the cap the worker runs under lives in the deployment's `.env`, not in pi's environment.
 // Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
-const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
+const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
 
 /**
  * Issue #471: the environment `resolvePaths` should see, by the rule `doctor` judges the service by
@@ -773,11 +773,20 @@ export function readPauseWindows({ pauseWindowsPath, fs = nodeFs }) {
  * parse it), and written ATOMICALLY (tmp + rename) so the live-reload watcher never sees a half-written file.
  * Reached from operator-typed `/dispatch pause …` handlers AND the confirm-gated `dispatch_pause_*` tools; the
  * tools route through `confirmedWrite` (an operator approves before this runs). Returns `{ ok }` or `{ invalid }`.
+ *
+ * `expect` (issue #640), as for `writeScopedLimits` and `writeProjects`: the `writeInputs` snapshots the change was
+ * built from (the console's preview, stored in its confirm ticket). Right before the rename the file is re-read and
+ * compared with them, and a difference refuses with nothing written, so a confirm applies exactly what was previewed.
+ * With no `expect` the re-check is against this call's own read, which only narrows the window a concurrent write
+ * could be lost in. Deliberately NOT `replaceFile`: that one refuses a symlink and keeps the file's mode and owner,
+ * each a behaviour change for the extension's existing callers, which this change does not make.
  */
-export function writePauseWindows({ pauseWindowsPath, mutate, fs = nodeFs }) {
+export function writePauseWindows({ pauseWindowsPath, mutate, expect = null, fs = nodeFs }) {
   let current = [];
+  // The text as read, which is also the snapshot the re-check compares against when there is no `expect`.
+  const read = fileSnapshot(fs, pauseWindowsPath);
   try {
-    const raw = JSON.parse(fs.readFileSync(pauseWindowsPath, "utf8"));
+    const raw = JSON.parse(read);
     if (Array.isArray(raw?.windows)) current = raw.windows;
   } catch {
     // Missing/invalid file: start from empty; the validated atomic write below repairs it.
@@ -789,8 +798,20 @@ export function writePauseWindows({ pauseWindowsPath, mutate, fs = nodeFs }) {
   } catch (e) {
     return { invalid: e?.message ?? String(e) };
   }
-  const tmp = `${pauseWindowsPath}.tmp`;
-  fs.writeFileSync(tmp, text, { mode: 0o644 });
+  // A tmp name of its own, created exclusively, as `replaceFile` does: the console and the pi extension are two
+  // processes writing this file, and a shared `<file>.tmp` would let one rename the other's bytes past its own re-check.
+  const tmp = `${pauseWindowsPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  fs.writeFileSync(tmp, text, { mode: 0o644, flag: "wx" });
+  for (const input of Array.isArray(expect) ? expect : [{ path: pauseWindowsPath, text: read }]) {
+    if (fileSnapshot(fs, input.path) !== input.text) {
+      try {
+        fs.unlinkSync?.(tmp);
+      } catch {
+        // nothing to drop
+      }
+      return { invalid: `${input.path} changed after this change was built from it (another session wrote it); nothing was written. Look again and retry` };
+    }
+  }
   fs.renameSync(tmp, pauseWindowsPath);
   return { ok: true };
 }
