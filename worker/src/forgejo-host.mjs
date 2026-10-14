@@ -29,6 +29,9 @@ import { isDeterminateFetchFailure } from "./transient.mjs";
 
 const API_PREFIX = "/api/v1";
 
+/** How many pages of repository labels the parked marker's lookup reads before it gives up (50 a page at most). */
+const MAX_LABEL_PAGES = 20;
+
 /** Build the host surface. Returns the same four methods every forge host exposes. */
 export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 	const root = `${String(apiUrl ?? "").replace(/\/+$/, "")}${API_PREFIX}`;
@@ -155,10 +158,22 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 	}
 
 	/**
-	 * Add or remove the parked marker on an issue (issue #625, parked.mjs). Forgejo adds and removes a
-	 * label by NAME (its IssueLabelsOption and the `{identifier}` path take a name or an id), but only one the repository
-	 * already has, so adding first creates the repository label; a label that already exists answers 409 or 422 there. The caller treats any throw as fail-open:
-	 * the session store's sidecar, not this label, decides whether a reply resumes anything.
+	 * Add or remove the parked marker on an issue (issue #625, parked.mjs). The caller treats any throw as fail-open: the
+	 * session store's sidecar, not this label, decides whether a reply resumes anything.
+	 *
+	 * BY ID, AFTER A LOOKUP, because Forgejo does not refuse a duplicate label name. Measured on 14.0.5: a second
+	 * `POST /repos/{o}/{r}/labels {"name":"pi-awaiting-input",...}` answers 201 and creates ANOTHER repository label of
+	 * that name (the repository's labels became ai #1, pi-awaiting-input #2, pi-awaiting-input #3 after the second park);
+	 * adding by name then attaches EVERY label of that name (the issue carried #2 and #3, two adds in its timeline); and
+	 * removing by name took off only ONE (204, #3 stayed). So the marker outlived the resumed run for good, each park added
+	 * a repository label, and every later plain reply was routed, to end as `not-parked`. The 409/422 this used to accept
+	 * on the create never happens on Forgejo 14.
+	 *
+	 * Adding: list the repository's labels, create one only when none has the exact name, and attach the LOWEST id, so a
+	 * repository that already holds duplicates stops growing them and the issue gets one marker. Removing: read the
+	 * labels the issue actually carries and remove every one of that name by id, so an issue that holds two from before
+	 * this fix is cleared too. The duplicate repository labels themselves are left alone: deleting a repository's labels
+	 * is the operator's call, and a spare one carried by no issue routes nothing (docs/forgejo.md says how to tidy them).
 	 */
 	async function setParkedLabel(ref, target, on, token) {
 		const [owner, name] = splitRepo(ref);
@@ -175,21 +190,45 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 				throw new InfraRetry(`forgejo-host: ${method} ${path} failed (${fetchFailureReason(err)})`);
 			}
 			if (!res.ok && !accept.includes(res.status)) throw new InfraRetry(`forgejo-host: ${method} ${path} returned ${res.status}`);
+			return res;
 		};
 		const issue = `/repos/${owner}/${name}/issues/${encodeURIComponent(target?.number)}/labels`;
+		const markers = (labels) => (Array.isArray(labels) ? labels : []).filter((l) => l?.name === PARKED_LABEL && Number.isSafeInteger(l?.id)).map((l) => l.id);
 		if (on) {
-			await send("POST", `/repos/${owner}/${name}/labels`, { name: PARKED_LABEL, color: "#fbca04", description: "pi-dispatch: the last run is waiting for an answer" }, [409, 422]);
-			await send("POST", issue, { labels: [PARKED_LABEL] });
+			let ids = await repoLabelIds(owner, name, token, markers);
+			if (ids.length === 0) {
+				const res = await send("POST", `/repos/${owner}/${name}/labels`, { name: PARKED_LABEL, color: "#fbca04", description: "pi-dispatch: the last run is waiting for an answer" }, [409, 422]);
+				// A forge that DOES refuse the duplicate (409/422, a Gitea or a later Forgejo) raced another park to it: list
+				// again. A 201 hands back the label, so no second read is needed.
+				const created = res.ok ? await res.json().catch(() => null) : null;
+				ids = Number.isSafeInteger(created?.id) ? [created.id] : await repoLabelIds(owner, name, token, markers);
+			}
+			if (ids.length === 0) throw new InfraRetry(`forgejo-host: ${owner}/${name} has no ${PARKED_LABEL} label after creating it`);
+			await send("POST", issue, { labels: [Math.min(...ids)] });
 			return;
 		}
-		// Already gone is success: 404 (no such issue) and 422. Forgejo answers 422 {"message":"label does not exist
-		// [label_id: 0, repo_id: 1]"} when the REPOSITORY has no such label at all (measured on 14.0.5), which is every
-		// completed non-parked run on an awaitInput trigger in a repository that never parked, and each one logged
-		// `parked_label_failed`. Matched on the status alone, not the body: in 14.0.5's DeleteIssueLabel the only 422 is
-		// "label does not exist" (repository, organization or id), the binding's own 422 needs a request body and this
-		// sends none, and the message text is free to change between versions where the status is the API's contract.
-		// Were some other 422 ever read as gone, a stale marker would stay, which decides nothing (the sidecar does).
-		await send("DELETE", `${issue}/${encodeURIComponent(PARKED_LABEL)}`, undefined, [404, 422]);
+		// Already gone is success: 404 (no such issue) and, on the removal, 422 -- Forgejo's answer when no such label
+		// exists (measured on 14.0.5: {"message":"label does not exist [label_id: 0, repo_id: 1]"}). Matched on the status
+		// alone: in 14.0.5's DeleteIssueLabel the only 422 is "label does not exist", the binding's own 422 needs a request
+		// body and none is sent, and the message is free to change between versions. A stray 422 read as gone would leave
+		// a stale marker, which decides nothing.
+		const carried = markers(await get(issue, token, { notFound: [] }));
+		for (const id of carried) await send("DELETE", `${issue}/${id}`, undefined, [404, 422]);
+	}
+
+	/**
+	 * The ids of every repository label named `PARKED_LABEL`, in id order. Paged until an EMPTY page rather than until a
+	 * short one, because the instance caps the page size (`MAX_RESPONSE_ITEMS`) below what was asked for, and a short page
+	 * is then every page. Bounded, so a server that never returns an empty page cannot hold a job's teardown.
+	 */
+	async function repoLabelIds(owner, name, token, markers) {
+		const ids = [];
+		for (let page = 1; page <= MAX_LABEL_PAGES; page++) {
+			const labels = await get(`/repos/${owner}/${name}/labels?page=${page}&limit=50`, token);
+			if (!Array.isArray(labels) || labels.length === 0) return ids.sort((a, b) => a - b);
+			ids.push(...markers(labels));
+		}
+		throw new InfraRetry(`forgejo-host: ${owner}/${name} lists more than ${MAX_LABEL_PAGES} pages of labels`);
 	}
 
 	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
