@@ -23,7 +23,10 @@ and one token cannot serve both safely.
 - **The job token, `FORGEJO_TOKEN`.** Make the harness account a **Write** collaborator of each repository,
   and mint a **repository-scoped** token ("Specific repositories") carrying only `write:repository` and
   `write:issue`. That is genuinely narrower than GitLab's equivalent: there is no all-or-nothing `api` scope
-  to fall back to. Every forgejo job carries this token.
+  to fall back to. Every forgejo job carries this token, and nothing a job does needs it to be an admin's:
+  the worker reads the default branch's protection from the branch itself
+  (`GET /repos/{owner}/{repo}/branches/{branch}`, whose `protected` Forgejo computes with its own rule
+  matching, wildcards included), not from the rule list, which only an admin may read.
 - **The lookup token, `FORGEJO_PERMISSION_TOKEN`.** The author gate asks Forgejo for the permission of
   whoever triggered the job (`GET /repos/{owner}/{repo}/collaborators/{user}/permission`), and Forgejo
   answers that question about another user only to a site admin or an admin of the repository. A `write`
