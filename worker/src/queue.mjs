@@ -248,6 +248,38 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 const SEMANTIC_WINDOW_MS = 10 * 60 * 1000;
 
 /**
+ * Close the semantic window of a run that PARKED (REQ-AWAIT-INPUT, DES-AWAIT-INPUT-ENDS-THE-JOB). Never throws.
+ *
+ * The window exists to coalesce rapid duplicate deliveries into one ACTIVE job. A ttl-mode key outlives the job it
+ * was set for (bullmq 5.80.4, `removeDeduplicationKeyIfNeededOnFinalization.lua`: a finished job deletes its key only
+ * when it has no ttl), so without this a person's answer that lands within ten minutes of the delivery that STARTED
+ * the parked run is swallowed against that finished run: the receiver answers `deduplicated`, nothing runs, and the
+ * marker stays. Once a run has parked, the next delivery on its key is a deliberate answer, never a duplicate.
+ *
+ * It asks the BullMQ job itself, rather than rebuilding the key from the job data: `job.deduplicationId` is the id
+ * the add stored with the job (`deid` in its hash), so there is no second spelling of the key format to drift from
+ * `enqueueForgeJob`'s, and it covers every suffix (the `closed:`/`cmd:` slot, a replica's `:r<n>`) by construction.
+ * And `job.removeDeduplicationKey()` is a compare-and-delete (`removeDeduplicationKey-1.lua`: DEL only when the key
+ * still holds THIS job's id), where `queue.removeDeduplicationKey(id)` is a bare DEL that could free a key a later
+ * job now holds.
+ *
+ * Fails open with a named line: a failure only leaves today's behaviour (the answer waits out the window).
+ * `released` is false, logged as a release and not as a failure, when the key is already gone (the window lapsed
+ * during a long run) or now names another job.
+ */
+export async function releaseSemanticWindow(job, log = () => {}) {
+	if (!job?.deduplicationId || typeof job.removeDeduplicationKey !== "function") return false;
+	try {
+		const released = (await job.removeDeduplicationKey()) === true;
+		log("parked_window_released", { jobId: job.id ?? null, released });
+		return released;
+	} catch (error) {
+		log("parked_window_release_failed", { jobId: job.id ?? null, code: typeof error?.code === "string" ? error.code : "error" });
+		return false;
+	}
+}
+
+/**
  * Enqueue a GitHub-triggered job. Returns `{ jobId, deduplicated, survivingJobId? }` -- the computed
  * per-delivery id, plus whether the SEMANTIC window swallowed this delivery (issue #289; the GUID
  * layer's replays are deliberately invisible, see the comparison below). `enqueueLocalJob` keeps its

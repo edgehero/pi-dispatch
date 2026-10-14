@@ -292,15 +292,27 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   trigger a redelivery storm for a handled delivery), but no longer "queued", because a receiver that
   logs the swallow while answering success on the wire would be an honest log behind a lying wire.
   Before this, re-labelling an issue inside the window did nothing, with no feedback anywhere.
+  **A run that PARKS closes its own window** (`REQ-AWAIT-INPUT`, `DES-AWAIT-INPUT-ENDS-THE-JOB`). The window
+  coalesces rapid duplicate deliveries into one ACTIVE job, and a ttl-mode key outlives the job it was set for: a
+  finished job deletes its key only when it has no ttl. So the answer to a parked run, which arrives on the same
+  key, was swallowed against the finished run whenever it came within ten minutes of the delivery that started that
+  run, and quick answers are the normal case. Once a run has parked, the next delivery on its key is a deliberate
+  answer, never a duplicate, so the worker deletes the key on the park, through the job's own compare-and-delete
+  (the key is freed only while it still names that job). Every other job keeps its window to the end of its ttl.
 - **Evidence (upstream)**: `taskforcesh/bullmq @ v5.80.4 → src/commands/addStandardJob-9.lua:88-93`
-  (`EXISTS jobIdKey` → `handleDuplicatedJob`; a duplicate add is a silent no-op, not a throw)
+  (`EXISTS jobIdKey` → `handleDuplicatedJob`; a duplicate add is a silent no-op, not a throw);
+  `src/commands/includes/removeDeduplicationKeyIfNeededOnFinalization.lua` (a finishing job deletes its
+  dedup key only at `PTTL` `-1` or `0`, so a ttl key outlives it); `src/commands/removeDeduplicationKey-1.lua`
+  (`GET` then `DEL` only when the key holds the given job id), reached as `Job.removeDeduplicationKey()`
+  with the `deid` the add stored on the job (`src/classes/job.ts`)
 - **Traces to**: `REQ-QUEUE-BURST-NO-DROP`, `CONST-RETRY-INFRA-ONLY`
 - **Acceptance**: Given the same delivery id twice **within the retention window** — on either forge —
   the second add is ignored and exactly one job runs. Given a GitLab delivery carrying neither
   `webhook-id` nor `Idempotency-Key`, the receiver returns 400 and enqueues nothing. Given a GitLab issue
   `#5` and a merge request `!5` in one project firing the same flow, both run. Given a redelivery after retention has expired, a new job runs — this
   is accepted and documented, not a defect, but it must be a *chosen* window rather than an inherited
-  default.
+  default. Given a run that parks, a new delivery on its key inside the ten minutes creates a job, while a
+  run that ends without parking still coalesces one there.
 
 ## REQ-TRIGGER-AUTHOR-GATE
 
@@ -2641,8 +2653,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   issue that carries the label, from an admitted author, to a comment trigger that arms `run.resume`, a job is
   enqueued; given the key's `parked` sidecar it runs, and without it the job is refused `not-parked` with
   `budgetReserved: false`, no comment and the label removed. Given the same reply from an author the trigger does not
-  admit, or on a pull request, or on an issue without the label, nothing is enqueued. Given a parked run's record, the
-  panel's run row says `awaiting-input` where a finished run's says `done`.
+  admit, or on a pull request, or on an issue without the label, nothing is enqueued. Given a reply that reaches the
+  comment trigger seconds after the run parked, inside the ten-minute semantic window of the delivery that started
+  that run, it runs: a park closes that window (`REQ-DEDUP-BY-DELIVERY-GUID`), and so does a resumed run that parks
+  again. Given a parked run's record, the panel's run row says `awaiting-input` where a finished run's says `done`.
 
 ## REQ-RESURRECTABLE-SANDBOX
 
@@ -3561,6 +3575,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-14 | No issue, found in a live lab on 4.3.0 (Forgejo 14; every forge has it): the answer to a parked run, arriving within ten minutes of the delivery that started that run, was swallowed by the semantic window against the finished run (`deduplicated`, `202`, nothing run, the label left on). **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED** (semantic layer only): a run that parks closes its own window through the job's compare-and-delete, the bullmq 5.80.4 evidence for why a ttl key outlives its job is cited, and Acceptance gains the parked case beside the unchanged coalescing of a run that did not park. The GUID layer UNCHANGED, checked. **`REQ-AWAIT-INPUT` AMENDED**: Acceptance gains the quick answer, and a resumed run that parks again. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: the key, the promotion and the chain bound do not move; the release runs after the promotion. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a release failure is logged and changes no outcome. **Code evidence**: worker/src/queue.mjs -> releaseSemanticWindow; worker/src/processor.mjs -> releaseParkedWindow; worker/src/index.mjs. |
 | 2026-10-12 | No issue: a runner MCP refusal named in the run record, and doctor on an MCP endpoint. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: the worker's fixed terminal sentences gain the runner's six exit-2 refusals of a job's MCP servers, `mcp-unavailable`, `mcp-config-invalid`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed`, which recorded and commented as `runner-policy` before; each sentence names the rule and what the operator checks, never the server, a host or a variable, and is quoted in the clause. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**, acceptance only: a server answering HTTP 401 records `mcp-unavailable` and comments that reason's sentence; doctor proves the route of a declared endpoint that only an enabled overlay MCP server dials and passes it on any answer (an `https://` server's closed socket included), rather than warning that `/v1/models` did not answer 200, and judges one a model also dials as a model server. **`REQ-EGRESS-ALLOWLIST` AMENDED**, acceptance only: the same exception on the `models` probe. `REQ-OPERATOR-FAILURE-NOTIFICATION` is UNCHANGED, checked: the hook's set spreads `RUNNER_POLICY_REASONS`, so the six page as `runner-policy` did, and the pickup's free `mcp-config-invalid` pages nobody by its `budgetReserved: false`. |
 | 2026-10-12 | No issue: the forge's own MCP server. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the worker-authored `forge` entry is the one exception to "the operator's file" (a github or gitlab trigger names it in `run.mcp`; the forge's own MCP server, pinned in the job image, runs as the token the job already holds; the overlay may not use the name); acceptance gains its cases (the forge servers' merge and approval tools withheld among them) and traces gain `DES-FORGE-MCP`. `REQ-GLOBAL-PI-OVERLAY`, `REQ-TRIGGER-SECRETS` and `REQ-EGRESS-ALLOWLIST` are UNCHANGED, checked. The statement says withholding those tools is not a boundary (the token's role and branch protection are), and acceptance names the `GITLAB_URL` shapes that refuse `forge`. |
 | 2026-10-12 | No issue: MCP servers in jobs, the operator's view. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a trigger's `run.mcp` shows as a row badge, on the `dispatch_triggers` record and in its drill-in with each server as the overlay offers it; read-only, names and where each runs, never a value. `REQ-UPSTREAM-CONTRACT-TESTS` gains an advisory companion: pi-upgrade-check's MCP canary runs the runner's MCP tests and pins against pi@latest, so a release that moves them shows before the bump. `REQ-MCP-OPERATOR-SERVERS` is UNCHANGED, checked. |

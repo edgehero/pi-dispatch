@@ -213,6 +213,11 @@ your answer, below the same data delimiter every comment gets. On a pull request
 trigger's phrase (`@pi go with option B`). If the trigger also sets `awaitInput`, the agent can ask again. The label
 comes off once a run continues without asking again.
 
+You can answer right away. A run that stops to ask gives up the ten-minute window in which pi-dispatch treats a
+second comment on the same issue as a repeat of the first, so a quick answer is never mistaken for one. (If the
+worker cannot reach Valkey at that moment it logs `parked_window_release_failed`, and an answer within those ten
+minutes is then answered `deduplicated`; post it again after the window.)
+
 Rules:
 
 - `awaitInput` needs `"resume": true` beside it, and is refused wherever `resume` is (cron, `command`, `replicas`,

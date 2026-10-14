@@ -22,6 +22,7 @@ import { BUDGET_RECHECK_MS, HOST_BUDGET_TICK_MS, NEVER_FITS_RECHECK_MS, makeHost
 import { governedDollars } from "./allocation.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
+import { releaseSemanticWindow } from "./queue.mjs";
 
 
 export const QUEUE = "pi-jobs";
@@ -1344,6 +1345,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// mirroring the name/signal injection above. Omitted when unwired so a bare processor falls back
 				// to runJob's no-op default (a chain fault can never flip a completed outcome either way).
 				...(deps.collectChain ? { collectChain: (ctx) => deps.collectChain({ ...ctx, job }) } : {}),
+				// DES-AWAIT-INPUT-ENDS-THE-JOB: a parked run's semantic window is closed on the REAL BullMQ job, which holds the
+				// dedup id the add stored and the compare-and-delete that frees only a key it still owns (queue.mjs). Bound
+				// unconditionally, AFTER the `...deps` spread like the injections around it: whether the key may outlive a park
+				// is not a choice a wiring gets to make by omission.
+				releaseParkedWindow: () => releaseSemanticWindow(job, deps?.log),
 				// The plan collector (issue #505) the same way and for the same reason: the writer it records is the REAL job's
 				// `.id`, and the authority it checks is `.data` as queued. The pickup's `portfolio` decision rides in `ctx`.
 				...(deps.collectPlan ? { collectPlan: (ctx) => deps.collectPlan({ ...ctx, job }) } : {}),

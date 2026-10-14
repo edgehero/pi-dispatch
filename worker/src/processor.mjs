@@ -302,6 +302,10 @@ export async function runJob(job, deps) {
 		// (job, on) => Promise<void> (issue #625): add or remove the forge's parked marker. Never throws; the marker is a
 		// hint for the receiver, and the sidecar decides. The default does nothing.
 		parkedLabel = async () => {},
+		// () => Promise<unknown> (DES-AWAIT-INPUT-ENDS-THE-JOB): close this job's semantic dedup window once it has parked,
+		// so the answer is not swallowed against it. Takes no job: the key belongs to the REAL BullMQ job, which only the
+		// wiring holds (index.mjs binds queue.mjs's `releaseSemanticWindow` to it). Never throws. The default does nothing.
+		releaseParkedWindow = async () => {},
 		// The session store's root, or null when the feature is unavailable (REQ-RESUMABLE-SESSION). Read
 		// ONLY to answer the fail-closed gate below -- nothing here opens it, and it never reaches the
 		// container env (docker-run.mjs mounts a per-job COPY, never the store).
@@ -1520,6 +1524,12 @@ export async function runJob(job, deps) {
 				// job is ignored, since that runner was never offered the tool.
 				const parked = exitReason === "awaiting-input" && job.awaitInput === true;
 				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked }) : null;
+				// The window closes AFTER the promotion (an answer that gets in must find the `parked` mark and the transcript)
+				// and BEFORE the comment and the marker: the marker is what routes a phrase-free reply on an issue, and the
+				// comment is what tells a pull request's author to reply, so no answer they invite can meet the old key. Every
+				// park takes this path, a resumed run that parks again included. Guarded although the seam never throws: a
+				// fault here must not cost the person the comment that says how to continue.
+				if (parked) await Promise.resolve().then(releaseParkedWindow).catch(() => {});
 				if (parked) await comment(job, parkedComment(job.target));
 				// The forge marker the receiver routes a phrase-free reply on: set on a park, cleared when a run on a key that
 				// could park ends without parking. Never throws, and decides nothing: the sidecar promotion just wrote does.
