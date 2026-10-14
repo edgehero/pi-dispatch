@@ -17,6 +17,13 @@
  * the queue stack into an artifact builder. Its class list is duplicated below and pinned
  * byte-for-byte by a parity test in insights-html.test.mjs.
  *
+ * The operator console (issue #641) draws the same sections one by one, so the slice normalizers (`norm*`), the section
+ * renderers (`*SectionHtml`, `kpisHtml`, `planCardsHtml`, the daily charts, `breakdownHtml`, `topologySectionHtml`) and
+ * the stylesheet and script are exported. A renderer takes its slice NORMALIZED, and pushes each tooltip's text onto the
+ * `tips` array it is handed, the element carrying the index as `data-tip`. None of them emits a `style` attribute, a
+ * `<style>` or `<script>` element, or an `on*` handler (the console's CSP refuses inline style and script); only
+ * `buildInsightsHtml` wraps the page in its inline stylesheet and script.
+ *
  * Chart encoding rule the file:// posture forces: "estimated" is drawn with fill-opacity plus a
  * dashed outline, never an SVG hatch pattern -- a pattern fill would need a paint-server reference,
  * and the posture test bans that whole reference syntax as a substring.
@@ -163,7 +170,7 @@ function normDailyEntries(daily) {
  * total re-sort of every array with the fold's OWN comparators -- "top 8 by the fold's order" must
  * survive a shuffled payload, so the order is re-derived here rather than trusted.
  */
-function normFold(fold) {
+export function normFold(fold) {
   if (fold === null || fold === undefined || typeof fold !== "object") return null;
   const win = fold.window !== null && typeof fold.window === "object" ? fold.window : {};
   const window = {
@@ -338,7 +345,7 @@ const PROJECT_ID = INSIGHTS_PROJECT_ID_RE;
  * HTML-escapes it and ISOLATES it in a `<bdi>`, so even a right-to-left name cannot reorder the id or the text beside
  * it. Total: junk in, an empty map out.
  */
-function normProjectNames(v) {
+export function normProjectNames(v) {
   const names = new Map();
   for (const p of Array.isArray(v) ? v : []) {
     if (p === null || typeof p !== "object" || typeof p.id !== "string" || !PROJECT_ID.test(p.id)) continue;
@@ -393,7 +400,7 @@ function normBudgetWindow(v) {
 /** The budget slice's allowlist. Null payload -> null section ("no budget data in this payload"),
  * the stated-absence idiom every other missing slice uses. States arrive as WORDS the assembler
  * computed with the worker's own classifier; this page never re-derives a threshold. */
-function normBudget(v) {
+export function normBudget(v) {
   if (v === null || v === undefined || typeof v !== "object") return null;
   const t = v.tokens !== null && v.tokens !== undefined && typeof v.tokens === "object" ? v.tokens : {};
   return {
@@ -552,7 +559,7 @@ function splitCountMap(v, keys) {
  * with its text. `{ unreachable }`: the envelope loads and Valkey could not be read, so no number is drawn. Otherwise
  * live. Null when the payload has no slice (an older payload): no section at all, the stated-absence idiom's other half.
  */
-function normAllocation(v) {
+export function normAllocation(v) {
   if (v === null || v === undefined || typeof v !== "object") return null;
   if (v.unset === true) return { kind: "unset" };
   if (typeof v.problem === "string" && v.problem !== "") return { kind: "problem", problem: clip(escapeInterpreted(v.problem), 240) };
@@ -605,7 +612,7 @@ function normAllocation(v) {
 
 /** costByTrigger: keys are the graph's own trigger ids -- server-side join vocabulary only, they
  * never reach the page (the badge is text at a chip's coordinates, joined via the scene layout). */
-function normSpendMap(v) {
+export function normSpendMap(v) {
   if (v === null || v === undefined || typeof v !== "object" || Array.isArray(v)) return null;
   const out = new Map();
   for (const key of Object.keys(v)) {
@@ -876,7 +883,7 @@ export function layoutCumulative(daily, { width, height } = {}) {
 
 // ---- HTML emission (server-side strings; the page script only ever assigns them as text) ----
 
-function dailyChartHtml(daily, tips) {
+export function dailyChartHtml(daily, tips) {
   if (daily.length === 0) return '<div class="dim">no runs in the spend window</div>';
   const lay = layoutDailyChart(daily, { width: DAILY_W, height: DAILY_H });
   const costByDay = new Map(daily.map((d) => [d.day, d.cost]));
@@ -944,7 +951,7 @@ function axisFrame(plot, yTicks) {
   return parts.join("");
 }
 
-function cumulativeHtml(daily, tips) {
+export function cumulativeHtml(daily, tips) {
   const lay = layoutCumulative(daily, {});
   if (lay.points.length === 0) return "";
   const parts = [`<svg width="${fmt(lay.width)}" height="${fmt(lay.height)}" role="img" aria-label="cumulative window spend">`];
@@ -965,7 +972,7 @@ function cumulativeHtml(daily, tips) {
   return `<div class="dim small">cumulative</div>${parts.join("")}`;
 }
 
-function flowLinesHtml(nf, tips) {
+export function flowLinesHtml(nf, tips) {
   if (nf.dailyByFlow === null) return null; // absence: the fold predates the series, so no section at all
   const lay = layoutFlowLines(nf.dailyByFlow, {});
   if (lay.panels.length === 0) return '<div class="dim">no runs in the spend window</div>';
@@ -1031,7 +1038,7 @@ function stateWord(state) {
  * and states the absence; slots and tokens are counts, never dollars, so nothing here touches
  * fmtCost. Renders even when the cost fold is null: the lever does not depend on the spend scan.
  */
-function budgetSectionHtml(nb) {
+export function budgetSectionHtml(nb) {
   if (nb === null) return '<div class="dim">no budget data in this payload</div>';
   const rows = [];
   const slotRow = (label, wdw) => {
@@ -1169,7 +1176,7 @@ function splitCountsLine(label, counts, empty) {
  * worker's integers, outcomes and reasons its enum words, and the plans' own reason TEXT never reaches this page (it is
  * agent text, drawn only in the panel's `b` view). No host is named: the page is a file meant to be shared.
  */
-function splitSectionHtml(na, tips, names, windowLabel) {
+export function splitSectionHtml(na, tips, names, windowLabel) {
   if (na.kind === "unset") return '<div id="split" class="dim">no envelope (PI_ENVELOPE_FILE is unset), so there is no split and delegation is off</div>';
   if (na.kind === "problem") return `<div id="split"><div class="row"><span class="state over">envelope problem</span><span>${escapeHtml(na.problem)}</span></div></div>`;
   if (na.kind === "unreachable") return '<div id="split" class="dim">the split could not be read from the queue, so no number is shown (see the banner)</div>';
@@ -1280,7 +1287,7 @@ function listSection(title, rows, aria, tips, extra = "") {
   return `<div class="bl"><h3>${escapeHtml(title)}</h3>${body}${tail}${extra}</div>`;
 }
 
-function breakdownHtml(nf, minted, tips, names = new Map()) {
+export function breakdownHtml(nf, minted, tips, names = new Map()) {
   const secs = [];
   secs.push(listSection("by flow", nf.byFlow.map((r) => ({ label: r.flow, cost: r.cost, runs: r.runs, apiEquiv: r.apiEquiv })), "spend by flow", tips));
   if (nf.byTrigger === null) {
@@ -1311,7 +1318,7 @@ function breakdownHtml(nf, minted, tips, names = new Map()) {
   return `<div id="grid">${secs.join("")}</div>`;
 }
 
-function kpisHtml(nf) {
+export function kpisHtml(nf) {
   const p = nf.provenance;
   const ledgered = Math.max(0, p.runsTotal - p.runsUnmetered - p.runsUnledgered);
   const top = nf.byFlow.length > 0 ? nf.byFlow[0] : null;
@@ -1334,7 +1341,7 @@ function limitLine(w) {
   return `limit ${fmt(w.limit)} ${w.unit}`;
 }
 
-function planCardsHtml(plans) {
+export function planCardsHtml(plans) {
   const cards = plans.map((pl) => {
     const parts = [`<div class="plan${pl.hypothetical ? " hypo" : ""}">`];
     parts.push(`<div><span class="pid">${escapeHtml(pl.id)}</span> <span class="pv">${escapeHtml(pl.vendor)}</span> · ${escapeHtml(`${fmtUsd(pl.price.amount)}/${pl.price.per}`)}${pl.hypothetical ? " (hypothetical)" : ""}</div>`);
@@ -1360,7 +1367,7 @@ function planCardsHtml(plans) {
 // The dollars legend beside the reused graph legend. "seeded" is deliberately absent: only the
 // what-if command emits it and this page never renders a what-if, so listing it would promise an
 // encoding no bar here can carry (it stays in INSIGHTS_COST_CLASSES because the class exists).
-function dollarsLegendHtml() {
+export function dollarsLegendHtml() {
   const sw = (inner) => `<svg width="20" height="12" aria-hidden="true">${inner}</svg>`;
   const rows = [];
   const row = (sample, text) => rows.push(`<div class="row">${sample}<span>${escapeHtml(text)}</span></div>`);
@@ -1455,7 +1462,7 @@ function normSizingDim(v, reasons) {
  * suggestion, the call that applies it, and its peak series (at most SIZING_POINTS_MAX points, each a finite instant,
  * a peak and a size in MiB). Null for a payload without the slice (no section), `{ unreachable }` for a read that failed.
  */
-function normSizing(v) {
+export function normSizing(v) {
   if (v === null || v === undefined || typeof v !== "object") return null;
   if (typeof v.unreachable === "string") return { unreachable: clip(escapeInterpreted(v.unreachable), 120) };
   const hostsIn = v.hosts !== null && typeof v.hosts === "object" ? v.hosts : {};
@@ -1573,7 +1580,7 @@ function sizingFacts(m, c) {
   return facts;
 }
 
-function sizingSectionHtml(ns, tips, nowMs) {
+export function sizingSectionHtml(ns, tips, nowMs) {
   if (ns.unreachable) return `<div class="dim">job sizes not read: ${escapeHtml(ns.unreachable)}</div>`;
   const parts = [];
   if (ns.hosts.unreachable) parts.push(`<div class="dim small">host budgets not read: ${escapeHtml(ns.hosts.unreachable)}</div>`);
@@ -1733,7 +1740,7 @@ function normCapFacts(f) {
  * not shared, no history, or numbers), and the coverage sentence. Null for a payload without the slice (no section),
  * `{ unreachable }` for a read that failed or a window that is not one.
  */
-function normCapacity(v) {
+export function normCapacity(v) {
   if (v === null || v === undefined || typeof v !== "object") return null;
   if (typeof v.unreachable === "string") return { unreachable: capText(v.unreachable, 240) ?? "unknown" };
   if (v.noTime === true) return { noTime: true, fromMs: Number.isSafeInteger(v.fromMs) && Math.abs(v.fromMs) <= 8.64e15 ? v.fromMs : null };
@@ -1907,7 +1914,7 @@ function capacityChartSvg(host, nc, tips, nowMs) {
   return svg.join("");
 }
 
-function capacitySectionHtml(nc, tips, nowMs, windowLabel) {
+export function capacitySectionHtml(nc, tips, nowMs, windowLabel) {
   if (nc.unreachable) return `<div class="dim">capacity not read: ${escapeHtml(nc.unreachable)}</div><div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`;
   if (nc.noTime) return `<div class="dim">no time in this window yet: ${escapeHtml(windowLabel)} starts at ${escapeHtml(capWhen(nc.fromMs))}</div><div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`;
   const hours = nc.window.bucketMs % 3_600_000 === 0 ? `${fmt(nc.window.bucketMs / 3_600_000)}h` : `${fmt(Math.round(nc.window.bucketMs / 60_000))}m`;
@@ -1958,7 +1965,7 @@ function utcDateStr(ms) {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-function footerHtml(nf, windowLabel) {
+export function footerHtml(nf, windowLabel) {
   const p = nf.provenance;
   const lines = [];
   lines.push(`~ marks estimates · metered = pi-ai computed prices, not invoices · pi-ai ${p.piAiPin ?? "—"}`);
@@ -1972,7 +1979,7 @@ function footerHtml(nf, windowLabel) {
   return `<div id="prov">${lines.map((l) => `<div>${escapeHtml(l)}</div>`).join("")}</div>`;
 }
 
-function costBannersHtml(p, nf, nb, na) {
+export function costBannersHtml(p, nf, nb, na) {
   const banners = [];
   if (typeof p.costsUnreachable === "string" && p.costsUnreachable !== "") banners.push(`costs unreachable: ${clip(p.costsUnreachable, 160)}`);
   if (nb !== null && nb !== undefined && nb.unreachable !== null) banners.push(`budget unreachable: ${nb.unreachable}`);
@@ -1986,9 +1993,77 @@ function costBannersHtml(p, nf, nb, na) {
   return `<div id="cost-banners">${banners.map((b) => `<div class="banner">${escapeHtml(b)}</div>`).join("")}</div>`;
 }
 
+/** The words a payload's `window` reads as on the page, an em dash (the page's mark for none) for one it does not name. */
+export function insightsWindowLabel(window) {
+  return window === "7d" ? "last 7d" : window === "30d" ? "last 30d" : window === "mtd" ? "month to date" : "\u2014";
+}
+
+/**
+ * The spend badges over the topology's trigger chips, and the server-side join table: original trigger id -> minted
+ * ordinal. The originals stay in this scope; only the ordinal ever reaches a data attribute or the spend layer's
+ * coordinates. `scene` is `buildGraphScene`'s, `spend` is `normSpendMap`'s (null for none). `{ minted, html }`: the map
+ * `breakdownHtml` links its rows by, and the `<text>` badges for `topologySectionHtml`.
+ */
+export function topologySpend(scene, spend) {
+  const minted = new Map();
+  const spendParts = [];
+  for (const pl of scene.layout.nodes) {
+    const orig = pl.node.id;
+    if (typeof orig !== "string" || !orig.startsWith("trigger:")) continue;
+    minted.set(orig, pl.id);
+    const entry = spend !== null && spend !== undefined ? spend.get(orig) : undefined;
+    if (!entry) continue;
+    const cls = entry.cost.class;
+    const fill = cls === "estimated" || cls === "seeded" ? PAGE_THEME.amber : PAGE_THEME.dim;
+    // At the scene's own badge line: the scene routes a trigger's re-arm loop below that line, so a badge
+    // drawn anywhere else could land on the loop again (issue #483).
+    // The badge fits its chip (issue #492): a plan badge carries the plan's free-form id, and one long enough
+    // ran past the chip onto the wires beside it. Cut with the ellipsis, the whole text in a tooltip.
+    const text = fmtCost(entry.cost);
+    const cols = Math.max(2, Math.floor((pl.w - 20) / BADGE_COL_W));
+    const shown = drawnColumns(text) <= cols ? text : clipColumns(text, cols - 1);
+    const tip = shown !== text ? `<title>${escapeHtml(text)}</title>` : "";
+    spendParts.push(`<text x="${fmt(pl.x + 16)}" y="${fmt(pl.y + SPEND_BADGE_DY)}" font-size="10" fill="${fill}">${escapeHtml(shown)}${tip}</text>`);
+  }
+  return { minted, html: spendParts.join("") };
+}
+
+/**
+ * The topology section: the scene's pane with the spend badges (`topologySpend`'s html) over it, the dollars legend and
+ * the scene's legend. Pan, zoom, the tooltip and label fitting are PAGE_JS and FIT_JS, which read the page's `GRAPH`.
+ */
+export function topologySectionHtml(scene, spendHtml) {
+  const windowDays = scene.norm.caps.windowDays ?? "?";
+  const vb = scene.viewBox;
+  const parts = [];
+  parts.push(`<section><h2>topology (fixed ${escapeHtml(String(windowDays))}d window)</h2>`);
+  parts.push('<div class="dim small">chip run counts use the topology window; spend badges use the spend window</div>');
+  parts.push([
+    '<div id="wrap">',
+    // The pane takes the scene's own aspect ratio, the viewBox's (clamped by the stylesheet's max-height): a fixed
+    // pane height letterboxes a wide flat topology into a mostly-empty band under "meet", and the
+    // headless-screenshot pass caught exactly that. Height stays fluid; pan/zoom covers a tall scene.
+    // At most GRAPH_MAX_SCALE page pixels per scene unit: a one-trigger scene filled the pane at several times the
+    // scale of a real deployment's, its 14px chip labels drawn at 50px (issue #483, once the viewBox stopped
+    // padding every scene with 80 units). Wider scenes fill the pane as before; a small one sits centred.
+    // That cap is the `width` attribute, which the stylesheet's `max-width:100%` holds to the pane, and never a `style`
+    // attribute: the operator console serves this section under a CSP that refuses inline style (issue #641).
+    `<svg id="graph" class="canvas" width="${fmt(Math.max(1, vb.w) * GRAPH_MAX_SCALE)}" viewBox="${fmt(vb.x)} ${fmt(vb.y)} ${fmt(vb.w)} ${fmt(vb.h)}" role="img" aria-label="pi-dispatch trigger and flow topology" preserveAspectRatio="xMidYMid meet">`,
+    `<g id="root">${scene.svgBody}</g>`,
+    `<g id="spend">${spendHtml}</g>`,
+    "</svg>",
+    '<div id="tip"></div>',
+    "</div>",
+  ].join(""));
+  parts.push(dollarsLegendHtml());
+  parts.push(legendHtml(scene.norm, scene.hiddenLabels));
+  parts.push("</section>");
+  return parts.join("\n");
+}
+
 // ---- page chrome ----
 
-const INSIGHTS_CSS = `
+export const INSIGHTS_CSS = `
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:${PAGE_THEME.canvas};color:${PAGE_THEME.fg};font:14px/1.4 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:60px 16px 40px}
 #hdr{position:fixed;top:0;left:0;right:0;height:46px;display:flex;align-items:center;gap:12px;padding:0 14px;background:${PAGE_THEME.panel};border-bottom:1px solid ${PAGE_THEME.border};z-index:3}
@@ -2042,7 +2117,7 @@ h3{font-size:12px;color:${PAGE_THEME.dim};margin:0 0 4px}
 .cap-warn{color:${PAGE_THEME.amber}}
 .rowlink{cursor:pointer}
 #wrap{position:relative;border:1px solid ${PAGE_THEME.border};border-radius:6px}
-svg.canvas{display:block;width:100%;height:auto;min-height:220px;max-height:75vh;cursor:grab;touch-action:none}
+svg.canvas{display:block;max-width:100%;height:auto;min-height:220px;max-height:75vh;margin:0 auto;cursor:grab;touch-action:none}
 #tip{position:absolute;display:none;max-width:340px;background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:8px 10px;font-size:12px;color:${PAGE_THEME.fg};white-space:pre-line;pointer-events:none;z-index:4}
 #legend,#dollars{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:10px 12px;font-size:11px;color:${PAGE_THEME.dim};margin-top:10px;max-width:440px}
 #legend h2,#dollars h2{font-size:11px;color:${PAGE_THEME.fg};margin:6px 0 4px}
@@ -2060,7 +2135,7 @@ svg.canvas{display:block;width:100%;height:auto;min-height:220px;max-height:75vh
 // nothing assembles markup on the client (textContent only), and selection is NOT reimplemented --
 // a breakdown row replays a plain DOM click at its chip so PAGE_JS's own handler stays the single
 // owner of the dim/highlight state.
-const INSIGHTS_JS = `
+export const INSIGHTS_JS = `
 (function () {
   "use strict";
   var tip = document.getElementById("tip");
@@ -2154,32 +2229,12 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     na = null;
   }
 
-  const windowLabel = p.window === "7d" ? "last 7d" : p.window === "30d" ? "last 30d" : p.window === "mtd" ? "month to date" : "—";
+  const windowLabel = insightsWindowLabel(p.window);
   const windowDays = scene.norm.caps.windowDays ?? "?";
   const dualWindow = `spend window: ${windowLabel} · topology: fixed ${windowDays}d record window · series bounded by retention (PI_LOG_RETENTION_DAYS) and the 92-day scan cap`;
 
-  // Server-side join table: original trigger id -> minted ordinal. The originals stay in this
-  // scope; only the ordinal ever reaches a data attribute or the spend layer's coordinates.
-  const minted = new Map();
-  const spendParts = [];
-  for (const pl of scene.layout.nodes) {
-    const orig = pl.node.id;
-    if (typeof orig !== "string" || !orig.startsWith("trigger:")) continue;
-    minted.set(orig, pl.id);
-    const entry = spend !== null && spend !== undefined ? spend.get(orig) : undefined;
-    if (!entry) continue;
-    const cls = entry.cost.class;
-    const fill = cls === "estimated" || cls === "seeded" ? PAGE_THEME.amber : PAGE_THEME.dim;
-    // At the scene's own badge line: the scene routes a trigger's re-arm loop below that line, so a badge
-    // drawn anywhere else could land on the loop again (issue #483).
-    // The badge fits its chip (issue #492): a plan badge carries the plan's free-form id, and one long enough
-    // ran past the chip onto the wires beside it. Cut with the ellipsis, the whole text in a tooltip.
-    const text = fmtCost(entry.cost);
-    const cols = Math.max(2, Math.floor((pl.w - 20) / BADGE_COL_W));
-    const shown = drawnColumns(text) <= cols ? text : clipColumns(text, cols - 1);
-    const tip = shown !== text ? `<title>${escapeHtml(text)}</title>` : "";
-    spendParts.push(`<text x="${fmt(pl.x + 16)}" y="${fmt(pl.y + SPEND_BADGE_DY)}" font-size="10" fill="${fill}">${escapeHtml(shown)}${tip}</text>`);
-  }
+  // Server-side join table: original trigger id -> minted ordinal (`topologySpend`).
+  const { minted, html: spendHtml } = topologySpend(scene, spend);
 
   const tips = [];
   const bodyParts = [];
@@ -2242,27 +2297,7 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     bodyParts.push('<section><div class="dim">no cost data in this payload</div></section>');
   }
 
-  const vb = scene.viewBox;
-  bodyParts.push(`<section><h2>topology (fixed ${escapeHtml(String(windowDays))}d window)</h2>`);
-  bodyParts.push('<div class="dim small">chip run counts use the topology window; spend badges use the spend window</div>');
-  bodyParts.push([
-    '<div id="wrap">',
-    // The pane takes the scene's own aspect ratio (clamped by the stylesheet's max-height): a fixed
-    // pane height letterboxes a wide flat topology into a mostly-empty band under "meet", and the
-    // headless-screenshot pass caught exactly that. Height stays fluid; pan/zoom covers a tall scene.
-    // At most GRAPH_MAX_SCALE page pixels per scene unit: a one-trigger scene filled the pane at several times the
-    // scale of a real deployment's, its 14px chip labels drawn at 50px (issue #483, once the viewBox stopped
-    // padding every scene with 80 units). Wider scenes fill the pane as before; a small one sits centred.
-    `<svg id="graph" class="canvas" style="aspect-ratio:${fmt(Math.max(1, vb.w))}/${fmt(Math.max(1, vb.h))};max-width:${fmt(Math.max(1, vb.w) * GRAPH_MAX_SCALE)}px;margin:0 auto" viewBox="${fmt(vb.x)} ${fmt(vb.y)} ${fmt(vb.w)} ${fmt(vb.h)}" role="img" aria-label="pi-dispatch trigger and flow topology" preserveAspectRatio="xMidYMid meet">`,
-    `<g id="root">${scene.svgBody}</g>`,
-    `<g id="spend">${spendParts.join("")}</g>`,
-    "</svg>",
-    '<div id="tip"></div>',
-    "</div>",
-  ].join(""));
-  bodyParts.push(dollarsLegendHtml());
-  bodyParts.push(legendHtml(scene.norm, scene.hiddenLabels));
-  bodyParts.push("</section>");
+  bodyParts.push(topologySectionHtml(scene, spendHtml));
   if (nf !== null) bodyParts.push(footerHtml(nf, windowLabel));
 
   return [

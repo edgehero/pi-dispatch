@@ -845,9 +845,9 @@ test("a small topology is not blown up past a real deployment's scale (issue #48
   one.chainEdges.edges = [];
   for (const graph of [buildGraphModel(one), buildGraphModel(CANNED())]) {
     const out = buildInsightsHtml({ graph, fold: null, costsUnreachable: null, window: "30d", costByTrigger: null }, { now: NOW });
-    const m = /<svg id="graph" class="canvas" style="aspect-ratio:([\d.]+)\/[\d.]+;max-width:([\d.]+)px;margin:0 auto" viewBox="[\d. -]+ ([\d.]+) [\d.]+"/.exec(out);
+    const m = /<svg id="graph" class="canvas" width="([\d.]+)" viewBox="[\d. -]+ ([\d.]+) [\d.]+"/.exec(out);
     assert.ok(m, "the pane carries its scale cap");
-    assert.ok(Number(m[2]) <= Number(m[3]) * 1.35 + 0.1, `max-width ${m[2]} for a ${m[3]}-unit scene`);
+    assert.ok(Number(m[1]) <= Number(m[2]) * 1.35 + 0.1, `width ${m[1]} for a ${m[2]}-unit scene`);
   }
 });
 
@@ -1071,8 +1071,8 @@ test("the split's refusal list is the worker's four reasons, the one list the as
   const { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } = await import("@edgehero/pi-dispatch/allocation");
   assert.deepEqual([...INSIGHTS_SPLIT_REFUSALS], [ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON, PORTFOLIO_NO_ENVELOPE, PORTFOLIO_SNAPSHOT_OVERSIZE]);
   assert.ok(Object.isFrozen(INSIGHTS_SPLIT_REFUSALS));
-  const src = readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
-  assert.match(src, /const SPLIT_REFUSALS: readonly string\[\] = INSIGHTS_SPLIT_REFUSALS;/, "the assembler counts by the page's list, not a copy");
+  const src = readFileSync(fileURLToPath(new URL("../src/insights-assembly.mjs", import.meta.url)), "utf8");
+  assert.match(src, /const SPLIT_REFUSALS = INSIGHTS_SPLIT_REFUSALS;/, "the assembler counts by the page's list, not a copy");
 });
 
 test("the split says what this host sees: its mismatch, an outside edit, a plan id it cannot read, and a count it cannot read (#507)", () => {
