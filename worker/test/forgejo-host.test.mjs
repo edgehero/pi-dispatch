@@ -46,75 +46,73 @@ test("a branch whose commit has no id is a retryable failure, never an undefined
 
 // --- branch protection: issue #61's Gap 5, and the reason this host exists ---
 
-test("protection is read from branch_protections -- GitHub's /protection path is never called", async () => {
-	// github-host treats a 404 from /branches/{b}/protection as "not protected". Forgejo has no such
-	// endpoint AT ALL, so carrying that rule across would report every branch unprotected and silently
-	// disarm the never-merge backstop. `fakeFetch` throws on an unrouted call, so if this host ever asked
-	// for GitHub's path the test fails rather than quietly returning false.
+// The branch object Forgejo 14.0.5 answered GET /repos/human/parked-lab/branches/main with, for a WRITE collaborator's
+// token on a protected main (measured; the commit is cut to the field resolveDefaultBranchSha reads).
+const PROTECTED_MAIN = { name: "main", commit: { id: "abc123" }, protected: true, user_can_push: false, effective_branch_protection_name: "" };
+
+test("protection is the branch object's own `protected`, read with a write collaborator's token -- no admin route", async () => {
+	// The listing this replaced, GET /branch_protections, is an admin route: measured on Forgejo 14.0.5, a write
+	// collaborator's token got 403 {"message":"user should be an owner or a collaborator with admin write of a
+	// repository"} and every job failed before spending. `fakeFetch` throws on an unrouted call, so asking for the
+	// listing, or GitHub's /protection path, fails here rather than passing quietly.
 	const fetchFn = fakeFetch({
 		"GET /api/v1/repos/acme/widgets": { default_branch: "main" },
-		"GET /api/v1/repos/acme/widgets/branch_protections": [{ rule_name: "main" }],
+		"GET /api/v1/repos/acme/widgets/branches/main": PROTECTED_MAIN,
 	});
 	const host = makeForgejoHost({ apiUrl: API, fetchFn });
 	assert.equal(await host.isDefaultBranchProtected(REPO, "t"), true);
-	assert.equal(
-		fetchFn.calls.some((c) => c.key.includes("/protection")),
-		false,
-		"GitHub's protection endpoint must never be consulted on Forgejo",
-	);
+	assert.equal(fetchFn.calls.some((c) => c.key.includes("protection")), false, "neither /branch_protections nor GitHub's /protection");
 });
 
-test("a GLOB rule protects the branch it covers but does not name", async () => {
-	// `release/*` protects `release/1.0`, while GET /branch_protections/release/1.0 would 404. Calling the
-	// per-name endpoint instead of listing would be a second fail-open hiding behind the first fix.
-	const host = (rules, branch) =>
-		makeForgejoHost({
-			apiUrl: API,
-			fetchFn: fakeFetch({
-				"GET /api/v1/repos/acme/widgets": { default_branch: branch },
-				"GET /api/v1/repos/acme/widgets/branch_protections": rules,
-			}),
-		});
-	assert.equal(await host([{ rule_name: "release/*" }], "release/1.0").isDefaultBranchProtected(REPO, "t"), true);
-	assert.equal(await host([{ rule_name: "release/*" }], "main").isDefaultBranchProtected(REPO, "t"), false);
-	assert.equal(await host([], "main").isDefaultBranchProtected(REPO, "t"), false, "no rules is a determinate 'not protected'");
-});
-
-test("the deprecated branch_name field is honoured too -- an older instance must not report unprotected", async () => {
+test("an unprotected branch is a determinate false: Forgejo answers protected: false when no rule matches", async () => {
 	const host = makeForgejoHost({
 		apiUrl: API,
 		fetchFn: fakeFetch({
 			"GET /api/v1/repos/acme/widgets": { default_branch: "main" },
-			"GET /api/v1/repos/acme/widgets/branch_protections": [{ branch_name: "main" }],
+			"GET /api/v1/repos/acme/widgets/branches/main": { ...PROTECTED_MAIN, protected: false, user_can_push: true },
 		}),
 	});
-	assert.equal(await host.isDefaultBranchProtected(REPO, "t"), true);
+	assert.equal(await host.isDefaultBranchProtected(REPO, "t"), false);
 });
 
-test("a non-2xx from either protection call is retryable, NEVER false", async () => {
-	// Collapsing an error into "unprotected" is the same fail-open in a different costume: the job would be
-	// admitted to push to a branch a human is supposed to gate.
-	for (const status of [401, 403, 429, 500, 502]) {
+test("a branch a GLOB rule covers reads protected, and its slashes reach Forgejo's /branches/* route as slashes", async () => {
+	// Modelled on Forgejo v14.0.5: GetBranch asks GetFirstMatchProtectedBranchRule, which returns the first rule whose
+	// Match covers the name (a `release/*` glob covers `release/1.0`), and convert.ToBranch sets protected: true for it,
+	// with effective_branch_protection_name filled only for a repository admin (so empty for the job's token).
+	const fetchFn = fakeFetch({
+		"GET /api/v1/repos/acme/widgets": { default_branch: "release/1.0" },
+		"GET /api/v1/repos/acme/widgets/branches/release/1.0": { ...PROTECTED_MAIN, name: "release/1.0" },
+	});
+	const host = makeForgejoHost({ apiUrl: API, fetchFn });
+	assert.equal(await host.isDefaultBranchProtected(REPO, "t"), true);
+	assert.deepEqual(await host.resolveDefaultBranchSha(REPO, "t"), { branch: "release/1.0", sha: "abc123" }, "the tip is read from the same path shape");
+});
+
+test("a non-2xx from either call is retryable, NEVER false -- a missing branch's 404 included", async () => {
+	// Collapsing an error into "unprotected" is the same fail-open in a different costume. 404 is Forgejo's answer for a
+	// branch that does not exist (measured), and 403 is what the old admin-only listing gave a write collaborator.
+	for (const status of [401, 403, 404, 429, 500, 502]) {
 		const host = makeForgejoHost({
 			apiUrl: API,
 			fetchFn: fakeFetch({
 				"GET /api/v1/repos/acme/widgets": { default_branch: "main" },
-				"GET /api/v1/repos/acme/widgets/branch_protections": status,
+				"GET /api/v1/repos/acme/widgets/branches/main": status,
 			}),
 		});
-		await assert.rejects(() => host.isDefaultBranchProtected(REPO, "t"), `${status} must not read as unprotected`);
+		await assert.rejects(() => host.isDefaultBranchProtected(REPO, "t"), /returned/, `${status} must not read as unprotected`);
 	}
 });
 
-test("branch_protections returning a non-array is retryable, never an empty result", async () => {
-	const host = makeForgejoHost({
-		apiUrl: API,
-		fetchFn: fakeFetch({
-			"GET /api/v1/repos/acme/widgets": { default_branch: "main" },
-			"GET /api/v1/repos/acme/widgets/branch_protections": { rules: [] },
-		}),
-	});
-	await assert.rejects(() => host.isDefaultBranchProtected(REPO, "t"));
+test("a branch object without a boolean `protected` is retryable, never read as unprotected", async () => {
+	for (const value of [undefined, null, "true", 1]) {
+		const body = { name: "main", commit: { id: "abc123" } };
+		if (value !== undefined) body.protected = value;
+		const host = makeForgejoHost({
+			apiUrl: API,
+			fetchFn: fakeFetch({ "GET /api/v1/repos/acme/widgets": { default_branch: "main" }, "GET /api/v1/repos/acme/widgets/branches/main": body }),
+		});
+		await assert.rejects(() => host.isDefaultBranchProtected(REPO, "t"), /no boolean protected/, `protected ${JSON.stringify(value)}`);
+	}
 });
 
 // --- comments and PR head ---

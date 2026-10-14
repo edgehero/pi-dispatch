@@ -4,17 +4,25 @@
  *
  * BRANCH PROTECTION IS THE REASON TO READ THIS FILE. `github-host.mjs` treats a 404 from
  * `/repos/{o}/{r}/branches/{b}/protection` as "not protected", which is correct on GitHub, where that
- * endpoint exists and 404 means "no protection on this branch". Forgejo has no such endpoint at all -- it
- * uses `/branch_protections`, a different path with a different shape -- so carrying GitHub's assumption
- * across would make EVERY branch report unprotected and silently disarm the backstop that stops the agent
- * pushing to a protected branch. Issue #61 records this, and `REQ-BRANCH-PROTECTION-PRECONDITION` already
- * cites it by number as the failure that ordering exists to avoid.
+ * endpoint exists and 404 means "no protection on this branch". Forgejo has no such endpoint at all, so
+ * carrying GitHub's assumption across would make EVERY branch report unprotected. Issue #61 records this, and
+ * `REQ-BRANCH-PROTECTION-PRECONDITION` already cites it by number as the failure that ordering exists to avoid.
  *
- * And the fix is not simply "call the other endpoint". Forgejo's rules are GLOB patterns: a rule named
- * `release/*` protects `release/1.0` while `GET /branch_protections/release/1.0` returns 404. So this
- * LISTS the rules and matches each pattern against the branch, exactly as the GitLab host does -- and it
- * reuses that host's `matchesBranch` rather than writing a second globber, because two implementations of
- * "which branches does this rule cover" is two chances to widen it.
+ * The answer is the branch object's own `protected` field, from `GET /repos/{o}/{r}/branches/{branch}`. Forgejo
+ * computes it with the GLOB match itself: at v14.0.5 `GetBranch` (routers/api/v1/repo/branch.go) calls
+ * `GetFirstMatchProtectedBranchRule`, which loads every rule of the repository and returns the first whose
+ * `Match` covers the branch (models/git/protected_branch_list.go, protected_branch.go: a plain name compared
+ * case-insensitively, anything else as a glob), and `convert.ToBranch` sets `protected: true` exactly when a rule
+ * matched. So a `release/*` rule protects `release/1.0` here as it does in the forge. The route needs only read
+ * access to the code (`reqRepoReader(unit.TypeCode)`), which the job's `write` collaborator token has.
+ *
+ * This used to LIST `/branch_protections` and glob-match the rules here (reusing the GitLab host's
+ * `matchesBranch`). That listing is an admin route (`reqAdmin()`), so a job token of a `write` collaborator got
+ * 403 `{"message":"user should be an owner or a collaborator with admin write of a repository"}` (measured on
+ * Forgejo 14.0.5) and every job failed before spending: the check had quietly required an admin's token, which
+ * OQ-043 exists to keep out of jobs. The `protected` field is older than everything the listing supported
+ * (Gitea 1.11, and Forgejo is a fork of 1.18 and later), so no fallback to the listing is kept: it could only
+ * ever answer for a token that should not be in the job.
  *
  * A non-2xx is retryable, never `false`. Collapsing an error into "unprotected" is the same fail-open in a
  * different costume.
@@ -24,10 +32,17 @@ import { configError } from "./config.mjs";
 import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
-import { matchesBranch } from "./gitlab-host.mjs";
 import { isDeterminateFetchFailure } from "./transient.mjs";
 
 const API_PREFIX = "/api/v1";
+
+/**
+ * A branch name as the tail of `/branches/*`. Forgejo routes that path with a wildcard (`m.Get("/*", repo.GetBranch)`),
+ * so a branch with a slash is sent with its slashes and each SEGMENT escaped, never as one `%2F`-joined token.
+ */
+function branchPath(branch) {
+	return String(branch).split("/").map(encodeURIComponent).join("/");
+}
 
 /** How many pages of repository labels the parked marker's lookup reads before it gives up (50 a page at most). */
 const MAX_LABEL_PAGES = 20;
@@ -77,7 +92,7 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 		if (typeof branch !== "string" || branch === "") {
 			throw new InfraRetry(`forgejo-host: ${owner}/${name} reported no default_branch`);
 		}
-		const info = await get(`/repos/${owner}/${name}/branches/${encodeURIComponent(branch)}`, token);
+		const info = await get(`/repos/${owner}/${name}/branches/${branchPath(branch)}`, token);
 		// Gitea's Branch carries its tip as `commit.id`; some versions and forks also expose `commit.sha`.
 		// Both are read, and neither being a string is a hard failure rather than an undefined SHA -- a job
 		// that cannot name the commit it is standing on must not proceed to clone something else.
@@ -89,24 +104,22 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 	}
 
 	/**
-	 * Whether the default branch is covered by any protection rule.
+	 * Whether the default branch is covered by any protection rule, as Forgejo itself decides it: the branch
+	 * object's `protected` (see the module header for why this endpoint, and not the rule listing).
 	 *
-	 * See the module header: this is the endpoint and the glob matching that GitHub's 404 rule would have
-	 * got wrong in two independent ways.
+	 * A non-2xx (a missing branch's 404 included) is retryable through `get`, never `false`, and so is a body whose
+	 * `protected` is not a boolean: an instance that stops sending the field must not read as a determinate answer.
 	 */
 	async function isDefaultBranchProtected(ref, token) {
 		const [owner, name] = splitRepo(ref);
 		const repo = await get(`/repos/${owner}/${name}`, token);
 		const branch = repo?.default_branch;
 		if (typeof branch !== "string" || branch === "") return false;
-		const rules = await get(`/repos/${owner}/${name}/branch_protections`, token);
-		if (!Array.isArray(rules)) {
-			throw new InfraRetry(`forgejo-host: ${owner}/${name} branch_protections returned a non-array`);
+		const info = await get(`/repos/${owner}/${name}/branches/${branchPath(branch)}`, token);
+		if (typeof info?.protected !== "boolean") {
+			throw new InfraRetry(`forgejo-host: ${owner}/${name} branch ${branch} reported no boolean protected`);
 		}
-		// `rule_name` is the current field; `branch_name` is its deprecated predecessor and is still what
-		// older instances send. Reading only the new one would report every branch on an older Forgejo as
-		// unprotected -- the same class of silent fail-open this file exists to avoid.
-		return rules.some((rule) => matchesBranch(rule?.rule_name ?? rule?.branch_name, branch));
+		return info.protected;
 	}
 
 	/**

@@ -498,6 +498,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   be indistinguishable from a project that does not exist or a token that cannot see it. The list is also
   what makes **wildcard** protections work: GitLab rules may be patterns (`release/*`, `*`), and an
   exact-name lookup would report a covered branch unprotected and refuse a job that should have run.
+  **Forgejo** answers on the branch object itself: `GET /repos/{o}/{r}/branches/{b}` carries a boolean
+  `protected` that Forgejo computes with its own glob match over every rule of the repository
+  (`GetFirstMatchProtectedBranchRule` at v14.0.5), behind read access to the code. Its rule listing,
+  `/branch_protections`, is NOT the source: it is an admin route, so reading it would require the job's
+  token to be an admin's, which `OQ-043` keeps out of jobs. A non-2xx, and a body without a boolean
+  `protected`, are retryable.
   Issue #61 records the failure this ordering exists to avoid: carrying one forge's 404 semantics to
   another made every branch report unprotected and silently disarmed the backstop.
   `pi-dispatch doctor` additionally states the enforcement point at setup time (issue #80): github
@@ -512,8 +518,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   policy refusal before `reserveBudget` and before any container starts — no budget slot is consumed, no
   provider spend occurs, and a refusal comment is posted to the issue. A transient protection-API error is
   retried, not treated as unprotected — on GitHub any non-`404`, on GitLab **any** non-200, since there is
-  no status there that may read as "unprotected". Given a GitLab default branch covered only by a wildcard
-  rule, the job is admitted.
+  no status there that may read as "unprotected", and on Forgejo any non-200 or a non-boolean `protected`.
+  Given a GitLab default branch covered only by a wildcard rule, the job is admitted. Given a Forgejo job
+  whose token is a `write` collaborator's, the check answers without an admin route.
 
 ## REQ-LOCAL-JOB-VISIBILITY
 
@@ -3795,3 +3802,4 @@ instead of drifting.
 | 2026-10-14 | Found rendering the README images from a parked run. **`REQ-AWAIT-INPUT` AMENDED** (Acceptance only): the panel's run row named a parked run `✔ done`, so the LIST said nothing waited on the operator while `/dispatch runs` and the run drill-in both named `awaiting-input`; the row now shows a completed run's reason in its place, in the warning colour, and a completed run without one still reads `done`. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool, key or view moved. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record is read, never written. **Code evidence**: admin/src/dashboard.ts -> outcomeColored. |
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`REQ-AWAIT-INPUT` UNCHANGED, checked**: "a run on the key that ends without parking clears it" now holds on Forgejo without a false failure line. Clearing the label in a repository that has no `pi-awaiting-input` label at all answers 422 `{"message":"label does not exist [label_id: 0, repo_id: 1]"}`, which the Forgejo host now reads as already gone beside 404, so a completed non-parked run no longer logs `parked_label_failed`. Matched on the status, since 14.0.5's `DeleteIssueLabel` gives 422 only for a missing label and the request carries no body to fail binding. |
 | 2026-10-14 | No issue: the lab's Forgejo follow-up, `OQ-043`. **`REQ-TRIGGER-SECRETS` AMENDED**, one name in its Acceptance: the reserved set gains `RECEIVER_ONLY_VARS` (the forge table's new column, today `FORGEJO_PERMISSION_TOKEN`), so a trigger cannot bind the receiver's admin lookup token into a job. **`REQ-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: who may trigger does not move; only which token asks Forgejo about them. |
+| 2026-10-14 | No issue: found in the live lab once the Forgejo job token was a `write` collaborator's (`OQ-043`). **`REQ-BRANCH-PROTECTION-PRECONDITION` AMENDED**, in the Why and the Acceptance: Forgejo's answer is the branch object's `protected` (`GET /repos/{o}/{r}/branches/{b}`, read access to code), which Forgejo computes with its own glob match (`GetBranch` calls `GetFirstMatchProtectedBranchRule`, and `convert.ToBranch` sets `protected: true` for a matched rule, at v14.0.5). The worker used to list `/branch_protections`, an admin route: measured on 14.0.5 a `write` collaborator's token got 403 `{"message":"user should be an owner or a collaborator with admin write of a repository"}`, so every job failed before spending, and the check had quietly required the admin job token `OQ-043` keeps out of jobs. The listing is dropped with no fallback: `protected` is in Gitea's Branch object since 1.11 and Forgejo forked from 1.18. A non-2xx or a non-boolean `protected` stays retryable, never "unprotected". The Statement is UNCHANGED, checked. |
