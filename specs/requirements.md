@@ -723,7 +723,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   A write tool applies
   its change **only after a human operator approves a `ctx.ui.confirm` dialog showing the concrete
   before→after**, and **refuses — writing nothing — when no interactive operator is present** (`ctx.hasUI`
-  false; print/headless). The operator-typed overlay CRUD and the confirm-gated tools reach the **same**
+  false; print/headless). The operator console's equivalent of that dialog is the single-use ticket bound to the
+  diff it previewed (`REQ-CONSOLE-SECURITY` (g)). The operator-typed overlay CRUD and the confirm-gated tools reach the **same**
   validated, atomic `writeTriggers`/`writeSettings`. `dispatch_run` still takes **no spend-knob argument**
   (`model`/`maxTurns`/`dailyCap`/`concurrency`).
   The panel's job-count meters take their caps from the settings overlay only; with none set there a meter reads
@@ -841,6 +842,91 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   session with no deployment, then a repository's own `triggers.json`, `scoped-limits.json` or `projects.json` is not
   guarded; given a deployment built with `init` and `up` and pi started in it with no pointer, then every file its
   `.env` names, and that `.env`, are guarded.
+
+## REQ-CONSOLE-SECURITY
+
+- **Statement**: The operator console (`pi-dispatch-console serve`, `DES-OPERATOR-CONSOLE`) shall be a separate
+  process that listens only on loopback or on a 0600 unix socket unless the operator opts into a public bind; shall
+  answer every request but `/healthz` and login only within a session obtained from a named token or a one-time
+  login code; shall accept a write only when it is same-origin, JSON, by the operator role, on a console that is not
+  read-only, and confirmed by a single-use ticket bound to the diff the operator saw; shall make every write through
+  the read model's existing funnels; shall send the same security headers on every response and escape every value
+  it renders; shall record every write, every write a guard refuses and every sign-in in a hash-chained audit log
+  (refusals of requests that carry no session one row each up to a rate, and counted past it); and shall
+  never put a token, a login code, a cookie value or a request body in a log line, an audit row or a page.
+- **Scope**: the console process and its CLI. The pi extension is unchanged and still binds no port
+  (`REQ-ADMIN-VIA-PI-EXTENSION`). In #640 the console serves login, logout, `whoami`, a signed-in placeholder and
+  one reference write, the pause windows; the screens are #641's, the other writes #642's, the live logs #643's,
+  and each of those meets this requirement as it lands. `REQ-INSIGHTS-HTML-EXPORT` is unchanged: the static file
+  keeps zero external requests and binds nothing.
+- **Why**: the console is the most powerful surface after a shell on the host, and a loopback port is reachable by
+  every local account, by any page the operator's browser opens and, on Docker Desktop, by a job container
+  (`DES-OPERATOR-CONSOLE`'s six threats). Each clause below closes one route, and each is held by a named test,
+  because a security property nobody runs is a sentence, not a control.
+- **Traces to**: `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
+  `INT-CONSOLE-AUDIT-LOG`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`.
+- **Acceptance**:
+  - (a) **Where it listens, and what it refuses to start on.** Given no `PI_CONSOLE_LISTEN`, the console listens on
+    `127.0.0.1:4790`; given a non-loopback IP literal without `PI_CONSOLE_BIND_PUBLIC=1`, a hostname, or a unix
+    socket path longer than the platform allows, `serve` refuses with a sentence naming the value and binds
+    nothing; given `PI_CONSOLE_BIND_PUBLIC=1`, doctor warns. Given a tokens file that is group or world accessible,
+    a symlink, not a regular file, owned by another account, or holding no operator token, `serve` refuses to start
+    and doctor names the problem; given a tokens file inside any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`), doctor fails; given a second
+    `serve` on the same deployment while the first runs, it refuses on the lock. Tests:
+    `admin/test/console-listen.test.mjs`, `admin/test/console-config.test.mjs`, `admin/test/console-cli.test.mjs` (the lock),
+    `worker/test/console-tokens.test.mjs`, `worker/test/doctor-console.test.mjs`.
+  - (b) **The Host hostname allowlist.** Given a request whose Host hostname is not `127.0.0.1`, `localhost`,
+    `[::1]` or a name in `PI_CONSOLE_ALLOWED_HOSTS` (`evil.test`, `127.0.0.1.nip.io`, `host.docker.internal`,
+    `host.containers.internal`, `gateway.docker.internal`), it is answered 421 and its handler never runs; given
+    `localhost:8080` (a tunnel on another port), it is accepted; given `PI_CONSOLE_ALLOWED_HOSTS` naming a
+    container gateway name, the console refuses to start. Tests: `admin/test/console-guards.test.mjs`,
+    `admin/test/console-server.test.mjs`, `admin/test/console-config.test.mjs`.
+  - (c) **A cross-site or same-site write is refused.** Given a write with `Sec-Fetch-Site` `same-site`,
+    `cross-site` or `none`, with no `Sec-Fetch-Site` and an `Origin` other than `http://<Host>`, with no `Origin`,
+    or with a body that is not `application/json` (a form post), it is answered 403 and nothing is written; given
+    an `OPTIONS` request, no response carries an `Access-Control-*` header. Tests: `admin/test/console-guards.test.mjs`,
+    `admin/test/console-server.test.mjs`.
+  - (d) **The read-only switch and the viewer role.** Given `PI_CONSOLE_READ_ONLY=1`, every write route in the route
+    table answers 403 and writes nothing, and login still works; given a viewer's session, every write route answers
+    403; each such refusal appends an audit row with `action: "refused"`. Test: `admin/test/console-server.test.mjs`.
+  - (e) **The headers on every response.** Given any route in the route table (the test iterates the table, not a
+    hand list), and given a 404, a 405, a 421, a 403 and a 401, the response carries the CSP, `nosniff`,
+    `no-referrer`, both cross-origin policies, `no-store` and the `Permissions-Policy` of `DES-OPERATOR-CONSOLE`; no
+    page carries an inline script; every rendered value is escaped after the control-byte scrub. Tests:
+    `admin/test/console-headers.test.mjs`, `admin/test/console-html.test.mjs`, `admin/test/console-server.test.mjs`.
+  - (f) **No token or code anywhere it could leak.** Given a full test session (token login, one-time code login,
+    a write, a refusal, logout, the CLI's token commands), no captured log line, audit row or response body
+    contains the test token, the test code, the session cookie's value, or the `pdc_` prefix outside the one line
+    `token add` and `token rotate` print; `token list` prints names and roles only. Tests:
+    `admin/test/console-server.test.mjs`, `admin/test/console-cli.test.mjs`, `worker/test/console-audit.test.mjs`.
+  - (g) **Writes go through the funnel, behind a single-use ticket.** Given a pause-windows preview, the confirm
+    applies exactly the previewed change through `writePauseWindows`, whatever else the confirm's body carries; given a ticket that is reused, expired,
+    issued to another session or for another action, or a file that changed after the preview, the confirm is
+    refused and the file is byte-identical. The console has no write path that is not a read-model funnel. Tests:
+    `admin/test/console-confirm.test.mjs`, `admin/test/console-pause-windows-expect.test.mjs`,
+    `admin/test/console-server.test.mjs`.
+  - (h) **The audit chain, refusals included.** Given rows appended across a month boundary, each row's `prev` is
+    the sha256 of the previous raw line and `seq` rises by one; given a row edited, removed or reordered,
+    `audit verify` names the first broken file and line and doctor warns; given the oldest month reaped, verify
+    reports where the chain starts and does not call it broken; given an append that fails, the write it would
+    record is refused; given a write a guard refused (Host, origin, content type, read-only, auth, role) or a failed
+    login, a row records it, except that past 60 refusals a minute from requests with no session the rest are
+    counted into one row written with the next allowed one; a refusal from a signed-in session is always its own
+    row. Tests:
+    `worker/test/console-audit.test.mjs`, `admin/test/console-server.test.mjs`, `worker/test/doctor-console.test.mjs`.
+  - (i) **Session limits and revocation.** Given a session idle past `PI_CONSOLE_IDLE_MINUTES` or older than
+    `PI_CONSOLE_MAX_HOURS`, its next request is unauthenticated; given its token revoked or rotated, its role
+    changed, or `sessions end-all` run, its next request is unauthenticated; login issues a new session id each
+    time; the login rate limit answers 429 past its burst and every failed login is audited; a one-time login code
+    works once, also under two concurrent consumers, and not after 60 seconds; the tokens file is in the pi
+    extension's `guardedFiles()`. Tests: `admin/test/console-sessions.test.mjs`,
+    `admin/test/write-guard.test.mjs`, `admin/test/write-guard.wired.test.mjs`, `admin/test/write-guard.cwd.test.mjs`,
+    `admin/test/console-login-codes.test.mjs`, `admin/test/console-guards.test.mjs`,
+    `admin/test/console-server.test.mjs`, `worker/test/console-tokens.test.mjs`.
+  - (j) **Unix socket mode is private.** Given `PI_CONSOLE_LISTEN=unix:/abs/path`, the socket is mode 0600 in a
+    directory that gives nothing to group or other and belongs to the console's account, and `serve` refuses a
+    parent directory that does not; a stale socket nobody answers on is replaced, and a live one is not. Test:
+    `admin/test/console-listen.test.mjs`.
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -3803,3 +3889,4 @@ instead of drifting.
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`REQ-AWAIT-INPUT` UNCHANGED, checked**: "a run on the key that ends without parking clears it" now holds on Forgejo without a false failure line. Clearing the label in a repository that has no `pi-awaiting-input` label at all answers 422 `{"message":"label does not exist [label_id: 0, repo_id: 1]"}`, which the Forgejo host now reads as already gone beside 404, so a completed non-parked run no longer logs `parked_label_failed`. Matched on the status, since 14.0.5's `DeleteIssueLabel` gives 422 only for a missing label and the request carries no body to fail binding. |
 | 2026-10-14 | No issue: the lab's Forgejo follow-up, `OQ-043`. **`REQ-TRIGGER-SECRETS` AMENDED**, one name in its Acceptance: the reserved set gains `RECEIVER_ONLY_VARS` (the forge table's new column, today `FORGEJO_PERMISSION_TOKEN`), so a trigger cannot bind the receiver's admin lookup token into a job. **`REQ-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: who may trigger does not move; only which token asks Forgejo about them. |
 | 2026-10-14 | No issue: found in the live lab once the Forgejo job token was a `write` collaborator's (`OQ-043`). **`REQ-BRANCH-PROTECTION-PRECONDITION` AMENDED**, in the Why and the Acceptance: Forgejo's answer is the branch object's `protected` (`GET /repos/{o}/{r}/branches/{b}`, read access to code), which Forgejo computes with its own glob match (`GetBranch` calls `GetFirstMatchProtectedBranchRule`, and `convert.ToBranch` sets `protected: true` for a matched rule, at v14.0.5). The worker used to list `/branch_protections`, an admin route: measured on 14.0.5 a `write` collaborator's token got 403 `{"message":"user should be an owner or a collaborator with admin write of a repository"}`, so every job failed before spending, and the check had quietly required the admin job token `OQ-043` keeps out of jobs. The listing is dropped with no fallback: `protected` is in Gitea's Branch object since 1.11 and Forgejo forked from 1.18. A non-2xx or a non-boolean `protected` stays retryable, never "unprotected". The Statement is UNCHANGED, checked. |
+| 2026-10-14 | Issue #640, the operator console's security model. **NEW `REQ-CONSOLE-SECURITY`**: the console is a separate process on loopback or a 0600 unix socket; every request but `/healthz` and login needs a named token's session; a write is same-origin, JSON, by the operator role, on a console that is not read-only, behind a single-use ticket bound to the previewed diff, through the read model's funnels; one header set on every response and every value escaped; every write, refusal and sign-in in a hash-chained audit log; no token, code, cookie or body in a log, a row or a page. Acceptance clauses (a) to (j) each name the test files that hold them (`admin/test/console-*.test.mjs`, `worker/test/console-tokens.test.mjs`, `worker/test/console-audit.test.mjs`, `worker/test/doctor-console.test.mjs`). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, one sentence in the confirm rule: the console's equivalent of the confirm dialog is the single-use, diff-bound ticket (`REQ-CONSOLE-SECURITY` (g)); the model-callable tool list is untouched. UNCHANGED, checked: `REQ-INSIGHTS-HTML-EXPORT` (the static file keeps zero external requests and binds nothing), `REQ-TOPOLOGY-GRAPH` (its "no port" is the graph surface's, which is still the artifact), `REQ-SCOPED-PAUSE-WINDOWS` (the console's pause-window write reaches the same validated `writePauseWindows`), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, and `constitution.md` (no port clause, checked). |

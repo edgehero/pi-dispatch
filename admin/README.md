@@ -222,6 +222,12 @@ One command puts a live terminal view over the whole deployment:
   The bundled `operate-pi-dispatch` skill teaches the agent these gates.
 - **Logs stay put.** Raw container output shows only in the panel's viewer, never in model context.
 
+**A web console as well.** The same package installs `pi-dispatch-console`, a separate process that serves a web page
+for the deployment on loopback or on a private unix socket, behind a named token per person. Every write is previewed,
+confirmed and recorded in an audit log, and nothing listens unless you start it. Today it holds sign in and the pause
+windows; the screens follow. See
+[`docs/console.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/console.md).
+
 ## More than one machine
 
 The console reads the whole deployment, not one host. The status line names the workers once they have

@@ -6504,7 +6504,11 @@ validator rather than a second copy of it.
   boot-loads through it. Neither side re-derives the schema, so they cannot drift (mirrors
   `INT-TRIGGERS-FILE-CONTRACT`).
 - **Write protocol**: atomic tmp + rename (`writePauseWindows`); the worker's directory watch hot-swaps the
-  in-memory windows on change and **keeps the last-good set on a bad edit** (no restart).
+  in-memory windows on change and **keeps the last-good set on a bad edit** (no restart). Right before the rename
+  the writer re-reads the file and refuses, with nothing written, when it differs from what the change was built
+  from: the caller's `expect` snapshots (the console's confirm ticket, issue #640) or, without them, the writer's own
+  read. Before #640 a write landing between that read and the rename was silently overwritten; now the second writer
+  is told to look again.
 - **Enforcement**: at pickup, before `reserveBudget`, a scope-matching active window defers the job with
   `job.moveToDelayed(windowEndMs, token)` + `DelayedError`; it consumes no budget and auto-resumes at the end.
 - **Acceptance**: Given a well-formed file with a window covering now for a job's scope, the job is delayed to
@@ -8112,6 +8116,125 @@ this project never grows one.
 completed/failed listener bodies, HOOK_POLICY_REASONS; worker/src/config.mjs -> parseOnFailure,
 onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.test.mjs.
 
+## INT-CONSOLE-TOKENS-FILE-CONTRACT
+
+**`pi-dispatch-console token ...` → the console server and doctor.** Who may sign in to the operator console, by
+name and role (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY`). The file holds hashes only: a copy of it signs no one
+in.
+
+- **Location**: `PI_CONSOLE_TOKENS_FILE`, default `console-tokens.json`, a relative value resolved against the
+  deployment folder (`--deployment <dir>`, else the deployment pointer's `deploymentDir`, else the working
+  directory). Read by the worker export `./console-tokens` (`tokensFilePath`), which the console and doctor share,
+  so the two cannot disagree on where it is. The one-time login codes live beside it, in
+  `<dirname(tokens file)>/console-login-codes/`.
+- **Shape**:
+  ```json
+  { "version": 1, "generation": 0, "tokens": [
+    { "name": "rob", "role": "operator", "sha256": "<64 lowercase hex>", "createdAt": "2026-10-14T09:00:00.000Z" }
+  ] }
+  ```
+  - `version` (required): `1`. Any other value refuses the file, naming the version found, because a newer file may
+    mean something this build cannot see.
+  - `generation` (required): a whole number, 0 or more. `sessions end-all` raises it by one, and every session
+    minted under an older generation ends on its next request.
+  - `tokens[].name`: `^[a-z0-9][a-z0-9._-]{0,31}$`, unique in the file. It is what the audit log names, so it should
+    name a person.
+  - `tokens[].role`: `operator` (reads and writes) or `viewer` (reads).
+  - `tokens[].sha256`: the sha256 hex of the token, 64 lowercase hex characters, unique in the file.
+  - `tokens[].createdAt`: an ISO instant, set when the token was added or last rotated.
+  Any problem refuses the WHOLE file with a sentence naming the entry and the fix (invalid JSON, a missing list, a
+  duplicate name or hash, a bad role, hash or date): a console that half-reads its own access list is not one an
+  operator can reason about.
+- **The token**: `pdc_` followed by base64url of 32 random bytes (256 bits). The prefix makes a leaked token
+  greppable and recognisable to a secret scanner. It is printed ONCE, on one line, by `token add` and `token rotate`,
+  and never stored, logged, audited or rendered anywhere. sha256 is the right hash for a 256-bit random secret: a KDF
+  would slow the guessing of a low-entropy password and buys nothing here (`DES-OPERATOR-CONSOLE`, Rejected). A
+  presented token is hashed and compared against EVERY entry with `timingSafeEqual`, with no early exit.
+- **Modes and owner**: the file is a regular file (checked with `lstat`, so a symlink is refused, not followed),
+  mode 0600 or tighter (`mode & 0o077` must be 0) and owned by the account that runs the console (the uid check is
+  skipped where the platform has no uid). Anything else and `serve` refuses to start, and doctor names it: ssh's rule
+  for a private key, for the same reason.
+- **Refusal rules at start**: no file, a refused file, or a file with no `operator` entry refuses `serve`, with a
+  sentence naming `pi-dispatch-console token add --name <n> --role operator`. A file inside
+  any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`) is a doctor failure (a job that mounts the folder could read the names and roles).
+- **Write protocol**: only the CLI writes it (`token add`, `token revoke`, `token rotate`, `sessions end-all`). Each
+  write reads the file, builds the new text, creates a temporary file in the same directory exclusively (`wx`) at
+  0600, re-checks that the file did not change since it was read, and renames over it; a symlinked target is
+  refused. `token add` creates the file at 0600 when it is absent and refuses a name that exists. `token rotate`
+  gives a name a new secret (its sessions end, because their hash is gone); `token revoke` removes the entry (its
+  sessions end the same way). Each change appends an audit row (`token-added`, `token-revoked`, `token-rotated`,
+  `sessions-ended`) with the actor `{name: "shell", role: "shell", session: null}`. The pi extension's
+  `guardedFiles()` holds the file, so the operator's pi session cannot write it with `write` or `edit`.
+- **Read protocol**: the server reads it at start and on every request through the same reader, so a change
+  takes effect on the next request without a restart.
+- **Acceptance**: `REQ-CONSOLE-SECURITY` (a) and (i).
+
+## INT-CONSOLE-AUDIT-LOG
+
+**The console server and its CLI → `audit verify`, doctor, and later a remote console.** The record of who did what
+through the console (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY` (h)).
+
+- **Location**: `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl`, the UTC month of the row's `at`, on the host whose
+  console acted. The directory is created 0700 and each file 0600, appended with `O_APPEND`, one JSON object per
+  line. The worker export `./console-audit` owns the format; the admin and doctor import it, never a copy. The
+  single-instance lock `.console.lock` sits in the same directory (one `serve` per logs directory), and so does the
+  short append lock `.append.lock`, held from the head read to the write so that `serve` and a CLI command appending
+  at the same moment take turns instead of writing two rows with the same `seq` and `prev`. The lock holds its
+  writer's pid and a random tag; it is taken over only when that pid is dead, never by age, and a writer removes it
+  only while it still holds that writer's own tag (an age would compare the filesystem's
+  clock with the process's); one still held after two seconds makes `append` throw.
+- **Row**:
+  ```json
+  { "at": "2026-10-14T09:00:00.000Z", "seq": 42, "prev": "<sha256 hex of the previous raw line>",
+    "actor": { "name": "rob", "role": "operator", "session": "<12 hex>" },
+    "action": "write", "target": "pause-windows", "outcome": "ok",
+    "beforeDigest": "<hex>", "afterDigest": "<hex>", "ticket": "<12 hex>" }
+  ```
+  - `at`: ISO instant, stamped by the writer from its injected clock.
+  - `seq`: a whole number that rises by one per row, across months.
+  - `prev`: the sha256 hex of the previous row's raw line, without its newline; `null` only on the very first row
+    ever written. The chain continues across month files.
+  - `actor`: `{name, role, session}`. `session` is the first 12 hex characters of the sha256 of the session id,
+    never the id; `null` for a CLI row, whose actor is `{name: "shell", role: "shell", session: null}`; a failed login
+    names no token holder.
+  - `action`, exactly one of: `login`, `login-failed`, `login-code`, `logout`, `refused`, `write`, `token-added`,
+    `token-revoked`, `token-rotated`, `sessions-ended`, `serve-started` (`CONSOLE_AUDIT_ACTIONS`).
+  - `outcome`, exactly one of: `ok`, `refused`, `failed` (`CONSOLE_AUDIT_OUTCOMES`).
+  - `target`, `reason` (optional, absent when unset): short strings, control characters written out as `\u{XXXX}`,
+    at most 200 characters. A refusal's `reason` starts with the guard (`host`, `origin`, `content-type`,
+    `read-only`, `role`, `auth`) followed by the console's own refusal sentence, which may name a refused Host
+    hostname but never quotes a header value, a cookie or a body.
+  - `beforeDigest`, `afterDigest` (optional): digests of the file before and after a write, so a row ties to a change
+    without holding it. `ticket` (optional): the first 12 hex characters of the sha256 of the confirm ticket the
+    write redeemed, never the ticket. A confirm appends its `ok` row BEFORE the write; when the write is then refused
+    or throws, a second row with the same `ticket` and outcome `failed` follows, so the last row for a ticket is its
+    outcome.
+  - An unknown action or outcome throws in the writer: the vocabulary is closed.
+- **Rate-limited refusals**: a refusal of a request that carried no session (`actor.name` `anonymous`) is written
+  one row each up to 60 a minute (burst 120). Past that, refusals are counted, and the count is written as one row,
+  `action: "refused"`, `target: "(rate limited)"`, its `reason` starting with the number, just before the next
+  allowed row. A refusal from a signed-in session is always its own row.
+- **Never in a row**: a token, a login code, a cookie value, a session id, a request body, or any payload text.
+- **Head recovery**: the writer keeps no head in memory. Every append reads the newest month file's last line (a
+  bounded 64 KiB tail read) under the append lock, so a restart, or a CLI command writing while `serve` runs,
+  continues the one chain. A last line that does not parse makes every append throw until the file is moved aside;
+  doctor and `audit verify` name it.
+- **Failure**: `append` is synchronous and throws on any failure, and the caller refuses the write it was going to
+  record. A write that cannot be audited does not happen.
+- **Verification**: `pi-dispatch-console audit verify` and doctor walk every month file in order and check each `prev`
+  and `seq`. The result is `{ok: true, rows, startsAt}` or `{ok: false, rows, broken: {file, line, reason}}`, naming
+  the first broken link. The first row of the oldest SURVIVING file is not checked against a predecessor: when the
+  retention reaper removed older months, verify reports where the chain starts (`startsAt`, the file and `seq`), and
+  does not call it broken. A broken chain is a doctor warning.
+- **Retention**: reaped on `PI_LOG_RETENTION_DAYS` by the worker (`makeConsoleAuditReaper`, at boot and on each
+  retention sweep, beside the allocation log reaper), because the worker always runs and the console may not. Only
+  names of the `YYYY-MM.jsonl` shape are touched, and the newest file is never reaped, since it holds the head.
+- **The Valkey mirror**: each row `serve` writes is also pushed, after the file holds it and best effort, onto the
+  list `console:audit` (`LPUSH` then `LTRIM` to 500 rows), the `alloc:log` precedent, so a console on another host
+  can show recent rows later. The short-lived CLI commands do not connect to Valkey, so their rows are in the file
+  only. A mirror failure never fails the append; the file is the record.
+- **Acceptance**: `REQ-CONSOLE-SECURITY` (f) and (h).
+
 ## Revision History
 
 | Date | Change |
@@ -8385,3 +8508,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-14 | No issue: a park closes the job's semantic dedup window (`DES-AWAIT-INPUT-ENDS-THE-JOB`, `REQ-DEDUP-BY-DELIVERY-GUID`). **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: the `run.awaitInput` bullet says nothing about timing and no field moves. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: the `parked` sidecar and the promotion are untouched. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record of a parked run is the same; the release is a log line only. |
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a forgejo job now carries the minted token as `GITEA_TOKEN` and the instance as `GITEA_INSTANCE_URL` (the configured `FORGEJO_URL`, scheme included), the only pair the pinned tea 0.15.0 logs in from without a stored login. Since the tea pin (be1cc42e) a forgejo job carried `FORGEJO_TOKEN`, `GITEA_SERVER_TOKEN` and `FORGEJO_HOST`, under which every `tea` command the envelope names answers "Error: no available login". `GITEA_SERVER_TOKEN` and `FORGEJO_HOST` stay (the first is `tea login add --token`'s default, the second may be read by a skill). The forge table's `hostVar` column becomes the list `hostVars`, so `FORGE_HOST_VARS` and the `run.secrets` reservation derive both URL names; the minted-name list in the `PI_FORWARD_ENV` refusal gains `GITEA_TOKEN`, and the per-forge names sentence now names forgejo and azure, which it had omitted. `INT-FORGEJO-PAYLOAD-SUBSET` UNCHANGED, checked: nothing about the payload moves. |
 | 2026-10-14 | No issue: the lab's Forgejo follow-up, `OQ-043`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `FORGEJO_PERMISSION_TOKEN` is refused in `PI_FORWARD_ENV` and deleted from the closed container map after every other write, from the forge table's new `receiverOnlyVars` column (`RECEIVER_ONLY_VARS`). It is the receiver's author-gate lookup token, of an account that is an admin of the repositories, and no job may hold it. **`INT-FORGEJO-PAYLOAD-SUBSET` UNCHANGED, checked**: the lookup still takes `sender.login` and nothing else from the payload. |
+| 2026-10-14 | Issue #640, the operator console. **NEW `INT-CONSOLE-TOKENS-FILE-CONTRACT`**: `PI_CONSOLE_TOKENS_FILE` (default `console-tokens.json` in the deployment folder), `{version: 1, generation, tokens: [{name, role, sha256, createdAt}]}`, a regular file at 0600 owned by the console's account (symlinks refused), the whole file refused on any problem, no operator token refuses `serve`; the token is `pdc_` plus base64url of 32 random bytes, shown once by `token add` or `token rotate` and never stored; sha256 is enough for 256 random bits; `sessions end-all` bumps `generation`; writes are an exclusive temporary file and a rename, by the CLI only, each audited; the pi extension guards the file. **NEW `INT-CONSOLE-AUDIT-LOG`**: `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl` (directory 0700, files 0600, appended), rows `{at, seq, prev, actor, action, target, outcome, reason, beforeDigest, afterDigest, ticket}`, `prev` the sha256 of the previous raw line across months, the head recovered from the newest file's last line, a reaped head reported as where the chain starts rather than as broken, a failed append refusing its write, a best-effort mirror on the Valkey list `console:audit` (500 rows), the closed action and outcome vocabularies, and never a token, a code, a cookie, a session id or a body. **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED** (shape, validation and atomic rename unchanged; `writePauseWindows` gains an optional `expect` that refuses a file changed since the preview, and without one it now refuses a file that changed between its own read and its rename, where it used to overwrite that change; the Write protocol bullet says so). UNCHANGED, checked: `INT-DEPLOYMENT-POINTER-CONTRACT` (the console resolves its deployment through the pointer and adds no allowlisted key), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`. |

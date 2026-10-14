@@ -2004,6 +2004,24 @@ adversarial passes did.
 - **What would close it**: removing the fallback, which would make every deployment without the new variable fail
   every forgejo trigger closed; or a per-job Forgejo credential, which Forgejo does not offer.
 
+## OQ-044: Where the console shows a run's transcript
+
+- **Status**: `OPEN` (2026-10-14, issue #640), handed to #643.
+- **Question**: a run's `.log` (`PI_CAPTURE_JOB_LOGS`) and its session transcript live only on the host that ran the
+  job, and `docs/multi-host.md` keeps them there on purpose: they are the artifacts that hold issue text, comment text
+  and tool output. A console on one host of a fleet, or on a machine that is not a worker, can show run records for
+  every host but transcripts only for its own. Should the console show transcripts only for runs whose host it is
+  (and say so for the others), or should transcripts be shipped to where the console runs?
+- **What #640 already decides**: run text reaches a console page only for the operator role, always escaped after
+  the control-byte scrub (`REQ-CONSOLE-SECURITY` (e), `DES-OPERATOR-CONSOLE`), and never in a list view. Nothing in
+  #640 shows a transcript.
+- **Why it matters**: shipping moves the most PII-bearing bytes this system holds off the machine the operator chose
+  to keep them on, and adds a store with its own retention; showing only local runs leaves a fleet operator a page
+  that answers "not on this host" for most runs.
+- **Needs**: a decision in #643 (live logs), with the retention and the PII placement of any shipped copy stated in
+  `SECURITY.md` before it ships.
+- **Cross-links**: `REQ-CONSOLE-SECURITY`, `DES-OPERATOR-CONSOLE`, `REQ-DURABLE-RUN-HISTORY`, `REQ-RESUMABLE-SESSION`.
+
 ## Revision History
 
 | Date | Change |
@@ -2111,3 +2129,4 @@ adversarial passes did.
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **NEW `OQ-043`** (`ACCEPTED RISK`): the Forgejo harness account must be a repository admin for the author gate's lookup to answer (a `write` collaborator's token gets 403), and on an admin account the `write:repository` token every forgejo job carries reaches the repository's settings and branch protection. Closed by a separate read-only lookup token for the receiver, not built. **`OQ-013` UNCHANGED, checked**: it is GitLab's gate and its lookup; the Forgejo lookup's loud 503 posture is the same and unchanged. |
 | 2026-10-14 | No issue: the lab's Forgejo follow-up. **`OQ-043` AMENDED, still `ACCEPTED RISK` and now mitigated**: the receiver's own `FORGEJO_PERMISSION_TOKEN` (a `read:repository` token of an admin account, kept out of every job) answers the author gate, so the job's token stays a `write` collaborator's. The source evidence that a read scope suffices and that the admin check is against the token's user is cited in the row. The residual is the fallback to `FORGEJO_TOKEN` when the variable is unset. **`OQ-013` UNCHANGED, checked.** |
 | 2026-10-14 | No issue. **`OQ-043` UNCHANGED, checked**, and the check found a second admin dependency it had not named: the Forgejo host's branch protection check listed `/branch_protections`, an admin route, so a `write` collaborator's job token failed every job with 403. That check now reads the branch object's `protected` (`REQ-BRANCH-PROTECTION-PRECONDITION`), and nothing a job does needs an admin's token any more; the lookup fallback stays the only residual. |
+| 2026-10-14 | Issue #640. **NEW `OQ-044`** (`OPEN`, handed to #643): where the console shows a run's transcript, given that `.log` files and session transcripts stay on the host that ran the job; #640 fixes only that run text reaches a page for the operator role alone, always escaped, never in a list. UNCHANGED, checked: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-INSIGHTS-HTML-EXPORT`, and `constitution.md` (no port clause, checked). |

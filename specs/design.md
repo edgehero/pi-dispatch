@@ -2299,7 +2299,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   tail read. The
   extension still **binds no network port at all**: a file with no server is not a surface — nothing
   listens, nothing off-machine gained reachability — so this stays strictly narrower than the
-  superseded `127.0.0.1` panel. The artifact carries **run-record fields and operator-authored
+  superseded `127.0.0.1` panel. Since issue #640 that property is the EXTENSION's, and it still holds for the
+  extension: the operator console of `DES-OPERATOR-CONSOLE` is a second surface, a separate process
+  (`pi-dispatch-console`) over the same read model and the same write funnels, and it is that process, never this
+  extension, that listens. The artifact carries **run-record fields and operator-authored
   trigger/skill strings only, never `.log` bytes and never a host path beyond the folder's basename**
   — the same placement boundary as everything else here, applied to a file that outlives the session.
   **Its labels are sized and cut in estimated COLUMNS, and no cut on the page leaves half a character**
@@ -2541,8 +2544,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   without a restart (`OQ-008`), keeping the running config on an invalid edit. The extension also ships an
   `operate-pi-dispatch` skill (advertised via the `resources_discover` event) that recommends how to use
   those human confirm gates. The extension talks to the same Valkey
-  (`VALKEY_URL`) and reads the run-history sidecar files; it **binds no network port at all**. Bull Board
-  is dropped. Since issue #54 the read-model additionally carries the graph's data surface: it enumerates
+  (`VALKEY_URL`) and reads the run-history sidecar files; it **binds no network port at all** (the extension; since
+  issue #640 the console of `DES-OPERATOR-CONSOLE` is a separate process that does, under that entry's rules). Bull
+  Board is dropped. Since issue #54 the read-model additionally carries the graph's data surface: it enumerates
   a cron folder's committed skills from the git object store at HEAD (`readFolderSkills` — the worker's
   own `selectEntries`/`keepOnlyDeclaredSkills` over one hardened `ls-tree`, plus one bounded `cat-file`
   per SKILL.md), lists a trigger's injected skills dir advisorily (`readInjectedSkills`), and folds
@@ -2563,7 +2567,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Why**:
   - **The receiver still carries no admin surface — ever.** The superseded panel narrowed that surface to
     a `127.0.0.1` bind; a surface with **no port at all** is strictly narrower still. Nothing reachable
-    from the network gained a control here — it lost one.
+    from the network gained a control here; it lost one. Since issue #640 a console does listen, in its own
+    process and on loopback or a 0600 socket (`DES-OPERATOR-CONSOLE`); the receiver still carries no admin surface,
+    and this extension still binds nothing.
   - **Reconciliation with the amended `CONST-ISOLATION-CONTAINER-PER-JOB`.** pi **does** run on the host
     here, as the operator's own interactive tool — which the amended constraint scopes out: this session
     is not a harness invocation, processes no adversarial input, is operator-present, and holds no harness
@@ -2854,7 +2860,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     named: an operator on a divergent pi version gets no admin surface and falls back to direct Valkey and
     file inspection, rather than a silently degraded one.
 - **Rejected**:
-  - *A served graph page (a localhost listener for the HTML view, or live data via a socket)* — the
+  - **SUPERSEDED by `DES-OPERATOR-CONSOLE` (issue #640)**, kept as written because the reasoning was right for a
+    surface with no security model of its own: the console is that served page, built as a separate process under
+    the rules of that entry, and the insights artifact itself still binds nothing.
+    *A served graph page (a localhost listener for the HTML view, or live data via a socket)*: the
     exact surface this entry removed, re-proposed with a prettier face; the socket→file substitution
     `DES-JOB-OUTBOX-CHAINING` canonised applies symmetrically here, so the browser view is a written
     artifact and refresh is the page reloading a re-written file, never a connection.
@@ -2862,11 +2871,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     is placement (overlay-viewer-only), not filtering; an escaped copy in a durable file outside the
     overlay would trade that structural defence for an HTML-escaping promise, the one trade this
     design refuses everywhere else.
-  - *The web panel + Bull Board* — an entire localhost web app for a solo, terminal-native operator. The
+  - **SUPERSEDED by `DES-OPERATOR-CONSOLE` (issue #640)** for the web panel, kept as written: the console is a web
+    surface with writes, decided once the operator asked for full management in a browser; Bull Board stays dropped.
+    *The web panel + Bull Board*: an entire localhost web app for a solo, terminal-native operator. The
     superseded `DES-PANEL-SEPARATE-FROM-RECEIVER` holds the full original reasoning; it was correct for a
     networked panel and is removed because the network surface is removed.
   - *Mounting admin on the receiver* — unchanged rejection: the receiver must bind `0.0.0.0`, so any admin
-    surface on it is published to the internet.
+    surface on it is published to the internet. Still rejected under `DES-OPERATOR-CONSOLE` (issue #640), which
+    runs the console as its own process for exactly this reason.
   - *The extension spawning pi as a subprocess* — would violate `no-pi-outside-container` and the amended
     constraint's harness-invocation scope. The extension runs *inside* the operator's session; it does not
     launch an agent.
@@ -9308,6 +9320,207 @@ a tunnel.
   (`decisiveExitLine`, `parseExitResources`, `parseExitOomKilled`), worker/src/container-spec.mjs (`memoryBytes`),
   worker/src/run-container.mjs, worker/src/processor.mjs (`peakReachedLimit`), image/verify-image.sh.
 
+## DES-OPERATOR-CONSOLE
+
+- **Status**: issue #640, the security model and hardened skeleton of the console epic (#650). The screens arrive
+  with #641, every write but the pause windows with #642, live logs with #643. This entry supersedes three of the
+  rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
+  stand, and keeps its fourth: mounting admin on the receiver stays rejected.
+- **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
+  admin package (`@edgehero/pi-dispatch-admin`, `admin/src/console/cli.mjs` bundled to `dist/console.mjs` beside the
+  extension), on `node:http` alone. The pi extension is unchanged and still binds no port; the console is a second
+  surface over the same read model (`admin/src/read-model.mjs`), never a second write path. The property that
+  replaces "binds no network port" has five parts, each held by a lettered clause of `REQ-CONSOLE-SECURITY`:
+  1. **It listens on loopback or on a private socket.** `PI_CONSOLE_LISTEN` takes `127.0.0.1:4790` (the default),
+     `[::1]:<port>` or `unix:/abs/path`. Only IP literals are accepted, because a hostname can resolve somewhere else;
+     loopback is 127.0.0.0/8 and ::1, and any other literal is refused unless `PI_CONSOLE_BIND_PUBLIC=1`, on which
+     doctor warns. A unix socket's parent directory must exist, belong to the console's account and give nothing to
+     group or other; the socket is created under umask 077 and then set to 0600. A stale socket is removed only when
+     `lstat` says it is a socket AND a connect to it fails, so a running console's socket is never taken over, and a
+     path longer than the platform's `sun_path` (104 bytes on macOS, 108 on Linux) is refused before the bind, by
+     name, because the kernel would otherwise truncate it to a different path.
+  2. **Every request needs a named token's session.** Apart from `GET /healthz` (no data, `ok`) and the login routes,
+     a request needs a session, and a session comes only from a token in the tokens file
+     (`INT-CONSOLE-TOKENS-FILE-CONTRACT`) or from a one-time login code that `pi-dispatch-console link --name <n>`
+     mints as the deployment's own account. Two roles: `operator` (reads and writes) and `viewer` (reads). Sessions
+     live in the process (a restart signs everyone out), the id is 32 random bytes, a new one at every login (no
+     fixation), in the cookie `pdc_session` with `HttpOnly; SameSite=Strict; Path=/`. An idle limit
+     (`PI_CONSOLE_IDLE_MINUTES`, default 60, 5 to 1440) and an absolute one (`PI_CONSOLE_MAX_HOURS`, default 12, 1
+     to 168) bound it, and every request re-reads the tokens file: a session whose token was revoked or rotated, whose
+     role changed, or whose `generation` is older than the file's (`sessions end-all`) ends on that request. Each
+     session holds at most `PI_CONSOLE_MAX_STREAMS` (default 4) live streams, for #641's event streams.
+  3. **A write is same-origin, JSON, and confirmed by a single-use ticket bound to its diff.** A write route is a POST
+     whose `Content-Type` is `application/json`. When the request carries `Sec-Fetch-Site` (every current browser sends it),
+     the write is refused unless it says exactly `same-origin`; without that header (an older browser, a script) the
+     `Origin` must equal `http://<Host>`, and a write with no `Origin` at all is refused. A write also needs the
+     operator role and a console that is not read-only (`PI_CONSOLE_READ_ONLY=1` answers every write route 403). A
+     config write is two requests: a preview, which answers the diff and a ticket, and a confirm, which carries only
+     the ticket. The ticket is random, held by the server, bound to the session and the action, deleted on any
+     attempt to redeem it (single use, refused or not) and good for 5 minutes. It holds the snapshots the preview was
+     built from, and the confirm hands them to the funnel's existing `expect` parameter, so a confirm applies exactly
+     the change it showed or refuses with "changed after this change was built from it", and writes nothing. A paid
+     action (from #642) carries the reservation the page shows before its confirm. Every write goes through the
+     read model's funnels: in #640 that is `writePauseWindows`, which gains the `expect` parameter its money-file
+     siblings (`writeScopedLimits`, `writeProjects`) already had. The console adds no write path of its own.
+  4. **Every response carries the same headers, and every page escapes.** One function, applied to every response
+     including refusals and 404s, sets a CSP of
+     `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+     `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`,
+     `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: no-store` and a `Permissions-Policy` that denies
+     every feature. No response carries an `Access-Control-*` header, so no cross-origin script can read one, and
+     a cross-origin JSON write never passes its preflight. Every page is built by one tagged template that escapes
+     every interpolated value after the panel's control-byte scrub (`scrubControls`, then `escapeHtml` from
+     `graph-html.mjs`); only an already-built fragment can be inserted raw, so raw interpolation of a value is
+     impossible by construction. The page's script is a file served from `/static/console.js`, never inline. Run
+     text (titles, transcripts, tool output) reaches the page only for the operator role, and always escaped.
+  5. **Every write and every guard's refusal is audited, in a hash chain.** Each write, each refused write (Host,
+     origin, content type, read-only, auth, role), each login, failed login, used login code and logout, each token change made
+     with the CLI, and each `serve` start appends one row to `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl`
+     (`INT-CONSOLE-AUDIT-LOG`), whose `prev` is the sha256 of the row before it. An append that fails refuses the
+     write it would have recorded (fail loudly, as the allocation audit does). No row holds a token, a login code, a
+     cookie value or a request body. A refusal of a request that carries no session costs its sender nothing, so
+     those rows are rate limited (60 a minute, burst 120) and the rest counted into one row written with the next
+     allowed one: one row per request would let anyone who reaches the port grow the log, and the chain's verify
+     time, without bound. A refusal from a signed-in session, every sign-in and every write is
+     always its own row. A body refused as too large or as not JSON, and a change the preview refuses as invalid, are
+     answered without a row: none of them got as far as a write.
+  The guards come from one route table, `{method, path, auth, write, handler}`, applied by one dispatcher in a fixed
+  order: security headers, the Host check, the route lookup (404, 405), the write guards (origin, content type,
+  read-only, role), the session (401 JSON for `/api/*`, a 303 to `/login` for a page), the handler. A new route
+  cannot skip a guard, and the tests iterate the table rather than a hand list. Login is a write for origin and
+  content type and needs no session, and read-only mode and the viewer role do not refuse it. The server's own limits:
+  `headersTimeout` 10 s, `requestTimeout` 30 s, a 64 KiB body (413), 64 connections, and a login rate limit that is
+  one global token bucket (5 a minute, burst 10, 429), global because every peer is loopback and a per-address
+  bucket would be one bucket anyway. Each failed login is audited. The limit delays; it never locks anyone out.
+- **Why**: the issue's decisions (full management from the first version, writes included; loopback, an SSH tunnel
+  for remote use, a long random token) make the console the most powerful surface this project has after a shell on
+  the host, and put it on a socket. "Loopback only" does not mean "the operator only": every local account, every
+  page the operator's browser opens, and, on Docker Desktop, the job container itself can reach a loopback port. So
+  no single control carries the model. The socket narrows who can connect; the token says who is asking; the Host
+  check defeats DNS rebinding; same-origin plus JSON defeats a hostile page that rides the operator's cookie; the
+  ticket makes a confirm mean "this diff" and nothing newer; the funnels keep every write inside the validation the
+  pi extension's writes already pass; and the audit says afterwards who did what. Per-person tokens answer the
+  issue's first open question: the audit names a person, and one person's access is revoked without rotating
+  everyone's.
+- **The six threats found while surveying, beyond the issue's text, and what answers each**:
+  1. **The job container can be a client of the console.** On Docker Desktop `host.docker.internal` reaches the
+     host's loopback listeners (measured from the egress proxy on 2026-09-30, Docker Desktop 4.37.2, `docs/backends.md`).
+     So "loopback only" does not keep the untrusted side out. The Host check always refuses `host.docker.internal`, `host.containers.internal` and
+     `gateway.docker.internal`, and the console refuses to start when `PI_CONSOLE_ALLOWED_HOSTS` names one; a job
+     that reaches the port still needs a token; and unix-socket mode removes the path. Measured on 2026-10-14
+     with `ghcr.io/edgehero/pi-job:4.3.0` and a listener bound to `127.0.0.1`: on Docker Desktop 27.4.0 (macOS) a
+     container on the default bridge (the `PI_EGRESS=0` posture) reached it through `host.docker.internal` with a
+     200, and the server saw the peer as `127.0.0.1` with `Host: host.docker.internal:<port>`, so the peer address
+     cannot tell a job from the operator. The Host header tells them apart only for a client that keeps the name it
+     dialled (a browser, `curl`, an SDK); a program in the job can send `Host: localhost` and pass the Host check,
+     which is why the Host refusal is a defence against browsers and careless clients, the token is the barrier
+     against a job, and the unix socket is the recommended mode on Docker Desktop. A listener on `::1` was not
+     reached. On the
+     `--internal` network of the armed posture the name did not resolve (`EAI_AGAIN`) and the gateway addresses were
+     unreachable (`ENETUNREACH`); there the egress proxy is the only way out, and it reaches the host's loopback only
+     for an operator who allowlisted `host.docker.internal` (`docs/backends.md`). On native Linux (Docker 27.5.1, the
+     `docker:27-dind` lab) a bridge container with `--add-host host.docker.internal:host-gateway` was refused, as was
+     the bridge gateway address, and an `--internal` container got "network unreachable". A unix socket has no
+     address a container can name, and no job mount carries it. Podman is unmeasured.
+  2. **An SSH tunnel changes the port.** With `ssh -L 8080:127.0.0.1:4790` the browser sends `Host: localhost:8080`,
+     so the issue's rule (the Host must equal the configured host and port) would refuse every tunnel on another
+     port. The rule is on the **hostname**: `127.0.0.1`, `localhost`, `[::1]` or a name in
+     `PI_CONSOLE_ALLOWED_HOSTS`, compared case-insensitively with a trailing dot stripped, any port; anything else is
+     421. Rebinding is defeated by the hostname, which an attacker's DNS name never is, not by the port. The `Origin`
+     check uses the Host the request carried, so it holds through any tunnel port. Measured on 2026-10-14 through a
+     real tunnel to a unix socket (OpenSSH 9.9p2 on macOS to OpenSSH 9.2p1 in a Debian 12 container, `ssh -L
+     9999:/home/op/run/console.sock`, the socket `srw-------` in a 0700 directory): Chrome 155 on `localhost:9999`
+     signed in with a token and with a one-time link, made the same refusals as on a direct port, and a
+     `host.docker.internal` Host through the tunnel was 421.
+  3. **Another app on localhost is the same site.** A site ignores ports, so a page served from `localhost:3000` is
+     same-site with the console, and its requests carry a `SameSite=Strict` cookie. That is why a write needs
+     `Sec-Fetch-Site: same-origin` exactly: `same-site` is refused, as are `cross-site` and `none`. Measured on
+     2026-10-14 in Chrome 155 (headless, macOS), signed in to the console on `localhost`, then visiting a page on
+     `localhost:3001`: its `text/plain` form POST and its `no-cors` fetch both reached the console carrying the
+     session cookie and `Sec-Fetch-Site: same-site`, and both were answered 403 and audited (`origin: ... Sec-Fetch-Site
+     was same-site`); its JSON fetch never left the browser, because the preflight `OPTIONS` was answered 405 with no
+     `Access-Control-*` header. Its credentialed GET of `/api/whoami` and its image GET also arrived with the cookie
+     and were answered, but the page could read neither response. So `SameSite=Strict` does not stop a same-site
+     page, as predicted; the write guards do, and every GET route must stay free of side effects. In the same run a
+     name mapped to `127.0.0.1` (`evil.test`, Chrome's `--host-resolver-rules`) got 421 on every request, an inline
+     script injected into a console page was blocked by the CSP (`script-src 'self'`), and neither the token nor the
+     one-time code appeared in the request log or the audit log.
+  4. **The operator's own pi session could mint a console token.** After a prompt injection, pi's `write` or `edit`
+     tool could add an entry to the tokens file. The tokens file joins the pi extension's `guardedFiles()` (labelled
+     "console tokens file"), the guard that already holds the envelope, the money files and the deployment's `.env`.
+     The session's `bash` can still write it; that residual is the one `DES-ADMIN-VIA-PI-EXTENSION` already names
+     for every guarded file, and the audit records each token the CLI adds.
+  5. **A job could read the tokens file.** A local trigger whose `run.folder` contains the deployment folder mounts
+     it into the job. The file holds sha256 hashes only, and a 256-bit random token cannot be recovered from its
+     hash, so a read grants no login; it does name people and their roles. Doctor fails a tokens file inside
+     any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`), the precedent of the allocation envelope, which the worker refuses to boot on when it
+     lies inside any path a job container can see.
+  6. **Two writers would fork the audit chain.** `serve` and a CLI command (`token add` while the console runs) both
+     append, and two appends that read the same head would write two rows on one `prev`. No head is kept in memory:
+     every append reads the head from the newest file and writes its row under a short append lock
+     (`console-audit/.append.lock`, created exclusively with the writer's pid, removed in `finally`, taken over only
+     when that pid is dead, never by age, so no skew between the filesystem's clock and the process's can let two
+     writers in), so writers take turns; a test runs two processes appending 150 rows each and verifies one
+     unbroken chain of 300. Separately, `serve` takes a single-instance lock,
+     `<PI_LOGS_DIR>/console-audit/.console.lock`, created exclusively (`wx`) with its pid: a lock whose pid is alive
+     refuses the second `serve` with a sentence naming it, a dead pid's lock is taken over, and the lock is released
+     when the server closes. Two consoles on one deployment would hold two session stores and two rate limits, and an
+     operator would not know which one revoked what.
+- **Remote use**: the console terminates no TLS. Remote use is an SSH tunnel to the port
+  (`ssh -L 4790:127.0.0.1:4790 host`) or to the socket (`ssh -L 4790:/path/console.sock host`), and the tunnel is the
+  transport's security. A console on another host than the worker is allowed later, for reads: it needs only Valkey
+  and the deployment folder, nothing in #640 depends on the host, and the audit's Valkey mirror (`console:audit`) is
+  how such a console would read the log. Where run transcripts can be shown is `OQ-044`, handed to #643.
+- **The cookie's attributes**: `Secure` and the `__Host-` prefix are set only if Chrome, Firefox and Safari keep such
+  a cookie on `http://127.0.0.1` and `http://localhost`, where the console is served without TLS; a browser that
+  drops it would make login silently fail. Measured on 2026-10-14 with a server setting three cookies over plain
+  http: Chrome 155 (headless, macOS 15.7) sent back all three on both hosts, but WebKit (a `WKWebView`, the engine of
+  Safari 18.6) sent back only the plain one and dropped both the `Secure` cookie and the `__Host-` one. So the
+  cookie is the plain name `pdc_session`, `HttpOnly; SameSite=Strict; Path=/`, without `Secure`: with it, a Safari
+  operator could never log in. Firefox is unmeasured. Nothing is lost on the wire, where the cookie never leaves the
+  loopback hop or the tunnel.
+- **Rejected**:
+  - **Mounting the console on the receiver.** Still rejected, for the reason `DES-PANEL-SEPARATE-FROM-RECEIVER`
+    recorded and `DES-ADMIN-VIA-PI-EXTENSION` kept: the receiver binds `0.0.0.0` and faces the forge, so any admin
+    surface on it is published to the internet, and one crash in the console would take webhook ingress with it.
+  - **A web framework or a build step.** A framework puts its dependency tree in the process that holds operator
+    power, for a handful of routes, and a client build step puts a bundler between the reviewed source and what the
+    browser runs. Server-rendered template literals with one escaping helper keep the escaping in one place, which
+    is the property that matters when the page renders hostile text.
+  - **TLS in the process.** TLS is the tunnel's job. A loopback listener with a self-signed certificate adds key
+    material to protect, trains the operator to click through a warning, and protects a hop that never leaves the
+    machine.
+  - **One shared token** (the issue's first proposal). The audit could not name a person, and revoking one person's
+    access would rotate everyone's.
+  - **bcrypt or another KDF for the stored hashes.** A KDF slows the guessing of a secret a person chose. A console
+    token is 256 random bits, which no guessing reaches, so sha256 is enough; a KDF would only add a per-login cost
+    that a local attacker could use to slow the operator's logins further. The code says so beside the hash, so it
+    is not later "fixed".
+  - **A cookie with `Secure` or the `__Host-` prefix.** WebKit drops both on plain-http loopback (measured, see the
+    cookie's attributes above), so either would lock Safari operators out.
+  - **The token in a URL** (`?token=`, or a token login link). A query string reaches the server's request log, the
+    browser's history and a `Referer`. The one-time link instead carries a code in the **fragment**, which the browser
+    never sends to the server; a same-origin script POSTs it, it is single use, lives 60 seconds, and is never the
+    token.
+  - **A Valkey stream as the audit record** (the issue's proposal). A capped stream forgets by design and a Valkey
+    flush loses it. The month file is the record and Valkey a best-effort mirror, as the allocation audit and
+    `alloc:log` already are.
+- **Residuals**, stated rather than implied (each is a "What is NOT defended" entry in `SECURITY.md`): root on the
+  host reads and writes everything the console does; a compromised operator browser or machine acts with the
+  operator's session; a compromised tunnel endpoint is the operator; a local user can spend the global login rate limit
+  and slow the operator's own login, and can hold the 64 connections open (each cut ten seconds after it stops short
+  of a full request, so the holder must keep reconnecting) to keep the operator out while it lasts; on Docker Desktop
+  a job on a TCP listen is such a user, and unix-socket mode removes both paths; and the operator session's `bash`
+  can write the tokens file (threat 4).
+- **Traces to**: `REQ-CONSOLE-SECURITY`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`,
+  `DES-ADMIN-VIA-PI-EXTENSION`, `DES-PANEL-SEPARATE-FROM-RECEIVER`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`,
+  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `OQ-044`.
+- **Code evidence**: admin/src/console/ (`cli.mjs`, `config.mjs`, `listen.mjs`, `guards.mjs`, `headers.mjs`,
+  `html.mjs`, `server.mjs`, `sessions.mjs`, `login-codes.mjs`, `confirm.mjs`, `lock.mjs`), worker/src/console-tokens.mjs,
+  worker/src/console-audit.mjs, worker/src/doctor.mjs (`consoleChecks`), worker/src/start.mjs (the audit reaper in
+  the retention sweep), admin/src/index.ts (`guardedFiles`),
+  admin/src/read-model.mjs (`writePauseWindows`).
+
 ## Revision History
 
 | Date | Change |
@@ -9610,3 +9823,4 @@ a tunnel.
 | 2026-10-13 | No issue: the default model moves to `claude-sonnet-5-5`. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED** (text only): its worked example names `claude-sonnet-4-5-20250929` as the model it prices rather than as the default, so the figures stay true. Its Why (one call on the default model can cost several dollars) is UNCHANGED, checked: Sonnet 5.5's worst call is larger in output (128,000 tokens at $10 a million) and smaller in input rates, still dollars, and doctor's cap warning prices it at $1.31072 under a $1.00 cap with the bound's minimal input. |
 | 2026-10-14 | No issue, found in a live lab on 4.3.0: a quick answer to a parked run was swallowed by the semantic window of the delivery that started that run. **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**: a park closes the job's semantic window, after the promotion and before the fixed comment and the label, through the real BullMQ job's compare-and-delete with the id its add stored; fail-open with `parked_window_release_failed`. Rejected: rebuilding the key from the job data, the queue's bare `DEL`, the receiver skipping the window for a reply, and the non-ttl window for every job. The residual (an answer that lands before the release) is recorded. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` UNCHANGED, checked**: the dedup layers and their visibility stay as they are; one more BullMQ call is used, at the pin. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the semantic key is the queue's, not the session store's, and nothing new is looked up. |
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**, one sentence: on Forgejo the parked label is attached and removed by id after a lookup. Measured: a second `POST /repos/{o}/{r}/labels` with the name `pi-awaiting-input` answered 201 and made a duplicate (labels #2 and #3), adding by name attached both to the issue, and removing by name answered 204 and took off one, so the label outlived the resumed run, each park added a repository label, and later plain replies kept routing to `not-parked`. The host now lists the repository's labels (paged, bounded), creates one only when none has the exact name, attaches the lowest id, and on removal deletes every copy the issue carries by id, with 404 and 422 read as already gone. Duplicate repository labels from 4.3.0 are left for the operator (`docs/sessions.md`). **`REQ-AWAIT-INPUT` UNCHANGED, checked**: the marker still routes and never decides; the sidecar does. **`OQ-042` UNCHANGED, checked**: who may set the label does not move. |
+| 2026-10-14 | Issue #640, the operator console's security model and hardened skeleton. **NEW `DES-OPERATOR-CONSOLE`**: a separate process, the bin `pi-dispatch-console` of the admin package, on `node:http` alone, over the same read model as the pi extension. The property that replaces "binds no network port": it listens on loopback (`127.0.0.1:4790` by default, IP literals only, a public literal only with `PI_CONSOLE_BIND_PUBLIC=1`) or on a 0600 unix socket; every request but `/healthz` and login needs a named token's session; a write needs `Sec-Fetch-Site: same-origin` (or an exact `Origin`), JSON, the operator role, a console that is not read-only, and a single-use ticket bound to the previewed diff, and goes through the read model's funnels (`writePauseWindows` gains `expect`); every response carries one header set; every write, refusal and sign-in lands in a hash-chained audit log. Six threats found while surveying are recorded with their answers: the job container reaching loopback through the host gateway (the Host check refuses the gateway names, a token is required, and the unix socket removes the path), an SSH tunnel changing the port (the Host check is on the hostname, any port), a page on another localhost port being same-site (`same-site` is refused), the operator's pi session minting a token (the tokens file joins `guardedFiles()`), a job reading the tokens file through a mounted path (hashes only, and doctor fails a tokens file inside any path a job container can see), and two writers forking the chain (an append lock around the head read and the write, plus a single-instance lock on `serve`). Rejected, with reasons: mounting on the receiver (still), a framework or build step, TLS in the process, one shared token, a KDF for 256-bit tokens, `Secure` or `__Host-` before the browser lab, the token in a URL (the one-time code rides in the fragment), and a Valkey stream as the record. Measured on 2026-10-14 and recorded in the entry: a Docker Desktop job container reaches a host loopback listener through `host.docker.internal` on the default bridge and not on `--internal`, native Linux reaches it in neither posture; WebKit drops `Secure` and `__Host-` cookies on plain-http loopback, so the cookie is plain; in Chrome 155 a hostile page on another localhost port is same-site and its writes are refused on `Sec-Fetch-Site`, a rebound name gets 421, and the CSP blocks an injected inline script; and a real `ssh -L` tunnel to the unix socket signs in on a different port. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the extension still binds no port, stated as the extension's property, and the console is named as a second surface in a separate process; its Why bullet on the receiver says the receiver still carries no admin surface; the rejected served graph page and web panel are marked SUPERSEDED by `DES-OPERATOR-CONSOLE` where they stand, their text kept; mounting admin on the receiver stays rejected. **`DES-PANEL-SEPARATE-FROM-RECEIVER` UNCHANGED, checked**: still superseded, and its reasoning is what the console's separate process rests on. UNCHANGED, checked: `CONST-ISOLATION-CONTAINER-PER-JOB` (the console runs no agent and processes no adversarial input as instructions; run text is data it escapes), `CONST-BUDGET-BEFORE-TOKENS` (the console's one write moves a pause window through the same funnel as the panel, and paid actions are #642's), and `constitution.md` (it holds no port clause, checked). |
