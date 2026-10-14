@@ -67,7 +67,11 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A job container's `/session` transcript | **None** — agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges |
 | A **resurrected sandbox**'s operator shell (`pi-dispatch sandbox`) | **Operator — the same trust as a terminal on this host** | A third channel, and the first the **operator** opens rather than the agent. Not a job container: no minted token, no provider key, no agent running, started only by a keypress. It re-mounts a finished run's workspace, which for a forge job holds attacker-influenced code — the same trust shape as checking out a stranger's pull request locally. Every isolation flag still applies; ports it publishes are `127.0.0.1`-only and last only while it does |
 | The **venue** a job's container is built in (`run.backend`, `PI_BACKENDS`) | **Operator — the same trust as the daemon they point the worker at** | A different axis from every row above. Those ask *who wrote this*; this asks *who is holding the execution*. Today there is one venue, the Docker daemon the worker's docker CLI resolves, which is the operator's own machine unless `DOCKER_HOST` or a docker context points it elsewhere; the worker reads that answer at boot and before each job, logs a redirect, and a floor asking `credentialTransit=enforced` refuses one. It judges the endpoint's form, so a unix socket or loopback port that is really a tunnel to another machine still reads as this host. A venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and the isolation flags in **this worker's argv do not reach it**. What bounds it is a declaration an operator reads (`docs/backends.md`), a floor they can require of every blessed venue, and a boot refusal when the two disagree. |
-| Receiver, worker, queue, admin extension | Trusted | They never execute agent-authored content — the admin extension feeds only PII-free, fixed-enum run records to the model; raw container output stays in the overlay viewer |
+| The operator console process (`pi-dispatch-console serve`) | **Operator, the same trust as the admin extension** | It runs as the deployment's account and writes through the same read-model funnels as the panel. It renders untrusted text (issue titles, and from #641 on run text) but only escaped, after the control-byte scrub, under a strict CSP and behind the operator role; it executes none of it and feeds none of it to a model. It listens on loopback or a 0600 unix socket, never on the receiver ([The operator console](#the-operator-console)) |
+| The operator's browser | **Operator, while it holds a session** | A signed-in browser acts as the token's person. Every other page that browser opens, including one on another `localhost` port, is **None**: the console refuses its writes by origin, not by trust in the browser |
+| The console tokens file (`PI_CONSOLE_TOKENS_FILE`) | **Operator, the same trust as the deployment's `.env`** | It says who may sign in. It holds sha256 hashes only, so a copy signs no one in, but whoever can WRITE it can add a person. The console refuses to start on one that is group or world accessible, a symlink or another account's; the pi extension guards it from its own session's `write` and `edit`; doctor fails it inside any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`) |
+| The login-code drop directory (`console-login-codes/` beside the tokens file) | **Operator, the same trust as the tokens file** | `pi-dispatch-console link` writes a one-time code's hash there (directory 0700, file 0600, 60 seconds, consumed by the first `unlink` that wins). Whoever can write it can mint a login, which is why it must be the deployment account's alone |
+| Receiver, worker, queue, admin extension, operator console | Trusted | They never execute agent-authored content: the admin extension feeds only PII-free, fixed-enum run records to the model; raw container output stays in the overlay viewer. The operator console renders untrusted text as data only: escaped, behind the operator role, and never in a list view |
 
 ## What is defended
 
@@ -233,6 +237,53 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   a captured delivery replays as new paid work once the job key ages out. HTTPS is mandatory, the author
   gate still runs, and every money gate still applies — but if that trade is not acceptable to you, do not
   enable the Azure arm. `OQ-015` records the full reasoning.
+
+## The operator console
+
+The admin extension binds no port. The operator console does: `pi-dispatch-console serve` is a separate process
+that serves a web page to manage the deployment ([`docs/console.md`](docs/console.md), `DES-OPERATOR-CONSOLE`,
+`REQ-CONSOLE-SECURITY`). It never runs on the receiver, which faces the internet. It listens on `127.0.0.1:4790` by
+default, or on a unix socket at mode 0600, and refuses any other address unless you set `PI_CONSOLE_BIND_PUBLIC=1`
+(doctor then warns). It terminates no TLS: reach it from another machine through `ssh -L`.
+
+The threat model, and what answers each part:
+
+- **A local user on the host.** Any account on the machine can connect to a loopback port. Every request but
+  `/healthz`, the sign-in pages and the console's script needs a session, and a session needs a named token (256 random bits) or a one-time login code that only
+  the deployment's account can mint. Login attempts are rate limited and every failure is audited. In unix-socket
+  mode the socket is 0600 in a directory only the deployment's account can enter, so another account cannot connect
+  at all.
+- **The job container reaching loopback through the host gateway.** On Docker Desktop `host.docker.internal`
+  reaches the host's loopback listeners, so a job may be able to open a connection to the console. The console
+  refuses every request whose Host is `host.docker.internal`, `host.containers.internal` or
+  `gateway.docker.internal` before any route runs, refuses to start when `PI_CONSOLE_ALLOWED_HOSTS` names one, and
+  still needs a token; a job holds none. The Host refusal stops a browser and any client that keeps the name it
+  dialled; a program in the job can send `Host: localhost` instead, so against a job the token is the barrier, and
+  failed sign-ins are rate limited. Unix-socket mode removes the path, because no job mounts the socket, and is the
+  recommended mode on Docker Desktop.
+- **A hostile page on another localhost port.** Browsers treat `localhost:3000` and the console as the same SITE (a
+  site ignores ports), so a page there would ride a `SameSite=Strict` cookie. Every write needs
+  `Sec-Fetch-Site: same-origin` exactly (`same-site` is refused), or, from a browser that does not send that header,
+  an `Origin` equal to the console's own, and a JSON body, which no cross-origin page can send without a CORS
+  preflight that the console never answers. A write is two requests, a preview and a confirm that carries a
+  single-use ticket bound to that session and that diff.
+- **DNS rebinding.** A hostile name that resolves to `127.0.0.1` reaches the port, but its requests carry the hostile
+  name in `Host`. The console accepts only `127.0.0.1`, `localhost`, `[::1]` and names you list in
+  `PI_CONSOLE_ALLOWED_HOSTS`, whatever the port (so an SSH tunnel on any local port works), and answers anything else
+  421.
+- **Hostile run text rendered in the page.** Issue titles, comments, tool output and transcripts are attacker text.
+  Every value the console renders is scrubbed of control bytes and HTML-escaped by one template, so raw insertion is
+  impossible by construction; the CSP allows scripts only from the console's own files and no inline script; run text
+  reaches a page only for the operator role and never in a list view; no response carries an
+  `Access-Control-*` header.
+- **A leaked tokens file grants nothing.** The file stores sha256 hashes, never a token; a token is shown once, at
+  `token add` or `token rotate`, and appears in no log, audit row or page. Revoking or rotating a token, or
+  `sessions end-all`, ends the affected sessions on their next request.
+- **Who did what.** Every write, every write refused by a guard and every sign-in is appended to
+  `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl` as a hash chain (`pi-dispatch-console audit verify` names the first
+  broken link). Refusals of requests with no session are written one row each up to 60 a minute and counted past
+  that, so a flood cannot grow the log without bound. The chain makes an edit evident, not impossible: whoever can write that file can also rewrite every
+  row after the one they changed.
 
 ## What is NOT defended (v1)
 
@@ -542,6 +593,18 @@ Stated openly rather than discovered later:
   accident, not as controls on an adversary who already has code execution in the container. The bound
   that is not agent-writable is `PI_SESSION_MAX_RESUME_CHAIN`, which counts the host's own deliveries.
 
+- **The operator console cannot defend against the host or the operator's own machine.** Root on the host reads
+  the tokens file, the audit log and the console's memory, and can rewrite the audit chain end to end. A compromised
+  operator browser or machine acts with the operator's session, which is what a session is. A compromised tunnel
+  endpoint (the machine running `ssh -L`, or anything that can connect to its forwarded local port) is a local user
+  on the host from the console's point of view: it still needs a token, but it sees whatever a signed-in browser
+  sends through it. And the login rate limit is one global bucket, because every peer is loopback: a local user can
+  spend it and slow the operator's own login (never lock them out). The same holds for availability: whoever can
+  connect can hold the console's 64 connections open (each is cut after ten seconds without a full request, so a
+  client must keep reconnecting), which keeps the operator out while it lasts; it gains nothing else. On Docker
+  Desktop a job container is such a client on a TCP listen. Unix-socket mode removes both paths for other accounts and
+  for jobs.
+
 ## Operator responsibilities
 
 - **Protect your default branch.** Require a pull-request review, forbid force-pushes. This is not a
@@ -678,7 +741,8 @@ Stated openly rather than discovered later:
   only the root session's turns. The backstops there are the 30-minute container timeout, the job-count caps, and
   your provider-side spend limit, not the meter.
 - **The admin surface is not a network service.** It is a pi extension in your own terminal session plus
-  a `settings.json` file — it binds no port. Whoever can run pi with the extension loaded, or write
+  a `settings.json` file, and it binds no port. The operator console is the exception you start yourself: a separate
+  process that listens on loopback or a private socket, under the rules in [The operator console](#the-operator-console). Whoever can run pi with the extension loaded, or write
   `PI_SETTINGS_FILE` (default `~/.pi-dispatch/settings.json`, whose permissions are therefore part of your
   threat model), holds operator power: the same trust as shell access on the host. Treat it that way.
   It is operator-present, processes no adversarial input, and holds no harness credentials — which is why
