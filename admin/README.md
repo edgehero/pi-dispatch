@@ -129,7 +129,7 @@ Four things to know before you build on it:
 One command puts a live terminal view over the whole deployment:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-13" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-14" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
 </p>
 
 - **MCP servers, read-only.** A trigger that names MCP servers says so on its row (`[mcp ...]`), and its
@@ -146,7 +146,7 @@ One command puts a live terminal view over the whole deployment:
   always marked as one ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-13" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-14" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
 </p>
 
 - **Triggers, editable live.** Add, edit and delete triggers without a restart. Drill-ins show what
@@ -184,7 +184,7 @@ One command puts a live terminal view over the whole deployment:
   It counts jobs only: a machine busy with other work reads as idle.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-09" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a stale host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-14" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a stale host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects" width="820">
 </p>
 
 - **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`
@@ -198,7 +198,7 @@ One command puts a live terminal view over the whole deployment:
   plan. A run's detail names the plan a portfolio run wrote and the dollars it settled.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-allocation.png?v=2026-10-05" alt="The panel's budget split view: the weekly envelope, each project's floor, weight, share and spend, the headroom, the applied plan clamped by the step with its reasons, and the history across two hosts with a revert" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-allocation.png?v=2026-10-14" alt="The panel's budget split view: the weekly envelope, each project's floor, weight, share and spend, the headroom, the applied plan with its reasons, and the history across two hosts with a revert and a refused plan" width="820">
 </p>
 
 - **The portfolio manager.** A weekly flow you own reads the budget and writes a plan of weights. The

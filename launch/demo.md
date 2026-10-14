@@ -1,7 +1,8 @@
 # Recording the demo (GIF / video)
 
 The `/dispatch` panel is the hook — a short recording of it is worth more than any paragraph. This is the
-recipe; it needs a real terminal, so it's yours to run (the panel can't be driven headless). Two options:
+recipe; it needs a real terminal and pi itself, so it's yours to run (the still panel images are drawn headless by
+`launch/render-images.mjs`, below, but a recording needs pi's own TUI moving). Two options:
 [`vhs`](https://github.com/charmbracelet/vhs) (scripted, reproducible, best for a clean GIF) or
 [`asciinema`](https://asciinema.org) + [`agg`](https://github.com/asciinema/agg) (records a real session).
 
@@ -130,12 +131,13 @@ output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate the
 
 ## The panel and insights images
 
-`docs/images/dispatch-dashboard.svg`, `dispatch-hosts.svg`, their `.png` copies and `insights-view.png` are drawn by
-the shipped code over one canned deployment, by a committed script:
+Every panel and command image in `docs/images` is drawn by the shipped code over one canned deployment, by a
+committed script: `dispatch-dashboard.svg`, `dispatch-hosts.svg`, `dispatch-allocation.svg`,
+`dispatch-run-detail.svg`, `dispatch-commands.svg`, the `.png` copies of the first three and `insights-view.png`.
 
 ```sh
-node launch/render-images.mjs          # the two SVGs
-node launch/render-images.mjs --png    # also the two PNGs (for the npm page) and insights-view.png
+node launch/render-images.mjs          # the five SVGs
+node launch/render-images.mjs --png    # also the three PNGs (for the npm page) and insights-view.png
 ```
 
 What it needs:
@@ -154,9 +156,14 @@ no run breaks a cap, a scoped limit, a host's slots or budget, or a project's sh
 days and trims the shared run mirror by them, so its history here starts at the age cutoff of its last trim that
 removed a run (that write's time less 7 days), and the insights page hatches the time before as no data. The script empties its
 environment before anything loads, so no key or deployment of the machine running it is read, and nothing is fetched.
-Only the queue's live counts, its workers, the active job and the failed job are canned. The dashboard is
-`makeDashboard`'s LIST at width 80, the hosts image the same panel after `u`; each SVG is checked against the
-renderer's lines before it is written, and two runs write the same bytes (`admin/test/render-images.test.mjs`). The
+Only live state is canned: the queue's live counts, its workers, the active job and the failed job, and the parked
+run's retained sandbox (a directory on a worker's disk, with this shell's egress setting). The panel images are one
+`makeDashboard` at width 80, driven by its own keys: the LIST, then `u` for the hosts, `b` for the budget split, and
+the cursor moved to the parked run (a triage run that asked a question and ended `awaiting-input`) with Enter for its
+run detail. The commands image is what `/dispatch status`, `budget`, `runs 5`, `triggers` and `priorities` send,
+assembled from the same reads and renderers the extension uses, with the deployment's folder shown as `~/pi-work`.
+Each SVG is checked against the renderer's lines before it is written, and two runs write the same bytes
+(`admin/test/render-images.test.mjs`). The
 insights page is `insightsCommand`'s, shot at 1240 px and device scale 2, full page, with the browser's clock one
 minute after the page was generated.
 
