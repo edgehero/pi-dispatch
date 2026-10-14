@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { FORGES, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind, targetSeparator } from "../src/forges.mjs";
+import { FORGES, FORGE_KINDS, MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS, RUN_KINDS, forgeSpec, isForgeKind, targetSeparator } from "../src/forges.mjs";
 import { forgeDeliveryJobId, deliveryJobId, gitlabDeliveryJobId } from "../src/job-id.mjs";
 
 test("FORGE_KINDS is exactly the table's keys, so nothing can be in one and not the other", () => {
@@ -26,6 +26,7 @@ test("every forge describes every field, so a half-filled row cannot reach a cal
 		// hostVars is legitimately empty for a forge with no self-hosted instance concept, so only its SHAPE
 		// is pinned -- asserting a member would forbid the honest answer.
 		assert.ok(Array.isArray(spec.hostVars) && spec.hostVars.every((n) => typeof n === "string" && n !== ""), `${kind}: hostVars is a list of names, possibly empty`);
+		assert.ok(Array.isArray(spec.receiverOnlyVars) && spec.receiverOnlyVars.every((n) => typeof n === "string" && n !== ""), `${kind}: receiverOnlyVars is a list of names, possibly empty`);
 	}
 });
 
@@ -157,4 +158,14 @@ test("a forgejo job carries the exact pair tea 0.15.0 logs in from, and the pin 
 	assert.ok(FORGES.forgejo.tokenVars.includes("GITEA_TOKEN"), "tea 0.15.0 reads its environment login's token from GITEA_TOKEN and nothing else");
 	assert.ok(FORGES.forgejo.hostVars.includes("GITEA_INSTANCE_URL"), "tea 0.15.0 reads its environment login's URL from GITEA_INSTANCE_URL and nothing else");
 	assert.ok(MINTED_TOKEN_VARS.has("GITEA_TOKEN"), "and so a forwarded host GITEA_TOKEN would shadow the job's token");
+});
+
+test("the forgejo lookup token is receiver-only, and is in no set a job's env is written from (OQ-043)", () => {
+	assert.ok(RECEIVER_ONLY_VARS.has("FORGEJO_PERMISSION_TOKEN"));
+	for (const kind of FORGE_KINDS) {
+		for (const name of RECEIVER_ONLY_VARS) {
+			assert.equal(FORGES[kind].tokenVars.includes(name), false, `${kind}: ${name} must never be minted into a job`);
+			assert.equal(FORGES[kind].hostVars.includes(name), false, `${kind}: ${name} must never be written as a host var`);
+		}
+	}
 });

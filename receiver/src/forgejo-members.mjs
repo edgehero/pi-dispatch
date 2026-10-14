@@ -40,13 +40,25 @@ const API_PREFIX = "/api/v1";
 const WRITE_PERMISSIONS = new Set(["owner", "admin", "write"]);
 
 /**
- * Build the resolver. `token` is the same operator-supplied access token the worker uses; `fetchFn` is
- * injected so the whole module is testable offline.
+ * What a 403 tells the operator to fix, by which variable's token asked. Fixed strings, never the body.
+ * With the dedicated lookup token, its account is the one that must be an admin. With the fallback, the right repair
+ * is NOT to make the job's account an admin (that hands every job a token able to lift branch protection, OQ-043) but
+ * to give the lookup its own token.
+ */
+const FORBIDDEN_REASON = Object.freeze({
+	FORGEJO_PERMISSION_TOKEN: "collaborator permission lookup returned 403 (the account behind FORGEJO_PERMISSION_TOKEN must be an admin or the owner of the repository, and the token must carry read:repository)",
+	FORGEJO_TOKEN: "collaborator permission lookup returned 403 (FORGEJO_TOKEN's account is not an admin of the repository: set FORGEJO_PERMISSION_TOKEN to a read:repository token of an account that is, docs/forgejo.md)",
+});
+
+/**
+ * Build the resolver. `token` is the lookup token (FORGEJO_PERMISSION_TOKEN, or FORGEJO_TOKEN as the fallback) and
+ * `tokenVar` names which, for a 403's reason; `fetchFn` is injected so the whole module is testable offline.
  *
  * Returns `resolveAuthority(repoFullName, login)` -> `{ authorized: boolean }` | `{ indeterminate: string }`
  * -- the same shape every forge's resolver returns.
  */
-export function makeResolveForgejoAuthority({ apiUrl, token, fetchFn = fetch }) {
+export function makeResolveForgejoAuthority({ apiUrl, token, tokenVar = "FORGEJO_TOKEN", fetchFn = fetch }) {
+	const forbidden = FORBIDDEN_REASON[tokenVar] ?? FORBIDDEN_REASON.FORGEJO_TOKEN;
 	return async function resolveAuthority(repoFullName, login) {
 		// Both halves have to be present AND well-formed before they become path segments. A slash or a `..`
 		// in either would reach a different endpoint than the one this function believes it is asking, and
@@ -78,7 +90,7 @@ export function makeResolveForgejoAuthority({ apiUrl, token, fetchFn = fetch }) 
 			// {"message":"Only admins can query all permissions, repo admins can query all repo permissions,
 			// collaborators can query only their own"}; the same account raised to repo admin gets 200). The
 			// other 403s this route can give are the token's scope (`token does not have at least one of
-			// required scope(s)`, `token scope is limited to public repos`), so the reason names both repairs.
+			// required scope(s)`, `token scope is limited to public repos`), so the dedicated token's reason names its scope too.
 			// Still indeterminate, and that is a decision, not an oversight. A retry cannot heal it, but the
 			// retry costs nothing (no token is minted and nothing spends before this answer), while the
 			// alternative is worse in the way this file's header names: a determinate refusal answers 204, which
@@ -86,8 +98,8 @@ export function makeResolveForgejoAuthority({ apiUrl, token, fetchFn = fetch }) 
 			// trigger "delivered" while nothing ran. A 503 marks each delivery failed there, the log line below
 			// names the repair, and a delivery that failed this way still describes real work to redo once the
 			// account is fixed. The body is still not read: the fixed reason is enough, and a body is not ours
-			// to log.
-			return { indeterminate: "collaborator permission lookup returned 403 (the harness account must be an admin of the repository, and its token must carry write:repository)" };
+			// to log. The reason names the variable whose token asked (FORBIDDEN_REASON).
+			return { indeterminate: forbidden };
 		}
 		if (!res.ok) {
 			// Note what is NOT here: the response body. A Forgejo error body can echo the request, and the

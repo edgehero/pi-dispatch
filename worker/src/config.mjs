@@ -10,7 +10,7 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { delimiter, isAbsolute, posix } from "node:path";
 import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
-import { MINTED_TOKEN_VARS } from "./forges.mjs";
+import { MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
@@ -176,6 +176,14 @@ function forwardEnvList(raw, egressArmed = false) {
 	if (minted.length > 0) {
 		throw configError(
 			`PI_FORWARD_ENV must not forward ${minted.join(", ")} -- the worker mints a per-job token (CONST-TOKEN-SCOPED-PER-JOB) and a forwarded operator token would silently override it`,
+		);
+	}
+	// OQ-043: a receiver-only credential (FORGEJO_PERMISSION_TOKEN) is an ADMIN account's token, kept apart from the job's
+	// precisely so no job holds it. Forwarding it would undo that with one config line.
+	const receiverOnly = names.filter((n) => RECEIVER_ONLY_VARS.has(n));
+	if (receiverOnly.length > 0) {
+		throw configError(
+			`PI_FORWARD_ENV must not forward ${receiverOnly.join(", ")} -- only the receiver reads it, for the author gate's permission lookup, and it belongs to an account that is an admin of the repositories, which is exactly what a job must not hold (OQ-043)`,
 		);
 	}
 	const workerOnly = names.filter((n) => WORKER_ONLY_SECRET_VARS.has(n));

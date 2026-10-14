@@ -17,31 +17,40 @@ dedup transfers unchanged for the same reason.
 
 ## Set it up
 
-**1. Make the harness account an admin of each repository, then mint its token.** The author gate asks
-Forgejo for the permission of whoever triggered the job
-(`GET /repos/{owner}/{repo}/collaborators/{user}/permission`), and Forgejo answers that question about
-another user only to a site admin or an admin of the repository. A `write` collaborator gets 403 ("Only
-admins can query all permissions, repo admins can query all repo permissions, collaborators can query only
-their own"), every trigger then fails closed, and nothing ever runs. So add the harness account to each
-repository with **Administrator** access. A site admin account also works, but it reaches every repository
-on the instance, which is far more than this needs.
+**1. Give the harness two tokens from two accounts.** The jobs and the author gate need different things,
+and one token cannot serve both safely.
 
-Then mint the token: **repository-scoped** ("Specific repositories"), carrying only `write:repository` and
-`write:issue`. That is genuinely narrower than GitLab's equivalent: there is no all-or-nothing `api` scope
-to fall back to.
+- **The job token, `FORGEJO_TOKEN`.** Make the harness account a **Write** collaborator of each repository,
+  and mint a **repository-scoped** token ("Specific repositories") carrying only `write:repository` and
+  `write:issue`. That is genuinely narrower than GitLab's equivalent: there is no all-or-nothing `api` scope
+  to fall back to. Every forgejo job carries this token.
+- **The lookup token, `FORGEJO_PERMISSION_TOKEN`.** The author gate asks Forgejo for the permission of
+  whoever triggered the job (`GET /repos/{owner}/{repo}/collaborators/{user}/permission`), and Forgejo
+  answers that question about another user only to a site admin or an admin of the repository. A `write`
+  collaborator gets 403 ("Only admins can query all permissions, repo admins can query all repo
+  permissions, collaborators can query only their own"), and then every trigger fails closed and nothing
+  ever runs. So use a **different** account that is an admin (or the owner) of each repository, and mint a
+  token from it carrying **`read:repository` only**. Only the receiver reads this variable. It is never
+  handed to a job: `PI_FORWARD_ENV` refuses it, a trigger's `run.secrets` cannot bind it, and the worker
+  removes it from the job's environment besides.
 
-**Know what admin costs, because the scopes do not narrow it.** Forgejo checks a token twice: its scope by
-category and method (any write under `/repos/{owner}/{repo}` needs `write:repository`), and the account's
-access to the repository. The settings, webhook, collaborator and branch protection endpoints all sit in the
-`repository` category behind a repository admin check (`routers/api/v1/api.go` at Forgejo 14.0.5). So an
-admin account's `write:repository` token can edit the repository's settings, add webhooks and
-collaborators, and change or delete branch protection. Only deleting or transferring the repository needs
-the owner. Forgejo has no per-job mint, so this same token is in every forgejo job's container, held by an
-agent that reads issue text anyone can write. Branch protection on the default branch is what stands
-between that agent and your default branch (`REQ-BRANCH-PROTECTION-PRECONDITION`), and on an admin account
-the token can take it off. pi-dispatch has no separate, read-only token for the permission lookup today, so
-this is the price of Forgejo triggers: give the account admin only on the repositories this deployment
-services, rotate the token, and weigh it before arming triggers on a repository that matters.
+Why `read:repository` is enough, and why it is safe, from Forgejo 14.0.5's source. The permission route is a
+GET inside the repository routes that `tokenRequiresScopes(AccessTokenScopeCategoryRepository)` wraps, and
+that check asks for the READ level on a GET and the WRITE level only on POST, PUT, PATCH and DELETE
+(`routers/api/v1/api.go`). The admin requirement is checked against the token's **user**, not its scope:
+`GetRepoPermissions` (`routers/api/v1/repo/collaborators.go`) admits a caller for whom `IsUserRepoAdmin()`
+holds, and that is the permission `GetUserRepoPermission` computes for the account behind the token. So a
+read scoped token of an admin answers the gate, and cannot write anything.
+
+**What it costs to skip the second token.** Without `FORGEJO_PERMISSION_TOKEN` the lookup uses
+`FORGEJO_TOKEN`, and that account then has to be an admin. The token's scopes do not narrow an admin: the
+settings, webhook, collaborator and branch protection endpoints all sit in the same `repository` scope
+category behind a repository admin check, so that `write:repository` token can edit the repository's
+settings, add webhooks and collaborators, and change or delete branch protection (only deleting or
+transferring the repository needs the owner). Forgejo has no per-job mint, so every forgejo job would carry
+it, held by an agent that reads issue text anyone can write, and branch protection is what stands between
+that agent and your default branch (`REQ-BRANCH-PROTECTION-PRECONDITION`). It works, and `pi-dispatch
+doctor` warns for as long as it is set up that way (`OQ-043` in [`specs/open-questions.md`](../specs/open-questions.md)).
 
 **2. Tell the harness who it is.** A repository-scoped token **cannot call `GET /user`**, because
 `read:user` is not among the four permissions such a token may carry. So set the harness account's numeric
@@ -49,7 +58,8 @@ id explicitly:
 
 ```bash
 FORGEJO_URL=https://forgejo.example.com
-FORGEJO_TOKEN=...
+FORGEJO_TOKEN=...            # the harness account (a write collaborator): every job carries it
+FORGEJO_PERMISSION_TOKEN=... # an admin account's read:repository token: the receiver's alone
 FORGEJO_BOT_ID=42          # the harness account's numeric id, from its profile page
 FORGEJO_WEBHOOK_SECRET=... # a long random string
 ```
@@ -168,14 +178,14 @@ work during an outage behind a response indistinguishable from a stranger being 
 
 **Know what that looks like, because 403 lands there too.** Only two answers from the permission endpoint
 are determinate: a 200 carrying a permission string, and a 404 (no such user or repository), which is the
-refusal. Every other status, **403 included**, is indeterminate. A 403 is almost always setup: the harness
-account is not an admin of the repository (step 1), or its token lacks `write:repository`. Nothing fires and
-nothing is silently dropped: the receiver logs `forgejo_permission_lookup_failed` with the reason
-`collaborator permission lookup returned 403 (the harness account must be an admin of the repository, and
-its token must carry write:repository)` and answers **503**, so the delivery shows as failed in the
-webhook's delivery history rather than as delivered. That is deliberate. A retry cannot fix a 403, but it
-costs nothing (nothing is minted or spent before this answer), while answering 204 would record every
-trigger as delivered while none ran. Fix the account, then trigger again whatever you still want run.
+refusal. Every other status, **403 included**, is indeterminate. A 403 is almost always setup: the token that asked
+belongs to an account that is not an admin of the repository (step 1), or lacks `read:repository`. Nothing
+fires and nothing is silently dropped: the receiver logs `forgejo_permission_lookup_failed` with a reason that
+names the variable to fix (`FORGEJO_PERMISSION_TOKEN` when it is set; otherwise it says to set it) and answers
+**503**, so the delivery shows as failed in the webhook's delivery history rather than as delivered. That is
+deliberate. A retry cannot fix a 403, but it costs nothing (nothing is minted or spent before this answer),
+while answering 204 would record every trigger as delivered while none ran. The receiver also logs, at boot,
+which variable the lookup uses (`forgejo_permission_token`). Fix the account, then trigger again whatever you still want run.
 
 ## The scope trade-off
 

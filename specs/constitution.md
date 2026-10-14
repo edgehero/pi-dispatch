@@ -969,16 +969,17 @@ passing, on the record — issue #80.)
   establish its own identity refuses to boot — an unresolved self never equals a sender id, so the guard
   would fail open silently rather than loudly.
 
-  A second consequence narrows the scope half's claim, and is recorded so the claim stays true. The
-  author gate's permission lookup about another user is answered by Forgejo only to a site admin or a
-  repository admin (measured on 14.0.5: a `write` collaborator's token gets 403), so the harness account
-  must be an **admin** of each repository it serves. The token's scopes do not narrow that: Forgejo checks
-  the scope by category and method and the account's access separately, and the settings, webhook,
-  collaborator and branch protection endpoints sit in the `repository` category behind a repository admin
-  check. So on Forgejo the one token every job carries can change repository settings and branch
-  protection, which is the barrier `REQ-BRANCH-PROTECTION-PRECONDITION` relies on. Deleting or transferring
-  the repository still needs the owner. The residual, and what would close it (a separate, read-only token
-  used only for the lookup), is `OQ-043`.
+  A second consequence is why the author gate has a token of its own. Forgejo answers a lookup of another
+  user's repository permission only to a site admin or a repository admin (measured on 14.0.5: a `write`
+  collaborator's token gets 403), and the token's scopes would not narrow an admin account: the settings,
+  webhook, collaborator and branch protection endpoints sit in the `repository` scope category behind a
+  repository admin check. So the job's token stays a `write` collaborator's, and the lookup asks with
+  `FORGEJO_PERMISSION_TOKEN`: a `read:repository` token of a different account that is an admin, read by
+  the receiver alone and kept out of every job (refused in `PI_FORWARD_ENV` and `run.secrets`, deleted from
+  the container env last). A read scope reaches no write endpoint, so that admin account's token can change
+  nothing. Unset, the lookup falls back to `FORGEJO_TOKEN`, whose account must then be an admin, and every
+  job then carries a token able to lift branch protection; that fallback is the residual `OQ-043` records,
+  and doctor warns while it is in use.
 - **Why**: The credential's short **expiry** — not its capabilities — is the blast-radius bound for the
   case where an injected agent exfiltrates its environment, which is a *when*, not an *if*. A broad,
   long-lived classic PAT makes one successful injection permanent and multi-repo, which is why it is
@@ -1088,6 +1089,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-14 | No issue: the lab's Forgejo follow-up. **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED**, the paragraph added earlier the same day: the author gate now asks with its own token, `FORGEJO_PERMISSION_TOKEN` (a `read:repository` token of an account that is a repository admin, read by the receiver alone and refused or deleted on every path into a job), so the job's `FORGEJO_TOKEN` stays a `write` collaborator's and the scope half holds again. The fallback to `FORGEJO_TOKEN` when it is unset is the residual (`OQ-043`, now mitigated). Verified at Forgejo v14.0.5: the permission route is a GET inside the `repository` scope group, so `tokenRequiresScopes` asks only `read:repository`, and `GetRepoPermissions` admits the caller by `ctx.IsUserRepoAdmin()`, which is `ctx.Repo.Permission` computed by `GetUserRepoPermission(repo, ctx.Doer)`: the token's USER, not its scope. **`CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the gate and its 503 posture do not move. |
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED**, one paragraph in its Forgejo text: the harness account must be a repository ADMIN, because Forgejo answers the author gate's lookup of another user's permission only to a site or repository admin (a `write` collaborator's token got 403 `{"message":"Only admins can query all permissions, repo admins can query all repo permissions, collaborators can query only their own"}`, and every trigger failed closed). The token's scopes do not narrow an admin account: at Forgejo 14.0.5 the settings, webhook, collaborator and branch protection endpoints are in the `repository` scope category behind a repository admin check, so the token every forgejo job carries can lift branch protection. Recorded as `OQ-043` rather than glossed. **`CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the 403 stays indeterminate (503), now with a reason that names the repair; who may trigger does not move. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: the receiver's 503 retries a free lookup, nothing is minted or reserved before it. |
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`CONST-TRIGGER-AUTHOR-GATE` AMENDED in its Forgejo enumeration only (text)**: the admitted permission strings are `owner`, `admin` and `write`. Forgejo answers `{"permission":"owner","role_name":"owner",...}` for a personal repository's owner (measured on `GET /api/v1/repos/human/parked-lab/collaborators/human/permission`), and the two-member set dropped every trigger the owner set as `author-not-allowed`. The constraint itself, write access or above, is UNCHANGED, checked: an owner can push, so admitting it is the statement applied rather than widened, and `read` and `none` still refuse. |
 | 2026-10-12 | No issue: the forge's own MCP server. **`CONST-MERGE-NEVER-AUTOMATIC` AMENDED**, in the Acceptance: the forge MCP servers a job may be handed run with the forges' dedicated merge and approval tools withheld in the image (github-mcp-server's `merge_pull_request` and `pull_request_review_write`, mcp-gitlab's `merge_merge_request`, `approve_merge_request`, `unapprove_merge_request` and `approve_deployment`), dropped from every tool list and refused at the call, proved by `verify-image.sh`; and the line says plainly that this is not a boundary (a GitLab quick action in a note or a description, the job's CLI, or the server run from the job's shell act with the token's role), which stays the token's role and the branch's protection. The Statement and the Why are UNCHANGED, checked: approval stays a merge by another name, and the harness calls no merge. `CONST-TOKEN-SCOPED-PER-JOB` is UNCHANGED, checked: its GitLab token is "not merge-capable in practice" with the Developer role `docs/gitlab.md` now asks for, not with Maintainer. |

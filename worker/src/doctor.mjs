@@ -604,7 +604,7 @@ export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
 export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
-export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
+export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
  * Issue #471 (follow-up): the variables the CLIs doctor spawns read from their environment, by the CLI that reads them.
  * The worker starts podman, docker and gh with its OWN environment (no `env` option: `image-preflight.mjs`,
@@ -727,7 +727,7 @@ export const DOCTOR_SHELL_KEYS = Object.freeze({
 
 /** Issue #471: the service keys whose values a disagreement line never prints (set or unset only); URLs print as
  *  `urlShown` does. Every other key's two values are shown, quoted. */
-const SECRET_SERVICE_KEYS = new Set([VALKEY_PASSWORD_KEY, "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_PRIVATE_KEY", "WEBHOOK_SECRET", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_TOKEN", "AZURE_WEBHOOK_SECRET"]);
+const SECRET_SERVICE_KEYS = new Set([VALKEY_PASSWORD_KEY, "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_PRIVATE_KEY", "WEBHOOK_SECRET", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_TOKEN", "AZURE_WEBHOOK_SECRET"]);
 const URL_SERVICE_KEYS = new Set(["VALKEY_URL", "GITLAB_URL", "FORGEJO_URL", "AZURE_ORG_URL"]);
 
 /** `keys` narrowed to `SERVICE_ENV_KEYS` plus the provider's own key variables. */
@@ -830,6 +830,7 @@ export const EMPTY_READ_AS_UNSET = Object.freeze({
 	GITLAB_WEBHOOK_SECRET: "empty",
 	FORGEJO_URL: "empty",
 	FORGEJO_TOKEN: "empty",
+	FORGEJO_PERMISSION_TOKEN: "blank",
 	FORGEJO_WEBHOOK_SECRET: "empty",
 	AZURE_ORG_URL: "empty",
 	AZURE_TOKEN: "empty",
@@ -2006,15 +2007,26 @@ export async function collectChecks(shellVars, seams) {
 			checks.push({ ok: true, label: `forgejo triggers configured (${urlShown(env.FORGEJO_URL)})` });
 		}
 		// Measured on Forgejo 14.0.5: the author gate's permission lookup answers 403 unless the token's account is a site
-		// admin, a repository admin, or the actor themselves, so a harness that is only a `write` collaborator fails every
-		// trigger closed (503). Doctor cannot ask: forgejo triggers name no repository (each delivery does), and the lookup
-		// it would need is the one in question. So, like the GitLab scope line above (issue #462), a FACT LINE with the
-		// advice in the label, printed whenever forgejo triggers are armed. It names the cost as well as the rule, because
-		// the same token reaches every forgejo job.
-		checks.push({
-			ok: true,
-			label: "the Forgejo harness account must be an ADMIN of every repository its triggers serve: Forgejo refuses a write collaborator's lookup of another user's permission (403), and every trigger then fails closed with 503. Its token keeps write:repository and write:issue only, but on an admin account that scope reaches repository settings, webhooks and branch protection, and every forgejo job carries it (docs/forgejo.md)",
-		});
+		// admin, a repository admin, or the actor themselves. Which token asks is the receiver's choice (OQ-043):
+		// FORGEJO_PERMISSION_TOKEN when set, a read:repository token of an admin account that no job ever holds; else
+		// FORGEJO_TOKEN, every job's token, whose account must then be an admin. Doctor cannot ask Forgejo either way
+		// (forgejo triggers name no repository, each delivery does), so it says which token is in use: a FACT LINE when the
+		// dedicated one is set, with the requirement in the label (issue #462's form), and a WARNING on the fallback,
+		// because the fallback is the configuration that puts an admin's token into every job.
+		const permissionToken = typeof env.FORGEJO_PERMISSION_TOKEN === "string" && env.FORGEJO_PERMISSION_TOKEN.trim() !== "";
+		if (permissionToken) {
+			checks.push({
+				ok: true,
+				label: "forgejo author-gate lookups use FORGEJO_PERMISSION_TOKEN: its account must be an admin (or the owner) of every repository the triggers serve and the token needs read:repository only, while FORGEJO_TOKEN, which every job carries, stays a write collaborator's (docs/forgejo.md)",
+			});
+		} else {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: "FORGEJO_PERMISSION_TOKEN is unset, so forgejo author-gate lookups use FORGEJO_TOKEN: Forgejo answers them only to a repository admin, so that account must be one, and then every forgejo job carries an admin's token that can change repository settings and branch protection (OQ-043)",
+				fix: "keep FORGEJO_TOKEN's account a write collaborator, and set FORGEJO_PERMISSION_TOKEN to a read:repository token of an account that is an admin (or the owner) of the repositories; only the receiver reads it (docs/forgejo.md)",
+			});
+		}
 	}
 
 	// Issue #508: with the egress policy on, a job reaches a forge only over https on port 443.

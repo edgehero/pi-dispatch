@@ -808,6 +808,49 @@ test("a refusal AFTER the queue exists closes what the boot built, so the exit c
 	assert.deepEqual(spent.closes, ["listen:error", "queue", "router"], "an exhausted window releases both handles too -- exit 1 must actually REACH the supervisor for the fresh-window story to exist");
 });
 
+/** A forgejo-only boot (OQ-043): which token the author gate's resolver is built with, and what the boot line says. */
+async function forgejoBoot(extraEnv) {
+	const dir = tempDir("receiver-start-forgejo-");
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "forgejo", flow: "fj-f" } }] }));
+	const built = [];
+	const identityTokens = [];
+	const { createServer } = capturingServer();
+	const lines = await bootLogLines((write) =>
+		startReceiverClosed(
+			{ PI_TRIGGERS_FILE: triggersPath, FORGEJO_URL: "http://192.168.68.52:3700", FORGEJO_WEBHOOK_SECRET: "fj-secret", FORGEJO_TOKEN: "job-token", FORGEJO_BOT_ID: "7", ...extraEnv },
+			{
+				write,
+				makeQueueFn: stubQueue,
+				createServer,
+				resolveForgejoSelfId: async ({ token }) => (identityTokens.push(token), 7),
+				makeResolveForgejoAuthority: (opts) => (built.push(opts), async () => ({ authorized: true })),
+			},
+		),
+	);
+	return { built, identityTokens, lines };
+}
+
+test("forgejo: FORGEJO_PERMISSION_TOKEN, when set, is the ONLY token the author gate's lookup uses (OQ-043)", async () => {
+	const { built, identityTokens, lines } = await forgejoBoot({ FORGEJO_PERMISSION_TOKEN: " admin-read-token " });
+	assert.equal(built.length, 1);
+	assert.equal(built[0].token, "admin-read-token", "the lookup asks with the admin account's read:repository token, trimmed");
+	assert.equal(built[0].tokenVar, "FORGEJO_PERMISSION_TOKEN", "so a 403 names the variable whose account must be the admin");
+	assert.deepEqual(identityTokens, ["job-token"], "identity stays FORGEJO_TOKEN's: it is the account the jobs post as");
+	const line = lines.find((l) => l.event === "forgejo_permission_token");
+	assert.deepEqual(line, { event: "forgejo_permission_token", source: "FORGEJO_PERMISSION_TOKEN" });
+	assert.equal(JSON.stringify(lines).includes("admin-read-token"), false, "names, never values");
+});
+
+test("forgejo: unset or blank, the lookup falls back to FORGEJO_TOKEN and the boot line says so", async () => {
+	for (const extra of [{}, { FORGEJO_PERMISSION_TOKEN: "   " }]) {
+		const { built, lines } = await forgejoBoot(extra);
+		assert.equal(built[0].token, "job-token");
+		assert.equal(built[0].tokenVar, "FORGEJO_TOKEN");
+		assert.equal(lines.find((l) => l.event === "forgejo_permission_token")?.source, "FORGEJO_TOKEN");
+	}
+});
+
 test("every identity arm rides retryIdentity, and no bare identity await remains (source pin, issue #318)", () => {
 	// Cheaper than building forgejo/azure boot fixtures, and it kills the mutation the behavioural tests
 	// cannot see: ONE arm quietly unwrapped, its three siblings still green.
