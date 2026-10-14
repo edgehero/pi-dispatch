@@ -558,7 +558,7 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 	delete env.PI_DISPATCH_PRICE_TABLE;
 
 	// Forge-backed jobs, and local cron jobs that opted in via run.github. Other local-folder jobs have
-	// no token (CONST-TOKEN-SCOPED-PER-JOB). The mint goes into BOTH of its forge's variables because
+	// no token (CONST-TOKEN-SCOPED-PER-JOB). The mint goes into EVERY one of its forge's variables because
 	// each CLI has its own preference -- gh prefers GH_TOKEN over GITHUB_TOKEN, glab prefers GITLAB_TOKEN
 	// -- and mirroring forecloses any precedence surprise inside the container.
 	//
@@ -583,7 +583,7 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 		}
 		for (const name of spec.tokenVars) env[name] = githubToken;
 		const host = forgeHosts?.[forgeKind];
-		if (spec.hostVar && host) env[spec.hostVar] = host;
+		if (host) for (const name of spec.hostVars) env[name] = host;
 	}
 
 	return env;

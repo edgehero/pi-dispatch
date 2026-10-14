@@ -1841,7 +1841,13 @@ refactor apart.
     (see below); the minted per-job token under **its own forge's variable
     names, and only those**: `GITHUB_TOKEN` + `GH_TOKEN` for a github job (and for a local cron job that
     opts in via `run.github: true`, `INT-TRIGGERS-FILE-CONTRACT`); `GITLAB_TOKEN` + `GL_TOKEN`, plus
-    `GITLAB_HOST`, for a gitlab job. Each forge's pair is mirrored because its CLI has its own preference
+    `GITLAB_HOST`, for a gitlab job; `FORGEJO_TOKEN` + `GITEA_TOKEN` + `GITEA_SERVER_TOKEN`, plus
+    `GITEA_INSTANCE_URL` and `FORGEJO_HOST` (both the configured `FORGEJO_URL`, scheme included), for a
+    forgejo job, because the pinned tea 0.15.0 logs in from the environment through `GITEA_INSTANCE_URL` +
+    `GITEA_TOKEN` and no other pair (measured: `GITEA_SERVER_URL`/`GITEA_SERVER_TOKEN` and `FORGEJO_HOST`
+    answer "no available login"; `GITEA_SERVER_TOKEN` is the default of `tea login add --token`);
+    `AZURE_DEVOPS_EXT_PAT` + `SYSTEM_ACCESSTOKEN`, plus `AZURE_DEVOPS_ORG_URL`, for an azure job. Each
+    forge's names are mirrored because its CLI has its own preference
     (gh prefers `GH_TOKEN`, glab prefers `GITLAB_TOKEN`), which forecloses precedence surprises.
     **Cross-forge export is refused by construction**: a GitLab credential exported as `GITHUB_TOKEN`
     would be sent by `gh` to github.com on the agent's first invocation — a working credential handed to
@@ -1919,8 +1925,8 @@ refactor apart.
     allowlist of extra host vars — e.g. a custom provider's key — forwarded by exact `-e NAME=VALUE`, never a
     pass-through, so it satisfies `no-broad-env-into-container`; **every** minted-token name is refused in
     the allowlist at config load — derived from the forge table rather than enumerated here, currently
-    `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `FORGEJO_TOKEN`, `GITEA_SERVER_TOKEN`,
-    `AZURE_DEVOPS_EXT_PAT`, `SYSTEM_ACCESSTOKEN` — because a forwarded operator token would silently
+    `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `FORGEJO_TOKEN`, `GITEA_TOKEN`,
+    `GITEA_SERVER_TOKEN`, `AZURE_DEVOPS_EXT_PAT`, `SYSTEM_ACCESSTOKEN` — because a forwarded operator token would silently
     override the minted per-job value. The list grows with each forge, which is why it is a set rather
     than a pair. **`GITHUB_APP_PRIVATE_KEY` is refused for a second, different reason**: nothing overrides
     it, it simply does not belong in a container. It is the App's *signing* key, so it mints installation
@@ -8374,3 +8380,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-13 | No issue: the default model moves to `claude-sonnet-5-5`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED** (text only): the `modelPolicy` evidence names the model its smoke run sets, `claude-sonnet-4-5-20250929`, rather than calling it the default; the image's smoke runs keep it, since they pin a catalog row for a zero-spend run and move with no default. |
 | 2026-10-13 | Issue #625, found before release. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `awaitInput` joins `AUTHORED_NARROWING_FIELDS` (authored when `true`), so a job whose trigger arms `run.awaitInput` but which arrived without it, from a receiver older than #625 that drops the key as unknown, is refused pre-spend as `trigger-skew` instead of running without the tool on a clean record. The `run.awaitInput` bullet and the skew paragraph name it. `REQ-AWAIT-INPUT` UNCHANGED, checked: what a parked run is does not move. |
 | 2026-10-14 | No issue: a park closes the job's semantic dedup window (`DES-AWAIT-INPUT-ENDS-THE-JOB`, `REQ-DEDUP-BY-DELIVERY-GUID`). **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: the `run.awaitInput` bullet says nothing about timing and no field moves. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: the `parked` sidecar and the promotion are untouched. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record of a parked run is the same; the release is a log line only. |
+| 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a forgejo job now carries the minted token as `GITEA_TOKEN` and the instance as `GITEA_INSTANCE_URL` (the configured `FORGEJO_URL`, scheme included), the only pair the pinned tea 0.15.0 logs in from without a stored login. Since the tea pin (be1cc42e) a forgejo job carried `FORGEJO_TOKEN`, `GITEA_SERVER_TOKEN` and `FORGEJO_HOST`, under which every `tea` command the envelope names answers "Error: no available login". `GITEA_SERVER_TOKEN` and `FORGEJO_HOST` stay (the first is `tea login add --token`'s default, the second may be read by a skill). The forge table's `hostVar` column becomes the list `hostVars`, so `FORGE_HOST_VARS` and the `run.secrets` reservation derive both URL names; the minted-name list in the `PI_FORWARD_ENV` refusal gains `GITEA_TOKEN`, and the per-forge names sentence now names forgejo and azure, which it had omitted. `INT-FORGEJO-PAYLOAD-SUBSET` UNCHANGED, checked: nothing about the payload moves. |

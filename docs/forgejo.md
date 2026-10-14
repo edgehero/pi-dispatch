@@ -171,6 +171,13 @@ bad agent rather than a missing tool.
 `gh`. `image/verify-image.sh` checks it is present and that the image's `dev.pi-dispatch.forges` label
 agrees.
 
+The job's token reaches `tea` as `GITEA_TOKEN` and the instance as `GITEA_INSTANCE_URL` (your `FORGEJO_URL`,
+scheme included). That pair is the only one the pinned tea 0.15.0 logs in from without a stored login:
+`GITEA_SERVER_TOKEN` is only the default of `tea login add --token`, and with it alone every `tea` command
+fails with "no available login". The job also carries the token as `FORGEJO_TOKEN` and `GITEA_SERVER_TOKEN`,
+and the URL as `FORGEJO_HOST`, for scripts and skills. The worker sets all five itself: a trigger's
+`run.secrets` cannot bind any of them, and `PI_FORWARD_ENV` refuses the three token names.
+
 **`run.replicas` works here** (issue #187). `"replicas": 2` on a `label`, `comment` or `pull_request` rule
 races two independent sandboxes on one delivery, each on its own `pi/issue-<n>-r<i>` branch, each opening
 its own pull request titled `[r1/2] …`. It is **webhook only**: there is no Forgejo poller.

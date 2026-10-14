@@ -37,8 +37,10 @@
  *   names that must be refused in `PI_FORWARD_ENV`, and those two lists being derived from one entry is
  *   the point: a forge added to the mint but not to the refusal set is a long-lived host token forwarded
  *   into every container, and nothing would have said so.
- * - `hostVar` is where a self-hosted instance URL lands in the container, or `null` for a forge that has
- *   no instance concept in this codebase yet.
+ * - `hostVars` are where a self-hosted instance URL lands in the container (the configured URL verbatim,
+ *   scheme included), or an empty list for a forge that has no instance concept in this codebase yet. A
+ *   LIST for the reason `tokenVars` is one: the CLI's own name is the one that matters, and a second,
+ *   forge-named copy is what scripts and skills reach for.
  * - `prLabelAction` is this forge's `pull_request` action meaning "a label changed", or `null` where the
  *   forge has no distinguishable one. It decides whether a rule naming that action must carry a positive
  *   selector, and the reason is independent of who is gating: a rule keyed on labels that names no labels
@@ -51,7 +53,7 @@ export const FORGES = {
 		deliveryIdName: "X-GitHub-Delivery GUID",
 		pullRequestSep: "#",
 		tokenVars: ["GITHUB_TOKEN", "GH_TOKEN"],
-		hostVar: null,
+		hostVars: [],
 		prLabelAction: "labeled",
 	},
 	gitlab: {
@@ -59,7 +61,7 @@ export const FORGES = {
 		deliveryIdName: "webhook-id / Idempotency-Key",
 		pullRequestSep: "!",
 		tokenVars: ["GITLAB_TOKEN", "GL_TOKEN"],
-		hostVar: "GITLAB_HOST",
+		hostVars: ["GITLAB_HOST"],
 		// A label added to a merge request arrives as a plain `update`, indistinguishable from any other
 		// edit, so there is no action for a positive-selector rule to attach to. (Separately, a GitLab label
 		// is not an approval at all -- a Guest can set one at issue creation -- which is why every gitlab
@@ -76,9 +78,19 @@ export const FORGES = {
 		// Forgejo numbers issues and pull requests from ONE per-repository sequence, exactly as GitHub does
 		// -- an issue and a PR cannot share an index. So `#` names one thing and no discriminator is needed.
 		pullRequestSep: "#",
-		// `tea` reads GITEA_SERVER_TOKEN; the unprefixed name is what the API examples and most scripts use.
-		tokenVars: ["FORGEJO_TOKEN", "GITEA_SERVER_TOKEN"],
-		hostVar: "FORGEJO_HOST",
+		// `tea` logs in from the environment ONLY through GITEA_TOKEN plus GITEA_INSTANCE_URL. Measured on the
+		// pinned tea 0.15.0 in the 4.3.0 job image against a live Forgejo 14.0.5: that pair lists issues, while
+		// GITEA_SERVER_URL + GITEA_SERVER_TOKEN (with or without GITEA_LOGIN_VIA_ENV=1), FORGEJO_HOST +
+		// GITEA_SERVER_TOKEN, and GITEA_TOKEN alone inside a clone all fail "Error: no available login". So
+		// from be1cc42e until this row changed, every `tea` command the forgejo envelope tells the agent to run
+		// failed. GITEA_SERVER_TOKEN stays: it is the default of `tea login add --token` (its --help says
+		// `[$GITEA_SERVER_TOKEN]`), so an agent that adds a login explicitly still gets the job's token, and it
+		// stays reserved. FORGEJO_TOKEN is what the API examples and most scripts use.
+		// worker/test/forges.test.mjs pins these names to the tea version image/Dockerfile installs.
+		tokenVars: ["FORGEJO_TOKEN", "GITEA_TOKEN", "GITEA_SERVER_TOKEN"],
+		// GITEA_INSTANCE_URL is tea's, and must be the full URL with its scheme (FORGEJO_URL is). FORGEJO_HOST
+		// is read by no CLI; it is kept because it has been in every forgejo job since #61 and a skill may use it.
+		hostVars: ["GITEA_INSTANCE_URL", "FORGEJO_HOST"],
 		// Forgejo names the action, so the positive-selector rule applies exactly as it does on GitHub.
 		// Note this is HYGIENE, not the gate: unlike GitHub, every forgejo trigger is additionally gated on
 		// the actor's resolved repository permission -- see filter-forgejo.mjs for why that is not
@@ -99,7 +111,7 @@ export const FORGES = {
 		pullRequestSep: "!",
 		// `az repos` reads AZURE_DEVOPS_EXT_PAT; SYSTEM_ACCESSTOKEN is what a pipeline-shaped script expects.
 		tokenVars: ["AZURE_DEVOPS_EXT_PAT", "SYSTEM_ACCESSTOKEN"],
-		hostVar: "AZURE_DEVOPS_ORG_URL",
+		hostVars: ["AZURE_DEVOPS_ORG_URL"],
 		// Azure attaches no labels to a pull request at all, so there is no action to attach the rule to and
 		// a predicated PR rule could never match. The loader refuses one rather than letting it load dead.
 		prLabelAction: null,
@@ -140,14 +152,13 @@ export const MINTED_TOKEN_VARS = new Set(FORGE_KINDS.flatMap((kind) => FORGES[ki
  * `MINTED_TOKEN_VARS` and derived the same way, from the table rather than by hand, so a forge added
  * later cannot be missed here either.
  *
- * Separate from `MINTED_TOKEN_VARS` because `hostVar` is a separate column: the token set is
+ * Separate from `MINTED_TOKEN_VARS` because `hostVars` is a separate column: the token set is
  * `tokenVars` only, so a name like `GITLAB_HOST` is in NEITHER set until this one exists. That gap is
  * not theoretical -- `buildContainerEnv` writes this variable after the mint, so a trigger field able
  * to name it would be silently overwritten, and the job would run without the value it asked for on a
- * clean exit 0. github's row is `null` and contributes nothing, which is why the filter is here and
- * not at the call site.
+ * clean exit 0. github's row is empty and contributes nothing.
  */
-export const FORGE_HOST_VARS = new Set(FORGE_KINDS.map((kind) => FORGES[kind].hostVar).filter((name) => typeof name === "string"));
+export const FORGE_HOST_VARS = new Set(FORGE_KINDS.flatMap((kind) => FORGES[kind].hostVars));
 
 /**
  * The separator between a repo label and a target number, for this forge and this target type: the
