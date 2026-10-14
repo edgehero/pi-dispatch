@@ -39,7 +39,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 |---|---|---|
 | **GitHub webhook** — label, `@pi` comment, or PR activity | A collaborator. Applying a label is a permission **GitHub itself** restricts to collaborators, so the label doubles as the approval step; it is not a check we make. Comment and PR auto-action triggers are author-gated here. | Decline the PR |
 | **GitLab webhook** — label, `@pi` comment, or MR activity | A project member with **Developer access or above**, resolved from the API on every delivery. The label is **not** the approval step — see below. | Decline the MR |
-| **Forgejo webhook** — label, `@pi` comment, or PR activity | A collaborator with **admin or write** permission, resolved from the API on every delivery — labels included. | Decline the PR |
+| **Forgejo webhook** — label, `@pi` comment, or PR activity | A collaborator with **owner, admin or write** permission, resolved from the API on every delivery — labels included. | Decline the PR |
 | **Azure DevOps service hook** — work-item tag, `@pi` comment, or PR activity | A **project member**, resolved from the Graph API on every delivery. A work item names the actor only by email address. | Decline the PR |
 | **CLI** — manual run (`pi-dispatch run`) | Whoever has shell on the host / can run the CLI | Decline the PR, or **nothing** for a folder |
 | **Cron** — a schedule | **Nobody, at the time it runs.** It fires unattended. | As above |

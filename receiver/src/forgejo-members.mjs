@@ -4,9 +4,12 @@
  *
  * Forgejo has no `author_association`; the concept is GitHub's. What it has instead is
  * `GET /repos/{owner}/{repo}/collaborators/{collaborator}/permission`, which answers
- * `{ permission: "admin"|"write"|"read"|"none" }`. `admin` and `write` are the honest analogue of
- * `OWNER|MEMBER|COLLABORATOR`: they are exactly the levels that can push a branch, which is the property
- * the constitution actually requires.
+ * `{ permission: "owner"|"admin"|"write"|"read"|"none" }`. `owner`, `admin` and `write` are the honest
+ * analogue of `OWNER|MEMBER|COLLABORATOR`: they are exactly the levels that can push a branch, which is the
+ * property the constitution actually requires. `owner` is not hypothetical and not rare: measured on
+ * Forgejo 14.0.5, the owner of a personal repository asking about themselves gets
+ * `{"permission":"owner","role_name":"owner",...}`, and a set without it dropped every trigger they set
+ * as `author-not-allowed`.
  *
  * The shape of this module is the GitLab resolver's, for the same three reasons, and they are worth
  * restating rather than cross-referencing:
@@ -31,9 +34,10 @@ const API_PREFIX = "/api/v1";
 /**
  * The permission levels that can push to the repository. `read` and `none` cannot, so a job started on
  * their say-so would be doing work the actor could not do themselves -- the line CONST-TRIGGER-AUTHOR-GATE
- * draws.
+ * draws. These are the strings of Forgejo's access modes (none, read, write, admin, owner); `owner` is what
+ * a personal repository's owner is answered with (measured, see the header).
  */
-const WRITE_PERMISSIONS = new Set(["admin", "write"]);
+const WRITE_PERMISSIONS = new Set(["owner", "admin", "write"]);
 
 /**
  * Build the resolver. `token` is the same operator-supplied access token the worker uses; `fetchFn` is
