@@ -230,6 +230,10 @@ Rules:
 - The label only routes the reply. The worker checks the saved session's own `parked` mark before anything is spent,
   so a label set by hand on an issue that is not waiting starts nothing (the run record says `not-parked`) and is
   removed.
+- On Forgejo, 4.3.0 left a `pi-awaiting-input` label behind on parked issues and made a new repository label of
+  that name on every park (Forgejo accepts a duplicate label name). Later releases attach one label by id and remove
+  every copy an issue carries, so those issues clear on their next run. The extra repository labels stay until you
+  delete them (Issues, Labels): keep the one with the lowest id, which is the one pi-dispatch uses.
 - Only the job's own tool can park a run. A repository extension that registers the same name stops the job before
   its prompt (`await-input-shadowed`).
 - Upgrade the worker and the receiver together. A receiver from before this feature drops `awaitInput`, and the

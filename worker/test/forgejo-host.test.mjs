@@ -173,37 +173,125 @@ test("the clone URL is tokenless, and refuses without an instance URL", () => {
 
 // -- setParkedLabel (issue #625) ------------------------------------------------------------------
 
-test("setParkedLabel creates the repository label (an existing one is fine), adds it by name, and removes it by name", async () => {
-	const fetchFn = fakeFetch({
-		"POST /api/v1/repos/acme/widgets/labels": 409,
-		"POST /api/v1/repos/acme/widgets/issues/7/labels": [],
-		"DELETE /api/v1/repos/acme/widgets/issues/7/labels/pi-awaiting-input": 404,
+/**
+ * A fake that answers `{ status, body }` per `METHOD path`, may answer one key differently on each call (an array),
+ * records every call, and THROWS on an unrouted one. The bodies below are Forgejo 14.0.5's, measured, cut to the
+ * fields this code reads.
+ */
+function forgejoFake(routes) {
+	const seen = {};
+	const fn = async (url, init = {}) => {
+		const key = `${init.method ?? "GET"} ${String(url).replace(/^https?:\/\/[^/]+/, "")}`;
+		fn.calls.push({ key, init });
+		if (!Object.hasOwn(routes, key)) throw new Error(`unrouted ${key}`);
+		const n = (seen[key] = (seen[key] ?? 0) + 1);
+		const r = Array.isArray(routes[key]) ? routes[key][Math.min(n, routes[key].length) - 1] : routes[key];
+		return { ok: r.status >= 200 && r.status < 300, status: r.status, json: async () => r.body };
+	};
+	fn.calls = [];
+	return fn;
+}
+const LABELS = "/api/v1/repos/acme/widgets/labels";
+const ISSUE_LABELS = "/api/v1/repos/acme/widgets/issues/7/labels";
+const page = (n) => `GET ${LABELS}?page=${n}&limit=50`;
+const lbl = (id, name = "pi-awaiting-input") => ({ id, name, color: "fbca04" });
+
+test("parking a repository that has no marker label creates it once and attaches it by its id", async () => {
+	const fetchFn = forgejoFake({
+		[page(1)]: { status: 200, body: [lbl(1, "ai")] },
+		[page(2)]: { status: 200, body: [] },
+		[`POST ${LABELS}`]: { status: 201, body: lbl(2) },
+		[`POST ${ISSUE_LABELS}`]: { status: 200, body: [lbl(2)] },
 	});
-	const host = makeForgejoHost({ apiUrl: API, fetchFn });
-	await host.setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok");
-	assert.deepEqual(fetchFn.calls.map((c) => c.key), ["POST /api/v1/repos/acme/widgets/labels", "POST /api/v1/repos/acme/widgets/issues/7/labels"]);
-	assert.deepEqual(JSON.parse(fetchFn.calls[1].init.body), { labels: ["pi-awaiting-input"] });
-	await host.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
-	const refused = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "POST /api/v1/repos/acme/widgets/labels": 201, "POST /api/v1/repos/acme/widgets/issues/7/labels": 403 }) });
-	await assert.rejects(() => refused.setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok"));
+	await makeForgejoHost({ apiUrl: API, fetchFn }).setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok");
+	assert.deepEqual(fetchFn.calls.map((c) => c.key), [page(1), page(2), `POST ${LABELS}`, `POST ${ISSUE_LABELS}`]);
+	assert.equal(JSON.parse(fetchFn.calls[2].init.body).name, "pi-awaiting-input");
+	assert.deepEqual(JSON.parse(fetchFn.calls[3].init.body), { labels: [2] }, "by id: by name, Forgejo attaches every label of that name");
 });
 
-test("clearing the marker in a repository that never had the label is already-gone, not a failure", async () => {
-	// Measured on Forgejo 14.0.5: DELETE /repos/{o}/{r}/issues/{n}/labels/pi-awaiting-input answers 422
-	// {"message":"label does not exist [label_id: 0, repo_id: 1]"} when the repository has no such label, so every
-	// completed non-parked run on an awaitInput trigger logged parked_label_failed ... returned 422.
-	const fetchFn = async (url, init = {}) => {
-		fetchFn.calls.push(`${init.method} ${String(url).replace(/^https?:\/\/[^/]+/, "")}`);
-		return { ok: false, status: 422, json: async () => ({ message: "label does not exist [label_id: 0, repo_id: 1]" }) };
-	};
-	fetchFn.calls = [];
-	const host = makeForgejoHost({ apiUrl: API, fetchFn });
-	await host.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
-	assert.deepEqual(fetchFn.calls, ["DELETE /api/v1/repos/acme/widgets/issues/7/labels/pi-awaiting-input"]);
-	// Only the removal reads 422 as done: adding the marker to an issue still refuses on it.
-	const adding = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "POST /api/v1/repos/acme/widgets/labels": 201, "POST /api/v1/repos/acme/widgets/issues/7/labels": 422 }) });
-	await assert.rejects(() => adding.setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok"), /returned 422/);
-	// And any other refusal of the removal still throws, so a real failure is still logged.
-	const refused = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "DELETE /api/v1/repos/acme/widgets/issues/7/labels/pi-awaiting-input": 403 }) });
-	await assert.rejects(() => refused.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok"), /returned 403/);
+test("parking again reuses the existing label rather than creating a duplicate, which Forgejo 14 would accept with 201", async () => {
+	// Measured: a second POST /labels with the same name answered 201 and made label #3 beside #2. The fake leaves that
+	// route out, so a create here would throw as unrouted.
+	const fetchFn = forgejoFake({
+		[page(1)]: { status: 200, body: [lbl(1, "ai"), lbl(2)] },
+		[page(2)]: { status: 200, body: [] },
+		[`POST ${ISSUE_LABELS}`]: { status: 200, body: [lbl(2)] },
+	});
+	await makeForgejoHost({ apiUrl: API, fetchFn }).setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok");
+	assert.deepEqual(fetchFn.calls.map((c) => c.key), [page(1), page(2), `POST ${ISSUE_LABELS}`]);
+	assert.deepEqual(JSON.parse(fetchFn.calls[2].init.body), { labels: [2] });
+});
+
+test("a repository that already holds duplicates gets the LOWEST id attached, and no third copy", async () => {
+	// The lab repository's labels after two parks under 4.3.0: ai #1, pi-awaiting-input #2 and #3. Paged across two pages
+	// to pin that the lookup reads past the first one.
+	const fetchFn = forgejoFake({
+		[page(1)]: { status: 200, body: [lbl(1, "ai"), lbl(3)] },
+		[page(2)]: { status: 200, body: [lbl(2), lbl(4, "pi-awaiting-input-old")] },
+		[page(3)]: { status: 200, body: [] },
+		[`POST ${ISSUE_LABELS}`]: { status: 200, body: [lbl(2)] },
+	});
+	await makeForgejoHost({ apiUrl: API, fetchFn }).setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok");
+	assert.deepEqual(JSON.parse(fetchFn.calls.at(-1).init.body), { labels: [2] }, "exact name only, lowest id");
+});
+
+test("a forge that refuses the duplicate name (409/422) is read again rather than failing the park", async () => {
+	const fetchFn = forgejoFake({
+		[page(1)]: [{ status: 200, body: [] }, { status: 200, body: [lbl(5)] }],
+		[page(2)]: { status: 200, body: [] },
+		[`POST ${LABELS}`]: { status: 409, body: { message: "label exists" } },
+		[`POST ${ISSUE_LABELS}`]: { status: 200, body: [lbl(5)] },
+	});
+	await makeForgejoHost({ apiUrl: API, fetchFn }).setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok");
+	assert.deepEqual(JSON.parse(fetchFn.calls.at(-1).init.body), { labels: [5] });
+});
+
+test("clearing removes EVERY marker the issue carries, by id, so an issue left with two by 4.3.0 heals", async () => {
+	// Measured: the issue carried #2 and #3, and DELETE .../labels/pi-awaiting-input answered 204 and took off one.
+	const fetchFn = forgejoFake({
+		[`GET ${ISSUE_LABELS}`]: { status: 200, body: [lbl(1, "ai"), lbl(2), lbl(3)] },
+		[`DELETE ${ISSUE_LABELS}/2`]: { status: 204, body: null },
+		[`DELETE ${ISSUE_LABELS}/3`]: { status: 204, body: null },
+	});
+	await makeForgejoHost({ apiUrl: API, fetchFn }).setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
+	assert.deepEqual(fetchFn.calls.map((c) => c.key), [`GET ${ISSUE_LABELS}`, `DELETE ${ISSUE_LABELS}/2`, `DELETE ${ISSUE_LABELS}/3`], "the `ai` label is not touched");
+});
+
+test("clearing an issue that carries no marker sends no DELETE at all, and a missing issue is already clear", async () => {
+	const none = forgejoFake({ [`GET ${ISSUE_LABELS}`]: { status: 200, body: [lbl(1, "ai")] } });
+	await makeForgejoHost({ apiUrl: API, fetchFn: none }).setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
+	assert.deepEqual(none.calls.map((c) => c.key), [`GET ${ISSUE_LABELS}`]);
+	const gone = forgejoFake({ [`GET ${ISSUE_LABELS}`]: { status: 404, body: { message: "not found" } } });
+	await makeForgejoHost({ apiUrl: API, fetchFn: gone }).setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
+});
+
+test("a removal Forgejo answers 404 or 422 is already gone; any other refusal still throws for the log", async () => {
+	// 422 is Forgejo 14.0.5's measured answer for a label that does not exist:
+	// {"message":"label does not exist [label_id: 0, repo_id: 1]"} (the label was removed between the read and the delete).
+	for (const status of [404, 422]) {
+		const fetchFn = forgejoFake({
+			[`GET ${ISSUE_LABELS}`]: { status: 200, body: [lbl(2)] },
+			[`DELETE ${ISSUE_LABELS}/2`]: { status, body: { message: "label does not exist [label_id: 0, repo_id: 1]" } },
+		});
+		await makeForgejoHost({ apiUrl: API, fetchFn }).setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok");
+	}
+	const refused = forgejoFake({
+		[`GET ${ISSUE_LABELS}`]: { status: 200, body: [lbl(2)] },
+		[`DELETE ${ISSUE_LABELS}/2`]: { status: 403, body: {} },
+	});
+	await assert.rejects(() => makeForgejoHost({ apiUrl: API, fetchFn: refused }).setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok"), /returned 403/);
+	// Only the removal reads 422 as done: attaching the marker still refuses on it.
+	const adding = forgejoFake({
+		[page(1)]: { status: 200, body: [lbl(2)] },
+		[page(2)]: { status: 200, body: [] },
+		[`POST ${ISSUE_LABELS}`]: { status: 422, body: {} },
+	});
+	await assert.rejects(() => makeForgejoHost({ apiUrl: API, fetchFn: adding }).setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok"), /returned 422/);
+});
+
+test("the label lookup is bounded, so a server that never sends an empty page cannot hold a teardown", async () => {
+	const fetchFn = async (url) => (fetchFn.n++, { ok: true, status: 200, json: async () => [lbl(9, "other")] });
+	fetchFn.n = 0;
+	await assert.rejects(() => makeForgejoHost({ apiUrl: API, fetchFn }).setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok"), /pages of labels/);
+	assert.equal(fetchFn.n, 20);
 });
