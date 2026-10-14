@@ -30,7 +30,7 @@ import { join } from "node:path";
 import { findEnvKeys } from "@earendil-works/pi-ai/compat";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { egressEnv } from "./egress.mjs";
-import { forgeSpec } from "./forges.mjs";
+import { RECEIVER_ONLY_VARS, forgeSpec } from "./forges.mjs";
 import { apiKeyVariable } from "./provider-key.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 import { KEYLESS_HOW, keylessVerdict, providerRenameHint, readOverlayModels, RENAMED_PROVIDERS } from "./model-endpoints.mjs";
@@ -585,6 +585,10 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 		const host = forgeHosts?.[forgeKind];
 		if (host) for (const name of spec.hostVars) env[name] = host;
 	}
+
+	// OQ-043: the receiver's own lookup credential (FORGEJO_PERMISSION_TOKEN) is an admin account's token and never a
+	// job's. PI_FORWARD_ENV and run.secrets both refuse it upstream; this is the line that holds if either is bypassed.
+	for (const name of RECEIVER_ONLY_VARS) delete env[name];
 
 	return env;
 }

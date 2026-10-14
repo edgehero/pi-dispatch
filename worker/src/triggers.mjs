@@ -30,7 +30,7 @@ import { imageRefProblem } from "./image-ref.mjs";
 // materialize.mjs and the admin already import it, and a keep-in-sync copy would drift where a
 // traversal guard cannot). flow-gate's module body is import-inert, so this keeps parseTriggers pure.
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
-import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
+import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 // The server-name rule, from the one module that parses the overlay's list (its body is import-inert).
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE } from "./mcp-config.mjs";
@@ -261,7 +261,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * Every set is IMPORTED, never retyped, which is the rule `sandbox.test.mjs` keeps for the same reason: a
  * forge added to the table later must not need a second edit here to stay covered.
  */
-export const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...RUNNER_ENV_NAMES, ...PROVIDER_STEERING_VARS]);
+export const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...RECEIVER_ONLY_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...RUNNER_ENV_NAMES, ...PROVIDER_STEERING_VARS]);
 
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";

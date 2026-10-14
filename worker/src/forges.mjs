@@ -41,6 +41,9 @@
  *   scheme included), or an empty list for a forge that has no instance concept in this codebase yet. A
  *   LIST for the reason `tokenVars` is one: the CLI's own name is the one that matters, and a second,
  *   forge-named copy is what scripts and skills reach for.
+ * - `receiverOnlyVars` are credentials of this forge that only the RECEIVER reads, and that must never reach a
+ *   job: refused in `PI_FORWARD_ENV`, reserved from `run.secrets`, and deleted from the container env as a
+ *   backstop (`RECEIVER_ONLY_VARS`). Empty for every forge whose author gate the job's own token can answer.
  * - `prLabelAction` is this forge's `pull_request` action meaning "a label changed", or `null` where the
  *   forge has no distinguishable one. It decides whether a rule naming that action must carry a positive
  *   selector, and the reason is independent of who is gating: a rule keyed on labels that names no labels
@@ -54,6 +57,7 @@ export const FORGES = {
 		pullRequestSep: "#",
 		tokenVars: ["GITHUB_TOKEN", "GH_TOKEN"],
 		hostVars: [],
+		receiverOnlyVars: [],
 		prLabelAction: "labeled",
 	},
 	gitlab: {
@@ -62,6 +66,7 @@ export const FORGES = {
 		pullRequestSep: "!",
 		tokenVars: ["GITLAB_TOKEN", "GL_TOKEN"],
 		hostVars: ["GITLAB_HOST"],
+		receiverOnlyVars: [],
 		// A label added to a merge request arrives as a plain `update`, indistinguishable from any other
 		// edit, so there is no action for a positive-selector rule to attach to. (Separately, a GitLab label
 		// is not an approval at all -- a Guest can set one at issue creation -- which is why every gitlab
@@ -91,6 +96,10 @@ export const FORGES = {
 		// GITEA_INSTANCE_URL is tea's, and must be the full URL with its scheme (FORGEJO_URL is). FORGEJO_HOST
 		// is read by no CLI; it is kept because it has been in every forgejo job since #61 and a skill may use it.
 		hostVars: ["GITEA_INSTANCE_URL", "FORGEJO_HOST"],
+		// The author gate's own lookup token (OQ-043): Forgejo answers a lookup of another user's permission only to a
+		// repository admin, so this is a read:repository token of an account that is one, and the job's FORGEJO_TOKEN
+		// can stay a write collaborator's. A job holding it would hold an admin's token, which is the whole point lost.
+		receiverOnlyVars: ["FORGEJO_PERMISSION_TOKEN"],
 		// Forgejo names the action, so the positive-selector rule applies exactly as it does on GitHub.
 		// Note this is HYGIENE, not the gate: unlike GitHub, every forgejo trigger is additionally gated on
 		// the actor's resolved repository permission -- see filter-forgejo.mjs for why that is not
@@ -112,6 +121,7 @@ export const FORGES = {
 		// `az repos` reads AZURE_DEVOPS_EXT_PAT; SYSTEM_ACCESSTOKEN is what a pipeline-shaped script expects.
 		tokenVars: ["AZURE_DEVOPS_EXT_PAT", "SYSTEM_ACCESSTOKEN"],
 		hostVars: ["AZURE_DEVOPS_ORG_URL"],
+		receiverOnlyVars: [],
 		// Azure attaches no labels to a pull request at all, so there is no action to attach the rule to and
 		// a predicated PR rule could never match. The loader refuses one rather than letting it load dead.
 		prLabelAction: null,
@@ -159,6 +169,13 @@ export const MINTED_TOKEN_VARS = new Set(FORGE_KINDS.flatMap((kind) => FORGES[ki
  * clean exit 0. github's row is empty and contributes nothing.
  */
 export const FORGE_HOST_VARS = new Set(FORGE_KINDS.flatMap((kind) => FORGES[kind].hostVars));
+
+/**
+ * Every credential name only the receiver reads (`receiverOnlyVars`), derived from the table like the two sets above.
+ * The worker refuses each in `PI_FORWARD_ENV`, the triggers loader refuses each in `run.secrets`, and
+ * `buildContainerEnv` deletes each last, so no path puts one in a container.
+ */
+export const RECEIVER_ONLY_VARS = new Set(FORGE_KINDS.flatMap((kind) => FORGES[kind].receiverOnlyVars));
 
 /**
  * The separator between a repo label and a target number, for this forge and this target type: the

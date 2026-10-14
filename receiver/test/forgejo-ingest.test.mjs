@@ -250,6 +250,25 @@ test("a 403 names the repair (the harness must be a repo admin), stays indetermi
 	assert.match(logs.at(-1).reason, /admin of the repository/);
 });
 
+test("the lookup sends the token it was built with, and a 403 names THAT variable's repair (OQ-043)", async () => {
+	const body = { message: "Only admins can query all permissions, repo admins can query all repo permissions, collaborators can query only their own" };
+	let auth = null;
+	const dedicated = makeResolveForgejoAuthority({
+		apiUrl: "https://fj",
+		token: "admin-read-token",
+		tokenVar: "FORGEJO_PERMISSION_TOKEN",
+		fetchFn: async (url, init) => ((auth = init.headers.Authorization), okResponse(body, 403)),
+	});
+	const verdict = await dedicated("acme/widgets", "alice");
+	assert.equal(auth, "token admin-read-token");
+	assert.match(verdict.indeterminate, /returned 403 \(the account behind FORGEJO_PERMISSION_TOKEN must be an admin or the owner of the repository, and the token must carry read:repository\)/);
+	// On the fallback the repair is NOT "make the job's account an admin": it is to give the lookup its own token.
+	const fallback = makeResolveForgejoAuthority({ apiUrl: "https://fj", token: "job-token", tokenVar: "FORGEJO_TOKEN", fetchFn: async () => okResponse(body, 403) });
+	const fb = await fallback("acme/widgets", "alice");
+	assert.match(fb.indeterminate, /FORGEJO_TOKEN's account is not an admin of the repository: set FORGEJO_PERMISSION_TOKEN/);
+	for (const r of [verdict.indeterminate, fb.indeterminate]) assert.equal(r.includes("Only admins"), false, "never the body");
+});
+
 test("a 200 with no permission string is indeterminate, never a refusal", async () => {
 	// Answering false would turn an upstream schema change into a silent, permanent refusal of every trigger.
 	for (const permission of [40, null, undefined, {}, ["write"]]) {

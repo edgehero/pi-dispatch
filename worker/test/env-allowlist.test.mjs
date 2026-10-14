@@ -778,6 +778,26 @@ test("a forgejo job hands tea the instance's full URL and the token, under the n
 	for (const name of ["GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "GL_TOKEN", "GITLAB_HOST"]) assert.equal(name in env, false, name);
 });
 
+test("the receiver's forgejo lookup token never reaches a job's env, by any route (OQ-043)", { skip }, () => {
+	// Both upstream refusals bypassed at once (config.mjs refuses it in PI_FORWARD_ENV, the loader in run.secrets): the
+	// backstop in buildContainerEnv still drops it, so an admin account's token cannot ride into a container.
+	const env = buildContainerEnv({
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+		jobId: "j1",
+		githubToken: "fj-minted",
+		forgeKind: "forgejo",
+		forgeHosts: { forgejo: "https://fj.example" },
+		hostEnv: { ANTHROPIC_API_KEY: "k", FORGEJO_PERMISSION_TOKEN: "admin-read-token" },
+		forwardEnv: ["FORGEJO_PERMISSION_TOKEN"],
+		secrets: { FORGEJO_PERMISSION_TOKEN: "admin-read-token" },
+	});
+	assert.equal("FORGEJO_PERMISSION_TOKEN" in env, false);
+	assert.equal(Object.values(env).includes("admin-read-token"), false, "not under any other name either");
+	assert.equal(env.GITEA_TOKEN, "fj-minted", "the job's own token is untouched");
+});
+
 test("a github job is unchanged: the github names only, and no gitlab ones", () => {
 	const env = buildContainerEnv({
 		provider: "anthropic",

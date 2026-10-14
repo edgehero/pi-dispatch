@@ -632,6 +632,17 @@ test("PI_FORWARD_ENV refuses every name any forge's mint can write -- read off t
 	}
 });
 
+test("PI_FORWARD_ENV refuses every receiver-only credential, read off the table (OQ-043)", () => {
+	for (const name of FORGE_KINDS.flatMap((kind) => FORGES[kind].receiverOnlyVars)) {
+		assert.throws(
+			() => loadConfig({ PI_FORWARD_ENV: `SOME_KEY,${name}` }),
+			(e) => e.piDispatchConfig === true && e.message.includes(name) && e.message.includes("OQ-043"),
+			`${name} must be refused at load`,
+		);
+	}
+	assert.ok(FORGES.forgejo.receiverOnlyVars.includes("FORGEJO_PERMISSION_TOKEN"), "the fixture must not be vacuous");
+});
+
 test("loadGitLabAuth is null without a token, and refuses any source other than pat", () => {
 	assert.equal(loadGitLabAuth({}), null, "no token means no gitlab forge at all");
 	assert.deepEqual(loadGitLabAuth({ GITLAB_TOKEN: "glpat-x" }), { source: "pat", apiUrl: "https://gitlab.com", tokenVar: "GITLAB_TOKEN" });

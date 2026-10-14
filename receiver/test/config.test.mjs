@@ -776,3 +776,18 @@ test("reloadTriggers swaps an armed close one-shot for its disarmed twin: the ru
 	assert.deepEqual(cfg.triggers.github.label.map((r) => r.index), [0, 2], "the disarm shifted NO later index: file entry 2 is still rule index 2");
 	assert.equal(cfg.triggers.knownFlows.has("cleanup"), false, "and its flow left the armed-intent allowlist with it");
 });
+
+// OQ-043: the author gate's lookup token is the receiver's alone, and falls back to FORGEJO_TOKEN.
+test("forgejo: lookupToken is FORGEJO_PERMISSION_TOKEN when set (trimmed), else FORGEJO_TOKEN, and names which", () => {
+	const triggers = { fileExists: () => true, readFile: () => JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "forgejo", flow: "f" } }] }) };
+	const env = { FORGEJO_URL: "https://fj", FORGEJO_WEBHOOK_SECRET: "s", FORGEJO_TOKEN: "job-token" };
+	const set = loadReceiverConfig({ ...env, FORGEJO_PERMISSION_TOKEN: " admin-read " }, triggers).forgejo;
+	assert.equal(set.token, "job-token", "FORGEJO_TOKEN keeps its own job: identity");
+	assert.equal(set.lookupToken, "admin-read");
+	assert.equal(set.lookupTokenVar, "FORGEJO_PERMISSION_TOKEN");
+	for (const extra of [{}, { FORGEJO_PERMISSION_TOKEN: "" }, { FORGEJO_PERMISSION_TOKEN: "  " }]) {
+		const unset = loadReceiverConfig({ ...env, ...extra }, triggers).forgejo;
+		assert.equal(unset.lookupToken, "job-token");
+		assert.equal(unset.lookupTokenVar, "FORGEJO_TOKEN");
+	}
+});

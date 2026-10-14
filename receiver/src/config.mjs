@@ -184,6 +184,16 @@ function loadGitLabConfig(env) {
  * `FORGEJO_BOT_ID` is optional and exists for one reason: a repository-scoped token cannot call
  * `GET /user` (see worker/src/forgejo-identity.mjs). Without it, following the token-scoping advice would
  * make the receiver unable to identify itself, and identity is not optional here.
+ *
+ * `FORGEJO_PERMISSION_TOKEN` is optional and is the author gate's alone (OQ-043). Forgejo answers a lookup of
+ * ANOTHER user's repository permission only to a site admin or a repository admin, so whichever token asks must
+ * belong to one. FORGEJO_TOKEN is also every forgejo job's token, so making ITS account an admin hands each job
+ * a token that can lift branch protection. This variable lets a DIFFERENT account, an admin of the repositories,
+ * answer that one GET with a `read:repository` token, while the job's account stays a `write` collaborator.
+ * Read here and nowhere else: it never reaches the worker's job env, and the worker refuses it in PI_FORWARD_ENV
+ * and run.secrets (WORKER_ONLY_SECRET_VARS). Unset (or blank), the lookup falls back to FORGEJO_TOKEN, which is
+ * the behaviour before it existed and works only if that account is an admin; `lookupTokenVar` names which one
+ * is in use, so the boot line and a 403's reason can say so.
  */
 function loadForgejoConfig(env) {
 	const secret = env.FORGEJO_WEBHOOK_SECRET;
@@ -206,7 +216,15 @@ function loadForgejoConfig(env) {
 	if (typeof token !== "string" || token.trim() === "") {
 		throw configError("FORGEJO_TOKEN is required for forgejo triggers -- the receiver resolves the actor's repository permission before it may enqueue");
 	}
-	return { secret, token, apiUrl: apiUrl.trim(), botId };
+	const permissionToken = typeof env.FORGEJO_PERMISSION_TOKEN === "string" ? env.FORGEJO_PERMISSION_TOKEN.trim() : "";
+	return {
+		secret,
+		token,
+		apiUrl: apiUrl.trim(),
+		botId,
+		lookupToken: permissionToken !== "" ? permissionToken : token,
+		lookupTokenVar: permissionToken !== "" ? "FORGEJO_PERMISSION_TOKEN" : "FORGEJO_TOKEN",
+	};
 }
 
 /**

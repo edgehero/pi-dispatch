@@ -10907,14 +10907,25 @@ test("the GitLab token scope is a FACT LINE whose advice is in the label, since 
 	assert.equal(scope.failed, false);
 });
 
-test("forgejo triggers print the repo-admin requirement as a FACT LINE, measured on Forgejo 14.0.5", async () => {
-	// A `write` collaborator's token got 403 {"message":"Only admins can query all permissions, repo admins can query all
-	// repo permissions, collaborators can query only their own"} from the author gate's lookup, so nothing ever ran.
-	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("forgejo"), FORGEJO_URL: "https://code.example.org", FORGEJO_WEBHOOK_SECRET: "s", FORGEJO_TOKEN: "fj_token_val" }), adviceSeams());
-	const line = renderedOne(checks, /must be an ADMIN of every repository/);
-	assert.match(line.text, /^✓ the Forgejo harness account must be an ADMIN of every repository its triggers serve: .*\(403\).*branch protection.*\(docs\/forgejo\.md\)\n$/);
-	assert.equal(line.failed, false, "advice, never a failure: doctor cannot know which repositories deliveries will name");
-	assert.equal(line.text.includes("fj_token_val"), false);
+test("forgejo: a set FORGEJO_PERMISSION_TOKEN is a FACT LINE naming whose account must be the admin (OQ-043)", async () => {
+	// Measured on Forgejo 14.0.5: a `write` collaborator's token got 403 {"message":"Only admins can query all permissions,
+	// repo admins can query all repo permissions, collaborators can query only their own"} from the author gate's lookup.
+	const base = { PI_TRIGGERS_FILE: forgeTriggersFile("forgejo"), FORGEJO_URL: "https://code.example.org", FORGEJO_WEBHOOK_SECRET: "s", FORGEJO_TOKEN: "fj_token_val" };
+	const checks = await collectChecks(imgEnv({ ...base, FORGEJO_PERMISSION_TOKEN: "fj_lookup_val" }), adviceSeams());
+	const line = renderedOne(checks, /author-gate lookups use FORGEJO_PERMISSION_TOKEN/);
+	assert.match(line.text, /^✓ forgejo author-gate lookups use FORGEJO_PERMISSION_TOKEN: its account must be an admin \(or the owner\).*read:repository only.*write collaborator's \(docs\/forgejo\.md\)\n$/);
+	assert.equal(line.failed, false);
+	assert.equal(checks.some((c) => /FORGEJO_PERMISSION_TOKEN is unset/.test(c.label)), false, "no fallback warning when it is set");
+	assert.equal(JSON.stringify(checks).includes("fj_lookup_val"), false, "presence only");
+});
+
+test("forgejo: without FORGEJO_PERMISSION_TOKEN doctor WARNS that the job token then has to be an admin's (OQ-043)", async () => {
+	for (const extra of [{}, { FORGEJO_PERMISSION_TOKEN: "   " }]) {
+		const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("forgejo"), FORGEJO_URL: "https://code.example.org", FORGEJO_WEBHOOK_SECRET: "s", FORGEJO_TOKEN: "fj_token_val", ...extra }), adviceSeams());
+		const line = renderedOne(checks, /FORGEJO_PERMISSION_TOKEN is unset/);
+		assert.match(line.text, /^⚠ FORGEJO_PERMISSION_TOKEN is unset, so forgejo author-gate lookups use FORGEJO_TOKEN: .*branch protection \(OQ-043\)\n {4}→ keep FORGEJO_TOKEN's account a write collaborator, and set FORGEJO_PERMISSION_TOKEN/);
+		assert.equal(line.failed, false, "a warning never fails doctor");
+	}
 });
 
 test("persisted transcripts and a context bound that may be inert are FACT LINES whose advice is in the label (#462)", async () => {

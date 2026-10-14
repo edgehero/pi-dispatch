@@ -211,10 +211,14 @@ export async function startReceiver(
 		if (cfg.forgejo) {
 			const forgejoSelfId = await retryIdentity(() => resolveForgejoSelfIdFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.token, botId: cfg.forgejo.botId }), { forge: "forgejo", ...retryOpts });
 			log({ event: "self_identity", forge: "forgejo", id: forgejoSelfId, source: cfg.forgejo.botId ? "FORGEJO_BOT_ID" : "api" });
+			// The author gate's lookup token, by NAME only (OQ-043): FORGEJO_PERMISSION_TOKEN when set, else FORGEJO_TOKEN,
+			// whose account must then be a repository admin. Identity above stays FORGEJO_TOKEN's: it is the account the
+			// jobs post as, which the bot-loop guard must recognise.
+			log({ event: "forgejo_permission_token", source: cfg.forgejo.lookupTokenVar });
 			forgejo = {
 				secret: cfg.forgejo.secret,
 				selfId: forgejoSelfId,
-				resolveAuthority: makeResolveForgejoAuthorityFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.token }),
+				resolveAuthority: makeResolveForgejoAuthorityFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.lookupToken, tokenVar: cfg.forgejo.lookupTokenVar }),
 			};
 		}
 
