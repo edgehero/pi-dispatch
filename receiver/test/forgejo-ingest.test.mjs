@@ -177,9 +177,9 @@ test("routing is by PATH -- a forgejo delivery to / is handled by github, whose 
 
 const okResponse = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
-test("admin and write authorize; read and none do not", async () => {
+test("owner, admin and write authorize; read and none do not", async () => {
 	const at = (permission) => makeResolveForgejoAuthority({ apiUrl: "https://fj", token: "t", fetchFn: async () => okResponse({ permission }) });
-	for (const p of ["admin", "write"]) {
+	for (const p of ["owner", "admin", "write"]) {
 		assert.deepEqual(await at(p)("acme/widgets", "alice"), { authorized: true }, `${p} can push, which is the property the constitution requires`);
 	}
 	for (const p of ["read", "none"]) {
@@ -188,6 +188,16 @@ test("admin and write authorize; read and none do not", async () => {
 	// An EMPTY permission is not a determinate "read" -- it is a shape this code does not recognise, and it
 	// must go to the indeterminate arm rather than be rounded down to a refusal.
 	assert.ok((await at("")("acme/widgets", "alice")).indeterminate, "an empty permission is unrecognised, not a denial");
+});
+
+test("a personal repository's owner is admitted on Forgejo's real answer, which says owner", async () => {
+	// Measured on Forgejo 14.0.5 (API version 14.0.5+gitea-1.22.0):
+	// GET /api/v1/repos/human/parked-lab/collaborators/human/permission answered 200 with this body (the
+	// user object it also carries is cut here). Without `owner` in the set the repository's owner was
+	// dropped `author-not-allowed` on every trigger they set.
+	const body = { permission: "owner", role_name: "owner", user: { login: "human" } };
+	const resolve = makeResolveForgejoAuthority({ apiUrl: "http://192.168.68.52:3700", token: "t", fetchFn: async () => okResponse(body) });
+	assert.deepEqual(await resolve("human/parked-lab", "human"), { authorized: true });
 });
 
 test("the lookup asks the collaborator-permission endpoint with the token in an Authorization header", async () => {

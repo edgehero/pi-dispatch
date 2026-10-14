@@ -1,6 +1,6 @@
 # Forgejo (and Gitea) triggers
 
-A Forgejo issue labelled by someone holding `write` or `admin` on the repository starts the same job a
+A Forgejo issue labelled by someone holding `write`, `admin` or `owner` on the repository starts the same job a
 GitHub one does: same queue, same container, same budget, same pause windows, same run history. A `read`
 collaborator is refused.
 
@@ -131,8 +131,9 @@ started.
 ## Who can trigger a job
 
 The actor's repository permission is resolved from
-`GET /repos/{owner}/{repo}/collaborators/{user}/permission`, and must be `admin` or `write` — for **every**
-trigger type, labels included.
+`GET /repos/{owner}/{repo}/collaborators/{user}/permission`, and must be `owner`, `admin` or `write` — for
+**every** trigger type, labels included. `owner` is what Forgejo answers for the owner of a personal
+repository; up to 4.3.0 the receiver refused it, so the owner's own label or comment never started a job.
 
 Labels on Forgejo very probably *are* self-gating, as they are on GitHub: applying one needs write access.
 The gate deliberately does not rest on that. It has not been verified against a running instance across
