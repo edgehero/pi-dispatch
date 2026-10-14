@@ -182,7 +182,14 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 			await send("POST", issue, { labels: [PARKED_LABEL] });
 			return;
 		}
-		await send("DELETE", `${issue}/${encodeURIComponent(PARKED_LABEL)}`, undefined, [404]);
+		// Already gone is success: 404 (no such issue) and 422. Forgejo answers 422 {"message":"label does not exist
+		// [label_id: 0, repo_id: 1]"} when the REPOSITORY has no such label at all (measured on 14.0.5), which is every
+		// completed non-parked run on an awaitInput trigger in a repository that never parked, and each one logged
+		// `parked_label_failed`. Matched on the status alone, not the body: in 14.0.5's DeleteIssueLabel the only 422 is
+		// "label does not exist" (repository, organization or id), the binding's own 422 needs a request body and this
+		// sends none, and the message text is free to change between versions where the status is the API's contract.
+		// Were some other 422 ever read as gone, a stale marker would stay, which decides nothing (the sidecar does).
+		await send("DELETE", `${issue}/${encodeURIComponent(PARKED_LABEL)}`, undefined, [404, 422]);
 	}
 
 	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
