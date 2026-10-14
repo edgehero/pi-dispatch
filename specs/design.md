@@ -2302,7 +2302,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   superseded `127.0.0.1` panel. Since issue #640 that property is the EXTENSION's, and it still holds for the
   extension: the operator console of `DES-OPERATOR-CONSOLE` is a second surface, a separate process
   (`pi-dispatch-console`) over the same read model and the same write funnels, and it is that process, never this
-  extension, that listens. The artifact carries **run-record fields and operator-authored
+  extension, that listens. Since issue #641 the overlay's snapshot is the read model's `createFleetReader`: the
+  client, the queue pool and the whole `fetchSnapshot` pass moved out of `dashboard.ts` into `read-model.mjs`
+  unchanged (the panel's existing tests pass as they were, which is the proof), so the panel and the console read the
+  deployment one way and there is no second read model. The snapshot it reads gained fields the panel does not have
+  to draw (every active job, counts per queue, `parked`, `failures24h`); `activeJobId`, which `l` follows, is still
+  there. The overlay gains a **PARKED** view, reached from LIST with `k`, fed by the snapshot's
+  `parked`: one row per parked run with its target, its age, its session chain count (unknown, never 0, for a store
+  this host cannot see) and the forge kind, never a guessed link (`chain ?` when unknown); an answered run is left out, and a list
+  that could not be read says "parked runs unknown" rather than "nothing parked". It reads only what the console's parked
+  inbox reads, so the two surfaces stay equal (#641's second open question), and like every view it writes nothing:
+  answering is #642's. The artifact carries **run-record fields and operator-authored
   trigger/skill strings only, never `.log` bytes and never a host path beyond the folder's basename**
   — the same placement boundary as everything else here, applied to a file that outlives the session.
   **Its labels are sized and cut in estimated COLUMNS, and no cut on the page leaves half a character**
@@ -2942,7 +2952,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   string through pi's own validation, so a number is read by its value; one that does not print as a plain decimal of at most 6 places is refused.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-ISSUE-TEXT-IS-DATA`, `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `DES-AI-TRIGGER-FLOW-GATE`,
-  `DES-JOB-OUTBOX-CHAINING`, `REQ-DURABLE-RUN-HISTORY`
+  `DES-JOB-OUTBOX-CHAINING`, `REQ-DURABLE-RUN-HISTORY`, `DES-OPERATOR-CONSOLE`, `REQ-OPERATOR-CONSOLE-SCREENS`
 
 ## DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY
 
@@ -9322,8 +9332,9 @@ a tunnel.
 
 ## DES-OPERATOR-CONSOLE
 
-- **Status**: issue #640, the security model and hardened skeleton of the console epic (#650). The screens arrive
-  with #641, every write but the pause windows with #642, live logs with #643. This entry supersedes three of the
+- **Status**: issue #640, the security model and hardened skeleton of the console epic (#650); issue #641, the
+  screens, the live updates and `/api/state` (the bullets from "The screens" to "Wiring" below). Every write but the
+  pause windows arrives with #642, live logs with #643. This entry supersedes three of the
   rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
 - **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
@@ -9348,7 +9359,8 @@ a tunnel.
      (`PI_CONSOLE_IDLE_MINUTES`, default 60, 5 to 1440) and an absolute one (`PI_CONSOLE_MAX_HOURS`, default 12, 1
      to 168) bound it, and every request re-reads the tokens file: a session whose token was revoked or rotated, whose
      role changed, or whose `generation` is older than the file's (`sessions end-all`) ends on that request. Each
-     session holds at most `PI_CONSOLE_MAX_STREAMS` (default 4) live streams, for #641's event streams.
+     token holds at most `PI_CONSOLE_MAX_STREAMS` (default 4) live streams across its sessions, for #641's event
+     streams.
   3. **A write is same-origin, JSON, and confirmed by a single-use ticket bound to its diff.** A write route is a POST
      whose `Content-Type` is `application/json`. When the request carries `Sec-Fetch-Site` (every current browser sends it),
      the write is refused unless it says exactly `same-origin`; without that header (an older browser, a script) the
@@ -9479,6 +9491,114 @@ a tunnel.
   cookie is the plain name `pdc_session`, `HttpOnly; SameSite=Strict; Path=/`, without `Secure`: with it, a Safari
   operator could never log in. Firefox is unmeasured. Nothing is lost on the wire, where the cookie never leaves the
   loopback hop or the tunnel.
+- **The screens** (issue #641, `REQ-OPERATOR-CONSOLE-SCREENS`): eight read pages, each an exact path with a bounded
+  query string, so the route table stays a table of exact paths and the #640 tests that iterate it cover every page
+  without a hand list. `/` is the overview, `/runs` the run history (the run filters and a `before` cursor), `/run?id=`
+  one run, `/parked` the parked inbox, `/insights?range=7d|30d|mtd` the spend and insights sections, `/fleet` the
+  queues, hosts, schedules and failed jobs, `/config` the configuration and `/audit` the audit log (operator only).
+  Beside them: `GET /api/state` (`INT-CONSOLE-STATE-API`), `GET /api/events?page=` (`INT-CONSOLE-EVENT-STREAM`) and
+  `GET /static/console.css`. The page set is one frozen table, `PAGES` in `admin/src/console/pages.mjs`
+  (`name -> {path, auth, live, title}`), from which the routes are built.
+  - **A page is a list of panels.** Each panel is a pure renderer from the page's data to an escaped fragment
+    (`admin/src/console/panels.mjs`), placed in `<section id="p-<name>" data-panel>`, and the SAME renderer serves
+    the first load and every live update, so a live page cannot drift from a reloaded one. `loadPageData` is the
+    only function a page reads through, and it calls the fleet reader's `snapshot()` at most once per call.
+  - **Every query is judged before anything is read.** `parsePageQuery` bounds and charset-checks every value and
+    refuses a bad one by field name, never echoing it. The run filters are `parseRunFilter`
+    (`admin/src/run-filter.mjs`, pure): ten fields (`repo`, `kind`, `flow`, `trigger`, `project`, `host`, `outcome`,
+    `reason`, `model`, and `q`, a case-insensitive substring of the target), each matched exactly but `q`, each
+    with the charset of the shape the worker writes into that record field, so a refusal can never hide a run that
+    exists; a field given twice is refused rather than one copy winning, and a value is never trimmed into one that
+    passes.
+  - **No inline style.** The CSP's `style-src 'self'` blocks an inline `<style>` and every `style=` attribute, so the
+    stylesheet is a served file (`admin/src/console/style.mjs`, `CONSOLE_CSS`) built from the insights page's own CSS
+    (`INSIGHTS_CSS`, now exported), the panel's theme tokens (`PAGE_THEME`) and the console's layout rules; the one
+    `style=` the insights renderers carried became a class. The insights section renderers are exported and reused,
+    never copied, and their tooltips are `data-tip` indexes the served script reads.
+- **One fleet reader, so there is no second read model**: the panel's snapshot code (`createDashboardDeps` and
+  `fetchSnapshot` in `dashboard.ts`, which held one client and a pool of failFast queues for the 1 s tick) moved into
+  `read-model.mjs` as `createFleetReader(paths, seams)`, returning `{snapshot, runsPage, runById, pause, resume,
+  cancelActive, dispose}`. The panel and the console each build one, so the two surfaces read the deployment the same
+  way; copying the panel's loop would have made the console a third reader. It was moved, not rewritten: the
+  panel's existing tests pass unchanged, and that is the proof the move is a move. The read model's other readers
+  open and close a client per call (a queue per fleet queue plus a SCAN for the queue state), which is right for a
+  command and far too heavy for a 1 s poll. The snapshot gained, for both surfaces: every active job (`active`,
+  `{jobId, queue, startedAt, host}`, never a job's `.data`, beside the old `activeJobId`), counts per queue
+  (`queueCounts`) beside the summed ones, `parked`, and `failures24h` (folded from a wide window of the newest 1000
+  merged runs, read at most once per 15 s; `failures24hFloor` says the window did not reach back a day, so the count
+  is a floor). New readers, each over an injected client:
+  - `readRunsPage`: one page of the merged history, newest first, at most 100 runs. **The cursor is a score, not an
+    offset**: `before` is the instant of the last run shown, so a run that lands while an operator pages lands above
+    every cursor already handed out and moves nothing, where an offset would shift every later page and show a run
+    twice; a page never ends inside a group of runs that share one instant. It filters after fetching, in batches,
+    and stops after examining 2000 records (`RUNS_PAGE_EXAMINE_MAX`), answering `truncated` with a `next` that
+    resumes exactly where it stopped, so a filter that matches nothing costs a bounded read per request. The mirror
+    side is `readMirroredPage` (a `ZREVRANGEBYSCORE` and one `MGET`), and `readMirroredRuns` gains `prune: false`:
+    the mirror read the panel uses prunes stale members, which is right for one reader and wrong for a page any
+    viewer can load, since a page read must not write. The local side is an index of this host's records held
+    across requests and re-read at most every 15 s. Merged by the worker's `mergeRuns`, as the panel merges.
+  - `readRunById`: this host's file first, because the file is the record, then the mirror's by-id read; an id
+    outside the charset the worker mints is refused before any path or key is built from it.
+  - `readParkedRuns`: a parked run is `outcome: "completed"` with `reason: "awaiting-input"` (`REQ-AWAIT-INPUT`).
+    Nothing records that one was answered, so `answered` is derived: a later run on the same kind and target, since
+    an answer is a new delivery on that issue. The chain count is the session store's `resume-chain` counter at the
+    re-derived key (`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`) when `PI_SESSIONS_DIR` is on the console's host, else
+    unknown, never 0 for a store this host cannot see. A pull request's key needs its head ref, which the record does
+    not carry, so its count is unknown too.
+  - `secretProfileNames` (names only, never a resolver path or a value), and the worker's `readConsoleAudit` (newest
+    rows first, a position cursor, at most 500 rows a call, bounded memory over the chunked month files; a line that
+    is not a row comes back as `{broken, file, line}` in its place rather than being skipped, because an audit screen
+    that drops a damaged line hides what `audit verify` exists to name).
+  - `forgeLinkOf(record, env)`: **derived from the deployment's environment, never guessed.** GitHub on
+    `github.com`, as the panel always built it; GitLab, Forgejo and Azure on the deployment's own instance URL
+    (`GITLAB_URL`, `FORGEJO_URL`, `AZURE_ORG_URL`, then the job-container names in `FORGES[kind].hostVars`), http
+    or https only, with no credentials, query or fragment. Null on a control byte, a repository outside its forge's
+    charset, a `.` or `..` segment, a separator the forge never writes, or no instance URL: a link an operator
+    clicks to the wrong host is worse than none.
+- **Insights in the console**: `assembleInsights` and its sub-assemblers moved from `index.ts` into the pi-free
+  `admin/src/insights-assembly.mjs`, which takes the pricing as a parameter. `index.ts` imports it and its behaviour
+  and tests are unchanged. The console passes the worker's real pricing (`@edgehero/pi-dispatch/pricing`), so its
+  bundle carries `pi-ai` for the price table, as the extension bundle already did, but never the pi runtime: the
+  console is not a pi session and must not load one. `insights.html` stays the offline artifact, unchanged
+  (`REQ-INSIGHTS-HTML-EXPORT`). An assembly walks run records, so the console caches it 30 s per range.
+- **The live hub** (`admin/src/console/live.mjs`): live updates are server-rendered panels over Server-Sent Events
+  (`INT-CONSOLE-EVENT-STREAM`). One poll loop in the console process, every second (the panel's cadence), and only
+  while at least one stream is open, so a console nobody watches reads nothing and N open tabs cost Valkey one poll,
+  not N; a runs view, whose filters make every distinct query its own read, reloads at most every 5 seconds. Each tick
+  it loads each distinct page and query once, renders that page's panels, digests each, and writes
+  only the panels whose digest changed, as `event: panel` with a rising `id`. A stream opens with every panel of its
+  page, unless its `Last-Event-ID` is the current id, in which case it missed nothing; a `: ping` comment every 15 s
+  keeps a tunnel or proxy from closing an idle stream; a client whose unsent buffer passes 2 MiB is ended, and its
+  browser reconnects to a fresh snapshot, rather than the process that holds operator power buffering for a reader
+  that does not read. The browser swaps the `innerHTML` of the matching `data-panel` element with that
+  server-escaped fragment; the CSP still forbids inline script, so a swapped fragment can run nothing.
+- **The stream lifecycle**: #640 judged the session on each request, and a stream is one request that does not end,
+  so #640 had no way to end a stream when its session died. Now each tick the hub re-judges every stream's session
+  with `sessions.peek(id, file)`, which runs every check `get` runs (idle, absolute, generation, token hash and role)
+  but neither moves `lastSeen` nor deletes. Re-judging with `get` would have kept an idle session alive for as long
+  as a tab stayed open, turning `PI_CONSOLE_IDLE_MINUTES` into "never" for anyone who leaves the console open: **an
+  open stream never extends a session; only a request does.** A stream whose session fails gets `event: end` and is
+  closed, so revoke, rotate, a role change, `sessions end-all`, the idle limit and the absolute limit end it within a
+  tick, and logout ends that session's streams at once through the hub's registry (`endSession`). Slots: at most
+  `PI_CONSOLE_MAX_STREAMS` streams per token across all its sessions (default 4; per session would let one token
+  multiply its budget by signing in again), and at most 32 in the whole process with 8 kept for the operator role,
+  so streams can never take more than half of the 64 connections and a viewer token cannot lock operators out of
+  live pages; a stream over either cap is refused 429, and `res.on("close")` releases its slot. A stream outlives
+  `requestTimeout` and `headersTimeout`, which bound how long a request takes to arrive, not how long its response
+  runs. An event stream carries the security headers of every response, plus `Content-Type: text/event-stream`,
+  `Cache-Control: no-store` and `X-Accel-Buffering: no`.
+- **The role and run-text rule** (`REQ-CONSOLE-SECURITY` (l)): run records are PII-free by construction
+  (`INT-RUN-HISTORY-FILE-CONTRACT`), so every page shows them to both roles. The strings in them a hostile party can
+  shape (`jobId`, `target`, `parentJobId`) are scrubbed and escaped by the one template, like every value. The one
+  free text the screens read is BullMQ's `failedReason`, the worker's own throw message, de-payloaded at its sources
+  and belt-scrubbed (`DES-ADMIN-VIA-PI-EXTENSION`, the FAILED surface): it reaches a page only for the operator role,
+  only in a detail view, never in a list, and never in a viewer's `/api/state`. The audit page is operator only,
+  because its rows name people, session digests and refused hostnames. A test walks every page as a viewer with
+  hostile fixture values. #641 shows no transcript and no `.log` (`OQ-044`, #643).
+- **Wiring**: `serve` builds one `createFleetReader` on the deployment's Valkey, with `installPanelValkeyContext`
+  applied as the panel applies it so TLS and auth deployments connect the same way, and with `PI_SESSIONS_DIR` when
+  it is set; it builds the insights cache, the audit reader and the hub, passes them to `createConsoleServer` as named
+  dependencies, and disposes all of them on stop. `SERVER_LIMITS` is overridable for tests only.
 - **Rejected**:
   - **Mounting the console on the receiver.** Still rejected, for the reason `DES-PANEL-SEPARATE-FROM-RECEIVER`
     recorded and `DES-ADMIN-VIA-PI-EXTENSION` kept: the receiver binds `0.0.0.0` and faces the forge, so any admin
@@ -9505,21 +9625,42 @@ a tunnel.
   - **A Valkey stream as the audit record** (the issue's proposal). A capped stream forgets by design and a Valkey
     flush loses it. The month file is the record and Valkey a best-effort mirror, as the allocation audit and
     `alloc:log` already are.
+  - **JSON over the stream and rendering in the browser** (issue #641). The escaping would move into browser code,
+    a second escaper beside the template, and the property that matters when a page shows hostile text is that
+    there is one. Server-rendered panels keep it, and the same renderer serves a reload.
+  - **A single-page app or a client framework for the live pages** (issue #641). The live updates did not change
+    the reason a framework and a build step were rejected above; a panel swap needs a few lines of served script.
+  - **Each browser polling** (Valkey through an API, or the page reloading itself). N open tabs would be N pollers
+    and N times the reads on the deployment's Valkey; one poll in the console fans out to every stream.
+  - **WebSockets** (issue #641). The updates go one way, and SSE is enough: it is a plain GET through the same
+    dispatcher and guards as every page, and the browser reconnects with `Last-Event-ID` by itself. A WebSocket
+    needs upgrade handling on the trusted process, a second framing to parse, and an origin check of its own (a
+    WebSocket handshake is not held by the same-origin policy), all for a channel the console would never read
+    from.
 - **Residuals**, stated rather than implied (each is a "What is NOT defended" entry in `SECURITY.md`): root on the
   host reads and writes everything the console does; a compromised operator browser or machine acts with the
   operator's session; a compromised tunnel endpoint is the operator; a local user can spend the global login rate limit
   and slow the operator's own login, and can hold the 64 connections open (each cut ten seconds after it stops short
   of a full request, so the holder must keep reconnecting) to keep the operator out while it lasts; on Docker Desktop
   a job on a TCP listen is such a user, and unix-socket mode removes both paths; and the operator session's `bash`
-  can write the tokens file (threat 4).
-- **Traces to**: `REQ-CONSOLE-SECURITY`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`,
+  can write the tokens file (threat 4). Since #641: a token holder, a viewer included, who signs in eight times can
+  hold all 32 stream slots, so other people's pages still load and still sign in but are not live until those
+  streams close or that token's sessions end (`token revoke` or `rotate`); and a page that is only watched signs
+  out at the idle limit, by design (an open stream never extends a session).
+- **Traces to**: `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
+  `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `DES-ADMIN-VIA-PI-EXTENSION`, `DES-PANEL-SEPARATE-FROM-RECEIVER`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`,
+  `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`, `REQ-AWAIT-INPUT`, `REQ-INSIGHTS-HTML-EXPORT`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `OQ-044`.
 - **Code evidence**: admin/src/console/ (`cli.mjs`, `config.mjs`, `listen.mjs`, `guards.mjs`, `headers.mjs`,
-  `html.mjs`, `server.mjs`, `sessions.mjs`, `login-codes.mjs`, `confirm.mjs`, `lock.mjs`), worker/src/console-tokens.mjs,
-  worker/src/console-audit.mjs, worker/src/doctor.mjs (`consoleChecks`), worker/src/start.mjs (the audit reaper in
-  the retention sweep), admin/src/index.ts (`guardedFiles`),
-  admin/src/read-model.mjs (`writePauseWindows`).
+  `html.mjs`, `server.mjs`, `sessions.mjs` (`peek` since #641), `login-codes.mjs`, `confirm.mjs`, `lock.mjs`, and
+  since #641 `pages.mjs`, `panels.mjs`, `style.mjs`, `script.mjs`, `live.mjs`), worker/src/console-tokens.mjs,
+  worker/src/console-audit.mjs (`readConsoleAudit` since #641), worker/src/doctor.mjs (`consoleChecks`),
+  worker/src/start.mjs (the audit reaper in the retention sweep), worker/src/run-mirror.mjs (`readMirroredPage`, the
+  `prune` option), admin/src/index.ts (`guardedFiles`), admin/src/read-model.mjs (`writePauseWindows`, and since #641
+  `createFleetReader`, `readRunsPage`, `makeLocalRunIndex`, `readRunById`, `readParkedRuns`, `secretProfileNames`,
+  `forgeLinkOf`), admin/src/run-filter.mjs, admin/src/insights-assembly.mjs, admin/src/insights-html.mjs (the
+  exported sections and `INSIGHTS_CSS`).
 
 ## Revision History
 
@@ -9824,3 +9965,4 @@ a tunnel.
 | 2026-10-14 | No issue, found in a live lab on 4.3.0: a quick answer to a parked run was swallowed by the semantic window of the delivery that started that run. **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**: a park closes the job's semantic window, after the promotion and before the fixed comment and the label, through the real BullMQ job's compare-and-delete with the id its add stored; fail-open with `parked_window_release_failed`. Rejected: rebuilding the key from the job data, the queue's bare `DEL`, the receiver skipping the window for a reply, and the non-ttl window for every job. The residual (an answer that lands before the release) is recorded. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` UNCHANGED, checked**: the dedup layers and their visibility stay as they are; one more BullMQ call is used, at the pin. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the semantic key is the queue's, not the session store's, and nothing new is looked up. |
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**, one sentence: on Forgejo the parked label is attached and removed by id after a lookup. Measured: a second `POST /repos/{o}/{r}/labels` with the name `pi-awaiting-input` answered 201 and made a duplicate (labels #2 and #3), adding by name attached both to the issue, and removing by name answered 204 and took off one, so the label outlived the resumed run, each park added a repository label, and later plain replies kept routing to `not-parked`. The host now lists the repository's labels (paged, bounded), creates one only when none has the exact name, attaches the lowest id, and on removal deletes every copy the issue carries by id, with 404 and 422 read as already gone. Duplicate repository labels from 4.3.0 are left for the operator (`docs/sessions.md`). **`REQ-AWAIT-INPUT` UNCHANGED, checked**: the marker still routes and never decides; the sidecar does. **`OQ-042` UNCHANGED, checked**: who may set the label does not move. |
 | 2026-10-14 | Issue #640, the operator console's security model and hardened skeleton. **NEW `DES-OPERATOR-CONSOLE`**: a separate process, the bin `pi-dispatch-console` of the admin package, on `node:http` alone, over the same read model as the pi extension. The property that replaces "binds no network port": it listens on loopback (`127.0.0.1:4790` by default, IP literals only, a public literal only with `PI_CONSOLE_BIND_PUBLIC=1`) or on a 0600 unix socket; every request but `/healthz` and login needs a named token's session; a write needs `Sec-Fetch-Site: same-origin` (or an exact `Origin`), JSON, the operator role, a console that is not read-only, and a single-use ticket bound to the previewed diff, and goes through the read model's funnels (`writePauseWindows` gains `expect`); every response carries one header set; every write, refusal and sign-in lands in a hash-chained audit log. Six threats found while surveying are recorded with their answers: the job container reaching loopback through the host gateway (the Host check refuses the gateway names, a token is required, and the unix socket removes the path), an SSH tunnel changing the port (the Host check is on the hostname, any port), a page on another localhost port being same-site (`same-site` is refused), the operator's pi session minting a token (the tokens file joins `guardedFiles()`), a job reading the tokens file through a mounted path (hashes only, and doctor fails a tokens file inside any path a job container can see), and two writers forking the chain (an append lock around the head read and the write, plus a single-instance lock on `serve`). Rejected, with reasons: mounting on the receiver (still), a framework or build step, TLS in the process, one shared token, a KDF for 256-bit tokens, `Secure` or `__Host-` before the browser lab, the token in a URL (the one-time code rides in the fragment), and a Valkey stream as the record. Measured on 2026-10-14 and recorded in the entry: a Docker Desktop job container reaches a host loopback listener through `host.docker.internal` on the default bridge and not on `--internal`, native Linux reaches it in neither posture; WebKit drops `Secure` and `__Host-` cookies on plain-http loopback, so the cookie is plain; in Chrome 155 a hostile page on another localhost port is same-site and its writes are refused on `Sec-Fetch-Site`, a rebound name gets 421, and the CSP blocks an injected inline script; and a real `ssh -L` tunnel to the unix socket signs in on a different port. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the extension still binds no port, stated as the extension's property, and the console is named as a second surface in a separate process; its Why bullet on the receiver says the receiver still carries no admin surface; the rejected served graph page and web panel are marked SUPERSEDED by `DES-OPERATOR-CONSOLE` where they stand, their text kept; mounting admin on the receiver stays rejected. **`DES-PANEL-SEPARATE-FROM-RECEIVER` UNCHANGED, checked**: still superseded, and its reasoning is what the console's separate process rests on. UNCHANGED, checked: `CONST-ISOLATION-CONTAINER-PER-JOB` (the console runs no agent and processes no adversarial input as instructions; run text is data it escapes), `CONST-BUDGET-BEFORE-TOKENS` (the console's one write moves a pause window through the same funnel as the panel, and paid actions are #642's), and `constitution.md` (it holds no port clause, checked). |
+| 2026-10-14 | Issue #641, the operator console's screens and live updates. **`DES-OPERATOR-CONSOLE` AMENDED**: eight read pages (overview, runs, run detail, parked inbox, insights with a range, fleet, configuration, audit), each an exact path with a bounded query, built from one `PAGES` table and from pure panel renderers that serve both the first load and every live update; `GET /api/state` and `GET /api/events` (`INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`); the stylesheet a served file, because the CSP blocks inline style. ONE FLEET READER: the panel's snapshot code moved from `dashboard.ts` into `read-model.mjs` as `createFleetReader`, unchanged, and both surfaces build one, which is what "no second read model" means; new readers for a run page (a score cursor, 100 a page, 2000 examined at most, the mirror read without pruning so a page read writes nothing), a run by id, parked runs (`answered` derived from a later run on the same kind and target, the chain count unknown rather than 0 where this host cannot see the store), secret profile names, the audit rows, and forge links derived from the deployment's own instance URL, never guessed. The insights assembly moved pi-free with the pricing passed in, so the console bundle carries `pi-ai` for prices and never the pi runtime. THE LIVE HUB: server-rendered panels over SSE, only changed panels sent, a snapshot on connect, `Last-Event-ID`, a 15 s ping, a 2 MiB slow-client drop, and one 1 s poll that runs only while a stream is open. THE STREAM LIFECYCLE, the gap #640 left: each tick re-judges every stream's session with a new `sessions.peek`, which never moves `lastSeen`, so an open tab never extends a session, and logout, revoke, rotate, end-all and expiry end a stream within a tick; `PI_CONSOLE_MAX_STREAMS` per session plus a global cap of 32, so streams never take all 64 connections (429 past either). THE ROLE RULE: records are PII-free and shown to both roles, the hostile-capable strings escaped; BullMQ `failedReason` only to the operator and only in a detail view; the audit page operator only. Rejected: JSON with client rendering (a second escaper), a single-page app or framework, polling from each browser, WebSockets (one-way updates need no upgrade handling on the trusted process). Two residuals added: one token's eight sessions can hold every stream slot, and a watched page still signs out at the idle limit. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the overlay's snapshot is the moved `createFleetReader`, behaviour unchanged, and a new PARKED view reads the snapshot's `parked`. UNCHANGED, checked: `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (the parked chain count re-derives the key and indexes nothing), `DES-AWAIT-INPUT-ENDS-THE-JOB` (parking is read, never changed; answering is #642's), `DES-PANEL-SEPARATE-FROM-RECEIVER` (still superseded, the console still never runs on the receiver), and `REQ-INSIGHTS-HTML-EXPORT`'s file (unchanged; the console renders the same sections live). |

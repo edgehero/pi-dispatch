@@ -249,7 +249,7 @@ default, or on a unix socket at mode 0600, and refuses any other address unless 
 The threat model, and what answers each part:
 
 - **A local user on the host.** Any account on the machine can connect to a loopback port. Every request but
-  `/healthz`, the sign-in pages and the console's script needs a session, and a session needs a named token (256 random bits) or a one-time login code that only
+  `/healthz`, the sign-in pages and the console's script and stylesheet needs a session, and a session needs a named token (256 random bits) or a one-time login code that only
   the deployment's account can mint. Login attempts are rate limited and every failure is audited. In unix-socket
   mode the socket is 0600 in a directory only the deployment's account can enter, so another account cannot connect
   at all.
@@ -279,6 +279,37 @@ The threat model, and what answers each part:
 - **A leaked tokens file grants nothing.** The file stores sha256 hashes, never a token; a token is shown once, at
   `token add` or `token rotate`, and appears in no log, audit row or page. Revoking or rotating a token, or
   `sessions end-all`, ends the affected sessions on their next request.
+- **Live pages hold connections, so streams are capped and end with their session.** A live page keeps one event
+  stream open. A token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all its sign-ins, and the whole
+  console 32, half of its 64 connections, of which 8 are kept for operators, so open dashboards can never keep page
+  loads or sign in out and a viewer token cannot take every live slot; past a cap a stream is refused (429). Every second the console re-checks each stream's session, without counting that as activity: logout ends a
+  session's streams at once, and a revoked or rotated token, a changed role, `sessions end-all` or an expired session
+  ends them within a second. An open tab never keeps a session alive, so an unattended screen still signs out at the
+  idle limit. A browser that stops reading is dropped once 2 MiB are waiting for it, so a slow reader cannot make
+  the console buffer without bound. The console polls Valkey once a second for all streams together, and not at all
+  while none is open, so tabs do not multiply the load on the deployment.
+- **Query strings are bounded before anything is read.** Every filter, cursor, range and id a page takes is checked
+  against a fixed character set and length, and a bad one is refused by name, never echoed back. A run page reads at
+  most 100 runs and examines at most 2000 records before it answers with what it found, so a filter that matches
+  nothing costs a bounded read of the mirror, not a walk of its whole history. This host's own run files are read
+  into one shared index at most every 15 seconds, whatever the filter, and the newest 5000 kept; a live runs page
+  refreshes every few seconds rather than every second, and one token's streams share one budget, so distinct
+  filters cannot multiply the load past a fixed bound. A run id outside the shapes the worker mints is
+  refused before any file path or Valkey key is built from it. No page read writes: the console's reader is built
+  read-only, so it reads the run mirror without pruning it and leaves the held-jobs set as it finds it (the panel's
+  own reader still tidies both, as it always did), and a test records every Valkey command a snapshot sends. The one
+  write left is BullMQ's own: opening a queue client sets that queue's metadata (its library version and event cap)
+  to the values every worker already writes, so it changes nothing a reader sees.
+- **Who sees what.** Run records hold no attacker-chosen text by construction, so both roles see them; their job id,
+  target and parent job id can still be shaped by whoever opened an issue, and are escaped like every value. The one
+  free text the screens show, a failed job's reason from BullMQ, is shown to the operator role alone, on a detail
+  page alone, never in a list, and is absent from a viewer's `/api/state`. The audit page is the operator's alone.
+  Secret profiles appear by name; no page shows a resolver, a reference or a value. No page shows a log or a
+  transcript (`OQ-044`).
+- **Forge links are never guessed.** A run's link points at `github.com` for GitHub and, for GitLab, Forgejo and
+  Azure DevOps, at the instance URL the deployment itself is configured with, http or https only. When there is no
+  such URL, or the target does not parse as that forge's repository and number, no link is drawn: a link to a host
+  the console made up is a phishing aid, and a missing link costs a copy and paste.
 - **Who did what.** Every write, every write refused by a guard and every sign-in is appended to
   `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl` as a hash chain (`pi-dispatch-console audit verify` names the first
   broken link). Refusals of requests with no session are written one row each up to 60 a minute and counted past
@@ -603,7 +634,9 @@ Stated openly rather than discovered later:
   connect can hold the console's 64 connections open (each is cut after ten seconds without a full request, so a
   client must keep reconnecting), which keeps the operator out while it lasts; it gains nothing else. On Docker
   Desktop a job container is such a client on a TCP listen. Unix-socket mode removes both paths for other accounts and
-  for jobs.
+  for jobs. Live streams are capped below that, but a token holder (a viewer too) who signs in eight times can hold
+  all 32 stream slots: other people's pages still load, but stay static until those streams close or that token is
+  revoked or rotated.
 
 ## Operator responsibilities
 

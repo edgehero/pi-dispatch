@@ -4946,7 +4946,7 @@ validator rather than a second copy of it.
    deliberately not the OS temp dir, which several platforms sweep on reboot. A host that cannot name a
    home falls back to <OS temp>/pi-dispatch/logs and `pi-dispatch doctor` says so in one line.)
   { "jobId":   "<raw job id: delivery id | local-<hex> | repeat:<sched>:<millis>>",
-    "kind":    "github" | "gitlab" | "local" | null,
+    "kind":    "github" | "gitlab" | "forgejo" | "azure" | "local" | null,   // RUN_KINDS, worker/src/forges.mjs
     "target":  "<repo>#<issue>"  |  "<project>!<iid>"  |  "local:<basename>" | null,
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
@@ -8235,6 +8235,111 @@ through the console (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY` (h)).
   only. A mirror failure never fails the append; the file is the record.
 - **Acceptance**: `REQ-CONSOLE-SECURITY` (f) and (h).
 
+## INT-CONSOLE-STATE-API
+
+**The console → scripts and later integrations.** `GET /api/state`: the deployment's live snapshot as JSON, so a
+script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONSOLE`,
+`REQ-OPERATOR-CONSOLE-SCREENS` (k)).
+
+- **Request**: `GET /api/state`, no query. It needs a session (`pdc_session`, from `POST /login` with a token, or
+  from a one-time link); without one it is answered `401` with a JSON error, never a redirect, as every `/api/*`
+  route is. The viewer role is enough. It is a GET and has no side effect beyond the request moving its session's
+  `lastSeen`, as every request does.
+- **Response**: `200`, `Content-Type: application/json`, with the security headers of every console response
+  (`Cache-Control: no-store` among them). The body is ONE fleet reader snapshot (`createFleetReader`, the reader the
+  pages and the `/dispatch` panel read), projected by `stateOf` (`admin/src/console/live.mjs`) to these keys and no
+  others (a test pins the key list):
+  ```json
+  { "version": 1, "at": 1760432400000, "role": "operator",
+    "paused": { "state": false, "partial": false },
+    "counts": { "waiting": 0, "active": 1, "paused": 0, "delayed": 0, "failed": 0 },
+    "queues": [ { "queue": "pi-jobs", "paused": false, "counts": {} } ],
+    "workers": 2, "fleetDegraded": false,
+    "hosts": [ { "name": "mac", "lastBeatAgeMs": 1200, "capacity": { "memMiB": 8192, "cpuCenti": 400, "concurrency": 3 }, "running": 1 } ],
+    "budget": { "day": 3, "week": 10, "month": 40, "tokensToday": 120000 },
+    "dollars": { "unreachable": false, "windows": [ { "ledger": "global", "scope": null, "window": "day", "capMicros": 5000000, "counterMicros": 1200000, "full": false } ] },
+    "parked": [ { "target": "acme/web#12", "kind": "github", "ageMs": 60000, "chainCount": null } ],
+    "parkedUnknown": false,
+    "failures24h": 0, "failures24hFloor": false,
+    "active": [ { "jobId": "gh-...", "queue": "pi-jobs", "startedAt": 1760432400000, "host": "mac" } ],
+    "schedulers": [ { "name": "nightly", "next": 1760432400000, "overdue": false, "overdueMs": 0, "stalls": 0 } ],
+    "schedulerStallMax": 3,
+    "failed": { "unreachable": false, "rows": [ { "jobId": "...", "queue": "pi-jobs", "attemptsMade": 3, "endedAt": 1760432400000, "failedReason": "..." } ], "more": 0 } }
+  ```
+  `parkedUnknown` true means the parked list could not be read, so an empty `parked` is not "nobody waiting". A
+  folder-scoped dollar window's `scope` is null rather than a host path.
+- **What it never holds**: a token, a cookie, a session id, a host path beyond what the panel shows, a secret's value
+  or resolver reference (secret profiles appear by name only), a job's `.data`, log or transcript text. A record's
+  `jobId`, `target` and `parentJobId` are JSON strings, encoded by `JSON.stringify` and never interpreted; a script
+  that puts one in HTML escapes it itself.
+- **The role difference**: for a viewer, every failed job's `failedReason` key is absent (not null), the one free text the snapshot carries. The operator gets it scrubbed (control bytes replaced, 120
+  characters at most, `DES-ADMIN-VIA-PI-EXTENSION`'s FAILED surface). Nothing else differs between the roles.
+- **Unreachable parts**: a part the reader could not read says so with a boolean (`failed.unreachable`,
+  `dollars.unreachable`, `fleetDegraded`, `parkedUnknown`), never with the error's text, which can name hosts and
+  addresses and stays in the console's own log; read beside it, an empty list or a zero is "unknown", not "nothing
+  there". `failures24hFloor: true` means `failures24h` is a floor. When the fleet cannot be read at all (Valkey
+  down), the answer is `503` with `{ "version": 1, "error": "<a fixed sentence>" }` instead of a partial body.
+- **Stability**: within `version: 1`, keys are only ever added. A key removed or renamed, or a value whose meaning
+  changes, raises `version`; a script should check `version` and ignore keys it does not know. The keys of the
+  nested projections follow the read model's snapshot and are held by the same tests.
+- **Acceptance**: `REQ-OPERATOR-CONSOLE-SCREENS` (k), `REQ-CONSOLE-SECURITY` (l).
+
+## INT-CONSOLE-EVENT-STREAM
+
+**The console → its own pages.** `GET /api/events?page=<name>&<that page's query>`: the Server-Sent Events stream
+that keeps an open page live (issue #641, `DES-OPERATOR-CONSOLE`, the live hub and the stream lifecycle). The served
+script is its only intended client; it is documented so that what a stream may carry, and when it ends, is pinned.
+
+- **Request**: a GET with the session cookie. `page` names a page in `PAGES` whose `live` is true; the rest of the
+  query is that page's own (`parsePageQuery`, every value bounded and charset-checked, refused by field name). A
+  page the session's role may not open is refused as the page itself would be. `Last-Event-ID` (the header the
+  browser sends on a reconnect) is optional. An unknown page, a page that is not live (run, insights, config,
+  audit) or a refused query is answered 400 JSON; a page above the session's role is 403.
+- **Admission**: at most `PI_CONSOLE_MAX_STREAMS` (default 4, 1 to 32) open streams per token across all its
+  sessions, and at most 32 in the process, of which 8 are kept for the operator role; a stream over any of these is
+  answered `429` with `Retry-After` and opens nothing. `HEAD` is answered `405`. The slot is taken before the response
+  starts and released on the response's `close`, however it ends. 32 is half of the server's 64 connections, so
+  streams can never hold every connection.
+- **Response**: `200` with the security headers of every console response, plus `Content-Type: text/event-stream`,
+  `Cache-Control: no-store` and `X-Accel-Buffering: no`. The body is a sequence of events:
+  ```
+  id: 3f9c2a-17
+  event: panel
+  data: {"id":"p-queues","html":"<table>...</table>"}
+
+  : ping
+
+  event: end
+  data: {}
+  ```
+  - `panel`: `data` is one line of JSON, `{id, html}`. `id` is a panel region of the page (`p-<panel>`, the `id` of a
+    `<section data-panel>` the page rendered); `html` is that region's complete new content, rendered on the server by
+    the same renderer as the page and escaped by the same template. The client replaces the content of the element
+    with that `id` only when the element carries `data-panel`, and never runs anything from it (the CSP forbids
+    inline script in any case).
+  - The event `id` is the hub's sequence for that page, query, role and name (each is drawn for its own reader, so
+    a viewer never receives an operator's panels), prefixed by a random per-process epoch: it rises whenever any of its panels changes, and
+    every `panel` event written in one tick carries the same value. Ids carry a per-process prefix, so an id from
+    before a restart never matches.
+  - `: ping`, a comment line, every 15 seconds, so an idle stream is not closed by a tunnel or a proxy. Clients ignore
+    it.
+  - `end`: the session is over (logout, revoke, rotate, a role change, `sessions end-all`, the idle or the absolute
+    limit). The server closes the stream after it; the page goes to `/login` instead of reconnecting.
+    Its data is `{}`, because a browser fires no event that carries none.
+- **The first events**: a new stream gets every panel of its page, as of the latest tick, unless its
+  `Last-Event-ID` equals the current sequence for that page, query, role and name, in which case it missed nothing and gets
+  nothing until the next change. Any other `Last-Event-ID`, a stale one or garbage, gets every panel: the hub keeps
+  no history to replay, so a full set is the only correct answer to "I missed something".
+- **Only what changed**: after the first events, a panel is sent only when its rendered content differs from what
+  the stream was last sent for it (a digest per panel). One poll of the fleet reader a second, in the console
+  process, serves every stream, and only while at least one is open.
+- **When it ends**: on `end` (above); within a tick, about a second, of the session failing any check, which is
+  re-judged every tick without moving its `lastSeen`, so an open stream never keeps a session alive; at once on
+  logout; when the client's unsent buffer passes 2 MiB, without an `end` (the browser reconnects and, its
+  `Last-Event-ID` being stale by then, gets every panel again); and when the console stops. `requestTimeout` and
+  `headersTimeout` do not end it.
+- **Acceptance**: `REQ-CONSOLE-SECURITY` (k), `REQ-OPERATOR-CONSOLE-SCREENS` (j).
+
 ## Revision History
 
 | Date | Change |
@@ -8509,3 +8614,4 @@ through the console (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY` (h)).
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a forgejo job now carries the minted token as `GITEA_TOKEN` and the instance as `GITEA_INSTANCE_URL` (the configured `FORGEJO_URL`, scheme included), the only pair the pinned tea 0.15.0 logs in from without a stored login. Since the tea pin (be1cc42e) a forgejo job carried `FORGEJO_TOKEN`, `GITEA_SERVER_TOKEN` and `FORGEJO_HOST`, under which every `tea` command the envelope names answers "Error: no available login". `GITEA_SERVER_TOKEN` and `FORGEJO_HOST` stay (the first is `tea login add --token`'s default, the second may be read by a skill). The forge table's `hostVar` column becomes the list `hostVars`, so `FORGE_HOST_VARS` and the `run.secrets` reservation derive both URL names; the minted-name list in the `PI_FORWARD_ENV` refusal gains `GITEA_TOKEN`, and the per-forge names sentence now names forgejo and azure, which it had omitted. `INT-FORGEJO-PAYLOAD-SUBSET` UNCHANGED, checked: nothing about the payload moves. |
 | 2026-10-14 | No issue: the lab's Forgejo follow-up, `OQ-043`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `FORGEJO_PERMISSION_TOKEN` is refused in `PI_FORWARD_ENV` and deleted from the closed container map after every other write, from the forge table's new `receiverOnlyVars` column (`RECEIVER_ONLY_VARS`). It is the receiver's author-gate lookup token, of an account that is an admin of the repositories, and no job may hold it. **`INT-FORGEJO-PAYLOAD-SUBSET` UNCHANGED, checked**: the lookup still takes `sender.login` and nothing else from the payload. |
 | 2026-10-14 | Issue #640, the operator console. **NEW `INT-CONSOLE-TOKENS-FILE-CONTRACT`**: `PI_CONSOLE_TOKENS_FILE` (default `console-tokens.json` in the deployment folder), `{version: 1, generation, tokens: [{name, role, sha256, createdAt}]}`, a regular file at 0600 owned by the console's account (symlinks refused), the whole file refused on any problem, no operator token refuses `serve`; the token is `pdc_` plus base64url of 32 random bytes, shown once by `token add` or `token rotate` and never stored; sha256 is enough for 256 random bits; `sessions end-all` bumps `generation`; writes are an exclusive temporary file and a rename, by the CLI only, each audited; the pi extension guards the file. **NEW `INT-CONSOLE-AUDIT-LOG`**: `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl` (directory 0700, files 0600, appended), rows `{at, seq, prev, actor, action, target, outcome, reason, beforeDigest, afterDigest, ticket}`, `prev` the sha256 of the previous raw line across months, the head recovered from the newest file's last line, a reaped head reported as where the chain starts rather than as broken, a failed append refusing its write, a best-effort mirror on the Valkey list `console:audit` (500 rows), the closed action and outcome vocabularies, and never a token, a code, a cookie, a session id or a body. **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED** (shape, validation and atomic rename unchanged; `writePauseWindows` gains an optional `expect` that refuses a file changed since the preview, and without one it now refuses a file that changed between its own read and its rename, where it used to overwrite that change; the Write protocol bullet says so). UNCHANGED, checked: `INT-DEPLOYMENT-POINTER-CONTRACT` (the console resolves its deployment through the pointer and adds no allowlisted key), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`. |
+| 2026-10-14 | Issue #641, the operator console's screens and live updates. **NEW `INT-CONSOLE-STATE-API`**: `GET /api/state`, one fleet reader snapshot as JSON for a session of either role (401 JSON without one); never a token, a secret's value or reference, a job's data or run text; a viewer's body carries no `failedReason`; a part that could not be read says `unreachable` rather than reading as zero; keys only added within `version: 1`. **NEW `INT-CONSOLE-EVENT-STREAM`**: `GET /api/events?page=` with the page's own query, two events (`panel`, one line of JSON `{id, html}` that replaces one `data-panel` region, and `end`, the session is over), a sequence `id` per page and query, every panel on connect unless `Last-Event-ID` is current, only changed panels after that, a 15 s ping, 429 past `PI_CONSOLE_MAX_STREAMS` per session or 32 in the process, and a client more than 2 MiB behind dropped to reconnect fresh. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the `kind` enum said `github`, `gitlab` or `local`, stale since the Forgejo and Azure forges (#61, #43) began writing `forgejo` and `azure`; it now lists the worker's `RUN_KINDS`, which the console's `kind` filter takes its vocabulary from, so a filter the spec allowed could no longer be refused by the code or the other way round. The record itself is UNCHANGED, checked: no field was added and none changed meaning. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: the audit screen reads the month files through the worker's new `readConsoleAudit` and writes nothing; no action or outcome was added. |
