@@ -30,3 +30,22 @@ await build({
 });
 
 console.log("[built admin/dist/index.mjs]");
+
+// The operator console's command (issue #640), a second program from the same sources: `pi-dispatch-console`, the
+// package's `bin`. Same bundling rule as the extension (worker internals inlined, the heavy deps external, so the
+// published tarball still needs nothing it does not declare); the pi runtime stays external too, though the console
+// never imports it, so a stray transitive import fails loudly at load rather than bundling pi. The banner is the
+// shebang npm's bin shim needs; esbuild keeps it as the file's first line.
+await build({
+	entryPoints: [join(here, "src/console/cli.mjs")],
+	outfile: join(here, "dist/console.mjs"),
+	bundle: true,
+	format: "esm",
+	platform: "node",
+	target: "node22",
+	external: ["@earendil-works/pi-coding-agent", "bullmq", "ioredis"],
+	banner: { js: "#!/usr/bin/env node\n// pi-dispatch operator console (bundled). Source: https://github.com/edgehero/pi-dispatch" },
+	logLevel: "info",
+});
+
+console.log("[built admin/dist/console.mjs]");
