@@ -4,6 +4,7 @@ import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
+import { consoleAnswerBy } from "./console-answer.mjs";
 
 // The close words in every forge's spelling, derived from the one table (never re-typed here): a
 // matched PR action in this set marks a close job for the semantic-key discriminant below.
@@ -343,8 +344,14 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, parkedReply, secrets, secretsProfile, waitFor, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
+	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
+	// else. Rebuilt from the one field rather than copied, `parkedReply`'s rule for durable job data, and refused when the
+	// name is not a console token's: the worker prints it on the forge in the answer's trail comment, so a name outside
+	// that charset (an `@`, markdown, a control byte) must never reach a queue.
+	const consoleBy = consoleMeta === undefined ? null : consoleAnswerBy(consoleMeta);
+	if (consoleMeta !== undefined && consoleBy === null) throw new TypeError("enqueueForgeJob: console.by must be a console token name ([a-z0-9][a-z0-9._-]{0,31})");
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
 	// only when the filter resolved one, exactly like chainDepth/parentJobId above, so an unflagged trigger's
@@ -404,6 +411,9 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// A phrase-free reply to a parked issue (issue #625), gated by the worker on the key's `parked` mark. Never part
 		// of an id: it says how the delivery was routed, not what it is.
 		...(parkedReply === true && { parkedReply: true }),
+		// Issue #642: the console answer's provenance, at JOB level and never inside `trigger` (copied verbatim into
+		// /job/event.json): it is for the worker's trail comment, not for the agent. Never part of an id.
+		...(consoleBy !== null && { console: { by: consoleBy } }),
 		// REQ-TRIGGER-SECRETS. The env variables this trigger binds and the profile whose resolver reads
 		// them. REFERENCES only: no value is ever enqueued, because a queued job is durable and a resolved
 		// credential in Redis would outlive the container it was scoped to. The worker resolves them at job

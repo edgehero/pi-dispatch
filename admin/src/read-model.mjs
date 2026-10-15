@@ -402,7 +402,27 @@ export function installPanelValkeyContext({ env = process.env } = {}) {
  * disagreement }` with each URL as `urlShown` prints it, never with its userinfo; every client sends the deployment's
  * password by that same context.
  */
-export async function killSwitchSet({ paused, env = process.env, setFn = setQueuePaused, resolveFn = killSwitchValkeyUrls, stateFn = pointerState, fs = nodeFs, uid = process.geteuid?.() } = {}) {
+export async function killSwitchSet({ paused, env = process.env, setFn = setQueuePaused, resolveFn = killSwitchValkeyUrls, stateFn = pointerState, fs = nodeFs, uid = process.geteuid?.(), plan = null } = {}) {
+  const picked = plan ?? killSwitchPlan({ paused, env, resolveFn, stateFn, fs, uid });
+  if (picked.refused) return { refused: picked.refused };
+  const context = picked.context ?? null;
+  const conn = context
+    ? { parseConnectionFn: (u, o = {}) => parseConnection(u, { ...o, context }), redisFn: (u, o = {}) => makeRedisClient(u, { ...o, context }) }
+    : {};
+  const results = [];
+  for (const url of picked.urls) results.push({ url, shown: urlShown(url), res: await setFn({ url, paused, ...conn }) });
+  return { results, disagreement: picked.urls.length > 1 ? picked.disagreement : null };
+}
+
+/**
+ * The kill switch's DECISION, without acting (issue #642): which Valkeys a pause or resume reaches, or why it refuses.
+ * `{ refused }`, or `{ urls, disagreement, context }` with `context` the `panelValkeyContext` every client of it must
+ * take (the deployment's password). Split out of `killSwitchSet` so every surface that pauses (the tools, the TUI's
+ * `p`/`r` through the fleet reader, the console) refuses the same resume on the same two-Valkey disagreement, by one
+ * rule rather than one copy each. `stateFn` names the deployment folder: the pi extension's pointer by default, the
+ * console's own deployment folder when it passes one.
+ */
+export function killSwitchPlan({ paused, env = process.env, resolveFn = killSwitchValkeyUrls, stateFn = pointerState, fs = nodeFs, uid = process.geteuid?.() } = {}) {
   const { deploymentDir, owned } = stateFn();
   const context = panelValkeyContext({ env, pointerDir: deploymentDir, owned, fs, uid });
   const picked = resolveFn({ env, context });
@@ -410,10 +430,38 @@ export async function killSwitchSet({ paused, env = process.env, setFn = setQueu
   if (picked.urls.length > 1 && !paused) {
     return { refused: `${picked.disagreement}: resume would start jobs on one of them, so it resumes neither. Make them agree (the .env is what the service reads), or run: pi-dispatch resume --valkey-url <url>` };
   }
-  const conn = { parseConnectionFn: (u, o = {}) => parseConnection(u, { ...o, context }), redisFn: (u, o = {}) => makeRedisClient(u, { ...o, context }) };
-  const results = [];
-  for (const url of picked.urls) results.push({ url, shown: urlShown(url), res: await setFn({ url, paused, ...conn }) });
-  return { results, disagreement: picked.urls.length > 1 ? picked.disagreement : null };
+  return { urls: picked.urls, disagreement: picked.urls.length > 1 ? picked.disagreement : null, context };
+}
+
+/**
+ * Pause or resume ONE fleet queue (issue #642): the console's per-queue control. `queue` must be a queue this
+ * deployment drains, by the kill switch's own discovery (`readFleetQueues`: the live registry unioned with the queues
+ * that exist), so a mistyped name is refused rather than creating a paused queue nothing reads (the silent no-op
+ * `cli.mjs` warns about). Returns `{ ok: true, paused, queue }`, `{ invalid }` for a name that is not a fleet queue, or
+ * `{ unreachable }`.
+ *
+ * One Valkey, the caller's `url`. The fleet-wide two-Valkey rule (`killSwitchPlan`) is about stopping or starting a
+ * whole deployment; a single queue named here is named on the Valkey the caller reads it from, where its paused flag
+ * was seen.
+ */
+export async function setQueuePausedOne({ url, queue, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+  if (typeof queue !== "string" || queue === "") return { invalid: "a queue name is required" };
+  if (typeof paused !== "boolean") return { invalid: "paused must be true or false" };
+  let q = null;
+  try {
+    const { names, blind } = await readFleetQueues({ url, redisFn, timeoutMs });
+    if (!names.includes(queue)) {
+      return { invalid: `${JSON.stringify(queue)} is not a queue this deployment drains (${names.join(", ")})${blind ? `; the host registry could not be read (${blind}), so a host's queue may be missing from that list` : ""}. Nothing was changed` };
+    }
+    q = makeQueueFn(parseConnectionFn(url, { failFast: true }), { name: queue });
+    if (paused) await q.pause();
+    else await q.resume();
+    return { ok: true, paused, queue };
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    if (q) await q.close().catch(() => {});
+  }
 }
 
 export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
@@ -660,8 +708,12 @@ function hourKey(nowMs) {
  * and the two ways out: fix the file, or delete it to start from an empty overlay. A MISSING file is still the
  * normal empty overlay and writes as before, and so does a BLANK one (whitespace or a byte-order mark only), which
  * holds nothing that could be lost.
+ *
+ * `expect` (issue #642), as for `writePauseWindows`: the `writeInputs` snapshots the change was built from (the console's
+ * preview). `writeOverlay` re-reads them right before its rename and refuses, with nothing written, when one changed.
+ * Without it the write is what it always was.
  */
-export function writeSettings({ settingsFile, mutate, fs = nodeFs, dollarEnv = undefined, deploymentDir = null }) {
+export function writeSettings({ settingsFile, mutate, expect = null, fs = nodeFs, dollarEnv = undefined, deploymentDir = null }) {
   const res = readOverlay(settingsFile, { fs });
   if (res.invalid && !blankSettingsFile(settingsFile, fs)) return { invalid: overlayInvalidRefusal(res.invalid) };
   const next = mutate({ ...(res.overlay ?? {}) });
@@ -669,7 +721,7 @@ export function writeSettings({ settingsFile, mutate, fs = nodeFs, dollarEnv = u
   // passes the env, and the answer is a WARNING returned beside the result, never a refusal: the worker's cap may come
   // from a source not visible here (`mergedDollarProblem`). Other keys are not judged.
   const warning = dollarEnv === undefined ? undefined : mergedDollarProblem(next, dollarEnv, { deploymentDir })?.warning;
-  const w = writeOverlay(settingsFile, next, { fs });
+  const w = writeOverlay(settingsFile, next, { fs, expect });
   if (w.invalid) return { invalid: w.invalid };
   return { ok: true, overlay: next, ...(warning ? { warning } : {}) };
 }
@@ -758,6 +810,14 @@ export function mergedDollarProblem(overlay, env, { deploymentDir = null } = {})
  * rather than from the tmp write -- same throw contract, different message.
  */
 export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
+
+/**
+ * The console's job actions (issue #642): retry and remove a failed job (one or in bulk), re-run a finished run, answer
+ * a parked run. They live in `job-actions.mjs` for size alone and are re-exported here, so every caller still reaches
+ * the queue through this one funnel. And the worker's reserve rule, for the reserve a paid action shows before confirm.
+ */
+export { BULK_MAX, enqueueParkedAnswer, enqueueRerun, planFailedBulk, planParkedAnswer, planRerun, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs } from "./job-actions.mjs";
+export { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 
 /**
  * Read + validate the pause-windows file for display (REQ-SCOPED-PAUSE-WINDOWS). Returns `{ windows }` of
@@ -1981,15 +2041,31 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
 export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, queueFn = makeQueue, timeoutMs = 2500 } = {}) {
   if (typeof jobId !== "string" || jobId === "") return { invalid: "a job id is required" };
   let redis;
-  let queue;
+  const queues = [];
   try {
     parseConnection(url, { failFast: true });
     redis = redisFn(url);
-    queue = queueFn(parseConnection(url, { failFast: true }));
-    // The sequence itself (hash-with-a-clock check, state check, hold keys before the job) lives in the
-    // worker's cancel-state.mjs since issue #287 gave it a second caller: one body, imported rather than
-    // re-implemented, which is this module's own rule for everything it shares with the worker.
-    return await withTimeout(removeHeldJob({ redis, queue, jobId }), timeoutMs, { invalid: "timed out reaching the queue" });
+    // EVERY fleet queue (issue #642), as `pi-dispatch cancel` searches them (cancel-cli.mjs): a held job lives on the queue
+    // it was enqueued onto, and a named host's cron, chained children and routed forge jobs live on `pi-jobs@<name>`.
+    // Looking only in the shared queue refused every held job on a host queue as "no longer in the queue", for a job
+    // the panel was showing. The first queue that knows the id owns it (ids are unique across queues by construction);
+    // when none does, the shared queue answers, so the refusal keeps its words.
+    const settled = (async () => {
+      // Half the budget for the discovery, so the queue reads and the removal still fit inside the outer bound.
+      const { names } = await readFleetQueues({ url, redisFn, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) });
+      let owner = null;
+      for (const name of names) {
+        const q = queueFn(parseConnection(url, { failFast: true }), { name });
+        queues.push(q);
+        if (owner === null && (await q.getJob(jobId))) owner = q;
+        if (owner !== null) break;
+      }
+      // The sequence itself (hash-with-a-clock check, state check, hold keys before the job) lives in the
+      // worker's cancel-state.mjs since issue #287 gave it a second caller: one body, imported rather than
+      // re-implemented, which is this module's own rule for everything it shares with the worker.
+      return removeHeldJob({ redis, queue: owner ?? queues[0], jobId });
+    })();
+    return await withTimeout(settled, timeoutMs, { invalid: "timed out reaching the queue" });
   } catch (err) {
     return { invalid: err?.message ?? String(err) };
   } finally {
@@ -1998,12 +2074,14 @@ export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, que
     } catch {
       // already closed
     }
-    try {
-      // A bullmq Queue has BOTH `disconnect` and `close`; `close` is the one that releases its blocking
-      // connections, so it is named explicitly rather than reached through a `??` that short-circuits.
-      await queue?.close?.();
-    } catch {
-      // already closed
+    for (const queue of queues) {
+      try {
+        // A bullmq Queue has BOTH `disconnect` and `close`; `close` is the one that releases its blocking
+        // connections, so it is named explicitly rather than reached through a `??` that short-circuits.
+        await queue?.close?.();
+      } catch {
+        // already closed
+      }
     }
   }
 }
@@ -3458,6 +3536,11 @@ export function createFleetReader(
     fs = nodeFs,
     readOnly = false,
     activeLimit = 1,
+    // Issue #642: the kill switch's decision for `pause`/`resume` (`killSwitchPlan`'s shape: `({ paused }) => { refused }
+    // | { urls, disagreement, context }`). The default is this reader's own Valkey alone, which is what `pause` did
+    // before; a surface that knows its deployment passes the real plan (the TUI: `killSwitchPlan`, over the pointer),
+    // so the two-Valkey refusal holds there exactly as it does for the tools.
+    killSwitchPlanFn = null,
   } = {},
 ) {
   const prune = readOnly !== true;
@@ -3509,6 +3592,26 @@ export function createFleetReader(
       if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
     }
     return unionQueueNames(lastNames, existing).map((n) => pool.get(n));
+  };
+
+  // Flip every kill-switch queue on THIS reader's Valkey through the held pool, `setQueuePaused`'s result shape.
+  const poolSet = async (paused) => {
+    await fleetQueues(); // refresh `lastNames` from the registry before unioning the keyspace onto it
+    const done = [];
+    for (const q of await killSwitchQueues()) {
+      try {
+        if (paused) await q.pause();
+        else await q.resume();
+      } catch (err) {
+        return { unreachable: err?.message ?? String(err), partial: { done, failed: q?.name ?? "-", error: err?.message ?? String(err) }, ...(fleetDegraded ? { blind: fleetDegraded } : {}) };
+      }
+      done.push(q?.name ?? "-");
+    }
+    return { ok: true, paused, queues: done, ...(fleetDegraded ? { blind: fleetDegraded } : {}) };
+  };
+  const killSwitch = async (paused) => {
+    const plan = killSwitchPlanFn ? killSwitchPlanFn({ paused }) : { urls: [paths.valkeyUrl], disagreement: null, context: null };
+    return killSwitchSet({ paused, plan, setFn: (args) => (args.url === paths.valkeyUrl ? poolSet(paused) : setQueuePaused(args)) });
   };
 
   // The last records scan for the dollar windows, `{ at, sinceMs, records }`, reused for DOLLAR_RECORDS_TTL_MS.
@@ -3730,15 +3833,22 @@ export function createFleetReader(
     async runById(jobId) {
       return readRunById(redis, { logsDir: paths.logsDir, jobId, fs });
     },
+    // The kill switch (issue #642): ONE funnel with the tools' `killSwitchSet`, so a resume across two disagreeing
+    // Valkeys is refused here too. Returns `killSwitchSet`'s shape: `{ refused }`, or `{ results: [{ url, shown, res }],
+    // disagreement }`, where `res` is `{ ok: true, paused, queues }`, or `{ unreachable, partial: { done, failed, error } }`
+    // for a loop that stopped part-way (it used to throw, which the TUI swallowed). This reader's own Valkey goes through
+    // its held pool (no second connection for a keypress); any other Valkey the plan names, through `setQueuePaused`.
     async pause() {
-      await fleetQueues(); // refresh `lastNames` from the registry before unioning the keyspace onto it
-      for (const q of await killSwitchQueues()) await q.pause();
+      return killSwitch(true);
     },
     async resume() {
       // Resume spans the same set, and it is the direction that strands a deployment: a queue paused while its host
       // was live, then resumed while that host is down, stays paused with nothing naming it.
-      await fleetQueues();
-      for (const q of await killSwitchQueues()) await q.resume();
+      return killSwitch(false);
+    },
+    /** One fleet queue (issue #642): `setQueuePausedOne` on this reader's Valkey. */
+    async pauseQueue({ queue, paused }) {
+      return setQueuePausedOne({ url: paths.valkeyUrl, queue, paused, makeQueueFn, parseConnectionFn, redisFn });
     },
     async cancelActive({ jobId }) {
       // The CLI's channel, byte for byte (issue #287, worker/src/cancel-state.mjs): a request key the owning worker

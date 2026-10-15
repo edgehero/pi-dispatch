@@ -47,6 +47,7 @@
 import nodeFs from "node:fs";
 import { parseTriggers } from "./triggers.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
+import { expectRefusal } from "./file-expect.mjs";
 
 /**
  * A lock older than this is a crashed writer's, not a live one's: every write under it is a read,
@@ -192,8 +193,14 @@ function discardTmp(fs, tmp) {
  * A missing or unparseable existing file starts from an empty set; the validated write repairs it.
  * Returns `{ ok: true }`, or `{ invalid }` for a validation failure OR a held lock; fs failures throw,
  * the contract this function has always had.
+ *
+ * `expect` (issue #642): the `{ path, text }` snapshots the change was built from (the admin's `writeInputs`, taken
+ * before an operator's confirm, e.g. the console's preview). Re-read INSIDE the lock, right before the rename, so the
+ * re-check and the rename are one critical section against every other writer of this file (the disarm included): a
+ * difference refuses with nothing written. Without it the write is byte-identical to what it always was; the lock
+ * already serialises a single read-modify-write, and `expect` widens that to the whole preview-to-confirm dialog.
  */
-export function writeTriggers({ triggersPath, mutate, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
+export function writeTriggers({ triggersPath, mutate, expect = null, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
 	const fd = takeLock(triggersPath, fs, log, now);
 	if (fd === null) {
 		// Immediate, not retried: the callers sit on the pi TUI event loop, and the holder is a write
@@ -236,6 +243,13 @@ export function writeTriggers({ triggersPath, mutate, fs = nodeFs, log = () => {
 		const tmp = tmpPathFor(triggersPath);
 		try {
 			fs.writeFileSync(tmp, text, { mode: 0o644 });
+			// After the tmp is written and before the rename, under the lock: nothing between this read and the rename
+			// can change the file except a writer that broke the lock (the stale-takeover residual in the header).
+			const changed = expectRefusal(fs, expect);
+			if (changed) {
+				discardTmp(fs, tmp);
+				return { invalid: changed };
+			}
 			renameIntoPlace(fs, tmp, triggersPath);
 		} catch (err) {
 			discardTmp(fs, tmp);

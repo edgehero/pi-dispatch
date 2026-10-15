@@ -293,12 +293,13 @@ test("writeOverlay: happy path ensures the dir, writes a same-dir tmp, then rena
 	assert.equal(mkdir.options.recursive, true, "mkdirSync is recursive");
 
 	const write = fs.ops.find((o) => o.op === "write");
-	assert.equal(write.path, "/s/settings.json.tmp", "tmp is the target + .tmp");
+	// Issue #642: a tmp file of its own (pid and random), no longer the shared `<path>.tmp` two writers could collide on.
+	assert.match(write.path, new RegExp(`^/s/settings\\.json\\.${process.pid}\\.[0-9a-f]{12}\\.tmp$`), "tmp is the target + pid + random + .tmp");
 	assert.equal(dirname(write.path), dirname("/s/settings.json"), "tmp is a same-directory sibling");
 	assert.equal(write.data, `${JSON.stringify({ model: "m", concurrency: 4 }, null, 2)}\n`, "2-space indent + trailing newline");
 
 	const rename = fs.ops.find((o) => o.op === "rename");
-	assert.equal(rename.from, "/s/settings.json.tmp");
+	assert.equal(rename.from, write.path);
 	assert.equal(rename.to, "/s/settings.json");
 });
 
