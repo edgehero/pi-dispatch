@@ -219,6 +219,62 @@ export function createDashboardDeps(paths: any, seams: any = {}) {
 }
 
 /**
+ * The panel's writes wrapped in the console's audit chain (issue #642): pause and resume (the kill switch), cancelling
+ * the active job and cancelling a held one, each through `write(opts, fn)` (index.ts hands `panelWrite` bound to the
+ * deployment's logs directory), which appends the `ok` row BEFORE the write, a `failed` row after one that did not
+ * land, and refuses the write when the first append fails. The audit writer is injected rather than imported because
+ * this file touches no filesystem of its own (index.ts holds the reads and writes); the reads pass through untouched.
+ * A refused write comes back as `{ refused, invalid }`, which the cancel note and the switch note already render.
+ */
+export function withAuditedWrites(deps: any, write: (opts: any, fn: () => any) => any) {
+  return {
+    ...deps,
+    pause: () => write({ kind: "fleet-pause", target: "fleet", failure: switchFailure }, () => deps.pause()),
+    resume: () => write({ kind: "fleet-resume", target: "fleet", failure: switchFailure }, () => deps.resume()),
+    cancelActive: ({ jobId }: any) => write({ kind: "cancel-active", target: jobId, failure: cancelFailure }, () => deps.cancelActive({ jobId })),
+    cancelHeld: ({ jobId }: any) => write({ kind: "cancel-held", target: jobId, failure: cancelFailure }, () => deps.cancelHeld({ jobId })),
+  };
+}
+
+/**
+ * A pause or resume result's failure: a refusal it carries (`{ refused }`, the kill switch's two-Valkey disagreement on
+ * a resume, or `{ invalid }`), or a Valkey in its `results` (`killSwitchSet`'s shape, which the fleet reader returns
+ * since issue #642) it could not reach, whole or half. Undefined, or results that all landed, is a switch that landed.
+ * index.ts judges the tools' and the command's kill-switch audit rows by it too, so the panel has one rule.
+ */
+export function switchFailure(res: any): string | null {
+  if (typeof res?.refused === "string" && res.refused !== "") return res.refused;
+  if (typeof res?.invalid === "string" && res.invalid !== "") return res.invalid;
+  const bad = (Array.isArray(res?.results) ? res.results : []).find((r: any) => r?.res?.unreachable);
+  if (!bad) return null;
+  const at = bad.shown ?? "the deployment's Valkey";
+  return bad.res.partial ? `FAILED at ${bad.res.partial.failed} on ${at}, so the deployment is half switched` : `could not reach the queue at ${at}`;
+}
+
+/** A cancel result's failure: a refusal, or no worker acknowledging (nothing changed). */
+function cancelFailure(res: any): string | null {
+  if (typeof res?.invalid === "string" && res.invalid !== "") return res.invalid;
+  if (typeof res?.refused === "string" && res.refused !== "") return res.refused;
+  if (res?.timeout) return "no worker acknowledged";
+  return null;
+}
+
+/**
+ * The footer note for a pause or resume: why it was refused or failed (a half switched deployment is the one outcome
+ * this switch exists to prevent, so it is said, never left to the next snapshot), the two Valkeys a pause switched when
+ * this process's and the deployment's disagree, or null for a switch that simply landed (the next snapshot's paused
+ * flag says that). Scrubbed: a refusal can quote a URL or a reason another process wrote.
+ */
+function switchNote(verb: string, res: any): string | null {
+  const why = switchFailure(res);
+  if (why !== null) {
+    const refused = typeof res?.refused === "string" || typeof res?.invalid === "string";
+    return `${verb} ${refused ? "refused" : "failed"}: ${scrubControl(why)}`;
+  }
+  return typeof res?.disagreement === "string" && res.disagreement !== "" ? `${scrubControl(res.disagreement)}: ${verb}d both` : null;
+}
+
+/**
  * The dashboard overlay component. `deps` is the one injection seam: production defaults to a real
  * `createDashboardDeps(paths)` (one queue + one redis for the panel's lifetime); tests pass a canned
  * `fetchSnapshot` and `pause`/`resume`/`dispose` spies and never touch Redis. The first fetch fires
@@ -1098,12 +1154,18 @@ export function makeDashboard({
         tui?.requestRender?.();
         return;
       }
+      // Issue #642: a pause or resume that did not land (the kill switch's refusal, or the audit log that could not be
+      // written) is said in the footer note; one that landed shows as the next snapshot's paused flag, as before.
       if (data === "p" || data === "P") {
-        void act(deps.pause);
+        void act(async () => {
+          actionNote = switchNote("pause", await deps.pause());
+        });
         return;
       }
       if (data === "r" || data === "R") {
-        void act(deps.resume);
+        void act(async () => {
+          actionNote = switchNote("resume", await deps.resume());
+        });
       }
     },
     dispose,

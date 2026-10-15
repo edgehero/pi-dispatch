@@ -18,6 +18,11 @@
  * instead of both writing a row with the same `seq` and `prev`. A lock whose holder pid is dead is taken over; a lock
  * still held after `LOCK_WAIT_MS` makes the append throw, which refuses the write (see `withAppendLock`).
  *
+ * Rows come from the console (`serve`), its CLI (actor role `shell`) and, since issue #642, the panel: the `/dispatch` TUI
+ * and the pi extension's tools write theirs as actor role `panel` (`admin/src/audited-write.mjs`). The role is an escaped
+ * string like the name, not a closed set. A write row may also carry `kind` (which write), `reserve` (micro-dollars a
+ * paid action holds) and `count` (a bulk action's size), all optional: a row without them verifies as it always did.
+ *
  * A row is mirrored to Valkey (`console:audit`, LPUSH then LTRIM, the `alloc:log` precedent in `allocation.mjs`) as a
  * VIEW: the file is the record, and a mirror that fails loses nothing the file does not hold.
  */
@@ -33,6 +38,10 @@ export const CONSOLE_AUDIT_OUTCOMES = Object.freeze(["ok", "refused", "failed"])
 // A string field's cap, in code points, AFTER its controls are written out: a row stays small enough for the bounded tail
 // read below whatever a caller hands in (a Host header, a refusal reason), and no field can bury the others.
 export const CONSOLE_AUDIT_FIELD_MAX = 200;
+// A write row's optional action name (issue #642: the console's action table and the panel's own writes), one short
+// lowercase word with dashes: a closed charset rather than an escaped free string, so a reader can group rows by it and
+// no caller can carry text in it. `action` itself stays the closed vocabulary above; `kind` only says which write.
+export const CONSOLE_AUDIT_KIND_RE = /^[a-z0-9-]{1,40}$/;
 // Only names of this shape are the log's: the reaper and the verifier never touch or read anything else an operator put
 // in the directory.
 const MONTH_FILE_RE = /^\d{4}-\d{2}\.jsonl$/;
@@ -153,8 +162,26 @@ function auditRowBody(input) {
 		action,
 	};
 	const optional = (field) => (input[field] === undefined || input[field] === null ? {} : { [field]: auditString(input[field], field) });
-	// In reading order: who, did what, to what, how it went, why, then the digests and the ticket that tie it to a change.
-	return { ...body, ...optional("target"), outcome, ...optional("reason"), ...optional("beforeDigest"), ...optional("afterDigest"), ...optional("ticket") };
+	const absent = (field) => input[field] === undefined || input[field] === null;
+	if (!absent("kind") && !(typeof input.kind === "string" && CONSOLE_AUDIT_KIND_RE.test(input.kind))) throw new Error("console audit row: kind must be 1 to 40 of a-z, 0-9 and -");
+	if (!absent("reserve") && !(Number.isSafeInteger(input.reserve) && input.reserve >= 0)) throw new Error("console audit row: reserve must be a non-negative whole number of micro-dollars");
+	if (!absent("count") && !(Number.isSafeInteger(input.count) && input.count >= 1)) throw new Error("console audit row: count must be a positive whole number");
+	const number = (field) => (absent(field) ? {} : { [field]: input[field] });
+	// In reading order: who, did what (and which write), to what, how it went, why, what it holds and how many, then the
+	// digests and the ticket that tie it to a change.
+	return { ...body, ...(absent("kind") ? {} : { kind: input.kind }), ...optional("target"), outcome, ...optional("reason"), ...number("reserve"), ...number("count"), ...optional("beforeDigest"), ...optional("afterDigest"), ...optional("ticket") };
+}
+
+/**
+ * Whether a parsed row's optional issue #642 fields, where present, are what `auditRowBody` writes: `kind` in its
+ * charset, `reserve` a non-negative safe integer, `count` a positive one. A row without them is a row from before them,
+ * and is fine.
+ */
+function optionalFieldsWellFormed(row) {
+	if (row.kind !== undefined && !(typeof row.kind === "string" && CONSOLE_AUDIT_KIND_RE.test(row.kind))) return false;
+	if (row.reserve !== undefined && !(Number.isSafeInteger(row.reserve) && row.reserve >= 0)) return false;
+	if (row.count !== undefined && !(Number.isSafeInteger(row.count) && row.count >= 1)) return false;
+	return true;
 }
 
 /** The `YYYY-MM.jsonl` names in `dir`, oldest first; [] when the directory does not exist. Other errors throw. */
@@ -298,6 +325,7 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs }) {
 				if (!CONSOLE_AUDIT_ACTIONS.includes(row.action) || !CONSOLE_AUDIT_OUTCOMES.includes(row.outcome)) {
 					return broken("the row's action or outcome is not one the console writes");
 				}
+				if (!optionalFieldsWellFormed(row)) return broken("the row's kind, reserve or count is not one the console writes");
 				if (prior === null) {
 					if (row.prev === null) {
 						if (row.seq !== 1) return broken(`the first row has no prev but seq ${row.seq}; the chain's start was changed`);

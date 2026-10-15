@@ -21,24 +21,25 @@
 
 import { blankSettingsFile, readSettingsView, writeSettings } from "./read-model.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
-
-const PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
-
-/** The declared table, rendered for a human on their own host: names and paths, never a reference. */
-function renderProfiles(profiles: Record<string, string>): string {
-  const names = Object.keys(profiles).sort();
-  if (names.length === 0) return "No resolver profiles are declared in the settings overlay.";
-  return ["Resolver profiles (settings overlay):", ...names.map((n) => `  ${n} -> ${profiles[n]}`)].join("\n");
-}
+// The name and path rules and the confirm's exact bytes (issue #642): pi-free, so the operator console declares a
+// profile under the same rules and shows the same words.
+import { planSecretProfileAdd, planSecretProfileRemove, renderProfiles, secretProfileNameRefusal, secretResolverPathRefusal } from "./write-plans.mjs";
+// The write lands in the console's audit chain as the panel (issue #642), appended before it.
+import { panelWrite } from "./audited-write.mjs";
+import { logsDirPath } from "@edgehero/pi-dispatch/config";
 
 // `fs` is injected for the repo's usual reason: these tests must never touch a real settings file, and a
 // dialog flow that writes on the way to being asserted is a test that lies about what it proved.
+// `deps.logsDir` is where the write is audited (index.ts passes the deployment's), else the paths' own, else PI_LOGS_DIR as
+// the worker resolves it; `deps.audit` replaces the audit writer (the tests' seam).
 export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, tokens: string[], deps: any = {}): Promise<void> {
   // An EXPORTED door with its own `ctx` (issue #404): reached through the command handler in production and
   // driven directly by tests, so it gates for itself rather than trusting its caller.
   const ctx = gateDialogs(rawCtx);
   const ui = ctx?.ui;
   const fsSeam = deps.fs ? { fs: deps.fs } : {};
+  const auditDir = deps.logsDir ?? paths.logsDir ?? logsDirPath(process.env);
+  const auditSeam = deps.audit ? { audit: deps.audit } : {};
   const view = readSettingsView({ settingsFile: paths.settingsFile, ...fsSeam });
   // Fail-soft on read, like every other display path: an operator whose overlay is broken still needs to
   // be told what is wrong rather than handed nothing. A BLANK file (whitespace or a byte-order mark only, issue #540)
@@ -66,32 +67,34 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
     const nameAnswer = await ui.input("profile name — what a trigger's run.secretsProfile will say (e.g. prod)", "default");
     const name = (nameAnswer ?? "").trim();
     if (name === "") return;
-    if (!PROFILE_NAME.test(name)) {
-      notify?.("a profile name may use letters, digits, dot, dash and underscore only — PI_SECRET_PROFILES is a comma-separated list of name:path pairs", "error");
+    const badName = secretProfileNameRefusal(name);
+    if (badName !== null) {
+      notify?.(badName, "error");
       return;
     }
     const pathAnswer = await ui.input("resolver — ABSOLUTE path to the script that reads one reference", "/opt/pi/resolve.sh");
     const path = (pathAnswer ?? "").trim();
     if (path === "") return;
-    // Absolute for `resolveEnvSetup`'s reason, restated because an operator meets it here rather than
-    // there: a service manager's working directory is not a login shell's, so a relative path is a
-    // different file on every host.
-    if (!(path.startsWith("/") || /^([A-Za-z]:[\\/]|\\\\)/.test(path))) {
-      notify?.("the resolver needs an ABSOLUTE path: a service manager's working directory is not your shell's", "error");
+    // Absolute for `resolveEnvSetup`'s reason (`secretResolverPathRefusal`): a service manager's working directory is
+    // not a login shell's, so a relative path is a different file on every host.
+    const badPath = secretResolverPathRefusal(path);
+    if (badPath !== null) {
+      notify?.(badPath, "error");
       return;
     }
     // The pointer wizard's discipline: show the EXACT bytes to be written, not a summary of them. This
     // file redirects what the worker executes, so the operator approves the thing itself.
-    const replacing = profiles[name] ? `\n\nThis REPLACES the current ${name} -> ${profiles[name]}` : "";
-    const ok = await ui.confirm(
-      "Declare a secret resolver",
-      `${paths.settingsFile} gets:\n${JSON.stringify({ secretProfiles: { ...profiles, [name]: path } }, null, 2)}${replacing}\n\nThe worker EXECUTES this script, as the account it runs as, once per reference. It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.`,
-    );
+    const planned: any = planSecretProfileAdd({ name, path, profiles, settingsFile: paths.settingsFile });
+    if (planned.refusal) {
+      notify?.(planned.refusal, "error");
+      return;
+    }
+    const ok = await ui.confirm(planned.plan.title, planned.plan.message);
     if (!ok) {
       notify?.("not declared", "info");
       return;
     }
-    const res = writeSettings({ settingsFile: paths.settingsFile, mutate: (o: any) => ({ ...o, secretProfiles: { ...profiles, [name]: path } }), ...fsSeam });
+    const res: any = panelWrite(auditDir, { ...auditSeam, kind: "secret-profile-add", target: paths.settingsFile }, () => writeSettings({ settingsFile: paths.settingsFile, mutate: planned.plan.mutate, ...fsSeam }));
     if (res.invalid) {
       notify?.(`rejected: ${res.invalid}`, "error");
       return;
@@ -102,18 +105,17 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
 
   if (action === "remove") {
     const name = (tokens[1] ?? "").trim();
-    if (!name || !(name in profiles)) {
-      notify?.(`no such profile. ${renderProfiles(profiles)}`, "warning");
+    const planned: any = planSecretProfileRemove({ name, profiles, settingsFile: paths.settingsFile });
+    if (planned.refusal) {
+      notify?.(planned.refusal, "warning");
       return;
     }
-    const ok = await ui.confirm("Remove a secret resolver", `${name} -> ${profiles[name]}\n\nEvery trigger naming it refuses PRE-SPEND after this, rather than running without its secrets.`);
+    const ok = await ui.confirm(planned.plan.title, planned.plan.message);
     if (!ok) {
       notify?.("not removed", "info");
       return;
     }
-    const next = { ...profiles };
-    delete next[name];
-    const res = writeSettings({ settingsFile: paths.settingsFile, mutate: (o: any) => ({ ...o, secretProfiles: next }), ...fsSeam });
+    const res: any = panelWrite(auditDir, { ...auditSeam, kind: "secret-profile-remove", target: paths.settingsFile }, () => writeSettings({ settingsFile: paths.settingsFile, mutate: planned.plan.mutate, ...fsSeam }));
     if (res.invalid) {
       notify?.(`rejected: ${res.invalid}`, "error");
       return;

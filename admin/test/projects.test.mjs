@@ -19,6 +19,9 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const indexMod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
+// Issue #642: every write these drive is audited as the panel into PI_LOGS_DIR's console-audit chain, so the file's
+// writes land in a directory of its own rather than the account's default logs directory.
+process.env.PI_LOGS_DIR = tempDir("pd-642-panel-audit-");
 
 function registeredTools() {
   const tools = [];
