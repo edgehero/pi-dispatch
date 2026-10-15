@@ -1,6 +1,8 @@
 import * as nodeFs from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import { ensureUnderAccountRoot } from "./config.mjs";
+import { expectRefusal } from "./file-expect.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { checkDollarInvariant, parseUsdMicros } from "./money.mjs";
 
@@ -287,13 +289,24 @@ export function resolveSettings(config, read) {
 /**
  * Write `candidate` to `path` atomically. Validates with the same rules as `readOverlay` (an invalid
  * candidate returns `{ invalid }` and touches no file; an empty `{}` candidate is valid), serialises
- * the validated overlay with 2-space indent and a trailing newline, writes a same-directory
- * `<path>.tmp`, then renames it over `path`. NEVER throws.
+ * the validated overlay with 2-space indent and a trailing newline, writes a same-directory tmp file of
+ * its own, then renames it over `path`. NEVER throws.
+ *
+ * The tmp name is `<path>.<pid>.<random>.tmp`, created exclusively (`wx`), as `writePauseWindows` and the admin's
+ * `replaceFile` do (issue #642). It was a fixed `<path>.tmp`, harmless while one process wrote the overlay; the
+ * console and the pi extension are two, and a shared name lets one rename the other's bytes past its own re-check.
+ * A write that fails after the tmp exists removes it, so a unique name never becomes litter. A file already at the tmp
+ * name (another writer's, or one planted there) refuses the write rather than being overwritten, and is left alone:
+ * the exclusive create is what makes the name this writer's. `random` is injectable so a test can aim at that name.
+ *
+ * `expect` (issue #642): the `{ path, text }` snapshots the change was built from (the admin's `writeInputs`, taken
+ * before an operator's confirm). Right before the rename each file is re-read, and a difference refuses with nothing
+ * written (`file-expect.mjs`). Without it the write is what it always was.
  *
  * The rename is retried once on EPERM to ride out a Windows AV/indexer briefly locking the destination;
  * a second failure surfaces as `{ invalid }`, never a throw. Returns `{ ok: true }` on success.
  */
-export function writeOverlay(path, candidate, { fs = nodeFs, log = () => {} } = {}) {
+export function writeOverlay(path, candidate, { fs = nodeFs, log = () => {}, expect = null, random = randomBytes } = {}) {
 	const result = validateOverlay(candidate, log);
 	if (result.invalid) return { invalid: result.invalid };
 
@@ -306,21 +319,38 @@ export function writeOverlay(path, candidate, { fs = nodeFs, log = () => {} } = 
 		return { invalid: err?.piDispatchConfig ? `settings dir refused: ${err.message}` : `settings dir unwritable (${err?.code ?? "mkdir-error"})` };
 	}
 
-	const tmp = `${path}.tmp`;
+	const tmp = `${path}.${process.pid}.${random(6).toString("hex")}.tmp`;
+	const drop = () => {
+		try {
+			fs.unlinkSync?.(tmp);
+		} catch {
+			// nothing to drop
+		}
+	};
 	const data = `${JSON.stringify(result.overlay, null, 2)}\n`;
 	try {
-		fs.writeFileSync(tmp, data);
+		fs.writeFileSync(tmp, data, { flag: "wx" });
 	} catch (err) {
 		return { invalid: `settings write failed (${err?.code ?? "write-error"})` };
+	}
+
+	const changed = expectRefusal(fs, expect);
+	if (changed) {
+		drop();
+		return { invalid: changed };
 	}
 
 	try {
 		fs.renameSync(tmp, path);
 	} catch (err) {
-		if (err?.code !== "EPERM") return { invalid: `settings rename failed (${err?.code ?? "rename-error"})` };
+		if (err?.code !== "EPERM") {
+			drop();
+			return { invalid: `settings rename failed (${err?.code ?? "rename-error"})` };
+		}
 		try {
 			fs.renameSync(tmp, path); // single retry: Windows AV/indexer lock is transient
 		} catch (retryErr) {
+			drop();
 			return { invalid: `settings rename failed (${retryErr?.code ?? "rename-error"})` };
 		}
 	}

@@ -20,7 +20,9 @@ export const LOCAL_FOLDER_PROJECT_CHANGED = "local-folder-project-changed";
 // Issue #505: a portfolio cron job refused before it spends, because this host could not apply the plan it would write.
 export const PORTFOLIO_NO_ENVELOPE = "portfolio-no-envelope";
 import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
-import { zeroRatedVerdict } from "./model-endpoints.mjs";
+import { callableModelRefs, zeroRatedFor } from "./reserve-estimate.mjs";
+import { answerTrailComment, consoleAnswerBy } from "./console-answer.mjs";
+import { forgeDeliveryJobId } from "./job-id.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -224,19 +226,37 @@ function modelPrefixesOf(modelDollars) {
 	return new Set((modelDollars ?? []).map((m) => m.keyPrefix));
 }
 
+/** How long a console answer's trail claim lives: a forge job's retained data (31 days), the longest the same id can return. */
+export const CONSOLE_TRAIL_CLAIM_MS = 31 * 24 * 60 * 60 * 1000;
+
 /**
- * The models a job may call (issue #501, #503 part 7), as `{ provider, id }` refs: its main model, and every entry of
- * its effective allowed-model list when it has one. A list entry that does not split is kept as `null`, which the
- * zero-rated check reads as "not zero-rated" (fail closed).
+ * Claim the one trail comment of a console answer (issue #642): true when this attempt set `console:trail:<jobId>` and
+ * so must post, false when an earlier attempt of the same job already did, when the job's id cannot be derived, or when
+ * Valkey did not answer (each logged by its kind, never the text). The id is the queue's own (`forgeDeliveryJobId` over
+ * the job's kind, delivery id and replica), so a retry of the same job, which keeps its data, reaches the same key.
+ * Never throws.
  */
-function callableModelRefs(job) {
-	const refs = [{ provider: job.provider, id: job.model }];
-	for (const entry of Array.isArray(job.models) ? job.models : []) {
-		const ref = splitModelEntry(entry);
-		refs.push(ref === null ? null : { provider: ref.provider, id: ref.model });
+async function claimConsoleTrail(redis, job, log) {
+	let jobId;
+	try {
+		jobId = forgeDeliveryJobId(job.kind, job.trigger?.deliveryId, job.replica);
+	} catch {
+		log("console_trail_skipped", { kind: job.kind ?? null, reason: "no-job-id" });
+		return false;
 	}
-	return refs;
+	try {
+		const set = await redis.set(`console:trail:${jobId}`, "1", "PX", CONSOLE_TRAIL_CLAIM_MS, "NX");
+		if (set === "OK") return true;
+		log("console_trail_skipped", { kind: job.kind ?? null, reason: "already-posted" });
+		return false;
+	} catch (error) {
+		log("console_trail_skipped", { kind: job.kind ?? null, reason: "valkey-error", code: typeof error?.code === "string" ? error.code : "error" });
+		return false;
+	}
 }
+
+// `callableModelRefs` (the models a job may call) moved to reserve-estimate.mjs (issue #642) with the zero-rated test
+// it feeds, so the console's reserve estimate and this processor's reserve judge one rule (`zeroRatedFor`).
 
 export async function runJob(job, deps) {
 	const {
@@ -1310,7 +1330,7 @@ export async function runJob(job, deps) {
 			// job carried a non-null cap), so an image that would ignore the 0 never gets here. A cap that is ALREADY 0
 			// (a malformed queued value reads as 0, `effectiveCostCapMicros`) has nothing to reserve either.
 			const refs = callableModelRefs(job);
-			const zero = job.maxCostMicros === 0 ? { zeroRated: true } : zeroRatedVerdict({ models: modelEndpoints?.models ?? null, endpoints: modelEndpoints?.endpoints ?? [], refs, builtinModel });
+			const zero = zeroRatedFor(job, { modelEndpoints, builtinModel });
 			if (zero.zeroRated) {
 				containerJob = { ...job, maxCostMicros: 0 };
 				dollars = dollarsRecord({ reservedMicros: 0, settledMicros: 0, basis: "unreserved" });
@@ -1372,6 +1392,27 @@ export async function runJob(job, deps) {
 				dollarHold = reservation.hold;
 				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis: modelPrefixes.size > 0 ? "floor" : null });
 			}
+		}
+
+		// Issue #642: ONE trail comment says who answered from the operator console and quotes what (console-answer.mjs:
+		// mentions neutralised, no control byte). Posted HERE, after every pre-spend gate and every reserve has passed and
+		// just before the container starts, so the issue never reads "answered" above a refusal that then dropped the
+		// answer (a `not-parked`, a missing session store, a cap); and still before the provider is called, so it spends
+		// nothing (CONST-BUDGET-BEFORE-TOKENS). The `comment` adapter posts as the deployment's own identity, which the
+		// receiver's self-guard drops as `self`, so the trail never starts a job. A `console` field whose name is not a
+		// console token's (a hand-built queue entry; enqueueForgeJob refuses one) posts nothing.
+		//
+		// ONCE PER JOB, not once per attempt: a forge job has `attempts: 2`, so an InfraRetry after this point re-runs every
+		// gate and would reach here again, and a console retry of a failed answer job is the same job id again. The claim
+		// is `SET console:trail:<jobId> 1 NX PX <31 days>` (the retention of a forge job's data, so the claim outlives every
+		// way the same id can come back), and only the attempt that set it posts. On a Valkey error the trail is SKIPPED
+		// and logged, never posted blind: at most once is the promise, because a duplicate trail reads on the forge as a
+		// second answer, while a missing one leaves the answer in the job and the audit log. Never throws: the trail is
+		// provenance, and a failed claim is no reason to refuse a job every gate has admitted.
+		if (job.parkedReply === true && job.console !== undefined) {
+			const by = consoleAnswerBy(job.console);
+			if (by === null) log("console_answer_by_invalid", { kind: job.kind ?? null });
+			else if (await claimConsoleTrail(redis, job, log)) await comment(job, answerTrailComment(by, job.trigger?.comment?.body));
 		}
 
 		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
