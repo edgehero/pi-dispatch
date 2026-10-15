@@ -393,8 +393,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: An operator shall be able to stop ONE job from a surface that needs no model: the CLI
   (`pi-dispatch cancel <jobId>`, VALKEY_URL-only like `pause`; on a shell/`.env` disagreement about VALKEY_URL it
-  refuses until `--valkey-url` names which, before or after the id, issue #468) and the panel (`x` on the ACTIVE row; the
-  held drill-in behind `h`). An active job is aborted on whichever host owns it and its run record says
+  refuses until `--valkey-url` names which, before or after the id, issue #468), the panel (`x` on the ACTIVE row; the
+  held drill-in behind `h`) and, since issue #642, the operator console (a cancel per active and per held job on the
+  fleet page, and cancel every held job in bulk, each a preview and a confirm, `REQ-OPERATOR-CONSOLE-ACTIONS`). All
+  three use one channel: the CLI's request key for an active job, `cancelHeldJob` for a held one. A held job is
+  looked for on EVERY fleet queue, the shared one and each host's `pi-jobs@<name>`, as the CLI always did; the panel's
+  funnel looked only in the shared queue and refused a held job on a host queue as gone, a defect #642 fixed for the
+  panel and the console at once. An active job is aborted on whichever host owns it and its run record says
   `outcome: "policy", reason: "operator-cancel"`; a queued, delayed or held job is removed and the cancel records
   NOTHING. What the CLI and the panel's footer say of the removed job's past is read off the job (issue #477): with no attempt made it never
   ran and has no record; with one or more (a job waiting to retry after a failed attempt) it made that many attempts,
@@ -409,7 +414,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   retried), `DES-CANCEL-VIA-REDIS-REQUEST-KEY`, `INT-CANCEL-CHANNEL-CONTRACT`
 - **Acceptance**: one job stops without touching its neighbours; the record says an operator did it;
   `dispatch_wait_cancel` stops being the only door to a held job; a cancel of a job this host does not
-  own says so instead of doing nothing.
+  own says so instead of doing nothing. Given a held job on a host queue, the panel and the console find and remove
+  it (`admin/test/job-actions.test.mjs`, `cancelHeldJob finds a held job on a HOST queue`); given a console cancel of
+  an active job that no worker acknowledges, the console answers the same named refusal as the CLI and the panel
+  (`admin/test/console-actions.test.mjs`); each console cancel is audited with kind `cancel-active`, `cancel-held` or,
+  in bulk, `held-cancel-all`, and each panel cancel with actor role `panel`.
 
 ## REQ-FRONTEND-VISUAL-VERIFY
 
@@ -724,7 +733,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   its change **only after a human operator approves a `ctx.ui.confirm` dialog showing the concrete
   before→after**, and **refuses — writing nothing — when no interactive operator is present** (`ctx.hasUI`
   false; print/headless). The operator console's equivalent of that dialog is the single-use ticket bound to the
-  diff it previewed (`REQ-CONSOLE-SECURITY` (g)). The operator-typed overlay CRUD and the confirm-gated tools reach the **same**
+  diff it previewed (`REQ-CONSOLE-SECURITY` (g)): the console's confirm IS the ticket, and since issue #642 it reaches
+  the same planners (`admin/src/write-plans.mjs`, the checks moved out of the extension with their sentences
+  unchanged) and the same funnels. Since issue #642 every write this extension makes (a tool's, a command's, a
+  dialog's, the panel's keys, `/dispatch secrets`) appends a row with actor role `panel` to the console audit log
+  (`INT-CONSOLE-AUDIT-LOG`) BEFORE it writes, and is refused, writing nothing, when that row cannot be appended; the
+  setup wizard alone is not audited (`DES-ADMIN-VIA-PI-EXTENSION` says why). The operator-typed overlay CRUD and the confirm-gated tools reach the **same**
   validated, atomic `writeTriggers`/`writeSettings`. `dispatch_run` still takes **no spend-knob argument**
   (`model`/`maxTurns`/`dailyCap`/`concurrency`).
   The panel's job-count meters take their caps from the settings overlay only; with none set there a meter reads
@@ -841,7 +855,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the pointer, then it is blocked, and pointing `.env` elsewhere does not unguard a file guarded before; given a
   session with no deployment, then a repository's own `triggers.json`, `scoped-limits.json` or `projects.json` is not
   guarded; given a deployment built with `init` and `up` and pi started in it with no pointer, then every file its
-  `.env` names, and that `.env`, are guarded.
+  `.env` names, and that `.env`, are guarded; given any write the extension makes (issue #642), an audit row with
+  actor role `panel` precedes it, a refused or throwing write is followed by a `failed` row under the same ticket, and
+  an audit log that cannot be appended refuses the write and leaves every file and queue as it was
+  (`admin/test/audited-write.test.mjs`, and `admin/test/panel-audit-wiring.test.mjs`, a table of every audited call
+  site that a source scan holds equal to the code, so a new unaudited write path fails); given a check moved into
+  `write-plans.mjs`, the tool's refusal is the same sentence as before, each sentence pinned word for word
+  (`admin/test/write-plans.test.mjs`); given the panel's `r` while the shell's and the deployment's Valkeys disagree,
+  the resume is refused and said in the footer (`admin/test/panel-audit-wiring.test.mjs`, "the panel's r on a
+  two-Valkey disagreement", through index.ts's own wiring).
 
 ## REQ-CONSOLE-SECURITY
 
@@ -859,8 +881,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Scope**: the console process and its CLI. The pi extension is unchanged and still binds no port
   (`REQ-ADMIN-VIA-PI-EXTENSION`). #640 built login, logout, `whoami` and one reference write, the pause windows; #641
   added the read screens, `/api/state` and the event streams (`REQ-OPERATOR-CONSOLE-SCREENS`), which meet this
-  requirement through clauses (e), (k) and (l); the other writes are #642's and the live logs #643's, and each of
-  those meets this requirement as it lands. `REQ-INSIGHTS-HTML-EXPORT` is unchanged: the static file keeps zero
+  requirement through clauses (e), (k) and (l); #642 added every other write and action
+  (`REQ-OPERATOR-CONSOLE-ACTIONS`), which meet it through clause (g) above all; the live logs are #643's and meet it
+  as they land. `REQ-INSIGHTS-HTML-EXPORT` is unchanged: the static file keeps zero
   external requests and binds nothing.
 - **Why**: the console is the most powerful surface after a shell on the host, and a loopback port is reachable by
   every local account, by any page the operator's browser opens and, on Docker Desktop, by a job container
@@ -903,12 +926,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     contains the test token, the test code, the session cookie's value, or the `pdc_` prefix outside the one line
     `token add` and `token rotate` print; `token list` prints names and roles only. Tests:
     `admin/test/console-server.test.mjs`, `admin/test/console-cli.test.mjs`, `worker/test/console-audit.test.mjs`.
-  - (g) **Writes go through the funnel, behind a single-use ticket.** Given a pause-windows preview, the confirm
-    applies exactly the previewed change through `writePauseWindows`, whatever else the confirm's body carries; given a ticket that is reused, expired,
-    issued to another session or for another action, or a file that changed after the preview, the confirm is
-    refused and the file is byte-identical. The console has no write path that is not a read-model funnel. Tests:
+  - (g) **Writes go through the funnel, behind a single-use ticket, for every entry of the action table** (issue
+    #642 generalised it from the one pause-windows write). Given any action's preview, the confirm applies exactly the
+    previewed change through that action's read-model funnel, whatever else the confirm's body carries: the ticket,
+    not the body, holds the payload, the snapshots (`expect`), the targets and the reserve. Given a ticket that is
+    reused, expired, issued to another session or for another action, a file that changed after the preview, or a job
+    whose state changed after it, the confirm is refused and the file or job is as it was. Given a confirm, its `ok`
+    audit row is appended before the funnel runs and an append failure refuses it; a refusal or throw from the funnel
+    appends a `failed` row under the same ticket digest. The console has no write path that is not a read-model
+    funnel. The tests loop over the action table (`REQ-OPERATOR-CONSOLE-ACTIONS` (a)). Tests:
     `admin/test/console-confirm.test.mjs`, `admin/test/console-pause-windows-expect.test.mjs`,
-    `admin/test/console-server.test.mjs`.
+    `admin/test/console-server.test.mjs`, and `admin/test/console-actions.test.mjs`.
   - (h) **The audit chain, refusals included.** Given rows appended across a month boundary, each row's `prev` is
     the sha256 of the previous raw line and `seq` rises by one; given a row edited, removed or reordered,
     `audit verify` names the first broken file and line and doctor warns; given the oldest month reaped, verify
@@ -966,7 +994,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   panel uses; shall keep every open live page current within about two seconds of a change in Valkey by sending only
   the panels that changed; and shall bound every query a page accepts. The `/dispatch` panel shall show the parked
   runs too.
-- **Scope**: reads only. Every write and action, answering a parked run included, is #642's; live logs, progress and
+- **Scope**: reads only. Every write and action, answering a parked run included, is #642's
+  (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; live logs, progress and
   transcripts are #643's and #644's (`OQ-044`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
   (e), (k) and (l) above all. `insights.html` stays the offline artifact, unchanged (`REQ-INSIGHTS-HTML-EXPORT`).
 - **Why**: before #641 the operator's live surfaces were the panel and a static insights file whose reload re-read
@@ -1009,7 +1038,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     its forge link where one can be built, its age and its session chain count, newest first; given a later run on the
     same kind and target, the parked run shows as answered; given `PI_SESSIONS_DIR` not on the console's host, a key
     with no directory there, a pull request (whose key the record cannot rebuild) or an unreadable counter, the chain
-    count shows as unknown, never 0. No answer box (#642). Tests: `admin/test/read-model-pages.test.mjs`
+    count shows as unknown, never 0. The answer box is #642's, for the operator role only
+    (`REQ-OPERATOR-CONSOLE-ACTIONS` (f)). Tests: `admin/test/read-model-pages.test.mjs`
     (`readParkedRuns`), `admin/test/console-pages.test.mjs`.
   - (e) **Insights** (`/insights?range=`). Given `range` `7d`, `30d` or `mtd`, the page shows the insights sections
     for that window, built by the same assembly `/dispatch insights` uses (`assembleInsights`, now pi-free in
@@ -1051,6 +1081,104 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     detail with Enter (reading the record by id when it is older than the panel's 50 runs), says "parked runs unknown"
     rather than "nothing parked" when the list could not be read, and writes nothing. Test:
     `admin/test/dashboard-parked.test.mjs`.
+
+## REQ-OPERATOR-CONSOLE-ACTIONS
+
+- **Statement**: The operator console shall do everything the `/dispatch` TUI and the pi extension's tools can do,
+  and the job actions they lack: retry and remove a failed job, re-run a finished run, answer a parked run, and the
+  bulk actions retry every failed job, remove every failed job and cancel every held job. Every action shall be a
+  preview and then a confirm under `REQ-CONSOLE-SECURITY`'s guards and single-use ticket; shall go through the read
+  model funnel the TUI and the tools use, with the same validators and the same refusal sentences; shall re-check at
+  the confirm what can have changed since the preview and refuse, writing nothing, when it did; shall show, before
+  the confirm of a paid action, the reserve the worker will hold; and shall land in the console audit log, beside the
+  rows the TUI's and the tools' own writes now append there as the panel.
+- **Scope**: the console's write routes, the funnels and planners they call (`admin/src/job-actions.mjs`,
+  `admin/src/write-plans.mjs`, the read model), the worker's trail comment for a console answer, and the panel's
+  audit rows. A config edit lands in the same files the TUI writes and is never committed to git. A sandbox is not
+  reopened from the browser: the page shows the command (`REQ-RESURRECTABLE-SANDBOX`, unchanged). Live logs and
+  transcripts are #643's; approval gates are #649's.
+- **Why**: after #641 the console showed the whole deployment and could change one file. An operator who saw a failed
+  job, a stuck queue or a parked question had to switch to a terminal to act on it, and the failed list was read only
+  on every surface. A second write path for the browser would have been a second set of rules, free to accept what
+  the panel refuses; so the console reuses the panel's funnels and planners, and the funnels the console needed and
+  the panel lacked (retry, remove, re-run, answer, one queue) were added to the read model for both. The answer to a
+  parked run cannot be a comment posted as the bot (the receiver's self-guard drops it), so the console builds the
+  reply job the receiver would have built, and the worker leaves the trail on the issue.
+- **Traces to**: `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `REQ-CONSOLE-SECURITY`,
+  `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-JOB-CANCEL`, `REQ-AWAIT-INPUT`, `REQ-ADMIN-VIA-PI-EXTENSION`,
+  `REQ-RESURRECTABLE-SANDBOX`, `INT-CONSOLE-AUDIT-LOG`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONFIG-OVERLAY-CONTRACT`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-ISSUE-TEXT-IS-DATA`.
+- **Acceptance** (the HTTP test file for every action is `admin/test/console-actions.test.mjs`; the routes are
+  `POST /api/act/<name>/preview|confirm`, generated from `ACTIONS` in `admin/src/console/actions.mjs`):
+  - (a) **Every action is a table entry behind every guard.** Given the action table, every entry has a preview and a
+    confirm route in the route table; given each route, a viewer's session, `PI_CONSOLE_READ_ONLY=1`, a cross-site or
+    same-site `Sec-Fetch-Site`, a missing `Origin` and a form-encoded body are each refused 403 with an audit row,
+    and nothing is written; given a ticket that is reused, expired, from another session or for another action, the
+    confirm is refused. Each test loops over the table, not a hand list. Tests: `admin/test/console-actions.test.mjs`,
+    `admin/test/console-server.test.mjs`, `admin/test/console-confirm.test.mjs`.
+  - (b) **Cancel an active job** (kind `cancel-active`). Given an active job, the confirm writes the CLI's cancel
+    request (`requestCancel`) and the page says what the worker acknowledged; given no worker acknowledging within the
+    window, the answer is `REQ-OPERATOR-JOB-CANCEL`'s named refusal, never a silent success. Tests: `admin/test/console-actions.test.mjs`,
+    `admin/test/dashboard.test.mjs` (the reader's `cancelActive`).
+  - (c) **Cancel a held job** (kind `cancel-held`). Given a held job on a host queue (`pi-jobs@<host>`), it is found
+    and removed, where the shared-queue-only funnel refused it as gone. Tests: `admin/test/job-actions.test.mjs`
+    (`cancelHeldJob finds a held job on a HOST queue`), `admin/test/console-actions.test.mjs`.
+  - (d) **Retry and remove a failed job** (kinds `failed-retry`, `failed-remove`). Given a failed job, the preview
+    binds its `attemptsMade` and `finishedOn`, and the confirm retries it (BullMQ `job.retry()`) or removes it; given
+    the job retried, removed or failed again since the preview, the confirm refuses "it changed since the preview" and
+    does nothing; the job is found on whichever fleet queue holds it. Tests: `admin/test/job-actions.test.mjs`
+    (`retryFailedJob and removeFailedJob act only on a job still failed as previewed`), `admin/test/console-actions.test.mjs`.
+  - (e) **Re-run** (kind `run-rerun`, paid). Given a local run, it re-queues the retained folder, flow and task on this
+    host's queue after the folder rule, re-checked at the confirm; given a cron run, it fires the trigger as the
+    triggers file says now; given a forge run, it queues the retained issue with the run fields of the trigger as the
+    file says now (refused by name when that trigger was deleted, changed forge or type, stopped matching, or runs
+    another flow), a fresh `console-` delivery id, routed to the host queue the receiver would choose, and without any
+    `console` field. Refused by name: expired
+    data (naming the retention), a `/command` run, an answer to a parked run, a cron trigger gone from the file or
+    served by another host, and a duplicate the 10-minute semantic window (or a minute window) takes, with nothing
+    queued. The preview shows the reserve. Tests: `admin/test/job-actions.test.mjs` (the three `planRerun` tests),
+    `admin/test/console-actions.test.mjs`.
+  - (f) **Answer a parked run** (kind `parked-answer`, paid). Given a parked forge issue run, the job queued is the
+    receiver's phrase-free reply for that issue field for field, except the delivery id, the sender, the comment
+    text, the GitHub association and `console: {by: <the token's name>}`; the text is scrubbed of control and bidi
+    characters and refused (never cut) when empty or above 8 KiB; refused by name when the run is not parked, already
+    answered, a pull request's park, its data expired, or no comment trigger would route a reply. The audit row holds
+    the job id and the answer's sha256, never the text. The worker posts exactly one trail comment ("Answered from the
+    operator console by <name>:" and the text quoted, every `@` neutralised) once every pre-spend gate and reserve has
+    passed, just before the container starts, and none when the job is refused by any gate (`not-parked`, a missing
+    session store, a cap); a `console.by` outside the token-name
+    charset is refused at enqueue and posts nothing at the worker. Tests: `admin/test/job-actions.test.mjs` (the
+    field-for-field test per forge, and `planParkedAnswer refuses by name`),
+    `worker/test/processor-console-answer.test.mjs`, `admin/test/console-actions.test.mjs`.
+  - (g) **The reserve shown is the reserve held.** Given a job, `estimateReserve` equals what the worker reserves for
+    the same job: the trigger's cap narrowing the deployment's, the overlay over the env, 0 for a zero-rated job, and
+    no dollar figure when no cap is set. Given a paid action, its preview shows that figure before the confirm and the
+    audit row carries it as `reserve`. Tests: `worker/test/processor-console-answer.test.mjs` (`estimateReserve
+    equals what the worker holds`), `admin/test/console-actions.test.mjs`.
+  - (h) **Fleet.** Given a resume while the shell's and the deployment's Valkeys disagree, it is refused on the
+    console, the TUI and the tools alike, and a pause reaches both; given one queue named, only that queue pauses or
+    resumes, and a name the fleet does not drain is refused with nothing changed. Tests:
+    `admin/test/job-actions.test.mjs` (`setQueuePausedOne`, the fleet reader's pause and resume), `admin/test/console-actions.test.mjs`.
+  - (i) **Configuration.** Given each configuration action, the preview's refusal for a bad value is the exact
+    sentence the matching tool gives (one planner, `write-plans.mjs`), and the confirm writes through the panel's
+    funnel; given the file changed by another session after the preview (the triggers file and the settings overlay
+    included), the confirm refuses and the file is byte-identical. A secret profile action names a profile and its
+    resolver path, never a value. Tests: `admin/test/write-plans.test.mjs`, `admin/test/write-expect.test.mjs`,
+    `worker/test/file-expect.test.mjs`, `admin/test/console-actions.test.mjs`.
+  - (j) **Bulk.** Given more than 100 matching jobs, the preview lists 100 and says how many more; the ticket binds
+    the exact list and each job's state; the confirm acts per job and reports per job, a job that changed refused
+    alone while the rest go on; the audit has one row per job, each with `count` and the one ticket digest. Tests:
+    `admin/test/job-actions.test.mjs` (`planFailedBulk ... reports per job`), `admin/test/console-actions.test.mjs`.
+  - (k) **One audit chain.** Given a write from a tool, a TUI key, a dialog or `/dispatch secrets`, a row with actor
+    role `panel` is appended before the write, and a compensating `failed` row after a refusal; given an audit append
+    that fails, the write is refused and nothing changes; given a session mixing console, panel and CLI rows, `audit
+    verify` passes. Tests: `admin/test/audited-write.test.mjs`, `worker/test/console-audit.test.mjs`.
+  - (l) **The sandbox command.** Given a run whose sandbox can be reopened, the run page shows `pi-dispatch sandbox
+    <jobId>` as text to copy (only for an id the run-id charset accepts), and no route starts a container. Test:
+    `admin/test/console-actions.test.mjs`.
+  - (m) **Live pages follow a write.** Given an action that landed, every open live page shows the change within
+    about two seconds with no reload, and a live panel holding a form in use is not redrawn under it. Tests:
+    `admin/test/console-actions.test.mjs` (the hub is ticked after every apply), the browser lab.
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -2855,9 +2983,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   run that is waiting on purpose (`CONST-RETRY-INFRA-ONLY`).
 - **Why the agent posts the question**: the question is model text. The exit line feeds the PII-free run record and
   carries no model text, so the worker posts only its own fixed sentence.
+- **The console as an answer source** (issue #642): an operator signed in to the operator console with an operator
+  token may answer a parked issue run from the parked inbox, under a session and a single-use ticket
+  (`REQ-CONSOLE-SECURITY`), as the deployment's own authority rather than as a forge author
+  (`CONST-TRIGGER-AUTHOR-GATE`'s operator clause). The console queues the job a phrase-free reply on that issue would
+  have queued, through the same comment trigger and its rules (`run.resume` armed, not a command), with the answer as
+  `trigger.comment.body`, so it reaches the agent below the delimiter as data, like any reply. The worker's
+  `not-parked` gate and the budget reserve apply unchanged. Because no comment of the operator's exists on the
+  forge, the worker posts one trail comment naming the token's person and quoting the answer, with every mention
+  neutralised, after the `not-parked` gate and before any spend, so the issue still shows what the agent was told.
+  A pull request's park is not answered from the console: its reply keeps the phrase on the forge.
 - **Traces to**: `REQ-RESUMABLE-SESSION`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`,
   `CONST-TRIGGER-AUTHOR-GATE`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `DES-AWAIT-INPUT-ENDS-THE-JOB`,
-  `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-SESSION-STORE-CONTRACT`.
+  `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-SESSION-STORE-CONTRACT`,
+  `REQ-OPERATOR-CONSOLE-ACTIONS`, `DES-OPERATOR-CONSOLE`.
 - **Acceptance**: Given a trigger without `run.awaitInput`, the job data, the container env and the session store are
   byte-identical to before. Given `run.awaitInput: true` without `run.resume: true`, the file is refused at load. Given
   an armed job whose agent calls the tool on its own and the tool ends the run, the runner exits `0` /
@@ -2874,6 +3013,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   comment trigger seconds after the run parked, inside the ten-minute semantic window of the delivery that started
   that run, it runs: a park closes that window (`REQ-DEDUP-BY-DELIVERY-GUID`), and so does a resumed run that parks
   again. Given a parked run's record, the panel's run row says `awaiting-input` where a finished run's says `done`.
+  Given an answer from the console to a parked issue run, the queued job matches the receiver's reply for that issue
+  field for field but for the delivery id, the sender, the comment text, the GitHub association and `console`
+  (`admin/test/job-actions.test.mjs`); given it passes every pre-spend gate and reserve, exactly one trail comment is
+  posted just before the container starts, and given it is refused by any gate (`not-parked`, a missing session
+  store, a cap), none (`worker/test/processor-console-answer.test.mjs`).
 
 ## REQ-RESURRECTABLE-SANDBOX
 
@@ -4015,3 +4159,4 @@ instead of drifting.
 | 2026-10-14 | No issue: found in the live lab once the Forgejo job token was a `write` collaborator's (`OQ-043`). **`REQ-BRANCH-PROTECTION-PRECONDITION` AMENDED**, in the Why and the Acceptance: Forgejo's answer is the branch object's `protected` (`GET /repos/{o}/{r}/branches/{b}`, read access to code), which Forgejo computes with its own glob match (`GetBranch` calls `GetFirstMatchProtectedBranchRule`, and `convert.ToBranch` sets `protected: true` for a matched rule, at v14.0.5). The worker used to list `/branch_protections`, an admin route: measured on 14.0.5 a `write` collaborator's token got 403 `{"message":"user should be an owner or a collaborator with admin write of a repository"}`, so every job failed before spending, and the check had quietly required the admin job token `OQ-043` keeps out of jobs. The listing is dropped with no fallback: `protected` is in Gitea's Branch object since 1.11 and Forgejo forked from 1.18. A non-2xx or a non-boolean `protected` stays retryable, never "unprotected". The Statement is UNCHANGED, checked. |
 | 2026-10-14 | Issue #640, the operator console's security model. **NEW `REQ-CONSOLE-SECURITY`**: the console is a separate process on loopback or a 0600 unix socket; every request but `/healthz` and login needs a named token's session; a write is same-origin, JSON, by the operator role, on a console that is not read-only, behind a single-use ticket bound to the previewed diff, through the read model's funnels; one header set on every response and every value escaped; every write, refusal and sign-in in a hash-chained audit log; no token, code, cookie or body in a log, a row or a page. Acceptance clauses (a) to (j) each name the test files that hold them (`admin/test/console-*.test.mjs`, `worker/test/console-tokens.test.mjs`, `worker/test/console-audit.test.mjs`, `worker/test/doctor-console.test.mjs`). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, one sentence in the confirm rule: the console's equivalent of the confirm dialog is the single-use, diff-bound ticket (`REQ-CONSOLE-SECURITY` (g)); the model-callable tool list is untouched. UNCHANGED, checked: `REQ-INSIGHTS-HTML-EXPORT` (the static file keeps zero external requests and binds nothing), `REQ-TOPOLOGY-GRAPH` (its "no port" is the graph surface's, which is still the artifact), `REQ-SCOPED-PAUSE-WINDOWS` (the console's pause-window write reaches the same validated `writePauseWindows`), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, and `constitution.md` (no port clause, checked). |
 | 2026-10-14 | Issue #641, the operator console's screens and live updates. **NEW `REQ-OPERATOR-CONSOLE-SCREENS`**: eight read pages and `/api/state`, all read through the one fleet reader the `/dispatch` panel uses (`createFleetReader`, moved from `dashboard.ts`), with acceptance per screen: the overview (failures in 24 hours shown as a floor when the window is short), the runs with ten exact filters plus a target substring, a score cursor stable while runs land and a 2000 record examine cap, the run detail (404 for an unknown id, a forge link from the deployment's own instance URL or none), the parked inbox (answered derived from a later run, the chain count unknown rather than 0), insights by range, the fleet (every active job, failed jobs listed without reason text), the configuration (secret profiles by name only) and the audit (operator only, broken lines shown in place); byte-pinned render fixtures; live updates within about two seconds; and the panel's new PARKED view. **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement gains the stream and role rules, the Scope no longer calls the screens future work, and two clauses are added: (k) an event stream ends with its session (logout at once; revoke, rotate, role change, end-all and expiry within a tick) and never extends one, with the per-session and global stream caps answered 429; (l) the role and run-text rule per page, held by a test that walks every page as a viewer with hostile values. Clauses (a) to (j) UNCHANGED, checked. **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: the file and its zero external requests stay; the console renders the same sections from the same assembly. **`REQ-AWAIT-INPUT` UNCHANGED, checked**: parked runs are read, never changed. |
+| 2026-10-15 | Issue #642, writes and actions from the operator console. **NEW `REQ-OPERATOR-CONSOLE-ACTIONS`**: the console does everything the `/dispatch` TUI and the tools do, plus retry and remove a failed job, re-run a finished run, answer a parked run, and three bulk actions (retry every failed job, remove every failed job, cancel every held job); each action a preview and a confirm through the panel's own funnel and planner, re-checked at the confirm, a paid action showing the reserve the worker will hold, every action audited; acceptance per action, naming the funnel tests and the console's HTTP suite `admin/test/console-actions.test.mjs`, over the routes `POST /api/act/<name>/preview` and `/confirm`. **`REQ-CONSOLE-SECURITY` AMENDED**: (g) generalised from the pause-windows write to every entry of the action table (the ticket holds payload, `expect`, targets and reserve; audit before the funnel, a `failed` row after a refusal; the tests loop over the table); Scope names the new requirement. **`REQ-OPERATOR-JOB-CANCEL` AMENDED**: the console is a third surface (per job and in bulk), on the CLI's channel; a held job is looked for on every fleet queue, which fixed the panel's funnel refusing a held job on a host queue as gone. **`REQ-AWAIT-INPUT` AMENDED**: the console as an answer source, under an operator session and a single-use ticket, the reply job the receiver would have built with the answer as data, the `not-parked` gate and the reserve unchanged, and the worker's one trail comment; a pull request's park is still answered on the forge. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the console's confirm is the ticket and reaches the same planners; every extension write appends a `panel` audit row before it writes and is refused when it cannot; the wizard is the one exception. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, wording: the parked inbox's answer box and the pages' controls are held by the new requirement. UNCHANGED, checked: `REQ-RESURRECTABLE-SANDBOX` (the console shows the command and starts no container, so the surfaces it lists are unchanged), `REQ-DELEGATED-ALLOCATION` (the priorities and revert actions use its funnels unchanged), `REQ-TRIGGER-AUTHOR-GATE` (the receiver's gate is untouched; the operator door is `CONST-TRIGGER-AUTHOR-GATE`'s new clause). |
