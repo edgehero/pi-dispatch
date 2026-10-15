@@ -78,18 +78,14 @@ import {
   listRunIds,
   setQueuePaused,
   killSwitchSet,
+  killSwitchPlan,
   installPanelValkeyContext,
   writeSettings,
-  overlayInvalidRefusal,
-  blankSettingsFile,
-  settingShown,
-  mergedDollarProblem,
   writeTriggers,
   writePauseWindows,
   writeScopedLimits,
   writeInputs,
   readProjects,
-  planProjectsWrite,
   writeProjects,
   enqueueDispatchRun,
   scanRunRecords,
@@ -98,12 +94,10 @@ import {
   DEPLOYMENT_SCAFFOLD_FILES,
   readEnvelope,
   readAllocations,
-  planEnvelopeWrite,
   writeEnvelope,
   applyPriorities,
   revertAllocation,
   envelopeJobCap,
-  envelopeRefusal,
 } from "./read-model.mjs";
 // The operator session's write guard (issue #504 part C): pi's own `write`, `edit` and `powershell` blocked on the
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
@@ -123,7 +117,6 @@ import {
   allocNow,
 } from "./insights-assembly.mjs";
 export { assembleBudgetView, splitCounts, capacityViewOf, INSIGHTS_CAPACITY_BUCKET_MS, INSIGHTS_CAPACITY_NAMES_SHOWN, _setAllocationSeamsForTests } from "./insights-assembly.mjs";
-import { parseBackendList } from "@edgehero/pi-dispatch/backends";
 import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // The trigger vocabularies, IMPORTED from the loader that validates them rather than retyped. Every one
 // of these was a hand-written copy of a table one package over, and this is the surface a MODEL authors
@@ -132,10 +125,9 @@ import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // capability lost with no error anywhere. A narrowed one means the model proposes an entry, the operator
 // approves a confirm dialog, and writeTriggers rejects it: a wasted human approval. `blessedBackends`
 // below is the precedent, and its header is a post-mortem of the same mistake.
-import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
-import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
-import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
-import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
+import { FORGE_KINDS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES } from "@edgehero/pi-dispatch/triggers";
+import { formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
+import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
@@ -165,12 +157,47 @@ import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
 import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations } from "./render.mjs";
-import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
+import { makeDashboard, createDashboardDeps, switchFailure, withAuditedWrites } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
 // buildTriggerEntry back from here -- a cycle on paper, but both sides only call across it at runtime.
 import { registerNudge } from "./setup-wizard.ts";
 import { matchesKey } from "./keys.mjs";
+// The pre-confirm half of every write (issue #642): build, judge with the worker's own validators, and say what the
+// confirm shows. Pi-free so the operator console refuses with these same words; the tools and commands below run the
+// plan, confirm, then call the read-model funnel. The builders the tests reach through this module are re-exported.
+import {
+  buildPauseWindow,
+  buildScopedLimit,
+  buildTriggerEntry,
+  envelopeGuard,
+  limitSummary,
+  liveOr,
+  planEnvelope,
+  planLimitAdd,
+  planLimitDelete,
+  planLimitEdit,
+  planPauseWindowAdd,
+  planPauseWindowDelete,
+  planPauseWindowEdit,
+  planPriorities,
+  planProjectAdd,
+  planProjectDelete,
+  planProjectEdit,
+  planSettingChange,
+  planSettingSet,
+  planSettingUnset,
+  planTriggerAdd,
+  planTriggerDelete,
+  planTriggerEdit,
+  projectShown,
+  scopeChangeNote,
+  sizeFieldsFrom,
+} from "./write-plans.mjs";
+export { blessedBackends, buildTriggerEntry, ISSUE_CLOSE_WORD, SIZE_FIELD_RIDES, scopeChangeNote } from "./write-plans.mjs";
+// One audit chain (issue #642): every write this extension makes, from a tool, a command or the panel, lands in the
+// operator console's audit log as actor `panel`, appended BEFORE the write (`audited-write.mjs`).
+import { panelWrite } from "./audited-write.mjs";
 
 // The single source of truth for the ExtensionAPI surface this extension
 // consumes. It grows only when a task actually uses a new member.
@@ -526,7 +553,7 @@ function registerTools(pi: ExtensionAPI): void {
     async execute() {
       // The CLI's kill-switch rule (PR #475's review, round 3): both Valkeys when this process's VALKEY_URL and the
       // deployment .env's disagree, every URL shown without its userinfo.
-      const set = await killSwitchSet({ paused: true });
+      const set: any = await panelWrite(auditDir(), { kind: "fleet-pause", target: "fleet", failure: switchFailure }, async () => await killSwitchSet({ paused: true }));
       if (set.refused) throw new Error(set.refused);
       const lines = [];
       for (const { shown, res } of set.results) {
@@ -548,7 +575,7 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({}),
     async execute() {
-      const set = await killSwitchSet({ paused: false });
+      const set: any = await panelWrite(auditDir(), { kind: "fleet-resume", target: "fleet", failure: switchFailure }, async () => await killSwitchSet({ paused: false }));
       if (set.refused) throw new Error(set.refused);
       const { shown, res } = set.results[0];
       if (res.unreachable && !res.partial) {
@@ -573,13 +600,13 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({ folder: Type.String(), flow: Type.String(), task: Type.String() }),
     async execute(_toolCallId, params) {
-      const res = await enqueueDispatchRun({
+      const res: any = await panelWrite(auditDir(), { kind: "run-enqueue", target: params.folder, failure: enqueueFailure }, () => enqueueDispatchRun({
         folder: params.folder,
         flow: params.flow,
         task: params.task,
         aiInvoked: true,
         env: deploymentEnv(),
-      });
+      }));
       if (res.refused) throw new Error(res.refused);
       if (res.unreachable) throw new Error(`could not reach the queue: ${res.unreachable}`);
       // Issue #524: a swallowed duplicate is said as one, so the model never reports a run that was not queued.
@@ -643,49 +670,22 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({ key: Type.String(), value: Type.Optional(Type.String()) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      if (!KNOWN_KEYS.includes(params.key)) {
-        throw new Error(`unknown key '${params.key}'. valid keys: ${KNOWN_KEYS.join(", ")}`);
-      }
       const paths = resolvePaths(deploymentEnv());
       const env = deploymentEnv(); // the dollar settings' source for the confirm (settingShown)
       const shown = { deploymentDir: pointerState().deploymentDir ?? null };
-      const view = readSettingsView({ settingsFile: paths.settingsFile });
-      // Issue #501: refused BEFORE the confirm over an invalid file, so the operator is never asked to approve a write
-      // that would be refused (and could not rebuild the file without erasing what it holds). Issue #540: a BLANK
-      // file (whitespace or a byte-order mark only) holds no key, so it is read as a missing one, the rule
-      // `writeSettings` applies to the write itself.
-      if (view?.invalid && !blankSettingsFile(paths.settingsFile)) throw new Error(`rejected: ${overlayInvalidRefusal(view.invalid)}`);
-      const unset = params.value === undefined || params.value.trim() === "";
-      const newVal = unset ? undefined : coerceSettingValue(params.key, params.value.trim());
-      // Issue #501, part 7: a dollar value is judged by the worker's own parser BEFORE the confirm, so the operator is
-      // never asked to approve a value the write would then refuse (the edit tools' rule). The message names the key.
-      if (!unset && (DOLLAR_SETTING_KEYS as readonly string[]).includes(params.key)) parseUsdMicros(newVal, params.key);
-      // The AFTER side of an unset is what the key falls back to, by the same rule as the before side.
-      const afterOverlay = unset ? Object.fromEntries(Object.entries(view?.overlay ?? {}).filter(([k]) => k !== params.key)) : { ...(view?.overlay ?? {}), [params.key]: newVal };
-      const after = unset ? settingShown(params.key, afterOverlay, env, shown) : String(newVal);
-      // Issue #501 (PR #542's review): a dollar change that would leave a window with no maxCostUsd in the MERGED overlay
-      // and the env visible here is WARNED in the confirm, never refused: the worker's cap may come from its service unit
-      // or --env-setup script, which the admin cannot see (`mergedDollarProblem`). The operator decides.
-      const isDollarKey = (DOLLAR_SETTING_KEYS as readonly string[]).includes(params.key);
-      const problem = isDollarKey ? mergedDollarProblem(afterOverlay, env, shown) : null;
-      // Issue #504 part C: the per-job cap is what the allocation envelope needs to load (each governed job reserves it),
-      // so a change that removes it or makes it unreadable is refused BEFORE the confirm, naming the conflict.
-      const broken = settingsEnvelopeRefusal(params.key, view?.overlay ?? {}, afterOverlay, paths, env);
-      if (broken) throw new Error(`rejected: ${escapeInterpreted(broken)}`);
-      const result = await confirmedWrite(
-        ctx,
-        {
-          title: unset ? `Unset ${params.key}` : `Set ${params.key}`,
-          message: `${params.key}: ${settingShown(params.key, view?.overlay, env, shown)} -> ${after}${problem?.warning ? `\n\nWarning: ${problem.warning}` : ""}`,
-        },
-        () => {
-          const res = unset
-            ? writeSettings({ settingsFile: paths.settingsFile, mutate: (o) => { delete o[params.key]; return o; } })
-            : writeSettings({ settingsFile: paths.settingsFile, mutate: (o) => ({ ...o, [params.key]: newVal }) });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, key: params.key, value: unset ? null : newVal };
-        },
-      );
+      // Judged BEFORE the confirm (`planSettingChange`, write-plans.mjs): an unknown key; an invalid file (issue #501;
+      // a BLANK one reads as missing, #540); a dollar value the worker's own parser refuses (#501 part 7); a change that
+      // would leave the allocation envelope unloadable (#504 part C). A dollar change that leaves a window uncapped in
+      // the merged overlay is WARNED in the confirm, never refused (PR #542's review): the worker's cap may come from its
+      // service unit, which the admin cannot see.
+      const planned: any = planSettingChange({ key: params.key, value: params.value, paths, env, shown });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: plan.unset ? "setting-unset" : "setting-set", target: paths.settingsFile }, () => writeSettings({ settingsFile: paths.settingsFile, mutate: plan.mutate, expect: plan.expect }));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, key: params.key, value: plan.value };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -750,29 +750,18 @@ function registerTools(pi: ExtensionAPI): void {
       backend: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      refuseWideningFields(params, "dispatch_trigger_add");
-      const blessed = blessedBackends(process.env);
-      if (params.backend !== undefined) {
-        // REFUSED UNDER AN EMPTY SET rather than passed through. A deployment that blesses nothing has no
-        // venue to name, so a picker that accepted a name here would author a trigger the worker refuses
-        // pre-spend on every delivery -- a file that reads as chosen and never runs.
-        if (blessed.length === 0) throw new Error("this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)");
-        if (!blessed.includes(params.backend)) throw new Error(`backend '${params.backend}' is not blessed by this deployment (PI_BACKENDS: ${blessed.join(", ")})`);
-      }
-      // #502, the edit tool's rule: a malformed provider, model or turn limit is refused with the loader's own
-      // message BEFORE the operator is asked, rather than after they approved an entry the write then refuses.
-      validateModelRef({ provider: optStr(params.provider), model: optStr(params.model), maxTurns: params.maxTurns }, "the new trigger", resolvePaths(deploymentEnv()).triggersPath);
-      const entry = buildTriggerEntry(params.kind, params);
-      if (!entry) throw new Error(`unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)`);
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Add ${params.kind} trigger`, message: `Add to triggers.json:\n${JSON.stringify(entry)}` },
-        () => {
-          const res = writeTriggers({ triggersPath: resolvePaths(deploymentEnv()).triggersPath, mutate: (list: any[]) => [...list, entry] });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, added: entry };
-        },
-      );
+      // Judged BEFORE the confirm (`planTriggerAdd`): the tool-proof fields and their near misses (#501 part 7), the
+      // backend against what PI_BACKENDS blesses (#227, refused under an empty set too), and the provider, model and turn
+      // limit with the loader's own message (#502), so the operator never approves an entry the write then refuses.
+      const paths = resolvePaths(deploymentEnv());
+      const planned: any = planTriggerAdd({ params, paths, env: process.env });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "trigger-add", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: plan.mutate, expect: plan.expect }));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, added: plan.entry };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -797,56 +786,20 @@ function registerTools(pi: ExtensionAPI): void {
       model: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      refuseWideningFields(params, "dispatch_trigger_edit");
+      // Judged BEFORE the confirm (`planTriggerEdit`): the tool-proof fields, the index, a non-empty flow, the backend
+      // against PI_BACKENDS (#227; the picker bounds what an operator can choose, the worker what actually runs), and the
+      // provider and model with the loader's own validator, alone and MERGED with the entry's own run (#502, PR #536).
       const paths = resolvePaths(deploymentEnv());
-      const list = triggerList(paths);
-      const cur = list[params.index];
-      if (!cur) throw new Error(`no trigger at index ${params.index} (have ${list.length})`);
-      const flow = params.flow.trim();
-      if (!flow) throw new Error("flow must be non-empty");
-      // #227, the same allowlist `_add` applies and for the same reason: the picker bounds what an operator
-      // can choose, and the worker bounds what actually runs (DES-PER-TRIGGER-SECRET-PROFILE -- the overlay
-      // is not the reviewed artifact). Checked here rather than as a schema enum because a schema is frozen
-      // at registration while PI_BACKENDS is read per call.
-      const backend = optStr(params.backend);
-      if (backend !== undefined) {
-        const blessed = blessedBackends(process.env);
-        if (blessed.length === 0) throw new Error("this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)");
-        if (!blessed.includes(backend)) throw new Error(`backend '${backend}' is not blessed by this deployment (PI_BACKENDS: ${blessed.join(", ")})`);
-      }
-      const venue = backend === undefined ? "" : `, backend: ${(cur as any).backend ?? "-"} -> ${backend}`;
-      // #502. Blank means "not sent", optStr's rule for backend above. A sent value goes through the
-      // worker's validator, the one parseTriggers runs at the write, so a malformed id is refused here
-      // with the loader's own message instead of after the operator approved it.
-      const ref = validateModelRef({ provider: optStr(params.provider), model: optStr(params.model) }, `trigger #${params.index + 1}`, paths.triggersPath);
-      // The display record carries no provider for a forge trigger, so the before half reads the raw
-      // entry; a file that cannot be read shows "-" and the write itself decides.
-      const rawRun = (() => {
-        try {
-          return JSON.parse(String(nodeFs.readFileSync(paths.triggersPath, "utf8")))?.triggers?.[params.index]?.run ?? {};
-        } catch {
-          return {};
-        }
-      })();
-      // #502 (PR #536's review): the MERGED run, before the confirm. A new provider or model checked alone passes, and
-      // only the write's parse would then find it off the trigger's own `run.models`, after the operator approved it.
-      validateModelRef({ ...rawRun, ...ref }, `trigger #${params.index + 1}`, paths.triggersPath);
-      const modelLine = ["provider", "model"].filter((k) => (ref as any)[k] !== undefined).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${(ref as any)[k]}`).join("");
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Edit trigger #${params.index + 1}`, message: `trigger #${params.index + 1} (${cur.type}) flow: ${cur.flow ?? "-"} -> ${flow}${venue}${modelLine}` },
-        () => {
-          const res = writeTriggers({
-            triggersPath: paths.triggersPath,
-            // `backend`, `provider` and `model` are merged only when the caller sent them, so an edit that
-            // changes just the flow leaves the entry byte-identical in every other key -- including a venue
-            // or a model it already had.
-            mutate: (raw: any[]) => raw.map((tr, i) => (i === params.index ? { ...tr, run: { ...tr.run, flow, ...(backend !== undefined && { backend }), ...ref } } : tr)),
-          });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, index: params.index, flow, ...(backend !== undefined && { backend }), ...ref };
-        },
-      );
+      const planned: any = planTriggerEdit({ params, paths, env: process.env });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        // `backend`, `provider` and `model` are merged only when the caller sent them (`plan.mutate`), so an edit that
+        // changes just the flow leaves the entry byte-identical in every other key.
+        const res: any = panelWrite(auditDir(), { kind: "trigger-edit", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: plan.mutate, expect: plan.expect }));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, index: params.index, flow: plan.flow, ...(plan.backend !== undefined && { backend: plan.backend }), ...plan.ref };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -888,16 +841,12 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const w = buildPauseWindow(params);
-      const result = await confirmedWrite(
-        ctx,
-        { title: "Add pause window", message: `Add to pause-windows.json:\n${JSON.stringify(w)}` },
-        () => {
-          const res = writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (list: any[]) => [...list, w] });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, added: w };
-        },
-      );
+      const plan: any = planPauseWindowAdd({ fields: params, paths }).plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "pause-window-add", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: plan.mutate, expect: plan.expect }));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, added: plan.entry };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -912,19 +861,14 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const p = readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath });
-      const list = Array.isArray(p?.windows) ? p.windows : [];
-      const cur = list[params.index];
-      if (!cur) throw new Error(`no pause window at index ${params.index} (have ${list.length})`);
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Delete pause window #${params.index + 1}`, message: `Remove pause window #${params.index + 1}: ${cur.scope} ${cur.from}-${cur.to} ${cur.tz}` },
-        () => {
-          const res = writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, deletedIndex: params.index };
-        },
-      );
+      const planned: any = planPauseWindowDelete({ index: params.index, paths });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "pause-window-delete", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: plan.mutate, expect: plan.expect }));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, deletedIndex: params.index };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -951,31 +895,16 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const p = readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath });
-      const list = Array.isArray(p?.windows) ? p.windows : [];
-      const cur = list[params.index];
-      if (!cur) throw new Error(`no pause window at index ${params.index} (have ${list.length})`);
-      // A provided field replaces; an omitted one keeps the current value (?? treats undefined as "keep").
-      // Rebuild through the shared builder so the result is validated the same way as an add.
-      const before = buildPauseWindow(cur);
-      const merged = buildPauseWindow({
-        scope: params.scope ?? cur.scope,
-        from: params.from ?? cur.from,
-        to: params.to ?? cur.to,
-        tz: params.tz ?? cur.tz,
-        days: params.days ?? cur.days,
-        dateFrom: params.dateFrom ?? cur.dateFrom,
-        dateTo: params.dateTo ?? cur.dateTo,
+      // A provided field replaces; an omitted one keeps the current value, rebuilt through the shared builder so the
+      // result is validated the same way as an add (`planPauseWindowEdit`).
+      const planned: any = planPauseWindowEdit({ index: params.index, fields: params, paths });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "pause-window-edit", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: plan.mutate, expect: plan.expect }));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, index: params.index, window: plan.entry };
       });
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Edit pause window #${params.index + 1}`, message: `pause window #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}` },
-        () => {
-          const res = writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, index: params.index, window: merged };
-        },
-      );
       return toolText(JSON.stringify(result));
     },
   });
@@ -1047,7 +976,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Cancel held job ${row.jobId}`, message: `Cancel ${row.target ?? row.jobId}, waiting on ${row.label ?? "a condition"}. It will never run.` },
         async () => {
-          const res = await cancelHeldJob({ url: paths.valkeyUrl, jobId: params.jobId });
+          const res: any = await panelWrite(auditDir(), { kind: "cancel-held", target: params.jobId }, () => cancelHeldJob({ url: paths.valkeyUrl, jobId: params.jobId }));
           if ((res as any).invalid) throw new Error(`rejected: ${(res as any).invalid}`);
           return { applied: true, jobId: params.jobId };
         },
@@ -1107,22 +1036,18 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
-      const l = buildScopedLimit({ ...params, ...dollarFieldsOf(params), ...sizeFieldsOf(params) });
-      // Issue #504 part C: judged BEFORE the confirm (the parser, the project pair and the allocation envelope), so the
-      // operator is never asked to approve a row the write would refuse, such as one below an envelope floor.
-      const envelope = envelopeGuard(paths, deploymentEnv());
-      const mutate = (list: any[]) => [...list, l];
-      refuseLimitsWrite({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate, envelope });
-      const result = await confirmedWrite(
-        ctx,
-        { title: "Add scoped limit", message: `Add to scoped-limits.json:\n${JSON.stringify(l)}` },
-        () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope, mutate });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, added: l, ...(res.pending ? { pending: res.pending } : {}) };
-        },
-      );
+      // Judged BEFORE the confirm (`planLimitAdd`): the dollar and size fields by the worker's parsers, then the whole
+      // change without writing (the parser, the project pair and the allocation envelope, issue #504 part C), so the
+      // operator is never asked to approve a row the write would refuse, such as one below an envelope floor. `expect` is
+      // the files as the change is built from them (PR #569's second review).
+      const planned: any = planLimitAdd({ params, paths, env: deploymentEnv() });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "limit-add", target: paths.scopedLimitsPath }, () => writeScopedLimits(plan.writeArgs));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, added: plan.entry, ...(res.pending ? { pending: res.pending } : {}) };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -1137,23 +1062,14 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
-      const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
-      const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
-      const cur = list[params.index];
-      if (!cur) throw new Error(`no scoped limit at index ${params.index} (have ${list.length})`);
-      const envelope = envelopeGuard(paths, deploymentEnv());
-      const mutate = (l: any[]) => l.filter((_, i) => i !== params.index);
-      refuseLimitsWrite({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate, envelope });
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Delete scoped limit #${params.index + 1}`, message: `Remove scoped limit #${params.index + 1}: ${cur.scope} ${limitSummary(cur)}` },
-        () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope, mutate });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, deletedIndex: params.index, ...(res.pending ? { pending: res.pending } : {}) };
-        },
-      );
+      const planned: any = planLimitDelete({ index: params.index, paths, env: deploymentEnv() });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "limit-delete", target: paths.scopedLimitsPath }, () => writeScopedLimits(plan.writeArgs));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, deletedIndex: params.index, ...(res.pending ? { pending: res.pending } : {}) };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -1189,45 +1105,18 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
-      const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
-      const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
-      const cur = list[params.index];
-      if (!cur) throw new Error(`no scoped limit at index ${params.index} (have ${list.length})`);
-      // Issue #501, part 7: a dollar field is judged BEFORE the confirm, so the operator is never asked to approve a
-      // value the write would refuse.
-      const usd = dollarFieldsOf(params);
-      // Issue #596: the size fields, judged and spelled the same way before the confirm.
-      const size = sizeFieldsOf(params);
-      // A provided field replaces; an omitted one keeps the current value (?? treats undefined as "keep").
-      // Rebuild through the shared builder so the result is validated the same way as an add.
-      const before = buildScopedLimit(cur);
-      const merged = buildScopedLimit({
-        scope: params.scope ?? cur.scope,
-        day: params.day ?? cur.day,
-        week: params.week ?? cur.week,
-        month: params.month ?? cur.month,
-        concurrent: params.concurrent ?? cur.concurrent,
-        // The dollar windows (version 2): a sent one replaces, an omitted one is CARRIED, never dropped, so an edit of
-        // a count field cannot silently remove a dollar cap.
-        dayUsd: usd.dayUsd ?? cur.dayUsd,
-        weekUsd: usd.weekUsd ?? cur.weekUsd,
-        monthUsd: usd.monthUsd ?? cur.monthUsd,
-        // The size fields (version 3) the same way: a sent one replaces, an omitted one is carried.
-        ...sizeFieldsFrom((k) => size[k] ?? cur[k]),
+      // Judged BEFORE the confirm (`planLimitEdit`): a dollar field (#501 part 7) and a size field (#596) by the worker's
+      // parsers; a provided field replaces and an omitted one is CARRIED, never dropped, so an edit of a count cannot
+      // silently remove a dollar cap or a size; then the whole change without writing, like an add. A size change adds
+      // the project's evidence to the confirm (`sizingNote`).
+      const planned: any = planLimitEdit({ params, paths, env: deploymentEnv(), sizingNoteFn: (scope: any) => sizingNote(paths, scope, Date.now()) });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "limit-edit", target: paths.scopedLimitsPath }, () => writeScopedLimits(plan.writeArgs));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, index: params.index, limit: plan.entry, ...(res.pending ? { pending: res.pending } : {}) };
       });
-      const envelope = envelopeGuard(paths, deploymentEnv());
-      const mutate = (l: any[]) => l.map((w, i) => (i === params.index ? merged : w));
-      refuseLimitsWrite({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate, envelope });
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}${Object.keys(size).length > 0 ? sizingNote(paths, merged.scope, Date.now()) : ""}` },
-        () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope, mutate });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, index: params.index, limit: merged, ...(res.pending ? { pending: res.pending } : {}) };
-        },
-      );
       return toolText(JSON.stringify(result));
     },
   });
@@ -1280,20 +1169,14 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const entry = { id: params.id, name: params.name ?? null, members: params.members };
-      const mutate = (list: any[]) => [...list, entry];
-      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, envelope: envelopeGuard(paths, deploymentEnv()) });
-      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
-      const added = plan.projects.find((p: any) => p.id === params.id);
-      const result = await confirmedWrite(
-        ctx,
-        { title: "Add project", message: `Add to projects.json:\n${JSON.stringify(projectShown(added))}\nRuns of these members record project ${added.id} from their next pickup.` },
-        () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs, envelope: envelopeGuard(paths, deploymentEnv()) });
-          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-          return { applied: true, added: projectShown(added), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
-        },
-      );
+      const planned: any = planProjectAdd({ params, paths, env: deploymentEnv() });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "project-add", target: paths.projectsFile }, () => writeProjects({ ...plan.writeArgs, envelope: envelopeGuard(paths, deploymentEnv()) }));
+        if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+        return { applied: true, added: projectShown(plan.added), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -1316,27 +1199,15 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const cur = currentProject(paths, params.id);
-      const merged = {
-        id: cur.id,
-        name: params.name === undefined ? cur.name : params.name === "" ? null : params.name,
-        members: params.members ?? cur.members,
-      };
-      const mutate = (list: any[]) => list.map((p) => (p.id === cur.id ? merged : p));
-      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, envelope: envelopeGuard(paths, deploymentEnv()) });
-      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
-      const after = plan.projects.find((p: any) => p.id === cur.id);
-      const leaving = cur.members.filter((m: string) => !after.members.includes(m));
-      const note = leaving.length > 0 ? `\n${leaving.map((m: string) => escapeInterpreted(m)).join(", ")} leave${leaving.length === 1 ? "s" : ""} the project: a project:${cur.id} row no longer counts ${leaving.length === 1 ? "it" : "them"}, which widens what ${leaving.length === 1 ? "it" : "they"} may spend.` : "";
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Edit project ${cur.id}`, message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\n→ ${JSON.stringify(projectShown(after))}${note}` },
-        () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs, envelope: envelopeGuard(paths, deploymentEnv()) });
-          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-          return { applied: true, project: projectShown(after), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
-        },
-      );
+      // A member leaving a capped project is named in the confirm (`planProjectEdit`): it WIDENS what it may spend.
+      const planned: any = planProjectEdit({ params, paths, env: deploymentEnv() });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "project-edit", target: paths.projectsFile }, () => writeProjects({ ...plan.writeArgs, envelope: envelopeGuard(paths, deploymentEnv()) }));
+        if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+        return { applied: true, project: projectShown(plan.after), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -1353,20 +1224,16 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({ id: Type.String() }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const cur = currentProject(paths, params.id);
-      const mutate = (list: any[]) => list.filter((p) => p.id !== cur.id);
-      // Judged BEFORE the confirm: a row naming the project refuses here, so the operator is never asked to approve it.
-      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, envelope: envelopeGuard(paths, deploymentEnv()) });
-      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Delete project ${cur.id}`, message: `Remove project ${cur.id} (${cur.members.length} member${cur.members.length === 1 ? "" : "s"}). Its members' runs record no project from their next pickup; records already written keep the id.` },
-        () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs, envelope: envelopeGuard(paths, deploymentEnv()) });
-          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-          return { applied: true, deleted: cur.id, ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
-        },
-      );
+      // Judged BEFORE the confirm (`planProjectDelete`): a row naming the project refuses here, so the operator is never
+      // asked to approve it.
+      const planned: any = planProjectDelete({ id: params.id, paths, env: deploymentEnv() });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "project-delete", target: paths.projectsFile }, () => writeProjects({ ...plan.writeArgs, envelope: envelopeGuard(paths, deploymentEnv()) }));
+        if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+        return { applied: true, deleted: plan.deleted, ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -1381,18 +1248,14 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const list = triggerList(paths);
-      const cur = list[params.index];
-      if (!cur) throw new Error(`no trigger at index ${params.index} (have ${list.length})`);
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Delete trigger #${params.index + 1}`, message: `Remove trigger #${params.index + 1}: ${cur.type} -> ${cur.flow ?? "-"}` },
-        () => {
-          const res = writeTriggers({ triggersPath: paths.triggersPath, mutate: (raw: any[]) => raw.filter((_, i) => i !== params.index) });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, deletedIndex: params.index };
-        },
-      );
+      const planned: any = planTriggerDelete({ index: params.index, paths });
+      if (planned.refusal) throw new Error(planned.refusal);
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
+        const res: any = panelWrite(auditDir(), { kind: "trigger-delete", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: plan.mutate, expect: plan.expect }));
+        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+        return { applied: true, deletedIndex: params.index };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -1485,26 +1348,19 @@ function registerTools(pi: ExtensionAPI): void {
       maxPlanDays: Type.Optional(Type.Integer()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const change = envelopeChangeOf(params);
-      if (Object.keys(change).length === 0) throw new Error("nothing to change: name at least one of window, totalUsd, floorsUsd, defaultWeights, enabled, writers, maxStepPct, minIntervalHours, maxPlanDays");
-      const a = allocationContext();
-      const files = { envelopeFile: a.paths.envelopeFile, projectsPath: a.paths.projectsFile, scopedLimitsPath: a.paths.scopedLimitsPath, maxCostMicros: a.maxCostMicros };
-      // Judged BEFORE the confirm, so the operator is never asked to approve an envelope the worker would refuse.
-      const plan: any = planEnvelopeWrite({ ...files, change });
-      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
-      if (plan.digest === plan.beforeDigest) return toolText(JSON.stringify({ applied: false, reason: "no change: the envelope already says this" }));
-      const result = await confirmedWrite(
-        ctx,
-        {
-          title: "Change the allocation envelope",
-          message: `${plan.lines.join("\n")}\n\nEvery host re-bases the split onto it with no step; a host whose copy differs refuses its jobs until it has it.`,
-        },
-        async () => {
-          const res: any = await writeEnvelope({ ...files, change, expect: plan.inputs, url: a.paths.valkeyUrl, ...allocRedis() });
-          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-          return { applied: true, digest: res.digest, previousDigest: res.previousDigest, changed: plan.lines };
-        },
-      );
+      // Judged BEFORE the confirm (`planEnvelope`), so the operator is never asked to approve an envelope the worker would
+      // refuse; a change the file already says is no write at all.
+      const env = deploymentEnv();
+      const paths = resolvePaths(deploymentEnv());
+      const planned: any = planEnvelope({ params, paths, env });
+      if (planned.refusal) throw new Error(planned.refusal);
+      if (planned.unchanged) return toolText(JSON.stringify({ applied: false, reason: planned.unchanged }));
+      const plan = planned.plan;
+      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, async () => {
+        const res: any = await panelWrite(auditDir(), { kind: "envelope-set", target: paths.envelopeFile, beforeDigest: plan.beforeDigest, afterDigest: plan.digest }, () => writeEnvelope({ ...plan.files, change: plan.change, expect: plan.expect, url: paths.valkeyUrl, ...allocRedis() }));
+        if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+        return { applied: true, digest: res.digest, previousDigest: res.previousDigest, changed: plan.lines };
+      });
       return toolText(JSON.stringify(result));
     },
   });
@@ -1553,48 +1409,9 @@ function allocationContext(): any {
   return { env, paths, maxCostMicros, read };
 }
 
-/** The envelope cross-check context the scoped-limits and projects writers take (`envelopeRefusal`). */
-function envelopeGuard(paths: any, env: any): any {
-  return paths.envelopeFile ? { file: paths.envelopeFile, maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env }) } : null;
-}
-
-/** A scoped-limits change judged in full without writing (`dryRun`); throws the refusal, so a tool refuses BEFORE its confirm. */
-function refuseLimitsWrite(args: any): void {
-  const res: any = writeScopedLimits({ ...args, dryRun: true });
-  if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-}
-
-/**
- * A settings write of `key` that would leave the allocation envelope invalid (the per-job cap removed, or set to
- * something the worker cannot read), or null. Only `maxCostUsd` can: it is the one setting the envelope is judged by.
- */
-function settingsEnvelopeRefusal(key: string, beforeOverlay: any, afterOverlay: any, paths: any, env: any): string | null {
-  if (key !== "maxCostUsd" || !paths.envelopeFile) return null;
-  return envelopeRefusal({
-    envelopeFile: paths.envelopeFile,
-    projectsPath: paths.projectsFile,
-    scopedLimitsPath: paths.scopedLimitsPath,
-    maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env, overlay: beforeOverlay }),
-    next: { maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env, overlay: afterOverlay }) },
-  });
-}
-
 /** The envelope as a tool shows it: numbers and ids the parser checked, in micro-dollars, with its digest. */
 function envelopeShown(e: any, digest: string): any {
   return { digest, window: e.window, totalMicros: e.totalMicros, floors: e.floors, defaultWeights: e.defaultWeights, delegation: e.delegation };
-}
-
-/** The tool's envelope fields as `planEnvelopeWrite`'s change: only the fields that were sent. */
-function envelopeChangeOf(p: any): any {
-  const change: any = {};
-  if (p.window !== undefined) change.window = p.window;
-  if (p.totalUsd !== undefined) change.totalUsd = p.totalUsd;
-  if (p.floorsUsd !== undefined) change.floorsUsd = p.floorsUsd;
-  if (p.defaultWeights !== undefined) change.defaultWeights = p.defaultWeights;
-  const delegation: any = {};
-  for (const f of ["enabled", "writers", "maxStepPct", "minIntervalHours", "maxPlanDays"]) if (p[f] !== undefined) delegation[f] = p[f];
-  if (Object.keys(delegation).length > 0) change.delegation = delegation;
-  return change;
 }
 
 /**
@@ -1607,16 +1424,10 @@ async function setPriorities(projects: any[], validDays?: number): Promise<any> 
   const a = allocationContext();
   if (!a.read.envelope) throw new Error(envelopeProblem(a.read));
   const now = allocNow();
-  const plan: any = {
-    ...(validDays !== undefined ? { validUntil: new Date(now.getTime() + validDays * 86400000).toISOString() } : {}),
-    projects: (Array.isArray(projects) ? projects : []).map((p: any) => ({
-      id: p?.id,
-      weight: p?.weight,
-      ...(p?.reason !== undefined ? { reason: p.reason } : {}),
-      ...(p?.repos !== undefined ? { repos: p.repos } : {}),
-    })),
-  };
-  const res: any = await applyPriorities({
+  const plan: any = planPriorities({ projects, validDays, now }).plan.plan;
+  // Audited as the panel too (issue #642), beside the allocation audit file's own row: the console's chain then holds
+  // every write this session made, and an append failure refuses the plan as a `refused` outcome the callers render.
+  const res: any = await panelWrite(a.paths.logsDir, { kind: "priorities-set", target: "allocation", failure: allocationFailure, refusal: (s: string) => ({ outcome: "refused", reason: s }) }, () => applyPriorities({
     url: a.paths.valkeyUrl,
     envelope: a.read.envelope,
     digest: a.read.digest,
@@ -1627,7 +1438,7 @@ async function setPriorities(projects: any[], validDays?: number): Promise<any> 
     logsDir: a.paths.logsDir,
     now,
     ...allocRedis(),
-  });
+  }));
   return res;
 }
 
@@ -1643,7 +1454,14 @@ async function allocationInfo(): Promise<any> {
 async function revertTo(target: any): Promise<any> {
   const a = allocationContext();
   if (!a.read.envelope) return { outcome: "refused", reason: "no-envelope" };
-  return revertAllocation({ url: a.paths.valkeyUrl, envelope: a.read.envelope, digest: a.read.digest, target, host: allocHost(a.env), logsDir: a.paths.logsDir, now: allocNow(), ...allocRedis() });
+  return panelWrite(a.paths.logsDir, { kind: "allocation-revert", target: "allocation", failure: allocationFailure, refusal: (s: string) => ({ outcome: "refused", reason: s }) }, () => revertAllocation({ url: a.paths.valkeyUrl, envelope: a.read.envelope, digest: a.read.digest, target, host: allocHost(a.env), logsDir: a.paths.logsDir, now: allocNow(), ...allocRedis() }));
+}
+
+/** An allocation write's failure for its audit row: an outcome other than applied, duplicate or reverted, with its reason enum. */
+function allocationFailure(res: any): string | null {
+  const outcome = res?.outcome;
+  if (outcome === "applied" || outcome === "duplicate" || outcome === "reverted") return null;
+  return `${typeof outcome === "string" ? outcome : "refused"}: ${typeof res?.reason === "string" ? res.reason : "unknown"}`;
 }
 
 /** The host name an audit row of this session carries: the deployment's PI_WORKER_NAME, else this machine's. */
@@ -1699,66 +1517,6 @@ function prioritiesOutcome(res: any): string {
 }
 
 /**
- * A project as a tool shows it (issue #499 part C): the `name` and every member ESCAPED, so a bidi override or an
- * invisible character in either is visible text in a confirm dialog and a tool result, never a reordering. The id is
- * charset-checked by the parser and shown as stored.
- */
-function projectShown(p: any): any {
-  return {
-    id: p?.id,
-    name: p?.name === null || p?.name === undefined ? null : escapeInterpreted(p.name),
-    // Members too (PR #569's review): a folder member may hold a C1 or bidi character the parser admits.
-    members: Array.isArray(p?.members) ? p.members.map((m: any) => escapeInterpreted(String(m))) : p?.members,
-  };
-}
-
-/** The project `id` names in the file the worker reads, or a throw that says why there is none. */
-function currentProject(paths: any, id: string): any {
-  const p: any = readProjects({ projectsPath: paths.projectsFile });
-  if (p?.unset) throw new Error("PI_PROJECTS_FILE is unset, so the worker reads no projects; set it in the deployment's .env (pi-dispatch up does) and restart the worker");
-  if (p?.invalid) throw new Error(`the projects file does not load: ${escapeInterpreted(p.invalid)}`);
-  if (p?.unreadable) throw new Error(`the projects file ${escapeInterpreted(String(paths.projectsFile))} could not be read (${p.unreadable})`);
-  const list: any[] = Array.isArray(p?.projects) ? p.projects : [];
-  const cur = list.find((x) => x.id === id);
-  if (!cur) throw new Error(`no project with id ${JSON.stringify(String(id)).slice(0, 40)} (dispatch_projects lists them)`);
-  return cur;
-}
-
-/** The current triggers as a display list (empty on a missing/invalid file), for index resolution + confirm text. */
-function triggerList(paths: any): any[] {
-  const t = readTriggers({ triggersPath: paths.triggersPath });
-  return Array.isArray(t?.triggers) ? t.triggers : [];
-}
-
-/**
- * Build one `{ on, run }` trigger entry from a kind + fields. The single source of truth for the on x run
- * matrix (cron -> local, every webhook kind -> a forge): the impossible combination is absent by
- * construction, mirroring the worker's load-time matrix. Shared by the add-trigger dialog and the
- * `dispatch_trigger_add` tool, so both produce identical shapes. `labels`/`action` accept either an array
- * (tool params) or a space-separated string (dialog input) via `asWords`. Returns null for an unknown kind.
- *
- * `f.forge` selects which forge a webhook trigger listens to, defaulting to github so every existing call
- * site -- and every existing entry this rewrites -- is unchanged. It is offered on BOTH paths, unlike
- * `run.image`, and the difference is deliberate: an image is a capability the model would gain (choose the
- * container and you choose the pi version, the guardrail floor and the loader posture), whereas a forge is
- * one it already has -- a model that can add a github trigger can already arm a paid run, and naming
- * gitlab instead does not widen that. Both remain gated by the same operator confirm.
- *
- * An unrecognised forge is passed through rather than corrected, so `parseTriggers` refuses it fail-loud at
- * the write. Silently rewriting a typo to github would arm a trigger on a forge the operator did not name.
- *
- * `run.resume` is deliberately on NEITHER path, following `run.image` rather than `f.forge`, and the test
- * is the one that separates those two: is it a capability the model would GAIN? A forge is not — a model
- * that can add a github trigger can already arm a paid run, and naming gitlab does not widen that. Resume
- * is. Arming it creates a channel in which the agent's own output persists to host disk and is replayed
- * into a later job on the same branch, so a model able to set it could arrange for its own reasoning to
- * reach a future run. That is a self-influence channel, and it is not one an operator confirm on a single
- * dialog meaningfully bounds — the confirm approves one entry, the channel outlives it.
- * Enabling it stays an edit to the reviewed `triggers.json` (`docs/sessions.md`), which is the same answer
- * `run.image` gets and for a stricter version of the same reason. The panel still DISPLAYS it, because
- * reading a disclosure and being able to arm one are different things.
- */
-/**
  * The forge prompt and the per-forge pull-request action vocabulary, in one place each.
  *
  * Both were two-way ternaries naming github and gitlab. A third and fourth forge turns a ternary into a
@@ -1766,14 +1524,6 @@ function triggerList(paths: any): any[] {
  * different failure from being refused: they simply never try.
  */
 export const FORGE_PROMPT = `forge — ${FORGE_KINDS.slice(0, -1).join(", ")} or ${FORGE_KINDS.at(-1)}`;
-// The per-forge issue close word (issue #231), the tool's default `action` for kind "issue": the
-// shared validator's ISSUE_ACTIONS accepts exactly one word per forge today, so defaulting to it
-// makes the kind authorable without knowing three forges' spellings. No azure entry on purpose --
-// the validator refuses the whole type there with its own message (a work item's close is a state
-// transition the projected payload subset cannot see), and a default here would only reword it.
-export const ISSUE_CLOSE_WORD: Record<string, string> = Object.fromEntries(
-  Object.entries(ISSUE_ACTIONS).map(([forge, actions]) => [forge, [...(actions as Set<string>)][0]]),
-);
 // The DEFAULTS stay hand-written and the hints do not, which is the whole distinction this sweep is
 // about. A hint restates what the loader ACCEPTS, so it is derived and cannot drift. A default answers
 // what an operator most often wants, which is an editorial judgement and not a property of the table:
@@ -1798,146 +1548,6 @@ export const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = O
 );
 
 /**
- * Which backends this deployment blessed, answered by the WORKER'S OWN parser.
- *
- * An earlier version reimplemented the comma split here and justified it by saying `backends.mjs` was not
- * in this bundle. It already is: `index.ts` imports `read-model.mjs`, which reaches `triggers.mjs`, which
- * imports `backends.mjs` -- and the built `dist/index.mjs` contains `BACKENDS_TABLE`. So the duplicate
- * bought nothing and cost the two things a duplicate always costs. It did not dedupe, and it returned `[]`
- * for an unset variable while the worker returns `["local"]`, so on the DEFAULT deployment the picker told
- * an operator "this deployment blesses no backends" about a deployment that blesses one and would have run
- * the trigger fine.
- *
- * Falls back to `[]` only when the value cannot be parsed at all. `parseBackendList` throws on an unknown
- * name, which is the worker refusing to boot -- the panel is not the place to relitigate that, and an empty
- * list makes the picker refuse every name, which is the safe direction while the deployment is broken.
- */
-export function blessedBackends(env: NodeJS.ProcessEnv): string[] {
-  try {
-    return parseBackendList(env.PI_BACKENDS);
-  } catch {
-    return [];
-  }
-}
-
-export function buildTriggerEntry(kind: string, f: any): any {
-  if (kind === "cron") {
-    // Optional per-entry provider/model/maxTurns pass through to job.data (highest precedence); omitted when
-    // blank so the value still resolves against the settings overlay/env at job start. Since #502 every
-    // kind carries them (`modelRun` below); this arm keeps its own spelling so the cron entry's key order
-    // is byte-identical to what it always wrote.
-    const run: any = { kind: "local", folder: f.folder, flow: f.flow, task: f.task };
-    const model = optStr(f.model);
-    const provider = optStr(f.provider);
-    const maxTurns = optInt(f.maxTurns);
-    if (model) run.model = model;
-    if (provider) run.provider = provider;
-    if (maxTurns !== undefined) run.maxTurns = maxTurns;
-    // #227, carried only when set so every pre-#227 call site writes a byte-identical entry.
-    const backend = optStr(f.backend);
-    if (backend) run.backend = backend;
-    return { on: { type: "cron", id: f.id, pattern: f.pattern }, run };
-  }
-  const forge = optStr(f.forge) ?? "github";
-  // `run.repository` is required on an azure label/comment trigger and REFUSED on every other forge's, so
-  // it is carried only when set and `parseTriggers` decides whether it belongs. Passing it through rather
-  // than validating here keeps one validator, exactly as an unrecognised forge is passed through to be
-  // refused fail-loud at the write instead of silently rewritten to github.
-  const repository = optStr(f.repository);
-  const backend = optStr(f.backend);
-  // #502. The tool's schema has always offered model/provider/maxTurns on every kind, and before #502 a
-  // webhook arm dropped them in silence: the operator approved an entry without the model they asked for.
-  // Carried only when set, so an entry that names none is byte-identical; parseTriggers validates them.
-  const model = optStr(f.model);
-  const provider = optStr(f.provider);
-  const maxTurns = optInt(f.maxTurns);
-  const modelRun = { ...(model ? { model } : {}), ...(provider ? { provider } : {}), ...(maxTurns !== undefined ? { maxTurns } : {}) };
-  const forgeRun = (rest: any) => ({ kind: forge, ...rest, ...(repository ? { repository } : {}), ...(backend ? { backend } : {}), ...modelRun });
-  if (kind === "label") return { on: { type: "label", any: asWords(f.labels ?? f.any) }, run: forgeRun({ flow: f.flow }) };
-  if (kind === "comment") return { on: { type: "comment", phrase: f.phrase }, run: forgeRun({ flow: f.flow }) };
-  if (kind === "pull_request") {
-    const on: any = { type: "pull_request", action: asWords(f.action) };
-    const any = asWords(f.labels ?? f.any);
-    if (any.length > 0) on.any = any;
-    // The close-trigger narrowings (issue #231), carried only when set so every pre-#231 call site
-    // writes byte-identical entries. Passed through rather than gated on the action word: the shared
-    // validator refuses number/once on a non-close rule with a message naming why, and pre-judging
-    // that here would be the silent-rewrite posture this function already rejects for `forge`.
-    const prNumber = optInt(f.number);
-    if (prNumber !== undefined) on.number = prNumber;
-    if (typeof f.once === "boolean") on.once = f.once;
-    // `forgeRun` is not used on this arm (it builds `on` itself), so the venue is carried explicitly.
-    // Without this the picker VALIDATED a name and then discarded it, and the confirm dialog rendered
-    // an entry with no `backend` for the operator to approve -- a pick accepted and dropped in silence.
-    return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}), ...modelRun } };
-  }
-  if (kind === "issue") {
-    // The close-trigger kind (issue #231). `action` DEFAULTS to this forge's close word -- the only
-    // word the shared validator accepts today -- so the kind is authorable without knowing three
-    // forges' spellings; an explicit word still passes through verbatim to be refused fail-loud if
-    // wrong. `number`/`once` ride only when set, mirroring the loader's absent-not-undefined shape;
-    // every constraint between them (once requires number, once excludes replicas, azure has no
-    // close trigger at all) lives in the one validator the write goes through.
-    const action = asWords(f.action);
-    const on: any = { type: "issue", action: action.length > 0 ? action : [ISSUE_CLOSE_WORD[forge] ?? "closed"] };
-    const number = optInt(f.number);
-    if (number !== undefined) on.number = number;
-    if (typeof f.once === "boolean") on.once = f.once;
-    // `forgeRun` is not used on this arm (it builds `on` itself), so the venue is carried explicitly.
-    // Without this the picker VALIDATED a name and then discarded it, and the confirm dialog rendered
-    // an entry with no `backend` for the operator to approve -- a pick accepted and dropped in silence.
-    return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}), ...modelRun } };
-  }
-  return null;
-}
-
-/**
- * Build one pause-window entry from a kind-less field bag (shared by the `dispatch_pause_add` tool and the
- * operator dialog). Required scope/from/to; optional tz/days/dateFrom/dateTo included only when non-blank so
- * an omitted field drops out of the JSON. `days` accepts an array (tool) or a space-separated string (dialog).
- * All value validation (time format, IANA tz, weekday names, date format) lives in the shared
- * `parsePauseWindows`, which the write goes through — a bad value is rejected there, never written.
- */
-function buildPauseWindow(f: any): any {
-  const w: any = { scope: String(f.scope ?? "").trim(), from: String(f.from ?? "").trim(), to: String(f.to ?? "").trim() };
-  const tz = optStr(f.tz);
-  const days = asWords(f.days);
-  const dateFrom = optStr(f.dateFrom);
-  const dateTo = optStr(f.dateTo);
-  if (tz) w.tz = tz;
-  if (days.length > 0) w.days = days;
-  if (dateFrom) w.dateFrom = dateFrom;
-  if (dateTo) w.dateTo = dateTo;
-  return w;
-}
-
-/**
- * Build one scoped-limit entry from a field bag (shared by dispatch_limit_add/_edit and the operator
- * dialogs). Required scope; day/week/month/concurrent ride only when an integer-shaped value parses, so a
- * blank dialog answer or omitted tool param drops out of the JSON. All value validation (positive safe
- * integers, at-least-one-limit, non-empty scope, no globs) lives in the shared parseScopedLimits, which
- * the write goes through — a bad value is rejected there, never written.
- */
-function buildScopedLimit(f: any): any {
-  const l: any = { scope: String(f.scope ?? "").trim() };
-  for (const k of ["day", "week", "month", "concurrent"]) {
-    const v = optInt(f[k]);
-    if (v !== undefined) l[k] = v;
-  }
-  // Version 2's dollar windows ride through as the parser's own decimal strings; the shared parser validates them.
-  for (const k of ["dayUsd", "weekUsd", "monthUsd"]) {
-    if (typeof f[k] === "string" && f[k].trim() !== "") l[k] = f[k].trim();
-  }
-  // Version 3's size fields (issue #596) ride through as given; the shared parser validates them, and refuses them on
-  // any row that is not a project row.
-  for (const k of SIZE_LIMIT_FIELDS) {
-    const v = SIZE_FIELD_RIDES[k](f[k]);
-    if (v !== undefined) l[k] = v;
-  }
-  return l;
-}
-
-/**
  * The version 3 size fields (issue #596), each with the TypeBox schema both limit tools take it by. Keyed in the
  * worker's `SIZE_LIMIT_FIELDS` order and held to it by a test (`admin/test/size-tools.test.mjs`), so the two schemas,
  * the edit's carry, the dialog's carry and the builder share one list rather than four hand-written copies.
@@ -1950,106 +1560,6 @@ export const SIZE_FIELD_SCHEMAS = {
   hostShare: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
   minJobs: Type.Optional(Type.Integer({ minimum: 1 })),
 };
-
-/** How each size field rides into a built row: its value, or undefined to leave it out. Keyed as above, and pinned. */
-export const SIZE_FIELD_RIDES: Record<string, (v: any) => any> = {
-  memory: (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : undefined),
-  cpus: (v) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? v.trim() : undefined),
-  hostShare: (v) => optInt(v),
-  minJobs: (v) => optInt(v),
-};
-
-/** Every size field, in `SIZE_LIMIT_FIELDS` order, with the value `pick` gives it: a merge or a carry in one line. */
-function sizeFieldsFrom(pick: (field: string) => any): Record<string, any> {
-  return Object.fromEntries(SIZE_LIMIT_FIELDS.map((k: string) => [k, pick(k)]));
-}
-
-/**
- * The size fields a scoped-limit tool was SENT (issue #596), in the one spelling the parser stores: `memory` through
- * the worker's own `parseMemory`/`formatMemory` ("1024m" becomes "1g"), `cpus` through `parseCpus`/`formatCpus` as a
- * number, `hostShare` and `minJobs` as given (the schema holds them to integers; the parser judges the rest). A blank
- * or absent field is not sent. A malformed size throws with the parser's own words before any confirm is shown.
- */
-function sizeFieldsOf(f: any): Record<string, any> {
-  const out: Record<string, any> = {};
-  const sent = (v: any) => v !== undefined && v !== null && !(typeof v === "string" && v.trim() === "");
-  if (sent(f?.memory)) {
-    try {
-      out.memory = formatMemory(parseMemory(typeof f.memory === "string" ? f.memory.trim() : f.memory));
-    } catch (e: any) {
-      throw new Error(`memory: ${e?.message ?? e}`);
-    }
-  }
-  if (sent(f?.cpus)) {
-    try {
-      out.cpus = Number(formatCpus(parseCpus(typeof f.cpus === "string" ? f.cpus.trim() : f.cpus)));
-    } catch (e: any) {
-      throw new Error(`cpus: ${e?.message ?? e}`);
-    }
-  }
-  for (const k of SIZE_LIMIT_FIELDS) {
-    if (k !== "memory" && k !== "cpus" && sent(f?.[k])) out[k] = f[k];
-  }
-  return out;
-}
-
-/**
- * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap),
- * `run.models` (the models its jobs may call) and `run.mcp` (the MCP servers they connect, below). Each one decides
- * what a trigger's jobs can spend or reach, and removing or widening it is a widening, so it is written by hand in the
- * reviewed triggers file and never by a model's call, even behind a confirm. Neither tool's schema names them, and
- * that alone is not the guard: a schema does not refuse extra keys, and a field silently dropped would let the model
- * report a narrowing that never landed. So a call that carries one is REFUSED, loudly, before any confirm, and so is
- * a NEAR MISS of any of them (`MaxCostUsd`, `max_cost_usd`, `allowedModels`, a homoglyph), at the top level and
- * under a `run` or `on` object the model may have nested: the loader's own sweeps (`runModelFieldNearMiss`, and
- * `mcpFieldNearMiss` below), so the console and the loader agree on what a near miss is. An existing value is never
- * touched: the add tool builds entries without these keys and the edit tool spreads the entry's own `run` under the
- * fields it sets.
- */
-const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.mcp"]);
-/**
- * `run.mcp` (REQ-MCP-OPERATOR-SERVERS) is tool-proof for the same reason: which outside systems a trigger's jobs act
- * on, with which credentials, is the operator's to write. Its near misses are the loader's own (`isMcpNearMiss`: the
- * ASCII spellings, and a key outside plain ASCII with no plain letter but the field's), and the field itself counts
- * here too, since this sweep refuses the field and its spellings alike.
- */
-function mcpFieldNearMiss(key: string): string | null {
-  return key === "mcp" || isMcpNearMiss(key) ? "run.mcp" : null;
-}
-function refuseWideningFields(params: any, tool: string): void {
-  const objects: [string, any][] = [["", params], ["run.", params?.run], ["on.", params?.on]];
-  for (const [label, source] of objects) {
-    if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
-    for (const key of Object.keys(source)) {
-      const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key);
-      if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
-      const what =
-        meant === "run.models" ? "allowed-model list" : meant === "run.mcp" ? "list of MCP servers" : "per-job dollar cap";
-      throw new Error(`${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${what} is set by hand in the triggers file, never by a tool`);
-    }
-  }
-}
-
-/**
- * The dollar fields a scoped-limit tool was SENT (issue #501, part 7), each judged by the worker's own
- * `parseUsdMicros` and returned in its canonical form (`formatMicros`: "2.5" becomes "2.50"), the form the parser
- * stores, so a confirm shows exactly what the file will hold. A blank or absent field is not sent. A malformed one
- * throws with the parser's message (the key named, never the value) before any confirm is shown.
- */
-function dollarFieldsOf(f: any): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const k of USD_LIMIT_FIELDS) {
-    const raw = f?.[k];
-    if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) continue;
-    // A JSON number cannot be refused here: pi's own argument validation (`validateToolArguments`, `Value.Convert`)
-    // turns it into a string before `execute` runs, and no schema keeps a string-typed field a number there (PR
-    // #550's review measured `Type.String`, `Type.Unsafe`, `allOf`, `anyOf` and `not`; only a schema with no `type`
-    // refused one, and a tool schema without a type is one some providers reject). So a number is read by its VALUE,
-    // the overlay's documented rule (`INT-CONFIG-OVERLAY-CONTRACT`): `2.5` is $2.50 and `1e-7` is refused.
-    out[k] = formatMicros(parseUsdMicros(typeof raw === "string" ? raw.trim() : raw, k));
-  }
-  return out;
-}
 
 /**
  * `dispatch_limits`' dollar rows for one scoped limit (issue #501, part 7): `{ dollars: [{ window, cap, capMicros,
@@ -2066,50 +1576,6 @@ function dollarRowsOf(l: any, used: any): any {
       return { window: w, cap: l[f], capMicros: parseUsdMicros(l[f], f), counterMicros: Number.isSafeInteger(counter) ? counter : null };
     }),
   };
-}
-
-/** One scoped limit as a display summary: `day 10 · week 40 · ≤1 at once` (set fields only). */
-function limitSummary(l: any): string {
-  const bits: string[] = [];
-  if (Number.isInteger(l?.day)) bits.push(`day ${l.day}`);
-  if (Number.isInteger(l?.week)) bits.push(`week ${l.week}`);
-  if (Number.isInteger(l?.month)) bits.push(`month ${l.month}`);
-  if (Number.isInteger(l?.concurrent)) bits.push(`≤${l.concurrent} at once`);
-  // Version 2's dollar windows (issues #501, #502), so a model or dollar-only row never summarizes as nothing.
-  if (typeof l?.dayUsd === "string") bits.push(`day $${l.dayUsd}`);
-  if (typeof l?.weekUsd === "string") bits.push(`week $${l.weekUsd}`);
-  if (typeof l?.monthUsd === "string") bits.push(`month $${l.monthUsd}`);
-  // Version 3's size (issue #596), with hostShare and minJobs, which each worker's host budget enforces since phase 2.
-  bits.push(...sizeBits(l));
-  return bits.join(" · ");
-}
-
-/**
- * "live" for a scoped-limits write the worker takes on its next reload. With `pending` (issue #499 part B: a
- * `project:<id>` row names a project the projects file on disk lacks), only what the admin can know: written, and the
- * worker applies it once its live projects define the id.
- */
-function liveOr(res: any): string {
-  return res?.pending ? `written; ${res.pending}` : "live";
-}
-
-/** Normalise a labels/action field to a trimmed non-empty string list, accepting an array or a string. */
-function asWords(x: any): string[] {
-  if (Array.isArray(x)) return x.map((s) => String(s).trim()).filter(Boolean);
-  return splitWords(x);
-}
-
-/** A trimmed non-empty string, or undefined (so a blank optional field drops out of the written JSON). */
-function optStr(x: any): string | undefined {
-  const s = String(x ?? "").trim();
-  return s === "" ? undefined : s;
-}
-
-/** A finite number from a string/number, or undefined when blank/absent/non-numeric. */
-function optInt(x: any): number | undefined {
-  if (x === undefined || x === null || String(x).trim() === "") return undefined;
-  const n = Number(x);
-  return Number.isFinite(n) ? n : undefined;
 }
 
 async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<void> {
@@ -2257,7 +1723,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       }
       // Operator path (aiInvoked:false): ungated -- typing the command is the approval -- but the dirty
       // guard still fires inside enqueueDispatchRun. No spend knobs; provider/model/maxTurns resolve worker-side.
-      const res = await enqueueDispatchRun({ folder, flow, task, aiInvoked: false, env: deploymentEnv() });
+      const res: any = await panelWrite(paths.logsDir, { kind: "run-enqueue", target: folder, failure: enqueueFailure }, () => enqueueDispatchRun({ folder, flow, task, aiInvoked: false, env: deploymentEnv() }));
       if (res.refused) {
         notify?.(res.refused, "error");
         return;
@@ -2281,7 +1747,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       const paused = sub === "pause";
       // The CLI's kill-switch rule (PR #475's review, round 3): a pause pauses BOTH Valkeys when this process's
       // VALKEY_URL and the deployment .env's disagree, a resume refuses then, and every URL is shown without userinfo.
-      const set = await killSwitchSet({ paused });
+      const set: any = await panelWrite(paths.logsDir, { kind: paused ? "fleet-pause" : "fleet-resume", target: "fleet", failure: switchFailure }, async () => await killSwitchSet({ paused }));
       if (set.refused) {
         notify?.(set.refused, "error");
         return;
@@ -2338,7 +1804,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       // anywhere (its default was the OS temp directory until issue #290). A panel-side check alone would
       // be cosmetic.
       const { runSecretsCommand } = await import("./secrets-command.ts");
-      await runSecretsCommand(paths, ctx, notify, tokens.slice(1));
+      await runSecretsCommand(paths, ctx, notify, tokens.slice(1), { logsDir: paths.logsDir });
       return;
     }
     case "setup": {
@@ -2519,8 +1985,11 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
       tui,
       theme,
       deps: {
-        // The dollar caps' env (issue #501, part 7): the deployment's, the source `dispatch_set`'s confirm reads.
-        ...createDashboardDeps(paths, { dollarEnvFn: deploymentEnv }),
+        // The dollar caps' env (issue #501, part 7): the deployment's, the source `dispatch_set`'s confirm reads. Its
+        // writes (pause, resume, both cancels) go through the console's audit chain as the panel (issue #642).
+        // The kill switch's plan (issue #642) is the CLI's and the tools' (`killSwitchPlan`): both Valkeys on a pause when this
+        // process's and the deployment's disagree, and a resume refused then, so the TUI cannot resume one and strand the other.
+        ...withAuditedWrites(createDashboardDeps(paths, { dollarEnvFn: deploymentEnv, killSwitchPlanFn: ({ paused }: any) => killSwitchPlan({ paused }) }), (opts: any, fn: () => any) => panelWrite(auditDir(), opts, fn)),
         // log read stays here; overlay-only, returns readLogTail's result verbatim
         tailLog: ({ jobId, lines }: { jobId: string; lines: number }) => readLogTail({ logsDir: paths.logsDir, jobId, lines }),
         // REQ-RESURRECTABLE-SANDBOX, both seams. The fs read and the spawn live HERE for the same reason
@@ -2838,14 +2307,6 @@ function pauseForMessage(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 2500));
 }
 
-/** Split a space-separated dialog answer into trimmed, non-empty words (label/action lists). */
-function splitWords(s: string | undefined): string[] {
-  return String(s ?? "")
-    .split(/\s+/)
-    .map((w) => w.trim())
-    .filter(Boolean);
-}
-
 /**
  * Drive a CRUD action the dashboard overlay signalled, using pi's `ctx.ui` dialogs (`select`/`input`/
  * `confirm`). Every write goes through `writeTriggers`/`writeSettings` (validated + atomic + fail-closed);
@@ -2908,7 +2369,7 @@ async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Pr
   const concurrent = await ui.input("concurrent — max jobs in flight for this scope, extras deferred (blank = no limit)", "");
   if (concurrent === undefined) return;
   const l = buildScopedLimit({ scope, day, week, month, concurrent });
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (list: any[]) => [...list, l] });
+  const res: any = panelWrite(auditDir(), { kind: "limit-add", target: paths.scopedLimitsPath }, () => writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (list: any[]) => [...list, l] }));
   notify?.(res.ok ? `scoped limit added (${liveOr(res)}): ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -2953,7 +2414,7 @@ export async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Not
   });
   const note = scopeChangeNote(buildScopedLimit(cur), merged);
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
+  const res: any = panelWrite(auditDir(), { kind: "limit-edit", target: paths.scopedLimitsPath }, () => writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) }));
   notify?.(res.ok ? `scoped limit #${index + 1} updated (${liveOr(res)}): ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -2997,16 +2458,6 @@ export function sizingNote(paths: any, scope: any, nowMs: number): string {
   return `\nProject ${id}'s runs (the last ${SUGGEST_WINDOW_DAYS} days, measured inside the jobs, so advisory): size now ${formatMemory(m.current)}, ${cpusText(c.current)}; ${peaks}. They suggest memory ${said(m, s.words.memory, formatMemory)}, CPUs ${said(c, s.words.cpu, formatCpus)}.${facts.length > 0 ? ` ${facts.map((f: string) => `${f[0].toUpperCase()}${f.slice(1)}.`).join(" ")}` : ""}`;
 }
 
-/**
- * The line an edit's confirm adds when it changes a row's scope (issue #498): every counter is keyed by the row's
- * scope, so a new scope (a bare "acme/web" rewritten to "github:acme/web", or any rename) starts a new count, and the
- * old key simply expires on its own TTL. Empty when the scope is unchanged.
- */
-export function scopeChangeNote(before: any, after: any): string {
-  if (before?.scope === after?.scope) return "";
-  return "\nThe scope changes, so this row starts a NEW count under a new key: the used runs and dollars of the old scope do not carry over. Jobs already running keep their slot under the old scope until they finish, and the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until then.";
-}
-
 /** Delete a scoped limit: select which, confirm, remove. */
 async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
   const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
@@ -3020,7 +2471,7 @@ async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify):
   if (index < 0) return;
   const ok = await ui.confirm("Delete scoped limit", `Remove ${labels[index]}?`);
   if (!ok) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (l: any[]) => l.filter((_, i) => i !== index) });
+  const res: any = panelWrite(auditDir(), { kind: "limit-delete", target: paths.scopedLimitsPath }, () => writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, envelope: envelopeGuard(paths, deploymentEnv()), mutate: (l: any[]) => l.filter((_, i) => i !== index) }));
   notify?.(res.ok ? `scoped limit #${index + 1} deleted (${liveOr(res)})` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -3050,7 +2501,7 @@ async function addPauseWindowViaDialogs(paths: any, ui: any, notify: Notify): Pr
   const dateTo = await ui.input("dateTo — only on/before \"YYYY-MM-DD\" (blank = no bound)", "");
   if (dateTo === undefined) return;
   const w = buildPauseWindow({ scope, from, to, tz, days, dateFrom, dateTo });
-  const res = writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (list: any[]) => [...list, w] });
+  const res: any = panelWrite(auditDir(), { kind: "pause-window-add", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (list: any[]) => [...list, w] }));
   notify?.(res.ok ? `pause window added (live) — ${w.scope} ${w.from}-${w.to}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -3092,7 +2543,7 @@ async function editPauseWindowViaDialogs(paths: any, ui: any, notify: Notify): P
     dateFrom: keep(dateFrom, cur.dateFrom),
     dateTo: keep(dateTo, cur.dateTo),
   });
-  const res = writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
+  const res: any = panelWrite(auditDir(), { kind: "pause-window-edit", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) }));
   notify?.(res.ok ? `pause window #${index + 1} updated (live) — ${merged.scope} ${merged.from}-${merged.to}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -3108,7 +2559,7 @@ async function deletePauseWindowViaDialogs(paths: any, ui: any, notify: Notify):
   if (index < 0) return;
   const ok = await ui.confirm("Delete pause window", `Remove ${labels[index]}?`);
   if (!ok) return;
-  const res = writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
+  const res: any = panelWrite(auditDir(), { kind: "pause-window-delete", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: (l: any[]) => l.filter((_, i) => i !== index) }));
   notify?.(res.ok ? `pause window #${index + 1} deleted (live)` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -3175,7 +2626,7 @@ async function addTriggerViaDialogs(paths: any, ui: any, notify: Notify): Promis
     if (flow === undefined) return;
     entry = buildTriggerEntry("pull_request", { action, labels, flow, forge });
   }
-  const res = writeTriggers({ triggersPath: paths.triggersPath, mutate: (list: any[]) => [...list, entry] });
+  const res: any = panelWrite(auditDir(), { kind: "trigger-add", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: (list: any[]) => [...list, entry] }));
   notify?.(res.ok ? `trigger added (live) — ${kind} → ${entry.run.flow}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -3184,10 +2635,10 @@ async function editTriggerFlow(paths: any, ui: any, notify: Notify, index: numbe
   if (typeof index !== "number") return;
   const flow = await ui.input(`new flow for trigger #${index + 1} — the .pi/skills/<name> skill it runs`, "");
   if (flow === undefined || flow.trim() === "") return;
-  const res = writeTriggers({
+  const res: any = panelWrite(auditDir(), { kind: "trigger-edit", target: paths.triggersPath }, () => writeTriggers({
     triggersPath: paths.triggersPath,
     mutate: (list: any[]) => list.map((t, i) => (i === index ? { ...t, run: { ...t.run, flow: flow.trim() } } : t)),
-  });
+  }));
   notify?.(res.ok ? `flow updated (live) → ${flow.trim()}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -3203,7 +2654,7 @@ async function deleteTriggerEntry(paths: any, ui: any, notify: Notify, index: nu
     const ok = await ui.confirm("Delete trigger", `Remove trigger #${index + 1} from triggers.json?`);
     if (!ok) return;
   }
-  const res = writeTriggers({ triggersPath: paths.triggersPath, mutate: (list: any[]) => list.filter((_, i) => i !== index) });
+  const res: any = panelWrite(auditDir(), { kind: "trigger-delete", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: (list: any[]) => list.filter((_, i) => i !== index) }));
   notify?.(res.ok ? `trigger #${index + 1} deleted (live)` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -3225,49 +2676,32 @@ type Notify = ((message: string, type?: string) => void) | undefined;
  * `writeOverlay` silently drops unknown keys and would report ok on a no-op), the value is coerced by the
  * key's type, and exactly one value token is accepted (model ids carry no spaces). A rejected candidate
  * surfaces `writeOverlay`'s key-only reason, and a present-but-invalid file is refused rather than rebuilt
- * (`writeSettings`, issue #501), so no prior overlay is ever lost to a set.
+ * (`writeSettings`, issue #501), so no prior overlay is ever lost to a set. The checks are `planSettingSet`'s
+ * (write-plans.mjs, the command surface); a dollar key's write carries the deployment's env, so `writeSettings`
+ * returns a WARNING beside it (issue #501, PR #542's review), never a refusal.
  */
 function applySet(settingsFile: string, tokens: string[], notify: Notify): void {
   const key = tokens[1] ?? "";
-  if (!KNOWN_KEYS.includes(key)) {
-    notify?.(`set: unknown key '${key}'. valid keys: ${KNOWN_KEYS.join(", ")}`, "error");
+  const planned: any = planSettingSet({ key, valueTokens: tokens.slice(2), ...settingsCommandContext(settingsFile), surface: "command" });
+  if (planned.refusal) {
+    notify?.(planned.refusal, "error");
     return;
   }
-  const valueTokens = tokens.slice(2);
-  if (valueTokens.length !== 1) {
-    notify?.(`set: ${key} takes exactly one value`, "error");
-    return;
-  }
-  const value = coerceSettingValue(key, valueTokens[0]);
-  const broken = settingsCommandEnvelopeRefusal(key, settingsFile, (o: any) => ({ ...o, [key]: value }));
-  if (broken) {
-    notify?.(`set: ${broken}`, "error");
-    return;
-  }
-  const res = writeSettings({ settingsFile, mutate: (o) => ({ ...o, [key]: value }), ...dollarCheckFor(key) });
+  const plan = planned.plan;
+  const res: any = panelWrite(auditDir(), { kind: "setting-set", target: settingsFile }, () => writeSettings({ settingsFile, mutate: plan.mutate, ...plan.writeArgs }));
   if (res.invalid) {
     notify?.(`set: ${res.invalid}`, "error");
     return;
   }
-  notify?.(`set ${key} = ${value}${res.warning ? ` (warning: ${res.warning})` : ""}`, res.warning ? "warning" : "info");
+  notify?.(`set ${key} = ${plan.value}${res.warning ? ` (warning: ${res.warning})` : ""}`, res.warning ? "warning" : "info");
 }
 
 /**
- * The merged-values dollar check (issue #501, PR #542's review) for a console write of `key`: the deployment's env and
- * whether it is visible, for a dollar key only, so `writeSettings` returns a WARNING beside the write (never a refusal).
- * Every other key writes as before.
+ * The deployment as the operator-typed `set`/`unset` judge it: its paths with the settings file the command writes,
+ * its environment (the dollar settings' source and the envelope's per-job cap), and the pointer's folder.
  */
-function dollarCheckFor(key: string): { dollarEnv?: any; deploymentDir?: string | null } {
-  if (!(DOLLAR_SETTING_KEYS as readonly string[]).includes(key)) return {};
-  return { dollarEnv: deploymentEnv(), deploymentDir: pointerState().deploymentDir ?? null };
-}
-
-/** `settingsEnvelopeRefusal` for the operator-typed `set`/`unset`, over the overlay as it is on disk now. */
-function settingsCommandEnvelopeRefusal(key: string, settingsFile: string, mutate: (o: any) => any): string | null {
-  if (key !== "maxCostUsd") return null;
-  const env = deploymentEnv();
-  const before = readSettingsView({ settingsFile })?.overlay ?? {};
-  return settingsEnvelopeRefusal(key, before, mutate({ ...before }), { ...resolvePaths(deploymentEnv()), settingsFile }, env);
+function settingsCommandContext(settingsFile: string): any {
+  return { paths: { ...resolvePaths(deploymentEnv()), settingsFile }, env: deploymentEnv(), shown: { deploymentDir: pointerState().deploymentDir ?? null } };
 }
 
 /**
@@ -3276,27 +2710,13 @@ function settingsCommandEnvelopeRefusal(key: string, settingsFile: string, mutat
  */
 function applyUnset(settingsFile: string, tokens: string[], notify: Notify): void {
   const key = tokens[1] ?? "";
-  if (!KNOWN_KEYS.includes(key)) {
-    notify?.(`unset: unknown key '${key}'. valid keys: ${KNOWN_KEYS.join(", ")}`, "error");
+  const planned: any = planSettingUnset({ key, ...settingsCommandContext(settingsFile), surface: "command" });
+  if (planned.refusal) {
+    notify?.(planned.refusal, "error");
     return;
   }
-  const broken = settingsCommandEnvelopeRefusal(key, settingsFile, (o: any) => {
-    const next = { ...o };
-    delete next[key];
-    return next;
-  });
-  if (broken) {
-    notify?.(`unset: ${broken}`, "error");
-    return;
-  }
-  const res = writeSettings({
-    settingsFile,
-    mutate: (o) => {
-      delete o[key];
-      return o;
-    },
-    ...dollarCheckFor(key),
-  });
+  const plan = planned.plan;
+  const res: any = panelWrite(auditDir(), { kind: "setting-unset", target: settingsFile }, () => writeSettings({ settingsFile, mutate: plan.mutate, ...plan.writeArgs }));
   if (res.invalid) {
     notify?.(`unset: ${res.invalid}`, "error");
     return;
@@ -3304,22 +2724,23 @@ function applyUnset(settingsFile: string, tokens: string[], notify: Notify): voi
   notify?.(`unset ${key}${res.warning ? ` (warning: ${res.warning})` : ""}`, res.warning ? "warning" : "info");
 }
 
+// ---- the panel's audit (issue #642) ----
+
 /**
- * Coerce a raw token to the settings value its key expects: `model`, `provider` and the four dollar keys keep
- * the raw string; every other overlay key is numeric and parses via `Number` (a non-numeric token becomes `NaN`, which
- * `writeOverlay` then rejects with a key-only reason). Keying off the string exceptions rather than an
- * enumerated numeric list keeps this in lockstep with `KNOWN_KEYS` -- a new numeric knob (weekly/monthly
- * caps, the token caps) is coerced without a second edit here. Bounds and integer-ness stay in
- * `writeOverlay`, the single validator.
+ * The logs directory this session's writes are audited in: the deployment's PI_LOGS_DIR as the panel resolves it
+ * (`resolvePaths(deploymentEnv())`, the directory the run history is read from), so the panel, the console and doctor
+ * read one chain. Read per call like every other path; `panelAudit` builds the writer once per directory.
  */
-function coerceSettingValue(key: string, raw: string): number | string {
-  if (key === "model" || key === "provider") return raw;
-  // Issue #501: a dollar key keeps the operator's text, because the overlay stores it AS WRITTEN and
-  // `Number` would quietly widen the money grammar (`1e3` and `0x10` become plain dollars, `2.50` loses its
-  // zero). `writeOverlay`'s `parseUsdMicros` is then the one judge of the exact string that was typed. The
-  // worker's own list, never a guess from the name.
-  if ((DOLLAR_SETTING_KEYS as readonly string[]).includes(key)) return raw;
-  return Number(raw);
+function auditDir(): string {
+  return resolvePaths(deploymentEnv()).logsDir;
+}
+
+/** An enqueue's failure for its audit row: a refusal, an unreachable queue, or a swallowed duplicate (nothing queued). */
+function enqueueFailure(res: any): string | null {
+  if (typeof res?.refused === "string" && res.refused !== "") return res.refused;
+  if (res?.unreachable) return "could not reach the queue";
+  if (res?.deduplicated) return "a duplicate: nothing new was queued";
+  return null;
 }
 
 /**

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,9 @@ const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const indexMod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
 const { handleDashboardAction } = indexMod;
+// Issue #642: every write these drive is audited as the panel into PI_LOGS_DIR's console-audit chain, so the file's
+// writes land in a directory of its own rather than the account's default logs directory.
+process.env.PI_LOGS_DIR = tempDir("pi-crud-logs-");
 
 /** Load the extension against a recording `pi` and return the registered tools by name. */
 function registeredTools() {
@@ -304,6 +307,23 @@ test("dispatch_trigger_add: an approved confirm appends a validated entry", asyn
   assert.deepEqual(w.triggers[0].on.any, ["pi:fix"]);
   assert.equal(w.triggers[0].run.flow, "frontend-fix");
   assert.match(shown[0].message, /triggers\.json/, "the confirm shows the entry being added");
+});
+
+test("dispatch_trigger_add: a file changed while the confirm was open is refused, and the other write is kept (issue #642)", async () => {
+  // A valid entry another session could have written, made by the tool itself into a scratch file.
+  const scratch = tmpTriggers({ triggers: [] });
+  process.env.PI_TRIGGERS_FILE = scratch;
+  await toolByName("dispatch_trigger_add").execute("id", { kind: "label", flow: "someone-else", labels: ["other"] }, undefined, undefined, toolCtx().ctx);
+  const other = read(scratch);
+  const path = tmpTriggers({ triggers: [] });
+  process.env.PI_TRIGGERS_FILE = path;
+  // The operator is reading the confirm when another session writes the file: the shown diff no longer holds.
+  const ctx = { hasUI: true, ui: { confirm: async () => (writeFileSync(path, JSON.stringify(other)), true) } };
+  await assert.rejects(
+    toolByName("dispatch_trigger_add").execute("id", { kind: "label", flow: "frontend-fix", labels: ["pi:fix"] }, undefined, undefined, ctx),
+    /changed after this change was built from it/,
+  );
+  assert.deepEqual(read(path), other, "nothing of the stale confirm was written over the other session's change");
 });
 
 test("dispatch_trigger_add: a cron entry carries an approved model/maxTurns override", async () => {
@@ -1285,6 +1305,21 @@ test("a revert (operator-revert) skips the interval and the step, and is still r
     assert.deepEqual(planOf(redis).allocations, { _other: 0, platform: 50 * M, shop: 50 * M }, "the whole way back, no step");
     assert.equal(planOf(redis).writer, "operator-revert");
     assert.equal(auditRows(files).at(-1).outcome, "reverted");
+  });
+});
+
+// Issue #642: the allocation writes land in the console's audit chain as the panel too, beside their own audit file.
+test("dispatch_priorities_set and dispatch_envelope_set are audited as the panel in the deployment's console-audit chain (#642)", async () => {
+  await withAllocation(async ({ files }) => {
+    const { ctx } = headless();
+    await toolByName("dispatch_priorities_set").execute("id", { projects: [{ id: "shop", weight: 3 }, { id: "platform", weight: 1 }] }, undefined, undefined, ctx);
+    const confirm = toolCtx({ answer: true });
+    await toolByName("dispatch_envelope_set").execute("id", { totalUsd: "120" }, undefined, undefined, confirm.ctx);
+    const dir = join(files.logs, "console-audit");
+    const rows = readFileSync(join(dir, readdirSync(dir).find((n) => n.endsWith(".jsonl"))), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.actor.role]), [["priorities-set", "ok", "panel"], ["envelope-set", "ok", "panel"]]);
+    assert.equal(rows[1].target, files.envelope);
+    assert.notEqual(rows[1].beforeDigest, rows[1].afterDigest, "the envelope row carries the digests the confirm judged");
   });
 });
 

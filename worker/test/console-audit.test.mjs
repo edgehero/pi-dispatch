@@ -527,3 +527,62 @@ test("readConsoleAudit: a file newer than the cursor is never opened, and one th
 	assert.deepEqual(res.rows.map(label), ["2026-10:broken:0", 2, 1]);
 	assert.equal(res.rows[0].reason, "EIO");
 });
+
+// Issue #642: the panel's writes and the console's action table add three optional fields to a write row and a new actor
+// role. The action vocabulary stays closed; `kind` only names which write.
+test("a write row takes optional kind, reserve and count, in reading order, and the panel role; rows without them still verify", () => {
+	const { logsDir, audit, clock, lines } = setup();
+	audit.append(row());
+	clock.set(T0 + 1000);
+	const panel = { name: "rob", role: "panel", session: null };
+	const stored = audit.append({ actor: panel, action: "write", kind: "trigger-add", target: "/d/triggers.json", outcome: "ok", reserve: 0, count: 3, ticket: "0123456789ab" });
+	assert.deepEqual(Object.keys(stored), ["at", "seq", "prev", "actor", "action", "kind", "target", "outcome", "reserve", "count", "ticket"]);
+	assert.equal(stored.actor.role, "panel");
+	assert.equal(stored.reserve, 0, "a reserve of zero is a figure (a zero-rated model), not an absence");
+	clock.set(T0 + 2000);
+	const plain = audit.append({ actor: panel, action: "write", target: "/d/settings.json", outcome: "failed", reason: "rejected" });
+	assert.equal("kind" in plain || "reserve" in plain || "count" in plain, false, "absent stays absent");
+	assert.equal(lines("2026-10").length, 3);
+	assert.deepEqual(verifyConsoleAudit({ logsDir }), { ok: true, rows: 3, startsAt: null });
+});
+
+test("a malformed kind, reserve or count throws and writes nothing; the action vocabulary stays closed", () => {
+	const { dir, audit } = setup();
+	const bad = [
+		{ kind: "Trigger-Add" },
+		{ kind: "x".repeat(41) },
+		{ kind: "a b" },
+		{ kind: 7 },
+		{ kind: "" },
+		{ reserve: -1 },
+		{ reserve: 1.5 },
+		{ reserve: "10" },
+		{ reserve: Number.MAX_SAFE_INTEGER + 1 },
+		{ count: 0 },
+		{ count: 2.5 },
+		{ count: "3" },
+	];
+	for (const extra of bad) assert.throws(() => audit.append(row({ action: "write", ...extra })), /kind|reserve|count/, JSON.stringify(extra));
+	assert.throws(() => audit.append(row({ action: "trigger-add" })), /unknown action/, "a kind is never an action");
+	assert.equal(fs.existsSync(join(dir, "2026-10.jsonl")), false);
+	// The edges that ARE allowed.
+	audit.append(row({ action: "write", kind: "a", reserve: Number.MAX_SAFE_INTEGER, count: 1 }));
+	audit.append(row({ action: "write", kind: "x".repeat(40) }));
+});
+
+test("verify names a row whose kind, reserve or count is not one the console writes", () => {
+	for (const field of [{ kind: "BAD KIND" }, { reserve: -5 }, { count: 0 }]) {
+		const { logsDir, dir, audit, clock } = setup();
+		audit.append(row());
+		clock.set(T0 + 1000);
+		audit.append(row({ action: "write", kind: "pause-windows" }));
+		const path = join(dir, "2026-10.jsonl");
+		const rows = fs.readFileSync(path, "utf8").split("\n").filter((l) => l !== "");
+		// Forge the LAST row in place: no successor breaks, so only the field check can see it.
+		rows[1] = JSON.stringify({ ...JSON.parse(rows[1]), ...field });
+		fs.writeFileSync(path, `${rows.join("\n")}\n`);
+		const res = verifyConsoleAudit({ logsDir });
+		assert.equal(res.ok, false, JSON.stringify(field));
+		assert.deepEqual(res.broken, { file: "2026-10.jsonl", line: 2, reason: "the row's kind, reserve or count is not one the console writes" });
+	}
+});
