@@ -14,7 +14,8 @@
  *      from the data, so the same data draws the same bytes. `renderPage` places each panel in
  *      `<section id="p-…" data-panel>`; `pagePanels` returns the same panels' inner HTML for the stream to swap in.
  *
- * THE ROLE RULE lives in the panels (`panels.mjs` header): the operator alone sees a failure reason and the audit log.
+ * THE ROLE RULE lives in the panels (`panels.mjs` header): the operator alone sees a failure reason and the audit log,
+ * and (issue #642) the action controls, which a read-only console draws for nobody.
  * Data is read once for both roles, and the role decides only what is drawn, so a stream must be rendered per role.
  */
 import { CONSOLE_AUDIT_CURSOR_RE } from "@edgehero/pi-dispatch/console-audit";
@@ -345,7 +346,7 @@ export async function loadPageData(name, query, deps = {}) {
 /** What a panel renderer is handed. */
 function viewOf(name, ctx) {
   const data = ctx?.data ?? {};
-  return { page: name, data, role: ctx?.session?.role ?? null, query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now };
+  return { page: name, data, role: ctx?.session?.role ?? null, readOnly: Boolean(ctx?.readOnly), query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now };
 }
 
 /** Each panel of screen `name` as `{ id, fragment }`. */

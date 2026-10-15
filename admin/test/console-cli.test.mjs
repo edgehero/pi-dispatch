@@ -4,7 +4,7 @@ import { request } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { cachedPerWindow, INSIGHTS_CACHE_MS, readSideOf, runCli, USAGE } from "../src/console/cli.mjs";
+import { cachedPerWindow, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, readSideOf, RESERVE_ENV_KEYS, runCli, USAGE } from "../src/console/cli.mjs";
 import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
@@ -475,6 +475,40 @@ test("readSideOf: this shell's environment outranks the deployment .env (panelEn
   assert.equal(side.paths.triggersPath, join(dir, "file-triggers.json"), "the .env fills what the shell leaves unset");
   assert.match(String(side.notice), /PI_LOGS_DIR/, "the disagreement is said by name");
   assert.ok(!String(side.notice).includes("/shell/logs") && !String(side.notice).includes("file-logs"), "never by value");
+});
+
+test("readSideOf: the keys a reserve estimate reads (PI_ALLOWED_MODELS, PI_MODEL_ENDPOINTS_FILE, ...) come from the deployment .env as the worker reads them", async () => {
+  const [readModel, serviceEnv, forges] = await Promise.all([import("../src/read-model.mjs"), import("@edgehero/pi-dispatch/service-env"), import("@edgehero/pi-dispatch/forges")]);
+  const dir = tempDir("console-side-");
+  writeFileSync(join(dir, ".env"), "PI_ALLOWED_MODELS=ollama/qwen3\nPI_MODEL_ENDPOINTS_FILE=eps.json\nPI_PROVIDER=ollama\nPI_MODEL=qwen3\n", { mode: 0o600 });
+  const side = readSideOf({ m: { readModel, serviceEnv, forges }, env: { HOME: dir }, dir, fs: await import("node:fs"), platform: process.platform, uid: process.geteuid?.() });
+  for (const [k, v] of Object.entries({ PI_ALLOWED_MODELS: "ollama/qwen3", PI_MODEL_ENDPOINTS_FILE: "eps.json", PI_PROVIDER: "ollama", PI_MODEL: "qwen3" })) assert.equal(side.env[k], v, k);
+  assert.ok(RESERVE_ENV_KEYS.includes("PI_MAX_COST_USD"));
+});
+
+test("endpointSnapshotFn: the worker's endpoint snapshot, so a job that can only call a declared, free local model previews $0, and the full cap without one", async () => {
+  const m = await loadModules();
+  assert.equal(typeof m.modelEndpoints.loadModelEndpoints, "function", "loadModules loads the worker's endpoint loader");
+  assert.equal(typeof m.modelCatalog.builtinModel, "function", "and the builtin catalog's cost lookup");
+  const fs = await import("node:fs");
+  const { estimateReserve } = await import("@edgehero/pi-dispatch/reserve-estimate");
+  const dir = tempDir("console-eps-");
+  const overlay = join(dir, "overlay");
+  mkdirSync(overlay);
+  writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { ollama: { baseUrl: "http://host.docker.internal:11434/v1", api: "openai-completions", models: [{ id: "qwen3" }] } } }));
+  const paths = { valkeyUrl: "redis://127.0.0.1:6379/0", globalPiDir: overlay };
+  const job = { kind: "github", provider: "ollama", model: "qwen3", maxCostUsd: "1.5" };
+  const none = endpointSnapshotFn({ m, env: {}, paths, dir, fs })();
+  assert.deepEqual(none, { endpoints: [], models: null }, "no declaration: no endpoint, and the overlay is not even read (the worker's rule)");
+  assert.equal(estimateReserve(job, { modelEndpoints: none }).dollarsMicros, 1_500_000, "not declared local: the full cap");
+  writeFileSync(join(dir, "model-endpoints.json"), JSON.stringify({ version: 1, endpoints: [{ id: "ollama", host: "host.docker.internal", port: 11434, slots: 2 }] }));
+  const snap = endpointSnapshotFn({ m, env: {}, paths, dir, fs })();
+  assert.equal(snap.endpoints.length, 1);
+  assert.deepEqual(estimateReserve(job, { modelEndpoints: snap, builtinModel: m.modelCatalog.builtinModel }), { slots: 1, dollarsMicros: 0, capMicros: 1_500_000, zeroRated: true });
+  // PI_MODEL_ENDPOINTS_FILE names another file, relative to the deployment folder, as the worker resolves it.
+  writeFileSync(join(dir, "eps.json"), JSON.stringify({ version: 1, endpoints: [] }));
+  assert.deepEqual(endpointSnapshotFn({ m, env: { PI_MODEL_ENDPOINTS_FILE: "eps.json" }, paths, dir, fs })().endpoints, []);
+  assert.equal(endpointSnapshotFn({ m: {}, env: {}, paths, dir, fs }), null, "no loader loaded: no snapshot");
 });
 
 test("the console bundle does not reach the pi runtime (@earendil-works/pi-coding-agent), directly or through any import", async (t) => {

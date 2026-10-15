@@ -18,18 +18,21 @@
  * answered 401 (and audited) before anyone asks which role it lacks.
  *
  * EVERY COLLABORATOR IS INJECTED: the token reader, the session store and its cookie helpers, the confirm tickets, the
- * login-code consumer, the audit log and the pause-windows writer. This module imports none of them, so its tests run
+ * login-code consumer, the audit log, the pause-windows writer and (issue #642) the action deps. This module imports none of them, so its tests run
  * on small fakes and `cli.mjs` is the one place the real ones are wired.
+ *
+ * THE WRITES ARE A TABLE (issue #642). Every change the console can make is an entry of `ACTIONS` (`actions.mjs`), and
+ * `actionRoutes` makes its two routes; one preview/confirm pipeline there holds the ticket, `expect`, audit-first and
+ * compensating-row logic for all of them. After a write lands it pokes the live hub, so open tabs update at once.
  *
  * NOTHING SECRET IS LOGGED OR ECHOED. The request log is `METHOD /path status`: the path only (the one-time code rides
  * in the fragment, which never reaches a request line), never a query, a header value, a cookie or a body. Audit rows
  * carry names, roles, a session digest and file digests, never a token, a code or a payload.
  */
-import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { createServer } from "node:http";
 import { readRawBody } from "@edgehero/pi-dispatch/http-body";
-import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
+import { ACTIONS, actionNamed, confirmAction, previewAction } from "./actions.mjs";
 import { contentTypeRefusal, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
 import { loginCodePage, loginPage } from "./html.mjs";
@@ -65,18 +68,12 @@ const EVENT_ID_RE = /^[0-9a-f]{1,16}-[0-9]{1,15}$/;
 /** Unauthenticated refusals written one row each, per minute (burst twice that); the rest are counted. */
 export const REFUSAL_ROWS_PER_MINUTE = 60;
 
-/** The fields a pause window may carry (`INT-PAUSE-WINDOWS-FILE-CONTRACT`); a preview refuses any other. */
-const PAUSE_WINDOW_KEYS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
-
-/** The confirm-ticket action name of the one reference write in #640. */
+/** The confirm-ticket action name of #640's reference write, now the `pause-windows` entry of `ACTIONS`. */
 export const PAUSE_WINDOWS_ACTION = "pause-windows";
 
 const ANONYMOUS = Object.freeze({ name: "anonymous", role: "none", session: null });
 // One-time codes are base64url(32 bytes), 43 characters; anything far off that is refused before it is hashed.
 const CODE_RE = /^[A-Za-z0-9_-]{16,128}$/;
-
-const sha256 = (text) => createHash("sha256").update(text).digest("hex");
-const digestOf = (text) => (text === null ? null : sha256(text));
 
 // ---- responses ----
 
@@ -187,124 +184,6 @@ async function postLogout(ctx) {
   return sendJson(res, 200, { ok: true }, { "set-cookie": deps.cookies.clearSessionCookie() });
 }
 
-/** The pause-windows file as it is now: `{text}` (null when absent) or `{refusal}`. */
-function readSnapshot(fs, path) {
-  try {
-    return { text: fs.readFileSync(path, "utf8") };
-  } catch (e) {
-    if (e?.code === "ENOENT") return { text: null };
-    return { refusal: `${path} cannot be read (${typeof e?.code === "string" ? e.code : "error"}); nothing was changed` };
-  }
-}
-
-/**
- * Preview a pause-windows change: validate it through the loader's own parser, compute both digests, and bind the
- * result to a single-use ticket carrying the file AS READ NOW (`expect`). Nothing is written here.
- *
- * `afterText` is built exactly as `writePauseWindows` serializes (`JSON.stringify({windows}, null, 2)` plus a newline),
- * which is what makes `afterDigest` the digest of the file the confirm writes; a test holds the two equal against the
- * real writer, so a change to its serialization fails there rather than drifting the audit's digests.
- */
-async function postPausePreview(ctx) {
-  const { deps, body, res, session } = ctx;
-  if (!Array.isArray(body.windows)) return sendError(res, 400, "send {\"windows\": [...]} with the whole new list of pause windows");
-  // Only the file's own fields, each a plain value, before anything serializes the list: an unknown key would be kept
-  // in the file for some later reader to trust, and a deeply nested value would cost a stack on the way to the parser.
-  for (const [i, w] of body.windows.entries()) {
-    if (w === null || typeof w !== "object" || Array.isArray(w)) return sendError(res, 400, `pause window at index ${i} is not an object; nothing was changed`);
-    for (const [key, value] of Object.entries(w)) {
-      if (!PAUSE_WINDOW_KEYS.includes(key)) return sendError(res, 400, `pause window at index ${i} has a field this file does not take (${PAUSE_WINDOW_KEYS.join(", ")} only); nothing was changed`);
-      const plain = typeof value === "string" || (key === "days" && Array.isArray(value) && value.every((d) => typeof d === "string"));
-      if (!plain) return sendError(res, 400, `pause window at index ${i}: ${key} must be ${key === "days" ? "a list of weekday names" : "a string"}; nothing was changed`);
-    }
-  }
-  const path = deps.config.pauseWindowsPath;
-  const snap = readSnapshot(deps.fs, path);
-  if (snap.refusal) return sendError(res, 409, snap.refusal);
-  let before = [];
-  try {
-    const raw = JSON.parse(snap.text ?? "null");
-    if (Array.isArray(raw?.windows)) before = raw.windows;
-  } catch {
-    // An unparseable file reads as empty, as writePauseWindows reads it; the write below repairs it.
-  }
-  const afterText = `${JSON.stringify({ windows: body.windows }, null, 2)}\n`;
-  try {
-    parsePauseWindows(afterText, path);
-  } catch (e) {
-    return sendError(res, 400, `${e?.message ?? "the pause windows are not valid"}; nothing was changed`);
-  }
-  const beforeDigest = digestOf(snap.text);
-  const afterDigest = digestOf(afterText);
-  if (beforeDigest === afterDigest) return sendJson(res, 200, { unchanged: true, before, after: body.windows });
-  const { ticket } = deps.tickets.issue({
-    sessionId: session.id,
-    action: PAUSE_WINDOWS_ACTION,
-    target: path,
-    payload: { windows: body.windows },
-    expect: [{ path, text: snap.text }],
-    beforeDigest,
-    afterDigest,
-  });
-  return sendJson(res, 200, { ticket, before, after: body.windows, beforeDigest, afterDigest });
-}
-
-/**
- * Confirm a previewed pause-windows change. AUDIT, THEN WRITE, so no write can land unaudited:
- *
- *   - The audit append is synchronous and throws on failure; it runs BEFORE `writePauseWindows`, and a throw answers
- *     500 with nothing written. Appending after the rename was rejected: a crash or a full disk between the rename
- *     and the append would leave a change on disk that the log never saw, which is the one outcome the log exists
- *     to rule out.
- *   - The cost of that order: the `ok` row is written before the outcome is known. When the writer then refuses (the
- *     file changed after the preview, so `expect` no longer matches) or throws, a compensating `failed` row with the
- *     same `ticket` digest follows. A reader of the log takes the LAST row for a ticket as its outcome. If that second
- *     append also fails, the log line says so (the residual: an `ok` row for a write that did not land, the safe
- *     direction to be wrong in).
- *
- * The ticket is single use and bound to this session (`confirm.mjs`); `expect` makes the write refuse when the file is
- * not what the preview showed.
- */
-async function postPauseConfirm(ctx) {
-  const { deps, body, res, session } = ctx;
-  const ticket = typeof body.ticket === "string" ? body.ticket : "";
-  const actor = actorOf(ctx);
-  const redeemed = ticket === "" ? { refusal: "no ticket was sent" } : deps.tickets.redeem({ sessionId: session.id, ticket, action: PAUSE_WINDOWS_ACTION });
-  if (!redeemed.entry) {
-    ctx.record({ actor, action: "write", target: deps.config.pauseWindowsPath, outcome: "refused", reason: String(redeemed.refusal ?? "ticket refused") });
-    return sendError(res, 409, `${redeemed.refusal ?? "that confirmation is not valid"}; preview the change again`);
-  }
-  const entry = redeemed.entry;
-  const row = { actor, action: "write", target: entry.target, beforeDigest: entry.beforeDigest, afterDigest: entry.afterDigest, ticket: sha256(ticket).slice(0, 12) };
-  try {
-    deps.audit.append({ ...row, outcome: "ok" });
-  } catch (e) {
-    deps.log(`console: audit append failed (${e?.code ?? "error"}), so the pause-windows write was refused`);
-    return sendError(res, 500, "the audit log could not be written, so nothing was changed; check the console's log directory");
-  }
-  const compensate = (reason) => {
-    try {
-      deps.audit.append({ ...row, outcome: "failed", reason });
-    } catch (e) {
-      deps.log(`console: audit append failed (${e?.code ?? "error"}) after a pause-windows write did not land; the log's last row for ticket ${row.ticket} says ok and is wrong`);
-    }
-  };
-  let result;
-  try {
-    result = deps.writePauseWindows({ pauseWindowsPath: entry.target, mutate: () => entry.payload.windows.map((w) => ({ ...w })), fs: deps.fs, expect: entry.expect });
-  } catch (e) {
-    compensate(`the write threw (${e?.code ?? "error"})`);
-    deps.log(`console: pause-windows write threw (${e?.code ?? "error"})`);
-    return sendError(res, 500, "the pause-windows file could not be written; nothing was changed");
-  }
-  if (!result?.ok) {
-    const why = String(result?.invalid ?? "the write was refused");
-    compensate(why);
-    return sendError(res, 409, why);
-  }
-  return sendJson(res, 200, { ok: true, beforeDigest: entry.beforeDigest, afterDigest: entry.afterDigest });
-}
-
 // ---- pages, state and the live stream (issue #641) ----
 
 /** `{query}` for page `name` from the request's query string, or null after answering 400. */
@@ -406,6 +285,18 @@ function pageRoutes(PAGES) {
 }
 
 /**
+ * Two POST routes per console action (issue #642), from the action table itself, so an action cannot exist without
+ * its auth and its write guards, and the route tests that iterate `ROUTES` reach every one: `/api/act/<name>/preview`
+ * and `/api/act/<name>/confirm`, operator only, writes.
+ */
+function actionRoutes(actions) {
+  return actions.flatMap((a) => [
+    { method: "POST", path: `/api/act/${a.name}/preview`, auth: "operator", write: true, action: a.name, handler: (ctx) => previewAction(ctx, a) },
+    { method: "POST", path: `/api/act/${a.name}/confirm`, auth: "operator", write: true, action: a.name, handler: (ctx) => confirmAction(ctx, a) },
+  ]);
+}
+
+/**
  * The route table. `write: true` means: Origin and Sec-Fetch-Site checked, JSON only, body read and bounded, refusals
  * audited. `readOnlyExempt` is for signing in and out only: a read-only console still has to let people in.
  */
@@ -432,8 +323,11 @@ export const ROUTES = Object.freeze([
   { method: "GET", path: "/api/state", auth: "viewer", write: false, handler: getState },
   // `noHead`: a HEAD would take a stream slot and hold it with no body ever sent, so it is 405 before anything runs.
   { method: "GET", path: "/api/events", auth: "viewer", write: false, noHead: true, handler: getEvents },
-  { method: "POST", path: "/api/pause-windows/preview", auth: "operator", write: true, handler: postPausePreview },
-  { method: "POST", path: "/api/pause-windows/confirm", auth: "operator", write: true, handler: postPauseConfirm },
+  // #640's reference write keeps its paths, as aliases of the `pause-windows` action (DES-OPERATOR-CONSOLE): the same
+  // handler, the same ticket action, so a ticket from either path redeems on either.
+  { method: "POST", path: "/api/pause-windows/preview", auth: "operator", write: true, action: PAUSE_WINDOWS_ACTION, handler: (ctx) => previewAction(ctx, actionNamed(PAUSE_WINDOWS_ACTION)) },
+  { method: "POST", path: "/api/pause-windows/confirm", auth: "operator", write: true, action: PAUSE_WINDOWS_ACTION, handler: (ctx) => confirmAction(ctx, actionNamed(PAUSE_WINDOWS_ACTION)) },
+  ...actionRoutes(ACTIONS),
 ].map((route) => Object.freeze(route)));
 
 /**
@@ -534,7 +428,7 @@ async function dispatch(req, res, deps) {
   if (!found) return sendError(res, 404, "there is no such page on this console");
   if (found.allow) return sendError(res, 405, `${method} is not accepted here; use ${found.allow.join(" or ")}`, { allow: found.allow.join(", ") });
   const route = found.route;
-  const ctx = { req, res, deps, route, session: null, body: null, record, searchParams };
+  const ctx = { req, res, deps, route, session: null, body: null, record, searchParams, json: (status, body, headers) => sendJson(res, status, body, headers), actor: () => actorOf(ctx) };
 
   if (route.write) {
     const checks = [
@@ -566,7 +460,13 @@ async function dispatch(req, res, deps) {
 
   if (route.write) {
     const read = await readBody(req);
-    if (!read.body) return sendError(res, read.status, read.sentence, read.status === 413 ? { connection: "close" } : {});
+    if (!read.body) {
+      // Audited like every other refusal of a write: the signed-in session's own row (a valid session is needed, so no
+      // anonymous flood), or a rate-limited anonymous one for a sign-in. The row names the fixed sentence, never a byte
+      // of the body.
+      record({ actor: actorOf(ctx), action: "refused", target: route.path, outcome: "refused", reason: `body: ${read.sentence}` });
+      return sendError(res, read.status, read.sentence, read.status === 413 ? { connection: "close" } : {});
+    }
     ctx.body = read.body;
   }
   return route.handler(ctx);
@@ -583,6 +483,9 @@ async function dispatch(req, res, deps) {
  *   - `tickets`: `issue({...})` -> `{ticket}`, `redeem({sessionId, ticket, action})` -> `{entry}` | `{refusal}`.
  *   - `audit.append(row)`: synchronous, throws on failure.
  *   - `writePauseWindows({pauseWindowsPath, mutate, fs, expect})` -> `{ok}` | `{invalid}`.
+ *   - issue #642: `actionDeps`, what the action table's entries read and write with (`actions.mjs`): `{rm, plans,
+ *     paths, env, fleet, killSwitchPlanFn, urlShown, envelopeProblem, host}`. An action whose needs are missing answers
+ *     503 at its preview; the pause-windows write needs none of it.
  *   - `limiter` (default: `makeLoginLimiter({now})`), `log(line)`, `fs`, `now`.
  *   - issue #641: `pages` (default: `pages.mjs`; its `PAGES` builds the routes, the rest renders), `pageDeps` (what
  *     `loadPageData` reads with: `{fleet, insights, audit, env, now}`), `hub` (`live.mjs`'s `makeLiveHub`), and
@@ -605,6 +508,7 @@ export function createConsoleServer({
   findToken,
   consumeLoginCode,
   writePauseWindows,
+  actionDeps = null,
   pages = realPages,
   pageDeps = null,
   hub = null,
@@ -613,7 +517,7 @@ export function createConsoleServer({
 }) {
   const limits = { ...SERVER_LIMITS, streamsTotal: STREAMS_TOTAL_MAX, streamsOperatorReserve: STREAMS_OPERATOR_RESERVE, ...limitsOverride };
   const refusalRows = makeLoginLimiter({ now, perMinute: REFUSAL_ROWS_PER_MINUTE, burst: 2 * REFUSAL_ROWS_PER_MINUTE });
-  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, consumeLoginCode, writePauseWindows, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, limits, streams: { open: 0 } };
+  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, limits, streams: { open: 0 } };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
   const server = createServer({ headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval }, (req, res) => {

@@ -36,9 +36,15 @@ test("issue returns only a random ticket, and redeem gives back exactly what was
   const { ticket } = t.issue(preview());
   assert.match(ticket, /^[A-Za-z0-9_-]{43}$/);
   const { entry } = t.redeem({ sessionId: "s1", ticket, action: "pause-windows" });
-  assert.deepEqual(entry, { ...preview(), reserve: null, issuedAt: T0, expiresAt: T0 + 300000 });
+  assert.deepEqual(entry, { ...preview(), reserve: null, targets: null, count: null, issuedAt: T0, expiresAt: T0 + 300000 });
   const paid = t.issue(preview({ reserve: { micros: 5 } }));
   assert.deepEqual(t.redeem({ sessionId: "s1", ticket: paid.ticket, action: "pause-windows" }).entry.reserve, { micros: 5 });
+  // Issue #642: a bulk action's job list rides the ticket too, so the confirm acts on exactly the previewed jobs.
+  const bulk = t.issue(preview({ targets: [{ jobId: "j1", attemptsMade: 1, finishedOn: 5 }] }));
+  assert.deepEqual(t.redeem({ sessionId: "s1", ticket: bulk.ticket, action: "pause-windows" }).entry.targets, [{ jobId: "j1", attemptsMade: 1, finishedOn: 5 }]);
+  // A resume's waiting-job count rides it too, for the audit row.
+  const resume = t.issue(preview({ count: 3 }));
+  assert.equal(t.redeem({ sessionId: "s1", ticket: resume.ticket, action: "pause-windows" }).entry.count, 3);
   assert.match(makeConfirmTickets().issue(preview()).ticket, /^[A-Za-z0-9_-]{43}$/);
 });
 

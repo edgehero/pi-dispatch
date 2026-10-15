@@ -182,3 +182,16 @@ test("the stylesheet is the insights CSS on tokens, with a light override and SV
   assert.deepEqual(Object.keys(LIGHT_THEME).sort(), Object.keys(DARK_THEME).sort(), "every dark role has a light value");
   assert.match(CONSOLE_CSS, /body\{background:var\(--pd-canvas\)/, "the body background is explicit");
 });
+
+test("the audit page names each write's kind, a paid action's reserve and a bulk row's size (issue #642)", async () => {
+  const rows = [
+    { seq: 2, at: "2026-10-08T00:00:01Z", actor: { name: "ops", role: "operator" }, action: "write", kind: "run-rerun", target: "gh-1", outcome: "ok", reserve: 2_500_000 },
+    { seq: 3, at: "2026-10-08T00:00:02Z", actor: { name: "pi", role: "panel" }, action: "write", kind: "failed-retry-all", target: "gh-2", outcome: "ok", count: 3 },
+  ];
+  const html = (await pagePanels("audit", ctxOf("operator", { audit: { rows, next: null } }))).map((p) => p.html).join("");
+  assert.match(html, /write <span class="mono">run-rerun<\/span>/);
+  assert.match(html, /reserve \$2\.50/);
+  assert.match(html, /write <span class="mono">failed-retry-all<\/span>/);
+  assert.match(html, /\(one of 3\)/);
+  assert.match(html, /pi \(panel\)/);
+});

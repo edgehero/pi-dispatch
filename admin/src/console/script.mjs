@@ -21,7 +21,19 @@
  *     the texts in `#insights-tips` (escaped by the server). Each marked element gets its text as an SVG `<title>`
  *     child (or a `title` attribute off SVG), set through `textContent`, so a tooltip is the browser's own and no
  *     markup is built here.
- * Server text is shown with `textContent`, never as markup; the one `innerHTML` is the panel swap above.
+ *   - the ACTION FORMS (issue #642; `form[data-action]`, drawn for an operator only): one handler, delegated from the
+ *     document so a form a live panel swapped in works too. Submit reads the form's named controls into JSON (`data-type`
+ *     says how: `int`, `json`, `list`, a checkbox is `true`; a blank control is left out), posts it to
+ *     `/api/act/<data-action>/preview`, and puts the response's `diffHtml` (server-rendered and escaped, like a panel)
+ *     into THAT form's own `[data-preview]` element and nowhere else, with a Confirm and a Cancel button built here. The
+ *     ticket stays in this closure; Confirm posts it to `/api/act/<name>/confirm`. A 409 shows the server's refusal
+ *     (the change happened since the preview, or was refused), which says to preview again; one that does not gets
+ *     that instruction added once. Success reloads the page; a bulk action with jobs refused shows
+ *     each job's result first, as text, with a button to reload.
+ *   - while a form is in use (its preview open, a field typed into or focused, its editor open), a live panel holding it
+ *     is NOT swapped, so an update cannot wipe a half-made change; the page reloads after a confirm anyway.
+ * Server text is shown with `textContent`, never as markup; the two `innerHTML` writes are the panel swap and the
+ * preview swap above, both of server-escaped fragments into elements the server marked for them.
  */
 export const CONSOLE_SCRIPT = `"use strict";
 (function () {
@@ -95,6 +107,115 @@ export const CONSOLE_SCRIPT = `"use strict";
     }
   }
   applyTips();
+  // ---- the action forms (issue #642) ----
+  function inUse(panel) {
+    if (panel.querySelector("[data-preview]:not([hidden])")) return true;
+    if (panel.querySelector("details[open] form[data-action]")) return true;
+    var active = document.activeElement;
+    if (active && panel.contains(active) && active.closest && active.closest("form[data-action]")) return true;
+    var fields = panel.querySelectorAll("form[data-action] input:not([type=hidden]), form[data-action] textarea");
+    for (var i = 0; i < fields.length; i++) if (fields[i].value !== fields[i].defaultValue) return true;
+    return false;
+  }
+  function bodyOf(form) {
+    var out = {};
+    var els = form.elements;
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!el.name || el.disabled) continue;
+      if (el.type === "checkbox") { if (el.checked) out[el.name] = true; continue; }
+      var v = el.value;
+      if (v === "") continue;
+      var t = el.getAttribute("data-type");
+      if (t === "int") {
+        var n = Number(v);
+        if (!isFinite(n)) throw new Error(el.name + " must be a number");
+        out[el.name] = n;
+      } else if (t === "json") {
+        try { out[el.name] = JSON.parse(v); } catch (e) { throw new Error(el.name + " is not valid JSON"); }
+      } else if (t === "list") {
+        out[el.name] = v.split(/[\\s,]+/).filter(function (w) { return w !== ""; });
+      } else {
+        out[el.name] = v;
+      }
+    }
+    return out;
+  }
+  function show(area, text) {
+    area.hidden = false;
+    area.textContent = text;
+  }
+  function button(label) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    return b;
+  }
+  function errorOf(r) {
+    return (r.body && typeof r.body.error === "string") ? r.body.error : "The console refused the request (" + r.status + ").";
+  }
+  function showResults(area, results) {
+    area.textContent = "";
+    var list = document.createElement("ul");
+    for (var i = 0; i < results.length; i++) {
+      var li = document.createElement("li");
+      var r = results[i] || {};
+      li.textContent = String(r.jobId) + ": " + (r.ok ? "done" : "not done, " + String(r.reason || "refused"));
+      list.appendChild(li);
+    }
+    area.appendChild(list);
+    var again = button("Reload");
+    again.addEventListener("click", function () { location.reload(); });
+    area.appendChild(again);
+    area.hidden = false;
+  }
+  document.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (!form || !form.matches || !form.matches("form[data-action]")) return;
+    ev.preventDefault();
+    var action = form.getAttribute("data-action") || "";
+    var area = form.querySelector("[data-preview]");
+    if (!/^[a-z0-9-]{1,40}$/.test(action) || !area) return;
+    var body;
+    try { body = bodyOf(form); } catch (e) { show(area, e.message); return; }
+    show(area, "Previewing...");
+    post("/api/act/" + action + "/preview", body).then(function (r) {
+      if (!r.ok) { show(area, errorOf(r)); return; }
+      if (r.body.unchanged) { show(area, (r.body.summary || []).join(" ") || "No change."); return; }
+      var ticket = r.body.ticket;
+      area.innerHTML = typeof r.body.diffHtml === "string" ? r.body.diffHtml : "";
+      area.hidden = false;
+      var bar = document.createElement("div");
+      bar.className = "confirm";
+      var yes = button("Confirm");
+      var no = button("Cancel");
+      bar.appendChild(yes);
+      bar.appendChild(no);
+      area.appendChild(bar);
+      no.addEventListener("click", function () {
+        area.textContent = "";
+        area.hidden = true;
+      });
+      yes.addEventListener("click", function () {
+        yes.disabled = true;
+        no.disabled = true;
+        post("/api/act/" + action + "/confirm", { ticket: ticket }).then(function (c) {
+          if (c.ok) {
+            var results = c.body && c.body.results;
+            var refused = false;
+            if (results && results.length) for (var i = 0; i < results.length; i++) if (results[i] && results[i].ok === false) refused = true;
+            if (refused) showResults(area, results);
+            else location.reload();
+          } else if (c.status === 409) {
+            var why = errorOf(c);
+            show(area, /preview/i.test(why) ? why : why + " Preview the change again.");
+          } else {
+            show(area, errorOf(c));
+          }
+        }, function () { show(area, "The console could not be reached."); });
+      });
+    }, function () { show(area, "The console could not be reached."); });
+  });
   var live = document.body ? document.body.getAttribute("data-live") : null;
   if (live && typeof EventSource === "function") {
     var query = document.body.getAttribute("data-query") || "";
@@ -118,6 +239,7 @@ export const CONSOLE_SCRIPT = `"use strict";
       if (!msg || typeof msg.id !== "string" || typeof msg.html !== "string") return;
       var el = document.getElementById(msg.id);
       if (!el || !el.hasAttribute("data-panel")) return;
+      if (inUse(el)) return;
       el.innerHTML = msg.html;
       mark("live", "on");
     });
