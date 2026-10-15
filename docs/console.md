@@ -7,9 +7,9 @@ same validated functions, so neither can do anything the other would refuse.
 It shows the whole deployment, live: what is running and queued on every host, every run with filters, the runs
 waiting for an answer, spend and insights for a range of days, the schedules, the configuration and the console's own
 audit log. Open pages update themselves about once a second while you watch, and `/api/state` gives a script the same
-snapshot as JSON. It has one write so far, the [pause windows](pause-windows.md), with a preview and a confirm; the
-other writes (answering a parked run, retrying a failed job, editing the configuration) arrive with issue #642, and
-live logs and transcripts with #643.
+snapshot as JSON. It can also change all of it: cancel, retry, remove and re-run jobs, answer a parked run, pause
+the fleet or one queue, and edit the configuration, each with a preview and a confirm ([Actions](#actions)). Live
+logs and transcripts arrive with #643.
 
 The first half of this page is about access, because the console is the most powerful surface after a shell on the
 host. [The screens](#the-screens) starts below that.
@@ -146,8 +146,8 @@ same residual every guarded file has ([`SECURITY.md`](../SECURITY.md)).
 
 A write is two steps. The preview shows the change as a diff; the confirm applies it. The confirm carries only a
 ticket the preview handed out, which works once, for your session, for 5 minutes, and only for that change: if the
-file changed after the preview (the panel, another browser, a hand edit), the confirm is refused and nothing is
-written. Preview again.
+file changed after the preview (the panel, another browser, a hand edit), or a job is no longer as the preview showed
+it, the confirm is refused and nothing is written. Preview again. [Actions](#actions) lists every write.
 
 Writes are refused (403) when:
 
@@ -158,15 +158,26 @@ Writes are refused (403) when:
 
 Each such refusal is a line in the audit log. A refused request that carried no session is written one line each up
 to 60 a minute; past that, refusals are counted and the count is written as one line, so whoever can reach the port
-cannot grow the log without bound. A body too large (413) or not valid JSON (400), and a change the preview refuses
-as invalid, are answered and not audited: nothing reached a write.
+cannot grow the log without bound. A signed-in write whose body is too large (413) or not valid JSON (400) is a line
+too, with a fixed reason and nothing of the body; a change the preview refuses as invalid is answered and not
+audited, since nothing reached a write.
 
 ## The audit log
 
 Every write, every write refused by a guard (as above), every sign-in, failed sign-in, used link and sign-out, every
 token change and every `serve` start is a line in `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl`. A line names the token's person and role, a
-short digest of the session, the action, its target and its outcome, and for a write the digests of the file before
-and after. It never holds a token, a code, a cookie or what was sent.
+short digest of the session, the action, which write it was (`kind`, such as `failed-retry` or `trigger-edit`), its
+target and its outcome, and for a write the digests of the file before and after. A paid action's line also holds
+the reserve it showed (`reserve`, in micro-dollars), and a bulk action writes one line per job, each with the size of
+the batch (`count`). It never holds a token, a code, a cookie or what was sent: an answer to a parked run is recorded
+by its sha256, never its text.
+
+**Writes from pi are in the same log.** What you change from the `/dispatch` panel, its commands and dialogs, or what
+the pi extension's tools change after your confirm, is written to this log too, with the role `panel` and your
+account's login name, so one log says what changed whichever surface changed it. The line is written before the
+change, and if it cannot be written (a full disk, a logs folder you cannot write) the change is refused with a
+sentence saying so. Fix the folder and try again. The one exception is `/dispatch setup`, which builds the deployment
+before there is a log to write to.
 
 Each line carries the sha256 of the line before it, so an edit shows:
 
@@ -194,8 +205,9 @@ set). It then checks:
 
 ## The screens
 
-Every page is read only. A viewer sees every page except the audit log, and never the reason text of a failed job
-(below).
+A viewer sees every page except the audit log, and never the reason text of a failed job (below). The buttons and
+forms that change something ([Actions](#actions)) are shown to operators only, and not at all on a read only
+console.
 
 | Page | What it shows |
 |---|---|
@@ -217,7 +229,7 @@ number on that forge, the page shows the target without a link.
 once a later run on the same issue exists, because an answer is a new delivery on that issue. The count of resumes
 comes from the session store, so the console can read it only when `PI_SESSIONS_DIR` is on its own host; anywhere
 else, and for a pull request (whose session the record cannot name), it shows as unknown rather than as 0.
-Answering from the console arrives with #642: until then, answer on the forge.
+An operator can answer an issue's parked run from this page ([Answering a parked run](#answering-a-parked-run)).
 
 **A failed job's reason** (BullMQ's message for the attempt that failed) is the one free text the screens show. It
 is the worker's own message, trimmed and cleaned, but it can still carry a fragment of something a job touched, so
@@ -255,6 +267,99 @@ examines at most 2000 runs; when it stops there it says so, and its "older" link
 The runs come from two places, merged as the panel merges them: this host's run records, and the fleet's run mirror
 in Valkey, which holds every host's recent runs (see [multi-host](multi-host.md)). When the mirror cannot be reached,
 the page shows this host's runs and says so. Reading the pages never changes the mirror.
+
+## Actions
+
+Operators can change the deployment from the pages that show it. Every action is the same two steps as any write
+([Writes](#writes)): **Preview** shows exactly what will happen (a diff for a file, the list of jobs for a job
+action) and **Confirm** does it. Nothing happens on a preview. If something changed in between, the confirm is
+refused with "changed since the preview" and nothing is done; preview again and you see the new state. Every action
+goes through the same functions as the `/dispatch` panel and the pi extension's tools, so a value the panel refuses
+is refused here with the same words, and every action lands in the [audit log](#the-audit-log).
+
+| Where | Action | What it does |
+|---|---|---|
+| Fleet | Cancel | Stops a running job on whichever host runs it, or removes a held one. A running job that no worker acknowledges is reported as not cancelled, never as done. |
+| Fleet | Retry | Puts a failed job back in the queue. The worker runs it again from the start, through every budget check, so it can cost money. |
+| Fleet | Remove | Deletes a failed job from the queue. Its run record stays. |
+| Fleet | Pause, Resume | The whole fleet, as `p` and `r` do in the panel, or one queue. A fleet resume is refused while the console's environment and the deployment's `.env` name different Valkeys, as in the panel and the tools. |
+| Fleet | Retry all, Remove all, Cancel all held | The bulk actions (below). |
+| Parked | Answer | Sends your answer to a run that is waiting on an issue ([below](#answering-a-parked-run)). Costs money. |
+| Run | Re-run | Runs the same thing again ([below](#re-running-a-run)). Costs money. |
+| Run | Sandbox | Shows the command that opens the run's sandbox on the host ([below](#opening-a-sandbox)). |
+| Configuration | Edit | Triggers, settings, pause windows, scoped limits, projects, the envelope, priorities, reverting the budget split, and secret profile names. |
+
+**Paid actions show what they reserve.** A re-run, an answer and a retry start a paid job, so their preview shows what the
+worker will hold for it before it runs: one job from the job count, and in dollars the per-job cap (the trigger's
+`maxCostUsd` or the deployment's, whichever is smaller), $0 for a job that can only call free local models, or "no
+cap" when neither is set. It is the worker's own rule, so the figure is what the worker will hold, and the worker
+still checks every cap when it picks the job up: a job the budget does not admit is refused then, as any job is. A
+bulk retry shows each job's reserve and the sum, and "reserve unknown" for a job whose data cannot be read, never $0.
+Resuming the fleet or a queue shows how many jobs are waiting to start, each of which reserves up to its own cap.
+
+**Configuration edits** change the same files the panel writes (`triggers.json`, the settings overlay, the money
+files) and nothing else. Nothing is committed to git: if you keep the deployment folder in git, commit the change
+yourself. A secret profile is a name and the path of its resolver script; the console never asks for or shows a
+secret's value. If another session (the panel, a tool, a hand edit) wrote the file after your preview, the confirm is
+refused and the file is left as it is.
+
+### Bulk actions
+
+Retry all failed jobs, remove all failed jobs (optionally only one queue or one repository), and cancel all held
+jobs. The preview lists every job the action will touch, at most 100; when more match, it says how many more, and
+you run it again for the rest. The confirm acts on exactly that list and re-checks each job: a job that was retried,
+removed or failed again since the preview is skipped and reported, and the others go ahead. The answer lists what
+happened to each job, and the audit log has one line per job. A bulk retry can start up to 100 paid jobs from one
+confirm, each still held to every cap.
+
+### Answering a parked run
+
+On the parked page, an operator can type an answer under a run that is waiting on an issue and send it. The console
+does not comment on the issue itself: it queues the same job a reply on the issue would have queued, through your
+comment trigger, with your answer as the reply text. The run resumes from where it stopped, and reads your answer as
+data, exactly as it reads a comment.
+
+What the issue shows: once the worker has checked that the issue really is waiting, and before anything is spent, it
+posts one comment as the deployment:
+
+> Answered from the operator console by rob:
+>
+> > your answer, quoted
+
+The name is your token's name. Any `@name` in your answer is changed so it does not notify anyone. That comment is
+the record of what the agent was told, for anyone who reads the issue later.
+
+An answer is at most 8 KiB of text; control characters are removed, and an empty answer or a longer one is refused,
+never cut. The console refuses, before queueing anything, a run that is not waiting any more (answered already, or a
+later run on the same issue), a run that parked on a pull request (answer it on the forge, with your trigger phrase),
+a run whose queue data has expired (31 days), and a deployment whose comment trigger would not route a reply (none for
+that forge, a command, or no `run.resume`). The audit log records the run and a hash of your answer, never the text.
+Answering needs a worker of the same release as the console: an older worker runs the answer but posts no comment.
+
+### Re-running a run
+
+Re-run on a run's page queues the same work again:
+
+- **A local run** (from `/dispatch run` or `pi-dispatch run`) runs its folder, flow and task again on this host,
+  refused when the folder has uncommitted changes, as `/dispatch run` refuses. Its queue data is kept a day after it
+  completes and a week after it fails.
+- **A scheduled run** fires its trigger once, as the triggers file says now, like `pi-dispatch run --trigger <id>`.
+- **A forge run** runs again on the same issue as a new delivery, so it gets a new job id, on the queue the receiver
+  would choose. Its issue and the trigger it matched come from its queue data (kept 31 days), but what the run may do
+  (flow, model, cost cap, secret profile, image, backend) comes from that trigger as the triggers file says now, and
+  the preview lists it. If the trigger was deleted, changed kind, stopped matching that label or action, or runs
+  another flow, the re-run is refused: start it again from the forge.
+
+A run whose data has expired, a `/command` run, and an answer to a parked run (answer the parked run again instead)
+are refused by name. The same issue and flow run or queued within the last 10 minutes take a forge re-run as a
+duplicate, and a local or scheduled re-run within the same minute likewise; the console says so and nothing is
+queued.
+
+### Opening a sandbox
+
+A run's page shows the command that reopens its sandbox, `pi-dispatch sandbox <job id>`, to copy and run in a shell on
+the host that ran the job. The console never opens a shell or starts a container itself: a terminal in the browser
+would put an interactive shell one stolen session away from anyone.
 
 ## Live updates
 
@@ -339,10 +444,10 @@ through the same code, so the two never disagree about what is waiting.
 | `PI_CONSOLE_MAX_STREAMS` | 4 | Live pages one token may hold open across its sign-ins, 1 to 32. The whole console holds at most 32, 8 of them kept for operators. |
 
 The console also reads, from the same deployment, `VALKEY_URL` (the queues, hosts and run mirror), `PI_LOGS_DIR`
-(this host's run records and the audit log), `PI_PAUSE_WINDOWS_FILE` (the one write), the files the configuration page
-shows (the triggers, settings, scoped limits, projects and envelope), `PI_SESSIONS_DIR` when it is on this host (the
+(this host's run records and the audit log), `PI_PAUSE_WINDOWS_FILE`, the files the configuration page shows and
+edits (the triggers, settings, scoped limits, projects and envelope), `PI_SESSIONS_DIR` when it is on this host (the
 parked runs' resume counts) and `GITLAB_URL`, `FORGEJO_URL` and `AZURE_ORG_URL` (the forge links).
 
 The design and its rejected alternatives are `DES-OPERATOR-CONSOLE` in [`specs/design.md`](../specs/design.md); the
-testable rules are `REQ-CONSOLE-SECURITY` and `REQ-OPERATOR-CONSOLE-SCREENS` in [`specs/requirements.md`](../specs/requirements.md); the threat model and
+testable rules are `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-OPERATOR-CONSOLE-ACTIONS` in [`specs/requirements.md`](../specs/requirements.md); the threat model and
 what it does not defend are in [`SECURITY.md`](../SECURITY.md#the-operator-console).

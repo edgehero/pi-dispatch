@@ -242,7 +242,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 
 The admin extension binds no port. The operator console does: `pi-dispatch-console serve` is a separate process
 that serves a web page to manage the deployment ([`docs/console.md`](docs/console.md), `DES-OPERATOR-CONSOLE`,
-`REQ-CONSOLE-SECURITY`). It never runs on the receiver, which faces the internet. It listens on `127.0.0.1:4790` by
+`REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`). It never runs on the receiver, which faces the internet. It listens on `127.0.0.1:4790` by
 default, or on a unix socket at mode 0600, and refuses any other address unless you set `PI_CONSOLE_BIND_PUBLIC=1`
 (doctor then warns). It terminates no TLS: reach it from another machine through `ssh -L`.
 
@@ -310,11 +310,44 @@ The threat model, and what answers each part:
   Azure DevOps, at the instance URL the deployment itself is configured with, http or https only. When there is no
   such URL, or the target does not parse as that forge's repository and number, no link is drawn: a link to a host
   the console made up is a phishing aid, and a missing link costs a copy and paste.
+- **Every write is a previewed, confirmed table entry** (issue #642). The console's writes (cancel, retry, remove,
+  re-run, answer a parked run, pause a queue or the fleet, every configuration edit, and the bulk actions) are one
+  table, and each one's preview and confirm routes are generated from it, so every write passes the same guards in
+  the same order: the Host check, `Sec-Fetch-Site: same-origin` (or an exact `Origin`), a JSON body, the operator role,
+  a console that is not read-only, then the session. A cross-site page, a form post, a viewer and a read-only console
+  are refused for every action, and the tests loop over the table rather than a hand list. The confirm carries only a
+  single-use ticket bound to the session and the action; the ticket, not the request body, holds what will be done,
+  the file snapshots it was built from and the jobs it names, so a confirm applies the change the operator saw or is
+  refused (a file another session wrote, a job that was retried, removed or failed again since the preview).
+  Every write goes through the same validators and funnels as the `/dispatch` panel, with the same refusal words.
+- **Bulk actions are bounded and bound.** A bulk retry, remove or held-cancel previews at most 100 jobs, and its
+  ticket binds that exact list and each job's state; the confirm re-checks every job alone, acts only on those still
+  as previewed, and reports per job. A hostile request cannot widen the list after the preview, because the confirm
+  takes no list. One audit row is written per job.
+- **Paid actions show their reserve.** A re-run and an answer to a parked run start a paid job, so their preview shows
+  what the worker will hold, computed by the worker's own rule (the per-job dollar cap, or nothing for a job that
+  cannot spend), and the audit row records it. The worker still reserves at pickup, after every free gate, and still
+  refuses a job its caps do not admit: the console shows the reserve, it does not grant it.
+- **An answer to a parked run is data, cannot ping anyone, and is posted only by the worker.** The console never posts on a
+  forge itself. It queues the reply job a forge reply would have queued, with the answer as the
+  comment text, which the job's prompt fences as data below the delimiter like any comment. The text has control
+  characters and bidirectional overrides removed and is at most 8 KiB, refused rather than cut. The worker accepts it
+  only when the issue really is parked (`not-parked` otherwise, nothing posted, nothing spent), and once every
+  pre-spend check and reserve has passed, just before the container starts, posts one trail comment as the deployment, "Answered from the operator console by <name>:" with the answer quoted. Every `@`
+  in it is followed by a zero-width space and `&`, `<` and `>` are written as entities, so the answer cannot mention a person or a team, and no HTML comment or tag can hide part of it on the forge; the comment is posted at most once per job, even across retries; the name is a console
+  token's name, whose characters cannot form a mention or markdown, and a job carrying any other name is refused when
+  it is queued. The receiver drops the trail as the deployment's own comment, so it never starts a job. The audit
+  log records the answer's sha256, never its text.
 - **Who did what.** Every write, every write refused by a guard and every sign-in is appended to
   `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl` as a hash chain (`pi-dispatch-console audit verify` names the first
-  broken link). Refusals of requests with no session are written one row each up to 60 a minute and counted past
+  broken link). Since issue #642 the same chain holds the `/dispatch` panel's writes and the pi extension's tools'
+  writes, as actor role `panel` with the account's login name, so a change made from a terminal is recorded like one
+  made from a browser. For both, the row is appended BEFORE the write and a write whose row cannot be appended does
+  not happen. Refusals of requests with no session are written one row each up to 60 a minute and counted past
   that, so a flood cannot grow the log without bound. The chain makes an edit evident, not impossible: whoever can write that file can also rewrite every
   row after the one they changed.
+- **No terminal in the browser.** The run page shows the `pi-dispatch sandbox <job>` command to copy; the console
+  never starts a container or a shell.
 
 ## What is NOT defended (v1)
 
@@ -637,6 +670,17 @@ Stated openly rather than discovered later:
   for jobs. Live streams are capped below that, but a token holder (a viewer too) who signs in eight times can hold
   all 32 stream slots: other people's pages still load, but stay static until those streams close or that token is
   revoked or rotated.
+- **An operator token speaks on the forge as the deployment** (issue #642). Answering a parked run makes the worker
+  quote the operator's text on that issue under the deployment's identity, naming the token. Mentions are
+  neutralised and the text is fenced as data for the agent, but what the words say is the operator's: whoever holds
+  an operator token (or a signed-in operator browser) can put text on any parked issue the deployment can comment
+  on, and can start paid runs (a re-run, an answer, up to 100 retries in one bulk confirm) within the caps. Give
+  operator tokens only to people you would give the deployment's forge identity and budget, and the viewer role to
+  everyone else.
+- **A panel row names an account the host vouches for, and an unwritable log stops the panel's writes.** A `panel` row names the OS login of whoever ran
+  pi, which the host, not the console, vouches for; anyone who can write `PI_LOGS_DIR` can also rewrite the chain, as
+  above. A full or unwritable logs directory refuses the panel's and the tools' writes until it is fixed: refusing is
+  the chosen failure, because a write the log never saw is the outcome the log exists to rule out.
 
 ## Operator responsibilities
 

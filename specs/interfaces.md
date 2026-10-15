@@ -4670,6 +4670,35 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 
   **Not model-callable**: neither trigger tool (`dispatch_trigger_add`, `dispatch_trigger_edit`) takes it,
   and an edit keeps an entry's existing value byte-identical. It is reviewed trigger content.
+- **`console` on a forge job (job level, optional, issue #642; not a trigger field).** `{ "by": "<console token
+  name>" }`, set only on the reply job the operator console queues for an answer to a parked issue run
+  (`REQ-AWAIT-INPUT`'s console source). `by` is a console token's name (`TOKEN_NAME_RE`: lowercase letters, digits,
+  dot, dash and underscore, starting with a letter or digit, at most 32), a charset with no `@`, no markdown, no
+  space and no control byte, because the worker prints it on the forge. `enqueueForgeJob` REBUILDS it from that one
+  field rather than copying the object (`parkedReply`'s rule for durable job data), writes it at job level beside
+  `parkedReply` and never inside `trigger` (so `/job/event.json`, a copy of `trigger`, never carries it), makes it
+  part of no job id or dedup key, and THROWS on a `by` outside the charset, so such a name never reaches a queue. The
+  worker posts one trail comment for a job with `parkedReply: true` and a valid `console.by` once every
+  pre-spend gate and reserve has passed, just before the container starts ("Answered from the operator console by <by>:" and
+  `trigger.comment.body` as a blockquote, every `@` followed by U+200B), and logs and posts nothing for one whose
+  `by` is not a token name. Absent on every job a receiver, the poller, cron, the CLI or an outbox makes, so their
+  job data is byte-identical to before. The rest of a console answer's job is the receiver's phrase-free reply for
+  that issue, field for field, but four: `trigger.deliveryId` is `console-<16 hex>` (a prefix no forge sends, so its
+  job id cannot collide with a delivery's), `trigger.sender` is `{ "id": null }`, on GitHub
+  `trigger.comment.author_association` is `OWNER`, and `trigger.comment.body` is the operator's scrubbed text (at
+  most 8 KiB, `worker/src/console-answer.mjs`, the worker export `./console-answer`). A console re-run of a forge run
+  enqueues the retained job's data with only `trigger.deliveryId` replaced by a fresh `console-` id and without any
+  `console` field. The admin bundles `enqueueForgeJob`, so a console answer carries `console` whichever worker
+  drains it; a worker older than #642 ignores the field and runs the answer without posting the trail, which is the
+  release obligation this file's revision row for #642 records.
+- **Write protocol** (`writeTriggers`, the worker export `./triggers-file`, the one writer the admin, the console and
+  the worker's disarm share): under `<path>.lock`, read and validate the whole file, apply the change, write a tmp
+  file, rename it over the file. Since issue #642 it takes an optional `expect`, the `{ path, text }` snapshots a
+  change was built from (the admin's `writeInputs`, taken before an operator's confirm, `worker/src/file-expect.mjs`'s
+  encoding: the text, `null` only for a missing file, a marker no text can equal for an unreadable one). They are
+  re-read INSIDE the lock, after the tmp is written and before the rename; a difference discards the tmp and returns
+  `{ invalid: "<path> changed after this change was built from it (another session wrote it); nothing was written.
+  Look again and retry" }`. Without `expect` the write is byte-identical to before.
 
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
@@ -6389,9 +6418,15 @@ validator rather than a second copy of it.
   WARNS, in the confirm before the write and in the console's answer, never refuses: the worker's cap may come from
   its service unit or `--env-setup` script, which the admin cannot see. `doctor` names a valid overlay whose merge
   with `.env` breaks it.
-  All keys are optional; a missing file is an empty overlay. **Write protocol** (admin extension): validate
-  the candidate object, serialise it, write a same-directory `settings.json.tmp`, then `rename` it over
-  `settings.json` — an atomic replace, with one EPERM retry on Windows. When the existing file is invalid,
+  All keys are optional; a missing file is an empty overlay. **Write protocol** (admin extension and, since issue
+  #642, the operator console, both through `writeSettings` over the worker's `writeOverlay`): validate the candidate
+  object, serialise it, write a same-directory tmp file of the writer's own, `settings.json.<pid>.<12 hex>.tmp`,
+  created exclusively (`wx`), then `rename` it over `settings.json`, an atomic replace, with one EPERM retry on
+  Windows; a write that fails after the tmp exists removes it. The tmp was the fixed `settings.json.tmp` until #642,
+  harmless with one writing process and not with two, where one could rename the other's bytes. An optional
+  `expect` (the `{ path, text }` snapshots a change was built from, `worker/src/file-expect.mjs`'s encoding) is
+  re-read after the tmp is written and before the rename, and a difference removes the tmp and refuses with
+  "changed after this change was built from it", nothing written; without it the write is as before. When the existing file is invalid,
   a write is REFUSED (since issue #501) with the read reason, key names only, and nothing is written:
   rebuilding it from `{}` erased whatever valid keys it still held (a `maxCostUsd`, a `secretProfiles`),
   turning a refused-every-job state into one that runs at the env cap or uncapped. The repair is the
@@ -8171,8 +8206,9 @@ in.
 
 ## INT-CONSOLE-AUDIT-LOG
 
-**The console server and its CLI → `audit verify`, doctor, and later a remote console.** The record of who did what
-through the console (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY` (h)).
+**The console server, its CLI and (since issue #642) the pi extension → `audit verify`, doctor, and later a remote
+console.** The record of who did what through the console, and since #642 through the `/dispatch` TUI and the
+extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SECURITY` (h)).
 
 - **Location**: `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl`, the UTC month of the row's `at`, on the host whose
   console acted. The directory is created 0700 and each file 0600, appended with `O_APPEND`, one JSON object per
@@ -8189,14 +8225,24 @@ through the console (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY` (h)).
     "actor": { "name": "rob", "role": "operator", "session": "<12 hex>" },
     "action": "write", "target": "pause-windows", "outcome": "ok",
     "beforeDigest": "<hex>", "afterDigest": "<hex>", "ticket": "<12 hex>" }
+  { "at": "2026-10-15T09:00:00.000Z", "seq": 43, "prev": "<sha256 hex>",
+    "actor": { "name": "rob", "role": "operator", "session": "<12 hex>" },
+    "action": "write", "kind": "failed-retry-all", "target": "<job id>", "outcome": "ok",
+    "count": 7, "ticket": "<12 hex>" }
   ```
+  A write row's fields are in that reading order: who, the action and which write (`kind`), to what, how it went,
+  why, what it holds (`reserve`) and how many (`count`), then the digests and the ticket.
   - `at`: ISO instant, stamped by the writer from its injected clock.
   - `seq`: a whole number that rises by one per row, across months.
   - `prev`: the sha256 hex of the previous row's raw line, without its newline; `null` only on the very first row
     ever written. The chain continues across month files.
   - `actor`: `{name, role, session}`. `session` is the first 12 hex characters of the sha256 of the session id,
     never the id; `null` for a CLI row, whose actor is `{name: "shell", role: "shell", session: null}`; a failed login
-    names no token holder.
+    names no token holder. Since issue #642 a write made from the `/dispatch` TUI, its commands and dialogs or the
+    extension's tools is `{name: <the OS login, reduced to [A-Za-z0-9._@-] and 64 characters, "unknown" when there is
+    none>, role: "panel", session: null}` (`panelActor`, `admin/src/audited-write.mjs`), appended to the deployment's
+    `PI_LOGS_DIR`. The roles written are `operator`, `viewer`, `shell` and `panel`; `role` is an escaped string like
+    `name`, not a closed set, so the verifier does not judge it.
   - `action`, exactly one of: `login`, `login-failed`, `login-code`, `logout`, `refused`, `write`, `token-added`,
     `token-revoked`, `token-rotated`, `sessions-ended`, `serve-started` (`CONSOLE_AUDIT_ACTIONS`).
   - `outcome`, exactly one of: `ok`, `refused`, `failed` (`CONSOLE_AUDIT_OUTCOMES`).
@@ -8208,8 +8254,31 @@ through the console (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY` (h)).
     without holding it. `ticket` (optional): the first 12 hex characters of the sha256 of the confirm ticket the
     write redeemed, never the ticket. A confirm appends its `ok` row BEFORE the write; when the write is then refused
     or throws, a second row with the same `ticket` and outcome `failed` follows, so the last row for a ticket is its
-    outcome.
-  - An unknown action or outcome throws in the writer: the vocabulary is closed.
+    outcome. A panel write has no console ticket; its rows share a fresh 12-hex correlation id in `ticket`
+    (`writeTicket`), under the same ok-then-failed rule.
+  - `kind` (optional, issue #642): which write a `write` row is, 1 to 40 of `a-z`, `0-9` and `-`
+    (`CONSOLE_AUDIT_KIND_RE`), a closed charset rather than an escaped string, so a reader can group rows by it and
+    no caller can carry text in it. `action` stays `write`; `kind` only names the write. The kinds written:
+    the panel's and the console's shared configuration and control writes `trigger-add`, `trigger-edit`,
+    `trigger-delete`, `setting-set`, `setting-unset`, `pause-window-add`, `pause-window-edit`, `pause-window-delete`,
+    `limit-add`, `limit-edit`, `limit-delete`, `project-add`, `project-edit`, `project-delete`, `envelope-set`,
+    `priorities-set`, `allocation-revert`, `secret-profile-add`, `secret-profile-remove`, `cancel-active`,
+    `cancel-held`, `fleet-pause`, `fleet-resume` and `run-enqueue`; and the console's own `queue-pause`,
+    `queue-resume`, `failed-retry`, `failed-remove`, `failed-retry-all`, `failed-remove-all`, `held-cancel-all`,
+    `run-rerun` and `parked-answer`. The list is descriptive: the writer enforces the charset, not the list, and
+    the console's configuration actions write the kind of their action's own name, plus `pause-windows-set` for the
+    whole-list replace.
+  - `reserve` (optional, issue #642): the micro-dollars a paid action (a re-run, an answer to a parked run) will
+    hold, as the preview showed it (`estimateReserve`), a non-negative safe integer. Absent when the action is not
+    paid or no dollar cap applies.
+  - `count` (optional, issue #642): a bulk action's size, a positive safe integer. A bulk action writes one row per
+    job, `target` that job's id, every row carrying the same `count` and `ticket`, so a reader groups a bulk action
+    by its ticket and reads each job's outcome from its own last row.
+  - An answer to a parked run is recorded by the parked run's job id in `target` and the sha256 of the answer text
+    in `afterDigest`; the text is never in a row.
+  - An unknown action or outcome throws in the writer: the vocabulary is closed. A `kind`, `reserve` or `count` of
+    the wrong shape throws too, and writes nothing. A row without them is a row from before them and verifies as it
+    always did.
 - **Rate-limited refusals**: a refusal of a request that carried no session (`actor.name` `anonymous`) is written
   one row each up to 60 a minute (burst 120). Past that, refusals are counted, and the count is written as one row,
   `action: "refused"`, `target: "(rate limited)"`, its `reason` starting with the number, just before the next
@@ -8223,7 +8292,8 @@ through the console (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY` (h)).
   record. A write that cannot be audited does not happen.
 - **Verification**: `pi-dispatch-console audit verify` and doctor walk every month file in order and check each `prev`
   and `seq`. The result is `{ok: true, rows, startsAt}` or `{ok: false, rows, broken: {file, line, reason}}`, naming
-  the first broken link. The first row of the oldest SURVIVING file is not checked against a predecessor: when the
+  the first broken link. A row whose `kind`, `reserve` or `count` is present and not of the shape above is a broken
+  link too. The first row of the oldest SURVIVING file is not checked against a predecessor: when the
   retention reaper removed older months, verify reports where the chain starts (`startsAt`, the file and `seq`), and
   does not call it broken. A broken chain is a doctor warning.
 - **Retention**: reaped on `PI_LOG_RETENTION_DAYS` by the worker (`makeConsoleAuditReaper`, at boot and on each
@@ -8232,8 +8302,14 @@ through the console (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY` (h)).
 - **The Valkey mirror**: each row `serve` writes is also pushed, after the file holds it and best effort, onto the
   list `console:audit` (`LPUSH` then `LTRIM` to 500 rows), the `alloc:log` precedent, so a console on another host
   can show recent rows later. The short-lived CLI commands do not connect to Valkey, so their rows are in the file
-  only. A mirror failure never fails the append; the file is the record.
-- **Acceptance**: `REQ-CONSOLE-SECURITY` (f) and (h).
+  only, and so are the panel's (`panelAudit` builds a writer without the mirror). A mirror failure never fails the
+  append; the file is the record.
+- **Failure, for the panel** (issue #642): a panel write whose `ok` row cannot be appended is refused in the shape its
+  funnel already uses (`{invalid}`, `{refused}`, or an allocation `refused` outcome) with the sentence "the audit log
+  could not be written, so nothing was changed; check PI_LOGS_DIR" (`AUDIT_REFUSAL`). A compensating `failed` row that
+  cannot be appended is logged and swallowed, leaving an `ok` row for a write that did not land: the safe direction
+  to be wrong in. The setup wizard's writes are not audited (`DES-ADMIN-VIA-PI-EXTENSION`).
+- **Acceptance**: `REQ-CONSOLE-SECURITY` (f), (g) and (h), `REQ-OPERATOR-CONSOLE-ACTIONS` (j) and (k).
 
 ## INT-CONSOLE-STATE-API
 
@@ -8615,3 +8691,4 @@ script is its only intended client; it is documented so that what a stream may c
 | 2026-10-14 | No issue: the lab's Forgejo follow-up, `OQ-043`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `FORGEJO_PERMISSION_TOKEN` is refused in `PI_FORWARD_ENV` and deleted from the closed container map after every other write, from the forge table's new `receiverOnlyVars` column (`RECEIVER_ONLY_VARS`). It is the receiver's author-gate lookup token, of an account that is an admin of the repositories, and no job may hold it. **`INT-FORGEJO-PAYLOAD-SUBSET` UNCHANGED, checked**: the lookup still takes `sender.login` and nothing else from the payload. |
 | 2026-10-14 | Issue #640, the operator console. **NEW `INT-CONSOLE-TOKENS-FILE-CONTRACT`**: `PI_CONSOLE_TOKENS_FILE` (default `console-tokens.json` in the deployment folder), `{version: 1, generation, tokens: [{name, role, sha256, createdAt}]}`, a regular file at 0600 owned by the console's account (symlinks refused), the whole file refused on any problem, no operator token refuses `serve`; the token is `pdc_` plus base64url of 32 random bytes, shown once by `token add` or `token rotate` and never stored; sha256 is enough for 256 random bits; `sessions end-all` bumps `generation`; writes are an exclusive temporary file and a rename, by the CLI only, each audited; the pi extension guards the file. **NEW `INT-CONSOLE-AUDIT-LOG`**: `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl` (directory 0700, files 0600, appended), rows `{at, seq, prev, actor, action, target, outcome, reason, beforeDigest, afterDigest, ticket}`, `prev` the sha256 of the previous raw line across months, the head recovered from the newest file's last line, a reaped head reported as where the chain starts rather than as broken, a failed append refusing its write, a best-effort mirror on the Valkey list `console:audit` (500 rows), the closed action and outcome vocabularies, and never a token, a code, a cookie, a session id or a body. **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED** (shape, validation and atomic rename unchanged; `writePauseWindows` gains an optional `expect` that refuses a file changed since the preview, and without one it now refuses a file that changed between its own read and its rename, where it used to overwrite that change; the Write protocol bullet says so). UNCHANGED, checked: `INT-DEPLOYMENT-POINTER-CONTRACT` (the console resolves its deployment through the pointer and adds no allowlisted key), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`. |
 | 2026-10-14 | Issue #641, the operator console's screens and live updates. **NEW `INT-CONSOLE-STATE-API`**: `GET /api/state`, one fleet reader snapshot as JSON for a session of either role (401 JSON without one); never a token, a secret's value or reference, a job's data or run text; a viewer's body carries no `failedReason`; a part that could not be read says `unreachable` rather than reading as zero; keys only added within `version: 1`. **NEW `INT-CONSOLE-EVENT-STREAM`**: `GET /api/events?page=` with the page's own query, two events (`panel`, one line of JSON `{id, html}` that replaces one `data-panel` region, and `end`, the session is over), a sequence `id` per page and query, every panel on connect unless `Last-Event-ID` is current, only changed panels after that, a 15 s ping, 429 past `PI_CONSOLE_MAX_STREAMS` per session or 32 in the process, and a client more than 2 MiB behind dropped to reconnect fresh. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the `kind` enum said `github`, `gitlab` or `local`, stale since the Forgejo and Azure forges (#61, #43) began writing `forgejo` and `azure`; it now lists the worker's `RUN_KINDS`, which the console's `kind` filter takes its vocabulary from, so a filter the spec allowed could no longer be refused by the code or the other way round. The record itself is UNCHANGED, checked: no field was added and none changed meaning. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: the audit screen reads the month files through the worker's new `readConsoleAudit` and writes nothing; no action or outcome was added. |
+| 2026-10-15 | Issue #642, writes and actions from the operator console. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: a write row gains optional `kind` (`[a-z0-9-]{1,40}`, a closed charset; `action` stays `write`), `reserve` (micro-dollars a paid action holds) and `count` (a bulk action's size, one row per job sharing the ticket); the actor role `panel` for the TUI's and the tools' writes (the OS login, scrubbed, no session) in the deployment's `PI_LOGS_DIR`, with a fresh 12-hex correlation id in `ticket`; the kinds written are listed (the console's configuration kinds are their action names, plus `pause-windows-set`); a malformed `kind`, `reserve` or `count` throws in the writer and is a broken link to the verifier; a panel write whose row cannot be appended is refused with `AUDIT_REFUSAL`; the panel's rows are not mirrored to Valkey; an answer is recorded by job id and sha256, never its text (the digest in `afterDigest`). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the forge job's optional job-level `console: {by}` (a console token name, rebuilt not copied, never inside `trigger`, part of no id, refused at enqueue outside the charset), the console answer's four differing fields (`console-` delivery id, `{id: null}` sender, GitHub `OWNER`, the scrubbed text of at most 8 KiB), a re-run's replaced delivery id and dropped `console`, and the write protocol of `writeTriggers` with `expect` re-read inside the lock before the rename. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**, the write protocol: the tmp file is the writer's own (`settings.json.<pid>.<12 hex>.tmp`, `wx`, removed on failure), CORRECTING the fixed `settings.json.tmp` this entry named, and `expect` re-read before the rename. New worker package exports: `./console-answer`, `./reserve-estimate`, `./schedules`, `./model-endpoints` and `./model-catalog` (the last two so the console's reserve reads the worker's own endpoint snapshot and price catalog; the admin bundles them, as it bundles every `@edgehero/pi-dispatch` subpath). RELEASE OBLIGATION, recorded so the release slice cannot miss it: the admin inlines `enqueueForgeJob`, so a console answer carries `console` whichever worker drains it, and only a worker of this release posts the trail comment (an older one runs the answer without it). The release must publish the worker and the admin together, and `docs/console.md` and doctor's version floor line (if one is added) must name that worker version, TBD at release. UNCHANGED, checked: `INT-CONSOLE-TOKENS-FILE-CONTRACT` (`by` reuses its name rule), `INT-RUN-HISTORY-FILE-CONTRACT` (a console job's record has no new field; a re-run is refused rather than rebuilt from it), `INT-SESSION-STORE-CONTRACT` (`isParked` judges a console answer as any reply), `INT-CONTAINER-JOB-INPUTS` (`console` never reaches `event.json`; the GitHub association `OWNER` does, as metadata), `INT-CANCEL-CHANNEL-CONTRACT` (the console's cancel is the CLI's request key), `INT-PAUSE-WINDOWS-FILE-CONTRACT`, `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT` and `INT-ENVELOPE-FILE-CONTRACT` (their writers already took `expect`). |

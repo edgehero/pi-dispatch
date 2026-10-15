@@ -227,7 +227,9 @@ console for the deployment on loopback or on a private unix socket, behind a nam
 whole fleet as it changes: an overview, every run with filters and paging, the runs waiting for an answer, spend and
 insights by range, queues, hosts and schedules, the configuration and its own audit log, plus `/api/state` as JSON for
 scripts. It reads through the same code as the panel, so the two never disagree; the panel shows the waiting runs too.
-Every write is previewed, confirmed and recorded in an audit log, and nothing listens unless you start it. See
+It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
+and edit the configuration, each previewed, confirmed and recorded in one audit log that holds the panel's own writes
+too. Nothing listens unless you start it. See
 [`docs/console.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/console.md).
 
 ## More than one machine

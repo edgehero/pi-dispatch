@@ -637,7 +637,31 @@ passing, on the record — issue #80.)
   the closure — refused today by `queue.mjs` for a reason ("baking a possibly-stale sha would only race the
   branch head") that is true for a seconds-long queue and inverted for a day-long hold. That residual is
   `OQ-029`. This clause widens WHEN an authorized job may begin, never WHO may authorize one.
-- **Traces to**: `REQ-TRIGGER-AUTHOR-GATE`, `REQ-WAIT-FOR`, `CONST-HMAC-OVER-RAW-BODY`, `OQ-013`, `OQ-020`, `OQ-029`
+
+  **AN OPERATOR START, added for the operator console (issue #642).** This entry governs a job started FROM A
+  WEBHOOK, and until now every forge job was one. The console makes two kinds of forge job without a delivery: an
+  answer to a parked issue run (`REQ-AWAIT-INPUT`'s console source) and a re-run of a finished forge run. Read
+  literally the Statement does not cover them, and read with "Together with `CONST-HMAC-OVER-RAW-BODY` this is the
+  entire gate" it would say they cannot exist; so the clause is written rather than left to whichever reading a
+  reviewer brings. It has three parts. **The say-so is the operator's.** Such a job exists only when a person signed
+  in with an OPERATOR token (`INT-CONSOLE-TOKENS-FILE-CONTRACT`, minted on the host as the deployment's own account)
+  confirms a previewed change with a single-use ticket bound to their session (`REQ-CONSOLE-SECURITY`): a stronger
+  say-so than write access to one repository, because whoever holds it already controls the deployment, its
+  triggers and its caps, and could write the same job onto the queue from the host. A viewer token, a read-only
+  console, a cross-site page and a confirm without a fresh ticket are all refused before anything is queued. **It is
+  marked as the operator's, never dressed as a forge author's.** Both carry a `console-` delivery id that no forge
+  sends, and the audit log names the person. An answer also carries `console: {by: <token name>}`, its sender is
+  `{id: null}`, and on GitHub its comment association is `OWNER`, the deployment's own authority, stated here so it is
+  never read as a forge user's claim. A re-run keeps the retained `trigger` of the start it repeats (its sender and
+  association are that start's, which passed this gate) and drops any `console` field. **It widens no webhook path.** The receiver's gate, its HMAC and its author checks are untouched,
+  a forge payload cannot set `console` (it lives at job level, outside `trigger`, written only by `enqueueForgeJob`'s
+  console caller and refused there unless it is a token name), and the worker gates the job exactly as a delivery's:
+  an answer still needs the key's `parked` mark (`not-parked` otherwise), and every job still reserves before it
+  spends. A re-run repeats a start that already passed this gate, on the retained data of that start, at an
+  operator's request. This clause adds an operator door beside the webhook one; it never lets a forge user through
+  it.
+- **Traces to**: `REQ-TRIGGER-AUTHOR-GATE`, `REQ-WAIT-FOR`, `CONST-HMAC-OVER-RAW-BODY`, `OQ-013`, `OQ-020`, `OQ-029`,
+  `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-AWAIT-INPUT`
 - **Acceptance**: Given `@pi fix this` from `author_association: NONE`, the receiver returns 204 and
   enqueues nothing. Given a `pull_request.opened` whose PR `author_association` is `NONE` (a fork PR), the
   receiver returns 204 and enqueues nothing; given the same from a `COLLABORATOR`, exactly one job runs.
@@ -661,6 +685,11 @@ passing, on the record — issue #80.)
   below 30, the receiver returns 204 and enqueues nothing; given the same from a Developer, exactly one job
   runs. Given a GitLab delivery whose access lookup could not be completed, the receiver returns **503**
   (redeliverable), never 204 — indeterminate is not denied.
+  Given a console answer or re-run attempted by a viewer token, on a read-only console, cross-site, or with a reused
+  or another session's ticket, nothing is queued (`REQ-OPERATOR-CONSOLE-ACTIONS` (a)); given an operator's confirmed
+  answer, the queued job carries `console.by` naming the token and a `console-` delivery id (a re-run carries the
+  delivery id and no `console`, `admin/test/job-actions.test.mjs`), and given a `console.by`
+  outside the token-name charset, `enqueueForgeJob` refuses it (`worker/test/processor-console-answer.test.mjs`).
 
 ## CONST-HMAC-OVER-RAW-BODY
 
@@ -1089,6 +1118,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-15 | Issue #642, writes and actions from the operator console. **`CONST-TRIGGER-AUTHOR-GATE` AMENDED**: a new clause, AN OPERATOR START. The Statement governs a job started from a webhook, and its Why calls the author gate with the HMAC "the entire" gate on who may spend and run; the console now makes forge jobs with no delivery (an answer to a parked issue run, a re-run of a forge run), so the clause is written rather than left to a reading. The say-so is an operator token's, under a session and a single-use ticket bound to the previewed change, a stronger authority than write access to one repository (its holder controls the deployment already); the job is marked as the operator's (a `console-` delivery id, and for an answer `console.by`, sender `{id: null}` and GitHub association `OWNER`, stated so it is never read as a forge user's claim; a re-run keeps the original start's `trigger`, which passed this gate); and no webhook path widens (the receiver is untouched, `console` lives outside `trigger` and is refused at enqueue unless it is a token name, the worker gates the job like a delivery's). Acceptance gains the viewer, read-only, cross-site and stale-ticket refusals and the enqueue refusal of a bad `console.by`. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the worker still reserves at pickup, after every free gate; the console only shows beforehand, through `estimateReserve`, the reserve the worker will hold, and the answer's trail comment is posted after every pre-spend gate and reserve, just before the container starts, so before any provider call. **`CONST-ISSUE-TEXT-IS-DATA` UNCHANGED, checked**: a console answer reaches the agent as `trigger.comment.body`, rendered in the fenced data region below the delimiter exactly as a forge reply's, and its `console` provenance never enters `event.json` or the prompt; the trail comment is forge text a later run reads as data like any comment. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the console starts no container (the sandbox command is shown, not run). |
 | 2026-10-14 | No issue: the lab's Forgejo follow-up. **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED**, the paragraph added earlier the same day: the author gate now asks with its own token, `FORGEJO_PERMISSION_TOKEN` (a `read:repository` token of an account that is a repository admin, read by the receiver alone and refused or deleted on every path into a job), so the job's `FORGEJO_TOKEN` stays a `write` collaborator's and the scope half holds again. The fallback to `FORGEJO_TOKEN` when it is unset is the residual (`OQ-043`, now mitigated). Verified at Forgejo v14.0.5: the permission route is a GET inside the `repository` scope group, so `tokenRequiresScopes` asks only `read:repository`, and `GetRepoPermissions` admits the caller by `ctx.IsUserRepoAdmin()`, which is `ctx.Repo.Permission` computed by `GetUserRepoPermission(repo, ctx.Doer)`: the token's USER, not its scope. **`CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the gate and its 503 posture do not move. |
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED**, one paragraph in its Forgejo text: the harness account must be a repository ADMIN, because Forgejo answers the author gate's lookup of another user's permission only to a site or repository admin (a `write` collaborator's token got 403 `{"message":"Only admins can query all permissions, repo admins can query all repo permissions, collaborators can query only their own"}`, and every trigger failed closed). The token's scopes do not narrow an admin account: at Forgejo 14.0.5 the settings, webhook, collaborator and branch protection endpoints are in the `repository` scope category behind a repository admin check, so the token every forgejo job carries can lift branch protection. Recorded as `OQ-043` rather than glossed. **`CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the 403 stays indeterminate (503), now with a reason that names the repair; who may trigger does not move. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: the receiver's 503 retries a free lookup, nothing is minted or reserved before it. |
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`CONST-TRIGGER-AUTHOR-GATE` AMENDED in its Forgejo enumeration only (text)**: the admitted permission strings are `owner`, `admin` and `write`. Forgejo answers `{"permission":"owner","role_name":"owner",...}` for a personal repository's owner (measured on `GET /api/v1/repos/human/parked-lab/collaborators/human/permission`), and the two-member set dropped every trigger the owner set as `author-not-allowed`. The constraint itself, write access or above, is UNCHANGED, checked: an owner can push, so admitting it is the statement applied rather than widened, and `read` and `none` still refuse. |

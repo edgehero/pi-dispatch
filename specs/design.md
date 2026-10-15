@@ -2312,7 +2312,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   this host cannot see) and the forge kind, never a guessed link (`chain ?` when unknown); an answered run is left out, and a list
   that could not be read says "parked runs unknown" rather than "nothing parked". It reads only what the console's parked
   inbox reads, so the two surfaces stay equal (#641's second open question), and like every view it writes nothing:
-  answering is #642's. The artifact carries **run-record fields and operator-authored
+  since #642 a parked run is answered on the forge or from the console's parked inbox, never from this view. The
+  artifact carries **run-record fields and operator-authored
   trigger/skill strings only, never `.log` bytes and never a host path beyond the folder's basename**
   — the same placement boundary as everything else here, applied to a file that outlives the session.
   **Its labels are sized and cut in estimated COLUMNS, and no cut on the page leaves half a character**
@@ -2950,9 +2951,48 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   a trigger tool call in silence* (the model would report a narrowing that never landed; a schema does not refuse
   extra keys, so the refusal is in the code). A dollar field the model sends as a JSON number reaches the tool as a
   string through pi's own validation, so a number is read by its value; one that does not print as a plain decimal of at most 6 places is refused.
+- **Plans, `expect` and the audit chain** (issue #642, shared with the operator console's action table):
+  - **The validators moved, the messages did not.** The checks the tools and the dialogs make before their confirm
+    (`buildTriggerEntry`, `refuseWideningFields`, `settingsEnvelopeRefusal`, the validation and plan halves of
+    `applySet`/`applyUnset`, the limit and project dry runs, the secret profile name and path rules) left `index.ts`
+    and `secrets-command.ts` for `admin/src/write-plans.mjs`, a pi-free module, because the console is not a pi
+    session and cannot import `index.ts`. Each planner returns `{refusal}` (the exact sentence the tool gave) or
+    `{plan}` with the confirm's title, message and summary, the `mutate` to apply and the `expect` it was built from.
+    The extension imports them and re-exports the names other files import from it. Every message is byte-identical
+    to the one it replaced and the tools' existing tests pass unchanged, which is the proof the move is a move; the
+    console's forms send the tools' own parameter names, so one planner serves both.
+  - **`expect` on triggers and settings.** `writeTriggers` (the worker's locked writer) and `writeSettings` (over
+    `writeOverlay`) take the `writeInputs` snapshots a change was built from, as `writePauseWindows`,
+    `writeScopedLimits`, `writeProjects` and `writeEnvelope` already did, and re-read them right before the rename:
+    inside the triggers lock for `writeTriggers`, so the re-check and the rename are one critical section against
+    every other writer of that file. A difference refuses with nothing written. One encoding of a snapshot
+    (`worker/src/file-expect.mjs`: the text, `null` only for a missing file, a marker no text can equal for an
+    unreadable one) is shared by the admin that takes it and the worker that compares it. The tools now pass the
+    snapshot their confirm was built from (`plan.expect`), so a file changed while the confirm dialog was open is
+    refused instead of overwritten; the TUI's own dialogs pass none and behave as before. `writeOverlay`'s tmp file is now its own (`<path>.<pid>.<random>.tmp`, created
+    exclusively) rather than the fixed `<path>.tmp`: two processes now write the overlay, and a shared tmp name
+    would let one rename the other's bytes past its own re-check.
+  - **One pause funnel.** The fleet reader's `pause()` and `resume()`, behind the panel's `p` and `r`, go through
+    `killSwitchPlan` and `killSwitchSet` like the tools, so a resume across two Valkeys that disagree is refused on
+    the TUI too, where it used to resume the reader's own Valkey alone; they return `killSwitchSet`'s shape, and a
+    loop that stops part way is a result (`partial`) the footer says aloud, where it used to throw and be swallowed.
+    The reader also gains `pauseQueue` (one fleet queue), and `cancelHeldJob` searches every fleet queue as
+    `pi-dispatch cancel` does, which fixed a held job on a host queue being refused as gone.
+  - **Panel writes are audited.** Every write the TUI, its commands, its dialogs and the tools make (each trigger,
+    setting, pause window, limit, project, envelope, priorities, allocation revert and secret profile write, the
+    kill switch, both cancels and the gated enqueue) runs inside `panelWrite`, actor role `panel` in the console's
+    audit log (`DES-OPERATOR-CONSOLE`, one audit chain). An append that fails refuses the write in the funnel's own
+    refusal shape, so each caller's existing failure path says it. The delegated allocation write is audited the
+    same way; its own `alloc:log` and allocation audit are unchanged.
+  - **The setup wizard is not audited, by decision.** It builds the deployment: it runs before a `PI_LOGS_DIR`
+    exists to append to, its writes create the files the audit would name (the deployment's `package.json`, the
+    pointer, a first trigger, a compose copy, one `.env` line), and every host mutation it sequences is the worker
+    CLI's own consented command, shown in a confirm before it spawns. Requiring an audit row would refuse the first
+    run on every fresh host, and the log it would write to is one the wizard has not yet pointed anything at.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-ISSUE-TEXT-IS-DATA`, `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `DES-AI-TRIGGER-FLOW-GATE`,
-  `DES-JOB-OUTBOX-CHAINING`, `REQ-DURABLE-RUN-HISTORY`, `DES-OPERATOR-CONSOLE`, `REQ-OPERATOR-CONSOLE-SCREENS`
+  `DES-JOB-OUTBOX-CHAINING`, `REQ-DURABLE-RUN-HISTORY`, `DES-OPERATOR-CONSOLE`, `REQ-OPERATOR-CONSOLE-SCREENS`,
+  `REQ-OPERATOR-CONSOLE-ACTIONS`, `INT-CONSOLE-AUDIT-LOG`, `DES-FIRST-RUN-SETUP-WIZARD`
 
 ## DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY
 
@@ -9333,8 +9373,9 @@ a tunnel.
 ## DES-OPERATOR-CONSOLE
 
 - **Status**: issue #640, the security model and hardened skeleton of the console epic (#650); issue #641, the
-  screens, the live updates and `/api/state` (the bullets from "The screens" to "Wiring" below). Every write but the
-  pause windows arrives with #642, live logs with #643. This entry supersedes three of the
+  screens, the live updates and `/api/state` (the bullets from "The screens" to "Wiring" below); issue #642, the
+  writes and actions (the bullets from "The action table" to "The sandbox, shown and not run" below, and the four
+  rejected options marked #642). Live logs arrive with #643. This entry supersedes three of the
   rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
 - **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
@@ -9373,7 +9414,8 @@ a tunnel.
      the change it showed or refuses with "changed after this change was built from it", and writes nothing. A paid
      action (from #642) carries the reservation the page shows before its confirm. Every write goes through the
      read model's funnels: in #640 that is `writePauseWindows`, which gains the `expect` parameter its money-file
-     siblings (`writeScopedLimits`, `writeProjects`) already had. The console adds no write path of its own.
+     siblings (`writeScopedLimits`, `writeProjects`) already had; since #642 it is every funnel in the action table
+     below, `writeTriggers` and `writeSettings` gaining `expect` too. The console adds no write path of its own.
   4. **Every response carries the same headers, and every page escapes.** One function, applied to every response
      including refusals and 404s, sets a CSP of
      `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
@@ -9394,8 +9436,9 @@ a tunnel.
      those rows are rate limited (60 a minute, burst 120) and the rest counted into one row written with the next
      allowed one: one row per request would let anyone who reaches the port grow the log, and the chain's verify
      time, without bound. A refusal from a signed-in session, every sign-in and every write is
-     always its own row. A body refused as too large or as not JSON, and a change the preview refuses as invalid, are
-     answered without a row: none of them got as far as a write.
+     always its own row. Since #642 a signed-in write whose body is refused as too large or as not JSON is a row too
+     (the session's actor, a fixed `body:` reason, nothing of the body); a change the preview refuses as invalid is
+     answered without a row, since it got no further than the preview.
   The guards come from one route table, `{method, path, auth, write, handler}`, applied by one dispatcher in a fixed
   order: security headers, the Host check, the route lookup (404, 405), the write guards (origin, content type,
   read-only, role), the session (401 JSON for `/api/*`, a 303 to `/login` for a page), the handler. A new route
@@ -9599,6 +9642,154 @@ a tunnel.
   applied as the panel applies it so TLS and auth deployments connect the same way, and with `PI_SESSIONS_DIR` when
   it is set; it builds the insights cache, the audit reader and the hub, passes them to `createConsoleServer` as named
   dependencies, and disposes all of them on stop. `SERVER_LIMITS` is overridable for tests only.
+- **The action table** (issue #642, `REQ-OPERATOR-CONSOLE-ACTIONS`): every write the console makes is one entry of a
+  frozen table, `ACTIONS` in `admin/src/console/actions.mjs`, shaped `{name, kind, paid, bulk, preview(body, ctx),
+  apply(entry, ctx)}`. `preview` answers `{refusal}`, `{unchanged}` or `{summary, diffHtml, expect, payload,
+  targets, reserve}`, and writes nothing; `apply` answers `{ok, results?}` or `{invalid}`. The routes are generated
+  from it, two per entry (a preview and a confirm, `auth: "operator"`, `write: true`; `POST /api/act/<name>/preview`
+  and `/api/act/<name>/confirm`), so the #640 dispatcher puts every
+  guard in front of every action and the tests that iterate the route table cover every action without a hand list.
+  The refusal tests that once hit the one pause-windows route by hand loop over the table. The pause-windows write
+  of #640 is the table's first entry; its old routes, `/api/pause-windows/preview` and `/confirm`,
+  stay as aliases of the same handler and ticket (a whole-list replace, kind `pause-windows-set`). The table holds no
+  validation of its own: each `preview` calls a planner in `admin/src/write-plans.mjs` or `admin/src/job-actions.mjs`
+  and each `apply` calls a read-model funnel, the same pair the `/dispatch` TUI and the pi extension's tools call, so
+  a value the panel refuses is refused here in the panel's own words.
+- **The generic pipeline**: one preview handler and one confirm handler serve every entry, so the ticket, the
+  re-check, the audit row and the compensating row are written once.
+  1. The preview runs the entry's `preview` and, on a plan, issues a ticket holding `{action, payload, expect,
+     targets, reserve, beforeDigest, afterDigest}`: what the confirm will do, the snapshots it was built from, the
+     jobs it will touch, and the reserve the page showed. It answers the summary, the diff (a `SafeHtml` fragment
+     built by the one template, swapped by the served script into `[data-preview]` alone) and the ticket.
+  2. The confirm redeems the ticket (single use, this session, this action, 5 minutes, unchanged from #640), appends
+     the `ok` audit row with `kind`, the digests, `reserve` and `count`, then runs `apply`. A refusal or a throw
+     appends a compensating `failed` row under the same ticket digest. An append that fails refuses the write
+     before `apply` runs.
+  3. `apply` hands the ticket's `expect` to the funnel, so a confirm applies exactly what was previewed or refuses
+     with "changed after this change was built from it" (a file) or "it changed since the preview" (a job), and the
+     page answers 409 and asks for a fresh preview.
+  4. After an `apply` that landed, the hub is poked (`hub.tick()`) so every open live page shows the change.
+  The served script handles every `form[data-action]` the same way: preview, show, confirm, reload. No inline
+  handler, and the CSP is unchanged.
+- **The action groups**, each a funnel that already existed or one #642 added beside the others in the read model
+  (`job-actions.mjs`, re-exported by `read-model.mjs`, so the read model stays the admin's one data access surface):
+  - **Runs and jobs**: cancel an active job (`requestCancel` through the fleet reader's `cancelActive`, the CLI's
+    channel, with `REQ-OPERATOR-JOB-CANCEL`'s named refusal when no worker acknowledges); cancel a held job
+    (`cancelHeldJob`); retry a failed job and remove a failed job (`retryFailedJob`, `removeFailedJob`: BullMQ's
+    own `job.retry()` and `job.remove()`, only on a job still `failed` with the previewed `attemptsMade` and
+    `finishedOn`); re-run a finished run (`planRerun`, `enqueueRerun`, paid); answer a parked run
+    (`planParkedAnswer`, `enqueueParkedAnswer`, paid).
+  - **Fleet**: pause and resume the whole fleet (`killSwitchPlan` and `killSwitchSet`, the tools' funnel, so a
+    resume across two disagreeing Valkeys is refused here as it is everywhere); pause and resume one queue
+    (`setQueuePausedOne`, which refuses a name the fleet does not drain rather than creating a paused queue
+    nothing reads).
+  - **Configuration**: triggers add, edit and delete (`writeTriggers`); settings set and unset (`writeSettings`);
+    secret profile names, a name and its resolver path added or removed, never a value; pause windows; scoped
+    limits; projects; the envelope; priorities (shows the plan before it applies); revert an allocation. Each is
+    the matching `plan*` of `write-plans.mjs` for the preview and the panel's funnel for the write, which now
+    takes `expect` on every file it writes.
+  - **Bulk**: retry every failed job, remove every failed job (either filtered by queue or by repository), and
+    cancel every held job.
+  The audit `kind` of each is the panel's where the panel already writes the same thing (`trigger-add`,
+  `setting-set`, `cancel-held`, `fleet-pause`, ...), and the console adds `queue-pause`, `queue-resume`,
+  `failed-retry`, `failed-remove`, `failed-retry-all`, `failed-remove-all`, `held-cancel-all`, `run-rerun` and
+  `parked-answer`. The action names are the kinds' own spellings for the configuration actions (`trigger-add`, `setting-set`,
+  `limit-edit`, ...) and `cancel-active`, `cancel-held`, `cancel-all-held`, `retry-failed`, `remove-failed`,
+  `retry-all-failed`, `remove-all-failed`, `fleet-pause`, `fleet-resume`, `queue-pause`, `queue-resume`, `rerun` and
+  `parked-answer` for the rest.
+- **Paid actions and the reserve**: a re-run and an answer to a parked run start a paid job, so their preview shows
+  what the worker will hold before the operator confirms, and the ticket and the audit row carry it (`reserve`, in
+  micro-dollars). The figure is `estimateReserve` (`worker/src/reserve-estimate.mjs`, the worker export
+  `./reserve-estimate`), which imports the worker's own rule rather than restating it: one job-count slot in each
+  window that applies, and in dollars the per-job cap `effectiveCostCapMicros(trigger maxCostUsd, deployment
+  maxCostUsd)` (the smaller of the two, each counted only when set, the deployment's resolved `overlay > env`), or 0
+  for a job that cannot spend (`zeroRatedFor`, the processor's own zero-rated test, moved beside it so the estimate
+  and the reserve judge one rule), or "no cap" when neither is set. Without the worker's endpoint snapshot the
+  estimate judges a job not zero-rated, so it can name a larger figure than the worker holds and never a smaller one.
+  `CONST-BUDGET-BEFORE-TOKENS` is unchanged: the worker still reserves at pickup, after every free gate, and the
+  page only says beforehand what that reserve will be. A retry also runs a job again, through every pre-spend gate, so
+  it is paid too: its preview reads the failed job's data and shows the same estimate, and a bulk retry shows each
+  job's and the sum; a job whose data cannot be read shows "reserve unknown", never $0. Resuming the fleet or a queue
+  is marked paid as well, since it releases jobs that will reserve.
+- **Answering a parked run** (`REQ-AWAIT-INPUT`'s console source): a comment posted as the deployment is dropped by
+  the receiver's self-guard, so the console cannot answer by commenting as the bot. It enqueues the reply job
+  itself:
+  - The job is the one the RECEIVER builds for a phrase-free reply on that forge's issue, field for field: the
+    parked run's `repo`, `projectId`, `azure` and issue target from its retained BullMQ job (kept 31 days), the
+    comment trigger's run fields as the triggers file says now, `resume: true`, `parkedReply: true`, `matched`
+    naming the comment trigger, and the answer in `trigger.comment.body`, which the prompt fences as data below the
+    delimiter like any comment (`CONST-ISSUE-TEXT-IS-DATA`). Four fields differ, by design: a fresh delivery id
+    (`console-<16 hex>`, never a forge's, so its job id cannot collide with one), the sender (`{id: null}`), the
+    GitHub author association (`OWNER`: the operator is the deployment's own authority, `CONST-TRIGGER-AUTHOR-GATE`'s
+    operator clause), and `console: {by: <token name>}` at job level, never inside `trigger`, so the agent's
+    `event.json` does not carry it. A test builds the receiver's reply and the console's for the same issue and
+    compares them field for field.
+  - The text is scrubbed (line endings made `\n`, other C0 and C1 controls, DEL, and the bidi overrides and isolates
+    removed, the line and paragraph separators made `\n`) and refused, never cut, when empty or above 8 KiB
+    (`worker/src/console-answer.mjs`, export `./console-answer`, the one rule both sides use).
+  - Refused by name before any ticket: a run that is not parked, one already answered (a later run on the same kind
+    and target), a pull request's park (its reply needs the head branch, so it keeps the phrase on the forge),
+    expired data, and a comment trigger the receiver would not route a reply through (absent, a command, or without
+    `run.resume`).
+  - The worker's gates apply as for any reply: the `not-parked` check first, then the budget reserve. A job that
+    passed `not-parked` and carries `console.by` posts ONE trail comment through the existing `comment` adapter,
+    once every pre-spend gate and reserve has passed, just before the container starts, so the issue never reads
+    "answered" above a refusal that then dropped the answer, and still before the provider is called:
+    "Answered from the operator console by <name>:" followed by the text as a blockquote, every `@` followed by a
+    zero-width space so the answer cannot mention a person or team under the deployment's identity. The name needs
+    no escaping: `enqueueForgeJob` refuses a `console.by` outside the token-name charset (lowercase letters, digits,
+    dot, dash, underscore, at most 32), and the worker posts nothing for one that is not. The trail is posted as the
+    deployment's identity, which the receiver's self-guard drops as `self`, so it never starts a job. A later
+    pre-spend refusal (a budget cap, a missing session store) still follows the trail, which then reads as an answer
+    that was given and not acted on, the same as a forge reply refused there.
+  - The trail is posted AT MOST ONCE per job: before posting, the worker sets `console:trail:<jobId>` with NX and a
+    31-day expiry, and only the attempt that set it posts, so an infrastructure retry or a console retry of the
+    answer's job never quotes the answer twice; on a Valkey error the trail is skipped and logged
+    (`console_trail_skipped`) rather than risk a second one. The quoted text escapes `&`, `<` and `>` as entities
+    before the mention neutraliser runs, so an HTML comment or tag cannot hide part of the answer on the forge and an
+    entity cannot spell a mention; the answer scrub also removes every bidi mark (U+061C, U+200E, U+200F, U+202A to
+    U+202E, U+2066 to U+2069) and turns U+2028, U+2029 and carriage returns into newlines.
+  - The audit row records the parked run's job id and the sha256 of the answer, never the text.
+- **Re-run sources, per kind** (`planRerun`): a run record cannot rebuild a forge job (it holds no payload text, by
+  construction), so each kind is rebuilt from the source that can:
+  - LOCAL (`/dispatch run`, `pi-dispatch run`, a chained child): the retained job's folder, flow and task, queued as
+    `/dispatch run` queues them (`enqueueLocalJobReporting`, this host's queue), after the same folder rule (a
+    repository root with a commit and no uncommitted changes), re-checked at the confirm. A local job's data is kept
+    24 hours after it completes and 7 days after it fails.
+  - CRON (`repeat:` and `manual:` ids): the trigger as the triggers file says NOW, fired once by hand
+    (`enqueueTriggerRunReporting`, `pi-dispatch run --trigger`'s path and refusals, through the worker's
+    `loadSchedules`, export `./schedules`).
+  - FORGE: the issue (repo, project, target, trigger context) from the retained job's data, but the RUN FIELDS
+    (flow, model, models, cost cap, secret profile, image, backend, packages, mcp) from the trigger at the retained
+    `matched.index` as the triggers file says NOW, built by the same `runFieldsOf` the parked answer uses, and listed
+    in the preview. That trigger must still be the same forge and type, still list the matched label or action, and
+    run the same flow (a comment's flow override only while the file still routes that flow, never through a command
+    trigger); otherwise the re-run is refused, "the trigger that started this run changed or is gone; start it again
+    from the forge". Replaying the retained fields was rejected: a trigger deleted or narrowed to stop a secret
+    profile, an image or a cost would have come back for 31 days, and a shifted index would have pointed the worker's
+    trigger-skew check at another trigger. A fresh `console-<hex>` delivery id makes the job id new; it is routed as
+    the receiver routes it (`jobNeeds`/`routeForgeJob`), and carries no `console` field (a re-run is not an answer).
+  Refused by name: expired data, a `/command` run (a command runs only from its reviewed trigger), an answer to a
+  parked run (answer again from the inbox instead), a cron trigger gone from the file or served by another host.
+  The forge job's 10-minute semantic window, and the local and cron minute windows, can still take the re-run as a
+  duplicate; only the enqueue can tell, and it says so by name with nothing queued.
+- **Bulk actions**: the preview lists every affected job, at most 100 (`BULK_MAX`), with each failed job's
+  `attemptsMade` and `finishedOn`, and the ticket binds that exact list and each job's state; a set larger than 100
+  shows the first 100 and says how many more matched. The confirm acts per job, re-checking each one, so a job
+  retried, removed or failed again since the preview is refused alone and the rest go on, and the answer reports per
+  job. The audit has one row per job (`target` the job id), each with `count` the list's size and the one ticket
+  digest, so a reader can group a bulk action and see each job's outcome.
+- **One audit chain**: the TUI's writes and the extension's tools' writes land in the same log as the console's,
+  as actor `{name: <os login>, role: "panel", session: null}`, in the deployment's `PI_LOGS_DIR/console-audit/`.
+  `auditedWrite` (`admin/src/audited-write.mjs`) applies the console's rule to them: the `ok` row before the write,
+  a compensating `failed` row with the same ticket after a refusal or a throw, and a write whose row cannot be
+  appended does not happen. The log's append lock already lets several writers on one host take turns, so the
+  console, its CLI and a pi session append to one chain. Before #642 only allocation writes were recorded outside
+  the console, so the log could say what a browser changed and nothing about the same change made from a terminal.
+- **The sandbox, shown and not run**: the run detail page shows `pi-dispatch sandbox <jobId>` for the operator to
+  copy and run on the host. Reopening a sandbox is `docker run -it` with the operator's terminal inherited
+  (`worker/src/sandbox.mjs`), which a separate process cannot hand to a browser; `REQ-RESURRECTABLE-SANDBOX`'s
+  surfaces are unchanged.
 - **Rejected**:
   - **Mounting the console on the receiver.** Still rejected, for the reason `DES-PANEL-SEPARATE-FROM-RECEIVER`
     recorded and `DES-ADMIN-VIA-PI-EXTENSION` kept: the receiver binds `0.0.0.0` and faces the forge, so any admin
@@ -9637,6 +9828,23 @@ a tunnel.
     needs upgrade handling on the trusted process, a second framing to parse, and an origin check of its own (a
     WebSocket handshake is not held by the same-origin policy), all for a channel the console would never read
     from.
+  - **A terminal in the browser** (issue #642), to reopen a sandbox from the page. Reopening is an interactive
+    `docker run -it` with the operator's terminal inherited; carrying it to a browser means a pty and a duplex
+    channel in the process that holds operator power, an interactive root-adjacent shell one stolen session away
+    from anyone, and the WebSocket handling rejected above. The page shows the one command instead, and the operator
+    runs it where they already have a shell.
+  - **Committing configuration to git** (issue #642). A config edit lands in the files the TUI writes (the triggers
+    file, the overlay, the money files) and nothing else. Committing would give the console process a git identity
+    and a repository to write, turn a confirmed file write into a second, separately failing step, and take a
+    decision that belongs to the operator's own review workflow; the files stay diffable for whoever commits them.
+  - **Posting the answer as the bot from the console process** (issue #642, the issue's own first question). A
+    comment posted as the deployment is dropped by the receiver's self-guard (`sender.id === selfId`), so it could
+    never resume the run, and it would put a forge credential in the console. The console enqueues the reply job and
+    the worker, which already holds the forge identity, posts the trail just before the container starts.
+  - **Re-running from the run record** (issue #642). The record is PII-free by construction: it holds no issue text,
+    no comment and no folder, so it cannot rebuild a forge job or a local one, and adding those fields would break
+    the property `INT-RUN-HISTORY-FILE-CONTRACT` exists for. The retained BullMQ job holds them for a bounded time
+    (31 days for a forge job), and a re-run past that is refused by name.
 - **Residuals**, stated rather than implied (each is a "What is NOT defended" entry in `SECURITY.md`): root on the
   host reads and writes everything the console does; a compromised operator browser or machine acts with the
   operator's session; a compromised tunnel endpoint is the operator; a local user can spend the global login rate limit
@@ -9646,12 +9854,21 @@ a tunnel.
   can write the tokens file (threat 4). Since #641: a token holder, a viewer included, who signs in eight times can
   hold all 32 stream slots, so other people's pages still load and still sign in but are not live until those
   streams close or that token's sessions end (`token revoke` or `rotate`); and a page that is only watched signs
-  out at the idle limit, by design (an open stream never extends a session).
-- **Traces to**: `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
+  out at the idle limit, by design (an open stream never extends a session). Since #642: an operator's answer is
+  quoted on the forge under the deployment's identity, so an operator token can put text on any parked issue the
+  deployment can comment on (mentions neutralised, the author named); a bulk action can start up to 100 paid
+  retries from one confirm, each still reserved and refused by the worker's caps; and a panel write made from a
+  shell that cannot append to the audit log is refused, so a full or unwritable `PI_LOGS_DIR` stops the TUI's and
+  the tools' writes until it is fixed.
+- **Traces to**: `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS`,
+  `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
   `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONFIG-OVERLAY-CONTRACT`,
   `DES-ADMIN-VIA-PI-EXTENSION`, `DES-PANEL-SEPARATE-FROM-RECEIVER`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`,
-  `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`, `REQ-AWAIT-INPUT`, `REQ-INSIGHTS-HTML-EXPORT`,
-  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `OQ-044`.
+  `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`, `DES-AWAIT-INPUT-ENDS-THE-JOB`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
+  `REQ-AWAIT-INPUT`, `REQ-OPERATOR-JOB-CANCEL`, `REQ-RESURRECTABLE-SANDBOX`, `REQ-INSIGHTS-HTML-EXPORT`,
+  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
+  `CONST-TRIGGER-AUTHOR-GATE`, `OQ-044`.
 - **Code evidence**: admin/src/console/ (`cli.mjs`, `config.mjs`, `listen.mjs`, `guards.mjs`, `headers.mjs`,
   `html.mjs`, `server.mjs`, `sessions.mjs` (`peek` since #641), `login-codes.mjs`, `confirm.mjs`, `lock.mjs`, and
   since #641 `pages.mjs`, `panels.mjs`, `style.mjs`, `script.mjs`, `live.mjs`), worker/src/console-tokens.mjs,
@@ -9660,7 +9877,16 @@ a tunnel.
   `prune` option), admin/src/index.ts (`guardedFiles`), admin/src/read-model.mjs (`writePauseWindows`, and since #641
   `createFleetReader`, `readRunsPage`, `makeLocalRunIndex`, `readRunById`, `readParkedRuns`, `secretProfileNames`,
   `forgeLinkOf`), admin/src/run-filter.mjs, admin/src/insights-assembly.mjs, admin/src/insights-html.mjs (the
-  exported sections and `INSIGHTS_CSS`).
+  exported sections and `INSIGHTS_CSS`). Since #642: admin/src/console/actions.mjs (`ACTIONS`, the generic preview
+  and confirm), admin/src/console/job-data.mjs (`readJobsData`, the read side of a paid retry's estimate), admin/src/job-actions.mjs (`retryFailedJob`, `removeFailedJob`, `planFailedBulk`,
+  `retryFailedJobs`, `removeFailedJobs`, `planRerun`, `enqueueRerun`, `planParkedAnswer`, `enqueueParkedAnswer`,
+  `BULK_MAX`), admin/src/read-model.mjs (`killSwitchPlan`, `setQueuePausedOne`, `cancelHeldJob` across the fleet,
+  `writeSettings` with `expect`, the fleet reader's `pause`, `resume` and `pauseQueue`), admin/src/write-plans.mjs,
+  admin/src/audited-write.mjs (`auditedWrite`, `panelWrite`, `panelActor`), worker/src/console-answer.mjs,
+  worker/src/reserve-estimate.mjs (`estimateReserve`, `zeroRatedFor`, `callableModelRefs`),
+  worker/src/file-expect.mjs, worker/src/queue.mjs (`enqueueForgeJob`'s `console`), worker/src/processor.mjs (the
+  trail comment), worker/src/console-audit.mjs (`kind`, `reserve`, `count`), worker/src/triggers-file.mjs and
+  worker/src/runtime-settings.mjs (`expect`).
 
 ## Revision History
 
@@ -9966,3 +10192,4 @@ a tunnel.
 | 2026-10-14 | No issue: found in a live lab (Forgejo 14.0.5, pi-dispatch 4.3.0). **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**, one sentence: on Forgejo the parked label is attached and removed by id after a lookup. Measured: a second `POST /repos/{o}/{r}/labels` with the name `pi-awaiting-input` answered 201 and made a duplicate (labels #2 and #3), adding by name attached both to the issue, and removing by name answered 204 and took off one, so the label outlived the resumed run, each park added a repository label, and later plain replies kept routing to `not-parked`. The host now lists the repository's labels (paged, bounded), creates one only when none has the exact name, attaches the lowest id, and on removal deletes every copy the issue carries by id, with 404 and 422 read as already gone. Duplicate repository labels from 4.3.0 are left for the operator (`docs/sessions.md`). **`REQ-AWAIT-INPUT` UNCHANGED, checked**: the marker still routes and never decides; the sidecar does. **`OQ-042` UNCHANGED, checked**: who may set the label does not move. |
 | 2026-10-14 | Issue #640, the operator console's security model and hardened skeleton. **NEW `DES-OPERATOR-CONSOLE`**: a separate process, the bin `pi-dispatch-console` of the admin package, on `node:http` alone, over the same read model as the pi extension. The property that replaces "binds no network port": it listens on loopback (`127.0.0.1:4790` by default, IP literals only, a public literal only with `PI_CONSOLE_BIND_PUBLIC=1`) or on a 0600 unix socket; every request but `/healthz` and login needs a named token's session; a write needs `Sec-Fetch-Site: same-origin` (or an exact `Origin`), JSON, the operator role, a console that is not read-only, and a single-use ticket bound to the previewed diff, and goes through the read model's funnels (`writePauseWindows` gains `expect`); every response carries one header set; every write, refusal and sign-in lands in a hash-chained audit log. Six threats found while surveying are recorded with their answers: the job container reaching loopback through the host gateway (the Host check refuses the gateway names, a token is required, and the unix socket removes the path), an SSH tunnel changing the port (the Host check is on the hostname, any port), a page on another localhost port being same-site (`same-site` is refused), the operator's pi session minting a token (the tokens file joins `guardedFiles()`), a job reading the tokens file through a mounted path (hashes only, and doctor fails a tokens file inside any path a job container can see), and two writers forking the chain (an append lock around the head read and the write, plus a single-instance lock on `serve`). Rejected, with reasons: mounting on the receiver (still), a framework or build step, TLS in the process, one shared token, a KDF for 256-bit tokens, `Secure` or `__Host-` before the browser lab, the token in a URL (the one-time code rides in the fragment), and a Valkey stream as the record. Measured on 2026-10-14 and recorded in the entry: a Docker Desktop job container reaches a host loopback listener through `host.docker.internal` on the default bridge and not on `--internal`, native Linux reaches it in neither posture; WebKit drops `Secure` and `__Host-` cookies on plain-http loopback, so the cookie is plain; in Chrome 155 a hostile page on another localhost port is same-site and its writes are refused on `Sec-Fetch-Site`, a rebound name gets 421, and the CSP blocks an injected inline script; and a real `ssh -L` tunnel to the unix socket signs in on a different port. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the extension still binds no port, stated as the extension's property, and the console is named as a second surface in a separate process; its Why bullet on the receiver says the receiver still carries no admin surface; the rejected served graph page and web panel are marked SUPERSEDED by `DES-OPERATOR-CONSOLE` where they stand, their text kept; mounting admin on the receiver stays rejected. **`DES-PANEL-SEPARATE-FROM-RECEIVER` UNCHANGED, checked**: still superseded, and its reasoning is what the console's separate process rests on. UNCHANGED, checked: `CONST-ISOLATION-CONTAINER-PER-JOB` (the console runs no agent and processes no adversarial input as instructions; run text is data it escapes), `CONST-BUDGET-BEFORE-TOKENS` (the console's one write moves a pause window through the same funnel as the panel, and paid actions are #642's), and `constitution.md` (it holds no port clause, checked). |
 | 2026-10-14 | Issue #641, the operator console's screens and live updates. **`DES-OPERATOR-CONSOLE` AMENDED**: eight read pages (overview, runs, run detail, parked inbox, insights with a range, fleet, configuration, audit), each an exact path with a bounded query, built from one `PAGES` table and from pure panel renderers that serve both the first load and every live update; `GET /api/state` and `GET /api/events` (`INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`); the stylesheet a served file, because the CSP blocks inline style. ONE FLEET READER: the panel's snapshot code moved from `dashboard.ts` into `read-model.mjs` as `createFleetReader`, unchanged, and both surfaces build one, which is what "no second read model" means; new readers for a run page (a score cursor, 100 a page, 2000 examined at most, the mirror read without pruning so a page read writes nothing), a run by id, parked runs (`answered` derived from a later run on the same kind and target, the chain count unknown rather than 0 where this host cannot see the store), secret profile names, the audit rows, and forge links derived from the deployment's own instance URL, never guessed. The insights assembly moved pi-free with the pricing passed in, so the console bundle carries `pi-ai` for prices and never the pi runtime. THE LIVE HUB: server-rendered panels over SSE, only changed panels sent, a snapshot on connect, `Last-Event-ID`, a 15 s ping, a 2 MiB slow-client drop, and one 1 s poll that runs only while a stream is open. THE STREAM LIFECYCLE, the gap #640 left: each tick re-judges every stream's session with a new `sessions.peek`, which never moves `lastSeen`, so an open tab never extends a session, and logout, revoke, rotate, end-all and expiry end a stream within a tick; `PI_CONSOLE_MAX_STREAMS` per session plus a global cap of 32, so streams never take all 64 connections (429 past either). THE ROLE RULE: records are PII-free and shown to both roles, the hostile-capable strings escaped; BullMQ `failedReason` only to the operator and only in a detail view; the audit page operator only. Rejected: JSON with client rendering (a second escaper), a single-page app or framework, polling from each browser, WebSockets (one-way updates need no upgrade handling on the trusted process). Two residuals added: one token's eight sessions can hold every stream slot, and a watched page still signs out at the idle limit. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the overlay's snapshot is the moved `createFleetReader`, behaviour unchanged, and a new PARKED view reads the snapshot's `parked`. UNCHANGED, checked: `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (the parked chain count re-derives the key and indexes nothing), `DES-AWAIT-INPUT-ENDS-THE-JOB` (parking is read, never changed; answering is #642's), `DES-PANEL-SEPARATE-FROM-RECEIVER` (still superseded, the console still never runs on the receiver), and `REQ-INSIGHTS-HTML-EXPORT`'s file (unchanged; the console renders the same sections live). |
+| 2026-10-15 | Issue #642, writes and actions from the operator console. **`DES-OPERATOR-CONSOLE` AMENDED**: THE ACTION TABLE, `ACTIONS` in `admin/src/console/actions.mjs`, one entry per write (`{name, kind, paid, bulk, preview, apply}`), from which the preview and confirm routes are generated, so the #640 dispatcher guards every action and the route-table tests cover every action; the pause-windows write is its first entry (routes `POST /api/act/<name>/preview` and `/confirm`; the old pause-windows routes stay as aliases). THE GENERIC PIPELINE: one preview issues a ticket holding the payload, the `expect` snapshots, the targets and the reserve; one confirm redeems it, appends the `ok` audit row (with `kind`, digests, `reserve`, `count`), applies through the funnel, appends a compensating `failed` row on a refusal or throw, and pokes the live hub; an append failure refuses. THE GROUPS: runs and jobs (cancel active with `REQ-OPERATOR-JOB-CANCEL`'s named refusal, cancel held, retry failed, remove failed, re-run, answer parked), fleet (pause and resume through the kill switch's one funnel, one queue), configuration (each through the `write-plans.mjs` planner and the panel's funnel), bulk. PAID ACTIONS AND THE RESERVE: `estimateReserve` (worker export `./reserve-estimate`) imports the worker's own rule (one slot, the per-job cap `effectiveCostCapMicros`, 0 for a job `zeroRatedFor` judges unable to spend), so the page shows what the worker will hold; the worker still reserves at pickup. PARKED ANSWERS: the receiver's phrase-free reply rebuilt field for field (the parked run's repo and target from its retained job, the comment trigger's run fields as the file says now), the text in `trigger.comment.body` fenced as data, a fresh `console-` delivery id, sender `{id: null}`, GitHub association `OWNER`, `console: {by}` at job level; the worker's one trail comment once every pre-spend gate and reserve has passed, just before the container starts, mentions neutralised by U+200B, dropped by the receiver's self-guard as `self`; the audit holds the answer's sha256, never the text. RE-RUN SOURCES: local from the retained job's folder, flow and task after the folder rule; cron from the trigger as the file says now (`./schedules`); forge with the issue from the retained job data and the run fields from the trigger as the file says now (refused when that trigger changed or is gone), a fresh delivery id, routed as the receiver routes, without `console`; refused by name on expired data, a `/command`, a parked answer, and a duplicate the semantic or minute window takes. BULK: at most 100, the ticket binding the exact list and each job's state, per-job re-check and results, one audit row per job with `count` and the shared ticket digest. ONE AUDIT CHAIN: the TUI's and the tools' writes as actor role `panel`, append before write, append failure refuses. THE SANDBOX: the command shown, never run. Rejected, with reasons: a browser terminal, committing configuration to git, posting the answer as the bot from the console process, re-running from the run record. Three residuals added: an operator token can quote text on any parked issue under the deployment's identity, one bulk confirm can start 100 paid retries (each still reserved), and an unwritable `PI_LOGS_DIR` stops the panel's writes. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the tools' and dialogs' pre-confirm checks moved to the pi-free `admin/src/write-plans.mjs` with their messages byte-identical and their tests unchanged; `writeTriggers` (inside its lock) and `writeSettings` take `expect`, sharing `worker/src/file-expect.mjs`'s snapshot encoding, and `writeOverlay`'s tmp file became its own; the fleet reader's `pause`/`resume` go through `killSwitchPlan`/`killSwitchSet`, so the two-Valkey disagreement refusal holds on the TUI too, a part-way stop is a result the footer says, and `pauseQueue` and the fleet-wide `cancelHeldJob` arrive; every panel write is audited as role `panel`; the setup wizard is not audited, and why (it runs before a logs directory exists and creates the files an audit would name; its host mutations are the worker CLI's own consented commands). The PARKED view still writes nothing. UNCHANGED, checked: `DES-AWAIT-INPUT-ENDS-THE-JOB` (parking and the `not-parked` gate are as they were; the console is one more source of the reply that gate judges), `DES-SANDBOX-IS-A-FRESH-CONTAINER` (no new way to open one), `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` (the priorities and revert actions call the same `applyPriorities` and `revertAllocation`; the allocation audit and `alloc:log` keep their rows), `DES-PANEL-SEPARATE-FROM-RECEIVER` (the console still never runs on the receiver), `DES-CANCEL-VIA-REDIS-REQUEST-KEY` (the console uses the CLI's request key). **Code evidence**: admin/src/job-actions.mjs, admin/src/write-plans.mjs, admin/src/audited-write.mjs, admin/src/read-model.mjs (`killSwitchPlan`, `setQueuePausedOne`, `cancelHeldJob`, `writeSettings`, `createFleetReader`), admin/src/index.ts, admin/src/dashboard.ts (`withAuditedWrites`, `switchFailure`), admin/src/secrets-command.ts, worker/src/console-answer.mjs, worker/src/reserve-estimate.mjs, worker/src/file-expect.mjs, worker/src/queue.mjs (`enqueueForgeJob`), worker/src/processor.mjs, worker/src/console-audit.mjs, worker/src/triggers-file.mjs, worker/src/runtime-settings.mjs, admin/src/console/actions.mjs, admin/src/console/job-data.mjs. |
