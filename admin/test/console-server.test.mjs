@@ -9,6 +9,7 @@ import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { SECURITY_HEADERS } from "../src/console/headers.mjs";
 import { html, page } from "../src/console/html.mjs";
 import * as realPages from "../src/console/pages.mjs";
+import { ACTIONS } from "../src/console/actions.mjs";
 import { BODY_LIMIT, createConsoleServer, lookupRoute, REFUSAL_ROWS_PER_MINUTE, ROUTES, SERVER_LIMITS, STATE_UNREADABLE, STREAMS_TOTAL_MAX } from "../src/console/server.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { writePauseWindows as realWritePauseWindows } from "../src/read-model.mjs";
@@ -297,6 +298,34 @@ test("a form-encoded, multipart or text/plain write is refused 403 (a cross-site
   assert.equal(c.sessions.live.size, 0);
 });
 
+test("EVERY write route in ROUTES (every action's preview and confirm among them) refuses same-site, cross-site, a missing Origin, form-encoded and text/plain 403 before auth, and audits each (derived from the table)", async () => {
+  const c = await start();
+  const { cookie } = await c.login();
+  const writeRoutes = ROUTES.filter((r) => r.write);
+  for (const a of ACTIONS) for (const step of ["preview", "confirm"]) assert.ok(writeRoutes.some((r) => r.path === `/api/act/${a.name}/${step}`), `${a.name} ${step} is in the loop`);
+  for (const route of writeRoutes) {
+    // A minute per route, so the anonymous refusal budget (REFUSAL_ROWS_PER_MINUTE) writes every row asserted here.
+    c.advance(60_000);
+    for (const site of ["same-site", "cross-site"]) {
+      const res = await c.post(route.path, { ticket: "x" }, { cookie, "sec-fetch-site": site });
+      assert.equal(res.status, 403, `${route.path} ${site}`);
+      assert.match(c.audit.rows.at(-1).reason, /^origin: /, `${route.path} ${site} audited`);
+    }
+    const noOrigin = c.writeHeaders({ cookie });
+    delete noOrigin.origin;
+    const bare = await c.send({ method: "POST", path: route.path, headers: noOrigin, body: JSON.stringify({ ticket: "x" }) });
+    assert.equal(bare.status, 403, `${route.path} no Origin`);
+    assert.match(c.audit.rows.at(-1).reason, /^origin: a write must carry an Origin header/);
+    for (const type of ["application/x-www-form-urlencoded", "text/plain"]) {
+      const res = await c.send({ method: "POST", path: route.path, headers: c.writeHeaders({ cookie, "content-type": type }), body: "ticket=x" });
+      assert.equal(res.status, 403, `${route.path} ${type}`);
+      assert.match(c.audit.rows.at(-1).reason, /^content-type: /, `${route.path} ${type} audited`);
+    }
+  }
+  assert.equal(c.writes.length, 0);
+  assert.equal(c.tickets.held.size, 0);
+});
+
 test("OPTIONS is a 405 with no Access-Control-* header, so no preflight ever succeeds", async () => {
   const c = await start();
   for (const path of ["/login", "/api/pause-windows/confirm", "/nowhere"]) {
@@ -373,6 +402,17 @@ test("the route table: every route declares auth and write, writes are POST, and
   assert.equal(fixed["GET /api/state"], "viewer");
   assert.equal(fixed["GET /api/events"], "viewer");
   assert.equal(fixed["GET /static/console.css"], "none");
+  // Issue #642: two operator write routes per action, generated from the table; #640's paths stay as aliases.
+  for (const a of ACTIONS) {
+    for (const step of ["preview", "confirm"]) {
+      const found = lookupRoute("POST", `/api/act/${a.name}/${step}`)?.route;
+      assert.ok(found, `${a.name} ${step}`);
+      assert.deepEqual([found.auth, found.write, found.action, found.readOnlyExempt ?? false], ["operator", true, a.name, false]);
+    }
+  }
+  assert.equal(lookupRoute("POST", "/api/pause-windows/preview").route.action, "pause-windows");
+  assert.equal(lookupRoute("POST", "/api/pause-windows/confirm").route.action, "pause-windows");
+  assert.equal(ROUTES.filter((r) => r.path.startsWith("/api/act/")).length, 2 * ACTIONS.length);
   assert.equal(STREAMS_TOTAL_MAX, 32);
   assert.ok(STREAMS_TOTAL_MAX < SERVER_LIMITS.maxConnections, "streams can never take every connection");
 });
@@ -402,33 +442,44 @@ test("unauthenticated: a page redirects to /login, an API answers 401, a write a
   assert.equal((await c.send({ path: "/api/whoami", headers: { cookie: `pdc_session=${"x".repeat(43)}` } })).status, 401);
 });
 
-test("a viewer's write is refused 403 and audited with the viewer's name; the viewer can still read", async () => {
+// The operator's writes, from the table (issue #642, REQ-CONSOLE-SECURITY d): every action route is one of them.
+const OPERATOR_WRITES = ROUTES.filter((r) => r.write && r.auth === "operator");
+
+test("a viewer's write is refused 403 and audited with the viewer's name, on EVERY operator write route; the viewer can still read", async () => {
   const c = await start();
   const { cookie } = await c.login(VIEW_TOKEN);
   const who = await c.send({ path: "/api/whoami", headers: { cookie } });
   assert.deepEqual(who.json(), { name: "vic", role: "viewer", readOnly: false });
-  const res = await c.post("/api/pause-windows/preview", { windows: [] }, { cookie });
-  assert.equal(res.status, 403);
-  assert.match(res.json().error, /operator role/);
-  const row = c.audit.rows.at(-1);
-  assert.equal(row.action, "refused");
-  assert.equal(row.outcome, "refused");
-  assert.equal(row.actor.name, "vic");
-  assert.equal(row.actor.role, "viewer");
-  assert.equal(row.actor.session, sha256(cookie.split("=")[1]).slice(0, 12));
-  assert.match(row.reason, /^role: /);
+  assert.ok(OPERATOR_WRITES.length >= 2 * ACTIONS.length, "every action's two routes are operator writes");
+  for (const route of OPERATOR_WRITES) {
+    const res = await c.post(route.path, { windows: [], ticket: "x" }, { cookie });
+    assert.equal(res.status, 403, route.path);
+    assert.match(res.json().error, /operator role/);
+    const row = c.audit.rows.at(-1);
+    assert.equal(row.action, "refused");
+    assert.equal(row.outcome, "refused");
+    assert.equal(row.target, route.path);
+    assert.equal(row.actor.name, "vic");
+    assert.equal(row.actor.role, "viewer");
+    assert.equal(row.actor.session, sha256(cookie.split("=")[1]).slice(0, 12));
+    assert.match(row.reason, /^role: /);
+  }
   assert.equal(c.writes.length, 0);
+  assert.equal(c.tickets.held.size, 0, "no preview ran");
 });
 
-test("read-only refuses an operator's write 403 and audits it, and still lets people sign in and out", async () => {
+test("read-only refuses an operator's write 403 and audits it on EVERY write route but sign-in and out, and still lets people sign in and out", async () => {
   const c = await start({ config: { readOnly: true } });
   const { res: signedIn, cookie } = await c.login();
   assert.equal(signedIn.status, 200);
-  const res = await c.post("/api/pause-windows/preview", { windows: [] }, { cookie });
-  assert.equal(res.status, 403);
-  assert.match(res.json().error, /read-only/);
-  assert.match(c.audit.rows.at(-1).reason, /^read-only: /);
+  for (const route of ROUTES.filter((r) => r.write && !r.readOnlyExempt)) {
+    const res = await c.post(route.path, { windows: [], ticket: "x" }, { cookie });
+    assert.equal(res.status, 403, route.path);
+    assert.match(res.json().error, /read-only/);
+    assert.match(c.audit.rows.at(-1).reason, /^read-only: /);
+  }
   assert.equal(c.writes.length, 0);
+  assert.equal(c.tickets.held.size, 0);
   assert.equal((await c.post("/logout", {}, { cookie })).status, 200);
 });
 
@@ -444,6 +495,27 @@ test("a body over 64 KiB is refused 413 without being read", async () => {
   const fits = `{"token":"${"y".repeat(BODY_LIMIT - 12)}"}`;
   assert.equal(Buffer.byteLength(fits), BODY_LIMIT);
   assert.equal((await c.send({ method: "POST", path: "/login", headers: c.writeHeaders(), body: fits })).status, 401);
+});
+
+test("a signed-in write refused for its body (bad JSON, not an object, over 64 KiB) gets its own audit row with the session's actor and no byte of the body", async () => {
+  const c = await start();
+  const { cookie } = await c.login();
+  const canary = "body-canary-91c2";
+  const cases = [
+    [`{"windows": "${canary}"`, 400, "body: the request body is not valid JSON"],
+    [`["${canary}"]`, 400, "body: the request body must be a JSON object"],
+    [JSON.stringify({ windows: canary, pad: "x".repeat(BODY_LIMIT) }), 413, `body: the request body is larger than ${BODY_LIMIT} bytes`],
+  ];
+  for (const [body, status, reason] of cases) {
+    const before = c.audit.rows.length;
+    const res = await c.send({ method: "POST", path: "/api/pause-windows/preview", headers: c.writeHeaders({ cookie }), body });
+    assert.equal(res.status, status, reason);
+    assert.equal(c.audit.rows.length, before + 1, `${reason}: one row`);
+    const row = c.audit.rows.at(-1);
+    assert.deepEqual([row.action, row.outcome, row.reason, row.target, row.actor.name], ["refused", "refused", reason, "/api/pause-windows/preview", "alice"]);
+    assert.ok(!JSON.stringify(row).includes(canary), "no body content in the row");
+  }
+  assert.equal(c.writes.length, 0);
 });
 
 test("a chunked body that grows past 64 KiB is cut off mid-stream (no length to answer 413 from), and nothing is done", async () => {

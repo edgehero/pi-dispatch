@@ -15,12 +15,13 @@
  * holds a token only where the operator asked for one. `link` prints a one-time code inside a URL, which is its
  * purpose; the code is not the token and dies in 60 seconds or at first use.
  *
- * The real collaborators (tokens, sessions, codes, tickets, audit, the pause-windows writer, and for #641 the server
- * with its pages, the fleet reader, the insights assembler and its pricing, and the live hub) are loaded here and
- * nowhere else, by `loadModules`; `runCli` takes them injected, so its tests run on fakes, and `--help` loads none.
+ * The real collaborators (tokens, sessions, codes, tickets, audit, the pause-windows writer, for #641 the server
+ * with its pages, the fleet reader, the insights assembler and its pricing, and the live hub, and for #642 the write
+ * planners and the action deps) are loaded here and nowhere else, by `loadModules`; `runCli` takes them injected, so its tests run on fakes, and `--help` loads none.
  */
 import * as nodeFs from "node:fs";
 import { realpathSync } from "node:fs";
+import { hostname } from "node:os";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -49,7 +50,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -64,8 +65,13 @@ export async function loadModules() {
     import("@edgehero/pi-dispatch/pricing"),
     import("@edgehero/pi-dispatch/service-env"),
     import("@edgehero/pi-dispatch/forges"),
+    import("../write-plans.mjs"),
+    import("./job-data.mjs"),
+    import("@edgehero/pi-dispatch/config"),
+    import("@edgehero/pi-dispatch/model-endpoints"),
+    import("@edgehero/pi-dispatch/model-catalog"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -95,6 +101,34 @@ export const CONSOLE_ACTIVE_LIMIT = 50;
 // the deployment folder, the service's working directory, never to wherever this command was started.
 const RELATIVE_PATH_FIELDS = Object.freeze(["logsDir", "settingsFile", "triggersPath", "pauseWindowsPath", "scopedLimitsPath", "projectsPath", "projectsFile", "envelopeFile", "subscriptionsPath", "globalPiDir"]);
 
+/** The env keys a reserve estimate reads beyond the panel's own (issue #642): `estimateReserve`'s and the endpoint loader's. */
+export const RESERVE_ENV_KEYS = Object.freeze(["PI_ALLOWED_MODELS", "PI_PROVIDER", "PI_MODEL", "PI_MAX_COST_USD", "PI_MODEL_ENDPOINTS_FILE"]);
+
+/**
+ * The model-endpoint snapshot a reserve estimate is judged against (issue #642), read the way the worker reads it at
+ * each pickup (`start.mjs`/`index.mjs`): the declared endpoints (`loadModelEndpoints`, PI_MODEL_ENDPOINTS_FILE or
+ * `model-endpoints.json` in the deployment folder, the worker's working directory) and, only when one is declared, the
+ * overlay's `models.json` (`readOverlayModels`). Returns `() => { endpoints, models }`, or null when the loader is not
+ * loaded. A declaration that does not load throws (the estimate then judges without one: never zero-rated, the larger
+ * figure); an overlay that cannot be read is `models: null`, the worker's own fail-open, which also judges not zero-rated.
+ */
+export function endpointSnapshotFn({ m, env, paths, dir, fs }) {
+  const me = m.modelEndpoints;
+  if (!me || typeof me.loadModelEndpoints !== "function") return null;
+  return () => {
+    const modelEndpointsFile = typeof m.workerConfig?.modelEndpointsFilePath === "function" ? m.workerConfig.modelEndpointsFilePath(env) : (env.PI_MODEL_ENDPOINTS_FILE ?? null);
+    const endpoints = me.loadModelEndpoints({ modelEndpointsFile, valkeyUrl: paths.valkeyUrl }, { readFileSync: fs.readFileSync, existsSync: fs.existsSync, cwd: dir });
+    if (endpoints.length === 0) return { endpoints, models: null };
+    let models = null;
+    try {
+      models = me.readOverlayModels(paths.globalPiDir ?? null, { readFileSync: fs.readFileSync, lstatSync: fs.lstatSync });
+    } catch {
+      models = null;
+    }
+    return { endpoints, models };
+  };
+}
+
 /**
  * The environment and paths the read side runs on (issue #641): this shell's environment with the deployment `.env`
  * filling the panel's keys (`panelEnv`, the TUI's own resolver, so the console reads the queue, logs and files the
@@ -111,7 +145,9 @@ export function readSideOf({ m, env, dir, fs, platform, uid }) {
   const panel = m.readModel.panelEnv({ env, pointerDir: dir, owned: [], fs, platform, uid });
   // The deployment's own forge URL variables (GITLAB_URL, FORGEJO_URL, AZURE_ORG_URL) are what a `.env` sets; the
   // job-container names after them only exist where the worker derived them.
-  const extraKeys = [...Object.values(m.readModel.FORGE_HOST_ENV ?? {}).flat(), ...(m.forges?.FORGE_HOST_VARS ?? []), "PI_SESSIONS_DIR"];
+  // Issue #642: the keys a reserve estimate reads as the worker does (the allowed-model list, the default provider and
+  // model, and where the model-endpoint declaration lives), so a console preview judges a job by the service's settings.
+  const extraKeys = [...Object.values(m.readModel.FORGE_HOST_ENV ?? {}).flat(), ...(m.forges?.FORGE_HOST_VARS ?? []), "PI_SESSIONS_DIR", ...RESERVE_ENV_KEYS];
   const extra = m.serviceEnv ? m.serviceEnv.deploymentServiceEnv({ env, dir, keys: extraKeys, platform, fs, uid }).env : {};
   const merged = { ...panel.env };
   for (const key of extraKeys) if (extra?.[key] !== undefined && merged[key] === undefined) merged[key] = extra[key];
@@ -333,7 +369,12 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     if (side.notice) io.err(`pi-dispatch-console: ${side.notice}`);
     // Read-only (the console never writes through its reader) and at most CONSOLE_ACTIVE_LIMIT active rows per
     // snapshot: a browser is told "and N more", never handed the whole active list. The TUI keeps the defaults.
-    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT });
+    //
+    // Issue #642: the same reader carries the console's kill switch (`pause`/`resume`) and the cancel request. Its pause
+    // goes through `killSwitchPlan` over THIS deployment's folder (`killSwitchPlanFn`), so the two-Valkey refusal of a
+    // resume holds here exactly as it does for the tools and the TUI. `readOnly` covers `snapshot()` alone.
+    const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
+    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn });
     const pricing = pricingOf(m.pricing);
     const pageDeps = {
       fleet,
@@ -369,6 +410,25 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       findToken: m.tokens.findToken,
       consumeLoginCode: (code) => m.loginCodes.consumeLoginCode({ dir: codesDir, code, fs, now }),
       writePauseWindows: m.readModel.writePauseWindows,
+      // What the action table writes with (issue #642, `actions.mjs`): the read model's funnels and the pi-free planners
+      // the tools use, over the paths and env the read side resolved, so a console write lands in the files and queues
+      // the service reads, refused in the tools' own words.
+      actionDeps: {
+        rm: m.readModel,
+        plans: m.writePlans ?? null,
+        paths: side.paths,
+        env: side.env,
+        fleet,
+        killSwitchPlanFn,
+        urlShown: m.connection?.urlShown,
+        envelopeProblem: m.insights?.envelopeProblem,
+        host: hostname(),
+        // A retry's reserve reads the failed job's queue data (read-only); only the reserve reaches a page.
+        readJobsData: m.jobData?.readJobsData,
+        // Every reserve estimate's zero-rated inputs, the worker's: the endpoint snapshot and the builtin catalog's costs.
+        modelEndpoints: endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs }),
+        builtinModel: m.modelCatalog?.builtinModel,
+      },
       pages: m.pages,
       pageDeps,
       hub,

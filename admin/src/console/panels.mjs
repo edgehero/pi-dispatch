@@ -14,6 +14,12 @@
  * so it is rendered only for the operator role, and only inside a per-job `<details>` element below the failed list,
  * never in a list row. A viewer's page carries none of it.
  *
+ * THE ACTION CONTROLS (issue #642). A form per action (`<form data-action="<name>">`, `actions.mjs`'s table), drawn only
+ * for an operator on a console that is not read-only (`canAct`), so a viewer's page and a read-only console's are what
+ * they were. A form holds hidden fields and plain inputs, never a handler; `/static/console.js` posts it as JSON to
+ * `/api/act/<name>/preview` and swaps the server's escaped preview into the form's own `[data-preview]` element. The
+ * server refuses every write a viewer or a read-only console sends anyway; hiding the controls only spares the click.
+ *
  * PATHS. A local folder, a skills directory or a folder scope is shown by its basename (the panel's and the insights
  * page's rule): a console page may be read on another machine, and a host's directory layout is not its business.
  */
@@ -128,6 +134,38 @@ function targetLink(record, env) {
 
 /** A panel's heading plus body. */
 const titled = (title, body) => html`<h2>${title}</h2>${body}`;
+
+// ---- action forms (issue #642) ---------------------------------------------------------------------------------------
+
+/** Whether this view draws write controls: an operator, on a console that is not read-only. */
+export const canAct = (view) => view?.role === "operator" && !view?.readOnly;
+
+/**
+ * One action's form: hidden fields (`[name, value, type?]`), the visible controls, the submit button, and the
+ * `[data-preview]` element the script fills with the server's preview. `type` is how the script reads a value
+ * (`int`, `json`, `list`; text by default).
+ */
+function actForm(action, { hidden = [], fields = null, label, cls = "act" }) {
+  return html`<form class="${cls}" data-action="${action}" autocomplete="off">${hidden.map(([k, v, type]) => html`<input type="hidden" name="${k}" value="${String(v)}"${type ? html` data-type="${type}"` : null}>`)}${fields}<button type="submit">${label}</button><div class="preview-area" data-preview hidden></div></form>`;
+}
+
+/** A labelled text input; `type` as `actForm`'s. */
+function field(name, label, { type = null, input = "text", required = false, placeholder = null, max = 512 } = {}) {
+  return html`<label>${label}<input name="${name}" type="${input}"${type ? html` data-type="${type}"` : null}${required ? html` required` : null}${placeholder ? html` placeholder="${placeholder}"` : null} maxlength="${max}" autocomplete="off" spellcheck="false"></label>`;
+}
+
+/** A labelled textarea (a JSON value, an answer, a list of members). */
+function area(name, label, { type = null, rows = 4, required = false, placeholder = null, max = 16384 } = {}) {
+  return html`<label>${label}<textarea name="${name}" rows="${rows}"${type ? html` data-type="${type}"` : null}${required ? html` required` : null}${placeholder ? html` placeholder="${placeholder}"` : null} maxlength="${max}" spellcheck="false"></textarea></label>`;
+}
+
+/** An index field: a whole number, 0 or more (the row number the list shows). */
+const indexField = (label = "Row #") => field("index", label, { type: "int", input: "number", required: true, max: 6 });
+
+/** A section's editor: the forms inside a closed `<details>`, so the panel reads as before until it is opened. */
+function editor(summary, forms) {
+  return html`<details class="editor"><summary>${summary}</summary><div class="forms">${forms}</div></details>`;
+}
 
 /** A `<table>` with a caption-free header row; `rows` are already-built `<tr>` fragments. */
 function table(label, heads, rows, emptyText) {
@@ -292,13 +330,14 @@ export const overviewFailures = fromSnapshot("Failures in the last 24 hours", (s
   return html`<p><span class="big${n > 0 ? " warn" : ""}">${s.failures24hFloor ? "at least " : ""}${count(n)}</span> failed ${n === 1 ? "run" : "runs"}.${s.failures24hFloor ? html` <span class="note">Every run read was inside the day, so there may be more.</span>` : null} <a href="${`/runs?${new URLSearchParams({ outcome: "failed" })}`}">See failed runs</a></p>`;
 });
 
-/** The active jobs, newest start first, as the overview and the fleet screen list them. */
-function activeTable(s, now) {
+/** The active jobs, newest start first, as the overview and the fleet screen list them; `act` adds a cancel per row. */
+function activeTable(s, now, act = false) {
   const rows = (Array.isArray(s.active) ? [...s.active] : []).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+  const cancel = (j) => (act && typeof j.jobId === "string" && RUN_ID_RE.test(j.jobId) ? html`<td>${actForm("cancel-active", { hidden: [["jobId", j.jobId]], label: "Cancel" })}</td>` : act ? html`<td>-</td>` : null);
   return table(
     "Active jobs",
-    ["Job", "Queue", "Host", "Started", "Running for"],
-    rows.map((j) => html`<tr><td>${runLink(j.jobId)}</td><td>${cell(j.queue)}</td><td>${cell(j.host)}</td><td>${j.startedAt ? utcText(j.startedAt) : "-"}</td><td>${j.startedAt ? ageText(now - j.startedAt) : "-"}</td></tr>`),
+    ["Job", "Queue", "Host", "Started", "Running for", ...(act ? ["Action"] : [])],
+    rows.map((j) => html`<tr><td>${runLink(j.jobId)}</td><td>${cell(j.queue)}</td><td>${cell(j.host)}</td><td>${j.startedAt ? utcText(j.startedAt) : "-"}</td><td>${j.startedAt ? ageText(now - j.startedAt) : "-"}</td>${cancel(j)}</tr>`),
     "Nothing is running.",
   );
 }
@@ -370,10 +409,21 @@ function withRun(title, render) {
   };
 }
 
+/**
+ * The run detail's operator actions (issue #642): the command that reopens the run's retained workspace on the host
+ * (`pi-dispatch sandbox <jobId>`, shown to copy and never run: a browser terminal was rejected, DES-OPERATOR-CONSOLE),
+ * and the re-run form, whose preview shows the reserve the worker will hold. A job id outside the run-id charset gets
+ * neither: it could not be typed back as one argument.
+ */
+function runActions(r, view) {
+  if (view.role !== "operator" || typeof r.jobId !== "string" || !RUN_ID_RE.test(r.jobId)) return null;
+  return html`<h3>Actions</h3><p>Open its retained workspace on the host: <code class="mono">${`pi-dispatch sandbox ${r.jobId}`}</code></p>${canAct(view) ? actForm("rerun", { hidden: [["jobId", r.jobId]], label: "Preview a re-run" }) : null}`;
+}
+
 export const runSummary = withRun("Run", (r, view, source) => {
   const started = msOf(r.startedAt);
   const ended = msOf(r.endedAt);
-  return facts([
+  return html`${facts([
     ["Job", html`<span class="mono">${cell(r.jobId)}</span>`],
     ["Target", targetLink(r, view.env)],
     ["Forge", cell(r.kind)],
@@ -394,7 +444,7 @@ export const runSummary = withRun("Run", (r, view, source) => {
     ["Ended", utcText(ended)],
     ["Took", Number.isFinite(started) && Number.isFinite(ended) ? ageText(ended - started) : "-"],
     ["Read from", source === "mirror" ? "the fleet's run mirror" : "this host's run history"],
-  ]);
+  ])}${runActions(r, view)}`;
 });
 
 export const runCostPanel = withRun("Tokens and dollars", (r, view) => {
@@ -456,12 +506,16 @@ export const runChain = withRun("Chain", (r, view) => {
 export const parkedInbox = fromSnapshot("Parked runs", (s, view) => {
   if (s.parkedUnreachable) return html`<p class="warn">The parked runs could not be read (${s.parkedUnreachable}); this is not an empty inbox.</p>`;
   const rows = Array.isArray(s.parked) ? s.parked : [];
-  return html`<p class="note">A parked run asked a question and ended; a reply on its issue or merge request resumes it. Answering from the console comes later.</p>${table(
+  // Issue #642: one answer form per parked run, below the list. The answer is the operator's own words, posted as the
+  // reply a forge comment would have been; the preview shows it and the reserve, and the audit keeps only its digest.
+  const answerable = canAct(view) ? rows.filter((p) => typeof p.jobId === "string" && RUN_ID_RE.test(p.jobId)) : [];
+  const answers = answerable.length === 0 ? null : html`<h3>Answer a parked run</h3>${answerable.map((p) => editor(html`Answer ${cell(p.target)} (${p.jobId})`, actForm("parked-answer", { hidden: [["jobId", p.jobId]], fields: area("text", "Your answer, as the reply on the issue", { rows: 4, required: true, max: 8192 }), label: "Preview the answer" })))}`;
+  return html`<p class="note">A parked run asked a question and ended; a reply on its issue or merge request resumes it, and an operator can answer it from here.</p>${table(
     "Parked runs",
     ["Target", "Forge", "Job", "Parked", "Waiting", { num: "Chain" }],
     rows.map((p) => html`<tr><td>${targetLink(p, view.env)}</td><td>${cell(p.kind)}</td><td>${runLink(p.jobId)}</td><td>${utcText(p.parkedAt)}</td><td>${ageText(p.ageMs)}</td><td class="num">${Number.isInteger(p.chainCount) ? p.chainCount : "unknown"}</td></tr>`),
     "Nothing is parked.",
-  )}`;
+  )}${answers}`;
 });
 
 // ---- insights --------------------------------------------------------------------------------------------------------
@@ -537,26 +591,33 @@ export function insightsPanel(view) {
 
 const COUNT_KEYS = Object.freeze(["waiting", "active", "delayed", "paused", "failed"]);
 
-export const fleetQueues = fromSnapshot("Queues", (s) => {
+export const fleetQueues = fromSnapshot("Queues", (s, view) => {
   const rows = Array.isArray(s.queueCounts) ? s.queueCounts : [];
-  return html`${facts([["Fleet", pausedState(s.queue)]])}${table(
+  const act = canAct(view);
+  // The kill switch for the whole fleet: pause unless it is paused, resume unless it is running (both when partial).
+  const q = s.queue ?? {};
+  const fleet = act ? html`<div class="bar">${q.pausedState ? null : actForm("fleet-pause", { label: "Pause the fleet" })}${q.pausedState || q.pausedPartial ? actForm("fleet-resume", { label: "Resume the fleet" }) : null}</div>` : null;
+  const one = (row) => (act && typeof row.queue === "string" ? html`<td>${actForm(row.paused ? "queue-resume" : "queue-pause", { hidden: [["queue", row.queue]], label: row.paused ? "Resume" : "Pause" })}</td>` : act ? html`<td>-</td>` : null);
+  return html`${facts([["Fleet", pausedState(s.queue)]])}${fleet}${table(
     "Queues",
-    ["Queue", "State", ...COUNT_KEYS.map((k) => ({ num: k[0].toUpperCase() + k.slice(1) }))],
-    rows.map((q) => html`<tr><td class="mono">${cell(q.queue)}</td><td>${q.paused ? "paused" : "running"}</td>${COUNT_KEYS.map((k) => html`<td class="num">${count(q.counts?.[k] ?? 0)}</td>`)}</tr>`),
+    ["Queue", "State", ...COUNT_KEYS.map((k) => ({ num: k[0].toUpperCase() + k.slice(1) })), ...(act ? ["Action"] : [])],
+    rows.map((row) => html`<tr><td class="mono">${cell(row.queue)}</td><td>${row.paused ? "paused" : "running"}</td>${COUNT_KEYS.map((k) => html`<td class="num">${count(row.counts?.[k] ?? 0)}</td>`)}${one(row)}</tr>`),
     "No queue was read.",
   )}`;
 });
 
-export const fleetActive = fromSnapshot("Active jobs", (s, view) => activeTable(s, view.now));
+export const fleetActive = fromSnapshot("Active jobs", (s, view) => activeTable(s, view.now, canAct(view)));
 
-export const fleetHeld = fromSnapshot("Held on a wait", (s) => {
+export const fleetHeld = fromSnapshot("Held on a wait", (s, view) => {
   const h = s.held;
   if (!h || h.unreachable) return html`<p class="warn">The held jobs could not be read.</p>`;
   const rows = Array.isArray(h.rows) ? h.rows : [];
-  return html`${table(
+  const act = canAct(view);
+  const cancel = (r) => (act && typeof r.jobId === "string" && RUN_ID_RE.test(r.jobId) ? html`<td>${actForm("cancel-held", { hidden: [["jobId", r.jobId]], label: "Cancel" })}</td>` : act ? html`<td>-</td>` : null);
+  return html`${act && rows.length > 0 ? html`<div class="bar">${actForm("cancel-all-held", { label: "Cancel every held job" })}</div>` : null}${table(
     "Held jobs",
-    ["Job", "Target", "Waiting for", "Held for"],
-    rows.map((r) => html`<tr><td class="mono">${cell(r.jobId)}</td><td class="mono">${cell(r.target)}</td><td>${cell(r.label)}</td><td>${ageText(r.waitedMs)}</td></tr>`),
+    ["Job", "Target", "Waiting for", "Held for", ...(act ? ["Action"] : [])],
+    rows.map((r) => html`<tr><td class="mono">${cell(r.jobId)}</td><td class="mono">${cell(r.target)}</td><td>${cell(r.label)}</td><td>${ageText(r.waitedMs)}</td>${cancel(r)}</tr>`),
     "No job is held.",
   )}${h.more > 0 ? html`<p class="note">${count(h.more)} more held.</p>` : null}${h.truncated ? html`<p class="note">The held set is larger than one read takes; not every member was read.</p>` : null}`;
 });
@@ -606,12 +667,22 @@ export const fleetFailed = fromSnapshot("Failed jobs", (s, view) => {
   // The list carries ids, queues, counts and instants only. The reason is free text (REQ-CONSOLE-SECURITY clause l):
   // the operator sees it in one detail element per job below the list, a viewer never.
   const details = operator && rows.length > 0 ? html`<h3>Why each failed</h3>${rows.map((r) => html`<details><summary class="mono">${cell(r.jobId)}</summary><p class="mono">${cell(r.failedReason)}</p></details>`)}` : null;
+  const act = canAct(view);
+  const jobForms = (r) => {
+    if (!act) return null;
+    if (typeof r.jobId !== "string" || !RUN_ID_RE.test(r.jobId)) return html`<td>-</td>`;
+    const hidden = [["jobId", r.jobId], ...(typeof r.queue === "string" ? [["queue", r.queue]] : [])];
+    return html`<td class="acts">${actForm("retry-failed", { hidden, label: "Retry" })}${actForm("remove-failed", { hidden, label: "Remove" })}</td>`;
+  };
+  // The bulk bar: every failed job (at most 100 per action), optionally one queue's or one repository's.
+  const filters = html`${field("queue", "Only queue", { max: 200 })}${field("repo", "Only repository", { placeholder: "owner/name", max: 512 })}`;
+  const bulk = act && rows.length > 0 ? editor("Retry or remove failed jobs in bulk", html`${actForm("retry-all-failed", { fields: filters, label: "Preview retry of all" })}${actForm("remove-all-failed", { fields: filters, label: "Preview removal of all" })}`) : null;
   return html`${table(
     "Failed jobs",
-    ["Job", "Queue", { num: "Attempts" }, "Failed"],
-    rows.map((r) => html`<tr><td class="mono">${cell(r.jobId)}</td><td class="mono">${cell(r.queue)}</td><td class="num">${cell(r.attemptsMade)}</td><td>${r.endedAt ? utcText(r.endedAt) : "-"}</td></tr>`),
+    ["Job", "Queue", { num: "Attempts" }, "Failed", ...(act ? ["Action"] : [])],
+    rows.map((r) => html`<tr><td class="mono">${cell(r.jobId)}</td><td class="mono">${cell(r.queue)}</td><td class="num">${cell(r.attemptsMade)}</td><td>${r.endedAt ? utcText(r.endedAt) : "-"}</td>${jobForms(r)}</tr>`),
     "No failed job is kept by the queue.",
-  )}${f.more > 0 ? html`<p class="note">${count(f.more)} more failed.</p>` : null}${operator ? details : html`<p class="note">Failure reasons are shown to operators only.</p>`}`;
+  )}${bulk}${f.more > 0 ? html`<p class="note">${count(f.more)} more failed.</p>` : null}${operator ? details : html`<p class="note">Failure reasons are shown to operators only.</p>`}`;
 });
 
 // ---- configuration ---------------------------------------------------------------------------------------------------
@@ -662,12 +733,18 @@ function triggerNotes(t) {
   ].filter(Boolean).join("; ");
 }
 
-export const configTriggers = fromSnapshot("Triggers", (s) => {
+/** The triggers editor: a JSON entry to add (the add tool's fields), the edit tool's fields, and a delete by row. */
+function triggersEditor(view) {
+  if (!canAct(view)) return null;
+  return editor("Change the triggers", html`${actForm("trigger-add", { fields: area("trigger", "New trigger, as the add tool's fields (JSON)", { type: "json", rows: 6, required: true, placeholder: '{"kind": "label", "labels": ["pi"], "flow": "triage"}' }), label: "Preview the add" })}${actForm("trigger-edit", { fields: html`${indexField()}${field("flow", "Flow", { required: true })}${field("backend", "Venue (optional)")}${field("provider", "Provider (optional)")}${field("model", "Model (optional)")}`, label: "Preview the edit" })}${actForm("trigger-delete", { fields: indexField(), label: "Preview the delete" })}`);
+}
+
+export const configTriggers = fromSnapshot("Triggers", (s, view) => {
   const v = s.triggers;
   const trouble = fileTrouble(v, "triggers file");
-  if (trouble) return html`<p class="warn">${trouble}</p>`;
+  if (trouble) return html`<p class="warn">${trouble}</p>${triggersEditor(view)}`;
   const list = Array.isArray(v.triggers) ? v.triggers : [];
-  return table(
+  return html`${table(
     "Triggers",
     [{ num: "#" }, "On", "Runs", "Model", "Notes"],
     list.map((t, i) => {
@@ -677,61 +754,91 @@ export const configTriggers = fromSnapshot("Triggers", (s) => {
       return html`<tr><td class="num">${i}</td><td>${triggerOn(t)}</td><td>${what}${where}</td><td>${model}</td><td>${triggerNotes(t) || "-"}</td></tr>`;
     }),
     "The triggers file declares no trigger.",
-  );
+  )}${triggersEditor(view)}`;
 });
 
 /** Settings shown with their value; every other key the overlay sets is listed by name only. */
 const SETTINGS_SHOWN = Object.freeze(["provider", "model", "maxTurns", "maxTokens", "concurrency", "dailyCap", "weeklyCap", "monthlyCap", "dailyTokenCap", "softHoldPct", "maxCostUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"]);
 
-export const configSettings = fromSnapshot("Settings overlay", (s) => {
+/** The settings editor: set a key to a value, or unset it back to its default (the `dispatch_set` tool's two shapes). */
+function settingsEditor(view) {
+  if (!canAct(view)) return null;
+  return editor("Change a setting", html`${actForm("setting-set", { fields: html`${field("key", "Key", { required: true, max: 64 })}${field("value", "Value", { required: true })}`, label: "Preview the change" })}${actForm("setting-unset", { fields: field("key", "Key", { required: true, max: 64 }), label: "Preview the unset" })}`);
+}
+
+export const configSettings = fromSnapshot("Settings overlay", (s, view) => {
   const v = s.settings;
-  if (!v || v.invalid) return html`<p class="warn">The settings overlay does not load; run pi-dispatch doctor for the reason.</p>`;
+  if (!v || v.invalid) return html`<p class="warn">The settings overlay does not load; run pi-dispatch doctor for the reason.</p>${settingsEditor(view)}`;
   const overlay = v.overlay ?? {};
   const shown = SETTINGS_SHOWN.filter((k) => ["string", "number", "boolean"].includes(typeof overlay[k]));
   const others = Object.keys(overlay).filter((k) => !SETTINGS_SHOWN.includes(k)).sort();
-  return html`${shown.length === 0 ? html`<p class="note">The overlay sets nothing; every setting is the deployment's environment or its default.</p>` : facts(shown.map((k) => [k, String(overlay[k])]))}${others.length > 0 ? html`<p class="note">Also set: ${others.join(", ")}</p>` : null}`;
+  return html`${shown.length === 0 ? html`<p class="note">The overlay sets nothing; every setting is the deployment's environment or its default.</p>` : facts(shown.map((k) => [k, String(overlay[k])]))}${others.length > 0 ? html`<p class="note">Also set: ${others.join(", ")}</p>` : null}${settingsEditor(view)}`;
 });
 
-export const configPauseWindows = fromSnapshot("Pause windows", (s) => {
+/** A pause window's fields, as the add and edit tools take them (an edit leaves a blank field as it was). */
+function pauseFieldsHtml(required) {
+  return html`${field("scope", "Scope", { required, placeholder: "owner/name, a folder, or *", max: 4096 })}${field("from", "From (HH:MM)", { required, max: 5 })}${field("to", "To (HH:MM)", { required, max: 5 })}${field("tz", "Zone (IANA, default UTC)", { max: 64 })}${field("days", "Days (mon..sun)", { type: "list", max: 64 })}${field("dateFrom", "From date (YYYY-MM-DD)", { max: 10 })}${field("dateTo", "To date (YYYY-MM-DD)", { max: 10 })}`;
+}
+
+function pauseEditor(view) {
+  if (!canAct(view)) return null;
+  return editor("Change the pause windows", html`${actForm("pause-window-add", { fields: pauseFieldsHtml(true), label: "Preview the add" })}${actForm("pause-window-edit", { fields: html`${indexField()}${pauseFieldsHtml(false)}`, label: "Preview the edit" })}${actForm("pause-window-delete", { fields: indexField(), label: "Preview the delete" })}`);
+}
+
+export const configPauseWindows = fromSnapshot("Pause windows", (s, view) => {
   const v = s.pauseWindows;
   const trouble = fileTrouble(v, "pause-windows file");
-  if (trouble) return html`<p class="note">${trouble}</p>`;
+  if (trouble) return html`<p class="note">${trouble}</p>${pauseEditor(view)}`;
   const list = Array.isArray(v.windows) ? v.windows : [];
-  return table(
+  return html`${table(
     "Pause windows",
     ["Scope", "From", "To", "Zone", "Days", "Dates"],
     list.map((w) => html`<tr><td class="mono">${shownPath(cell(w.scope))}</td><td>${cell(w.from)}</td><td>${cell(w.to)}</td><td>${cell(w.tz)}</td><td>${Array.isArray(w.days) && w.days.length > 0 ? w.days.join(", ") : "every day"}</td><td>${w.dateFrom || w.dateTo ? `${cell(w.dateFrom)} to ${cell(w.dateTo)}` : "-"}</td></tr>`),
     "No pause window is set.",
-  );
+  )}${pauseEditor(view)}`;
 });
 
 /** The scoped-limit fields a row may set, in the file's order, with how each reads. */
 const LIMIT_FIELDS = Object.freeze([["day", "jobs a day"], ["week", "jobs a week"], ["month", "jobs a month"], ["concurrent", "at once"], ["dayUsd", "a day"], ["weekUsd", "a week"], ["monthUsd", "a month"], ["memory", "memory"], ["cpus", "CPUs"], ["hostShare", "host share"], ["minJobs", "min jobs"]]);
 
-export const configScopedLimits = fromSnapshot("Scoped limits", (s) => {
+/** The scoped-limits editor: a row as the limit tools' fields (JSON), an edit of row N, a delete. */
+function limitsEditor(view) {
+  if (!canAct(view)) return null;
+  const json = area("limit", "The row, as the limit tools' fields (JSON)", { type: "json", rows: 4, required: true, placeholder: '{"scope": "acme/web", "day": 10, "concurrent": 2}' });
+  return editor("Change the scoped limits", html`${actForm("limit-add", { fields: json, label: "Preview the add" })}${actForm("limit-edit", { fields: html`${indexField()}${area("limit", "Fields to change (JSON)", { type: "json", rows: 3, required: true, placeholder: '{"day": 20}' })}`, label: "Preview the edit" })}${actForm("limit-delete", { fields: indexField(), label: "Preview the delete" })}`);
+}
+
+export const configScopedLimits = fromSnapshot("Scoped limits", (s, view) => {
   const v = s.scopedLimits;
   const trouble = fileTrouble(v, "scoped-limits file");
-  if (trouble) return html`<p class="note">${trouble}</p>`;
+  if (trouble) return html`<p class="note">${trouble}</p>${limitsEditor(view)}`;
   const list = Array.isArray(v.limits) ? v.limits : [];
-  return table(
+  return html`${table(
     "Scoped limits",
     ["Scope", "Limits"],
     list.map((l) => html`<tr><td class="mono">${shownPath(cell(l.scope))}</td><td>${LIMIT_FIELDS.filter(([k]) => l[k] !== null && l[k] !== undefined).map(([k, words]) => `${k.endsWith("Usd") ? `$${l[k]}` : l[k]} ${words}`).join("; ") || "-"}</td></tr>`),
     "No scoped limit is set.",
-  );
+  )}${limitsEditor(view)}`;
 });
 
-export const configProjects = fromSnapshot("Projects", (s) => {
+/** The projects, envelope, priorities and revert editors. */
+function projectsEditor(view) {
+  if (!canAct(view)) return null;
+  const members = (required) => area("members", "Members, one repository or folder per line", { rows: 3, required, max: 16384 });
+  return editor("Change the projects and the allocation", html`${actForm("project-add", { fields: html`${field("id", "Id", { required: true, max: 64 })}${field("name", "Name (optional)")}${members(true)}`, label: "Preview the add" })}${actForm("project-edit", { fields: html`${field("id", "Id", { required: true, max: 64 })}${field("name", "Name (blank keeps it)")}${members(false)}`, label: "Preview the edit" })}${actForm("project-delete", { fields: field("id", "Id", { required: true, max: 64 }), label: "Preview the delete" })}${actForm("envelope-set", { fields: area("envelope", "Envelope fields to change, as the envelope tool takes them (JSON)", { type: "json", rows: 4, required: true, placeholder: '{"totalUsd": "100", "enabled": true}' }), label: "Preview the envelope" })}${actForm("priorities-set", { fields: html`${area("projects", "Weights (JSON list of {id, weight})", { type: "json", rows: 3, required: true, placeholder: '[{"id": "web", "weight": 3}]' })}${field("validDays", "Valid for days (optional)", { type: "int", input: "number", max: 4 })}`, label: "Preview the priorities" })}${actForm("allocation-revert", { fields: indexField("History row # (newest is 0)"), label: "Preview the revert" })}`);
+}
+
+export const configProjects = fromSnapshot("Projects", (s, view) => {
   const v = s.projects;
   const trouble = fileTrouble(v, "projects file");
-  if (trouble) return html`<p class="note">${trouble}</p>`;
+  if (trouble) return html`<p class="note">${trouble}</p>${projectsEditor(view)}`;
   const list = Array.isArray(v.projects) ? v.projects : [];
   return html`${table(
     "Projects",
     ["Project", "Name", "Members"],
     list.map((p) => html`<tr><td class="mono">${cell(p.id)}</td><td>${cell(p.name)}</td><td class="mono">${Array.isArray(p.members) && p.members.length > 0 ? p.members.map(shownPath).join(", ") : "-"}</td></tr>`),
     "The projects file declares no project.",
-  )}${facts([["Allocation envelope", s.envelopeSet ? "set" : "not set"]])}`;
+  )}${facts([["Allocation envelope", s.envelopeSet ? "set" : "not set"]])}${projectsEditor(view)}`;
 });
 
 export const configMcp = fromSnapshot("MCP servers", (s) => {
@@ -753,10 +860,16 @@ export const configPackages = fromSnapshot("Staged pi packages", (s) => {
   return html`${v.stagedAt ? html`<p class="note">Staged ${v.stagedAt}.</p>` : null}<ul class="plain">${list.map((p) => html`<li class="mono">${p}</li>`)}</ul>`;
 });
 
-export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => {
+/** The secret profiles editor: a name and its resolver's absolute path, never a reference or a value. */
+function profilesEditor(view) {
+  if (!canAct(view)) return null;
+  return editor("Change the secret profiles", html`${actForm("secret-profile-add", { fields: html`${field("name", "Name", { required: true, max: 64 })}${field("path", "Resolver (absolute path)", { required: true, max: 4096 })}`, label: "Preview the add" })}${actForm("secret-profile-remove", { fields: field("name", "Name", { required: true, max: 64 }), label: "Preview the removal" })}`);
+}
+
+export const configSecretProfiles = fromSnapshot("Secret profiles", (s, view) => {
   const names = secretProfileNames(s.settings);
-  if (names.length === 0) return html`<p class="note">No secret profile is declared.</p>`;
-  return html`<p class="note">Names only: a profile's resolver and its references stay in the settings file.</p><ul class="plain">${names.map((n) => html`<li class="mono">${n}</li>`)}</ul>`;
+  if (names.length === 0) return html`<p class="note">No secret profile is declared.</p>${profilesEditor(view)}`;
+  return html`<p class="note">Names only: a profile's resolver and its references stay in the settings file.</p><ul class="plain">${names.map((n) => html`<li class="mono">${n}</li>`)}</ul>${profilesEditor(view)}`;
 });
 
 // ---- audit -----------------------------------------------------------------------------------------------------------
@@ -772,7 +885,7 @@ export function auditLog(view) {
       return html`<tr class="warn"><td colspan="7">Not an audit row: ${where}${r.reason ? ` (${r.reason})` : ""}. Run pi-dispatch doctor to check the chain.</td></tr>`;
     }
     const actor = r.actor && typeof r.actor === "object" ? `${cell(r.actor.name)} (${cell(r.actor.role)})` : "-";
-    return html`<tr><td class="num">${cell(r.seq)}</td><td>${utcText(msOf(r.at))}</td><td>${actor}</td><td>${cell(r.action)}</td><td class="mono">${cell(r.target)}</td><td${r.outcome === "ok" ? null : html` class="warn"`}>${cell(r.outcome)}</td><td>${cell(r.reason)}</td></tr>`;
+    return html`<tr><td class="num">${cell(r.seq)}</td><td>${utcText(msOf(r.at))}</td><td>${actor}</td><td>${cell(r.action)}${r.kind ? html` <span class="mono">${cell(r.kind)}</span>` : null}</td><td class="mono">${cell(r.target)}</td><td${r.outcome === "ok" ? null : html` class="warn"`}>${cell(r.outcome)}</td><td>${cell(r.reason)}${Number.isSafeInteger(r.reserve) ? html` reserve ${usdText(r.reserve)}` : null}${Number.isSafeInteger(r.count) ? html` (one of ${r.count})` : null}</td></tr>`;
   });
   const pager = html`<div class="pager">${view.query?.before !== undefined && view.query?.before !== null ? html`<a href="/audit">Newest rows</a>` : null}${a.next !== null && a.next !== undefined ? html`<a href="${`/audit?${new URLSearchParams({ before: String(a.next) })}`}">Older rows</a>` : null}</div>`;
   return titled("Audit log", html`${a.unreadable ? html`<p class="warn">${a.unreadable}</p>` : null}${table("Audit log", [{ num: "Seq" }, "At", "Who", "Action", "Target", "Outcome", "Reason"], body, "The audit log is empty.")}${pager}`);

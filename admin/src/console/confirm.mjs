@@ -15,6 +15,9 @@
  */
 import { randomBytes } from "node:crypto";
 
+/** The one instruction every refused redeem ends with; the console's confirm sends the refusal as it is. */
+export const PREVIEW_AGAIN = "Preview the change again and confirm the new preview";
+
 export function makeConfirmTickets({ now = () => Date.now(), random = randomBytes, ttlMs = 300000, max = 256 } = {}) {
   // Insertion order is issue order, so the first key is always the oldest.
   const tickets = new Map();
@@ -24,13 +27,18 @@ export function makeConfirmTickets({ now = () => Date.now(), random = randomByte
   }
 
   return {
-    /** Store a previewed change and return `{ticket}`, the only thing the browser gets. */
-    issue({ sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve = null }) {
+    /**
+     * Store a previewed change and return `{ticket}`, the only thing the browser gets. `reserve` is a paid action's
+     * estimate (what the worker will hold) and `targets` a bulk action's job list with each job's previewed state
+     * (issue #642); both ride the ticket so the confirm acts on exactly what the preview showed. `count` is how many
+     * jobs a resume lets start, which the preview showed and the audit row records.
+     */
+    issue({ sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve = null, targets = null, count = null }) {
       const t = now();
       sweep(t);
       while (tickets.size >= max) tickets.delete(tickets.keys().next().value);
       const ticket = random(32).toString("base64url");
-      tickets.set(ticket, { sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve, issuedAt: t, expiresAt: t + ttlMs });
+      tickets.set(ticket, { sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve, targets, count, issuedAt: t, expiresAt: t + ttlMs });
       return { ticket };
     },
 
@@ -42,7 +50,7 @@ export function makeConfirmTickets({ now = () => Date.now(), random = randomByte
     redeem({ sessionId, ticket, action }) {
       const entry = typeof ticket === "string" ? tickets.get(ticket) : undefined;
       if (typeof ticket === "string") tickets.delete(ticket);
-      const again = "Preview the change again and confirm the new preview";
+      const again = PREVIEW_AGAIN;
       if (!entry) return { refusal: `this confirmation is not valid: it was already used, has expired, or was never issued. ${again}` };
       if (entry.expiresAt <= now()) return { refusal: `this confirmation has expired. ${again}` };
       if (entry.sessionId !== sessionId) return { refusal: `this confirmation belongs to another sign-in. ${again}` };
