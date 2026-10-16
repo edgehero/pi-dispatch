@@ -525,9 +525,9 @@ test("createFleetReader: every active job (never .data), per-queue counts, unans
     const snap = await reader.snapshot();
     assert.deepEqual(asked.map((a) => a.slice(1)), [[0, 49], [0, 49]], "bounded per queue");
     assert.deepEqual(snap.active, [
-      { jobId: "gh-a1", queue: "pi-jobs", startedAt: AT - MIN, host: null },
-      { jobId: "gh-a2", queue: "pi-jobs@hostb", startedAt: AT - 2 * MIN, host: "hostb" },
-      { jobId: "gh-a3", queue: "pi-jobs@hostb", startedAt: null, host: null },
+      { jobId: "gh-a1", queue: "pi-jobs", startedAt: AT - MIN, host: null, progress: null },
+      { jobId: "gh-a2", queue: "pi-jobs@hostb", startedAt: AT - 2 * MIN, host: "hostb", progress: null },
+      { jobId: "gh-a3", queue: "pi-jobs@hostb", startedAt: null, host: null, progress: null },
     ]);
     assert.equal(snap.activeJobId, "gh-a1", "the TUI's field is still there");
     assert.ok(!JSON.stringify(snap).includes("SECRET"), "no Job .data anywhere in the snapshot");

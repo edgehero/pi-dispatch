@@ -44,16 +44,19 @@
 import { createHash, randomBytes } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { scrubControls } from "../panel.mjs";
+import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { compareTranscriptIds, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
 import { transcriptEntryHtml } from "./transcript.mjs";
 
 /**
  * `pageMinMs`: pages whose data is read at most once per that many ms, however often the loop ticks. The runs page
  * examines up to 2000 records per distinct filter, so 32 streams with 32 filters at the 1 s tick would keep a core busy;
- * at 5 s its views still move, at a fifth of the cost. Between loads the last data is rendered again (cheap), so a new
+ * at 5 s its views still move, at a fifth of the cost. The run detail (live since issue #644, for its progress panel)
+ * reads its record, its children (up to three runs pages) and two Valkey keys per load, so it is held to 2 s; the
+ * worker writes progress at most once a second, so a 2 s view misses nothing an operator could read. Between loads the last data is rendered again (cheap), so a new
  * view of the same page and query is drawn at once from it.
  */
-export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ runs: 5000 }), transcriptPagesPerTick: 4 });
+export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ runs: 5000, run: 2000 }), transcriptPagesPerTick: 4 });
 
 const digestOf = (text) => createHash("sha256").update(text).digest("hex");
 
@@ -468,6 +471,27 @@ function intOf(v) {
   return null;
 }
 
+/**
+ * An active row's progress (issue #644) as `/api/state` carries it: rebuilt field by field from the snapshot's integer
+ * projection (`activeProgressOf`), so nothing else a row might hold rides along. Never a phase name or a note; the tool
+ * name is the live stream's charset or `?`. Null when the row has none.
+ */
+function progressOf(p) {
+  if (p === null || typeof p !== "object") return null;
+  const n = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  const r = p.running;
+  const f = p.phase;
+  return {
+    turn: n(p.turn),
+    steps: n(p.steps),
+    failed: n(p.failed),
+    running: r && typeof r === "object" ? { tool: typeof r.tool === "string" && LIVE_TOOL_RE.test(r.tool) ? r.tool : "?", since: n(r.since) } : null,
+    phase: f && typeof f === "object" ? { index: n(f.index), count: n(f.count), done: n(f.done), total: n(f.total) } : null,
+    ended: p.ended === true,
+    updatedAt: n(p.updatedAt),
+  };
+}
+
 /** The `/api/state` document's version: a script checks it before it reads a field, and a breaking change bumps it. */
 export const STATE_VERSION = 1;
 
@@ -532,7 +556,7 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
     parkedUnknown: Boolean(s.parkedUnreachable),
     failures24h: num(s.failures24h),
     failures24hFloor: Boolean(s.failures24hFloor),
-    active: (Array.isArray(s.active) ? s.active : []).map((a) => ({ jobId: str(a?.jobId), queue: str(a?.queue), startedAt: num(a?.startedAt), host: str(a?.host) })),
+    active: (Array.isArray(s.active) ? s.active : []).map((a) => ({ jobId: str(a?.jobId), queue: str(a?.queue), startedAt: num(a?.startedAt), host: str(a?.host), progress: progressOf(a?.progress) })),
     schedulers: (Array.isArray(s.schedulers) ? s.schedulers : []).map((x) => {
       const name = x?.key ?? x?.name ?? null;
       return {

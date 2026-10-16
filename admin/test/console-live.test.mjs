@@ -184,7 +184,8 @@ test("SECURITY: a viewer and an operator on the same page and query never share 
 });
 
 test("a runs view is loaded at most every pageMinMs (5 s), not every tick; other pages load every tick; a new filter loads at once", async () => {
-  assert.deepEqual(LIVE_DEFAULTS.pageMinMs, { runs: 5000 });
+  // The run detail is held to 2 s since issue #644 made it live (its load reads a record and searches for children).
+  assert.deepEqual(LIVE_DEFAULTS.pageMinMs, { runs: 5000, run: 2000 });
   const now = clock();
   const h = hubOn({ now, pageMinMs: undefined });
   h.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "runs", query: { q: "zz1" } });
@@ -432,7 +433,7 @@ test("stateOf: the named fields only, numbers as numbers, no error text, no host
   assert.deepEqual(op.hosts, [{ name: "h1", lastBeatAgeMs: 1200, capacity: { memMiB: 4096, cpuCenti: null, concurrency: 2 }, running: 2 }]);
   assert.deepEqual(op.dollars.windows.map((w) => w.scope), [null, "openai/gpt"], "a folder scope's host path is dropped");
   assert.deepEqual(op.parked, [{ target: "o/r#12", kind: "github", ageMs: 3600000, chainCount: 2 }]);
-  assert.deepEqual(op.active, [{ jobId: "j9", queue: "pi", startedAt: T0 - 1000, host: "h1" }]);
+  assert.deepEqual(op.active, [{ jobId: "j9", queue: "pi", startedAt: T0 - 1000, host: "h1", progress: null }]);
   assert.deepEqual(op.schedulers, [{ name: "nightly", next: T0 - 5000, overdue: true, overdueMs: 5000, stalls: 1 }]);
   assert.equal(op.failed.rows[0].failedReason, "repo o/r: token for alice@example.test refused");
   assert.equal("failedReason" in viewer.failed.rows[0], false, "a viewer gets the row without BullMQ's free text");
