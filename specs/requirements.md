@@ -444,7 +444,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   where the requester is already looking, and is the only surface a non-maintainer ever sees. It is also the **only** signal for
   `CONST-PI-VERSION-PINNED`'s silent-no-op failure mode: if an upstream break makes every job a no-op,
   the queue still reports success — a missing completion comment is what a human would actually notice.
-- **Traces to**: `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-PI-VERSION-PINNED`
+- **Traces to**: `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-PI-VERSION-PINNED`, and since #644 `REQ-RUN-PROGRESS` and
+  `INT-FORGE-STATUS-COMMENT-EDIT`
 - **Who authors which comment** (issue #288, closing the acceptance's paid half): the AGENT authors the
   exit-0 status comment (the prompt contract instructs it, including for "I looked and cannot fix
   this"); the WORKER authors every other terminal comment -- each pre-spend refusal (the ladder; a `model-unknown`
@@ -457,7 +458,21 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   refusal of the credential or of access (an authentication or permission error, whatever its HTTP
   status), and its sentence tells the requester the operator must check the provider key and what it is
   allowed to use; and, since issues #501/#502, the four policy stops, each with its own fixed sentence:
-  `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, or to change an AI request in a way it does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed` live on an image that declares `modelPolicy` (its runner's pre-call model guard stopped a call to a model the list does not name; the same token is also the worker's FREE pre-spend refusal of a main model off the job's list, which posts its own refusal comment and pages nobody); and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call; and the runner's six exit-2 refusals of a job's MCP servers before its prompt, each with its own fixed sentence that says which rule stopped the run and what the operator checks, never the server, a host or a variable: `mcp-unavailable` ("Stopped: an MCP server this trigger names could not be used (it did not start, failed its handshake or refused the connection, an authentication error among them), so the run ended before the agent started. The operator needs to check that server and the job image. Not retried."), `mcp-config-invalid` ("Stopped: the list of MCP servers the worker wrote for this job is not one the job image accepts, so the run ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried."), `mcp-config-mismatch` ("Stopped: the MCP servers the worker wrote for this job are not the ones it named for it, so the run ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried."), `mcp-secret-missing` ("Stopped: a credential an MCP server this trigger names needs was not set inside the job, so the run ended before the agent started. The operator needs to check the secrets this trigger passes. Not retried."), `mcp-command-missing` ("Stopped: the job image does not have the program an MCP server this trigger names runs, so the run ended before the agent started. The operator needs to install that server in the job image or the overlay. Not retried."), `mcp-shadowed` ("Stopped: another extension in this job registers a tool or command that only the job's MCP servers may, so the run ended before the agent started. The operator needs to remove that extension or this trigger's MCP servers. Not retried.")), and the final infrastructure failure.
+  `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, or to change an AI request in a way it does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed` live on an image that declares `modelPolicy` (its runner's pre-call model guard stopped a call to a model the list does not name; the same token is also the worker's FREE pre-spend refusal of a main model off the job's list, which posts its own refusal comment and pages nobody); and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call; and the runner's six exit-2 refusals of a job's MCP servers before its prompt, each with its own fixed sentence that says which rule stopped the run and what the operator checks, never the server, a host or a variable: `mcp-unavailable` ("Stopped: an MCP server this trigger names could not be used (it did not start, failed its handshake or refused the connection, an authentication error among them), so the run ended before the agent started. The operator needs to check that server and the job image. Not retried."), `mcp-config-invalid` ("Stopped: the list of MCP servers the worker wrote for this job is not one the job image accepts, so the run ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried."), `mcp-config-mismatch` ("Stopped: the MCP servers the worker wrote for this job are not the ones it named for it, so the run ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried."), `mcp-secret-missing` ("Stopped: a credential an MCP server this trigger names needs was not set inside the job, so the run ended before the agent started. The operator needs to check the secrets this trigger passes. Not retried."), `mcp-command-missing` ("Stopped: the job image does not have the program an MCP server this trigger names runs, so the run ended before the agent started. The operator needs to install that server in the job image or the overlay. Not retried."), `mcp-shadowed` ("Stopped: another extension in this job registers a tool or command that only the job's MCP servers may, so the run ended before the agent started. The operator needs to remove that extension or this trigger's MCP servers. Not retried."); and, since issue #644, the runner's exit-2 refusal of a job armed with `run.progress`, `report-progress-shadowed` ("Stopped: another extension in this job registers the tool a run uses to report its progress, so the run ended before the agent started. The operator needs to remove that extension or this trigger's run.progress. Not retried.")), and the final infrastructure failure.
+  **One more worker-authored comment, opt-in (issue #644, `REQ-RUN-PROGRESS`, `INT-FORGE-STATUS-COMMENT-EDIT`)**: a
+  job whose trigger sets `run.statusComment: true` gets ONE status comment from the worker, posted when its container
+  starts and EDITED as the run goes and a last time with the run record's outcome, or, for an infrastructure failure
+  the queue will retry, with "attempt ended, retrying"; when the next attempt is refused before its container, that
+  refusal's record still makes the last edit. It is the only comment the worker edits.
+  Its text is fixed words, the job id and integers ("pi-dispatch job `<id>`: running. Turn 7, 12 steps (1 failed).
+  Phase 2 of 4 (3/10)."), never a phase name, a note, a tool name or any other model text, so a public thread carries
+  nothing the agent wrote through it. It replaces none of the comments above: the agent's exit-0 comment and the
+  worker's terminal comments are posted exactly as before, and the status comment's last edit is not the completion
+  or failure comment the Acceptance counts. It is posted and edited through the same adapter and identity as the
+  terminal comments, never throws and never delays the job, and is skipped, said once in the log
+  (`status_comment_skipped`), when progress is off (`progress-off`), when the job has no transcript to read progress
+  from (`no-transcript`), when it has no forge target that can post and edit (`no-forge-target`), and when its text
+  could contain the phrase that started the job (`phrase-collision`). Off by default.
   Once-ness for the infra class is BullMQ's own terminal decision
   (`finishedOn`, set only on the non-retry branch): a retried attempt comments nothing, so a flaky
   daemon cannot post three comments for one recovery, and the seam that reads it also covers the
@@ -465,7 +480,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   because a local job's comment lands verbatim in a persistent service log.
 - **Acceptance**: Given any forge-backed job reaching a terminal state, exactly one completion or failure
   comment exists on the issue — posted through that forge's own endpoint, which on GitLab means the merge
-  request notes path for a merge-request target and the issue notes path for an issue.
+  request notes path for a merge-request target and the issue notes path for an issue. Given a trigger
+  with `run.statusComment: true` (issue #644), exactly one further comment, the status comment, exists for the job (a
+  retry edits it rather than posting a second), its every edit holds only fixed words, the job id and integers, and it
+  is edited through that forge's edit endpoint (`INT-FORGE-STATUS-COMMENT-EDIT`); given a trigger without it, no
+  comment is edited and none is added. Tests: `worker/test/status-comment.test.mjs`, the four
+  `worker/test/*-host.test.mjs`, `worker/test/start-wiring.test.mjs`.
 
 ## REQ-OPERATOR-FAILURE-NOTIFICATION
 
@@ -1005,7 +1025,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   runs too.
 - **Scope**: reads only. Every write and action, answering a parked run included, is #642's
   (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; the live transcript on
-  the run page is #643's (`REQ-LIVE-TRANSCRIPT`, resolving `OQ-044`) and progress is #644's. The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
+  the run page is #643's (`REQ-LIVE-TRANSCRIPT`, resolving `OQ-044`) and progress is #644's (`REQ-RUN-PROGRESS`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
   (e), (k) and (l) above all. `insights.html` stays the offline artifact, unchanged (`REQ-INSIGHTS-HTML-EXPORT`).
 - **Why**: before #641 the operator's live surfaces were the panel and a static insights file whose reload re-read
   the same file. Parked runs were shown nowhere in the admin, the run list stopped at 50 records with no search, only
@@ -1201,7 +1221,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `PI_LIVE_TRANSCRIPTS=0`. On the console the transcript shall reach the operator role alone.
 - **Scope**: the worker's live file and publisher (`DES-LIVE-TRANSCRIPT-STREAM`), the stream
   (`INT-LIVE-TRANSCRIPT-STREAM`), the read model's readers, the panel's LIVE_TAIL and the console's run page and
-  transcript route (`DES-OPERATOR-CONSOLE`). Phase and step progress is #644's. The raw log stays host-local as
+  transcript route (`DES-OPERATOR-CONSOLE`). Phase and step progress is #644's (`REQ-RUN-PROGRESS`), read off the same file. The raw log stays host-local as
   before (`PI_CAPTURE_JOB_LOGS`). Reads of the transcript are not audited (considered in
   `DES-LIVE-TRANSCRIPT-STREAM`).
 - **Why**: the console shows every run's record fleet-wide but nothing of what a run is doing; the raw log exists
@@ -1248,6 +1268,157 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     escaped, resume from `Last-Event-ID`, send `done` after the `end`, end with the session and share the hub's
     slots; given a viewer, 403 and no transcript text on any page, panel or `/api/state`. Tests: `admin/test/console-transcript.test.mjs` (including
     an end-to-end stream written by the worker's own publisher), and `REQ-CONSOLE-SECURITY` (l).
+
+## REQ-RUN-PROGRESS
+
+- **Statement**: An operator shall be able to see where a running job is (the turn it is on, the steps done and
+  failed, the tool running now and, when its trigger opts in, the phase of its plan the agent reports) in the
+  console, in the `/dispatch` panel and, when its trigger opts in, in one edited forge status comment. The automatic
+  part (turns, steps, the tool running) shall need no trigger change and no image change. A trigger may set
+  `run.progress: true` to offer its jobs a `report_progress` tool and show the phases they report, and, on a forge
+  trigger, `run.statusComment: true` for the comment. Progress shall be advisory: read from a file the agent can
+  write, it shall feed no classification, budget, exit outcome, retry or other decision. A phase name or note shall
+  reach the operator role alone and never the run record or the forge; the run record shall gain a summary of integers
+  and closed keys only; the status comment shall hold fixed words, the job id and integers only. Reading progress shall
+  never fail, slow or hold a job, shall add no network path to the job container, and shall be turned off by
+  `PI_RUN_PROGRESS=0`.
+- **Scope**: the worker's reducer, key writer and status commenter (`DES-RUN-PROGRESS`), the key
+  (`INT-RUN-PROGRESS-KEY`), the record's `progress` (`INT-RUN-HISTORY-FILE-CONTRACT`), the forge edit
+  (`INT-FORGE-STATUS-COMMENT-EDIT`), the `report_progress` job tool and its capability, the two trigger fields
+  (`INT-TRIGGERS-FILE-CONTRACT`), the read model's readers, the console's displays and the panel's ACTIVE rows
+  (`DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`). Not in scope: per-tool live status inside a parallel batch
+  (pi saves a batch's results together, so the file cannot show it), a progress value the job can trust, and #645's
+  recovered runs, whose synthetic interrupted results are counted as ordinary results until their shape is settled.
+- **Why**: #643 lets an operator read a running job's transcript, but nothing summarises where a run is: an operator
+  watching a fleet scrolls transcripts to learn that a job is on turn 40 with a test command running for ten minutes.
+  The requester, on the issue, sees nothing between the start and the end. pi already writes everything the automatic
+  counters need into the session file the worker tails; a phase is the one fact only the agent knows, so it is a tool
+  the agent calls, whose call lands in the same file.
+- **Traces to**: `DES-RUN-PROGRESS`, `INT-RUN-PROGRESS-KEY`, `INT-FORGE-STATUS-COMMENT-EDIT`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-CONSOLE-STATE-API`, `DES-LIVE-TRANSCRIPT-STREAM`, `DES-OPERATOR-CONSOLE`,
+  `DES-ADMIN-VIA-PI-EXTENSION`, `REQ-LIVE-TRANSCRIPT`, `REQ-JOB-STATUS-COMMENTS`, `REQ-CONSOLE-SECURITY`,
+  `REQ-DURABLE-RUN-HISTORY`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`.
+- **Acceptance**:
+  - (a) **The reducer.** Given pi-shaped lines, each assistant message is one turn and opens a step per tool call, and
+    each result closes its call as `ok` or `error` with its own `durationMs`, null when pi wrote none; a parallel
+    batch's shared timestamp never becomes a duration; an unknown, duplicate or reused id changes nothing; a hostile
+    tool name shows as `?` and counts as `other`; open calls at the end are `interrupted` and nothing is consumed after
+    it; on a resume, lines before the baseline seed `prior` and the phases and never this attempt's counters; a reset
+    keeps the counts seen and counts a replayed line only when it closes a call still open; memory holds at 256 open
+    calls, 20 recent, 8 running and 32 phases; phases are read only with `run.progress`, only from an `ok` result, a
+    call with invalid arguments ignored whole, and their text redacted, then escaped, then cut; a call or result id
+    longer than 128 UTF-16 units is an anomaly and pins no memory, live or prior; an assistant message that ended in a
+    provider error or an abort opens no step, the error counting as no turn and the abort as one; a
+    `report_progress` the runner refused in the prior lines sets no phase; `longestInterruptedMs` is an open step's
+    time from its call to the end, beside `toolMs` as a sum; the time handed to the reducer is bounded as the stream's
+    (not negative, at most a day ahead, an integer). Tests: `worker/test/run-progress.test.mjs` (among them "a call id
+    longer than 128 units is an anomaly: a forged megabyte id pins nothing, live or prior (#644)", "a message that
+    ended in a provider error or an abort opens no steps; an error is not a turn, an abort is (#644)", "a
+    report_progress the runner refused in the prior lines does not set the resumed run's phase (#644)",
+    "longestInterruptedMs: an open step's time from its call to the end, beside toolMs as a sum (#644)"),
+    `worker/test/live-transcript.test.mjs` ("the time handed to onParsed is bounded as the stream's is: not negative,
+    at most a day ahead, an integer (#644)").
+  - (b) **The key.** Given a running job, the key is written at most once a second with a trailing write, its TTL 7
+    days from the first write and 24 hours after the final one; the final write has `ended` and the exit's outcome; a
+    retry carries the earlier attempt's `commentId`; the value fits 16 KiB; a client that is not ready, refuses, hangs
+    or is closed never throws and is logged once; with transcripts off and progress on the file is tailed, the key
+    written and no `run:live:` key touched; with both on the stream is as before and a job without `run.progress` reads
+    no phases; a reset in progress mode counts nothing twice; `updatedAt` is each write's own time and the snapshot is
+    written again every 30 s until the end, and never past 7 days from the writer's start (no write with a TTL under
+    1 s); a container the processor gives up on after the abort grace still gets the final write, with outcome
+    `unknown`; the sink's first write is the empty turn 0 snapshot, replacing the previous
+    attempt's final one at once; a status comment post slower than the final write is waited for (at most 2 s) so its
+    id lands in the key and the retry edits that comment. Tests: `worker/test/run-progress.test.mjs` (among them "the
+    writer stamps updatedAt with each write's time and rewrites the snapshot every 30 s until the end (#644)", "the
+    heartbeat never outlives the key's 7-day window: it stops for good, and no write sets a TTL under a second
+    (#644)", `worker/test/wiring.test.mjs`'s "giving up on a container whose stop did not take finishes its live
+    publisher, before the job dir goes (#644)", `worker/test/live-file.test.mjs`'s "onLive hands the processor the
+    publisher's finish, so a container it gives up on still ends its key (#644)", "the
+    sink writes the empty snapshot at start, replacing the previous attempt's final one at once (#644)", "a status
+    comment post slower than the final write still lands its id, so the retry edits it (#644)"),
+    `worker/test/live-transcript.test.mjs` (against a live Valkey).
+  - (c) **The record.** Given a run the reducer read, the record carries `progress` at its tail with integers and
+    closed keys only and no zero, and given a tool call named like a secret or as markup no string of it reaches the
+    record; given a run it did not read, the key is absent and the record is byte-identical to before; the record's
+    reason enum names `report-progress-shadowed` and `job-image-progress-unsupported`; a spent attempt that ends as an
+    operator cancel instead of a retry keeps its `progress` beside its `resources`. Tests:
+    `worker/test/run-progress.test.mjs` (the record's progress, make-it-lie), `worker/test/run-history.test.mjs` (the
+    runner's reasons against the spec's enum), `worker/test/resources-record.test.mjs` ("a cancel read only when a
+    spent attempt fails ends as the cancel and keeps that attempt's resources", which pins `progress` too).
+  - (d) **The tool and the fields.** Given `PI_REPORT_PROGRESS` absent or empty the tool is off, `1` on and anything
+    else a config error; given valid arguments it answers "recorded" and the run goes on, given invalid ones an error
+    result; a real session's transcript holds the call and its result; unarmed, the tool is absent and the system prompt
+    does not name it; another extension's tool of that name stops the run before the prompt
+    (`report-progress-shadowed`) and is refused at its call. Given `run.progress` or `run.statusComment` the job data
+    carries it only when `true`, on every forge filter and in the cron data (`progress` only), never moving a dedup key;
+    a non-boolean is refused on every type and `run.statusComment: true` on cron; the env carries
+    `PI_REPORT_PROGRESS=1` only for an armed job; an armed job on an image without `reportProgress` is refused before
+    any spend; a job whose authored trigger arms either and which arrived without it is `trigger-skew`; the trigger
+    tools carry both only as booleans and judge them before the confirm. Tests:
+    `image/runner/test/report-progress.test.mjs`, `image/runner/test/loader.test.mjs`,
+    `worker/test/triggers.test.mjs`, `worker/test/queue.test.mjs`, `worker/test/schedules.test.mjs`,
+    `receiver/test/filter.test.mjs`, `receiver/test/trigger-forwarding.test.mjs`, `worker/test/env-allowlist.test.mjs`,
+    `worker/test/image-preflight.test.mjs`, `worker/test/model-policy.test.mjs` (the skew rows),
+    `admin/test/write-plans.test.mjs`, `admin/test/job-actions.test.mjs`.
+  - (e) **The status comment.** Given `run.statusComment: true` on a forge job, one comment is posted when the
+    container starts and its id handed back; a retry edits that comment instead of posting a second; edits come at most
+    one per 30 s and only when the text changed, the trailing edit carrying the latest snapshot, at most 120 with the
+    last kept for the outcome; a 403, 404 or 429 stops editing, but a 429 stop does not stop the final edit; the final
+    edit is bounded and tried once more after a short pause on a failure or a 429 inside its bound; its outcome is the
+    run record's, "attempt ended, retrying" for an infrastructure retry (whose next attempt edits the same comment),
+    and the exit's only when no record settles it within 5 minutes, a record arriving after that (within 10 minutes)
+    correcting it once when its text differs, a new attempt dropping the old entry unedited; an attempt refused before
+    its container, which registers no commenter, still ends the comment an earlier attempt posted with the record's
+    outcome, read from the progress key's `commentId`; the text holds fixed words,
+    the sanitized job id and integers, and no phase name, note or tool name however hostile; nothing throws; each host
+    returns the created id and edits through its own endpoint, refusing a malformed id before any request; the wiring
+    hands the opener both switches and never-throwing post and edit wrappers; a phrase the text could contain skips the
+    comment, the retry's words included; and the receiver enqueues nothing for an edit of the comment on any of the four
+    forges. Tests: `worker/test/status-comment.test.mjs` (among them "a rate-limit stop (...) ends the progress edits
+    but not the final one", "the final edit is tried once more after a short pause on a failure or a 429, inside
+    finalTimeoutMs", "the retry text says the attempt ended and is being retried, never finished", and the three
+    "the registry: ..." tests, "the registry: a record slower than the fallback still corrects the comment once,
+    within a bounded grace", "the registry's late list is capped: the oldest finished commenter is dropped first"),
+    `worker/test/start-wiring.test.mjs` ("the status comment's final edit is the record's outcome, or retrying for an
+    infrastructure retry (#644)", "a record with no commenter edits the comment an earlier attempt posted, once, from
+    the progress key (#644)"), `worker/test/github-host.test.mjs`,
+    `worker/test/gitlab-host.test.mjs`,
+    `worker/test/forgejo-host.test.mjs`, `worker/test/azure-host.test.mjs`, `worker/test/start-wiring.test.mjs`,
+    `receiver/test/status-comment-edits.test.mjs`.
+  - (f) **The switch.** Given `PI_RUN_PROGRESS` unset, empty or `1`, progress is read; `0` turns off the key, the
+    record field and the comment; any other value refuses to boot; it is independent of `PI_LIVE_TRANSCRIPTS`, and the
+    live file is staged unless both are `0`; it is documented in both `.env.example` files. Tests:
+    `worker/test/config.test.mjs`, `worker/test/env-docs.test.mjs`, `worker/test/start-wiring.test.mjs`.
+  - (g) **The displays.** Given the worker's own snapshot, the read model reads it and drops its comment id; given a
+    hostile one (an unnamed field, a wrong type, a value past a cap) it refuses the whole key, and an off-charset tool
+    name reads as `?`; a run id outside the charset is refused before any read; many keys are read in ONE `MGET` of at
+    most 50 distinct ids; the fleet's `active` rows carry integers and a checked tool name only. The console's active
+    tables show a Progress column, the remote host's job too; the run page's Progress panel shows counters, running
+    tools, recent steps and phase integers to both roles and the phase names, a `<progress>` bar and the note to the
+    operator role alone, escaped, and a finished run shows its record's `progress` by the worker's rule; hostile values
+    stay inert. The panel's ACTIVE row shows the turn, steps, the running tool and the phase, rich and plain, within
+    every width, for a remote host's job, and without a progress seam (or with one that fails) keeps the integers and
+    names no phase. No phase name or note reaches `/api/state`, a list or a model-callable tool; `/api/state`'s
+    `active[].progress` carries `updatedAt`. A snapshot that has not ended and was not written for 180 s is STALE: the
+    run page leads with "Stale: no update for N min; the worker may be gone." and shows open steps as open at the last
+    update, the active tables' cell ends with "no update for N min; the worker may be gone", the ACTIVE row leads with
+    "no update for Nm, the worker may be gone", and no running age moves; an ended one is never stale, and an ACTIVE
+    row or active table row whose key has ended (an earlier attempt's) shows no progress. A retried job's run page
+    shows a key that started after the record's `endedAt` live under "An earlier attempt of this run ended
+    (outcome); this is the attempt after it.", and joins the key's phase names to the record only when the key ended
+    and is the same attempt (started no earlier than the record's `startedAt` and no later than its `endedAt`, an
+    unreadable time pairing with nothing). The record's figures read "Sum of step durations" and "Longest interrupted step", and the
+    resume prior "Earlier runs of this session". Tests: `admin/test/read-model-progress.test.mjs` (parseProgress
+    reads the worker's own snapshot, parseProgress refuses hostile snapshots whole, readProgress, readProgressMany,
+    the fleet snapshot's active rows with their `updatedAt`, "progressStaleFor: a running snapshot unwritten past the heartbeat's three minutes is stale; an ended one, or one
+    with no time, never is"), `admin/test/console-panels.test.mjs` (the run page's Progress panel, "the Progress panel
+    of a retried job (issue #644): a key newer than the record is the running attempt's, shown live; an older one is
+    never mixed in", "stale progress (issue #644): no write past three minutes says the worker may be gone, and a
+    running step gets no live age"), `admin/test/console-pages.test.mjs` (every screen, both roles; hostile values are
+    escaped or refused), `admin/test/dashboard-transcript.test.mjs` (the two ACTIVE row tests and "the ACTIVE row ignores an ended snapshot (an earlier attempt's) and marks a stale
+    one with no running age").
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -4008,6 +4179,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-16 | Issue #644, review round 1. **`REQ-RUN-PROGRESS` CORRECTED**, Acceptance only, the Statement unchanged. (a) gains: an id longer than 128 UTF-16 units is an anomaly; a message that ended in a provider error or an abort opens no step, the error no turn and the abort one; a refused prior `report_progress` sets no phase; `longestInterruptedMs` beside `toolMs` as a sum; the reducer's time bounded as the stream's. (b) gains: `updatedAt` is the write's time with a 30 s heartbeat until the end; the empty turn 0 snapshot at the sink's start replaces the previous attempt's final one; a slow comment post is waited for so its id reaches the key. (c) gains: a cancel that replaces a retry keeps `progress`. (e) CORRECTED: the final edit's outcome is the run record's (it was the exit's), "attempt ended, retrying" for an infrastructure retry, the exit's only after a 30 s fallback with no record; a 429 stop does not stop the final edit, which is retried once after a short pause; the phrase check covers the retry's words. (g) gains: the stale rule (not ended, no write for 180 s) and its words on the run page, the active tables and the ACTIVE row, running ages stopped; an ended key on an active row shows nothing; a retried job's record and key paired by time; the labels "Sum of step durations", "Longest interrupted step" and "Earlier runs of this session"; `/api/state`'s `active[].progress` carries `updatedAt`. Named tests added in (a), (b), (c), (e) and (g). **`REQ-JOB-STATUS-COMMENTS` CORRECTED**, the #644 clause: the last edit carries the run record's outcome or "attempt ended, retrying", not the exit's, and the skip names its four reasons (`progress-off`, `no-transcript`, `no-forge-target`, `phrase-collision`). Extended in the same round: (b) gains the writer's 7-day stop (no write with a TTL under 1 s) and the final write, outcome `unknown`, for a container the processor gives up on after the abort grace; (e) the fallback is 5 minutes (was 30 s), a record after it corrects the comment once within 10 minutes, and an attempt refused before its container still ends the comment an earlier attempt posted; (g) the key's phase names join a record only when the key started inside the record's attempt (no earlier than its `startedAt`). Named tests added in (b), (e) and (g). `REQ-JOB-STATUS-COMMENTS`' #644 clause gains: a next attempt refused before its container still makes the last edit. |
+| 2026-10-16 | Issue #644, run progress. **NEW `REQ-RUN-PROGRESS`**: an operator sees where a running job is (turn, steps done and failed, the tool running, and with `run.progress` the phase the agent reports through the `report_progress` tool) in the console, the `/dispatch` panel and, with `run.statusComment` on a forge trigger, one edited forge comment; the automatic counters need no trigger or image change; progress is advisory and feeds no decision; phase names and notes reach the operator role alone and never the record or the forge; the record gains integers and closed keys only; nothing fails, slows or holds a job or adds a network path; off with `PI_RUN_PROGRESS=0`; acceptance (a) to (f) with named tests from the worker, runner, receiver and admin suites, and (g), the displays (the read model's strict reader, the console's Progress column and panel, the panel's ACTIVE row). **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the who-authors clause gains the `report-progress-shadowed` sentence and the one opt-in status comment the worker posts and edits (fixed words, the job id and integers, the only comment it edits, replacing none of the others, skipped on a phrase collision); Acceptance gains the status comment's case and its tests; traces gain `REQ-RUN-PROGRESS` and `INT-FORGE-STATUS-COMMENT-EDIT`. **`REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-LIVE-TRANSCRIPT` AMENDED**, Scope only: progress is `REQ-RUN-PROGRESS`. UNCHANGED, checked: `REQ-OPERATOR-FAILURE-NOTIFICATION` (the hook's set spreads `RUNNER_POLICY_REASONS`, so `report-progress-shadowed` pages as `runner-policy` did, and the free `job-image-progress-unsupported` refusal pages nobody), `REQ-DURABLE-RUN-HISTORY` (the record stays PII-free: the new field holds no string from the transcript), `REQ-CONSOLE-SECURITY` (the run-text rule covers phase names and notes as it covers the transcript: operator only, escaped, never in a list or `/api/state`), `REQ-AWAIT-INPUT` (`await_human_input` is one of the record's closed tool names and is otherwise untouched). |
 | 2026-10-16 | Issue #643, live run transcripts. **NEW `REQ-LIVE-TRANSCRIPT`**: an operator watches a running job's transcript live from the console's run page and the `/dispatch` live tail, for a run on any host; what leaves the host is the transcript only (never the raw log or the thinking), redacted of the job's secrets and known token shapes, capped at 2,000 entries, removed 24 h after the end (7 days at most when the run never ended), never failing or slowing a job, with no new network path from the container, off with `PI_LIVE_TRANSCRIPTS=0`, operator only on the console; acceptance (a) to (f) with named tests (`worker/test/live-file.test.mjs`, `live-transcript.test.mjs`, `redact-secrets.test.mjs`, `admin/test/live-transcript-reader.test.mjs`, `dashboard-transcript.test.mjs`; the console's `admin/test/console-transcript.test.mjs`). **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement and Scope name the live transcript, and (l) is extended to the transcript stream (operator only, 403 for a viewer before a slot, escaped in a `<pre>`, never in a list, a hub panel or `/api/state`, `HEAD` 405, the slots and re-judging of (k)). **`REQ-RESUMABLE-SESSION` AMENDED**, Statement and Acceptance: a job without `run.resume` still keeps no transcript, writes nothing to the store and resumes nothing, but since #643 it does get a `/session` mount and `PI_SESSION_FILE` for its live file, so the "no mount, byte-identical argv" clauses are replaced. **`REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, Scope only: the transcript is #643's and delivered. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: the console line and the streamed container output are untouched, and `no-pii-in-logs` holds for the publisher, which logs the job id and counts only (`live_transcript_ended`, `live_transcript_write_failed`, `live_transcript_unstaged`), never an entry's content. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**: the record gains nothing. |
 | 2026-10-14 | No issue, found in a live lab on 4.3.0 (Forgejo 14; every forge has it): the answer to a parked run, arriving within ten minutes of the delivery that started that run, was swallowed by the semantic window against the finished run (`deduplicated`, `202`, nothing run, the label left on). **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED** (semantic layer only): a run that parks closes its own window through the job's compare-and-delete, the bullmq 5.80.4 evidence for why a ttl key outlives its job is cited, and Acceptance gains the parked case beside the unchanged coalescing of a run that did not park. The GUID layer UNCHANGED, checked. **`REQ-AWAIT-INPUT` AMENDED**: Acceptance gains the quick answer, and a resumed run that parks again. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: the key, the promotion and the chain bound do not move; the release runs after the promotion. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a release failure is logged and changes no outcome. **Code evidence**: worker/src/queue.mjs -> releaseSemanticWindow; worker/src/processor.mjs -> releaseParkedWindow; worker/src/index.mjs. |
 | 2026-10-12 | No issue: a runner MCP refusal named in the run record, and doctor on an MCP endpoint. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: the worker's fixed terminal sentences gain the runner's six exit-2 refusals of a job's MCP servers, `mcp-unavailable`, `mcp-config-invalid`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed`, which recorded and commented as `runner-policy` before; each sentence names the rule and what the operator checks, never the server, a host or a variable, and is quoted in the clause. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**, acceptance only: a server answering HTTP 401 records `mcp-unavailable` and comments that reason's sentence; doctor proves the route of a declared endpoint that only an enabled overlay MCP server dials and passes it on any answer (an `https://` server's closed socket included), rather than warning that `/v1/models` did not answer 200, and judges one a model also dials as a model server. **`REQ-EGRESS-ALLOWLIST` AMENDED**, acceptance only: the same exception on the `models` probe. `REQ-OPERATOR-FAILURE-NOTIFICATION` is UNCHANGED, checked: the hook's set spreads `RUNNER_POLICY_REASONS`, so the six page as `runner-policy` did, and the pickup's free `mcp-config-invalid` pages nobody by its `budgetReserved: false`. |

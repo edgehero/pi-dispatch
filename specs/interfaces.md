@@ -673,6 +673,7 @@ refactor apart.
   | **A parked run** (issue #625, `REQ-AWAIT-INPUT`): a job armed with `PI_AWAIT_INPUT=1` ended on the `await_human_input` tool's own successful result | the tool returned `terminate: true`, so the last message is its tool result | `0` / `awaiting-input` -- ranked below every budget stop and a classified rejection, above everything else. The worker reads this reason on code `0` alone (its closed `RUNNER_COMPLETED_REASONS`), and only for a job it armed |
   | Another extension registers `await_human_input` on a job armed with `PI_AWAIT_INPUT=1` | after `createAgentSession`, before the prompt | `2` / `await-input-shadowed` -- the tool a parked run ends on answers only for the job; a `tool_call` hook also blocks a late registration |
   | `PI_AWAIT_INPUT=1` with no `PI_SESSION_FILE` | preflight, before the prompt | `2` / `await-input-without-session` -- a parked run would keep no transcript to resume; a worker regression or a hand-run container |
+  | Another extension registers `report_progress` on a job armed with `PI_REPORT_PROGRESS=1` (issue #644, `REQ-RUN-PROGRESS`) | after `createAgentSession`, before the prompt | `2` / `report-progress-shadowed` -- another extension's tool would answer the calls the worker reads as phases; a `tool_call` hook also blocks a late registration. A member of `RUNNER_POLICY_REASONS` (`PROGRESS_RUNNER_REASONS`), with its own fixed terminal comment |
   | **A tool ended the run** (issue #623): every result of a tool round carried `terminate: true` (pi-agent-core 1.1.0 `agent-loop.js:167`), which pi's own tools never set, so an extension decided it | the last message is the **tool result**, which has no `stopReason` | `0` / `tool-terminated` -- the agent ran and a tool ended it on purpose. Before this row the absent `stopReason` fell to the unknown-reason default and the job was retried and billed again as `1` / `unknown-stop-reason:undefined`. Pinned by a loopback test that drives the real session at the pin |
   | **Output truncated at the token limit** | `stopReason: "length"` | `0`, **but log it** — it is a completed run, not a silent failure, and must not be mistaken for either |
 
@@ -1189,7 +1190,11 @@ refactor apart.
   file 0600), which pi writes the transcript into and the worker tails for `INT-LIVE-TRANSCRIPT-STREAM`. It has no
   store key, is never read back or promoted, and is deleted with the job directory. The runner contract is the
   existing one (an empty file opens a fresh session), so no image change; a caller that stages no file (a failed
-  staging) emits neither, as before.
+  staging) emits neither, as before. **Since issue #644 the worker reads the same file for run progress**
+  (`DES-RUN-PROGRESS`), so it is staged when either `PI_LIVE_TRANSCRIPTS` or `PI_RUN_PROGRESS` is on and left out
+  only when both are `0`. The `report_progress` tool (`run.progress`, `PI_REPORT_PROGRESS`) adds no input here: what
+  the agent reports lives only in that transcript, as the tool call and its result, and no `/job` file, mount or
+  network path carries it.
 - **A repo skill is materialised WHOLE, and bounded** (issue #60). The allowlist accepts
   `.pi/APPEND_SYSTEM.md` (an exact path) and **every declared file under `.pi/skills/<name>/`**, not just
   each `SKILL.md`. It used to accept only the latter, which meant a skill shipping `references/`,
@@ -1689,13 +1694,20 @@ refactor apart.
     any more than `forges` can. The token set at this version is `replicas`, `commands`, `excludeTools`,
     `anyUid`, `costCap`, `modelPolicy`, `exitAuth`, `mcp` (REQ-MCP-OPERATOR-SERVERS: the runner reads
     `/job/mcp.json`; its evidence is an offline run with a stub stdio server under a cost cap of 0, which must log
-    `mcp_servers_ready` and then stop `cost-cap`) and `forgeMcp` (`DES-FORGE-MCP`: the image carries the two forge
+    `mcp_servers_ready` and then stop `cost-cap`), `forgeMcp` (`DES-FORGE-MCP`: the image carries the two forge
     servers at their pins behind `/usr/local/bin/forge-mcp-github` and `/usr/local/bin/forge-mcp-gitlab`, which
     withhold the forges' dedicated merge and approval tools and a few others, a convenience not handed out and not a
     boundary; its evidence is both wrappers run as the job user with no network and a fake token, each answering
     `initialize` and a `tools/list` with no withheld name and no `merge` or `approv` name outside a fixed list of the
     other names that mention a merge request, and refusing a call to each withheld name as an unknown tool, and
-    github-mcp-server printing its release version) -- the third (issue #291) declares that the baked runner reads
+    github-mcp-server printing its release version), `awaitInput` (`REQ-AWAIT-INPUT`, issue #625: the baked runner reads
+    `PI_AWAIT_INPUT` and carries the `await_human_input` tool; its evidence is a grep of both, and a job armed with
+    `run.awaitInput` on an image without it is refused pre-spend, `job-image-await-input-unsupported`) and
+    `reportProgress` (`REQ-RUN-PROGRESS`, issue #644: the baked runner reads `PI_REPORT_PROGRESS` and carries the
+    `report_progress` tool; its evidence is a grep of `image/runner/src/config.mjs` for the variable and of
+    `image/runner/src/report-progress.mjs` for the tool, and a job armed with `run.progress` on an image without it is
+    refused pre-spend, `job-image-progress-unsupported`, because an older runner would ignore the variable and the
+    trigger's phases would never appear on a run that reads as fine) -- the third (issue #291) declares that the baked runner reads
     `PI_EXCLUDE_TOOLS`, and a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a "read-only"
     trigger with every tool the file says to remove: a permission quietly not enforced. `verify-image.sh` fails on any
@@ -1716,7 +1728,8 @@ refactor apart.
     network; one that could not enforce it would exit `model-policy-unenforceable`. The pi-upgrade-check workflow
     requires this repo's image to carry this token as well. The worker's `modelPolicy` row in `CAPABILITY_GATES`
     (below) is what reads it: a job with a list on an image without it is refused pre-spend. The worker's side of the
-    seven job-feature tokens (each token above but `anyUid` and `exitAuth`, `forgeMcp` the seventh) is ONE table
+    nine job-feature tokens (each token above but `anyUid` and `exitAuth`: `forgeMcp` the seventh, `awaitInput` the eighth
+    and `reportProgress` the ninth, in that order) is ONE table
     since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which jobs need
     it, the result key, the record reason, the log event and the comment. The preflight refuses the first row a job
     needs and the image lacks, in the order the branches had, so the behaviour is unchanged and a new image-gated
@@ -1893,7 +1906,7 @@ refactor apart.
     asserts MEMBERSHIP against the factory-derived pinned set pre-spend, exit 2, because pi silently
     ignores unknown `excludeTools` names -- then passes the list to `createAgentSession` and logs
     `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
-    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_AWAIT_INPUT` (`REQ-AWAIT-INPUT`, issue #625: `1` when the trigger armed `run.awaitInput` AND a resume transcript is staged (`prepared.session`; the live file every job gets since #643 does not count), omitted otherwise, never `0` or empty. The runner offers the `await_human_input` tool through an inline extension factory, refuses a third value as a config error, and refuses `1` without `PI_SESSION_FILE` as `await-input-without-session`); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
+    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_AWAIT_INPUT` (`REQ-AWAIT-INPUT`, issue #625: `1` when the trigger armed `run.awaitInput` AND a resume transcript is staged (`prepared.session`; the live file every job gets since #643 does not count), omitted otherwise, never `0` or empty. The runner offers the `await_human_input` tool through an inline extension factory, refuses a third value as a config error, and refuses `1` without `PI_SESSION_FILE` as `await-input-without-session`); `PI_REPORT_PROGRESS` (`REQ-RUN-PROGRESS`, issue #644: `1` when the trigger armed `run.progress`, omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule; not keyed on a staged transcript, since the tool keeps nothing. The runner offers the `report_progress` tool through an inline extension factory, refuses a third value as a config error, and refuses another extension's tool of that name as `report-progress-shadowed`. Reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot bind it through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`), so the live transcript's redactor leaves its value alone); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
     trigger's `run.mcp` names, comma-joined, safe by the loader's name rule, omitted when the job names none, never
     empty; the runner holds `/job/mcp.json` to exactly these names); `HOME=/home/pi` (issue #341: set ONLY beside
     `--user`, assigned after the `PI_FORWARD_ENV` and `run.secrets` loops so neither can move it, and reserved so a
@@ -4064,6 +4077,41 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   phrase. The worker adds the label on a park and removes it when a run on an armed key ends without parking. A job
   whose authored trigger arms it but which arrived without it (a receiver older than #625 drops the key) is refused
   pre-spend as `trigger-skew`, a row of `AUTHORED_NARROWING_FIELDS`.
+- **`run.progress` (all five kinds) and `run.statusComment` (github/gitlab/forgejo/azure triggers), optional booleans
+  (`REQ-RUN-PROGRESS`, `DES-RUN-PROGRESS`, issue #644), both opt-IN.** Absent or `false` = today's behaviour,
+  byte-identical normalized entry, job data, env and argv. Both are judged by one validator,
+  `validateProgressFlags` (`worker/src/triggers.mjs`), strictly boolean (a truthy `"false"` would arm what the operator
+  meant to leave off), in all five normalizers.
+  - `run.progress: true`: the job is offered one more tool, `report_progress` (`PI_REPORT_PROGRESS=1`,
+    `INT-CONTAINER-RUNTIME-CONTRACT`), with which the agent names the phase of its plan it is in, optionally `done`
+    of `total` and a short note; and the worker reads those phases into the run's progress key
+    (`INT-RUN-PROGRESS-KEY`). Legal on cron too: neither the tool nor the reader needs a forge. Nothing else
+    changes: the tool records and the run goes on. An image that does not declare the `reportProgress` capability is
+    refused pre-spend (`job-image-progress-unsupported`); another extension registering `report_progress` stops the
+    run before its prompt (`2` / `report-progress-shadowed`, `INT-RUNNER-EXIT-CODE-PROTOCOL`). The automatic counters
+    (turns, steps, the tool running) need no flag: every job has them while `PI_RUN_PROGRESS` is on.
+  - `run.statusComment: true`: the worker posts one comment on the triggering issue or pull request when the container
+    starts and edits it as the run goes, with fixed words, the job id and integers only, never model text
+    (`INT-FORGE-STATUS-COMMENT-EDIT`). Refused at load on a cron trigger (`run.statusComment is only available on a
+    forge trigger`): a cron job has no issue or pull request to post on (`run.github` mints a token, it names no
+    target), so `true` there would do nothing. `false` is carried on cron, `run.resume`'s rule. It needs
+    `PI_RUN_PROGRESS` on, since the comment renders the progress snapshot; with it off the job runs without the
+    comment and the worker logs `status_comment_skipped` with reason `progress-off` (`no-transcript` when no live file
+    was staged, `no-forge-target` when the job has no forge target or its host cannot edit).
+  - Neither needs the other: a status comment without `run.progress` shows turns and steps and no phase.
+  - Each rides the job data at JOB level only when `true` (`job.progress`, `job.statusComment`), never inside
+    `trigger`, through every receiver filter, `enqueueForgeJob`, the console's `runFieldsOf` and, for `progress`, the
+    cron scheduler data (`worker/src/schedules.mjs`). Neither is part of any job id or dedup key.
+  - **Version skew**: both are rows of `AUTHORED_NARROWING_FIELDS`, authored when `true`: a receiver from before #644
+    tolerates the keys as unknown and drops them, and the job would run without the tool or the comment its trigger
+    promised, on a clean record; the worker refuses such a job pre-spend as `trigger-skew`, naming the field.
+  - **Model-callable**: yes, both, unlike `run.awaitInput`, `run.mcp` or `run.excludeTools`. Neither gives
+    the model a capability: `progress` offers the job a tool that records a phase name in the transcript and does
+    nothing else, and the status comment is fixed worker text on the item the trigger already acts on.
+    `dispatch_trigger_add` (every kind) and `dispatch_trigger_edit` take `progress` and `statusComment`, carry each
+    only when it is a boolean (so an entry that names neither is byte-identical), merge an edit's only when sent, and
+    judge them with the loader's own validator against the entry's `on.type` before the operator's confirm
+    (`admin/src/write-plans.mjs`), so a status comment on cron is refused before the operator is asked.
 - **`run.packages` (ALL FOUR trigger kinds, optional boolean) — an opt-OUT**: absent or `true` = the
   worker emits `PI_PACKAGES` with the container paths of the pi packages the operator staged into the
   global overlay (`INT-PI-PACKAGES-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`), so the flow gets
@@ -4612,7 +4660,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `:ro` mount sees an older file) would enqueue the job WITHOUT its list, and the job would run on the
   deployment's list or on none while every record reads like a correct run. The worker's own read of the
   triggers file catches it, `run.waitFor`'s skew check generalised to a table of authored NARROWING fields
-  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, `mcp`, and since #625 `awaitInput` when `true`): when
+  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, `mcp`, since #625 `awaitInput` when `true`, and since #644 `progress` and `statusComment` when `true`): when
   the entry at the job's matched index (identity-checked on flow, command, kind and on-type) sets the field and
   the job ARRIVED without it (`job.data.models` or `job.data.maxCostUsd`, read before the env fill), the job is refused pre-spend as
   `trigger-skew`, naming the field. The same limits as the wait check: it reads `PI_TRIGGERS_FILE`, else
@@ -4990,7 +5038,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|job-image-progress-unsupported|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -5049,7 +5097,14 @@ validator rather than a second copy of it.
     "earlier": [ { "host": "<worker name>", "startedAt": "<ISO-8601>",                  // issue #599: the slot intervals of this job's
                    "endedAt": "<ISO-8601>", "memMiB": <int> | null,                     // earlier attempts, which this record replaced;
                    "cpuCenti": <int> | null } ] | null,                                 // at most 4, newest last
-    "stalledRepick": <bool> }                                                           // issue #599: picked up again after a stall
+    "stalledRepick": <bool>,                                                            // issue #599: picked up again after a stall
+    "progress"?: { "turns"?: <int>, "steps"?: <int>, "failed"?: <int>,                    // issue #644: CONDITIONAL key, present only when
+                   "interrupted"?: <int>, "toolMs"?: <int>, "longestStepMs"?: <int>,      // the worker read the run's progress; integers
+                   "longestInterruptedMs"?: <int>,                                        // and closed keys only, a zero left out
+                   "phasesDeclared"?: <int>, "lastPhaseIndex"?: <int>,                    // and closed keys only, a zero left out
+                   "tools"?: { "read"?: <int>, "bash"?: <int>, "edit"?: <int>, "write"?: <int>, "grep"?: <int>,
+                               "find"?: <int>, "ls"?: <int>, "await_human_input"?: <int>,
+                               "report_progress"?: <int>, "other"?: <int> } } }
   ```
   **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
   after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
@@ -5177,6 +5232,30 @@ validator rather than a second copy of it.
   no record, so its slot time is unknown; the report counts such runs and says so. A stall after a failed attempt is a
   retry like any other (`stalledRepick` false, its earlier attempt carried in `earlier`), and the stalled attempt's own
   slot time, which no record holds, is counted nowhere (`OQ-039`). Its `queuedAt` is null, for the reason a retry's is.
+  **`progress` (issue #644, `DES-RUN-PROGRESS`) is additive, an explicit literal rebuilt by the worker
+  (`recordedProgress`, `worker/src/run-history.mjs`), TAIL position after `stalledRepick`, and the record's first
+  CONDITIONAL key**: present only when the worker's progress reducer ran for the job (`PI_RUN_PROGRESS` on, a Valkey
+  client, a staged transcript file and a container that started), absent otherwise, so every record of a run without
+  it, and every record written before the field, is byte-identical to before. `host` chose null-with-the-key-present
+  for its reason (a value change, not a shape change); `progress` chooses absence because it summarises a reading that
+  did not happen, and a null would claim a reading that found nothing. A run that was read and did nothing records
+  `progress: {}`. The keys: `turns` (assistant messages this attempt), `steps` (tool results that closed a call),
+  `failed` (results pi marked `isError`), `interrupted` (calls still open when the container ended), `toolMs` (the sum
+  of the results' own `durationMs`: a sum of step durations, not wall time, since the steps of a parallel batch
+  overlap and it can exceed the run's own duration) and `longestStepMs` (the longest closed step),
+  `longestInterruptedMs` (the longest a call still open at the end had run, from its call's time to the end: where a
+  tool that hung until the job timeout shows, which `longestStepMs` cannot see), `phasesDeclared` (distinct `report_progress` phases, at most
+  32) and `lastPhaseIndex` (the current phase's 0-based index, only beside `phasesDeclared`), and `tools`, the closed
+  steps counted per tool under the closed names `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`,
+  `await_human_input` and `report_progress` (`PROGRESS_RECORD_TOOLS`) plus `other`. Each value is a safe non-negative
+  integer and a zero is left out (`tools` too, when empty); a value that is not one is dropped, never copied. **No
+  string from the transcript reaches it**: a tool name is compared against the literal list and counted, never
+  copied, so a tool the model named after a secret or as markup counts under `other`; no phase name, note or free tool
+  name is recorded, which keeps the record PII-free by construction. The transcript is agent-writable, so the counts
+  are ADVISORY, like `resources`: no reader may take them as evidence of what the run did, and no decision reads
+  them. An earlier attempt's progress is not carried: a retry records its own attempt's counts. A spent attempt that
+  ends as an operator cancel instead of a retry (`endCancelled`, `worker/src/index.mjs`) keeps its `progress` beside its
+  `resources`.
   **Readers of `queuedAt` and `capacity` (issue #599)**: the capacity report (`worker/src/capacity.mjs`,
   `INT-CAPACITY-REPORT`) reads them with `host`, `project`, `startedAt`, `endedAt`, `size` and `resources.cpuUsec`,
   judges every value again as untrusted, and writes nothing to any record. A record without the `capacity` key (from
@@ -8358,7 +8437,13 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
     "failed": { "unreachable": false, "rows": [ { "jobId": "...", "queue": "pi-jobs", "attemptsMade": 3, "endedAt": 1760432400000, "failedReason": "..." } ], "more": 0 } }
   ```
   `parkedUnknown` true means the parked list could not be read, so an empty `parked` is not "nobody waiting". A
-  folder-scoped dollar window's `scope` is null rather than a host path.
+  folder-scoped dollar window's `scope` is null rather than a host path. **Since issue #644 each `active` row gains
+  `progress`** (`INT-RUN-PROGRESS-KEY`), integers and the running call's checked tool name only, never a phase name or
+  a note, and null when the job has no readable progress key; within `version: 1`, an added key (`STATE_VERSION`
+  unchanged): `{ "turn", "steps", "failed", "running": { "tool", "since" } | null, "phase": { "index", "count",
+  "done", "total" } | null, "ended", "updatedAt" }` (`activeProgressOf`), `running` the newest open call, `count` the
+  length of the phase list, and `updatedAt` the key's last write, so a script can apply the stale rule
+  (`INT-RUN-PROGRESS-KEY`: not ended and older than 180 s).
 - **What it never holds**: a token, a cookie, a session id, a host path beyond what the panel shows, a secret's value
   or resolver reference (secret profiles appear by name only), a job's `.data`, log or transcript text. A record's
   `jobId`, `target` and `parentJobId` are JSON strings, encoded by `JSON.stringify` and never interpreted; a script
@@ -8384,8 +8469,8 @@ script is its only intended client; it is documented so that what a stream may c
 - **Request**: a GET with the session cookie. `page` names a page in `PAGES` whose `live` is true; the rest of the
   query is that page's own (`parsePageQuery`, every value bounded and charset-checked, refused by field name). A
   page the session's role may not open is refused as the page itself would be. `Last-Event-ID` (the header the
-  browser sends on a reconnect) is optional. An unknown page, a page that is not live (run, insights, config,
-  audit) or a refused query is answered 400 JSON; a page above the session's role is 403.
+  browser sends on a reconnect) is optional. An unknown page, a page that is not live (insights, config, audit;
+  the run page too until issue #644 made it live for its Progress panel) or a refused query is answered 400 JSON; a page above the session's role is 403.
 - **Admission**: at most `PI_CONSOLE_MAX_STREAMS` (default 4, 1 to 32) open streams per token across all its
   sessions, and at most 32 in the process, of which 8 are kept for the operator role; a stream over any of these is
   answered `429` with `Retry-After` and opens nothing. `HEAD` is answered `405`. The slot is taken before the response
@@ -8529,6 +8614,193 @@ publisher cannot drift.
   and marked truncated. The fleet reader's `transcriptSince` and `transcriptMeta` run these on its own client,
   bounded at 2 s.
 - **Acceptance**: `REQ-LIVE-TRANSCRIPT` (b) to (e).
+
+## INT-RUN-PROGRESS-KEY
+
+**worker → Valkey → the read model (the console, the `/dispatch` panel) and the worker's next attempt.** One Valkey
+string per running job holding where the run is, as one JSON snapshot (issue #644, `DES-RUN-PROGRESS`,
+`REQ-RUN-PROGRESS`). The worker is its only writer (`makeProgressWriter`, `worker/src/run-progress.mjs`). The
+constants are the worker's, exported from `@edgehero/pi-dispatch/run-progress` (`PROGRESS_KEY_PREFIX`,
+`progressKeyFor`, `PROGRESS_MAX_BYTES`, `PROGRESS_RUNNING_MAX`, `PROGRESS_RECENT_MAX`, `PROGRESS_PHASES_MAX`,
+`PROGRESS_PHASE_MAX`, `PROGRESS_NOTE_MAX`, `PROGRESS_COUNT_MAX`, `PROGRESS_OPEN_MAX`, `PROGRESS_ID_MAX`,
+`PROGRESS_HEARTBEAT_MS`, `COMMENT_ID_RE`, `REPORT_PROGRESS_TOOL`), with the TTLs and the outcome enum taken from `@edgehero/pi-dispatch/live-transcript`
+(`LIVE_TTL_LIVE_MS`, `LIVE_TTL_ENDED_MS`, `LIVE_OUTCOMES`, `LIVE_TOOL_RE`), so the reader and the writer cannot drift.
+
+- **Key**: `run:progress:<sanitized job id>`, the queue's job id through `sanitizeJobId`, as `run:live:` is. Absent when
+  the job never wrote one, when `PI_RUN_PROGRESS=0`, or after it expired; a reader cannot tell those apart.
+- **Value**: one string, the snapshot serialized as JSON, written whole by `SET <key> <json> PX <ttl>`. Every write
+  carries the whole state, so a lost write is repaired by the next one. The shape (`v: 1`):
+  ```
+  { "v": 1,
+    "turn": <int>,                    // assistant messages this attempt (after the resume baseline), not "error" ones
+    "steps": <int>,                   // tool results that closed a call
+    "failed": <int>,                  // of those, results pi marked isError
+    "interrupted": <int>,             // calls still open at the end; set in the final snapshot only
+    "running": [ { "tool": "<name>", "since": <ms> } ],              // open calls, newest last, at most 8; [] once ended
+    "recent":  [ { "tool": "<name>", "status": "ok" | "error" | "interrupted",
+                   "durationMs": <int> | null, "at": <ms> } ],       // the last 20 closed steps, newest last
+    "phase":   { "index": <int>, "done": <int> | null, "total": <int> | null } | null,   // 0-based index into phases
+    "phases":  [ "<phase name>" ],                                   // first-seen order, at most 32: MODEL TEXT
+    "note":    "<the latest report's note>" | null,                  // MODEL TEXT
+    "prior":   { "turns": <int>, "steps": <int> } | null,            // counted from lines before the resume baseline
+    "startedAt": <ms>, "updatedAt": <ms>,                           // updatedAt: the time of the write that carried it
+    "ended": <bool>,
+    "outcome": "completed" | "policy" | "failed" | "unknown" | null, // on the final write only
+    "commentId": "<forge status comment id>" | null }                // COMMENT_ID_RE, INT-FORGE-STATUS-COMMENT-EDIT
+  ```
+  Every integer is a safe non-negative integer; `done` and `total` are at most 1,000,000 with `done <= total` and
+  `total >= 1`. `since` is the assistant entry's time and `at` the result's (the pi entry's own timestamp when it lies
+  between 0 and a day ahead, else the read time, `DES-LIVE-TRANSCRIPT-STREAM`'s rule); `durationMs` is the result's own
+  `durationMs`, null when pi wrote none (a call refused before it ran), never a timestamp difference. An assistant
+  message whose `stopReason` is `"error"` or `"aborted"` opens no step (pi runs none of its calls); an `"error"` one is
+  no turn and an `"aborted"` one is, as the runner counts turns. A call or result whose id is longer than
+  `PROGRESS_ID_MAX` (128 UTF-16 units) is ignored, so a forged id cannot pin memory while its step is open.
+- **Tool names** (`running[].tool`, `recent[].tool`) are model-chosen and checked: the live stream's charset
+  (`LIVE_TOOL_RE`, `[A-Za-z0-9_.:-]{1,64}`), else `?`, and `?` too when the job's redactor would change the name.
+- **Model text**: `phases[]` and `note` come from the agent's `report_progress` calls, only on a job armed with
+  `run.progress` and only once the call's result arrived with `isError: false` (the runner validated it). Each is
+  redacted with the job's redactor (`DES-LIVE-TRANSCRIPT-STREAM`'s), then has its control and bidi characters written
+  as `\u{XXXX}` (`escapeControls`), then is cut to 64 code points (a phase) or 200 (a note). **It is agent-written
+  text even so**: a reader shows it to the operator role alone, escaped for its own medium, and interprets none of it.
+  Neither ever reaches the run record (`INT-RUN-HISTORY-FILE-CONTRACT`'s `progress` holds counts) or the forge
+  comment (`INT-FORGE-STATUS-COMMENT-EDIT` holds integers).
+- **Size**: the serialized value is at most `PROGRESS_MAX_BYTES` (16 KiB of UTF-8). Past it the writer drops `recent`
+  oldest first, then `phases` from the tail, then the note, until it fits. **`phase.index` is not adjusted by that
+  cut**, so it can point past `phases`: a reader bounds it.
+- **When it is written**: the first write when the container starts, once the writer has read the key an earlier
+  attempt left (below), carrying the empty snapshot (turn 0), so a retry's key replaces the previous attempt's final
+  snapshot at once; then on every change, at most once a second, with a trailing write for the latest state; while the
+  attempt has not ended, again every 30 s (`PROGRESS_HEARTBEAT_MS`) when nothing changed, a heartbeat whose only new
+  value is `updatedAt`; and a final write when the container ends, after the live transcript's own final read, with
+  `ended: true`, `running: []`, every call still open counted in `interrupted` and listed in `recent` as
+  `interrupted`, and `outcome` the exit's own reading (`liveOutcomeOf`, the stream's `end` rule: it can differ from the
+  run record's classification, and the record is the authority). Before the final write the sink waits at most 2 s for
+  a status comment post still in flight, so its id rides the final write and a retry edits that comment. Nothing is
+  written after the final write.
+- **Staleness**: a key that has not ended and whose `updatedAt` is older than 180 s (`PROGRESS_STALE_MS`,
+  `progressStaleFor` in `admin/src/read-model.mjs`, six missed heartbeats) belongs to a worker that stopped writing (a
+  crash, a kill, a lost Valkey), not to a quiet run. Readers say so and stop the running ages they would otherwise keep
+  counting; an ended key is never stale.
+- **TTLs**: 7 days (`LIVE_TTL_LIVE_MS`) from this attempt's first successful write, each later write setting what is
+  left of it so no write extends it; 24 hours (`LIVE_TTL_ENDED_MS`) from the final write. A key whose worker died
+  mid-run has no final write and lives out its 7 days, read as stale (above) after 180 s. Seven days after the writer
+  started, every write but the final one stops for good, the heartbeat with it (`run_progress_expired`), so no write
+  sets a TTL under 1 s. When the processor gives up on a container whose stop did not take, it makes the final write
+  itself, with outcome `unknown` (`onLive`, `DES-RUN-PROGRESS`).
+- **Retries**: a retry reuses the job id and so the key. An attempt's first write first READS the key (a bounded
+  `GET`) and keeps its `commentId` when it matches `COMMENT_ID_RE`, so the attempt edits the comment the first one
+  posted; the key is then replaced whole by this attempt's state (the earlier attempt's counts are not carried). An
+  unreadable or unreachable key is read as none.
+- **Failure**: every call is bounded (1 s for a write and the read, 2 s for the final write, 5 s for the sink's whole
+  finish, the wait for a comment post and the final write together) and best effort: a client that is not ready, refuses or hangs costs that
+  write, counted, and is logged once per job (`run_progress_write_failed`, the job id only); nothing here throws into,
+  fails or slows the job.
+- **Reading** (`admin/src/read-model.mjs`): `parseProgress(raw)` validates strictly (`v` 1, every named key with its
+  type and cap, a tool name outside `LIVE_TOOL_RE` read as `?`, `phase.index` bounded): a field it does not name makes
+  the WHOLE key `{ invalid }`, so adding a field to the snapshot means raising `v`. `commentId` is validated and then
+  dropped, so no reader hands a forge id on. `readProgress(redis, jobId, { timeoutMs })` returns that snapshot, `{
+  absent }`, `{ invalid }` (also for a run id outside the run-id charset, refused before any read) or `{ unreachable
+  }`; `readProgressMany(redis, jobIds)` reads at most `PROGRESS_BATCH_MAX` (50) distinct ids in ONE `MGET`, ids
+  outside the charset left out. The fleet reader exposes both on its held client, bounded like its other reads
+  (`progress(jobId)`, `progressFor(jobIds)`), and its snapshot's `active` rows carry `activeProgressOf`'s projection:
+  integers (`updatedAt` among them, for the stale rule) and the running call's checked tool name only, never a phase
+  name or the note, so `/api/state` and the
+  lists stay free of model text (`INT-CONSOLE-STATE-API`). The full snapshot, phase names included, is read for an
+  operator's surface alone (the run page, the panel's ACTIVE row).
+- **Acceptance**: `REQ-RUN-PROGRESS` (a) to (c) and (g).
+
+## INT-FORGE-STATUS-COMMENT-EDIT
+
+**worker → forge.** The one forge comment the worker posts and then EDITS (issue #644, `REQ-RUN-PROGRESS`,
+`REQ-JOB-STATUS-COMMENTS`): a job whose trigger set `run.statusComment: true` gets one status comment on its issue or
+pull request when its container starts, edited as the run goes and a last time with the run record's outcome
+(`worker/src/status-comment.mjs`, the host methods below, wired in `worker/src/start.mjs`).
+
+- **Post**: each forge host's `postStatusComment(ref, target, text, token)` now RETURNS `{ id }`, read after the 2xx
+  (callers that ignored its result are unchanged): GitHub and Forgejo the issue comment's id, GitLab the note's id, each
+  as a decimal string; Azure DevOps `<threadId>:<commentId>` for a pull request (the create answers the thread with its
+  first comment) and `wi:<commentId>` for a work item comment. A 2xx whose body has no usable id answers `{ id: null }`
+  and never throws, since the comment exists and a retry would post a second one.
+- **Edit**: a new `editStatusComment(ref, target, id, text, token)` on each host:
+  ```
+  github   PATCH /repos/{owner}/{repo}/issues/comments/{id}                       { body }    (issues and pull requests alike)
+  gitlab   PUT   /projects/{id}/issues/{iid}/notes/{note}                         { body }    (target.type issue)
+           PUT   /projects/{id}/merge_requests/{iid}/notes/{note}                 { body }    (target.type pull_request)
+  forgejo  PATCH /repos/{owner}/{repo}/issues/comments/{id}                       { body }
+  azure    PATCH /{project}/_apis/git/repositories/{repo}/pullRequests/{pr}/threads/{t}/comments/{c}?api-version=7.1   { content }
+           PATCH /{project}/_apis/wit/workItems/{w}/comments/{c}?api-version=7.1-preview.4                           { text }
+  ```
+  The id is checked before it reaches a URL: `STATUS_COMMENT_ID_RE` (`^[A-Za-z0-9:_-]{1,200}$`) and numeric on GitHub,
+  GitLab and Forgejo; on Azure its form must agree with `target.type` (a `<t>:<c>` id for a pull request, `wi:<c>` for
+  a work item), since the number comes from the target and the wrong pairing would address another object. A
+  malformed id is a config error with no request. An HTTP failure throws with `status` set (octokit's own error on
+  GitHub, `InfraRetry` with `status` elsewhere).
+- **Identity**: both calls go through the `comment` adapter's path in `start.mjs` (`forgeFor`, the auth re-resolve,
+  a token minted per call), so the status comment is posted and edited by the same forge identity as every other
+  comment the worker posts, and needs no permission the terminal comments did not already use beyond editing that
+  identity's own comment.
+- **The wrappers never throw**: `statusPost` answers `{ id }` or null; `statusEdit` answers `{ ok: true }`,
+  `{ stop: "http-403" | "http-404" | "http-429" }` (the comment is gone, the token may not edit it, or the forge is rate
+  limiting: editing on would repeat the refusal), or `{ ok: false }` for any other failure, which the next edit tries
+  again. A host without `editStatusComment`, a job with no forge host or no target, gets no commenter at all, so no
+  comment is posted that could never be updated.
+- **The text** (`renderStatusText`): fixed words, the sanitized job id (cut to 128 characters) in backticks, and
+  integers. Running: ``pi-dispatch job `<id>`: running. Turn 7, 12 steps (1 failed). Phase 2 of 4 (3/10).``; finished:
+  ``... `<id>`: finished: completed. ...`` with the outcome from `LIVE_OUTCOMES` (anything else written `unknown`); an
+  attempt that ended and will be retried: ``... `<id>`: attempt ended, retrying. ...`` (`STATUS_RETRYING`).
+  `(N failed)` and `N interrupted` appear only when above 0; the phase part only when a phase was reported, its `of
+  <n>` from the LENGTH of `phases` (only when it exceeds the index) and its `(<done>/<total>)` or `(<done> done)` from
+  the integers. **No phase name, note or tool name is ever written**: a public comment must not carry model text that
+  could mention a user or hold a link, and a counter that is not a safe non-negative integer is written as 0.
+- **Cadence** (`makeStatusCommenter`): one post when the container starts (after the progress key's read, below); an
+  edit only when the rendered text changed and no sooner than 30 s after the last forge call, the trailing edit
+  carrying the latest snapshot; at most 120 edits a job, the last kept for the final edit, so the outcome is written
+  whenever the run got that far; on `{ stop }` no further progress edit, the last text left in place. Forge calls run
+  one at a time. The final edit cancels a pending one and is bounded at 4 s: a stuck forge costs a stale comment, never
+  a slower job. It is made even after an earlier `http-429` stop (a rate limit asks for a pause, and a comment left
+  saying "running" after the run is wrong for good), and tried once more after 1 s, inside the same 4 s, when the forge
+  answers a 429 or any other failure (`{ ok: false }`); an `http-403` or `http-404` stop still ends it. A run that ends
+  before its commenter started posts one comment carrying the outcome; one whose post found no id posts nothing more,
+  since the first may have landed.
+- **The final outcome** (`makeStatusCommentRegistry`, start.mjs): the exit code is a weaker reading than the run
+  record's classification (an OOM kill exits 137 and is recorded `policy`; an infrastructure exit is retried under the
+  same job id), so the final edit is made from the record. Each commenter is registered by job id; the progress sink
+  hands it the final snapshot when the container ends, and `recordRun` settles it with the record's `outcome`, or with
+  `STATUS_RETRYING` when the error is an `InfraRetry` and the record's `attempt` is below the job's `attempts`. An
+  attempt that leaves no record (a hold, a record path that threw) is finished `STATUS_FALLBACK_MS` (5 minutes) after
+  the container ended with the exit's outcome. **A late settle**: a commenter the fallback finished is kept for
+  `STATUS_LATE_SETTLE_MS` (10 minutes; at most `STATUS_LATE_SETTLE_MAX`, 256, the oldest dropped first), and a record
+  that settles in that time makes one corrective final edit (`correct`, allowed one edit past the 120) when its text
+  differs from the fallback's. A later attempt's commenter replaces the entry, and any kept one, without a final
+  edit. **An attempt with no commenter** (refused before its container, so nothing registered): when the job set
+  `statusComment`, `recordRun` reads the progress key (one bounded `GET`, never throwing) and, when it holds a valid
+  `commentId` (an earlier attempt's post), makes one edit bounded at 4 s with the record's outcome and the key's
+  snapshot; a phrase collision skips it before the read, and a key with no id edits nothing. An operator's cancel of a
+  delayed retry writes no record, so it reaches none of this, and the comment keeps its retrying text.
+- **Retries and recovery**: the posted id is stored in the progress key's `commentId` (`INT-RUN-PROGRESS-KEY`); a later
+  attempt of the same job reads it at its first write and edits that comment instead of posting a second one. A post
+  still in flight when the container ends is waited for (at most 2 s) before the key's final write, so its id is not
+  lost. An invalid stored id is not trusted, and the attempt posts a fresh comment.
+- **Loops**: every edit is a comment event on the forge. The receiver drops it twice: the bot-loop guard (the editor
+  is the harness's own identity), and on GitHub, GitLab and Forgejo the comment route, which routes only a CREATED
+  comment (GitHub's and Forgejo's `edited` action and a GitLab note update route as nothing), so a maintainer who edits
+  the status comment to hold the trigger phrase starts nothing either. On Azure DevOps the receiver reads one pull request
+  comment event type and splits it by no action, so there the bot's own event is dropped by the self guard
+  alone, as are its work item update and comment events, and a member's work item update that changes no tag routes
+  as nothing. Pinned through the whole receiver on all four forges by
+  `receiver/test/status-comment-edits.test.mjs`, each with a positive control. **Belt and braces at the source**:
+  before it builds a commenter, the worker renders every word form the text can take (each count singular and plural,
+  each failure part, each phase form, running, every outcome and the retry) for this job id and refuses the comment when the
+  phrase the job was started with (`trigger.matched.phrase`, set on the comment route only) could occur in it, digit
+  runs compared as one (`statusTextMayMatch`); the job then runs without a comment and logs `status_comment_skipped`
+  with reason `phrase-collision`.
+- **Logs** carry the job id and a reason or an HTTP status, never the text: `status_comment_failed` (`op` post or
+  edit, `status`), `status_comment_stopped` (`reason`), `status_comment_capped` (`edits`),
+  `status_comment_final_timeout`, `status_comment_error` (an error's name) and `status_comment_skipped` (`reason`:
+  `progress-off` for a trigger that asked for a comment on a deployment with `PI_RUN_PROGRESS=0`, `no-transcript` when
+  the job had no transcript file or job id to read progress from, `no-forge-target` for a job with no forge host that can post and edit or
+  no target, `phrase-collision` above).
+- **Acceptance**: `REQ-RUN-PROGRESS` (e).
 
 ## Revision History
 
@@ -8807,3 +9079,5 @@ publisher cannot drift.
 | 2026-10-14 | Issue #641, the operator console's screens and live updates. **NEW `INT-CONSOLE-STATE-API`**: `GET /api/state`, one fleet reader snapshot as JSON for a session of either role (401 JSON without one); never a token, a secret's value or reference, a job's data or run text; a viewer's body carries no `failedReason`; a part that could not be read says `unreachable` rather than reading as zero; keys only added within `version: 1`. **NEW `INT-CONSOLE-EVENT-STREAM`**: `GET /api/events?page=` with the page's own query, two events (`panel`, one line of JSON `{id, html}` that replaces one `data-panel` region, and `end`, the session is over), a sequence `id` per page and query, every panel on connect unless `Last-Event-ID` is current, only changed panels after that, a 15 s ping, 429 past `PI_CONSOLE_MAX_STREAMS` per session or 32 in the process, and a client more than 2 MiB behind dropped to reconnect fresh. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the `kind` enum said `github`, `gitlab` or `local`, stale since the Forgejo and Azure forges (#61, #43) began writing `forgejo` and `azure`; it now lists the worker's `RUN_KINDS`, which the console's `kind` filter takes its vocabulary from, so a filter the spec allowed could no longer be refused by the code or the other way round. The record itself is UNCHANGED, checked: no field was added and none changed meaning. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: the audit screen reads the month files through the worker's new `readConsoleAudit` and writes nothing; no action or outcome was added. |
 | 2026-10-15 | Issue #642, writes and actions from the operator console. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: a write row gains optional `kind` (`[a-z0-9-]{1,40}`, a closed charset; `action` stays `write`), `reserve` (micro-dollars a paid action holds) and `count` (a bulk action's size, one row per job sharing the ticket); the actor role `panel` for the TUI's and the tools' writes (the OS login, scrubbed, no session) in the deployment's `PI_LOGS_DIR`, with a fresh 12-hex correlation id in `ticket`; the kinds written are listed (the console's configuration kinds are their action names, plus `pause-windows-set`); a malformed `kind`, `reserve` or `count` throws in the writer and is a broken link to the verifier; a panel write whose row cannot be appended is refused with `AUDIT_REFUSAL`; the panel's rows are not mirrored to Valkey; an answer is recorded by job id and sha256, never its text (the digest in `afterDigest`). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the forge job's optional job-level `console: {by}` (a console token name, rebuilt not copied, never inside `trigger`, part of no id, refused at enqueue outside the charset), the console answer's four differing fields (`console-` delivery id, `{id: null}` sender, GitHub `OWNER`, the scrubbed text of at most 8 KiB), a re-run's replaced delivery id and dropped `console`, and the write protocol of `writeTriggers` with `expect` re-read inside the lock before the rename. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**, the write protocol: the tmp file is the writer's own (`settings.json.<pid>.<12 hex>.tmp`, `wx`, removed on failure), CORRECTING the fixed `settings.json.tmp` this entry named, and `expect` re-read before the rename. New worker package exports: `./console-answer`, `./reserve-estimate`, `./schedules`, `./model-endpoints` and `./model-catalog` (the last two so the console's reserve reads the worker's own endpoint snapshot and price catalog; the admin bundles them, as it bundles every `@edgehero/pi-dispatch` subpath). RELEASE OBLIGATION, recorded so the release slice cannot miss it: the admin inlines `enqueueForgeJob`, so a console answer carries `console` whichever worker drains it, and only a worker of this release posts the trail comment (an older one runs the answer without it). The release must publish the worker and the admin together, and `docs/console.md` and doctor's version floor line (if one is added) must name that worker version, TBD at release. UNCHANGED, checked: `INT-CONSOLE-TOKENS-FILE-CONTRACT` (`by` reuses its name rule), `INT-RUN-HISTORY-FILE-CONTRACT` (a console job's record has no new field; a re-run is refused rather than rebuilt from it), `INT-SESSION-STORE-CONTRACT` (`isParked` judges a console answer as any reply), `INT-CONTAINER-JOB-INPUTS` (`console` never reaches `event.json`; the GitHub association `OWNER` does, as metadata), `INT-CANCEL-CHANNEL-CONTRACT` (the console's cancel is the CLI's request key), `INT-PAUSE-WINDOWS-FILE-CONTRACT`, `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT` and `INT-ENVELOPE-FILE-CONTRACT` (their writers already took `expect`). |
 | 2026-10-16 | Issue #643, live run transcripts. **NEW `INT-LIVE-TRANSCRIPT-STREAM`**: `run:live:<sanitized job id>`, one Valkey stream per running job written by the worker alone: flat string fields `kind` (`user`, `assistant`, `tool-call`, `tool-result`, `compaction`, `note`, `reset`, `skipped`, `end`), `ts`, `text` (redacted, controls written out except real newlines and tabs, cut at 4,096 code points or 8,192 for `assistant`), `tool`, `error`, `truncated`, and `outcome` on `end` only (`completed`, `policy`, `failed`, `unknown`, from the exit code, so it can differ from the record); `MAXLEN ~ 2000`, `PEXPIRE` 7 days at an attempt's first write (which deletes a previous attempt's stream) and 24 h with the `end`; what is never in it; the readers' shapes and validation (`TRANSCRIPT_ID_RE`, at most 200 a read, never a blocking `XREAD`). The constants are exported from the new worker subpath `@edgehero/pi-dispatch/live-transcript`; the off switch is `PI_LIVE_TRANSCRIPTS` (unset, empty or `1` on, `0` off, anything else refuses to boot), in both `.env.example` files. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: `GET /api/transcript?id=`, operator only (a viewer 403 before a slot), `HEAD` 405, the hub's slots, re-judging and 2 MiB cut, `entry` events whose `id:` is the stream id, `Last-Event-ID` validated as a stream id, `done` with the outcome after the `end`; the entry markup an `<article class="t-entry">` with an escaped `<pre>`, `done` data `{outcome}`. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: every job now gets `/session` and `PI_SESSION_FILE` (an empty live file for a job with no resume transcript; no store key, never promoted, deleted with the job dir; no image change); `PI_AWAIT_INPUT` stays keyed on a resume transcript; the runner sketch's in-memory comment corrected. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the mounts bullet, and **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the `run.resume` bullet: the flag decides resuming, not the mount. **`INT-SESSION-STORE-CONTRACT` AMENDED**: the `PI_SESSION_FILE` line, and the worker's read of the per-job copy during the run, which changes no edge. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED in substance, checked**: a non-resume job's `session` still reads `disabled` (`mergeSession` maps the runner's new `absent` back for exactly a job with a live file and no resolved session), and the record gains no field; one cell of the session-reason table says where `disabled` now comes from. |
+| 2026-10-16 | Issue #644, run progress. **NEW `INT-RUN-PROGRESS-KEY`**: `run:progress:<sanitized job id>`, one JSON string per running job written by the worker alone with `SET ... PX` (`v: 1`; `turn`, `steps`, `failed`, `interrupted`, `running` (at most 8, newest last), `recent` (the last 20 closed steps, each `ok`, `error` or `interrupted` with the result's own `durationMs` or null), `phase` and `phases` (at most 32 names) and `note`, `prior`, `startedAt`, `updatedAt`, `ended`, `outcome` and the forge comment's `commentId`); written on change at most once a second and once at the end, 7 days from the attempt's first write and 24 h after the final one; capped at 16 KiB by dropping `recent`, then `phases` from the tail, then the note, with `phase.index` left for readers to bound; tool names held to `LIVE_TOOL_RE` else `?`; phase names and notes are model text, redacted, escaped and cut, operator only, and never in the record or the comment; a retry reads the old key's `commentId` before it replaces the key. Constants exported from the new worker subpath `@edgehero/pi-dispatch/run-progress`. The readers: `parseProgress` (strict, an unnamed field invalidates the key, `commentId` dropped), `readProgress`, `readProgressMany` (one `MGET`, at most 50). **NEW `INT-FORGE-STATUS-COMMENT-EDIT`**: each host's `postStatusComment` now returns `{ id }` (Azure `<thread>:<comment>` or `wi:<comment>`), a new `editStatusComment` per forge (GitHub and Forgejo `PATCH .../issues/comments/{id}`, GitLab `PUT .../notes/{note}` on the target's collection, Azure the thread comment on 7.1 or the work item comment on 7.1-preview.4), ids checked before any URL, failures carrying `status`; the same identity and token path as every worker comment; never-throwing wrappers mapping 403, 404 and 429 to a stop; the text's grammar (fixed words, the job id, integers, never a phase name, note or tool name); one post, an edit at most every 30 s and only on a change, 120 at most, a final edit bounded at 4 s; the id kept in the progress key so a retry edits the same comment; the receiver's two drops of an edit, pinned on all four forges, and the worker's phrase-collision skip. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's first CONDITIONAL key, `progress`, at the tail after `stalledRepick` (integers and closed keys only, zeros left out, `tools` under nine closed names plus `other`, absent when the reducer did not run, `{}` when it ran and saw nothing, advisory); the reason enum gains `report-progress-shadowed` and `job-image-progress-unsupported`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.progress` (all five kinds) and `run.statusComment` (forge kinds; `true` refused on cron), strict booleans, at job level only when `true`, both rows of `AUTHORED_NARROWING_FIELDS`, and both model-callable through the two trigger tools, judged by the loader's validator before the confirm. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the `report-progress-shadowed` row. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_REPORT_PROGRESS` in the env list, and the capability token list gains `reportProgress`; CORRECTED at the same time, the list and the count of job-feature tokens had missed `awaitInput` since #625 (now nine rows, `forgeMcp`, `awaitInput` and `reportProgress` the last three). **`INT-CONTAINER-JOB-INPUTS` AMENDED**: the live file is staged when either switch is on, and the tool adds no input. **`INT-CONSOLE-STATE-API` AMENDED**: `active` rows gain `progress` (`turn`, `steps`, `failed`, `running` with `tool` and `since`, `phase` with `index`, `count`, `done` and `total`, `ended`), integers and a checked tool name only, `version` unchanged. UNCHANGED, checked: `INT-LIVE-TRANSCRIPT-STREAM` (the stream is written exactly as before when transcripts are on; with them off and progress on no `run:live:` key is touched), `INT-SESSION-STORE-CONTRACT` (progress reads the per-job copy as the stream does and writes nothing back), **`INT-CONSOLE-EVENT-STREAM` AMENDED**: no new route or event, but the run page is now a live page (its Progress panel, `p-progress`, is a hub `panel` re-rendered by digest, its data read at most every 2 s), so `page=run` is accepted, and an operator's run tab holds two streams (the hub's and the transcript's) of its token's `PI_CONSOLE_MAX_STREAMS` (default 4). |
+| 2026-10-16 | Issue #644, review round 1. **`INT-RUN-PROGRESS-KEY` CORRECTED**: `updatedAt` is the time of the write that carried it, and while the attempt has not ended the snapshot is written again every 30 s (`PROGRESS_HEARTBEAT_MS`); a new Staleness clause (not ended and `updatedAt` older than 180 s, `PROGRESS_STALE_MS`, `progressStaleFor`: the worker stopped writing; readers say so and stop their running ages; an ended key never is); the first write is the empty turn 0 snapshot, replacing the previous attempt's final one at once; the sink waits at most 2 s for a status comment post in flight before the final write; the 5 s bound covers that wait and the final write, no longer the comment's final edit; `turn` leaves out an assistant message with `stopReason` `"error"`, and such a message or an `"aborted"` one opens no step; an id longer than 128 UTF-16 units (`PROGRESS_ID_MAX`) is ignored; the constants list gains `PROGRESS_ID_MAX` and `PROGRESS_HEARTBEAT_MS`; the fleet's projection gains `updatedAt`. **`INT-FORGE-STATUS-COMMENT-EDIT` CORRECTED**: the final edit carries the run record's outcome, not the exit's, through a new The final outcome clause (`makeStatusCommentRegistry`, settled by `recordRun`; "attempt ended, retrying" for an `InfraRetry` with attempts left; the exit's outcome only after a 30 s fallback, `STATUS_FALLBACK_MS`, for an attempt with no record); the text gains the retrying state; the final edit is made after an earlier `http-429` stop and tried once more after 1 s on a 429 or a failure inside its 4 s, while 403 and 404 still end it, and it is no longer inside the sink's 5 s; a post in flight at the end is waited for so a retry edits it; the phrase check renders the retry too; `status_comment_skipped` names its four reasons (`progress-off`, `no-transcript`, `no-forge-target`, `phrase-collision`). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `progress` gains `longestInterruptedMs`, `toolMs` is stated as a sum of step durations that parallel steps overlap, and a cancel that replaces a retry (`endCancelled`) keeps `progress`. **`INT-CONSOLE-STATE-API` AMENDED**: `active[].progress` gains `updatedAt`, within `version: 1`. Extended in the same round: **`INT-RUN-PROGRESS-KEY`** TTLs gain the writer's 7-day stop (every write but the final one, the heartbeat with it, `run_progress_expired`; no write with a TTL under 1 s) and the processor's own final write, outcome `unknown`, for a container whose stop did not take (`onLive`). **`INT-FORGE-STATUS-COMMENT-EDIT`** The final outcome clause: `STATUS_FALLBACK_MS` is 5 minutes (was 30 s); a late settle within `STATUS_LATE_SETTLE_MS` (10 minutes, at most `STATUS_LATE_SETTLE_MAX`, 256) makes one corrective edit (`correct`) when its text differs; an attempt with no commenter gets one bounded edit from `recordRun` off the key's `commentId`, skipped on a phrase collision or a key with no id; an operator's cancel of a delayed retry writes no record and reaches none of it. |
