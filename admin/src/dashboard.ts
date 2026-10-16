@@ -26,7 +26,7 @@
 import { windowState } from "@edgehero/pi-dispatch/budget";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, createFleetReader, listRuns, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
+import { cancelHeldJob, createFleetReader, listRuns, progressStaleFor, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -223,6 +223,9 @@ export function createDashboardDeps(paths: any, seams: any = {}) {
     // says whether the run has a stream at all (no stream: the view falls back to this host's `.log`).
     tailTranscript: (jobId: string, after: string | null) => reader.transcriptSince(jobId, after),
     transcriptMeta: (jobId: string) => reader.transcriptMeta(jobId),
+    // The ACTIVE row's progress (issue #644): the running job's whole snapshot, phase names included (the panel is the
+    // operator's), off the same held client. The snapshot's own `active[].progress` carries the integers.
+    progress: (jobId: string) => reader.progress(jobId),
     async cancelHeld({ jobId }: any) {
       return cancelHeldJob({ url: paths.valkeyUrl, jobId });
     },
@@ -516,6 +519,15 @@ export function makeDashboard({
       // panel repaints on keystrokes, and a clock that ticks on keypress claims a freshness the data
       // does not have.
       if (snapshot && typeof snapshot === "object") snapshot.fetchedAt = deps.now ? deps.now() : Date.now();
+      // The ACTIVE row's phase NAME (issue #644): one GET for the one job the row shows, through the injected seam. The
+      // name is the model's words, so it is held on THIS panel's copy of the snapshot alone (the panel is the
+      // operator's), never on the fleet snapshot lists and `/api/state` are drawn from. Caught on its own: a failed read
+      // costs the name, never the tick.
+      if (snapshot && typeof snapshot === "object" && typeof snapshot.activeJobId === "string" && typeof deps?.progress === "function") {
+        const jobId = snapshot.activeJobId;
+        const got = await Promise.resolve(deps.progress(jobId)).catch(() => null);
+        snapshot.activePhase = { jobId, name: phaseNameOf(got) };
+      }
       // Only while the tail view is open, and only through the injected capability, re-read the tail keyed
       // by the id-only `tailJobId`. `await` unwraps a synchronous return too. The bytes stay in `tail`.
       if (view === "LIVE_TAIL" && tailJobId && (deps.tailLog || typeof deps?.tailTranscript === "function")) {
@@ -3072,7 +3084,8 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     // The cancel hint rides the SELECTED row, not the footer -- the footer's width arithmetic has no
     // headroom for another hint (its own comment), and the key only means anything on this row anyway.
     const hint = sel ? ` ${styler.fg("dim", "· x cancel")}` : "";
-    return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", scrubControl(String(row.jobId ?? "-")))} ${styler.fg("dim", "running")}${hint}`, inner, styler);
+    const progress = activeProgressText(row.progress, row.phaseName, row.now);
+    return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", scrubControl(String(row.jobId ?? "-")))} ${styler.fg("dim", "running")}${progress ? ` ${styler.fg("muted", `· ${progress}`)}` : ""}${hint}`, inner, styler);
   }
   const r = row.record ?? {};
   // The LIST pane renders the same stored fields as the drill-in and into the same terminal, so it holds
@@ -3511,6 +3524,57 @@ function countdownText(ms: number): string {
   return h ? `resets ${h}` : "";
 }
 
+/** The longest a phase name is drawn on the ACTIVE row, in columns, so it cannot push the job id's row into a wrap. */
+const PHASE_NAME_COLUMNS = 24;
+
+/**
+ * A progress read's current phase name (`readProgress`'s snapshot), or null: only when `phases[index]` exists, and never
+ * off an ENDED snapshot (the row is active, so an ended key is an earlier attempt's).
+ */
+function phaseNameOf(got: any): string | null {
+  const i = got?.phase?.index;
+  const phases = got?.phases;
+  return got?.v === 1 && got?.ended !== true && Number.isSafeInteger(i) && Array.isArray(phases) && i >= 0 && i < phases.length && typeof phases[i] === "string" ? phases[i] : null;
+}
+
+/**
+ * The ACTIVE row's progress (issue #644): "turn 7 · 12 steps (1 failed) · bash 40s · phase 2/4 build", or "" when the
+ * row has none. The integers come off the snapshot's active row (`activeProgressOf`), the tool name is the live stream's
+ * charset or `?`, and the phase name is the model's words: SCRUBBED AND CLIPPED here (`clipData` substitutes the
+ * control class, then cuts to `PHASE_NAME_COLUMNS`), before the whole row is clipped to the pane again. Exported for the
+ * width tests.
+ *
+ * An ENDED snapshot draws nothing: the row is active, so the key is an earlier attempt's (an infra retry keeps the job
+ * id) and this attempt has not written yet. A STALE one (`progressStaleFor`: no write past the worker's heartbeat) leads
+ * with "no update for Nm" and its running tool gets no age, which would otherwise keep growing for a step nobody watches.
+ */
+export function activeProgressText(p: any, phaseName: any, now: any): string {
+  if (p === null || typeof p !== "object" || p.ended === true) return "";
+  const n = (v: any) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  const stale = progressStaleFor(p, now);
+  const parts: string[] = stale !== null ? [`no update for ${ageWords(stale)}, the worker may be gone`] : [];
+  if (n(p.turn) !== null) parts.push(`turn ${p.turn}`);
+  if (n(p.steps) !== null) parts.push(`${p.steps} ${p.steps === 1 ? "step" : "steps"}${n(p.failed) ? ` (${p.failed} failed)` : ""}`);
+  const r = p.running;
+  if (r && typeof r.tool === "string") {
+    const age = stale === null && n(r.since) !== null && Number.isFinite(now) && now >= r.since ? ageWords(now - r.since) : "";
+    parts.push(`${cellOf(r.tool)}${age ? ` ${age}` : ""}`);
+  }
+  const f = p.phase;
+  if (f && n(f.index) !== null) {
+    const name = typeof phaseName === "string" && phaseName !== "" ? ` ${clipData(phaseName, PHASE_NAME_COLUMNS)}` : "";
+    parts.push(`phase ${f.index + 1}/${n(f.count) ?? "?"}${name}`);
+  }
+  return parts.join(" · ");
+}
+
+/** A short age: `40s`, `12m`, `3h 5m`. */
+function ageWords(ms: number): string {
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
+  return `${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60_000)}m`;
+}
+
 /**
  * The selectable LIST rows: the optional ACTIVE row first (present only when the snapshot carries an
  * id-only `activeJobId`), then one row per run record. `selected` and up/down span this array; Enter
@@ -3526,7 +3590,11 @@ function buildRows(snapshot: any, runSort = "time", runProject: any = ALL_RUNS):
   // trigger kept firing, reported as deleted (review finding). Falls back to the position only for a
   // record predating the field, where it is the best available claim.
   const triggers = (snapshot?.triggers?.triggers ?? []).map((t: any, i: number) => ({ kind: "trigger", trigger: t, index: Number.isInteger(t?.index) ? t.index : i }));
-  const active = snapshot?.activeJobId ? [{ kind: "active", jobId: snapshot.activeJobId }] : [];
+  // Issue #644: the row's progress, the integers off the snapshot's own `active` row and the phase name the panel read
+  // for this id (`activePhase`), both optional, so a snapshot without them draws the row it always did.
+  const activeRow = (Array.isArray(snapshot?.active) ? snapshot.active : []).find((a: any) => a?.jobId === snapshot?.activeJobId);
+  const phaseName = snapshot?.activePhase?.jobId === snapshot?.activeJobId ? snapshot?.activePhase?.name ?? null : null;
+  const active = snapshot?.activeJobId ? [{ kind: "active", jobId: snapshot.activeJobId, progress: activeRow?.progress ?? null, phaseName, now: snapshot?.fetchedAt }] : [];
   // The project filter (issue #499 part C) reads the id the record carries, never the projects file as it is now.
   const runs = (Array.isArray(snapshot?.runs) ? snapshot.runs : [])
     .filter((record: any) => runProject === ALL_RUNS || recordProject(record) === runProject)
@@ -3568,7 +3636,8 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
     if (row.kind === "active") {
       // The plain twin of runRow's selected-row cancel hint: the monochrome panel must not hide a key
       // the colored one advertises.
-      out.push(clipData(`${cursor} * ACTIVE ${cellOf(row.jobId)} running${i === selected ? " · x cancel" : ""}`, w));
+      const progress = activeProgressText(row.progress, row.phaseName, row.now);
+      out.push(clipData(`${cursor} * ACTIVE ${cellOf(row.jobId)} running${progress ? ` · ${progress}` : ""}${i === selected ? " · x cancel" : ""}`, w));
       continue;
     }
     const run = row.record;

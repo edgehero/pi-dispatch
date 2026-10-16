@@ -51,6 +51,7 @@ import {
   parkedInbox,
   runChain,
   runCostPanel,
+  runProgress,
   runResources,
   runSession,
   runSummary,
@@ -65,11 +66,14 @@ import { runTranscriptSection } from "./transcript.mjs";
  * stream (a screen whose data changes while it is open), `title` the heading, `nav` the navigation label (none for
  * the run detail, which is reached from a run). Insights is not live: its assembly is the expensive read (cached 30 s
  * by the caller), and the range picker is its refresh. Configuration and the audit log change by a person's hand.
+ * The run detail is live since issue #644: a running job's progress panel moves, and a run that ends gets its record's
+ * panels without a reload. Its data is read at most once per `LIVE_DEFAULTS.pageMinMs.run` (live.mjs), since a run's
+ * load also reads its record and searches for its children.
  */
 export const PAGES = Object.freeze({
   overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview" }),
   runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs" }),
-  run: Object.freeze({ path: "/run", auth: "viewer", live: false, title: "Run", nav: null }),
+  run: Object.freeze({ path: "/run", auth: "viewer", live: true, title: "Run", nav: null }),
   parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked" }),
   insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: "Spend and insights", nav: "Spend" }),
   fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet" }),
@@ -81,7 +85,7 @@ export const PAGES = Object.freeze({
 const PAGE_PANELS = Object.freeze({
   overview: [["p-state", overviewState], ["p-spend", overviewSpend], ["p-hosts", overviewHosts], ["p-parked", overviewParked], ["p-failures", overviewFailures], ["p-active", overviewActive]],
   runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
-  run: [["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
+  run: [["p-progress", runProgress], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
   parked: [["p-parked", parkedInbox]],
   insights: [["p-range", insightsRange], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
@@ -218,7 +222,7 @@ export function pageQueryString(name, query) {
 const PAGE_READS = Object.freeze({
   overview: ["snapshot"],
   runs: ["runsPage", "subscriptions"],
-  run: ["run", "subscriptions", "transcriptMeta"],
+  run: ["run", "subscriptions", "transcriptMeta", "progress"],
   parked: ["snapshot"],
   insights: ["insights"],
   fleet: ["snapshot"],
@@ -334,6 +338,16 @@ export async function loadPageData(name, query, deps = {}) {
       data.transcript = { unreachable: true, exists: false };
     }
   }
+  if (reads.includes("progress") && typeof deps.fleet?.progress === "function") {
+    // Issue #644: the run's progress snapshot, WHOLE (its phase names and note included), read once for both roles as
+    // all page data is; `runProgress` draws the model's words for an operator alone. Page data is never serialized to a
+    // browser: only rendered panels leave this process.
+    try {
+      data.progress = await deps.fleet.progress(q.id);
+    } catch {
+      data.progress = { unreachable: true };
+    }
+  }
   if (reads.includes("insights")) {
     try {
       data.insights = await deps.insights(q.range ?? "7d");
@@ -402,7 +416,9 @@ export async function renderPage(name, ctx) {
   // renders and swaps, and the transcript's entries are appended by the browser from the operator's own stream.
   const extra = name === "run" ? html`<section id="transcript" class="transcript-section">${runTranscriptSection(viewOf(name, ctx))}</section>` : null;
   const body = html`${headerHtml(name, ctx)}<main><h1>${heading}</h1>${panels.map(({ id, fragment }) => html`<section id="${id}" data-panel>${fragment}</section>`)}${extra}</main>`;
-  // A run with no record yet but a live transcript is a running job (its record is written at its end): 200, not 404.
-  const status = name === "run" && !ctx?.data?.run?.record && ctx?.data?.transcript?.exists !== true ? 404 : 200;
+  // A run with no record yet but a live transcript or progress snapshot is a running job (its record is written at its
+  // end): 200, not 404.
+  const progressing = ctx?.data?.progress !== null && typeof ctx?.data?.progress === "object" && ctx.data.progress.v === 1;
+  const status = name === "run" && !ctx?.data?.run?.record && ctx?.data?.transcript?.exists !== true && !progressing ? 404 : 200;
   return { status, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, live, query }) };
 }

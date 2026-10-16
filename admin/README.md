@@ -136,8 +136,10 @@ One command puts a live terminal view over the whole deployment:
   drill-in shows each one as the overlay offers it now: where it runs, how its tools are reached, and the
   variable names it is handed, or why every job of it would be refused. No tool and no key changes them.
 - **Status and spend.** Queue and worker state, day, week and month spend meters, a daily token counter,
-  and the run history with tokens and cost per job. `Enter` on a run opens its full record, `x` on a
-  running job cancels it after asking, and `b` on an opened run reopens its workspace.
+  and the run history with tokens and cost per job. Each running job shows where it is: its turn, steps done and
+  failed, the tool running and for how long, and the phase it reported (or, when its worker has written nothing for
+  3 minutes, that the worker may be gone). `Enter` on a run opens its full record, `x`
+  on a running job cancels it after asking, and `b` on an opened run reopens its workspace.
 - **Insights, the one analytics page.** Press `i` (or type `/dispatch insights`) and one self contained
   page opens in your browser. It shows the budget dials, plan verdicts against API rates, daily,
   cumulative and per flow spend charts, five breakdowns (by flow, trigger, model, repo and project), the
@@ -154,7 +156,9 @@ One command puts a live terminal view over the whole deployment:
   stays in the list, matches nothing, and is re-armed when you delete its `on.disarmed` mark from the file.
   Triggers that run third party code or a custom image carry a badge. Turning either on or off stays an
   edit to the reviewed `triggers.json`, which neither the console nor a model callable tool makes for you.
-  A portfolio manager's cron trigger carries `[portfolio]`: its jobs write the budget split.
+  A portfolio manager's cron trigger carries `[portfolio]`: its jobs write the budget split. The trigger tools can
+  turn on `progress` (the job gets a `report_progress` tool to name its phases) and `statusComment` (one forge comment
+  the worker edits as the run goes, numbers only), behind your confirm.
 - **Quiet hours.** Pause windows per folder or repo, timezone aware. A paused job waits, never drops, and
   costs nothing.
 - **Scoped limits.** Job caps per repo, folder or project (day, week, month), refused before any spend, plus a
@@ -229,7 +233,8 @@ insights by range, queues, hosts and schedules, the configuration and its own au
 scripts. It reads through the same code as the panel, so the two never disagree; the panel shows the waiting runs too.
 It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
 and edit the configuration, each previewed, confirmed and recorded in one audit log that holds the panel's own writes
-too. A running job's transcript, redacted, streams live on its run page for operators, and the panel's live tail
+too. Every running job's progress shows in its row and on its run page, and its transcript, redacted, streams live
+on its run page for operators, and the panel's live tail
 (`l`) reads the same transcript for a run on any host. Nothing listens unless you start it. See
 [`docs/console.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/console.md).
 

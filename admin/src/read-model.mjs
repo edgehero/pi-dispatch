@@ -63,6 +63,8 @@ import { sessionKeyFor } from "@edgehero/pi-dispatch/session-key";
 // The live transcript's key, kinds, outcomes and tool charset (issue #643), the worker's own, so the reader and the
 // publisher cannot drift on the stream's contract.
 import { LIVE_KINDS, LIVE_OUTCOMES, LIVE_TOOL_RE, liveKeyFor } from "@edgehero/pi-dispatch/live-transcript";
+// The progress key and its caps (issue #644), the worker's own, for the same reason.
+import { COMMENT_ID_RE, PROGRESS_COUNT_MAX, PROGRESS_MAX_BYTES, PROGRESS_NOTE_MAX, PROGRESS_PHASE_MAX, PROGRESS_PHASES_MAX, PROGRESS_RECENT_MAX, PROGRESS_RUNNING_MAX, progressKeyFor } from "@edgehero/pi-dispatch/run-progress";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty, localRepoProblem } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
@@ -3714,6 +3716,11 @@ export function createFleetReader(
           host: hostOfJob.get(String(j?.id)) ?? null,
         })),
       );
+      // Issue #644: each active job's progress, INTEGERS AND A CHARSET-CHECKED TOOL NAME ONLY (`activeProgressOf`): the
+      // snapshot is what lists, hub panels and `/api/state` are drawn from, so the model's phase names and note never
+      // enter it. ONE MGET for the first PROGRESS_BATCH_MAX ids, started now and awaited at the end, so it rides beside
+      // the reads below rather than adding a round trip to the tick. Unreadable: every row's progress is null.
+      const progressRead = readProgressMany(redis, active.map((a) => a.jobId), { timeoutMs: FLEET_READ_TIMEOUT_MS });
       // The scoped limits + their live counters (issue #242): GET only the windows a row caps, each cell caught
       // individually so one bad read degrades one cell, never the snapshot. Keys recomputed from the shared
       // scopeKeyPrefix, so this reader and the worker's writer cannot drift.
@@ -3781,6 +3788,9 @@ export function createFleetReader(
         (err) => ({ parked: [], failures24h: null, failures24hFloor: false, parkedUnreachable: scrubReason(err?.message ?? String(err)) || "the runs could not be read" }),
       );
 
+      const progressGot = await progressRead;
+      for (const row of active) row.progress = activeProgressOf(progressGot.byId?.[row.jobId]);
+
       return {
         held,
         failed,
@@ -3844,6 +3854,14 @@ export function createFleetReader(
     },
     async transcriptMeta(jobId) {
       return readTranscriptMeta(redis, jobId, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    // Run progress (issue #644), off the same held client: one job's whole snapshot (`readProgress`, phase names and
+    // note included, for an operator's surface alone), and many jobs' in one MGET (`readProgressMany`). Never throw.
+    async progress(jobId) {
+      return readProgress(redis, jobId, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    async progressFor(jobIds) {
+      return readProgressMany(redis, jobIds, { timeoutMs: FLEET_READ_TIMEOUT_MS });
     },
     // The kill switch (issue #642): ONE funnel with the tools' `killSwitchSet`, so a resume across two disagreeing
     // Valkeys is refused here too. Returns `killSwitchSet`'s shape: `{ refused }`, or `{ results: [{ url, shown, res }],
@@ -4227,6 +4245,185 @@ export async function readTranscriptMeta(redis, jobId, { timeoutMs = TRANSCRIPT_
     const ended = exists && last.kind === "end";
     return { exists, ended, outcome: ended ? last.outcome : null, length: exists ? length : 0, firstId: exists ? first?.id ?? null : null, lastId: exists ? last.id : null };
   }, timeoutMs);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Run progress (issue #644, INT-RUN-PROGRESS-KEY): the worker keeps a running job's progress summary in
+// `run:progress:<sanitized id>`, one JSON string. These read it, for the console and the `/dispatch` panel.
+//
+// ADVISORY, FORGEABLE AND PART MODEL TEXT. The worker builds the snapshot from a session file the agent can write, so
+// nothing here judges a run by it. Its `phases` and `note` are the model's own words (redacted and escaped by the
+// worker): they reach an operator's run page and the TUI alone, escaped again there, and never a list, a hub panel's
+// shared snapshot or `/api/state`, which get `activeProgressOf`'s integers and a charset-checked tool name only.
+//
+// STRICT. A key is read as a snapshot only when every field is the contract's: `v` 1, no field the contract does not
+// name, every number a non-negative safe integer, every list and string within the worker's own caps. Anything else is
+// `{ invalid }` whole, never a half-trusted object: the key is written by this project's worker alone, so a value that
+// fails is a newer or older worker, or something that is not the worker, and either way not a snapshot to draw.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const PROGRESS_TIMEOUT_MS = 2000;
+/** The most keys one `progressFor` MGET asks for: the console's active list is bounded well below it. */
+export const PROGRESS_BATCH_MAX = 50;
+const PROGRESS_FIELDS = Object.freeze(["v", "turn", "steps", "failed", "interrupted", "running", "recent", "phase", "phases", "note", "prior", "startedAt", "updatedAt", "ended", "outcome", "commentId"]);
+const PROGRESS_STATUSES = Object.freeze(["ok", "error", "interrupted"]);
+
+const isProgressCount = (v) => Number.isSafeInteger(v) && v >= 0;
+const onlyKeys = (o, keys) => Object.keys(o).every((k) => keys.includes(k)) && keys.every((k) => Object.hasOwn(o, k));
+const codePoints = (s) => [...s].length;
+/** The live stream's tool rule: the charset, else `?`. */
+const progressTool = (t) => (typeof t === "string" && LIVE_TOOL_RE.test(t) ? t : "?");
+
+/**
+ * One raw key value as a snapshot, or `{ invalid: reason }`. The reason names the rule, never the value. `commentId`
+ * is checked and dropped: it is the worker's own bookkeeping, and no surface shows it. Tool names outside the stream's
+ * charset read as `?` rather than refusing the snapshot (the worker writes `?` itself; this is the belt). A
+ * `phase.index` past the `phases` list is kept (the worker's 16 KiB cut drops names from the tail and leaves the index),
+ * so a surface takes the name only when `phases[index]` exists.
+ */
+export function parseProgress(raw) {
+  if (typeof raw !== "string") return { invalid: "the progress key is not a string" };
+  if (Buffer.byteLength(raw) > PROGRESS_MAX_BYTES) return { invalid: "the progress key is larger than the contract allows" };
+  let p;
+  try {
+    p = JSON.parse(raw);
+  } catch {
+    return { invalid: "the progress key is not JSON" };
+  }
+  const bad = (rule) => ({ invalid: `the progress key ${rule}` });
+  if (!isPlainObject(p)) return bad("is not an object");
+  if (p.v !== 1) return bad("is not version 1");
+  for (const k of Object.keys(p)) if (!PROGRESS_FIELDS.includes(k)) return bad("carries a field the contract does not name");
+  for (const k of PROGRESS_FIELDS) if (k !== "commentId" && !Object.hasOwn(p, k)) return bad("is missing a field");
+  for (const k of ["turn", "steps", "failed", "interrupted", "startedAt", "updatedAt"]) if (!isProgressCount(p[k])) return bad(`has a ${k} that is not a whole number`);
+  if (typeof p.ended !== "boolean") return bad("has an ended that is not a boolean");
+  if (p.outcome !== null && !LIVE_OUTCOMES.includes(p.outcome)) return bad("has an outcome outside the vocabulary");
+  if (Object.hasOwn(p, "commentId") && p.commentId !== null && !(typeof p.commentId === "string" && COMMENT_ID_RE.test(p.commentId))) return bad("has a comment id outside its charset");
+  if (!Array.isArray(p.running) || p.running.length > PROGRESS_RUNNING_MAX) return bad("has a running list that is not a bounded list");
+  const running = [];
+  for (const r of p.running) {
+    if (!isPlainObject(r) || !onlyKeys(r, ["tool", "since"]) || typeof r.tool !== "string" || !isProgressCount(r.since)) return bad("has a running step that is not one");
+    running.push({ tool: progressTool(r.tool), since: r.since });
+  }
+  if (!Array.isArray(p.recent) || p.recent.length > PROGRESS_RECENT_MAX) return bad("has a recent list that is not a bounded list");
+  const recent = [];
+  for (const r of p.recent) {
+    if (!isPlainObject(r) || !onlyKeys(r, ["tool", "status", "durationMs", "at"]) || typeof r.tool !== "string" || !PROGRESS_STATUSES.includes(r.status) || !(r.durationMs === null || isProgressCount(r.durationMs)) || !isProgressCount(r.at)) return bad("has a recent step that is not one");
+    recent.push({ tool: progressTool(r.tool), status: r.status, durationMs: r.durationMs, at: r.at });
+  }
+  if (!Array.isArray(p.phases) || p.phases.length > PROGRESS_PHASES_MAX) return bad("has a phase list that is not a bounded list");
+  for (const name of p.phases) if (typeof name !== "string" || name === "" || codePoints(name) > PROGRESS_PHASE_MAX) return bad("has a phase name that is not one");
+  let phase = null;
+  if (p.phase !== null) {
+    const f = p.phase;
+    if (!isPlainObject(f) || !onlyKeys(f, ["index", "done", "total"])) return bad("has a phase that is not one");
+    if (!isProgressCount(f.index) || f.index >= PROGRESS_PHASES_MAX) return bad("has a phase index out of range");
+    if (!(f.done === null || (isProgressCount(f.done) && f.done <= PROGRESS_COUNT_MAX))) return bad("has a phase done count out of range");
+    if (!(f.total === null || (isProgressCount(f.total) && f.total >= 1 && f.total <= PROGRESS_COUNT_MAX))) return bad("has a phase total out of range");
+    if (f.done !== null && f.total !== null && f.done > f.total) return bad("has a phase done past its total");
+    phase = { index: f.index, done: f.done, total: f.total };
+  }
+  if (!(p.note === null || (typeof p.note === "string" && codePoints(p.note) <= PROGRESS_NOTE_MAX))) return bad("has a note that is not one");
+  let prior = null;
+  if (p.prior !== null) {
+    if (!isPlainObject(p.prior) || !onlyKeys(p.prior, ["turns", "steps"]) || !isProgressCount(p.prior.turns) || !isProgressCount(p.prior.steps)) return bad("has a prior that is not one");
+    prior = { turns: p.prior.turns, steps: p.prior.steps };
+  }
+  return { v: 1, turn: p.turn, steps: p.steps, failed: p.failed, interrupted: p.interrupted, running, recent, phase, phases: [...p.phases], note: p.note === "" ? null : p.note, prior, startedAt: p.startedAt, updatedAt: p.updatedAt, ended: p.ended, outcome: p.outcome };
+}
+
+/** Whether `got` (a `readProgress` answer) is a snapshot rather than one of its three absences. */
+export const isProgressSnapshot = (got) => isPlainObject(got) && got.v === 1;
+
+/**
+ * A job's progress snapshot ON A CLIENT THE CALLER OWNS (never disconnected): the snapshot (`parseProgress`), `{ absent:
+ * true }` for no key (never published, `PI_RUN_PROGRESS=0`, or expired: 24 h after the end, 7 days after the first
+ * write), `{ invalid }` for a key that is not the contract's or a job id outside the run-id charset (checked before the
+ * key is built), or `{ unreachable }` (an error code at most, never the error's text). One GET, bounded. Never throws.
+ */
+export async function readProgress(redis, jobId, { timeoutMs = PROGRESS_TIMEOUT_MS } = {}) {
+  if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { invalid: "a run id is letters, digits and . _ : -, at most 200 characters" };
+  if (!redis) return { unreachable: "no Valkey client" };
+  const ms = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : PROGRESS_TIMEOUT_MS;
+  try {
+    const raw = await withTimeout(redis.get(progressKeyFor(jobId)), ms, Symbol.for("progress-timeout"));
+    if (raw === Symbol.for("progress-timeout")) return { unreachable: "timed out reaching the progress key" };
+    if (raw === null || raw === undefined) return { absent: true };
+    return parseProgress(raw);
+  } catch (err) {
+    return { unreachable: progressFailure(err) };
+  }
+}
+
+function progressFailure(err) {
+  const code = typeof err?.code === "string" && TRANSCRIPT_ERROR_CODE_RE.test(err.code) ? err.code : null;
+  return code ? `the progress key could not be read (${code})` : "the progress key could not be read";
+}
+
+/**
+ * Many jobs' progress in ONE MGET, ON A CLIENT THE CALLER OWNS: `{ byId: { [jobId]: snapshot | { absent } | { invalid }
+ * } }` or `{ unreachable }` for the whole batch. At most `PROGRESS_BATCH_MAX` distinct ids, in the order given (the
+ * rest, and ids outside the run-id charset, are left out of `byId`, which a surface reads as "not known"). Bounded by
+ * `timeoutMs`. Never throws.
+ */
+export async function readProgressMany(redis, jobIds, { timeoutMs = PROGRESS_TIMEOUT_MS } = {}) {
+  const ids = [...new Set((Array.isArray(jobIds) ? jobIds : []).filter((id) => typeof id === "string" && RUN_ID_RE.test(id)))].slice(0, PROGRESS_BATCH_MAX);
+  if (ids.length === 0) return { byId: {} };
+  if (!redis) return { unreachable: "no Valkey client" };
+  const ms = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : PROGRESS_TIMEOUT_MS;
+  try {
+    const values = await withTimeout(redis.mget(...ids.map((id) => progressKeyFor(id))), ms, Symbol.for("progress-timeout"));
+    if (!Array.isArray(values)) return { unreachable: "timed out reaching the progress keys" };
+    const byId = {};
+    ids.forEach((id, i) => {
+      const raw = values[i];
+      byId[id] = raw === null || raw === undefined ? { absent: true } : parseProgress(raw);
+    });
+    return { byId };
+  } catch (err) {
+    return { unreachable: progressFailure(err) };
+  }
+}
+
+/**
+ * The integers a list may carry of a snapshot (the fleet snapshot's `active[].progress`, `/api/state`, the console's
+ * active table, the TUI's ACTIVE row): `{ turn, steps, failed, running: { tool, since } | null, phase: { index, count,
+ * done, total } | null, ended, updatedAt }`, where `running` is the newest open step and `count` is how many phases
+ * the run has declared (at least `index + 1`, since the worker's size cut can drop names), and `updatedAt` (the last
+ * write) lets a surface say the progress is stale (`progressStaleFor`). No phase name, no note: null for anything that
+ * is not a snapshot.
+ */
+export function activeProgressOf(got) {
+  if (!isProgressSnapshot(got)) return null;
+  const newest = got.running.length > 0 ? got.running[got.running.length - 1] : null;
+  return {
+    turn: got.turn,
+    steps: got.steps,
+    failed: got.failed,
+    running: newest ? { tool: progressTool(newest.tool), since: newest.since } : null,
+    phase: got.phase ? { index: got.phase.index, count: Math.max(got.phases.length, got.phase.index + 1), done: got.phase.done, total: got.phase.total } : null,
+    ended: got.ended,
+    updatedAt: got.updatedAt,
+  };
+}
+
+/**
+ * How long a running job's snapshot may go unwritten before a surface calls it stale. The worker rewrites the key at
+ * least every 30 seconds while the run has not ended (a heartbeat, even with no step), so three minutes without a write
+ * means the worker stopped writing: it died, lost Valkey, or the host went away.
+ */
+export const PROGRESS_STALE_MS = 180_000;
+
+/**
+ * How long, in ms, a snapshot (or its `activeProgressOf` projection) has gone without a write when that is past
+ * `PROGRESS_STALE_MS`, else null. An ended snapshot is never stale (nothing more is written), and one without a usable
+ * `updatedAt` or a clock is not judged. `now` is the caller's clock, never read here.
+ */
+export function progressStaleFor(p, now) {
+  if (p === null || typeof p !== "object" || p.ended === true) return null;
+  if (!Number.isSafeInteger(p.updatedAt) || !Number.isFinite(now)) return null;
+  const age = now - p.updatedAt;
+  return age > PROGRESS_STALE_MS ? age : null;
 }
 
 /**

@@ -50,6 +50,8 @@ const SHOTS = Object.freeze([
   ["runs", "runs", ""],
   ["runs-filtered", "runs", "project=web&outcome=completed"],
   ["run", "run", "id=gh-2f6a"],
+  // Issue #644: a running job's detail (no record yet), with a progress snapshot that declared phases and left a note.
+  ["run-live", "run", "id=gh-b3d7"],
   ["parked", "parked", ""],
   ["insights", "insights", "range=7d"],
   ["fleet", "fleet", ""],
@@ -73,7 +75,34 @@ const HOSTILE = Object.freeze({
   jsTarget: "javascript:alert(3)/x#5",
   reason: `SECRET-FAILURE-TEXT <img src=x onerror=alert(4)>${ESC}[0m`,
   activeId: `gh-<b onmouseover=alert(5)>`,
+  // Issue #644: model text in the progress key. Raw control bytes on purpose, although the worker escapes them: the
+  // console's own scrub is the belt this pins.
+  phase: `<script>alert(6)</script>${ESC}[2J`,
+  note: `PHASE-NOTE-TEXT <img src=x onerror=alert(7)>${ESC}]8;;x${String.fromCharCode(7)}`,
 });
+
+/** The progress snapshots the child seeds (issue #644): a phased run on mini1, a phaseless one on the remote build3. */
+function progressSeeds(NOW, hostile) {
+  const base = { v: 1, interrupted: 0, prior: null, startedAt: NOW - 12 * 60_000, updatedAt: NOW - 2_000, ended: false, outcome: null, commentId: null };
+  return {
+    "gh-b3d7": {
+      ...base,
+      turn: 7,
+      steps: 12,
+      failed: 1,
+      running: [{ tool: "bash", since: NOW - 40_000 }],
+      recent: [
+        { tool: "read", status: "ok", durationMs: 120, at: NOW - 90_000 },
+        { tool: "bash", status: "error", durationMs: 2300, at: NOW - 60_000 },
+        { tool: "edit", status: "ok", durationMs: null, at: NOW - 45_000 },
+      ],
+      phase: { index: 1, done: 3, total: 10 },
+      phases: hostile ? ["survey", HOSTILE.phase, "verify", "report"] : ["survey", "migrate the schema", "verify", "report"],
+      note: hostile ? HOSTILE.note : "three of ten tables migrated",
+    },
+    "gh-e802": { ...base, turn: 31, steps: 58, failed: 0, running: [], recent: [{ tool: "grep", status: "ok", durationMs: 15, at: NOW - 5_000 }], phase: null, phases: [], note: null, prior: { turns: 4, steps: 9 } },
+  };
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The child: seed, read, render, write JSON. Runs only with CONSOLE_PAGES_CHILD set.
@@ -170,6 +199,9 @@ async function renderInChild() {
     appendFileSync(join(paths.logs, "console-audit", "2026-10.jsonl"), "this line is not an audit row\n");
 
     const hostile = variant === "hostile";
+    // The progress keys (issue #644), written as the worker writes them (`serializeProgress` under `progressKeyFor`).
+    const RP = await import("../../worker/src/run-progress.mjs");
+    for (const [id, snap] of Object.entries(progressSeeds(NOW, hostile))) await admin.set(RP.progressKeyFor(id), RP.serializeProgress(snap));
     if (hostile) {
       // Records written as a file another writer could leave: the local index reads every *.json in the logs dir.
       const base = { flow: "triage", host: "mini1", provider: "anthropic", model: "claude-sonnet-5-5", tokens: null, dollars: null };
@@ -326,6 +358,25 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   assert.match(first["run.operator"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">No live transcript: not published \(PI_LIVE_TRANSCRIPTS=0\), expired, or not started yet\. Reload to check again\.<\/p><\/section><\/main>/);
   assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/main>/);
   for (const key of ["run.operator", "run.viewer"]) assert.doesNotMatch(first[key].html, /data-transcript/, `${key}: no stream for an ended run without one`);
+  // Issue #644: the active tables carry each job's progress as integers and a tool name, the remote host's job too; the
+  // running job's detail shows its counters to everyone and its phase names, bar and note to the operator alone.
+  for (const key of ["overview.viewer", "fleet.operator"]) {
+    assert.match(first[key].html, /<th scope="col">Progress<\/th>/, key);
+    assert.match(first[key].html, /<td>turn 7, 12 steps \(1 failed\), bash running 40s, phase 2\/4<\/td>/, `${key}: the phased run`);
+    assert.match(first[key].html, /<td>turn 31, 58 steps<\/td>/, `${key}: the remote host's job`);
+  }
+  const liveRun = first["run-live.operator"].html;
+  assert.equal(first["run-live.operator"].status, 200, "a running job without a record is a page, not a 404");
+  assert.match(liveRun, /This run has no record yet/);
+  assert.match(liveRun, /Current phase: <strong>migrate the schema<\/strong> <progress value="3" max="10">3 of 10<\/progress>/);
+  assert.match(liveRun, /three of ten tables migrated/);
+  const liveViewer = first["run-live.viewer"].html;
+  assert.match(liveViewer, /<dt>Turn<\/dt><dd>7<\/dd>/, "a viewer gets the counters");
+  assert.match(liveViewer, /Phase 2 of 4: 3 of 10 done/, "and the phase's integers");
+  assert.match(liveViewer, /Phase names and the run's note are shown to operators only\./);
+  for (const text of ["migrate the schema", "three of ten tables migrated", "<progress"]) {
+    for (const [key, page] of Object.entries(first)) if (key !== "run-live.operator") assert.ok(!page.html.includes(text), `${key} carries no ${text}`);
+  }
   assert.match(first["runs.viewer"].html, /<th scope="col">Job<\/th>/);
   assert.match(first["runs.viewer"].html, /href="\/runs\?before=\d+">Older runs<\/a>/, "the runs page pages by a cursor");
   assert.match(first["runs-filtered.viewer"].html, /value="web"/, "the filter form shows the query's values");
@@ -344,6 +395,15 @@ test("console pages: hostile values are escaped or refused, and a viewer never s
     assert.ok(!page.html.includes("<script>alert"), `${key} has no live script from a value`);
     assert.ok(!page.html.includes("<b onmouseover"), `${key} has no live element from an active job id`);
     if (key.endsWith(".viewer")) assert.ok(!page.html.includes("SECRET-FAILURE-TEXT"), `${key} carries no failure reason`);
+  }
+  // Issue #644: the hostile phase name and note are escaped and scrubbed on the operator's run page, and absent from
+  // every other page (a viewer's run page, every list, every hub panel).
+  const liveRun = pages["run-live.operator"].html;
+  assert.match(liveRun, /Current phase: <strong>&lt;script&gt;alert\(6\)&lt;\/script&gt; ?\[2J<\/strong>/, "the hostile phase name is text");
+  assert.match(liveRun, /PHASE-NOTE-TEXT &lt;img src=x onerror=alert\(7\)&gt;/, "the hostile note is text");
+  for (const [key, page] of Object.entries(pages)) {
+    if (key === "hostileRunQuery" || key === "run-live.operator") continue;
+    assert.ok(!page.html.includes("PHASE-NOTE-TEXT") && !page.html.includes("alert(6)"), `${key} carries no phase name or note`);
   }
   // The hostile run is listed, escaped, and NOT linked: its id is outside the run-id charset, so /run would answer 400.
   const runs = pages["runs.viewer"].html;
@@ -512,6 +572,6 @@ test("renderPage answers 404 for a run that does not exist, and the stream's pan
   const html = String(page.html);
   assert.match(html, /No run with that id/);
   assert.match(html, /read-only console/);
-  assert.match(html, /<body data-page="run">/, "the run detail is not live");
+  assert.match(html, /<body data-page="run" data-live="run" data-query="id=gh-404">/, "the run detail is live (issue #644: its progress panel moves)");
   for (const { id, html: inner } of await pagePanels("run", ctx)) assert.ok(html.includes(`<section id="${id}" data-panel>${inner}</section>`), id);
 });

@@ -195,3 +195,94 @@ test("the audit page names each write's kind, a paid action's reserve and a bulk
   assert.match(html, /\(one of 3\)/);
   assert.match(html, /pi \(panel\)/);
 });
+
+test("the run page's Progress panel (issue #644): a finished run shows its record's progress by the worker's rule; the key's names only to an operator", async () => {
+  const { runProgress } = await import("../src/console/panels.mjs");
+  const progress = { turns: 9, steps: 14, failed: 2, toolMs: 61_000, longestStepMs: 2_500, phasesDeclared: 3, lastPhaseIndex: 2, tools: { bash: 6, read: 8, "<script>x</script>": 4, other: 1 }, note: "RECORD-TEXT" };
+  const record = { jobId: "gh-1", outcome: "completed", startedAt: new Date(NOW - 120_000).toISOString(), endedAt: new Date(NOW).toISOString(), progress };
+  const key = { v: 1, turn: 9, steps: 14, failed: 2, interrupted: 0, running: [], recent: [], phase: { index: 2, done: null, total: null }, phases: ["plan", "build", "KEY-PHASE-NAME"], note: "KEY-NOTE", prior: null, startedAt: NOW - 60_000, updatedAt: NOW, ended: true, outcome: "completed" };
+  const view = (role, data) => ({ page: "run", role, readOnly: false, query: { id: "gh-1" }, env: {}, now: NOW, data: { now: NOW, ...data } });
+  const op = String(runProgress(view("operator", { run: { record }, progress: key })));
+  assert.match(op, /<dt>Turns<\/dt><dd>9<\/dd>/);
+  assert.match(op, /<dt>Sum of step durations<\/dt><dd>1m<\/dd><dt>Longest step<\/dt><dd>2\.5 s<\/dd><dt>Phases declared<\/dt>/, "no interrupted step: no row for it");
+  assert.match(op, /<dt>Last phase<\/dt><dd>3 of 3<\/dd>/);
+  assert.match(op, /<td class="mono">bash<\/td><td class="num">6<\/td>/);
+  assert.ok(!op.includes("script") && !op.includes("RECORD-TEXT"), "a key outside the closed set, and a free string, never leave the record");
+  assert.match(op, /KEY-PHASE-NAME/, "an operator also gets the phase names while the key is kept");
+  const viewer = String(runProgress(view("viewer", { run: { record }, progress: key })));
+  assert.match(viewer, /<dt>Steps<\/dt><dd>14<\/dd>/);
+  assert.ok(!viewer.includes("KEY-PHASE-NAME") && !viewer.includes("KEY-NOTE"), "a viewer never gets the key's words");
+  // The worker's longest interrupted step, when the record has one.
+  const cut = String(runProgress(view("viewer", { run: { record: { ...record, progress: { ...progress, interrupted: 1, longestInterruptedMs: 95_000 } } }, progress: key })));
+  assert.match(cut, /<dt>Longest interrupted step<\/dt><dd>1m<\/dd>/);
+  // A key that has not ended is not this record's attempt's final word: no names beside the record.
+  assert.doesNotMatch(String(runProgress(view("operator", { run: { record }, progress: { ...key, ended: false, outcome: null } }))), /KEY-PHASE-NAME/);
+  // An older record without progress, and a running job's three absences, each say which.
+  assert.match(String(runProgress(view("operator", { run: { record: { jobId: "gh-1" } }, progress: { absent: true } }))), /record holds no progress/);
+  assert.match(String(runProgress(view("operator", { run: { missing: true }, progress: { unreachable: "x" } }))), /could not be read/);
+  assert.match(String(runProgress(view("operator", { run: { missing: true }, progress: { invalid: "x" } }))), /not one this console reads/);
+  assert.match(String(runProgress(view("viewer", { run: { missing: true }, progress: { absent: true } }))), /No live progress: not published \(PI_RUN_PROGRESS=0\)/);
+});
+
+// An infra retry keeps the job id: attempt 1 writes its record, then attempt 2 rewrites the progress key. The key
+// belongs to a later attempt when it started after the record ended.
+test("the Progress panel of a retried job (issue #644): a key newer than the record is the running attempt's, shown live; an older one is never mixed in", async () => {
+  const { runProgress } = await import("../src/console/panels.mjs");
+  const ended = NOW - 120_000;
+  const record = { jobId: "gh-1", outcome: "failed", startedAt: new Date(ended - 900_000).toISOString(), endedAt: new Date(ended).toISOString(), progress: { turns: 5, steps: 7, phasesDeclared: 4, lastPhaseIndex: 3 } };
+  const attempt2 = { v: 1, turn: 2, steps: 3, failed: 0, interrupted: 0, running: [{ tool: "bash", since: NOW - 20_000 }], recent: [], phase: { index: 0, done: null, total: null }, phases: ["ATTEMPT-2-PHASE"], note: null, prior: null, startedAt: ended + 30_000, updatedAt: NOW - 1_000, ended: false, outcome: null };
+  const view = (role, data) => ({ page: "run", role, readOnly: false, query: { id: "gh-1" }, env: {}, now: NOW, data: { now: NOW, ...data } });
+  const op = String(runProgress(view("operator", { run: { record }, progress: attempt2 })));
+  assert.match(op, /An earlier attempt of this run ended \(failed\); this is the attempt after it\./);
+  assert.match(op, /<dt>Turn<\/dt><dd>2<\/dd>/, "attempt 2's live counters");
+  assert.match(op, /<span class="mono">bash<\/span> running 20s/);
+  assert.match(op, /Current phase: <strong>ATTEMPT-2-PHASE<\/strong>/);
+  assert.doesNotMatch(op, /Last phase/, "attempt 1's lastPhaseIndex is not set beside attempt 2's names");
+  // The same key once attempt 2 has ended (its record not written yet) is still attempt 2's.
+  const done = String(runProgress(view("operator", { run: { record }, progress: { ...attempt2, running: [], ended: true, outcome: "completed" } })));
+  assert.match(done, /An earlier attempt of this run ended \(failed\)/);
+  assert.match(done, /The run has ended \(completed\)\./);
+  // A key of the record's own attempt: ended, started before the record ended. Its names join the record.
+  const same = String(runProgress(view("operator", { run: { record }, progress: { ...attempt2, startedAt: ended - 600_000, updatedAt: ended, running: [], ended: true, outcome: "failed" } })));
+  assert.match(same, /<dt>Last phase<\/dt><dd>4 of 4<\/dd>/);
+  assert.match(same, /ATTEMPT-2-PHASE/);
+  assert.doesNotMatch(same, /An earlier attempt/);
+  // A key that started BEFORE the record's attempt did is an earlier attempt's (attempt 2 refused before its container
+  // leaves attempt 1's ended key in place): its names never join this record, and an unreadable start pairs with none.
+  const earlier = { ...attempt2, startedAt: ended - 1_200_000, updatedAt: ended - 1_000_000, running: [], ended: true, outcome: "failed" };
+  const refused = String(runProgress(view("operator", { run: { record }, progress: earlier })));
+  assert.match(refused, /<dt>Turns<\/dt><dd>5<\/dd>/);
+  assert.doesNotMatch(refused, /ATTEMPT-2-PHASE|An earlier attempt/);
+  for (const startedAt of [undefined, "not a date"]) {
+    const noStart = String(runProgress(view("operator", { run: { record: { ...record, startedAt } }, progress: { ...attempt2, startedAt: ended - 600_000, updatedAt: ended, running: [], ended: true, outcome: "failed" } })));
+    assert.doesNotMatch(noStart, /ATTEMPT-2-PHASE/, `startedAt ${startedAt}`);
+  }
+  // A record whose end cannot be read pairs with no key at all.
+  const odd = String(runProgress(view("operator", { run: { record: { ...record, endedAt: null } }, progress: { ...attempt2, startedAt: ended - 600_000, ended: true } })));
+  assert.match(odd, /<dt>Turns<\/dt><dd>5<\/dd>/);
+  assert.doesNotMatch(odd, /ATTEMPT-2-PHASE|An earlier attempt/);
+});
+
+test("stale progress (issue #644): no write past three minutes says the worker may be gone, and a running step gets no live age", async () => {
+  const { progressText, runProgress } = await import("../src/console/panels.mjs");
+  const g = { v: 1, turn: 4, steps: 6, failed: 1, interrupted: 0, running: [{ tool: "bash", since: NOW - 600_000 }], recent: [], phase: null, phases: [], note: null, prior: { turns: 3, steps: 8 }, startedAt: NOW - 900_000, updatedAt: NOW - 300_000, ended: false, outcome: null };
+  const view = (data, now = NOW) => ({ page: "run", role: "viewer", readOnly: false, query: { id: "gh-1" }, env: {}, now, data: { now, ...data } });
+  const stale = String(runProgress(view({ run: { missing: true }, progress: g })));
+  assert.match(stale, /<p class="warn">Stale: no update for 5 min; the worker may be gone\.<\/p>/);
+  assert.match(stale, /<span class="mono">bash<\/span> open 5m at the last update/, "the age stops at the last write");
+  assert.doesNotMatch(stale, /running 10m/);
+  assert.match(stale, /<dt>Earlier runs of this session<\/dt><dd>3 turns, 8 steps before this run resumed the session<\/dd>/);
+  // Within the heartbeat's window (here exactly three minutes): live, with no warning.
+  const fresh = String(runProgress(view({ run: { missing: true }, progress: g }, g.updatedAt + 180_000)));
+  assert.doesNotMatch(fresh, /Stale/);
+  assert.match(fresh, /<span class="mono">bash<\/span> running 8m/);
+  // The run page's other panels, which have no record to show, say so too.
+  const pages = (await pagePanels("run", ctxOf("viewer", { run: { missing: true }, progress: g }, { id: "gh-1" }))).map((p) => p.html).join("");
+  assert.match(pages, /This run has no record yet: a run&#39;s record is written when it ends\. Its progress has had no update for 5 min; the worker may be gone\./);
+  // The active tables' cell: the same words, and no running age.
+  const row = { turn: 4, steps: 6, failed: 1, running: { tool: "bash", since: NOW - 600_000 }, phase: { index: 1, count: 3, done: null, total: null }, ended: false, updatedAt: NOW - 300_000 };
+  assert.equal(progressText(row, NOW), "turn 4, 6 steps (1 failed), bash running, phase 2/3, no update for 5 min; the worker may be gone");
+  assert.equal(progressText({ ...row, updatedAt: NOW - 2_000 }, NOW), "turn 4, 6 steps (1 failed), bash running 10m, phase 2/3");
+  // An ended key on an ACTIVE row is an earlier attempt's: the cell shows nothing of it.
+  assert.equal(progressText({ ...row, ended: true }, NOW), "-");
+});

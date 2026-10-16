@@ -52,7 +52,8 @@ import {
   topologySpend,
 } from "../insights-html.mjs";
 import { fmtCost } from "../panel.mjs";
-import { forgeLinkOf, secretProfileNames } from "../read-model.mjs";
+import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
+import { forgeLinkOf, isProgressSnapshot, progressStaleFor, secretProfileNames } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
 import { html, trustedRenderer } from "./html.mjs";
 
@@ -330,14 +331,42 @@ export const overviewFailures = fromSnapshot("Failures in the last 24 hours", (s
   return html`<p><span class="big${n > 0 ? " warn" : ""}">${s.failures24hFloor ? "at least " : ""}${count(n)}</span> failed ${n === 1 ? "run" : "runs"}.${s.failures24hFloor ? html` <span class="note">Every run read was inside the day, so there may be more.</span>` : null} <a href="${`/runs?${new URLSearchParams({ outcome: "failed" })}`}">See failed runs</a></p>`;
 });
 
+/** The words a stale snapshot carries (`progressStaleFor`): whole minutes since the last write. */
+export function staleText(ms) {
+  return `no update for ${Math.floor(ms / MIN)} min; the worker may be gone`;
+}
+
+/**
+ * An active row's progress (issue #644) as one cell: "turn 7, 12 steps (1 failed), bash running 40s, phase 2/4". Built
+ * from the snapshot's integer projection alone (`activeProgressOf`): integers and a tool name in the live stream's
+ * charset, never a phase name or a note, so the same cell is right for a viewer. `-` when the row has none, and for an
+ * ENDED snapshot: the job is active, so an ended key is an earlier attempt's (an infra retry keeps the job id) and
+ * this attempt has not written yet. A stale snapshot (no write for `PROGRESS_STALE_MS`) says so, and its running
+ * step gets no age: the clock would keep counting for a step nobody is watching.
+ */
+export function progressText(p, now) {
+  if (p === null || typeof p !== "object" || p.ended === true) return "-";
+  const n = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  const stale = progressStaleFor(p, now);
+  const parts = [];
+  if (n(p.turn) !== null) parts.push(`turn ${p.turn}`);
+  if (n(p.steps) !== null) parts.push(`${count(p.steps)} ${p.steps === 1 ? "step" : "steps"}${n(p.failed) ? ` (${count(p.failed)} failed)` : ""}`);
+  const r = p.running;
+  if (r && typeof r.tool === "string") parts.push(`${r.tool} running${stale === null && n(r.since) !== null && Number.isFinite(now) && now >= r.since ? ` ${ageText(now - r.since)}` : ""}`);
+  const f = p.phase;
+  if (f && n(f.index) !== null) parts.push(`phase ${f.index + 1}/${n(f.count) ?? "?"}`);
+  if (stale !== null) parts.push(staleText(stale));
+  return parts.length > 0 ? parts.join(", ") : "-";
+}
+
 /** The active jobs, newest start first, as the overview and the fleet screen list them; `act` adds a cancel per row. */
 function activeTable(s, now, act = false) {
   const rows = (Array.isArray(s.active) ? [...s.active] : []).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   const cancel = (j) => (act && typeof j.jobId === "string" && RUN_ID_RE.test(j.jobId) ? html`<td>${actForm("cancel-active", { hidden: [["jobId", j.jobId]], label: "Cancel" })}</td>` : act ? html`<td>-</td>` : null);
   return table(
     "Active jobs",
-    ["Job", "Queue", "Host", "Started", "Running for", ...(act ? ["Action"] : [])],
-    rows.map((j) => html`<tr><td>${runLink(j.jobId)}</td><td>${cell(j.queue)}</td><td>${cell(j.host)}</td><td>${j.startedAt ? utcText(j.startedAt) : "-"}</td><td>${j.startedAt ? ageText(now - j.startedAt) : "-"}</td>${cancel(j)}</tr>`),
+    ["Job", "Queue", "Host", "Started", "Running for", "Progress", ...(act ? ["Action"] : [])],
+    rows.map((j) => html`<tr><td>${runLink(j.jobId)}</td><td>${cell(j.queue)}</td><td>${cell(j.host)}</td><td>${j.startedAt ? utcText(j.startedAt) : "-"}</td><td>${j.startedAt ? ageText(now - j.startedAt) : "-"}</td><td>${progressText(j.progress, now)}</td>${cancel(j)}</tr>`),
     "Nothing is running.",
   );
 }
@@ -402,11 +431,127 @@ function withRun(title, render) {
   return (view) => {
     const got = view.data?.run;
     if (!got?.record) {
-      const why = got?.invalid ? "That is not a run id." : "No run with that id is in this host's history or the fleet's run mirror.";
-      return titled(title, html`<p class="warn">${why}</p>`);
+      // A running job has no record yet (it is written at the end); its live transcript or progress says it exists.
+      const running = view.data?.transcript?.exists === true || (isProgressSnapshot(view.data?.progress) && !view.data.progress.ended);
+      // A snapshot the worker stopped rewriting (its heartbeat is 30 s) may be a run that will never write a record.
+      const stale = isProgressSnapshot(view.data?.progress) ? progressStaleFor(view.data.progress, view.now) : null;
+      const why = got?.invalid ? "That is not a run id." : running ? `This run has no record yet: a run's record is written when it ends.${stale !== null ? ` Its progress has had ${staleText(stale)}.` : ""}` : "No run with that id is in this host's history or the fleet's run mirror.";
+      return titled(title, html`<p class="${running && !got?.invalid ? "note" : "warn"}">${why}</p>`);
     }
     return titled(title, render(got.record, view, got.source));
   };
+}
+
+// ---- run progress (issue #644) ---------------------------------------------------------------------------------------
+
+/** A step's duration: `1.2 s`, `40s`-style past a minute, or `-` when pi recorded none (the tool never ran). */
+function stepDuration(ms) {
+  if (!Number.isSafeInteger(ms) || ms < 0) return "-";
+  return ms < MIN ? `${(ms / SEC).toFixed(1)} s` : ageText(ms);
+}
+
+/** The run record's `progress`, rebuilt by the worker's own rule (`recordedProgress`): integers and closed keys only. */
+function recordProgressBody(r) {
+  const p = recordedProgress(r?.progress);
+  if (p === undefined) return null;
+  const z = (v) => (Number.isSafeInteger(v) ? count(v) : "0");
+  const tools = p.tools ? Object.entries(p.tools) : [];
+  return html`${facts([
+    ["Turns", z(p.turns)],
+    ["Steps", z(p.steps)],
+    ["Failed steps", z(p.failed)],
+    ["Interrupted steps", z(p.interrupted)],
+    // A sum, not wall time: steps the model ran in parallel overlap, so this can exceed the run's own duration.
+    ["Sum of step durations", Number.isSafeInteger(p.toolMs) ? stepDuration(p.toolMs) : "-"],
+    ["Longest step", Number.isSafeInteger(p.longestStepMs) ? stepDuration(p.longestStepMs) : "-"],
+    ["Longest interrupted step", Number.isSafeInteger(p.longestInterruptedMs) ? stepDuration(p.longestInterruptedMs) : null],
+    ["Phases declared", z(p.phasesDeclared)],
+    ["Last phase", Number.isSafeInteger(p.lastPhaseIndex) ? `${p.lastPhaseIndex + 1} of ${count(p.phasesDeclared)}` : null],
+  ])}${tools.length > 0 ? table("Steps by tool", ["Tool", { num: "Steps" }], tools.map(([name, n]) => html`<tr><td class="mono">${name}</td><td class="num">${count(n)}</td></tr>`), "") : null}`;
+}
+
+/**
+ * The live snapshot's phase section. The integers (which phase of how many, done of total) are a list's own facts and
+ * every role gets them; the NAMES, the bar and the note are the model's words and go to an operator alone, escaped by
+ * the template (the worker already escaped the control class; this is the second belt). A `phase.index` past the list
+ * (the worker's size cut) shows no name rather than a neighbour's.
+ */
+function phaseBody(g, operator) {
+  if (!g.phase && g.phases.length === 0) return html`<p class="note">This run declared no phase.</p>`;
+  const f = g.phase;
+  const total = f ? Math.max(g.phases.length, f.index + 1) : g.phases.length;
+  const where = f ? html`<p>Phase ${f.index + 1} of ${count(total)}${f.done !== null ? `: ${count(f.done)}${f.total !== null ? ` of ${count(f.total)}` : ""} done` : ""}</p>` : null;
+  if (!operator) return html`${where}<p class="note">Phase names and the run's note are shown to operators only.</p>`;
+  const name = f && f.index < g.phases.length ? g.phases[f.index] : null;
+  const bar = f && f.done !== null && f.total !== null ? html`<progress value="${String(f.done)}" max="${String(f.total)}">${`${f.done} of ${f.total}`}</progress>` : null;
+  const list = g.phases.length > 0 ? html`<ol class="phases">${g.phases.map((p, i) => html`<li${f && i === f.index ? html` aria-current="step"` : null}>${p}</li>`)}</ol>` : null;
+  return html`${where}${name !== null ? html`<p>Current phase: <strong>${name}</strong> ${bar}</p>` : bar}${list}${g.note !== null ? html`<h3>Note</h3><p class="run-note">${g.note}</p>` : null}`;
+}
+
+/**
+ * The live snapshot's counters and steps, for every role: integers, UTC times and charset-checked tool names. A STALE
+ * snapshot (`progressStaleFor`: no write past the worker's heartbeat) leads with a warning, and its open steps read as
+ * open at the last update, never as running now with an age the console's clock keeps growing.
+ */
+function liveProgressBody(g, view) {
+  const now = view.now;
+  const operator = view.role === "operator";
+  const stale = progressStaleFor(g, now);
+  const open = (r) => (stale === null ? `running ${Number.isFinite(now) && now >= r.since ? ageText(now - r.since) : "-"}` : `open ${g.updatedAt >= r.since ? ageText(g.updatedAt - r.since) : "-"} at the last update`);
+  const running = g.running.length === 0 ? html`<p class="note">${g.ended ? `The run has ended (${g.outcome ?? "unknown"}).` : "No step is running."}</p>` : html`<ul class="plain">${g.running.map((r) => html`<li><span class="mono">${r.tool}</span> ${open(r)}</li>`)}</ul>`;
+  const recent = [...g.recent].reverse();
+  return html`${stale !== null ? html`<p class="warn">Stale: ${staleText(stale)}.</p>` : null}${facts([
+    ["Turn", count(g.turn)],
+    ["Steps", `${count(g.steps)}${g.failed > 0 ? ` (${count(g.failed)} failed)` : ""}`],
+    ["Interrupted steps", g.interrupted > 0 ? count(g.interrupted) : null],
+    // The resume prior: what the session's earlier runs did before this run resumed it, not this job's retries.
+    ["Earlier runs of this session", g.prior ? `${count(g.prior.turns)} turns, ${count(g.prior.steps)} steps before this run resumed the session` : null],
+    ["Started", utcText(g.startedAt)],
+    ["Updated", utcText(g.updatedAt)],
+  ])}<h3>Running now</h3>${running}<h3>Phase</h3>${phaseBody(g, operator)}<h3>Recent steps</h3>${table("Recent steps", ["Tool", "Status", { num: "Took" }, "At"], recent.map((r) => html`<tr${r.status === "ok" ? null : html` class="warn"`}><td class="mono">${r.tool}</td><td>${r.status}</td><td class="num">${stepDuration(r.durationMs)}</td><td>${utcText(r.at)}</td></tr>`), "No step has finished yet.")}`;
+}
+
+/** Why a run has no progress snapshot: the key cannot tell these apart, so the panel names all three. */
+export const PROGRESS_ABSENT = "No live progress: not published (PI_RUN_PROGRESS=0), expired, or no step has been recorded yet.";
+
+/**
+ * The run page's "Progress" panel (issue #644). A run with a record shows the record's `progress` (and, while the key
+ * is still kept, an operator also gets the phase names it declared); a running job shows the live snapshot, counters
+ * and recent steps for everyone, phase names, the done/total bar and the note for an operator alone. The page is live
+ * (the hub re-renders this panel by digest), so a running job's counters move without a reload.
+ *
+ * An infra retry keeps the job id: attempt 1 writes its record and attempt 2 then rewrites the key. So the key is set
+ * beside the record only when the two are the SAME attempt, judged by time: a key that started after the record ended
+ * is a later attempt's, and the panel shows that live body (saying an earlier attempt ended, with the record's
+ * outcome); the key's phase names join the record only when the key has ended and started inside the record's
+ * attempt (no earlier than the record started, no later than it ended). A record whose start or end cannot be read
+ * pairs with no key.
+ */
+export function runProgress(view) {
+  const title = "Progress";
+  const record = view.data?.run?.record ?? null;
+  const g = view.data?.progress ?? null;
+  const live = isProgressSnapshot(g) ? g : null;
+  const recordEnd = typeof record?.endedAt === "string" ? Date.parse(record.endedAt) : Number.NaN;
+  if (record && live && Number.isFinite(recordEnd) && live.startedAt > recordEnd) {
+    const outcome = typeof record.outcome === "string" && /^[a-z-]{1,40}$/.test(record.outcome) ? record.outcome : "unknown";
+    return titled(title, html`<p class="note">An earlier attempt of this run ended (${outcome}); this is the attempt after it.</p>${liveProgressBody(live, view)}`);
+  }
+  if (record) {
+    const body = recordProgressBody(record);
+    // Both bounds: a key that started before this record's attempt did is an EARLIER attempt's (attempt 2 refused before
+    // its container leaves attempt 1's ended key in place), and its phase names are not this record's. An unreadable
+    // start pairs with nothing, as an unreadable end does.
+    const recordStart = typeof record.startedAt === "string" ? Date.parse(record.startedAt) : Number.NaN;
+    const same = live && live.ended && Number.isFinite(recordEnd) && Number.isFinite(recordStart) && live.startedAt >= recordStart && live.startedAt <= recordEnd;
+    const names = same && view.role === "operator" && live.phases.length > 0 ? html`<h3>Phases</h3>${phaseBody(live, true)}` : null;
+    if (body === null && names === null) return titled(title, html`<p class="note">This run's record holds no progress (an older worker, or PI_RUN_PROGRESS=0).</p>`);
+    return titled(title, html`${body ?? html`<p class="note">This run's record holds no progress.</p>`}${names}`);
+  }
+  if (live) return titled(title, liveProgressBody(live, view));
+  if (g?.unreachable) return titled(title, html`<p class="warn">The run's progress could not be read (is Valkey reachable?).</p>`);
+  if (g?.invalid) return titled(title, html`<p class="warn">The run's progress key is not one this console reads (a newer or older worker?).</p>`);
+  return titled(title, html`<p class="note">${PROGRESS_ABSENT}</p>`);
 }
 
 /**

@@ -18,7 +18,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
-const { makeDashboard, createDashboardDeps, transcriptLines } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
+const { makeDashboard, createDashboardDeps, transcriptLines, activeProgressText } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -408,4 +408,64 @@ test("createDashboardDeps wires the transcript seams to the fleet reader's own c
   assert.ok(commands.some((c) => c[0] === "xrange" && c[2] === "(5-1"), "the cursor is exclusive");
   assert.equal(clients, 1, "one client: the reader's own");
   await d.dispose();
+});
+
+// Issue #644: the ACTIVE row's progress. The integers come off the snapshot's active row; the phase NAME through the
+// `progress` seam (the fleet reader's single read in production), scrubbed and clipped. The job runs on mini2, not
+// this host: progress lives in the shared Valkey, so a remote job's row reads the same.
+test("the ACTIVE row shows turn, steps, the running tool and the phase, rich and plain, within every width, for a remote host's job", { timeout: 20_000 }, async () => {
+  const ESC = String.fromCharCode(27);
+  const name = `migrate${ESC}[2J the ジョブ schema and then some more words`;
+  const snap = () => ({ ...SNAP(), active: [{ ...SNAP().active[0], progress: { turn: 7, steps: 12, failed: 1, running: { tool: "bash", since: AT - 40_000 }, phase: { index: 1, count: 4, done: 3, total: 10 }, ended: false } }] });
+  const reads = [];
+  const progress = async (jobId) => (reads.push(jobId), { v: 1, phase: { index: 1, done: 3, total: 10 }, phases: ["survey", name] });
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100_000, deps: deps({ fetchSnapshot: async () => snap(), progress }) });
+  await until(() => reads.length > 0 && stripAnsi(comp.render(200).join("\n")).includes("phase 2/4"), "the progress read");
+  const rich = stripAnsi(comp.render(200).join("\n"));
+  const plain = comp.render(Number.NaN).join("\n");
+  assert.deepEqual(reads, ["jA"], "one read, for the one job the row shows");
+  // The name is scrubbed (the ESC becomes a space) and clipped to 24 columns, then the row is clipped to the pane.
+  const expected = /ACTIVE jA running · turn 7 · 12 steps \(1 failed\) · bash 40s · phase 2\/4 migrate \[2J the ジョブ …/;
+  assert.match(rich, expected, "rich");
+  // The plain degrade draws its run list 24 columns wide (its own layout), so the row's progress is there and cut.
+  assert.match(plain, /› \* ACTIVE jA running ·…/, "plain");
+  assert.match(activeProgressText(snap().active[0].progress, name, AT), /^turn 7 · 12 steps \(1 failed\) · bash 40s · phase 2\/4 migrate \[2J the ジョブ …$/, "the text both forms draw");
+  assert.doesNotMatch(rich + plain, /and then some more words/, "the phase name is clipped");
+  for (const w of [30, 41, 60, 80, 99, 120, 160]) {
+    for (const line of comp.render(w)) {
+      assert.ok(visibleLen(line) <= w, `width ${w}: ${JSON.stringify(stripAnsi(line))}`);
+      assert.doesNotMatch(stripAnsi(line), /[\u0000-\u0008\u000b-\u001f\u007f]/, `width ${w}: no control byte`);
+    }
+  }
+  await comp.dispose();
+});
+
+test("the ACTIVE row without a progress seam, or with one that fails, keeps the integers and names no phase", { timeout: 20_000 }, async () => {
+  const snap = () => ({ ...SNAP(), active: [{ ...SNAP().active[0], progress: { turn: 3, steps: 1, failed: 0, running: null, phase: { index: 0, count: 2, done: null, total: null }, ended: false } }] });
+  for (const extra of [{}, { progress: async () => { throw new Error("down"); } }, { progress: async () => ({ unreachable: "x" }) }]) {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100_000, deps: deps({ fetchSnapshot: async () => snap(), ...extra }) });
+    await until(() => stripAnsi(comp.render(120).join("\n")).includes("ACTIVE jA"), "the snapshot");
+    assert.match(stripAnsi(comp.render(120).join("\n")), /ACTIVE jA running · turn 3 · 1 step · phase 1\/2 /);
+    await comp.dispose();
+  }
+});
+
+// Issue #644: an infra retry keeps the job id, so the key an ACTIVE row reads can still be the ended attempt's until the
+// new attempt writes; and a worker that stopped writing leaves a key whose running step would age forever.
+test("the ACTIVE row ignores an ended snapshot (an earlier attempt's) and marks a stale one with no running age", { timeout: 20_000 }, async () => {
+  const row = { turn: 7, steps: 12, failed: 1, running: { tool: "bash", since: AT - 600_000 }, phase: { index: 1, count: 4, done: 3, total: 10 }, ended: false, updatedAt: AT - 2_000 };
+  assert.equal(activeProgressText({ ...row, ended: true }, "build", AT), "", "an ended key draws nothing on an active row");
+  assert.equal(activeProgressText(row, null, AT), "turn 7 · 12 steps (1 failed) · bash 10m · phase 2/4");
+  assert.equal(activeProgressText({ ...row, updatedAt: AT - 180_000 }, null, AT), "turn 7 · 12 steps (1 failed) · bash 10m · phase 2/4", "at the bound: not yet stale");
+  assert.equal(activeProgressText({ ...row, updatedAt: AT - 300_000 }, null, AT), "no update for 5m, the worker may be gone · turn 7 · 12 steps (1 failed) · bash · phase 2/4");
+  // Through the panel: an ended key read for the row yields no phase name, and the row keeps no progress of it.
+  const snap = () => ({ ...SNAP(), active: [{ ...SNAP().active[0], progress: { ...row, ended: true } }] });
+  const reads = [];
+  const progress = async (jobId) => (reads.push(jobId), { v: 1, ended: true, phase: { index: 1, done: 3, total: 10 }, phases: ["survey", "OLD-ATTEMPT-PHASE"] });
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100_000, deps: deps({ fetchSnapshot: async () => snap(), progress }) });
+  await until(() => reads.length > 0 && stripAnsi(comp.render(200).join("\n")).includes("ACTIVE jA"), "the progress read");
+  const rich = stripAnsi(comp.render(200).join("\n"));
+  assert.match(rich, /ACTIVE jA running · x cancel/, "no progress between the state and the hint");
+  assert.doesNotMatch(rich + comp.render(Number.NaN).join("\n"), /OLD-ATTEMPT-PHASE|turn 7/);
+  await comp.dispose();
 });
