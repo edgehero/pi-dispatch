@@ -352,7 +352,11 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # ignore it: the agent is never offered the tool, guesses or gives up, and the key is never marked parked. The worker
 # refuses that pairing pre-spend (its `awaitInput` capability row, reason job-image-await-input-unsupported).
 # verify-image.sh checks the baked runner reads the variable.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput"
+# `reportProgress` (issue #644) tells the worker this runner reads PI_REPORT_PROGRESS and offers the job the
+# report_progress tool. An older runner handed the variable would ignore it: the job runs without the tool and the
+# trigger's phases never appear. The worker refuses that pairing pre-spend (its `reportProgress` capability row,
+# reason job-image-progress-unsupported). verify-image.sh checks the baked runner reads the variable.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress"
 
 USER pi
 WORKDIR /workspace

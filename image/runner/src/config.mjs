@@ -60,6 +60,9 @@ export function parseRunnerEnv(env) {
 		// await_human_input tool and may end as `awaiting-input`. `false` (the overwhelmingly common state) is
 		// byte-identical to every job before the feature.
 		awaitInput: parseAwaitInput(env, "PI_AWAIT_INPUT"),
+		// INT-CONTAINER-JOB-INPUTS (issue #644): the trigger's run.progress -- whether the job is offered the
+		// report_progress tool. `false` (the default) is byte-identical to every job before the feature.
+		reportProgress: parseReportProgress(env, "PI_REPORT_PROGRESS"),
 		retry: {
 			maxRetries: parsePositiveInt(env, "PI_RETRY_MAX", 2),
 			baseDelayMs: parsePositiveInt(env, "PI_RETRY_BASE_MS", 2000),
@@ -198,6 +201,15 @@ function parseAwaitInput(env, name) {
 	if (raw === undefined || raw === "") return false;
 	if (raw === "1") return true;
 	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to offer await_human_input, or leave it unset)`);
+}
+
+// env-internal PI_REPORT_PROGRESS: the worker's own per-job input (issue #644), "1" or absent. Strict for
+// parseAwaitInput's reason: a third value is a hand-run container or a worker regression.
+function parseReportProgress(env, name) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return false;
+	if (raw === "1") return true;
+	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to offer report_progress, or leave it unset)`);
 }
 
 /**

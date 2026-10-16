@@ -166,6 +166,9 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		// REQ-AWAIT-INPUT (issue #625): whether the job may end awaiting a person's answer. Present only when armed,
 		// resume's rule, so an unflagged job's data stays byte-identical.
 		...(resolved.awaitInput === true ? { awaitInput: true } : {}),
+		// Issue #644: the progress tool and the forge status comment, each present only when armed, awaitInput's rule.
+		...(resolved.progress === true ? { progress: true } : {}),
+		...(resolved.statusComment === true ? { statusComment: true } : {}),
 		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
 		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
@@ -211,6 +214,8 @@ function routeLabel(subset, triggers, targetType) {
 		instructions: rule.instructions,
 		resume: rule.resume,
 		awaitInput: rule.awaitInput,
+		progress: rule.progress,
+		statusComment: rule.statusComment,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(added, rule.predicate) },
 		target: buildTarget(subset, targetType),
@@ -277,6 +282,8 @@ function mrResult(subset, rule, matched) {
 		instructions: rule.instructions,
 		resume: rule.resume,
 		awaitInput: rule.awaitInput,
+		progress: rule.progress,
+		statusComment: rule.statusComment,
 		replicas: rule.replicas,
 		matched,
 		target: buildTarget(subset, "pull_request"),
@@ -325,6 +332,8 @@ function routeIssueClose(subset, triggers, authorized) {
 		instructions: rule.instructions,
 		resume: rule.resume,
 		awaitInput: rule.awaitInput,
+		progress: rule.progress,
+		statusComment: rule.statusComment,
 		replicas: rule.replicas,
 		// `once: true` rides `matched` ONLY when armed (spreading false is a no-op), so the enqueue path
 		// can see a disarm is owed without re-reading the rule table -- and a plain close rule's matched
@@ -361,6 +370,8 @@ function routeMergeRequestClose(subset, triggers, authorized) {
 		instructions: rule.instructions,
 		resume: rule.resume,
 		awaitInput: rule.awaitInput,
+		progress: rule.progress,
+		statusComment: rule.statusComment,
 		replicas: rule.replicas,
 		// No `number` on an MR close's matched record -- parallel to routeMergeRequest's, where the item
 		// number is the target's business; the issue route carries it because the github design does.
@@ -422,6 +433,8 @@ function routeNote(subset, triggers, knownFlows) {
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		awaitInput: triggers.comment.awaitInput,
+		progress: triggers.comment.progress,
+		statusComment: triggers.comment.statusComment,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		...(parkedReply && { parkedReply: true }),

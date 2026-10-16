@@ -46,6 +46,7 @@ import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown, excludableToolNames } from "./src/tools.mjs";
 import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/mcp.mjs";
 import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-input.mjs";
+import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
 // and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
@@ -324,7 +325,9 @@ async function main() {
 	// The tool a job armed with run.awaitInput may end on (issue #625). Null otherwise, so an unarmed job's loader
 	// options are byte-identical to before the feature.
 	const awaitInput = cfg.awaitInput ? createAwaitInput() : null;
-	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? [])];
+	// The tool a job armed with run.progress reports its phases with (issue #644), on the same terms.
+	const reportProgress = cfg.reportProgress ? createReportProgress() : null;
+	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(reportProgress?.factories ?? [])];
 	const resourceLoader = await buildLoadedResourceLoader({
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
@@ -451,6 +454,11 @@ async function main() {
 	if (awaitInput) {
 		const shadow = awaitInputShadow(session.getAllTools());
 		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job may`, "await-input-shadowed");
+	}
+	// Likewise the progress tool (issue #644): another extension's report_progress would answer the calls the worker reads.
+	if (reportProgress) {
+		const shadow = reportProgressShadow(session.getAllTools());
+		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job may`, "report-progress-shadowed");
 	}
 	if (jobMcp) {
 		const shadow = mcpShadow({ tools: session.getAllTools(), commands: session.extensionRunner.getRegisteredCommands() });

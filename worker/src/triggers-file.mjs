@@ -496,6 +496,11 @@ export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	// the key as unknown), the job runs without it: the agent cannot ask, and the record reads like a clean run. Only
 	// `true` arms it, and the job data carries it only then, so `false` is nothing authored.
 	Object.freeze({ key: "awaitInput", authored: (v) => v === true }),
+	// Issue #644: the progress tool and the status comment. Dropped by a receiver from before #644 (which tolerates the
+	// keys as unknown), the job runs without the tool or without the comment the trigger promised, on a clean record.
+	// Only `true` arms either, and the job data carries each only then, so `false` is nothing authored.
+	Object.freeze({ key: "progress", authored: (v) => v === true }),
+	Object.freeze({ key: "statusComment", authored: (v) => v === true }),
 ]);
 
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {

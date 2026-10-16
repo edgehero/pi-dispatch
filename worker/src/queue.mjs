@@ -344,7 +344,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, progress, statusComment, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
 	// else. Rebuilt from the one field rather than copied, `parkedReply`'s rule for durable job data, and refused when the
@@ -408,6 +408,10 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// REQ-AWAIT-INPUT (issue #625): only when armed, so an unflagged job's data is byte-identical, and at JOB level
 		// for resume's reason: `trigger` is copied verbatim into /job/event.json.
 		...(awaitInput === true && { awaitInput: true }),
+		// Issue #644: the report_progress tool, and the forge status comment. Only when armed, awaitInput's rule and
+		// for its reasons (byte-identical unflagged data; job level, never inside `trigger`).
+		...(progress === true && { progress: true }),
+		...(statusComment === true && { statusComment: true }),
 		// A phrase-free reply to a parked issue (issue #625), gated by the worker on the key's `parked` mark. Never part
 		// of an id: it says how the delivery was routed, not what it is.
 		...(parkedReply === true && { parkedReply: true }),

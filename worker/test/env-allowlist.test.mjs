@@ -894,6 +894,13 @@ test("PI_AWAIT_INPUT is \"1\" only when the job is armed, and otherwise absent (
 	assert.equal(buildContainerEnv({ ...args, awaitInput: true }).PI_AWAIT_INPUT, "1");
 });
 
+test("PI_REPORT_PROGRESS is \"1\" only when the job is armed, and otherwise absent (issue #644)", { skip }, () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	for (const reportProgress of [undefined, false, "1", 1]) assert.equal(buildContainerEnv({ ...args, reportProgress }).PI_REPORT_PROGRESS, undefined, String(reportProgress));
+	assert.equal(buildContainerEnv({ ...args, reportProgress: true }).PI_REPORT_PROGRESS, "1");
+	assert.equal(buildContainerEnv({ ...args, reportProgress: true }).PI_AWAIT_INPUT, undefined, "the two tools are armed apart");
+});
+
 test("PI_MCP_SERVERS is emitted only when the job names servers, comma-joined, never empty (REQ-MCP-OPERATOR-SERVERS)", { skip }, () => {
 	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
 	for (const mcpServers of [undefined, []]) assert.equal(buildContainerEnv({ ...args, mcpServers }).PI_MCP_SERVERS, undefined);
@@ -1067,7 +1074,8 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, reportProgress: true });
+	assert.equal(env.PI_REPORT_PROGRESS, "1", "the drift check must see PI_REPORT_PROGRESS (issue #644)");
 	assert.equal(env.HOME, "/home/pi", "the drift check must see HOME, or a reservation it needs would go unchecked");
 	assert.equal(env.PI_EXIT_AUTH, "stdin", "the drift check must see PI_EXIT_AUTH too (issue #545)");
 	const dynamic = new Set(["ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]); // provider + mint: deployment state, refused pre-spend instead

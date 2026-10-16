@@ -58,6 +58,9 @@ const MAX_RUN = {
 	models: ["openai/gpt-5.4", "anthropic/claude-haiku-4-5"],
 	// #501. A STRING, the spelling an operator writes for money; the loader carries it as written.
 	maxCostUsd: "2.50",
+	// Issue #644: the progress tool and the forge status comment. Only `true` rides the job, so `true` here.
+	progress: true,
+	statusComment: true,
 };
 // The loader refuses some fields together (flow with command, command with instructions, waitFor with
 // replicas), so each entry is loaded twice and the two variants between them set every field.

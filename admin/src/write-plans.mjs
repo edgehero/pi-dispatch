@@ -24,7 +24,7 @@
  */
 import * as nodeFs from "node:fs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
-import { ISSUE_ACTIONS, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, isMcpNearMiss, runModelFieldNearMiss, validateModelRef, validateProgressFlags } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
@@ -140,6 +140,19 @@ export function backendRefusal(backend, env) {
   return null;
 }
 
+/** The #644 flags a tool call carries, each only when it is a boolean (see buildTriggerEntry). */
+function progressRun(f) {
+  return {
+    ...(typeof f.progress === "boolean" ? { progress: f.progress } : {}),
+    ...(typeof f.statusComment === "boolean" ? { statusComment: f.statusComment } : {}),
+  };
+}
+
+/** The loader's own refusal of the #644 flags as sent (a non-boolean, a status comment on cron), or null. */
+function progressRefusal(params, onType, at, path) {
+  return refusalOf(() => validateProgressFlags({ progress: params.progress, statusComment: params.statusComment }, at, path, { onType }));
+}
+
 /**
  * Build one `{ on, run }` trigger entry from a kind + fields. The single source of truth for the on x run
  * matrix (cron -> local, every webhook kind -> a forge): the impossible combination is absent by
@@ -167,6 +180,12 @@ export function backendRefusal(backend, env) {
  * Enabling it stays an edit to the reviewed `triggers.json` (`docs/sessions.md`), which is the same answer
  * `run.image` gets and for a stricter version of the same reason. The panel still DISPLAYS it, because
  * reading a disclosure and being able to arm one are different things.
+ *
+ * `run.progress` and `run.statusComment` (issue #644) ARE on both paths, and pass the same test the other way. Neither
+ * is a capability the model would gain: progress offers the job a tool that records a phase name in the transcript and
+ * does nothing else, and the status comment is fixed worker text (ids and integers, never model text) on the item the
+ * trigger already acts on. Each is carried only when it is a boolean, `once`'s rule, so an entry that names neither is
+ * byte-identical; `statusComment` on cron is passed through for the shared validator to refuse.
  */
 export function buildTriggerEntry(kind, f) {
   if (kind === "cron") {
@@ -184,6 +203,7 @@ export function buildTriggerEntry(kind, f) {
     // #227, carried only when set so every pre-#227 call site writes a byte-identical entry.
     const backend = optStr(f.backend);
     if (backend) run.backend = backend;
+    Object.assign(run, progressRun(f));
     return { on: { type: "cron", id: f.id, pattern: f.pattern }, run };
   }
   const forge = optStr(f.forge) ?? "github";
@@ -199,7 +219,7 @@ export function buildTriggerEntry(kind, f) {
   const model = optStr(f.model);
   const provider = optStr(f.provider);
   const maxTurns = optInt(f.maxTurns);
-  const modelRun = { ...(model ? { model } : {}), ...(provider ? { provider } : {}), ...(maxTurns !== undefined ? { maxTurns } : {}) };
+  const modelRun = { ...(model ? { model } : {}), ...(provider ? { provider } : {}), ...(maxTurns !== undefined ? { maxTurns } : {}), ...progressRun(f) };
   const forgeRun = (rest) => ({ kind: forge, ...rest, ...(repository ? { repository } : {}), ...(backend ? { backend } : {}), ...modelRun });
   if (kind === "label") return { on: { type: "label", any: asWords(f.labels ?? f.any) }, run: forgeRun({ flow: f.flow }) };
   if (kind === "comment") return { on: { type: "comment", phrase: f.phrase }, run: forgeRun({ flow: f.flow }) };
@@ -307,6 +327,9 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
   // message BEFORE the operator is asked, rather than after they approved an entry the write then refuses.
   const model = refusalOf(() => validateModelRef({ provider: optStr(params.provider), model: optStr(params.model), maxTurns: params.maxTurns }, "the new trigger", paths.triggersPath));
   if (model !== null) return { refusal: model };
+  // #644, the same rule: a non-boolean flag, or a status comment on a cron trigger, is refused with the loader's message.
+  const progress = progressRefusal(params, params.kind, "the new trigger", paths.triggersPath);
+  if (progress !== null) return { refusal: progress };
   const entry = buildTriggerEntry(params.kind, params);
   if (!entry) return { refusal: `unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)` };
   return {
@@ -324,7 +347,7 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
  * Plan a trigger edit (`dispatch_trigger_edit`): which flow trigger `index` runs, and optionally its `backend`,
  * `provider` and `model`, each merged only when sent so an edit of the flow leaves every other key byte-identical.
  * The model reference is judged alone and then MERGED with the entry's own `run` (PR #536's review), before the
- * confirm. `{ plan: { index, flow, backend, ref, mutate, target, expect, title, message, summary } }` or `{ refusal }`.
+ * confirm. `progress` and `statusComment` (issue #644) merge the same way. `{ plan: { index, flow, backend, ref, flags, mutate, target, expect, title, message, summary } }` or `{ refusal }`.
  */
 export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_edit", fs = nodeFs }) {
   const widening = wideningFieldRefusal(params, tool);
@@ -366,6 +389,11 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   const merged = refusalOf(() => validateModelRef({ ...rawRun, ...ref }, `trigger #${params.index + 1}`, paths.triggersPath));
   if (merged !== null) return { refusal: merged };
   const modelLine = ["provider", "model"].filter((k) => ref[k] !== undefined).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${ref[k]}`).join("");
+  // #644. Merged only when sent, like backend; judged against the entry's own on.type (no status comment on cron).
+  const progressFault = progressRefusal(params, cur.type, `trigger #${params.index + 1}`, paths.triggersPath);
+  if (progressFault !== null) return { refusal: progressFault };
+  const flags = progressRun(params);
+  const flagLine = Object.keys(flags).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${flags[k]}`).join("");
   const index = params.index;
   return {
     plan: {
@@ -376,10 +404,11 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
       // `backend`, `provider` and `model` are merged only when the caller sent them, so an edit that
       // changes just the flow leaves the entry byte-identical in every other key -- including a venue
       // or a model it already had.
-      mutate: (raw) => raw.map((tr, i) => (i === index ? { ...tr, run: { ...tr.run, flow, ...(backend !== undefined && { backend }), ...ref } } : tr)),
+      flags,
+      mutate: (raw) => raw.map((tr, i) => (i === index ? { ...tr, run: { ...tr.run, flow, ...(backend !== undefined && { backend }), ...ref, ...flags } } : tr)),
       target: paths.triggersPath,
       expect,
-      ...confirmOf(`Edit trigger #${index + 1}`, `trigger #${index + 1} (${cur.type}) flow: ${cur.flow ?? "-"} -> ${flow}${venue}${modelLine}`),
+      ...confirmOf(`Edit trigger #${index + 1}`, `trigger #${index + 1} (${cur.type}) flow: ${cur.flow ?? "-"} -> ${flow}${venue}${modelLine}${flagLine}`),
     },
   };
 }

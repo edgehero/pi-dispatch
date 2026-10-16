@@ -237,6 +237,15 @@ test("run.portfolio rides the scheduler data at JOB level, never inside trigger 
 	assert.equal(f.data.portfolio, false);
 });
 
+test("run.progress rides the scheduler data at JOB level only when armed (issue #644)", () => {
+	const [s] = load([{ ...CRON, run: { ...CRON.run, progress: true } }]);
+	assert.equal(s.data.progress, true);
+	assert.deepEqual(s.data.trigger, { id: "nightly-tidy", pattern: "0 3 * * *" });
+	const [f] = load([{ ...CRON, run: { ...CRON.run, progress: false, statusComment: false } }]);
+	assert.equal("progress" in f.data, false, "false is the default: the stored schedule grows no key");
+	assert.equal("statusComment" in f.data, false, "a cron job never carries a status comment");
+});
+
 test("an unflagged cron trigger's data grows no portfolio key: the stored schedule is byte-identical (issue #505)", () => {
 	const [s] = load([CRON]);
 	assert.equal("portfolio" in s.data, false);

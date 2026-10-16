@@ -428,6 +428,8 @@ function normalizeCron(on, run, index, path, state) {
 	// Called for its refusal only (issue #625): `true` needs run.resume, which cron refuses, so the returned `run`
 	// grows no `awaitInput` key, exactly as it grows no `replicas` one.
 	validateAwaitInputFlag(run, `cron trigger "${id}"`, path);
+	// Returned: run.progress is legal on cron, and run.statusComment survives only as `false` (issue #644).
+	const { progress, statusComment } = validateProgressFlags(run, `cron trigger "${id}"`, path, { onType: "cron" });
 	// Called and DISCARDED: on a cron trigger this can only refuse, and the refusal is the point. The
 	// returned `run` below deliberately grows no `replicas` key -- a cron entry can never carry one.
 	validateReplicas(run, `cron trigger "${id}"`, path);
@@ -459,7 +461,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }) },
 	};
 }
 
@@ -580,6 +582,33 @@ function validateAwaitInputFlag(run, at, path) {
 		throw configError(`${at}: run.awaitInput needs run.resume: true beside it -- a run that stops to wait for an answer is continued by the next run on the same issue or pull request, and only run.resume keeps the transcript it would continue from: ${path}`);
 	}
 	return run.awaitInput;
+}
+
+/**
+ * Validate the per-trigger progress flags (issue #644). Strictly boolean, validateAwaitInputFlag's rule and for its
+ * reason: a truthy `"false"` would arm what the operator meant to leave off.
+ *
+ * - `run.progress`: the job is offered the report_progress tool, and the worker reads the phases it reports. Legal on
+ *   every kind: the tool and the reducer need no forge, and a cron job's progress shows in the console like any other.
+ * - `run.statusComment`: the worker posts one comment on the issue or pull request and edits it as the run goes. Only
+ *   where the job has one to post on: a cron trigger has no issue or pull request (`run.github` mints a token, it
+ *   names no target), so `true` there is refused rather than accepted to do nothing. `false` is today's default and
+ *   is carried, `run.resume`'s rule.
+ *
+ * Neither needs the other: a status comment without run.progress shows turns and steps and no phase.
+ * Returns both, each undefined when absent, so an unflagged trigger normalizes byte-identically to today's.
+ * Exported for the admin's trigger tools, which judge the two before the operator's confirm with this message.
+ */
+export function validateProgressFlags(run, at, path, { onType }) {
+	for (const key of ["progress", "statusComment"]) {
+		if (run[key] !== undefined && typeof run[key] !== "boolean") {
+			throw configError(`${at}: run.${key} must be true or false when present: ${path}`);
+		}
+	}
+	if (onType === "cron" && run.statusComment === true) {
+		throw configError(`${at}: run.statusComment is only available on a forge trigger: a cron job has no issue or pull request to post its status on: ${path}`);
+	}
+	return { progress: run.progress, statusComment: run.statusComment };
 }
 
 /**
@@ -1675,6 +1704,7 @@ function normalizeLabel(on, run, index, path) {
 	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const awaitInput = validateAwaitInputFlag(run, at, path);
+	const { progress, statusComment } = validateProgressFlags(run, at, path, { onType: on.type });
 	const repository = validateRepository(run, "label", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1686,7 +1716,7 @@ function normalizeLabel(on, run, index, path) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1719,6 +1749,7 @@ function normalizeComment(on, run, index, path, state) {
 	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const awaitInput = validateAwaitInputFlag(run, at, path);
+	const { progress, statusComment } = validateProgressFlags(run, at, path, { onType: on.type });
 	const repository = validateRepository(run, "comment", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1730,7 +1761,7 @@ function normalizeComment(on, run, index, path, state) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1790,6 +1821,7 @@ function normalizeIssue(on, run, index, path) {
 	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const awaitInput = validateAwaitInputFlag(run, at, path);
+	const { progress, statusComment } = validateProgressFlags(run, at, path, { onType: on.type });
 	validateRepository(run, "issue", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1808,7 +1840,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1879,6 +1911,7 @@ function normalizePullRequest(on, run, index, path) {
 	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const awaitInput = validateAwaitInputFlag(run, at, path);
+	const { progress, statusComment } = validateProgressFlags(run, at, path, { onType: on.type });
 	validateRepository(run, "pull_request", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1902,7 +1935,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 

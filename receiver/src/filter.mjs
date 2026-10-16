@@ -189,6 +189,9 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 		// REQ-AWAIT-INPUT (issue #625): whether the job may end awaiting a person's answer. Present only when armed,
 		// resume's rule, so an unflagged job's data stays byte-identical.
 		...(resolved.awaitInput === true ? { awaitInput: true } : {}),
+		// Issue #644: the progress tool and the forge status comment, each present only when armed, awaitInput's rule.
+		...(resolved.progress === true ? { progress: true } : {}),
+		...(resolved.statusComment === true ? { statusComment: true } : {}),
 		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
 		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level like the rest, never
@@ -239,6 +242,8 @@ function routeIssueLabel(subset, triggers) {
 		instructions: rule.instructions,
 		resume: rule.resume,
 		awaitInput: rule.awaitInput,
+		progress: rule.progress,
+		statusComment: rule.statusComment,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.issue?.number, title: subset.issue?.title, body: subset.issue?.body },
@@ -308,6 +313,8 @@ function routeComment(subset, triggers, knownFlows) {
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		awaitInput: triggers.comment.awaitInput,
+		progress: triggers.comment.progress,
+		statusComment: triggers.comment.statusComment,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		...(parkedReply && { parkedReply: true }),
@@ -409,6 +416,8 @@ function routePullRequest(subset, triggers, action) {
 			instructions: rule.instructions,
 			resume: rule.resume,
 			awaitInput: rule.awaitInput,
+			progress: rule.progress,
+			statusComment: rule.statusComment,
 			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },
 			...(isReview ? { review: { id: review.id, body: review.body, state: review.state, author_association: review.author_association } } : {}),
@@ -527,6 +536,8 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		instructions: rule.instructions,
 		resume: rule.resume,
 		awaitInput: rule.awaitInput,
+		progress: rule.progress,
+		statusComment: rule.statusComment,
 		replicas: rule.replicas,
 		matched: matchedFor(rule),
 		target: targetFor(),

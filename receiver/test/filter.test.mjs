@@ -824,6 +824,30 @@ test("a matched rule's run.awaitInput reaches the JOB only when armed (issue #62
 	assert.equal(commented.job.awaitInput, true);
 });
 
+test("a matched rule's run.progress and run.statusComment reach the JOB only when armed (issue #644)", () => {
+	const cfg = forgeCfg({
+		triggers: {
+			label: [
+				{ index: 0, predicate: { any: ["pi:fix"] }, flow: "fix", progress: true, statusComment: true },
+				{ index: 1, predicate: { any: ["pi:docs"] }, flow: "docs", progress: false, statusComment: false },
+			],
+			comment: { index: 2, phrase: "@pi", defaultFlow: "triage", progress: true },
+			pullRequest: [],
+			knownFlows: new Set(["fix", "docs", "triage"]),
+		},
+	});
+	const armed = filter("issues", { sender: { id: 1 }, action: "labeled", issue: { number: 7, title: "T", body: "B", labels: [{ name: "pi:fix" }] } }, cfg, 99, "p1");
+	assert.equal(armed.job.progress, true);
+	assert.equal(armed.job.statusComment, true);
+	assert.equal("progress" in armed.job.trigger, false, "an execution knob, never in /job/event.json");
+	const off = filter("issues", { sender: { id: 1 }, action: "labeled", issue: { number: 8, title: "T", body: "B", labels: [{ name: "pi:docs" }] } }, cfg, 99, "p2");
+	assert.equal("progress" in off.job, false, "absent, not present-and-false");
+	assert.equal("statusComment" in off.job, false);
+	const commented = filter("issue_comment", { sender: { id: 1 }, action: "created", comment: { body: "@pi", author_association: "OWNER" }, issue: { number: 9, title: "T", body: "B", labels: [] } }, cfg, 99, "p3");
+	assert.equal(commented.job.progress, true);
+	assert.equal("statusComment" in commented.job, false);
+});
+
 // --- replicas ride the MATCHED rule onto the job (REQ-REPLICA-RUNS) ---
 
 test("replicas rides the matched rule onto the job, at JOB level and never inside trigger", () => {
