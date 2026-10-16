@@ -15,7 +15,7 @@ import { makeRedactor, secretValuesOf } from "./redact-secrets.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
- * `{ code, aborted, turns, tokens, session, usage, context, exitReason, resources?, exitOomKilled?, memoryLimit? }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
+ * `{ code, aborted, turns, tokens, session, usage, context, exitReason, resources?, exitOomKilled?, memoryLimit?, progress? }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
  * the 30-min timeout or graceful shutdown), which the processor classifies as POLICY (no retry) per
  * INT-RUNNER-EXIT-CODE-PROTOCOL. The numeric `code` alone cannot say this: a worker SIGKILL and a
  * kernel OOM both surface as 137, so the abort FLAG -- not the code -- is the discriminator.
@@ -72,9 +72,10 @@ export function makeRunContainer({
 	// the wiring drops the cached runtime facts the ceiling came from and the next pickup reads them again. The local
 	// venue's is the job-user resolver's `invalidate`; a no-op elsewhere (Podman accepts any `--cpus`, measured).
 	onCpuCeilingStale = () => {},
-	// Issue #643: `({ file, jobId, redact }) => { start, finish } | null`, the live transcript publisher's opener
-	// (live-transcript.mjs `makeLiveTranscriptOpener`). Null publishes nothing: a deployment with PI_LIVE_TRANSCRIPTS=0,
-	// one without a Valkey client, and every caller that predates the feature.
+	// Issue #643: `({ file, jobId, redact, job }) => { start, finish, progressSummary? } | null`, the live transcript
+	// publisher's opener (live-transcript.mjs `makeLiveTranscriptOpener`), which since issue #644 also reads run progress.
+	// Null publishes nothing: a deployment with PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0, one without a Valkey client,
+	// and every caller that predates the feature.
 	openLiveTranscript = null,
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
@@ -97,7 +98,11 @@ export function makeRunContainer({
 	// `size_bound_unenforced` so a run past its size's bound is named where it happens. The flags stay on the argv.
 	// `jobId` (issue #643) is the queue's job id, which names the live transcript stream as it names the run record
 	// (`run:live:` and `runs:rec:`, both through `sanitizeJobId`); absent, no stream is published.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null }) {
+	// `onLive(finish)` (issue #644) hears this attempt's bounded, idempotent publisher finish once the publisher is open, so
+	// the processor can end it when it stops waiting for a container whose stop did not take (index.mjs
+	// `boundAfterAbort`). Without it the publisher ends only on the CLI child's `close` or `error`, which never comes
+	// for that container: the progress key's heartbeat rewrote it as running for its whole 7-day window.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -169,6 +174,9 @@ export function makeRunContainer({
 			// runner refuses the flag without one (await-input-without-session), so a job whose resume degraded to no
 			// mount is not armed into that refusal.
 			awaitInput: job.awaitInput === true && prepared.session ? true : undefined,
+			// Issue #644: whether the runner offers `report_progress`, off `job` like awaitInput (env-allowlist.mjs maps it to
+			// PI_REPORT_PROGRESS=1). The worker reads the phases it reports only for the same job (`job.progress` below).
+			reportProgress: job.progress === true ? true : undefined,
 			// Issue #502: the effective allowed-model list, off `job` like excludeTools. index.mjs `effectiveJobOf` folds
 			// the deployment's PI_ALLOWED_MODELS in under the trigger's own, so `job.models` is already the one list.
 			allowedModels: Array.isArray(job.models) && job.models.length > 0 ? job.models : null,
@@ -258,11 +266,15 @@ export function makeRunContainer({
 				// `workerSet`: the proxy variables count as structural only with the values this worker wrote for this job's
 				// egress; a proxy URL an operator forwarded with PI_EGRESS=0 is redacted like any other forwarded value.
 				const workerSet = egressEnv({ proxy: egressProxy, armed: egress });
-				live = openLiveTranscript({ file: join(transcriptDir, LIVE_FILE_NAME), jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }) }) ?? null;
+				// `job` (issue #644) for its two switches, `progress` (read phases) and `statusComment` (the forge comment).
+				live = openLiveTranscript({ file: join(transcriptDir, LIVE_FILE_NAME), jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job }) ?? null;
 			} catch {
 				live = null;
 			}
 		}
+		// Issue #644: no publisher means no progress, so a trigger's `run.statusComment` cannot be honoured. Said once, by
+		// reason: both switches off (no opener), or no transcript file or job id to read progress from.
+		if (job?.statusComment === true && live === null) log("status_comment_skipped", { jobId: jobId ?? null, reason: typeof openLiveTranscript === "function" ? "no-transcript" : "progress-off" });
 		// Bounded and never throwing (live-transcript.mjs); called at most once, and always BEFORE this function resolves,
 		// so before the processor's `finally` removes the job directory the file lives in.
 		const finishLive = async (outcome) => {
@@ -270,6 +282,11 @@ export function makeRunContainer({
 				await live?.finish(outcome);
 			} catch {}
 		};
+		if (live !== null && typeof onLive === "function") {
+			try {
+				onLive(finishLive);
+			} catch {}
+		}
 
 		// Host-side per-job log sink, teed off `onOutput`. `name` is `pi-job-<jobId>`; the sink
 		// sanitizes internally. No container mount, no env var -- the sink lives on this side only.
@@ -317,6 +334,15 @@ export function makeRunContainer({
 				// closes and before this promise resolves, because the processor removes the job directory (and the file in
 				// it) as soon as it has the result. The outcome is the exit's own reading, the most this side knows.
 				await finishLive(liveOutcomeOf(code, aborted, neverStartedExits));
+				// Issue #644: the run record's `progress`, read once the final snapshot was taken. Only when the opener ran the
+				// progress reducer for this job; absent otherwise, so every other run resolves the object it always did.
+				let progress = null;
+				try {
+					progress = live?.progressSummary?.() ?? null;
+				} catch {
+					progress = null;
+				}
+				const ranProgress = progress !== null && typeof progress === "object" ? { progress } : {};
 				// A rejecting sink.close is swallowed so a misbehaving sink cannot hang the run; turns/tokens/session/usage/context/exitReason fall back to null.
 				let turns = null;
 				let tokens = null;
@@ -379,7 +405,7 @@ export function makeRunContainer({
 				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.
 				// `memoryLimit` only beside the OOM report, the one place it is read, for the same reason.
 				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true, memoryLimit } : {}) };
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth });
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress });
 			});
 		});
 

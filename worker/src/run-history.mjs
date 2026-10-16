@@ -179,7 +179,12 @@ export const MCP_RUNNER_REASONS = Object.freeze(["mcp-unavailable", "mcp-config-
  * `run.resume` and refuses that with no store). Named for MCP_RUNNER_REASONS' reason: the operator's fix is not a budget.
  */
 export const AWAIT_INPUT_RUNNER_REASONS = Object.freeze(["await-input-shadowed", "await-input-without-session"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS]);
+/**
+ * The runner's exit-2 refusal of a job armed with `run.progress` (issue #644), before the prompt: another extension
+ * registers `report_progress`, the job tool whose calls the worker reads as phases. Named for MCP_RUNNER_REASONS' reason.
+ */
+export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -409,6 +414,36 @@ export function parseExitOomKilled(text) {
 	return parsed?.by === EXIT_BY_SUPERVISOR && parsed?.code === 137 && parsed?.reason === EXIT_OOM_KILLED && used !== null && used.oomKills !== null && used.oomKills > 0;
 }
 
+/**
+ * The tool names the run record's `progress.tools` counts by name (issue #644): pi's built-in tools and the two job tools
+ * pi-dispatch offers. A tool name is model-chosen (pi records an unknown name as the model sent it), so a name enters the
+ * record only as a count under one of these literals, compared and never copied; every other name counts as `other`.
+ */
+export const PROGRESS_RECORD_TOOLS = Object.freeze(["read", "bash", "edit", "write", "grep", "find", "ls", "await_human_input", "report_progress"]);
+const PROGRESS_COUNT_KEYS = Object.freeze(["turns", "steps", "failed", "interrupted", "toolMs", "longestStepMs", "longestInterruptedMs", "phasesDeclared"]);
+
+/**
+ * The record's `progress` (issue #644, INT-RUN-HISTORY-FILE-CONTRACT), REBUILT from what run-progress.mjs `summary`
+ * returned: the closed count keys, `lastPhaseIndex` beside a declared phase, and `tools` under the closed names plus
+ * `other`, each a non-negative safe integer, zeros left out. Undefined (the key absent) when the reducer did not run for
+ * the job: the switch off, no transcript file, or an older worker. A non-object is absent too; a bad value is dropped,
+ * never copied.
+ */
+export function recordedProgress(p) {
+	if (p === null || typeof p !== "object" || Array.isArray(p)) return undefined;
+	const count = (v) => Number.isSafeInteger(v) && v > 0;
+	const out = {};
+	for (const key of PROGRESS_COUNT_KEYS) if (Object.hasOwn(p, key) && count(p[key])) out[key] = p[key];
+	if (out.phasesDeclared > 0 && Object.hasOwn(p, "lastPhaseIndex") && Number.isSafeInteger(p.lastPhaseIndex) && p.lastPhaseIndex >= 0) out.lastPhaseIndex = p.lastPhaseIndex;
+	const t = Object.hasOwn(p, "tools") ? p.tools : null;
+	if (t !== null && typeof t === "object" && !Array.isArray(t)) {
+		const tools = {};
+		for (const name of [...PROGRESS_RECORD_TOOLS, "other"]) if (Object.hasOwn(t, name) && count(t[name])) tools[name] = t[name];
+		if (Object.keys(tools).length > 0) out.tools = tools;
+	}
+	return out;
+}
+
 /** The validating rebuild behind `parseExitResources` and the record's `resources`: null on any violation. */
 function rebuildResources(r) {
 	if (r === null || typeof r !== "object" || Array.isArray(r)) return null;
@@ -605,6 +640,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const data = job.data ?? {};
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
+	const progress = recordedProgress(source.progress);
 	return {
 		jobId: job.id,
 		kind: kind ?? null,
@@ -791,6 +827,14 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// retry like any other (its earlier attempt's record is carried in `earlier`), so it is false there. A boolean,
 		// TAIL position after `earlier`, so the capacity report can say how many runs that is.
 		stalledRepick: Number.isInteger(job.stalledCounter) && job.stalledCounter > 0 && !(Number.isInteger(job.attemptsMade) && job.attemptsMade > 0),
+		// Where the run got to (issue #644, INT-RUN-HISTORY-FILE-CONTRACT): the turns, steps, failed and interrupted steps,
+		// tool time, the phase count and last phase index, and the steps per tool under a closed set of names, from the
+		// worker's own reading of the transcript (run-progress.mjs). REBUILT here (`recordedProgress`), TAIL position after
+		// `stalledRepick`. Integers and closed keys only: no phase name, note or tool name the model chose can reach it,
+		// so the record stays PII-free by construction. Read from a file the agent can write, so advisory, like
+		// `resources`. A CONDITIONAL key, unlike its neighbours: present only when the reducer ran for this job (the
+		// switch on and a transcript file present), so every record of a run without it is byte-identical to before.
+		...(progress !== undefined ? { progress } : {}),
 	};
 }
 

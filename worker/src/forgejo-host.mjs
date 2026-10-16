@@ -31,6 +31,7 @@
 import { configError } from "./config.mjs";
 import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
+import { commentIdOf, isStatusCommentId } from "./status-comment.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 import { isDeterminateFetchFailure } from "./transient.mjs";
 
@@ -155,6 +156,42 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 		if (!res.ok) {
 			throw new InfraRetry(`forgejo-host: POST ${path} returned ${res.status}`);
 		}
+		// The created comment's id, for the status commenter (issue #644). Read after the 2xx and never thrown on: the
+		// comment exists, and a retry would post a second one.
+		const comment = await res.json().catch(() => null);
+		return { id: commentIdOf(comment?.id) };
+	}
+
+	/**
+	 * Replace the body of the status comment `id` this host posted (issue #644, status-comment.mjs):
+	 * `PATCH /repos/{o}/{r}/issues/comments/{id}`. The id is the plain comment id, and `target` is unread for the
+	 * reason `postStatusComment` gives: a pull request's comments are issue comments. The id is checked against
+	 * `STATUS_COMMENT_ID_RE` (and must be numeric, as a comment id is) before it reaches a URL. An HTTP failure throws
+	 * InfraRetry with `status` set, so the caller can tell a 403/404/429 (stop editing) from a blip.
+	 */
+	async function editStatusComment(ref, target, id, text, token) {
+		const [owner, name] = splitRepo(ref);
+		if (!isStatusCommentId(id) || !/^[0-9]+$/.test(id)) {
+			throw configError(`forgejo-host: malformed status comment id: ${JSON.stringify(id)}`);
+		}
+		const path = `/repos/${owner}/${name}/issues/comments/${id}`;
+		let res;
+		try {
+			res = await fetchFn(`${root}${path}`, {
+				method: "PATCH",
+				headers: { Authorization: `token ${token}`, "content-type": "application/json" },
+				body: JSON.stringify({ body: text }),
+				redirect: "error",
+			});
+		} catch (err) {
+			if (isDeterminateFetchFailure(err)) {
+				throw configError(`forgejo-host: PATCH ${path} failed (${fetchFailureReason(err)})`);
+			}
+			throw new InfraRetry(`forgejo-host: PATCH ${path} failed (${fetchFailureReason(err)})`);
+		}
+		if (!res.ok) {
+			throw Object.assign(new InfraRetry(`forgejo-host: PATCH ${path} returned ${res.status}`), { status: res.status });
+		}
 	}
 
 	/**
@@ -244,7 +281,7 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 		throw new InfraRetry(`forgejo-host: ${owner}/${name} lists more than ${MAX_LABEL_PAGES} pages of labels`);
 	}
 
-	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
+	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, editStatusComment, resolvePullRequestHead, setParkedLabel };
 }
 
 /**

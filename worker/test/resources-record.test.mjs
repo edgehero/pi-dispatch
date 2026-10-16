@@ -71,9 +71,12 @@ test("a cancel acknowledged while the container ran keeps what that container us
 test("a cancel read only when a spent attempt fails ends as the cancel and keeps that attempt's resources", { skip }, async () => {
 	// The request is already waiting when the container exits 1, so the job ends as the cancel instead of retrying
 	// (INT-CANCEL-CHANNEL-CONTRACT), with the result rebuilt from the InfraRetry: its resources must survive that rebuild.
-	const { processor, records, logs } = harness(async () => ({ code: 1, aborted: false, turns: 1, resources: USED }), { cancelReq: "1" });
+	// Issue #644: the run's progress summary survives the same rebuild, beside the resources.
+	const PROGRESS = { turns: 3, steps: 2, interrupted: 1, longestInterruptedMs: 900 };
+	const { processor, records, logs } = harness(async () => ({ code: 1, aborted: false, turns: 1, resources: USED, progress: PROGRESS }), { cancelReq: "1" });
 	const result = await processor(job(), "tok", new AbortController().signal);
 	assert.equal(result.reason, "operator-cancel");
 	assert.ok(logs.some((l) => l.event === "job_cancelled_instead_of_retry" && l.spent === true), "the conversion path, not the raced exit");
 	assert.deepEqual(records.at(-1).result.resources, USED);
+	assert.deepEqual(records.at(-1).result.progress, PROGRESS);
 });

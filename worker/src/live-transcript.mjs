@@ -2,6 +2,7 @@ import { constants as fsConstants, mkdirSync, writeFileSync } from "node:fs";
 import { lstat as fsLstat, open as fsOpen } from "node:fs/promises";
 import { join } from "node:path";
 import { escapeControls } from "./projects.mjs";
+import { makeProgressSink } from "./run-progress.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 
 /**
@@ -261,8 +262,17 @@ export const outcomeOf = (outcome) => (LIVE_OUTCOMES.includes(outcome) ? outcome
  *
  * ON A RETRY the job id, and so the key, is the same. The first write of an attempt deletes what an earlier attempt
  * left, in the same transaction, so a stream holds one attempt and its `end` is that attempt's.
+ *
+ * RUN PROGRESS (issue #644). `onParsed(parsed, ts, { prior, replay })` is handed every parsed line, before and apart
+ * from the stream mapping, and never once the publisher is closed; a throw from it is swallowed. `prior` marks a line
+ * that ended at or before the BASELINE, the file's size when the first read began (`lstat`; a missing file or anything
+ * but a regular file is 0): on a resume those are the earlier runs' lines. After a reset there is no prior any more, and
+ * `replay` marks a line that ended at or before the rewritten file's size at the reset (run-progress.mjs states what
+ * the reducer does with it). `onReset()` is called at each reset. `stream: false` is the mode for progress with
+ * transcripts off: the file is tailed and every line handed to `onParsed`, and nothing is queued or written to the
+ * stream, so no `run:live:` key is ever touched.
  */
-export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(t ?? ""), now = () => Date.now(), pollMs = 500, log = () => {}, fs = { open: fsOpen, lstat: fsLstat }, timeoutMs = OP_TIMEOUT_MS, finishTimeoutMs = FINISH_TIMEOUT_MS, lineMaxBytes = LIVE_LINE_MAX_BYTES, pendingMax = PENDING_MAX, pendingMaxBytes = PENDING_MAX_BYTES, finalReadMaxBytes = LIVE_FINAL_READ_MAX_BYTES, readChunkBytes = READ_CHUNK_BYTES } = {}) {
+export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(t ?? ""), now = () => Date.now(), pollMs = 500, log = () => {}, fs = { open: fsOpen, lstat: fsLstat }, timeoutMs = OP_TIMEOUT_MS, finishTimeoutMs = FINISH_TIMEOUT_MS, lineMaxBytes = LIVE_LINE_MAX_BYTES, pendingMax = PENDING_MAX, pendingMaxBytes = PENDING_MAX_BYTES, finalReadMaxBytes = LIVE_FINAL_READ_MAX_BYTES, readChunkBytes = READ_CHUNK_BYTES, stream = true, onParsed = null, onReset = null } = {}) {
 	const key = liveKeyFor(jobId);
 	const id = sanitizeJobId(jobId);
 	let offset = 0;
@@ -281,6 +291,26 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	let pendingBytes = 0;
 	const counts = { published: 0, dropped: 0, skipped: 0, notes: 0, resets: 0, errors: 0, refused: 0 };
 	let warned = false;
+	let baseline = 0; // the file's size when the first read began: lines ending at or before it are `prior`
+	let baselineTaken = null;
+	let replayUntil = null; // set at a reset: the rewritten file's size then, lines ending at or before it are `replay`
+
+	/**
+	 * The baseline, once: the file's size before anything of this attempt was read. Never rejects. Only `onParsed` reads
+	 * it, so without one no `lstat` is added and the stream reads the file exactly as it did before issue #644.
+	 */
+	const takeBaseline = () => {
+		if (typeof onParsed !== "function") return undefined;
+		baselineTaken ??= (async () => {
+			try {
+				const info = await fs.lstat(file);
+				baseline = info.isFile() ? info.size : 0;
+			} catch {
+				baseline = 0;
+			}
+		})();
+		return baselineTaken;
+	};
 
 	/**
 	 * The flat field list of one entry, every value a string: the text redacted (the WHOLE text, before any cut), then
@@ -317,7 +347,7 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	};
 
 	const enqueue = (entry) => {
-		if (closed) return;
+		if (closed || !stream) return;
 		const fields = fieldsOf(entry);
 		if (fields === null) {
 			counts.errors += 1;
@@ -333,7 +363,9 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 		}
 	};
 
-	const publishLine = (bytes) => {
+	/** One complete line, `end` the file position just past it (where its newline was). */
+	const publishLine = (bytes, end) => {
+		if (closed) return;
 		const ts = now();
 		let parsed;
 		try {
@@ -344,11 +376,21 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 			return;
 		}
 		const at = typeof parsed?.timestamp === "string" ? Date.parse(parsed.timestamp) : Number.isFinite(parsed?.timestamp) ? parsed.timestamp : NaN;
-		for (const entry of entriesOf(parsed, Number.isFinite(at) ? at : ts)) enqueue(entry);
+		const entryTs = Number.isFinite(at) ? at : ts;
+		if (typeof onParsed === "function") {
+			// The same bound `fieldsOf` puts on the stream's `ts`: the line is the agent's to write, and the progress
+			// reducer keeps this as a step's `since` (the key's `running`, and `longestInterruptedMs` in the record).
+			const parsedTs = entryTs >= 0 && entryTs <= ts + TS_FUTURE_MS ? Math.trunc(entryTs) : ts;
+			try {
+				onParsed(parsed, parsedTs, replayUntil === null ? { prior: end <= baseline } : { prior: false, replay: end <= replayUntil });
+			} catch {}
+		}
+		if (!stream) return;
+		for (const entry of entriesOf(parsed, entryTs)) enqueue(entry);
 	};
 
-	/** Split `chunk` (appended bytes) into lines, holding a partial tail and skipping oversize lines. */
-	const takeBytes = (chunk) => {
+	/** Split `chunk` (appended bytes, the first at file position `base`) into lines, holding a partial tail and skipping oversize lines. */
+	const takeBytes = (chunk, base) => {
 		let start = 0;
 		for (;;) {
 			const nl = chunk.indexOf(0x0a, start);
@@ -369,7 +411,7 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 				continue;
 			}
 			if (line.length === 0) continue;
-			publishLine(line);
+			publishLine(line, base + start);
 		}
 		const tail = chunk.subarray(start);
 		if (skipping || tail.length === 0) return;
@@ -385,13 +427,20 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 		held = Buffer.concat([held, tail]);
 	};
 
-	const restart = () => {
+	/** The file was rewritten (`size` is its size as seen now): read it again from 0. */
+	const restart = (size) => {
 		offset = 0;
 		firstLine = null;
 		held = Buffer.alloc(0);
 		skipping = false;
 		counts.resets += 1;
+		replayUntil = Number.isSafeInteger(size) && size >= 0 ? size : 0;
 		enqueue({ kind: "reset", ts: now() });
+		if (typeof onReset === "function") {
+			try {
+				onReset();
+			} catch {}
+		}
 	};
 
 	/**
@@ -420,6 +469,7 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	 */
 	const readOnce = async (final = false) => {
 		if (refused) return;
+		await takeBaseline();
 		let handle = null;
 		try {
 			let info;
@@ -429,7 +479,7 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 				return; // not there yet (or gone with the job directory): nothing to read
 			}
 			if (!info.isFile()) return refuse();
-			if ((ino !== null && info.ino !== ino && offset > 0) || info.size < offset) restart();
+			if ((ino !== null && info.ino !== ino && offset > 0) || info.size < offset) restart(info.size);
 			ino = info.ino;
 			try {
 				handle = await fs.open(file, OPEN_FLAGS);
@@ -447,7 +497,7 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 			if (firstLine !== null && offset > 0) {
 				const probe = Buffer.alloc(firstLine.length);
 				const { bytesRead } = await readAt(probe, probe.length, 0);
-				if (bytesRead < firstLine.length || !probe.equals(firstLine)) restart();
+				if (bytesRead < firstLine.length || !probe.equals(firstLine)) restart(info.size);
 			}
 			let budget = final ? finalReadMaxBytes : readChunkBytes;
 			let atEnd = false;
@@ -467,16 +517,17 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 				const buf = Buffer.alloc(want);
 				const { bytesRead } = await readAt(buf, want, offset);
 				if (bytesRead <= 0) break;
+				const base = offset;
 				offset += bytesRead;
 				budget -= bytesRead;
-				takeBytes(buf.subarray(0, bytesRead));
+				takeBytes(buf.subarray(0, bytesRead), base);
 				if (!final) break;
 				await flush();
 			}
 			if (final && atEnd && held.length > 0 && !skipping) {
 				const line = held;
 				held = Buffer.alloc(0);
-				publishLine(line);
+				publishLine(line, offset);
 			}
 		} catch {
 			counts.errors += 1;
@@ -500,8 +551,8 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	 */
 	const flush = async (extra = []) => {
 		// No client: nothing to write to, so the queue keeps its bound and nothing else happens (a test seam; the opener
-		// builds no publisher without a client).
-		if (closed || !redis) return;
+		// builds no publisher without a client). With the stream off nothing is ever written to it, the `end` included.
+		if (closed || !redis || !stream) return;
 		// A client still connecting (or reconnecting) is not a failure: the queue keeps its entries, within its bound, for
 		// the next flush. Only a flush that carries the end (`extra`) proceeds, since nothing comes after it to retry.
 		if (typeof redis.status === "string" && redis.status !== "ready" && extra.length === 0) return;
@@ -552,6 +603,7 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 		start() {
 			if (started || finishing) return;
 			started = true;
+			void takeBaseline();
 			timer = setInterval(tick, pollMs);
 			timer.unref?.();
 			void tick();
@@ -583,10 +635,63 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 }
 
 /**
- * The opener `runContainer` is handed (start.mjs builds it when `PI_LIVE_TRANSCRIPTS` is not "0" and a Valkey client
- * exists): `({ file, jobId, redact }) => { start, finish }`. A seam, so a test wires a fake publisher or none.
+ * The opener `runContainer` is handed (start.mjs builds it when `PI_LIVE_TRANSCRIPTS` or `PI_RUN_PROGRESS` is on and a
+ * Valkey client exists): `({ file, jobId, redact, job }) => { start, finish, progressSummary }`. A seam, so a test wires
+ * a fake publisher or none.
+ *
+ *   - `transcripts` writes the stream (#643); `progress` builds the run progress sink (#644, run-progress.mjs) and hands
+ *     it every parsed line. With transcripts off and progress on, the file is tailed and nothing reaches the stream.
+ *   - `makeCommenter({ job, jobId, commentId, onId, finalTimeoutMs })` builds the forge status commenter
+ *     (status-comment.mjs), asked only for a job whose trigger set `run.statusComment` and only with progress on; it
+ *     may return null (start.mjs does for a job with no forge to post to). `job.progress === true` makes the sink read
+ *     `report_progress` phases.
+ *   - `finish(outcome)` finishes the stream first (its own bound, `FINISH_TIMEOUT_MS`, which also closes the publisher,
+ *     so no line is handed to the sink after it), then the sink (a wait for a comment post in flight and the final
+ *     write, its own bound of 5 s). Worst case at a run's end: 3 s plus 5 s, and the 5 s only when Valkey or the forge
+ *     hangs. The comment's final edit is not in it: start.mjs makes that one from the run record.
+ *   - `progressSummary()` is the record's `progress` (run-history.mjs `recordedProgress`), or null with progress off.
  */
-export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Date.now(), pollMs = 500 } = {}) {
-	if (!redis) return null;
-	return ({ file, jobId, redact }) => makeLiveTranscript({ file, jobId, redis, redact, now, pollMs, log });
+export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Date.now(), pollMs = 500, transcripts = true, progress = false, makeCommenter = null, progressWriter = {} } = {}) {
+	if (!redis || (!transcripts && !progress)) return null;
+	return ({ file, jobId, redact, job = null }) => {
+		// A trigger that asked for a status comment on a deployment with progress off gets none: said once per job, never
+		// a silent no-op (the comment is driven by progress, so there is nothing to post).
+		if (!progress && job?.statusComment === true) log("status_comment_skipped", { jobId: sanitizeJobId(jobId), reason: "progress-off" });
+		const sink = progress
+			? makeProgressSink({
+					redis,
+					jobId,
+					phasesEnabled: job?.progress === true,
+					redact,
+					now,
+					log,
+					writer: progressWriter,
+					makeCommenter: typeof makeCommenter === "function" && job?.statusComment === true ? (opts) => makeCommenter({ job, ...opts }) : null,
+				})
+			: null;
+		const live = makeLiveTranscript({ file, jobId, redis, redact, now, pollMs, log, stream: transcripts, ...(sink ? { onParsed: sink.consume, onReset: sink.reset } : {}) });
+		let finishing = null;
+		return {
+			poll: live.poll,
+			stats: () => ({ ...live.stats(), ...(sink ? { progress: sink.stats() } : {}) }),
+			start() {
+				live.start();
+				try {
+					sink?.start();
+				} catch {}
+			},
+			finish(outcome) {
+				finishing ??= (async () => {
+					try {
+						await live.finish(outcome);
+					} catch {}
+					try {
+						await sink?.finish(outcome);
+					} catch {}
+				})();
+				return finishing;
+			},
+			progressSummary: () => (sink ? sink.summary() : null),
+		};
+	};
 }

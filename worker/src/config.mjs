@@ -406,6 +406,21 @@ export function liveTranscriptsEnabled(env) {
 }
 
 /**
+ * Does the worker read each running job's progress from its transcript (issue #644, `DES-RUN-PROGRESS`)? Turns, steps,
+ * the tool running and a declared phase, to the `run:progress:` key, the run record's `progress` and, where a trigger
+ * opts in, the forge status comment. ON by default, like the live transcript. `PI_RUN_PROGRESS=0` turns all three off.
+ * Strict, for `liveTranscriptsEnabled`'s reason: any value but unset, empty, "1" or "0" refuses to boot. Independent of
+ * `PI_LIVE_TRANSCRIPTS`: with transcripts off and progress on, the file is still tailed and no transcript text is
+ * published (the key carries a redacted phase name and note only, from a job that opted into `run.progress`).
+ */
+export function runProgressEnabled(env) {
+	const raw = env.PI_RUN_PROGRESS;
+	if (raw === undefined || raw === "" || raw === "1") return true;
+	if (raw === "0") return false;
+	throw configError(`invalid PI_RUN_PROGRESS: ${JSON.stringify(raw)} (want "0" to turn run progress off, or leave it unset to read it)`);
+}
+
+/**
  * Parse the worker's config from `env` (default process.env). Every MONEY default is conservative:
  * spend controls (`PI_DAILY_CAP`, `PI_MAX_TURNS`) exist to bound money, so they default low, and a
  * cap of 0 would fail closed (budget.mjs refuses every job) rather than mean "unlimited". The optional
@@ -502,6 +517,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		settingsFile: settingsFilePath(env), // || (not ??) inside settingsFilePath, so an empty string falls back; INT-CONFIG-OVERLAY-CONTRACT
 		captureJobLogs: env.PI_CAPTURE_JOB_LOGS === "1", // no-pii-in-logs: raw job-log capture is opt-in; anything but "1" is off
 		liveTranscripts: liveTranscriptsEnabled(env), // issue #643: the live transcript stream, ON unless PI_LIVE_TRANSCRIPTS=0
+		runProgress: runProgressEnabled(env), // issue #644: run progress (key, record field, status comment), ON unless PI_RUN_PROGRESS=0
 		logRetentionDays: nonNegativeInt(env, "PI_LOG_RETENTION_DAYS", 30), // 0 = keep forever
 		// issue #292, OQ-007: how often the three host-side retention sweeps re-run while the worker is up.
 		// 0 = BOOT-ONLY, which is byte-identical to every version before this one -- start.mjs does not even

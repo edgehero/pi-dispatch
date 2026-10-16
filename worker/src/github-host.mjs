@@ -28,11 +28,12 @@ import { configError } from "./config.mjs";
 import { octokitLogOptions } from "./octokit-log.mjs";
 import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
+import { commentIdOf, isStatusCommentId } from "./status-comment.mjs";
 
 /**
  * Build the host surface. `octokitFor` is `(token) => new Octokit({ auth: token, ...octokitLogOptions(log) })`; inject a fake
  * to test offline. `log` is the caller's `(event, fields)` logger for the client's own warnings
- * (`octokitLog`, issue #530). Returns `{ resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment }`.
+ * (`octokitLog`, issue #530). Returns `{ resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, editStatusComment, ... }`.
  */
 export function makeGitHubHost({ log, octokitFor = (token) => new Octokit({ auth: token, ...octokitLogOptions(log) }) } = {}) {
 	/**
@@ -102,10 +103,34 @@ export function makeGitHubHost({ log, octokitFor = (token) => new Octokit({ auth
 	async function postStatusComment(repo, target, text, token) {
 		const [owner, name] = splitRepo(repo);
 		const octokit = octokitFor(token);
-		await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+		const { data } = await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
 			owner,
 			repo: name,
 			issue_number: target?.number,
+			body: text,
+		});
+		// The created comment's id, for the status commenter (issue #644). A 2xx with no usable id is still a posted
+		// comment, so it answers `{ id: null }` rather than throwing a retry that would post a second one.
+		return { id: commentIdOf(data?.id) };
+	}
+
+	/**
+	 * Replace the body of the status comment `id` this host posted (issue #644, status-comment.mjs). The id is the
+	 * plain issue-comment id: one `PATCH /repos/{o}/{r}/issues/comments/{id}` serves issues and pull requests alike,
+	 * so `target` is unread here for the reason `postStatusComment` gives. The id is checked against
+	 * `STATUS_COMMENT_ID_RE` before it reaches a route. An HTTP failure throws octokit's own error, which carries
+	 * `status`, so the caller can tell a 403/404/429 (stop editing) from a blip.
+	 */
+	async function editStatusComment(repo, target, id, text, token) {
+		const [owner, name] = splitRepo(repo);
+		if (!isStatusCommentId(id) || !/^[0-9]+$/.test(id)) {
+			throw configError(`github-host: malformed status comment id: ${JSON.stringify(id)}`);
+		}
+		const octokit = octokitFor(token);
+		await octokit.request("PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}", {
+			owner,
+			repo: name,
+			comment_id: id,
 			body: text,
 		});
 	}
@@ -154,7 +179,7 @@ export function makeGitHubHost({ log, octokitFor = (token) => new Octokit({ auth
 		}
 	}
 
-	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
+	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, editStatusComment, resolvePullRequestHead, setParkedLabel };
 }
 
 /**

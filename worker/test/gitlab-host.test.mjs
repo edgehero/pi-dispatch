@@ -177,3 +177,43 @@ test("setParkedLabel adds and removes the marker with one PUT on the issue, by n
 	assert.deepEqual(fetchFn.calls.map((c) => JSON.parse(c.init.body)), [{ add_labels: "pi-awaiting-input" }, { remove_labels: "pi-awaiting-input" }]);
 	await assert.rejects(() => host({ "PUT /projects/42/issues/5": json({}, 403) }).setParkedLabel(JOB, { type: "issue", number: 5 }, true, TOKEN));
 });
+
+// -- status note id and edit (issue #644) ---------------------------------------------------------
+
+test("postStatusComment returns the created note's id, and id null (never a throw) on a body without one", async () => {
+	assert.deepEqual(await host({ "POST /projects/42/issues/5/notes": json({ id: 991 }, 201) }).postStatusComment(JOB, { type: "issue", number: 5 }, "hi", TOKEN), { id: "991" });
+	const broken = { ok: true, status: 201, json: async () => { throw new SyntaxError("x"); } };
+	assert.deepEqual(await host({ "POST /projects/42/issues/5/notes": broken }).postStatusComment(JOB, { type: "issue", number: 5 }, "hi", TOKEN), { id: null });
+});
+
+test("editStatusComment PUTs the note on the collection the target's type names, as the post chose it", async () => {
+	for (const [type, collection] of [["issue", "issues"], ["pull_request", "merge_requests"]]) {
+		const fetchFn = fakeFetch({ [`PUT /projects/42/${collection}/5/notes/991`]: json({ id: 991 }) });
+		const h = makeGitLabHost({ apiUrl: "https://gl.test/", fetchFn });
+		await h.editStatusComment(JOB, { type, number: 5 }, "991", "new", TOKEN);
+		assert.equal(fetchFn.calls[0].url, `https://gl.test/api/v4/projects/42/${collection}/5/notes/991`);
+		assert.equal(fetchFn.calls[0].init.method, "PUT");
+		assert.equal(fetchFn.calls[0].init.headers["PRIVATE-TOKEN"], TOKEN);
+		assert.equal(fetchFn.calls[0].init.redirect, "error");
+		assert.deepEqual(JSON.parse(fetchFn.calls[0].init.body), { body: "new" });
+	}
+});
+
+test("editStatusComment refuses a malformed note id before any request", async () => {
+	const fetchFn = fakeFetch({});
+	const h = makeGitLabHost({ apiUrl: "https://gl.test", fetchFn });
+	for (const id of ["", "1/2", "..", "a".repeat(201), "wi:1", 991]) {
+		await assert.rejects(() => h.editStatusComment(JOB, { type: "issue", number: 5 }, id, "t", TOKEN), (e) => e.piDispatchConfig === true);
+	}
+	assert.equal(fetchFn.calls.length, 0);
+});
+
+test("a failed edit throws with the HTTP status set and never echoes the token", async () => {
+	for (const status of [403, 404, 429, 500]) {
+		const h = host({ "PUT /projects/42/issues/5/notes/991": json({ message: TOKEN }, status) });
+		await assert.rejects(
+			() => h.editStatusComment(JOB, { type: "issue", number: 5 }, "991", "t", TOKEN),
+			(e) => e.status === status && e.piDispatchRetry === true && !e.message.includes(TOKEN),
+		);
+	}
+});
