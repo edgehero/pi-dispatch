@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -283,6 +283,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			listJobContainers: listJobContainers ?? (() => async () => []),
 			makePodmanBackend: podmanBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
+			...(makePrepareWorkspace ? { makePrepareWorkspace } : {}),
 			...(listRunningSandboxes ? { listRunningSandboxes } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(loadConfig ? { loadConfig } : {}),
@@ -1247,7 +1248,8 @@ test("the sandbox stamp resolves its venue with the same default (#277)", () => 
 	// A window of the source between the preparer's construction and its preparers argument, rather than a
 	// regex over the whole object literal: that literal nests other calls' braces.
 	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
-	const from = src.indexOf("prepareWorkspace: makePrepareWorkspace({");
+	// `makePrepareWorkspaceFn` since issue #643: the factory is a seam (startWorker's `makePrepareWorkspace` option).
+	const from = src.indexOf("prepareWorkspace: makePrepareWorkspaceFn({");
 	const to = src.indexOf("preparers: makeForgePreparers(", from);
 	assert.ok(from >= 0 && to > from, "the preparer is constructed where this pin expects");
 	// A whole line: a `//` comment or `config.defaultBackends` must not satisfy it.
@@ -4894,4 +4896,70 @@ test("issue #596, phase 2: every budget refresh keeps the jobs' parent cgroup's 
 	// No facts (the runtime did not answer): no venue, nothing to keep.
 	await captured.hostBudget.onRefresh({ memMiB: null, cpuCenti: null }, {});
 	assert.deepEqual(syncs[1], { cpuCenti: null, plans: [] });
+});
+
+// Issue #643: the off switch reaches BOTH venues and the preparer. With PI_LIVE_TRANSCRIPTS=0 neither venue's runContainer
+// is handed an opener and the preparer stages no live file; a resume job, which always has a transcript file, then
+// publishes nothing either, because publishing needs the opener, not just the file. With it on, both venues get the
+// same opener, and a resume job run through the options local was handed does open the publisher.
+test("PI_LIVE_TRANSCRIPTS=0 hands neither venue an opener and the preparer no live file; on, both get one, resume jobs included (#643)", { skip }, async () => {
+	const { EventEmitter } = await import("node:events");
+	const rc = await import("../src/run-container.mjs");
+	const { makePrepareWorkspace: realPrepare } = await import("../src/prepare.mjs");
+	const auth = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
+	const boot = async (env) => {
+		const prepareCalls = [];
+		const podmanRcCalls = [];
+		const out = await runStart({
+			env: { PI_BACKENDS: "local,podman", ...env },
+			readPodmanInfo: PODMAN_INFO(),
+			jobUserIdentity: PODMAN_ID,
+			bootImage: { ok: true, capabilities: [] },
+			makePrepareWorkspace: (opts) => (prepareCalls.push(opts), realPrepare(opts)),
+			makePodmanBackend: (opts) =>
+				realPodmanBackend({
+					...opts,
+					makeImagePreflight: () => async () => ({ ok: true }),
+					makeRunContainer: (o) => (podmanRcCalls.push(o), async () => ({ code: 0 })),
+					spawnFn: () => {
+						throw new Error("a wiring test must never spawn podman");
+					},
+				}),
+			...auth,
+		});
+		return { ...out, prepareCalls, podmanRcCalls };
+	};
+	// A resume job through the REAL runContainer built from the options the wiring handed local's factory.
+	const runResume = async (opts, spy) => {
+		const child = () => {
+			const c = new EventEmitter();
+			c.stdout = new EventEmitter();
+			c.stderr = new EventEmitter();
+			c.stdin = { on() {}, end() {} };
+			setImmediate(() => c.emit("close", 0));
+			return c;
+		};
+		const opener = typeof opts.openLiveTranscript === "function" ? (o) => (spy.push(o.jobId), { start() {}, finish: async () => {} }) : opts.openLiveTranscript;
+		const session = { key: "k", hostDir: "/host/jobs/r1/session", resume: true, reason: "resumed" };
+		await rc.makeRunContainer({ ...opts, hostEnv: { ANTHROPIC_API_KEY: "sk-ant-wiring-0001" }, packagePaths: [], openJobLog: undefined, openLiveTranscript: opener, spawnFn: child })({ job: { kind: "github", repo: "o/n", provider: "anthropic", model: "m", maxTurns: 5, resume: true }, prepared: { workspace: "/w", jobDir: "/host/jobs/r1", session }, name: "pi-job-r1", signal: new AbortController().signal, jobId: "r1" });
+	};
+
+	const off = await boot({ PI_LIVE_TRANSCRIPTS: "0" });
+	assert.equal(off.runContainerCalls.length, 1, "local's factory was built");
+	assert.equal(off.runContainerCalls[0].openLiveTranscript ?? null, null, "local: no opener");
+	assert.equal(off.podmanRcCalls.length, 1, "podman's factory was built");
+	assert.equal(off.podmanRcCalls[0].openLiveTranscript ?? null, null, "podman: no opener");
+	assert.equal(off.prepareCalls[0].stageLive, null, "the preparer stages no live file");
+	const offSpy = [];
+	await runResume(off.runContainerCalls[0], offSpy);
+	assert.deepEqual(offSpy, [], "a resume job publishes nothing with the switch off");
+
+	const on = await boot({});
+	const opener = on.runContainerCalls[0].openLiveTranscript;
+	assert.equal(typeof opener, "function", "local: the opener");
+	assert.equal(on.podmanRcCalls[0].openLiveTranscript, opener, "podman: the same opener");
+	assert.equal("stageLive" in on.prepareCalls[0], false, "the preparer's own default stages the live file");
+	const onSpy = [];
+	await runResume(on.runContainerCalls[0], onSpy);
+	assert.deepEqual(onSpy, ["r1"], "a resume job opens the publisher");
 });

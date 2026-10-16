@@ -223,6 +223,12 @@ test("captureJobLogs is strict: only \"1\" enables it, everything else stays off
 	}
 });
 
+test("liveTranscripts is ON by default, \"0\" turns it off, and any other value refuses to boot (#643)", () => {
+	for (const on of [undefined, "", "1"]) assert.equal(loadConfig(on === undefined ? {} : { PI_LIVE_TRANSCRIPTS: on }).liveTranscripts, true, `PI_LIVE_TRANSCRIPTS=${JSON.stringify(on)}`);
+	assert.equal(loadConfig({ PI_LIVE_TRANSCRIPTS: "0" }).liveTranscripts, false);
+	for (const bad of ["false", "off", "no", "2"]) assert.throws(() => loadConfig({ PI_LIVE_TRANSCRIPTS: bad }), (e) => e.piDispatchConfig === true && /PI_LIVE_TRANSCRIPTS/.test(e.message), bad);
+});
+
 test("logRetentionDays accepts 0 (keep forever)", () => {
 	const c = loadConfig({ PI_LOG_RETENTION_DAYS: "0" });
 	assert.equal(c.logRetentionDays, 0);

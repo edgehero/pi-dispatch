@@ -643,6 +643,28 @@ test("collectChain receives the REAL BullMQ job (id + data), not runJob's effect
 	assert.equal(received.prepared.outboxDir, "/j/outbox", "prepared threads through to collectChain");
 });
 
+test("runContainer receives the real BullMQ job id as jobId, which names the live transcript stream (#643)", { skip }, async () => {
+	let received;
+	const job = { id: "repeat:sched:1700000000000", attemptsMade: 0, name: "github", data: { kind: "github", repo: "o/r" } };
+	const processor = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis: { async incr() { return 1; }, async expire() {} },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+		timeoutMs: 100000,
+		deps: {
+			mintToken: async () => "t",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({ jobDir: "/j", workspace: "/j/w", sha: "s" }),
+			runContainer: async (ctx) => ((received = ctx), { code: 0, aborted: false, turns: 1 }),
+			cleanup: async () => {},
+			comment: async () => {},
+		},
+	});
+	await processor(job, "tok", new AbortController().signal);
+	assert.equal(received.jobId, "repeat:sched:1700000000000", "the stream key and the run record key come from the same id");
+});
+
 test("prepareWorkspace receives (effectiveJob, token, { queueJobId: <real BullMQ job id> })", { skip }, async () => {
 	// runJob's own `job` is the effectiveJob (a spread of job.data, no `.id`). prepare needs the real
 	// wrapper's id to derive a cron job's scheduled-for instant from the deterministic

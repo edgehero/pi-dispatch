@@ -390,6 +390,22 @@ export function globalExtensionsEnabled(env) {
 }
 
 /**
+ * Does the worker publish each running job's transcript to Valkey (issue #643, `DES-LIVE-TRANSCRIPT-STREAM`)?
+ *
+ * ON by default: watching a run is what the console and the panel are for, and what leaves the host is redacted,
+ * capped at 2,000 entries and gone 24 hours after the run. `PI_LIVE_TRANSCRIPTS=0` is the opt-out, for a deployment
+ * that must keep transcript text (PII: issue and tool text) off its Valkey. Strict, for `globalExtensionsEnabled`'s
+ * reason: `PI_LIVE_TRANSCRIPTS=false` read as ON would be an operator believing PII stays on the host while it does
+ * not, so any value but unset, empty, "1" or "0" refuses to boot.
+ */
+export function liveTranscriptsEnabled(env) {
+	const raw = env.PI_LIVE_TRANSCRIPTS;
+	if (raw === undefined || raw === "" || raw === "1") return true;
+	if (raw === "0") return false;
+	throw configError(`invalid PI_LIVE_TRANSCRIPTS: ${JSON.stringify(raw)} (want "0" to keep transcripts off Valkey, or leave it unset to publish them)`);
+}
+
+/**
  * Parse the worker's config from `env` (default process.env). Every MONEY default is conservative:
  * spend controls (`PI_DAILY_CAP`, `PI_MAX_TURNS`) exist to bound money, so they default low, and a
  * cap of 0 would fail closed (budget.mjs refuses every job) rather than mean "unlimited". The optional
@@ -485,6 +501,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		logsDir: logsDirPath(env), // || (not ??) inside logsDirPath, so an empty string falls back to the default
 		settingsFile: settingsFilePath(env), // || (not ??) inside settingsFilePath, so an empty string falls back; INT-CONFIG-OVERLAY-CONTRACT
 		captureJobLogs: env.PI_CAPTURE_JOB_LOGS === "1", // no-pii-in-logs: raw job-log capture is opt-in; anything but "1" is off
+		liveTranscripts: liveTranscriptsEnabled(env), // issue #643: the live transcript stream, ON unless PI_LIVE_TRANSCRIPTS=0
 		logRetentionDays: nonNegativeInt(env, "PI_LOG_RETENTION_DAYS", 30), // 0 = keep forever
 		// issue #292, OQ-007: how often the three host-side retention sweeps re-run while the worker is up.
 		// 0 = BOOT-ONLY, which is byte-identical to every version before this one -- start.mjs does not even

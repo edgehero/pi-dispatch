@@ -1777,6 +1777,13 @@ export const NETNS_KEEPER_CRASH_LOOP = "netns-keeper-crash-loop";
 function mergeSession(prepared, fromRunner, promoted = null) {
 	const host = prepared?.session;
 	if (!host && !fromRunner) return null;
+	// Issue #643: a job that is not a resume job now runs on a live transcript file (`prepared.live`), which the runner
+	// opens empty and reports as `absent`. That is a fact about the live file, not about resuming, and this object
+	// describes resuming: such a job's record says `disabled`, exactly what the runner said for it before the live file
+	// existed, so its record is byte-identical to one written before the feature. Narrow on purpose, the live file and
+	// the runner's token exactly `absent`: any other report is carried as it always was, and resume jobs (`host`
+	// present) never reach this line.
+	if (!host && prepared?.live && fromRunner?.resumed === false && fromRunner.reason === "absent") return { resumed: false, reason: "disabled", bytes: null };
 	// A HOST GATE THAT REFUSED OUTRANKS THE RUNNER'S `absent`, and without this rule it never reached a
 	// record at all. A refused read stages a 0-byte file rather than nothing (session-store.mjs, where the
 	// reasoning is pi's EEXIST race), the container is handed that file either way, and pi opens it and
