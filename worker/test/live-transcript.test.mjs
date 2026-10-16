@@ -602,6 +602,31 @@ test("a NEW INODE at the same path, same first line and larger, is a reset and a
 	assert.deepEqual(redis.writes.map((w) => w.text ?? w.kind), ["session started", "old", "reset", "session started", "replacement, and longer than the old one", "end"]);
 });
 
+test("the resume baseline is taken when start runs: a line written before the first read finishes is this attempt's (#644)", async () => {
+	const { lstat, lstatSync, open } = await import("node:fs").then(async (sync) => ({ ...(await import("node:fs/promises")), lstatSync: sync.lstatSync }));
+	const seen = [];
+	let target = null;
+	let wrote = false;
+	// The first async lstat lands only after pi wrote a line, the race an awaited baseline lost.
+	const fs = {
+		open,
+		lstatSync,
+		lstat: async (p) => {
+			if (!wrote) {
+				wrote = true;
+				appendFileSync(target, msg({ role: "assistant", content: [] }));
+			}
+			return lstat(p);
+		},
+	};
+	const { pub, file } = fakeSetup({ fs, onParsed: (parsed, ts, flags) => seen.push(flags.prior) });
+	target = file;
+	pub.start();
+	await pub.poll();
+	await pub.finish("completed");
+	assert.deepEqual(seen, [false], "the line pi wrote after start is not an earlier run's");
+});
+
 test("start is idempotent and refused after finish (#643)", async () => {
 	const { lstat, open } = await import("node:fs/promises");
 	let lstats = 0;
