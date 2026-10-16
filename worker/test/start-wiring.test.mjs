@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, readProgressKey } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -284,6 +284,9 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makePodmanBackend: podmanBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(makePrepareWorkspace ? { makePrepareWorkspace } : {}),
+			...(makeLiveTranscriptOpener ? { makeLiveTranscriptOpener } : {}),
+			...(makeStatusCommenter ? { makeStatusCommenter } : {}),
+			...(readProgressKey ? { readProgressKey } : {}),
 			...(listRunningSandboxes ? { listRunningSandboxes } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(loadConfig ? { loadConfig } : {}),
@@ -4944,7 +4947,8 @@ test("PI_LIVE_TRANSCRIPTS=0 hands neither venue an opener and the preparer no li
 		await rc.makeRunContainer({ ...opts, hostEnv: { ANTHROPIC_API_KEY: "sk-ant-wiring-0001" }, packagePaths: [], openJobLog: undefined, openLiveTranscript: opener, spawnFn: child })({ job: { kind: "github", repo: "o/n", provider: "anthropic", model: "m", maxTurns: 5, resume: true }, prepared: { workspace: "/w", jobDir: "/host/jobs/r1", session }, name: "pi-job-r1", signal: new AbortController().signal, jobId: "r1" });
 	};
 
-	const off = await boot({ PI_LIVE_TRANSCRIPTS: "0" });
+	// Issue #644: the file has a second reader, run progress, so "off" is both switches off.
+	const off = await boot({ PI_LIVE_TRANSCRIPTS: "0", PI_RUN_PROGRESS: "0" });
 	assert.equal(off.runContainerCalls.length, 1, "local's factory was built");
 	assert.equal(off.runContainerCalls[0].openLiveTranscript ?? null, null, "local: no opener");
 	assert.equal(off.podmanRcCalls.length, 1, "podman's factory was built");
@@ -4962,4 +4966,158 @@ test("PI_LIVE_TRANSCRIPTS=0 hands neither venue an opener and the preparer no li
 	const onSpy = [];
 	await runResume(on.runContainerCalls[0], onSpy);
 	assert.deepEqual(onSpy, ["r1"], "a resume job opens the publisher");
+
+	// Issue #644: transcripts off and progress on still builds the opener (stream off, progress on) and stages the file.
+	const mid = await boot({ PI_LIVE_TRANSCRIPTS: "0" });
+	assert.equal(typeof mid.runContainerCalls[0].openLiveTranscript, "function", "progress alone builds the opener");
+	assert.equal("stageLive" in mid.prepareCalls[0], false, "and the preparer stages the live file");
+});
+
+// Issue #644: the opener is built with both switches as config read them, and handed the commenter factory, which builds a
+// commenter only for a forge job with a target and a host that can edit, over the wrappers: a post answers `{ id }`, an edit
+// that the forge refuses with 403, 404 or 429 answers `{ stop }`, any other failure `{ ok: false }`, and neither ever throws.
+test("the opener gets both switches and a commenter factory over never-throwing post and edit wrappers (#644)", { skip }, async () => {
+	const openers = [];
+	const commenters = [];
+	const calls = [];
+	let editError = null;
+	const host = fakeHost({
+		postStatusComment: async (job, target, text, token) => (calls.push(["post", target, text, token]), { id: "77" }),
+		editStatusComment: async (job, target, id, text, token) => {
+			calls.push(["edit", id, text, token]);
+			if (editError) throw editError;
+		},
+	});
+	const boot = (env) =>
+		runStart({
+			env,
+			makeAuth: async () => ({ mintToken: async () => "tok-1", selfId: 1, source: "gh" }),
+			makeHost: () => host,
+			makeLiveTranscriptOpener: (args) => (openers.push(args), () => ({ start() {}, finish: async () => {} })),
+			makeStatusCommenter: (args) => (commenters.push(args), { start() {}, update() {}, finish: async () => {}, commentId: () => null }),
+		});
+	await boot({ PI_LIVE_TRANSCRIPTS: "0" });
+	assert.equal(openers.length, 1);
+	assert.equal(openers[0].transcripts, false);
+	assert.equal(openers[0].progress, true);
+	const make = openers[0].makeCommenter;
+	assert.equal(typeof make, "function");
+	const job = { id: "j1", kind: "github", repo: "o/n", target: { type: "issue", number: 3 } };
+	assert.equal(make({ job: { ...job, kind: "local", target: undefined }, jobId: "j1", commentId: null, onId() {} }), null, "a local job gets no commenter");
+	assert.equal(make({ job: { ...job, target: undefined }, jobId: "j1", commentId: null, onId() {} }), null, "a forge job with no target gets none");
+	const ids = [];
+	const commenter = make({ job, jobId: "j1", commentId: "5", onId: (v) => ids.push(v), finalTimeoutMs: 4000 });
+	assert.notEqual(commenter, null);
+	const args = commenters.at(-1);
+	assert.equal(args.jobId, "j1");
+	assert.equal(args.commentId, "5", "the earlier attempt's comment id is handed on");
+	assert.equal(args.finalTimeoutMs, 4000);
+	assert.deepEqual(await args.post("hello"), { id: "77" });
+	assert.deepEqual(calls.at(-1), ["post", job.target, "hello", "tok-1"], "a token minted per call, the job's own target");
+	assert.deepEqual(await args.edit("77", "t2"), { ok: true });
+	for (const status of [403, 404, 429]) {
+		editError = Object.assign(new Error("refused"), { status });
+		assert.deepEqual(await args.edit("77", "t3"), { stop: `http-${status}` }, `HTTP ${status} stops editing`);
+	}
+	editError = Object.assign(new Error("boom"), { status: 500 });
+	assert.deepEqual(await args.edit("77", "t4"), { ok: false }, "any other failure is retried on the next edit");
+	host.postStatusComment = async () => {
+		throw new Error("down");
+	};
+	assert.equal(await args.post("x"), null, "a failed post answers null, never a throw");
+
+	// A comment job whose phrase the status text could contain gets no commenter, said once; another phrase does.
+	const before = commenters.length;
+	assert.equal(make({ job: { ...job, trigger: { matched: { type: "comment", phrase: "pi-dispatch" } } }, jobId: "j1", commentId: null, onId() {} }), null, "the text starts with pi-dispatch");
+	assert.equal(make({ job: { ...job, trigger: { matched: { type: "comment", phrase: "Turn 3" } } }, jobId: "j1", commentId: null, onId() {} }), null, "any number in the text");
+	assert.equal(commenters.length, before, "neither was built");
+	assert.notEqual(make({ job: { ...job, trigger: { matched: { type: "comment", phrase: "@pi fix" } } }, jobId: "j1", commentId: null, onId() {} }), null);
+
+	openers.length = 0;
+	await boot({ PI_LIVE_TRANSCRIPTS: "0", PI_RUN_PROGRESS: "0" });
+	assert.equal(openers.length, 0, "both off: no opener at all");
+});
+
+// Issue #644: the comment's final edit comes from the run record, not the exit code: an OOM kill exits 137 (the exit's
+// reading is `unknown`) and is recorded `policy`; an infrastructure failure with attempts left says retrying; one on the
+// last attempt says failed. The opener's commenter is the registry's wrapper, whose `ended` keeps the final snapshot.
+test("the status comment's final edit is the record's outcome, or retrying for an infrastructure retry (#644)", { skip }, async () => {
+	const { InfraRetry } = await import("../src/processor.mjs");
+	const openers = [];
+	const finishes = [];
+	const host = fakeHost({ postStatusComment: async () => ({ id: "7" }), editStatusComment: async () => {} });
+	const { recordRun, records } = await runStartWithRecords({
+		env: { PI_LIVE_TRANSCRIPTS: "0" },
+		makeAuth: async () => ({ mintToken: async () => "tok-1", selfId: 1, source: "gh" }),
+		makeHost: () => host,
+		makeLiveTranscriptOpener: (args) => (openers.push(args), () => ({ start() {}, finish: async () => {} })),
+		makeStatusCommenter: ({ jobId }) => ({ start() {}, update() {}, commentId: () => "7", finish: async (s, outcome) => void finishes.push([jobId, s?.turn ?? null, outcome]) }),
+	});
+	const make = openers[0].makeCommenter;
+	const data = { kind: "github", repo: "o/n", target: { type: "issue", number: 3 } };
+	const run = (id, attemptsMade, end) => {
+		const c = make({ job: { ...data, id }, jobId: id, commentId: null, onId() {} });
+		c.ended({ turn: 4 }, "unknown");
+		recordRun({ job: { id, name: "github", attemptsMade, opts: { attempts: 2 }, data }, ...end, startedAt: "a", endedAt: "b" });
+	};
+	run("j-oom", 0, { result: { outcome: "policy", reason: "oom-killed", exitCode: 137 } });
+	run("j-infra", 0, { error: new InfraRetry("never started", { reason: "container-never-started" }) });
+	run("j-last", 1, { error: new InfraRetry("never started", { reason: "container-never-started" }) });
+	run("j-bug", 0, { error: new Error("a bug in the worker") });
+	assert.deepEqual(finishes, [
+		["j-oom", 4, "policy"],
+		["j-infra", 4, "retrying"],
+		["j-last", 4, "failed"],
+		["j-bug", 4, "failed"],
+	]);
+	assert.equal(records.length, 4, "the record is written either way");
+	recordRun({ job: { id: "j-none", name: "github", data }, result: { outcome: "completed" }, startedAt: "a", endedAt: "b" });
+	assert.equal(finishes.length, 4, "a job with no commenter settles nothing");
+});
+
+// Issue #644: an attempt refused before its container registers no commenter, so the comment the earlier attempt left
+// saying "attempt ended, retrying" was never edited again. recordRun makes that edit itself, from the key's comment id.
+test("a record with no commenter edits the comment an earlier attempt posted, once, from the progress key (#644)", { skip }, async () => {
+	const edits = [];
+	const reads = [];
+	let key = { commentId: "7", snapshot: { turn: 4, steps: 3 } };
+	const host = fakeHost({ postStatusComment: async () => ({ id: "7" }), editStatusComment: async (job, target, id, text) => void edits.push([id, text, target]) });
+	const { recordRun } = await runStartWithRecords({
+		env: { PI_LIVE_TRANSCRIPTS: "0" },
+		makeAuth: async () => ({ mintToken: async () => "tok-1", selfId: 1, source: "gh" }),
+		makeHost: () => host,
+		readProgressKey: async ({ jobId }) => (reads.push(jobId), key),
+	});
+	const data = { kind: "github", repo: "o/n", target: { type: "issue", number: 3 }, statusComment: true };
+	const settled = async () => {
+		for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+	};
+	// Attempt 2 refused by a policy gate before any container: no commenter was registered for it.
+	recordRun({ job: { id: "j-2", name: "github", attemptsMade: 1, opts: { attempts: 2 }, data }, result: { outcome: "policy", reason: "cost-cap" }, startedAt: "a", endedAt: "b" });
+	await settled();
+	assert.deepEqual(edits, [["7", "pi-dispatch job `j-2`: finished: policy. Turn 4, 3 steps.", data.target]]);
+	// Nothing posted yet (an attempt 1 refused before its container): the key holds no id, and nothing is edited.
+	key = null;
+	recordRun({ job: { id: "j-1", name: "github", attemptsMade: 0, opts: { attempts: 2 }, data }, result: { outcome: "policy" }, startedAt: "a", endedAt: "b" });
+	await settled();
+	assert.equal(edits.length, 1);
+	// A job that asked for no comment never reads the key; a phrase the text could hold is skipped before the read.
+	key = { commentId: "7", snapshot: {} };
+	const before = reads.length;
+	recordRun({ job: { id: "j-3", name: "github", data: { ...data, statusComment: undefined } }, result: { outcome: "policy" }, startedAt: "a", endedAt: "b" });
+	recordRun({ job: { id: "j-4", name: "github", data: { ...data, trigger: { matched: { type: "comment", phrase: "finished" } } } }, result: { outcome: "policy" }, startedAt: "a", endedAt: "b" });
+	await settled();
+	assert.equal(reads.length, before);
+	assert.equal(edits.length, 1);
+});
+
+// Issue #644: the phrase check against the status text's every word form, with the integers collapsed.
+test("statusTextMayMatch: a phrase the status comment could contain is caught, numbers and plurals included (#644)", { skip }, async () => {
+	const { statusTextMayMatch } = await import("../src/start.mjs");
+	for (const phrase of ["pi-dispatch", "job", "running", "finished: policy", "Turn 41", "1 step", "12 steps", "failed", "interrupted", "Phase 9 of 9", "(3/10)", "done", "`abc-7`", "retrying", "attempt ended"]) {
+		assert.equal(statusTextMayMatch(phrase, "abc-7"), true, phrase);
+	}
+	for (const phrase of ["@pi", "/pi fix", "please fix", "Pi-Dispatch", ""]) assert.equal(statusTextMayMatch(phrase, "abc-7"), false, JSON.stringify(phrase));
+	assert.equal(statusTextMayMatch(undefined, "abc-7"), false);
+	assert.equal(statusTextMayMatch("my-job-id", "my-job-id"), true, "the job id is in the text");
 });

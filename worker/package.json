@@ -51,6 +51,7 @@
     "./console-audit": "./src/console-audit.mjs",
     "./console-answer": "./src/console-answer.mjs",
     "./live-transcript": "./src/live-transcript.mjs",
+    "./run-progress": "./src/run-progress.mjs",
     "./reserve-estimate": "./src/reserve-estimate.mjs",
     "./model-endpoints": "./src/model-endpoints.mjs",
     "./model-catalog": "./src/model-catalog.mjs",

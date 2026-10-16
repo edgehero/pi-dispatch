@@ -85,7 +85,8 @@ export function makePrepareWorkspace({
 	// Issue #524: how a thrown preparer's job dir is removed. A seam so the guard around it is testable.
 	removeDir = (dir) => rmSync(dir, { recursive: true, force: true }),
 	// Issue #643: stages the live transcript file of a job that has no resume transcript (live-transcript.mjs). A seam
-	// so a test can refuse it; null stages nothing, and every job then runs as it did before the feature.
+	// so a test can refuse it; null stages nothing, and every job then runs as it did before the feature. start.mjs passes
+	// null only when both readers of the file are off (PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0, issue #644).
 	stageLive = stageLiveFile,
 }) {
 	ensureDir(jobsDir);
@@ -203,7 +204,8 @@ export function makePrepareWorkspace({
 	}
 
 	/**
-	 * Issue #643: every job gets a live transcript file, so its run can be watched (live-transcript.mjs). A resume
+	 * Issue #643: every job gets a live transcript file, so its run can be watched (live-transcript.mjs) and, since issue
+	 * #644, its progress read (run-progress.mjs). A resume
 	 * job's staged transcript IS that file, so it is left exactly as `resolveSession` made it; any other prepared job
 	 * gets an empty one at the same place, with no store key and nothing to promote. A refusal (no `jobDir`) passes
 	 * through. A file that could not be staged is said, and the job runs without one, as every job did before.

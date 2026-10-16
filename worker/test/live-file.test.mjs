@@ -184,6 +184,38 @@ test("runContainer opens the publisher with the file, the job id and a redactor,
 	assert.equal(opened.length, 0, "no staged file, no stream");
 });
 
+test("onLive hands the processor the publisher's finish, so a container it gives up on still ends its key (#644)", { skip }, async () => {
+	const finishes = [];
+	const prepared = { workspace: "/w", jobDir: "/host/jobs/j1", live: { hostDir: "/host/jobs/j1/session" } };
+	const opener = () => ({ start() {}, finish: async (outcome) => finishes.push(outcome) });
+	let handed = null;
+	const during = async () => {
+		await handed("unknown");
+	};
+	await rc.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, openLiveTranscript: opener, spawnFn: fakeSpawn({}, { during }) })({ job: JOB, prepared, name: "n", signal: new AbortController().signal, jobId: "g1", onLive: (finish) => (handed = finish) });
+	assert.equal(finishes[0], "unknown", "the processor's finish reaches the publisher while the container still runs");
+	handed = null;
+	await rc.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn({}) })({ job: JOB, prepared, name: "n", signal: new AbortController().signal, jobId: "g2", onLive: (finish) => (handed = finish) });
+	assert.equal(handed, null, "no publisher, nothing handed");
+});
+
+test("a run.statusComment job with no progress publisher says why it gets no comment, never a silent no-op (#644)", { skip }, async () => {
+	const logs = [];
+	const log = (event, fields) => logs.push([event, fields]);
+	const job = { ...JOB, statusComment: true };
+	const prepared = { workspace: "/w", jobDir: "/host/jobs/j1", live: { hostDir: "/host/jobs/j1/session" } };
+	const run = (opts, p = prepared, j = job) => rc.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, log, spawnFn: fakeSpawn({}), ...opts })({ job: j, prepared: p, name: "n", signal: new AbortController().signal, jobId: "s1" });
+	await run({});
+	assert.deepEqual(logs.filter(([e]) => e === "status_comment_skipped"), [["status_comment_skipped", { jobId: "s1", reason: "progress-off" }]], "both switches off: no opener");
+	logs.length = 0;
+	await run({ openLiveTranscript: () => ({ start() {}, finish: async () => {} }) }, { workspace: "/w", jobDir: "/j" });
+	assert.deepEqual(logs.filter(([e]) => e === "status_comment_skipped"), [["status_comment_skipped", { jobId: "s1", reason: "no-transcript" }]], "an opener but no staged file");
+	logs.length = 0;
+	await run({ openLiveTranscript: () => ({ start() {}, finish: async () => {} }) });
+	await run({}, prepared, JOB);
+	assert.equal(logs.filter(([e]) => e === "status_comment_skipped").length, 0, "a publisher, or a job that asked for no comment: nothing said");
+});
+
 test("an opener or a publisher that throws, and a Valkey that refuses every write, never fail or hold the run (#643)", { skip }, async () => {
 	const prepared = { workspace: "/w", jobDir: "/host/jobs/j1", live: { hostDir: "/host/jobs/j1/session" } };
 	const go = (openLiveTranscript) => rc.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, openLiveTranscript, spawnFn: fakeSpawn({}) })({ job: JOB, prepared, name: "n", signal: new AbortController().signal, jobId: "7" });

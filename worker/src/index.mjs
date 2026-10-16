@@ -88,6 +88,13 @@ const THROTTLE_FLOOR_MS = 11_000;
 const ABORT_GRACE_MS = 30_000;
 
 /**
+ * The longest `boundAfterAbort` waits for its give-up hook (the host budget hold, and since issue #644 the live
+ * publisher's finish, itself bounded at 3 s plus 5 s) before it resolves anyway: a hook that hangs must not undo the
+ * bound this function exists for.
+ */
+const GIVE_UP_FINISH_MS = 10_000;
+
+/**
  * Resolve `run` normally, but stop waiting once the abort has fired and the grace has passed.
  *
  * See the call site for why this exists. Returns the same `{ code: 137, aborted: true }` shape a killed
@@ -110,9 +117,21 @@ function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS, onStop
 				if (settled) return;
 				settled = true;
 				log("stop_did_not_take", { job: job.id, graceMs });
-				// Issue #596, phase 2: the container may still run, so its host budget hold must outlive this job.
-				onStopDidNotTake();
-				resolve({ code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null });
+				// Issue #596, phase 2: the container may still run, so its host budget hold must outlive this job. Issue
+				// #644: the hook also ends the attempt's live publisher, and is awaited (bounded) BEFORE this resolves,
+				// because the processor removes the job directory the publisher's last read needs once it has the result.
+				let wait = null;
+				Promise.race([
+					Promise.resolve()
+						.then(onStopDidNotTake)
+						.catch(() => {}),
+					new Promise((done) => {
+						wait = setTimeout(done, GIVE_UP_FINISH_MS);
+						wait.unref?.();
+					}),
+				])
+					.finally(() => clearTimeout(wait))
+					.then(() => resolve({ code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }));
 			}, graceMs);
 			// A boot-blocking handle is not wanted here: the worker should be able to exit if everything else
 			// has finished, and this timer only matters while a job is still in flight.
@@ -727,6 +746,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// This pickup's entry in the running jobs (issue #599, phase 2), null until it is admitted below.
 		let runningKey = null;
 		let stopDidNotTake = false;
+		// Issue #644: the attempt's live publisher finish, handed over by runContainer's `onLive` (null until it is open).
+		let finishLive = null;
 		let name;
 		let venue;
 		// THE SCOPE HOLDS, in acquire order (issue #499 part B): the repo or folder slot, then the project slot. Each is
@@ -1320,8 +1341,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// container happened to exit on its own, because the operator was told the record would say operator-cancel.
 				runContainer: (ctx) =>
 					// `jobId` (issue #643) names the live transcript stream, as it names the run record.
-					boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: job.id }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
+					// Issue #644: `onLive` hands over the attempt's publisher finish, so giving up on a container whose stop did not
+					// take also ends its progress key (outcome `unknown`: nothing saw it exit) instead of leaving its heartbeat to
+					// rewrite the key as running for as long as the worker lives.
+					boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: job.id, onLive: (finish) => (finishLive = finish) }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
 						stopDidNotTake = true;
+						return finishLive?.("unknown");
 					}).then(async (r) => {
 						await stopCancelPoll();
 						const raced = r && r.aborted !== true && signal.aborted === true && signal.reason === "operator-cancel";
@@ -1431,7 +1456,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				await Promise.resolve(redis.del?.(cancelReqKey(job.id))).catch(() => {});
 				return true;
 			};
-			// A retry that already spent (a container that ran and exited as infra) keeps what it spent on the record, and
+			// A retry that already spent (a container that ran and exited as infra) keeps what it spent on the record (and, issue
+			// #644, where its run got to, `progress`, which the processor put on the error beside `resources`), and
 			// says the processor's own operator-cancel sentence; one that never started says it was cancelled before it did.
 			// The session rides along as the aborted-container path keeps it (`mergeSession`, already applied to the throw).
 			// A NON-retryable error (gate round 3) is not known to have started nothing, so it says the processor's own
@@ -1439,7 +1465,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			const endCancelled = async ({ retryable }) => {
 				const spent = error?.budgetReserved === true;
 				const beforeStart = retryable && !spent;
-				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null), ...(error?.dollars ? { dollars: error.dollars } : {}), ...(spent && error?.resources ? { resources: error.resources } : {}) };
+				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null), ...(error?.dollars ? { dollars: error.dollars } : {}), ...(spent && error?.resources ? { resources: error.resources } : {}), ...(spent && error?.progress ? { progress: error.progress } : {}) };
 				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent, retryable, ...(retryable ? {} : { failure: scrubCredentials(String(error?.message ?? error)).slice(0, 300) }) });
 				if (deps?.comment) await Promise.resolve(deps.comment(job.data, beforeStart ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS["operator-cancel"])).catch(() => {});
 				recordAfterGate({ job, result, startedAt, endedAt: new Date().toISOString() });

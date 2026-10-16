@@ -158,3 +158,60 @@ test("setParkedLabel rewrites the work item's tags whole: adds the marker beside
 	assert.deepEqual(patches.map((c) => JSON.parse(c.init.body)[0].value), ["triaged; pi-awaiting-input", "triaged"], "never a second copy, never another tag lost");
 	assert.equal(patches[0].init.headers["content-type"], "application/json-patch+json");
 });
+
+// --- status comment id and edit (issue #644) ---
+
+const THREAD_ROUTE = "POST /Fabrikam/_apis/git/repositories/repo-guid/pullRequests/12/threads";
+
+test("postStatusComment returns <thread>:<comment> for a pull request and wi:<comment> for a work item", async () => {
+	const pr = makeAzureHost({ orgUrl: ORG, fetchFn: fakeFetch({ [REPO_ROUTE]: REPO_BODY, [THREAD_ROUTE]: { id: 88, comments: [{ id: 1 }] } }) });
+	assert.deepEqual(await pr.postStatusComment(JOB, { type: "pull_request", number: 12 }, "hi", "t"), { id: "88:1" });
+	const wi = makeAzureHost({ orgUrl: ORG, fetchFn: fakeFetch({ "POST /Fabrikam/_apis/wit/workItems/7/comments": { id: 4021, workItemId: 7 } }) });
+	assert.deepEqual(await wi.postStatusComment(JOB, { type: "issue", number: 7 }, "hi", "t"), { id: "wi:4021" });
+	const bare = makeAzureHost({ orgUrl: ORG, fetchFn: fakeFetch({ [REPO_ROUTE]: REPO_BODY, [THREAD_ROUTE]: { id: 88 } }) });
+	assert.deepEqual(await bare.postStatusComment(JOB, { type: "pull_request", number: 12 }, "hi", "t"), { id: null }, "a thread with no comment id is no id, never half of one");
+});
+
+test("editStatusComment PATCHes the thread comment with content, on the stable api-version", async () => {
+	const fetchFn = fakeFetch({ [REPO_ROUTE]: REPO_BODY, "PATCH /Fabrikam/_apis/git/repositories/repo-guid/pullRequests/12/threads/88/comments/1": { id: 1 } });
+	await makeAzureHost({ orgUrl: ORG, fetchFn }).editStatusComment(JOB, { type: "pull_request", number: 12 }, "88:1", "new", "t");
+	const call = fetchFn.calls.at(-1);
+	assert.deepEqual(JSON.parse(call.init.body), { content: "new" });
+	assert.ok(call.url.endsWith("?api-version=7.1"));
+	assert.equal(call.init.headers.Authorization, `Basic ${Buffer.from(":t").toString("base64")}`);
+	assert.equal(call.init.redirect, "error");
+});
+
+test("editStatusComment PATCHes the work item comment with text, on the pinned preview api-version", async () => {
+	const fetchFn = fakeFetch({ "PATCH /Fabrikam/_apis/wit/workItems/7/comments/4021": { id: 4021 } });
+	await makeAzureHost({ orgUrl: ORG, fetchFn }).editStatusComment(JOB, { type: "issue", number: 7 }, "wi:4021", "new", "t");
+	const call = fetchFn.calls.at(-1);
+	assert.deepEqual(JSON.parse(call.init.body), { text: "new" });
+	assert.ok(call.url.endsWith("?api-version=7.1-preview.4"));
+});
+
+test("editStatusComment refuses a malformed id, or one whose form disagrees with the target, before any request", async () => {
+	const fetchFn = fakeFetch({});
+	const host = makeAzureHost({ orgUrl: ORG, fetchFn });
+	const cases = [
+		["pull_request", "wi:4021"],
+		["issue", "88:1"],
+		["pull_request", "88"],
+		["pull_request", "88:1:2"],
+		["issue", "wi:"],
+		["issue", "wi:1/2"],
+		["issue", `wi:${"1".repeat(200)}`],
+		["issue", 4021],
+	];
+	for (const [type, id] of cases) {
+		await assert.rejects(() => host.editStatusComment(JOB, { type, number: 7 }, id, "t", "t"), (e) => e.piDispatchConfig === true, `${type} ${id}`);
+	}
+	assert.equal(fetchFn.calls.length, 0);
+});
+
+test("a failed edit throws with the HTTP status set", async () => {
+	for (const status of [403, 404, 429, 503]) {
+		const host = makeAzureHost({ orgUrl: ORG, fetchFn: fakeFetch({ "PATCH /Fabrikam/_apis/wit/workItems/7/comments/4021": status }) });
+		await assert.rejects(() => host.editStatusComment(JOB, { type: "issue", number: 7 }, "wi:4021", "t", "t"), (e) => e.status === status && e.piDispatchRetry === true);
+	}
+});

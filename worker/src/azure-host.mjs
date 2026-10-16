@@ -24,6 +24,7 @@
 import { configError } from "./config.mjs";
 import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
+import { commentIdOf, isStatusCommentId } from "./status-comment.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 import { isDeterminateFetchFailure } from "./transient.mjs";
 
@@ -182,6 +183,67 @@ export function makeAzureHost({ orgUrl, fetchFn = fetch } = {}) {
 		if (!res.ok) {
 			throw new InfraRetry(`azure-host: POST ${path} returned ${res.status}`);
 		}
+		// The created comment's id, for the status commenter (issue #644), in the form `editStatusComment` routes on:
+		// `<threadId>:<commentId>` for a pull request thread (the create answers the thread, its comments inside) and
+		// `wi:<commentId>` for a work item comment. Read after the 2xx and never thrown on: the comment exists, and a
+		// retry would post a second one.
+		const created = await res.json().catch(() => null);
+		if (isPr) {
+			const threadId = commentIdOf(created?.id);
+			const commentId = commentIdOf(Array.isArray(created?.comments) ? created.comments[0]?.id : null);
+			return { id: threadId && commentId ? `${threadId}:${commentId}` : null };
+		}
+		const commentId = commentIdOf(created?.id);
+		return { id: commentId ? `wi:${commentId}` : null };
+	}
+
+	/**
+	 * Replace the text of the status comment `id` this host posted (issue #644, status-comment.mjs). The id says which
+	 * API it lives in, in the form `postStatusComment` returns:
+	 *   - `<threadId>:<commentId>`: a pull request thread comment, `PATCH .../pullRequests/{pr}/threads/{t}/comments/{c}`
+	 *     with `{ content }`;
+	 *   - `wi:<commentId>`: a work item comment, `PATCH .../wit/workItems/{w}/comments/{c}` with `{ text }`, on the same
+	 *     pinned preview api-version the post uses.
+	 * An id whose form disagrees with `target.type` is refused rather than sent: the pull request or work item number
+	 * comes from the target, and the wrong pairing would address a different object. The id is checked against
+	 * `STATUS_COMMENT_ID_RE` before it reaches a URL. An HTTP failure throws InfraRetry with `status` set, so the
+	 * caller can tell a 403/404/429 (stop editing) from a blip.
+	 */
+	async function editStatusComment(ref, target, id, text, token) {
+		const { project } = scopeOf(ref);
+		const isPr = target?.type === "pull_request";
+		const thread = isStatusCommentId(id) ? /^([0-9]+):([0-9]+)$/.exec(id) : null;
+		const workItem = isStatusCommentId(id) ? /^wi:([0-9]+)$/.exec(id) : null;
+		if (isPr ? !thread : !workItem) {
+			throw configError(`azure-host: malformed status comment id for a ${isPr ? "pull request" : "work item"}: ${JSON.stringify(id)}`);
+		}
+		let path;
+		let body;
+		if (isPr) {
+			const repo = await repoOf(ref, token);
+			path = `/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo?.id)}/pullRequests/${encodeURIComponent(target?.number)}/threads/${thread[1]}/comments/${thread[2]}?api-version=${API_VERSION}`;
+			body = { content: text };
+		} else {
+			path = `/${encodeURIComponent(project)}/_apis/wit/workItems/${encodeURIComponent(target?.number)}/comments/${workItem[1]}?api-version=7.1-preview.4`;
+			body = { text };
+		}
+		let res;
+		try {
+			res = await fetchFn(`${root}${path}`, {
+				method: "PATCH",
+				headers: { Authorization: authHeader(token), "content-type": "application/json" },
+				body: JSON.stringify(body),
+				redirect: "error",
+			});
+		} catch (err) {
+			if (isDeterminateFetchFailure(err)) {
+				throw configError(`azure-host: PATCH ${path} failed (${fetchFailureReason(err)})`);
+			}
+			throw new InfraRetry(`azure-host: PATCH ${path} failed (${fetchFailureReason(err)})`);
+		}
+		if (!res.ok) {
+			throw Object.assign(new InfraRetry(`azure-host: PATCH ${path} returned ${res.status}`), { status: res.status });
+		}
 	}
 
 	/**
@@ -228,7 +290,7 @@ export function makeAzureHost({ orgUrl, fetchFn = fetch } = {}) {
 		if (!res.ok) throw new InfraRetry(`azure-host: PATCH ${path} returned ${res.status}`);
 	}
 
-	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
+	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, editStatusComment, resolvePullRequestHead, setParkedLabel };
 }
 
 /**

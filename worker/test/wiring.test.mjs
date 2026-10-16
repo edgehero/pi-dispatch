@@ -1023,6 +1023,43 @@ test("an abort whose stop does NOT take still frees the slot, and says so (#227)
 	assert.equal(logs[0][1].job, "j1");
 });
 
+test("giving up on a container whose stop did not take finishes its live publisher, before the job dir goes (#644)", { skip }, async () => {
+	// The hole: the publisher (and so the progress key's heartbeat) ended only on the CLI child's close or error, which
+	// never comes for this container, so the key was rewritten as running for its whole 7-day window.
+	const order = [];
+	const finished = [];
+	const ac = new AbortController();
+	const processor = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis: { async incr() { return 1; }, async expire() {} },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+		abortGraceMs: 0,
+		timeoutMs: 100000,
+		recordRun: () => order.push("record"),
+		deps: {
+			mintToken: async () => "t",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
+			runContainer: async ({ onLive }) => {
+				onLive(async (outcome) => {
+					await new Promise((r) => setTimeout(r, 5));
+					finished.push(outcome);
+					order.push("finish");
+				});
+				ac.abort("job-timeout-30m");
+				return new Promise(() => {});
+			},
+			cleanup: async () => order.push("cleanup"),
+			comment: async () => {},
+		},
+	});
+	const result = await processor({ id: "j3", data: { kind: "github", repo: "o/r", target: { number: 1 } } }, "tok", ac.signal);
+	assert.equal(result.outcome, "policy");
+	assert.deepEqual(finished, ["unknown"], "ended once, with the outcome nothing observed");
+	assert.equal(order[0], "finish", "awaited before the processor records or removes the job directory");
+});
+
 test("a stop that DOES take settles normally and logs nothing about the grace (#227)", async () => {
 	const mod = await import("../src/index.mjs");
 	const logs = [];

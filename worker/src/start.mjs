@@ -71,6 +71,8 @@ import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { makeLiveTranscriptOpener } from "./live-transcript.mjs";
+import { readProgressKey } from "./run-progress.mjs";
+import { makeStatusCommenter, makeStatusCommentRegistry, renderStatusText, STATUS_OUTCOMES, STATUS_RETRYING } from "./status-comment.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
 import { authoredCron, envelopeJobPaths, loadSchedules, servedSchedules } from "./schedules.mjs";
@@ -143,6 +145,9 @@ const WORKER_VERSION = (() => {
 // `makeWatchCloser` lives in its own module since issue #301 (the receiver's triggers watch registers
 // the same handle); re-exported here so every existing importer keeps its address.
 export { makeWatchCloser } from "./watch-closer.mjs";
+
+/** The bound on `recordRun`'s final status edit for an attempt that registered no commenter, as the commenter's own. */
+const STATUS_UNREGISTERED_EDIT_MS = 4_000;
 
 /**
  * Race a read against a fuse, and CLEAN THE FUSE UP whichever side wins (issue #300). The fuse is
@@ -565,6 +570,36 @@ function watchModelEndpointsFile(config, ref, log, atBoot) {
  * per job (mintToken throws configError) rather than blocking startup. Collaborators are injectable
  * (defaulting to the real ones) so the wiring is testable offline with no Redis and no forge.
  */
+/**
+ * Whether a status comment for `jobId` could contain `phrase` (issue #644). The receiver starts a job on a comment that
+ * merely CONTAINS the phrase (receiver filter.mjs `body.includes`), so a bot comment matching its own deployment's phrase
+ * (a phrase like "pi-dispatch" or "Turn") would be read as a new request on every edit. The text is fixed words, the job
+ * id and integers, so this renders it for every word form it can take (singular and plural counts, each failure part,
+ * each phase form, running, every outcome and the retry) and compares with every digit run collapsed to one `0` on both sides: the
+ * integers are the only part that varies, and a phrase holding a number matches any number there. Conservative on
+ * purpose: a false yes costs one comment, a false no a comment loop.
+ */
+export function statusTextMayMatch(phrase, jobId, render = renderStatusText) {
+	if (typeof phrase !== "string" || phrase === "") return false;
+	const norm = (t) => String(t).replace(/[0-9]+/g, "0");
+	const needle = norm(phrase);
+	for (const c of [1, 2]) {
+		for (const failed of [0, c]) {
+			for (const interrupted of [0, c]) {
+				for (const phase of [null, { index: c - 1, done: null, total: null }, { index: c - 1, done: c, total: null }, { index: c - 1, done: c, total: c }]) {
+					for (const phases of [[], Array.from({ length: c + 1 }, () => "")]) {
+						for (const outcome of [undefined, ...STATUS_OUTCOMES]) {
+							const snapshot = { turn: c, steps: c, failed, interrupted, phase, phases };
+							if (norm(render({ jobId, snapshot, outcome })).includes(needle)) return true;
+						}
+					}
+				}
+			}
+		}
+	}
+	return false;
+}
+
 export async function startWorker(
 	env = process.env,
 	{
@@ -606,6 +641,13 @@ export async function startWorker(
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		// Issue #643: the preparer factory, a seam so a test can see what the wiring hands it (`stageLive`).
 		makePrepareWorkspace: makePrepareWorkspaceFn = makePrepareWorkspace,
+		// Issue #644: the opener and the status commenter factories, seams so a wiring test sees the switches and the
+		// forge calls the wiring hands them.
+		makeLiveTranscriptOpener: makeLiveTranscriptOpenerFn = makeLiveTranscriptOpener,
+		makeStatusCommenter: makeStatusCommenterFn = makeStatusCommenter,
+		// Issue #644: the progress key's bounded read, a seam so a wiring test can hand `recordRun` an earlier attempt's
+		// comment id without a Valkey.
+		readProgressKey: readProgressKeyFn = readProgressKey,
 		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
 		makeImagePreflight: makeImagePreflightFn = makeImagePreflight,
 		makeScopeClaimSweeper: makeScopeClaimSweeperFn = makeScopeClaimSweeper,
@@ -1381,10 +1423,100 @@ export async function startWorker(
 	// would be bytes nothing reads. That is also what keeps a single-host deployment byte-identical, since
 	// no job then issues a single extra Valkey command.
 	const runMirror = config.workerNameDeclared ? makeRunMirrorFn({ redis, retentionDays: config.logRetentionDays, log }) : null;
+	// Issue #644: the forge status comment's two calls, the `comment` adapter's shape below (forgeFor, the auth re-resolve,
+	// a token minted per call) and its rule: they NEVER throw, since the comment decides nothing. `statusPost` answers
+	// `{ id }` or null; `statusEdit` answers `{ ok: true }`, `{ stop }` for a 403, 404 or 429 (the comment is gone, the
+	// token may not edit it, or the forge is rate limiting: editing on would only repeat the refusal) and `{ ok: false }`
+	// for any other failure, which the commenter tries again on its next edit. Logs carry the job id and the status.
+	const statusAuth = async (job) => {
+		const forge = forgeFor(job);
+		if (!forge?.host) return null;
+		let auth = forge.auth ?? null;
+		if (!auth) {
+			try {
+				auth = await ensureAuth(job.kind);
+			} catch {
+				auth = null;
+			}
+		}
+		return auth ? { forge, auth } : null;
+	};
+	const statusPost = async (job, text) => {
+		try {
+			const ready = await statusAuth(job);
+			if (!ready || typeof ready.forge.host.postStatusComment !== "function") return null;
+			const token = await ready.auth.mintToken(job);
+			const posted = await ready.forge.host.postStatusComment(job, job.target, text, token);
+			return typeof posted?.id === "string" && posted.id !== "" ? { id: posted.id } : null;
+		} catch (err) {
+			log("status_comment_failed", { jobId: job?.id, op: "post", status: Number.isSafeInteger(err?.status) ? err.status : null });
+			return null;
+		}
+	};
+	const statusEdit = async (job, id, text) => {
+		try {
+			const ready = await statusAuth(job);
+			if (!ready) return { ok: false }; // auth unreachable just now: the next edit asks again
+			if (typeof ready.forge.host.editStatusComment !== "function") return { stop: "no-edit" };
+			const token = await ready.auth.mintToken(job);
+			await ready.forge.host.editStatusComment(job, job.target, id, text, token);
+			return { ok: true };
+		} catch (err) {
+			if (err?.status === 403 || err?.status === 404 || err?.status === 429) return { stop: `http-${err.status}` };
+			log("status_comment_failed", { jobId: job?.id, op: "edit", status: Number.isSafeInteger(err?.status) ? err.status : null });
+			return { ok: false };
+		}
+	};
+	// The commenter for one job, asked by the opener only when its trigger set `run.statusComment` and progress is on;
+	// null for a job with no forge to post to (a local or cron job without a target) or a host that cannot edit, so such
+	// a job runs with no comment rather than with a comment it could never update.
+	// The commenters of the running jobs, by job id: the sink hands each its final snapshot when the container ends, and
+	// `recordRun` below makes the final edit with the record's outcome (status-comment.mjs says why not the exit's).
+	const statusComments = makeStatusCommentRegistry();
+	const makeProgressCommenter = ({ job, jobId, commentId, onId, finalTimeoutMs }) => {
+		const host = forgeFor(job)?.host;
+		if (!host || typeof host.editStatusComment !== "function" || typeof host.postStatusComment !== "function" || !job?.target) {
+			log("status_comment_skipped", { jobId: job?.id ?? null, reason: "no-forge-target" });
+			return null;
+		}
+		// The comment must never trigger a job of its own: skipped, and said once for this job, when its text could hold
+		// the phrase the job was started with. A job started otherwise carries no phrase (`matched.phrase` is the comment
+		// route's), so a deployment whose comment trigger has a colliding phrase is caught only on its comment jobs.
+		const phrase = job?.trigger?.matched?.phrase;
+		if (statusTextMayMatch(phrase, jobId)) {
+			log("status_comment_skipped", { jobId: job?.id ?? null, reason: "phrase-collision" });
+			return null;
+		}
+		const commenter = makeStatusCommenterFn({ jobId, post: (text) => statusPost(job, text), edit: (id, text) => statusEdit(job, id, text), commentId, onId, log, ...(finalTimeoutMs ? { finalTimeoutMs } : {}) });
+		return commenter ? statusComments.register(jobId, commenter) : null;
+	};
 	// Issue #643 (DES-LIVE-TRANSCRIPT-STREAM): every running job's transcript, redacted, to its own capped Valkey stream,
 	// on every deployment unless PI_LIVE_TRANSCRIPTS=0. Not gated on a worker name, unlike the mirror above: the panel on
 	// a single host reads the same stream. Handed to both venues' runContainer, which publish only beside a staged file.
-	const openLiveTranscript = config.liveTranscripts ? makeLiveTranscriptOpener({ redis, log }) : null;
+	//
+	// Issue #644 (DES-RUN-PROGRESS): the same opener reads each job's progress off the same file unless PI_RUN_PROGRESS=0,
+	// so it is built when either switch is on; with transcripts off it tails the file and writes no stream.
+	const openLiveTranscript = config.liveTranscripts || config.runProgress ? makeLiveTranscriptOpenerFn({ redis, log, transcripts: config.liveTranscripts, progress: config.runProgress, makeCommenter: makeProgressCommenter }) : null;
+	// Issue #644: the final edit for an attempt that registered no commenter, so nothing else would edit the comment again.
+	// That is an attempt refused before its container (a cost cap, a policy gate) after an earlier attempt posted the
+	// comment and left it saying "attempt ended, retrying": with no edit here it said so for good. The comment's id is
+	// the one the earlier attempt's final write put in the progress key; an attempt 1 refused before its container
+	// finds none (nothing was posted) and edits nothing. One edit, from the record's outcome and the key's last snapshot
+	// (the earlier attempt's counters, the last the run reached), bounded and never throwing; skipped, as the commenter
+	// is, when the text could hold the job's own phrase.
+	const settleUnregisteredStatus = async (job, outcome) => {
+		try {
+			const data = job?.data ?? {};
+			if (statusTextMayMatch(data.trigger?.matched?.phrase, job.id)) return;
+			const key = await readProgressKeyFn({ redis, jobId: job.id });
+			if (!key?.commentId) return;
+			const text = renderStatusText({ jobId: job.id, snapshot: key.snapshot, outcome });
+			const done = await settleWithin(statusEdit(data, key.commentId, text), STATUS_UNREGISTERED_EDIT_MS, null);
+			if (done === null) log("status_comment_final_timeout", { jobId: job.id });
+		} catch {
+			// The comment decides nothing: a failure here costs a stale comment, never the record path.
+		}
+	};
 	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null }) => {
 		// The project (issue #499) was resolved at the pickup gate and rides here as `project` (an id or null), so a live
 		// edit of projects.json mid-run cannot make the record disagree with what the job was counted against. A record
@@ -1397,6 +1529,18 @@ export async function startWorker(
 		// below is built with, so the record resolves a job's venue exactly as dispatch does.
 		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier });
 		writeRecord(record);
+		// Issue #644: the status comment's last edit, from the record's classification. An infrastructure failure the queue
+		// will retry says the attempt ended and is being retried, not "finished": BullMQ retries an error that is not
+		// unrecoverable while attempts are left, and this record is written while the attempt still counts as running
+		// (`attemptsMade` is the attempts finished before it). Never throws, never awaited; a job with no commenter is a
+		// no-op.
+		try {
+			const attempts = Number.isSafeInteger(job?.opts?.attempts) ? job.opts.attempts : 1;
+			const retrying = !result && error instanceof InfraRetry && record.attempt < attempts;
+			const outcome = retrying ? STATUS_RETRYING : record.outcome;
+			if (statusComments.has(job?.id)) void statusComments.settle(job?.id, outcome);
+			else if (job?.data?.statusComment === true) void settleUnregisteredStatus(job, outcome);
+		} catch {}
 		// STRICTLY AFTER the file, and deliberately not awaited. After, because a crash between the two must
 		// leave a record with no fleet row rather than a fleet row with no record -- the mirror is a VIEW,
 		// and a view that can outlive its source is a second source of truth. Not awaited, because this is
@@ -1898,7 +2042,7 @@ export async function startWorker(
 						egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
 						egressProxy: config.egressProxy,
 						openJobLog,
-						openLiveTranscript, // issue #643: null when PI_LIVE_TRANSCRIPTS=0, and nothing is published
+						openLiveTranscript, // issues #643 and #644: null when PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0
 						globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
 						allowGlobalExtensions: config.allowGlobalExtensions,
 						// REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set
@@ -2347,8 +2491,9 @@ export async function startWorker(
 			prepareWorkspace: makePrepareWorkspaceFn({
 				jobsDir: config.jobsDir,
 				// Issue #643: with PI_LIVE_TRANSCRIPTS=0 no live file is staged either, so a job without a resume transcript
-				// runs exactly as it did before the feature (its session in memory, no /session mount).
-				...(config.liveTranscripts ? {} : { stageLive: null }),
+				// runs exactly as it did before the feature (its session in memory, no /session mount). Since issue #644 the
+				// progress reader needs the same file, so it is left out only when both switches are off.
+				...(config.liveTranscripts || config.runProgress ? {} : { stageLive: null }),
 				// Issue #464: the boot's own check, asked again before every job against the same env.
 				ensureDir: (dir) => ensureJobsDirFn(dir, { env }),
 				forgeFor,

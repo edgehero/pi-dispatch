@@ -817,3 +817,178 @@ test("a client still connecting keeps the entries queued, and they are written o
 	assert.deepEqual(r.writes.map((w) => w.text), ["session started", "first words", "second"], "the queued entries were kept, in order");
 	await s.pub.finish("completed");
 });
+
+// --- run progress (issue #644): the key writer and the progress-only mode, on the same database 14 ---------------
+
+const { makeLiveTranscriptOpener } = await import("../src/live-transcript.mjs");
+const { makeProgressWriter, progressKeyFor, PROGRESS_MAX_BYTES } = await import("../src/run-progress.mjs");
+const pcall = (id, name, args = {}) => ({ type: "toolCall", id, name, arguments: args });
+const presult = (id, name, durationMs = 1, isError = false) => ({ role: "toolResult", toolCallId: id, toolName: name, content: [], isError, durationMs });
+// `fire` runs the timer due soonest (the shortest delay), so the writer's 30 s heartbeat waits behind a trailing write.
+const manualTimers = () => {
+	const pending = [];
+	const setTimer = (fn, ms) => {
+		const t = { fn, ms, unref() {} };
+		pending.push(t);
+		return t;
+	};
+	const clearTimer = (t) => {
+		const i = pending.indexOf(t);
+		if (i !== -1) pending.splice(i, 1);
+	};
+	const fire = () => {
+		pending.sort((a, b) => a.ms - b.ms);
+		return pending.shift()?.fn();
+	};
+	return { pending, setTimer, clearTimer, fire };
+};
+
+test("the progress key: throttled to once a second with a trailing write, 7 day TTL from the first write, 24 h after the final (#644)", { skip: live }, async () => {
+	const r = await client();
+	let t = Date.parse(AT);
+	const timers = manualTimers();
+	const w = makeProgressWriter({ redis: r, jobId: "prog:throttle", now: () => t, setTimer: timers.setTimer, clearTimer: timers.clearTimer });
+	const key = progressKeyFor("prog:throttle");
+	w.update({ v: 1, turn: 1 });
+	await w.init();
+	await new Promise((res) => setTimeout(res, 50));
+	assert.equal(JSON.parse(await r.get(key)).turn, 1, "the first change is written at once");
+	const ttl1 = await r.pttl(key);
+	assert.ok(ttl1 > LIVE_TTL_LIVE_MS - 60_000 && ttl1 <= LIVE_TTL_LIVE_MS, `live TTL ${ttl1}`);
+	w.update({ v: 1, turn: 2 });
+	w.update({ v: 1, turn: 3 });
+	await new Promise((res) => setTimeout(res, 20));
+	assert.equal(JSON.parse(await r.get(key)).turn, 1, "inside the second: not yet");
+	assert.equal(timers.pending.filter((p) => p.ms <= 1000).length, 1, "one trailing write is scheduled, beside the heartbeat");
+	t += 1000;
+	timers.fire();
+	await new Promise((res) => setTimeout(res, 50));
+	assert.equal(JSON.parse(await r.get(key)).turn, 3, "the trailing write carries the latest");
+	t += 3_600_000;
+	w.update({ v: 1, turn: 4 });
+	await new Promise((res) => setTimeout(res, 50));
+	const ttl2 = await r.pttl(key);
+	assert.ok(ttl2 <= LIVE_TTL_LIVE_MS - 3_600_000 + 1000, "a later write never extends the TTL past 7 days from the first");
+	await w.final({ v: 1, turn: 4, ended: true, outcome: "completed" });
+	const end = JSON.parse(await r.get(key));
+	assert.deepEqual([end.ended, end.outcome, end.commentId], [true, "completed", null]);
+	const ttl3 = await r.pttl(key);
+	assert.ok(ttl3 > LIVE_TTL_ENDED_MS - 60_000 && ttl3 <= LIVE_TTL_ENDED_MS, `ended TTL ${ttl3}`);
+	w.update({ v: 1, turn: 99 });
+	await new Promise((res) => setTimeout(res, 30));
+	assert.equal(JSON.parse(await r.get(key)).turn, 4, "nothing after the final write");
+});
+
+test("the progress key carries an earlier attempt's commentId into the next attempt, and caps its size (#644)", { skip: live }, async () => {
+	const r = await client();
+	const key = progressKeyFor("prog:retry");
+	await r.set(key, JSON.stringify({ v: 1, turn: 9, commentId: "IC_kwDO:123" }), "PX", 60_000);
+	const w = makeProgressWriter({ redis: r, jobId: "prog:retry", now: () => Date.parse(AT) });
+	assert.equal(await w.init(), "IC_kwDO:123");
+	const huge = { v: 1, turn: 1, recent: Array.from({ length: 20 }, () => ({ tool: "x".repeat(2000), status: "ok", durationMs: 1, at: 1 })), phases: [], note: null };
+	await w.final(huge);
+	const raw = await r.get(key);
+	assert.ok(Buffer.byteLength(raw) <= PROGRESS_MAX_BYTES, `${Buffer.byteLength(raw)} bytes`);
+	const back = JSON.parse(raw);
+	assert.deepEqual([back.turn, back.commentId], [1, "IC_kwDO:123"], "replaced, the comment id kept");
+	await r.set(key, "not json", "PX", 60_000);
+	assert.equal(await makeProgressWriter({ redis: r, jobId: "prog:retry" }).init(), null, "an unreadable old key: a fresh comment");
+	await r.set(key, JSON.stringify({ commentId: "bad id!" }), "PX", 60_000);
+	assert.equal(await makeProgressWriter({ redis: r, jobId: "prog:retry" }).init(), null, "a malformed id is never carried");
+});
+
+test("a Valkey outage never throws from the progress writer: a closed client is counted and logged once (#644)", { skip: live }, async () => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const url = new URL(valkeyUrl);
+	url.pathname = "/14";
+	const closed = makeRedisClient(url.toString());
+	closed.on("error", () => {});
+	await closed.ping();
+	closed.disconnect();
+	const logs = [];
+	const w = makeProgressWriter({ redis: closed, jobId: "prog:down", log: (e) => logs.push(e) });
+	w.update({ v: 1 });
+	assert.equal(await w.init(), null);
+	await w.final({ v: 1, ended: true });
+	assert.deepEqual(logs, ["run_progress_write_failed"]);
+});
+
+test("transcripts off and progress on: the file is tailed, the progress key written, and no stream is ever touched (#644)", { skip: live }, async () => {
+	const r = await client();
+	const dir = tempDir("pi-live-prog-");
+	const file = join(dir, "current.jsonl");
+	// A resume transcript: the earlier run's lines are before the baseline.
+	writeFileSync(file, header() + msg({ role: "assistant", content: [pcall("old", "report_progress", { phase: "plan", total: 2 })] }) + msg(presult("old", "report_progress")));
+	const open = makeLiveTranscriptOpener({ redis: r, transcripts: false, progress: true, pollMs: 3_600_000, now: () => Date.parse(AT) });
+	const pub = open({ file, jobId: "prog:off-1", redact: (t) => String(t), job: { progress: true } });
+	pub.start();
+	await pub.poll();
+	appendFileSync(file, msg({ role: "assistant", content: [pcall("a", "bash", { cmd: "ls" }), pcall("b", "report_progress", { phase: "build", done: 1, total: 4 })] }));
+	appendFileSync(file, msg(presult("b", "report_progress", 2)));
+	await pub.poll();
+	await pub.finish("completed");
+	assert.equal(await r.exists(liveKeyFor("prog:off-1")), 0, "no run:live: key");
+	const snap = JSON.parse(await r.get(progressKeyFor("prog:off-1")));
+	assert.deepEqual([snap.turn, snap.steps, snap.interrupted, snap.ended, snap.outcome], [1, 1, 1, true, "completed"]);
+	assert.deepEqual(snap.prior, { turns: 1, steps: 1 });
+	assert.deepEqual(snap.phases, ["plan", "build"]);
+	assert.deepEqual(snap.phase, { index: 1, done: 1, total: 4 });
+	assert.deepEqual(pub.progressSummary(), { turns: 1, steps: 1, interrupted: 1, toolMs: 2, longestStepMs: 2, phasesDeclared: 2, lastPhaseIndex: 1, tools: { report_progress: 1 } });
+	assert.equal(pub.stats().pending, 0, "nothing queued for a stream");
+});
+
+test("both on: the stream is as before and the progress key beside it; a job without run.progress reads no phases (#644)", { skip: live }, async () => {
+	const r = await client();
+	const dir = tempDir("pi-live-prog-");
+	const file = join(dir, "current.jsonl");
+	writeFileSync(file, "");
+	const open = makeLiveTranscriptOpener({ redis: r, transcripts: true, progress: true, pollMs: 3_600_000, now: () => Date.parse(AT) });
+	const pub = open({ file, jobId: "prog:both-1", redact: (t) => String(t), job: {} });
+	pub.start();
+	appendFileSync(file, header() + msg({ role: "assistant", content: [pcall("1", "report_progress", { phase: "x" })] }) + msg(presult("1", "report_progress")));
+	await pub.poll();
+	await pub.finish("completed");
+	const kinds = (await r.xrange(liveKeyFor("prog:both-1"), "-", "+")).map(([, f]) => f[1]);
+	assert.deepEqual(kinds, ["note", "tool-call", "tool-result", "end"]);
+	const snap = JSON.parse(await r.get(progressKeyFor("prog:both-1")));
+	assert.deepEqual([snap.steps, snap.phases, snap.prior], [1, [], null], "an empty staged file has no prior, and no phases without run.progress");
+	assert.equal(makeLiveTranscriptOpener({ redis: r, transcripts: false, progress: false }), null, "both off: no opener");
+	assert.equal(makeLiveTranscriptOpener({ redis: null, progress: true }), null, "no client: no opener");
+});
+
+test("the opener with progress off says once that a run.statusComment job gets no comment (#644)", () => {
+	const logs = [];
+	const open = makeLiveTranscriptOpener({ redis: {}, transcripts: true, progress: false, log: (event, fields) => logs.push([event, fields]) });
+	open({ file: "/nonexistent/current.jsonl", jobId: "j/1", redact: (t) => String(t), job: { statusComment: true } });
+	open({ file: "/nonexistent/current.jsonl", jobId: "j2", redact: (t) => String(t), job: {} });
+	assert.deepEqual(logs, [["status_comment_skipped", { jobId: sanitizeJobId("j/1"), reason: "progress-off" }]]);
+});
+
+test("a reset in progress mode: counts kept, the rewritten lines replayed without counting twice (#644)", { skip: live }, async () => {
+	const r = await client();
+	const dir = tempDir("pi-live-prog-");
+	const file = join(dir, "current.jsonl");
+	writeFileSync(file, "");
+	const open = makeLiveTranscriptOpener({ redis: r, transcripts: false, progress: true, pollMs: 3_600_000, now: () => Date.parse(AT) });
+	const pub = open({ file, jobId: "prog:reset-1", redact: (t) => String(t), job: {} });
+	pub.start();
+	const body = header() + msg({ role: "assistant", content: [pcall("1", "read")] }) + msg(presult("1", "read"));
+	appendFileSync(file, body);
+	await pub.poll();
+	writeFileSync(file, header("s2") + msg({ role: "assistant", content: [pcall("1", "read")] }) + msg(presult("1", "read")));
+	await pub.poll();
+	appendFileSync(file, msg({ role: "assistant", content: [] }));
+	await pub.finish("completed");
+	assert.deepEqual(pub.progressSummary(), { turns: 2, steps: 1, toolMs: 1, longestStepMs: 1, tools: { read: 1 } });
+	assert.equal(pub.stats().progress.resets, 1);
+});
+
+test("the time handed to onParsed is bounded as the stream's is: not negative, at most a day ahead, an integer (#644)", async () => {
+	const seen = [];
+	const read = Date.parse(AT);
+	const { pub, append } = fakeSetup({ stream: false, onParsed: (_parsed, ts) => seen.push(ts) });
+	const entry = (timestamp) => `${JSON.stringify({ type: "message", timestamp, message: { role: "user", content: "x" } })}\n`;
+	append(entry(new Date(read + 2 * 24 * 3600 * 1000).toISOString()) + entry(-5) + entry(read - 1000.5) + entry(read + 3600 * 1000) + entry(AT) + entry(1e300));
+	await pub.finish("completed");
+	assert.deepEqual(seen, [read, read, read - 1001, read + 3600 * 1000, read, read], "a forged time is the read time; a fraction is cut");
+});

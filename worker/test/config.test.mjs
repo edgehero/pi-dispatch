@@ -223,6 +223,13 @@ test("captureJobLogs is strict: only \"1\" enables it, everything else stays off
 	}
 });
 
+test("runProgress is ON by default, \"0\" turns it off, any other value refuses to boot, and it is independent of liveTranscripts (#644)", () => {
+	for (const on of [undefined, "", "1"]) assert.equal(loadConfig(on === undefined ? {} : { PI_RUN_PROGRESS: on }).runProgress, true, `PI_RUN_PROGRESS=${JSON.stringify(on)}`);
+	assert.equal(loadConfig({ PI_RUN_PROGRESS: "0" }).runProgress, false);
+	assert.deepEqual([loadConfig({ PI_LIVE_TRANSCRIPTS: "0" }).runProgress, loadConfig({ PI_RUN_PROGRESS: "0" }).liveTranscripts], [true, true]);
+	for (const bad of ["false", "off", "yes", " 0", "2"]) assert.throws(() => loadConfig({ PI_RUN_PROGRESS: bad }), /invalid PI_RUN_PROGRESS/, bad);
+});
+
 test("liveTranscripts is ON by default, \"0\" turns it off, and any other value refuses to boot (#643)", () => {
 	for (const on of [undefined, "", "1"]) assert.equal(loadConfig(on === undefined ? {} : { PI_LIVE_TRANSCRIPTS: on }).liveTranscripts, true, `PI_LIVE_TRANSCRIPTS=${JSON.stringify(on)}`);
 	assert.equal(loadConfig({ PI_LIVE_TRANSCRIPTS: "0" }).liveTranscripts, false);

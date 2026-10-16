@@ -145,6 +145,8 @@ export const TERMINAL_COMMENTS = {
 	// Issue #625. The runner's two refusals of a job armed with run.awaitInput, each before the prompt.
 	"await-input-shadowed": "Stopped: another extension in this job registers the tool a run uses to stop and wait for an answer, so the run ended before the agent started. The operator needs to remove that extension or this trigger's run.awaitInput. Not retried.",
 	"await-input-without-session": "Stopped: this run may stop to wait for an answer but had nowhere to keep its work, so it ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",
+	// Issue #644. The runner's refusal of a job armed with run.progress, before the prompt.
+	"report-progress-shadowed": "Stopped: another extension in this job registers the tool a run uses to report its progress, so the run ended before the agent started. The operator needs to remove that extension or this trigger's run.progress. Not retried.",
 	// Issue #596. Never the size or the project: both are operator configuration, and the reader may be an issue author
 	// who can act on neither. The worker log and the run record carry them.
 	[EXIT_OOM_KILLED]: "Stopped: the job's container ran out of memory and was stopped. Partial work may exist. Not retried, because the same size would stop the same way. The operator can raise this job's memory size.",
@@ -512,6 +514,9 @@ export async function runJob(job, deps) {
 	let dollars = null;
 	// Issue #596: what the container used (`resources` off its exit line), null until a container ran and reported it.
 	let resources = null;
+	// Issue #644: the run's progress summary (run-progress.mjs `summary`), null until a container ran with the reducer on.
+	// Display only: carried to the record like `resources`, and never read by any decision below.
+	let progress = null;
 
 	try {
 		// The one-shot pre-spend check (issue #231), FIRST on the ladder: one file read, cheaper than
@@ -1420,11 +1425,12 @@ export async function runJob(job, deps) {
 		// then only a signed line is read (run-container.mjs, run-history.mjs `authenticExitLines`). An image that does not
 		// declare it is read as before, under the #542 trust rule below alone.
 		const exitAuth = (img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY);
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}) });
 		containerRan = true;
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
 		resources = ranResources ?? null;
+		progress = ranProgress ?? null;
 		// Issue #596: CONFIRMED killed for memory. The image's supervisor (image/runner/src/supervise.mjs) outlives the runner,
 		// whose process tree it gives the highest OOM score, and when the runner dies of SIGKILL with the cgroup's
 		// `oom_kill` above 0 it writes the signed line `code: 137, reason: "oom-killed"` (parseExitOomKilled). All three
@@ -1520,7 +1526,7 @@ export async function runJob(job, deps) {
 			// Awaited bare like every determinate refusal above: the adapter never throws by contract, and
 			// the one swallowed comment in this file (the catch's) justifies itself by its position.
 			await comment(job, TERMINAL_COMMENTS[reason]);
-			return { outcome: "policy", reason, exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}) };
+			return { outcome: "policy", reason, exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}), ...(progress ? { progress } : {}) };
 		}
 
 		// Issue #596: a runner the kernel killed for memory, CONFIRMED (`oomKilled` above). After the abort branch, so a
@@ -1536,7 +1542,7 @@ export async function runJob(job, deps) {
 			// The project and the size go to the log and the record, never to the comment (the TERMINAL_COMMENTS rule).
 			log("oom_killed", { jobId: job.id ?? null });
 			await comment(job, TERMINAL_COMMENTS[EXIT_OOM_KILLED]);
-			return { outcome: "policy", reason: EXIT_OOM_KILLED, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}) };
+			return { outcome: "policy", reason: EXIT_OOM_KILLED, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}), ...(progress ? { progress } : {}) };
 		}
 
 		switch (code) {
@@ -1597,6 +1603,7 @@ export async function runJob(job, deps) {
 					// record's `plan` is null otherwise, and every other result is unchanged.
 					...(plan ? { plan } : {}),
 					...(resources ? { resources } : {}),
+					...(progress ? { progress } : {}),
 				};
 			}
 			case EXIT_POLICY: {
@@ -1623,7 +1630,7 @@ export async function runJob(job, deps) {
 				// `why`. parseExitWhy keeps only a member of the closed COST_CAP_WHYS off a `cost-cap` line that said code 2,
 				// and it rides only beside a `cost-cap` reason, so a forged line can at worst name the wrong rule of three.
 				const why = reason === "cost-cap" && COST_CAP_WHYS.includes(exitWhy) ? { why: exitWhy } : {};
-				return { outcome: "policy", reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...why, ...(resources ? { resources } : {}) };
+				return { outcome: "policy", reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...why, ...(resources ? { resources } : {}), ...(progress ? { progress } : {}) };
 			}
 			case EXIT_INFRA:
 				// NO comment on any infra throw, here or in the catch: an InfraRetry may be retried and
@@ -1699,6 +1706,14 @@ export async function runJob(job, deps) {
 				e.dollars = dollars;
 			} catch {
 				// a frozen error keeps its own fields; the log lines above are the record of the hold
+			}
+		}
+		// Issue #644: the same for the run's progress, so a retried or failed attempt's record says where it got to.
+		if (progress !== null && e !== null && typeof e === "object" && e.progress === undefined) {
+			try {
+				e.progress = progress;
+			} catch {
+				// a frozen error keeps its own fields; progress is display only
 			}
 		}
 

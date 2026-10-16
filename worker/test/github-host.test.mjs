@@ -201,3 +201,43 @@ test("setParkedLabel adds the marker by name, and removing one the issue lacks (
 	const failing = makeGitHubHost({ octokitFor: fakeOctokitFor({ [del]: httpError(500) }) });
 	await assert.rejects(() => failing.setParkedLabel(REPO, { type: "issue", number: 7 }, false, "tok"));
 });
+
+// -- status comment id and edit (issue #644) -----------------------------------------------------
+
+test("postStatusComment returns the created comment's id as a string", async () => {
+	const host = makeGitHubHost({ octokitFor: fakeOctokitFor({ "POST /repos/{owner}/{repo}/issues/{issue_number}/comments": { id: 123456789 } }) });
+	assert.deepEqual(await host.postStatusComment(REPO, { type: "issue", number: 7 }, "hi", "tok"), { id: "123456789" });
+});
+
+test("postStatusComment answers id null, never a throw, when the 2xx carries no usable id", async () => {
+	// The comment exists: a throw here would make the caller retry and post a second one.
+	const host = makeGitHubHost({ octokitFor: fakeOctokitFor({ "POST /repos/{owner}/{repo}/issues/{issue_number}/comments": { id: "../x" } }) });
+	assert.deepEqual(await host.postStatusComment(REPO, { type: "issue", number: 7 }, "hi", "tok"), { id: null });
+});
+
+test("editStatusComment PATCHes the issue comment by id, for an issue and a pull request alike", async () => {
+	for (const type of ["issue", "pull_request"]) {
+		const octokitFor = fakeOctokitFor({ "PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}": { id: 5 } });
+		const host = makeGitHubHost({ octokitFor });
+		await host.editStatusComment(REPO, { type, number: 7 }, "5", "new text", "tok");
+		const [call] = octokitFor.constructions[0].calls;
+		assert.deepEqual(call.params, { owner: "owner", repo: "name", comment_id: "5", body: "new text" });
+		assert.equal(octokitFor.constructions[0].token, "tok");
+	}
+});
+
+test("editStatusComment refuses a malformed id before any request", async () => {
+	const octokitFor = fakeOctokitFor({});
+	const host = makeGitHubHost({ octokitFor });
+	for (const id of ["", "1/2", "../1", "a".repeat(201), "abc", 5, null, "1:2"]) {
+		await assert.rejects(() => host.editStatusComment(REPO, { type: "issue", number: 7 }, id, "t", "tok"), (e) => e.piDispatchConfig === true);
+	}
+	assert.equal(octokitFor.constructions.length, 0);
+});
+
+test("editStatusComment lets octokit's error through with its status, so 403/404/429 can stop the commenter", async () => {
+	for (const status of [403, 404, 429, 500]) {
+		const host = makeGitHubHost({ octokitFor: fakeOctokitFor({ "PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}": httpError(status) }) });
+		await assert.rejects(() => host.editStatusComment(REPO, { type: "issue", number: 7 }, "5", "t", "tok"), (e) => e.status === status);
+	}
+});

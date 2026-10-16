@@ -26,6 +26,7 @@
 import { configError } from "./config.mjs";
 import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
+import { commentIdOf, isStatusCommentId } from "./status-comment.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 import { isDeterminateFetchFailure } from "./transient.mjs";
 
@@ -147,6 +148,44 @@ export function makeGitLabHost({ apiUrl = "https://gitlab.com", fetchFn = fetch 
 		if (!res.ok) {
 			throw new InfraRetry(`gitlab-host: POST ${path} returned ${res.status}`);
 		}
+		// The created note's id, for the status commenter (issue #644). Read after the 2xx and never thrown on: the
+		// note exists, and a retry would post a second one.
+		const note = await res.json().catch(() => null);
+		return { id: commentIdOf(note?.id) };
+	}
+
+	/**
+	 * Replace the body of the status note `id` this host posted (issue #644, status-comment.mjs):
+	 * `PUT /projects/{id}/issues/{iid}/notes/{note}` or `.../merge_requests/{iid}/notes/{note}`. The id is the plain
+	 * note id; the collection comes from `target.type` exactly as `postStatusComment` chose it, so the same target
+	 * names the same route both times. The id is checked against `STATUS_COMMENT_ID_RE` (and must be numeric, as a
+	 * note id is) before it reaches a URL. An HTTP failure throws InfraRetry with `status` set, so the caller can tell
+	 * a 403/404/429 (stop editing) from a blip.
+	 */
+	async function editStatusComment(projectRef, target, noteId, text, token) {
+		const id = projectId(projectRef);
+		if (!isStatusCommentId(noteId) || !/^[0-9]+$/.test(noteId)) {
+			throw configError(`gitlab-host: malformed status note id: ${JSON.stringify(noteId)}`);
+		}
+		const collection = target?.type === "pull_request" ? "merge_requests" : "issues";
+		const path = `/projects/${id}/${collection}/${encodeURIComponent(target?.number)}/notes/${noteId}`;
+		let res;
+		try {
+			res = await fetchFn(`${root}${path}`, {
+				method: "PUT",
+				headers: { "PRIVATE-TOKEN": token, "content-type": "application/json" },
+				body: JSON.stringify({ body: text }),
+				redirect: "error",
+			});
+		} catch (err) {
+			if (isDeterminateFetchFailure(err)) {
+				throw configError(`gitlab-host: PUT ${path} failed (${fetchFailureReason(err)})`);
+			}
+			throw new InfraRetry(`gitlab-host: PUT ${path} failed (${fetchFailureReason(err)})`);
+		}
+		if (!res.ok) {
+			throw Object.assign(new InfraRetry(`gitlab-host: PUT ${path} returned ${res.status}`), { status: res.status });
+		}
 	}
 
 	/**
@@ -187,7 +226,7 @@ export function makeGitLabHost({ apiUrl = "https://gitlab.com", fetchFn = fetch 
 		if (!res.ok) throw new InfraRetry(`gitlab-host: PUT ${path} returned ${res.status}`);
 	}
 
-	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, resolvePullRequestHead, setParkedLabel };
+	return { resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment, editStatusComment, resolvePullRequestHead, setParkedLabel };
 }
 
 /**

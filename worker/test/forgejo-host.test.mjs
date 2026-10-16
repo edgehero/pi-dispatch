@@ -293,3 +293,34 @@ test("the label lookup is bounded, so a server that never sends an empty page ca
 	await assert.rejects(() => makeForgejoHost({ apiUrl: API, fetchFn }).setParkedLabel(REPO, { type: "issue", number: 7 }, true, "tok"), /pages of labels/);
 	assert.equal(fetchFn.n, 20);
 });
+
+// --- status comment id and edit (issue #644) ---
+
+test("postStatusComment returns the created comment's id", async () => {
+	const host = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "POST /api/v1/repos/acme/widgets/issues/7/comments": { id: 314 } }) });
+	assert.deepEqual(await host.postStatusComment(REPO, { type: "issue", number: 7 }, "hi", "t"), { id: "314" });
+});
+
+test("editStatusComment PATCHes the issue comment by id on the self-hosted base URL", async () => {
+	for (const type of ["issue", "pull_request"]) {
+		const fetchFn = fakeFetch({ "PATCH /forge/api/v1/repos/acme/widgets/issues/comments/314": { id: 314 } });
+		const host = makeForgejoHost({ apiUrl: "https://fj.example.com/forge/", fetchFn });
+		await host.editStatusComment(REPO, { type, number: 7 }, "314", "new", "t");
+		assert.equal(fetchFn.calls[0].init.headers.Authorization, "token t");
+		assert.equal(fetchFn.calls[0].init.redirect, "error");
+		assert.deepEqual(JSON.parse(fetchFn.calls[0].init.body), { body: "new" });
+	}
+});
+
+test("editStatusComment refuses a malformed id before any request, and throws with the status on failure", async () => {
+	const none = fakeFetch({});
+	const host = makeForgejoHost({ apiUrl: API, fetchFn: none });
+	for (const id of ["", "1/2", "..", "a".repeat(201), "1:2", 314]) {
+		await assert.rejects(() => host.editStatusComment(REPO, { type: "issue", number: 7 }, id, "t", "t"), (e) => e.piDispatchConfig === true);
+	}
+	assert.equal(none.calls.length, 0);
+	for (const status of [403, 404, 429, 502]) {
+		const failing = makeForgejoHost({ apiUrl: API, fetchFn: fakeFetch({ "PATCH /api/v1/repos/acme/widgets/issues/comments/314": status }) });
+		await assert.rejects(() => failing.editStatusComment(REPO, { type: "issue", number: 7 }, "314", "t", "t"), (e) => e.status === status && e.piDispatchRetry === true);
+	}
+});
