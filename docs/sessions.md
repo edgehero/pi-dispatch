@@ -11,8 +11,16 @@ A trigger can opt into continuing that conversation instead.
   "run": { "kind": "github", "flow": "fix", "resume": true } }
 ```
 
-Off by default. A deployment that sets nothing writes nothing to disk and its containers are launched
-with exactly the arguments they were before this feature existed.
+Off by default. A deployment that sets nothing keeps nothing between jobs and writes nothing to the
+session store.
+
+**Every job has a session file while it runs, and only resume jobs keep it.** Since #643 a job without
+`resume` also runs on a transcript file (unless the worker has `PI_LIVE_TRANSCRIPTS=0`, which stages none), an empty one staged in its own job folder
+(`<jobDir>/session/current.jsonl`, mounted at `/session`), so the worker can publish the run's transcript
+live to the console and the panel ([`multi-host.md`](multi-host.md), [`SECURITY.md`](../SECURITY.md)).
+That file has no key, is never copied into `PI_SESSIONS_DIR`, is never handed to another job, and is
+deleted with the job folder when the run ends. Its run record still reads `"reason": "disabled"`. What
+`resume` adds is everything below: a key, the store, and the next job continuing from the last.
 
 ## Setup
 

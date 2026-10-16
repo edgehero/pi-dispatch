@@ -229,7 +229,8 @@ insights by range, queues, hosts and schedules, the configuration and its own au
 scripts. It reads through the same code as the panel, so the two never disagree; the panel shows the waiting runs too.
 It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
 and edit the configuration, each previewed, confirmed and recorded in one audit log that holds the panel's own writes
-too. Nothing listens unless you start it. See
+too. A running job's transcript, redacted, streams live on its run page for operators, and the panel's live tail
+(`l`) reads the same transcript for a run on any host. Nothing listens unless you start it. See
 [`docs/console.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/console.md).
 
 ## More than one machine

@@ -64,7 +64,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A job container's `/outbox` request file | **None** — agent-authored | An agent-initiated signal channel back to the host; validated host-side before anything is enqueued. **Local jobs only** — a github job has no `/outbox` mount at all |
 | A job container's `/outbox/priorities.json` | **None**, agent-authored | A portfolio job's plan. Read host-side on a `completed` exit only, `lstat`-checked, opened with `O_NOFOLLOW` and `fstat`ed, at most 16 KiB, and judged by the same parser and ladder as the operator's own plan. Its `reason` text is never logged and never enters the run record |
 | A portfolio job's `/job/portfolio.json` | **Host-written, read-only** | The facts the manager plans with. Ids, digests, integers, instants, enum tokens and operator labels (project ids and member labels as projects.json names them, a folder by its basename) only: no issue text, title, plan reason or path, because the next run reads it as facts |
-| A job container's `/session` transcript | **None** — agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges |
+| A job container's `/session` transcript | **None**, agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges. Since #643 every job has one unless the worker sets `PI_LIVE_TRANSCRIPTS=0` (a non-resume job's is an empty live file in its own job folder, never promoted), and the worker also tails it during the run to publish a redacted copy to Valkey: parsed as data, redacted, escaped and capped before it leaves, never executed or fed to a model |
 | A **resurrected sandbox**'s operator shell (`pi-dispatch sandbox`) | **Operator — the same trust as a terminal on this host** | A third channel, and the first the **operator** opens rather than the agent. Not a job container: no minted token, no provider key, no agent running, started only by a keypress. It re-mounts a finished run's workspace, which for a forge job holds attacker-influenced code — the same trust shape as checking out a stranger's pull request locally. Every isolation flag still applies; ports it publishes are `127.0.0.1`-only and last only while it does |
 | The **venue** a job's container is built in (`run.backend`, `PI_BACKENDS`) | **Operator — the same trust as the daemon they point the worker at** | A different axis from every row above. Those ask *who wrote this*; this asks *who is holding the execution*. Today there is one venue, the Docker daemon the worker's docker CLI resolves, which is the operator's own machine unless `DOCKER_HOST` or a docker context points it elsewhere; the worker reads that answer at boot and before each job, logs a redirect, and a floor asking `credentialTransit=enforced` refuses one. It judges the endpoint's form, so a unix socket or loopback port that is really a tunnel to another machine still reads as this host. A venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and the isolation flags in **this worker's argv do not reach it**. What bounds it is a declaration an operator reads (`docs/backends.md`), a floor they can require of every blessed venue, and a boot refusal when the two disagree. |
 | The operator console process (`pi-dispatch-console serve`) | **Operator, the same trust as the admin extension** | It runs as the deployment's account and writes through the same read-model funnels as the panel. It renders untrusted text (issue titles, and from #641 on run text) but only escaped, after the control-byte scrub, under a strict CSP and behind the operator role; it executes none of it and feeds none of it to a model. It listens on loopback or a 0600 unix socket, never on the receiver ([The operator console](#the-operator-console)) |
@@ -304,8 +304,13 @@ The threat model, and what answers each part:
   target and parent job id can still be shaped by whoever opened an issue, and are escaped like every value. The one
   free text the screens show, a failed job's reason from BullMQ, is shown to the operator role alone, on a detail
   page alone, never in a list, and is absent from a viewer's `/api/state`. The audit page is the operator's alone.
-  Secret profiles appear by name; no page shows a resolver, a reference or a value. No page shows a log or a
-  transcript (`OQ-044`).
+  Secret profiles appear by name; no page shows a resolver, a reference or a value. No page shows a job's `.log`.
+  **Since #643 the run page shows a running job's live transcript, to the operator role alone** (`OQ-044`,
+  `REQ-LIVE-TRANSCRIPT`): what the agent said, the tools it called with their arguments, and what they returned, as
+  the worker published it to Valkey, redacted (see [Live transcripts are in Valkey](#what-is-not-defended-v1)).
+  A viewer gets a sentence instead and the transcript route refuses a viewer outright; the text is escaped after the
+  control-byte scrub, inside a `<pre>`, only on the run page, never in a list, never in `/api/state` and never in a
+  live panel. A transcript tab holds one of its token's stream slots, like any live page.
 - **Forge links are never guessed.** A run's link points at `github.com` for GitHub and, for GitLab, Forgejo and
   Azure DevOps, at the instance URL the deployment itself is configured with, http or https only. When there is no
   such URL, or the target does not parse as that forge's repository and number, no link is drawn: a link to a host
@@ -543,6 +548,43 @@ Stated openly rather than discovered later:
   container**, and default to `~/.pi-dispatch/logs`, outside any repository (they are **gitignored** as
   well, for the deployments that keep them in one); an age sweep prunes them at boot and on the retention timer
   (`PI_LOG_RETENTION_DAYS`, `0` = keep forever; `PI_SWEEP_INTERVAL_HOURS` sets the cadence). Leave capture off unless you need it, and treat the log directory as personal data while it is on.
+  The raw log never leaves its host. The live transcript is a separate, structured and redacted copy that does
+  (the next bullet).
+- **Live transcripts are in Valkey (PII), redacted but not secret-proof.** This reverses what this file and
+  `docs/multi-host.md` said until #643, that transcripts stay on the host that ran the job. Unless you set
+  `PI_LIVE_TRANSCRIPTS=0`, every worker publishes each running job's transcript to the deployment's Valkey (one
+  stream per job, `run:live:<job id>`), so the console and the `/dispatch` panel on any host can show it live.
+  - **What the worker reads**: only the job's own transcript file, as a regular file. The agent can replace that
+    file inside its container, so the worker refuses a symlink, a FIFO or a different file swapped in (it checks
+    before and after opening, and opens without following links), publishes one fixed note, and stops reading it,
+    so a job cannot make the worker publish a host file such as another job's stored transcript.
+  - **What it holds**: what the agent said, the tools it called with their arguments, and what they returned, so
+    issue and comment text, file contents and command output. Never the raw `.log` (that stays on its host, as
+    above), never the model's thinking, never a provider's error message.
+  - **How long**: at most 2,000 entries per job, removed 24 hours after the run ends; a run whose worker died before
+    the end keeps its stream for 7 days from its first entry.
+  - **Next to what**: Valkey already held personal data. A forge job's BullMQ data carries the issue or comment
+    title, body and author for 31 days. The transcript adds tool output and the agent's own text, redacted, for a
+    day.
+  - **Who can read it**: anyone with access to your Valkey (its password, its port, its volume or a backup of it),
+    the console's operator role, and anyone who runs the `/dispatch` panel against the deployment. A console viewer
+    cannot.
+  - **What is redacted**: every value the worker handed the job's container except the structural ones (paths,
+    flags, model names, counts), so the forge token, the provider key, every forwarded variable, every resolved
+    secret and every model-endpoint key, plus the exit key, each in its plain, JSON-escaped and URL-encoded
+    spelling when it is at least 8 characters; and known token shapes the job was never handed (GitHub, GitLab,
+    Anthropic and OpenAI style keys, Slack tokens, console tokens, AWS access key ids, `Authorization` and `Bearer`
+    credentials). Control and bidi characters are written out.
+  - **What is not**: a secret the agent transforms (base64, reversed, split across two tool calls, one character a
+    line, or with an invisible character such as a zero-width joiner inside it, which also stays invisible on the
+    page) is not caught, and cannot be by any rule that does not know the transformation. Nor is a secret shorter
+    than 8 characters, or a credential the job found that matches no known shape, or personal data, which is not a
+    secret and is shown on purpose. Redaction bounds an accident; it is not a barrier against an agent trying to
+    leak: an agent that can echo a secret can also send it out through whatever network access it has.
+  - **When the tail is lost**: a cancelled or timed-out job whose container does not stop within the abort grace
+    can be cleaned up before the worker's last read, so its last lines and its end marker are not published.
+  - Set `PI_LIVE_TRANSCRIPTS=0` on every worker if transcript text must not reach Valkey; any value but `0`, `1` or
+    empty refuses to boot, so a typo cannot read as off. Treat a Valkey backup as personal data either way.
 - **Prompt injection is not prevented, only bounded.** Untrusted text is kept out of the trusted region
   of the prompt by *placement*, not by filtering — content-filtering natural language is not a security
   boundary and this project does not pretend otherwise. The bound is the container, the scoped token,
@@ -909,4 +951,8 @@ Stated openly rather than discovered later:
   first is time since the last run on a key, the second is the age of the conversation itself. Retention
   here is not disk hygiene: a stale transcript is a **live input to a future job**, so an old file is a
   correctness problem before it is a capacity problem.
+  Since #643 a job that does not resume also writes a transcript file while it runs (unless `PI_LIVE_TRANSCRIPTS=0`), in its own job folder under the
+  temp directory (`<jobDir>/session/current.jsonl`, mode `0700`), so the worker can publish it live. That file is
+  never copied into `PI_SESSIONS_DIR`, never handed to another job, removed before a sandbox is kept, and deleted with
+  the job folder when the run ends. While the run lasts it is as sensitive as a stored transcript.
   `pi-dispatch doctor` reports the store and warns whenever a trigger arms the flag.

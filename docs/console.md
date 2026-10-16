@@ -8,8 +8,9 @@ It shows the whole deployment, live: what is running and queued on every host, e
 waiting for an answer, spend and insights for a range of days, the schedules, the configuration and the console's own
 audit log. Open pages update themselves about once a second while you watch, and `/api/state` gives a script the same
 snapshot as JSON. It can also change all of it: cancel, retry, remove and re-run jobs, answer a parked run, pause
-the fleet or one queue, and edit the configuration, each with a preview and a confirm ([Actions](#actions)). Live
-logs and transcripts arrive with #643.
+the fleet or one queue, and edit the configuration, each with a preview and a confirm ([Actions](#actions)). An
+operator can watch a running job's transcript live on its run page, whichever host runs it
+([The live transcript](#the-live-transcript)).
 
 The first half of this page is about access, because the console is the most powerful surface after a shell on the
 host. [The screens](#the-screens) starts below that.
@@ -213,7 +214,7 @@ console.
 |---|---|
 | `/` | The overview: whether the fleet is paused, the queue counts, the hosts online and how long ago each last checked in, today's spend against the caps, how many runs are waiting for an answer, and the failures of the last 24 hours. |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. |
-| `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. It says whether the record came from this host or from the mirror. |
+| `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. It says whether the record came from this host or from the mirror. For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, and how many times the session was resumed. |
 | `/insights?range=7d` | Spend and insights, the same sections as `/dispatch insights` draws into `insights.html`, for `7d`, `30d` or `mtd` (month to date). |
 | `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget and running jobs, every running job, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
@@ -236,8 +237,30 @@ is the worker's own message, trimmed and cleaned, but it can still carry a fragm
 only the operator role sees it, on the fleet page, in a "Why each failed" element below the failed jobs that you
 open per job, never in a list row.
 
-No page shows a job's log or transcript yet. Those stay on the host that ran the job, and how the console will show
-them is decided with #643.
+### The live transcript
+
+An operator's run page shows what the run is doing: what the agent said, each tool it called with its arguments,
+and what the tool returned, as the run goes. It works for a run on any host, because each worker publishes its
+running jobs' transcripts to Valkey, and for 24 hours after the run ends. New entries appear about a second after
+the agent writes them; the view follows the bottom unless you scroll up, and says whether the run is live or ended,
+and how it ended. Tool calls and their results are folded; open one to read it. A viewer sees "Transcripts are shown
+to operators only." A run with no transcript says "No live transcript: not published (PI_LIVE_TRANSCRIPTS=0), expired,
+or not started yet."
+
+- **Operators only.** A viewer sees a sentence saying transcripts are shown to operators, and nothing of the text.
+- **It is the transcript, not the raw log.** The model's thinking is not shown, and a job's `.log`
+  (`PI_CAPTURE_JOB_LOGS`) still stays on its host and is shown by no page.
+- **Secrets are taken out before it leaves the worker**: the job's own tokens and keys, and anything shaped like a
+  known token, read `[redacted]`. A secret the agent re-encoded is not caught, and issue text and tool output are
+  shown on purpose ([`SECURITY.md`](../SECURITY.md)).
+- **Long runs are trimmed**: Valkey keeps the last 2,000 entries of a run, and a long message or tool result is cut
+  and marked.
+- **No transcript** means one of: the worker has `PI_LIVE_TRANSCRIPTS=0`, the run has not started writing yet, or
+  its transcript expired (24 hours after the end, or 7 days after the start if its worker died). The page cannot
+  tell these apart and says so.
+- The transcript holds one of your token's live-page slots while it is open, like any live page.
+
+The `/dispatch` panel's live tail (`l`) reads the same transcript.
 
 ## Finding runs
 
@@ -364,7 +387,8 @@ would put an interactive shell one stolen session away from anyone.
 ## Live updates
 
 The overview, runs, parked and fleet pages update themselves while open. Run detail, insights, configuration and
-the audit log are drawn once per load; reload them to refresh. A small marker in the corner says `live`, or `reconnecting` while the
+the audit log are drawn once per load; reload them to refresh. The one exception is the run page's live
+transcript, which streams on its own ([The live transcript](#the-live-transcript)). A small marker in the corner says `live`, or `reconnecting` while the
 browser reconnects. The console reads Valkey once a second for every open page together, and only while a page is
 open, so ten open tabs cost the deployment what one does; the runs page, whose filters make each view its own read,
 refreshes every 5 seconds. Only the parts of the page that changed are sent.
@@ -446,8 +470,10 @@ through the same code, so the two never disagree about what is waiting.
 The console also reads, from the same deployment, `VALKEY_URL` (the queues, hosts and run mirror), `PI_LOGS_DIR`
 (this host's run records and the audit log), `PI_PAUSE_WINDOWS_FILE`, the files the configuration page shows and
 edits (the triggers, settings, scoped limits, projects and envelope), `PI_SESSIONS_DIR` when it is on this host (the
-parked runs' resume counts) and `GITLAB_URL`, `FORGEJO_URL` and `AZURE_ORG_URL` (the forge links).
+parked runs' resume counts) and `GITLAB_URL`, `FORGEJO_URL` and `AZURE_ORG_URL` (the forge links). The live
+transcripts come from Valkey; whether a worker publishes them is that worker's `PI_LIVE_TRANSCRIPTS`.
 
 The design and its rejected alternatives are `DES-OPERATOR-CONSOLE` in [`specs/design.md`](../specs/design.md); the
-testable rules are `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-OPERATOR-CONSOLE-ACTIONS` in [`specs/requirements.md`](../specs/requirements.md); the threat model and
+testable rules are `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and
+`REQ-LIVE-TRANSCRIPT` in [`specs/requirements.md`](../specs/requirements.md); the threat model and
 what it does not defend are in [`SECURITY.md`](../SECURITY.md#the-operator-console).

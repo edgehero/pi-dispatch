@@ -25,7 +25,7 @@ Both exist because getting them wrong is silent.
 | Credentials | `./.env` | (read by your service manager) | Every secret and every path. Back this up separately and encrypted, and never into a repository |
 | Session transcripts | **no default** | `PI_SESSIONS_DIR` | Resumable sessions. The most PII bearing thing here: issue text, file contents, tool output, the agent's own reasoning. Back it up only if you accept that |
 | GitHub App key | `./github-app-<slug>.pem` | `GITHUB_APP_PRIVATE_KEY_PATH` | Forge authentication |
-| Queue and counters | Docker volume | `VALKEY_URL` | The waiting queue, the day, week and month spend counters, the pause flag, delivery dedup, held jobs, the host registry and the run mirror |
+| Queue and counters | Docker volume | `VALKEY_URL` | The waiting queue, the day, week and month spend counters, the pause flag, delivery dedup, held jobs, the host registry, the run mirror, and the live transcripts (redacted, gone 24 hours after each run, none with `PI_LIVE_TRANSCRIPTS=0`). A forge job's queue data holds issue text for 31 days, so a backup of this volume is personal data |
 
 The Valkey volume is `pi-dispatch-valkey-data` when you started it with `pi-dispatch up`, and
 `valkey-data` (Compose prefixes it with the project name) when you started it with

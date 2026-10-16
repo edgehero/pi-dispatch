@@ -877,13 +877,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (refusals of requests that carry no session one row each up to a rate, and counted past it); shall
   never put a token, a login code, a cookie value or a request body in a log line, an audit row or a page; and,
   since #641, shall end every event stream when its session ends without a stream ever extending one, and shall show
-  free run text (BullMQ `failedReason`) and the audit log to the operator role alone.
+  free run text (BullMQ `failedReason`) and the audit log to the operator role alone; and, since #643, shall show a
+  run's live transcript to the operator role alone, escaped, and only on the run page.
 - **Scope**: the console process and its CLI. The pi extension is unchanged and still binds no port
   (`REQ-ADMIN-VIA-PI-EXTENSION`). #640 built login, logout, `whoami` and one reference write, the pause windows; #641
   added the read screens, `/api/state` and the event streams (`REQ-OPERATOR-CONSOLE-SCREENS`), which meet this
   requirement through clauses (e), (k) and (l); #642 added every other write and action
-  (`REQ-OPERATOR-CONSOLE-ACTIONS`), which meet it through clause (g) above all; the live logs are #643's and meet it
-  as they land. `REQ-INSIGHTS-HTML-EXPORT` is unchanged: the static file keeps zero
+  (`REQ-OPERATOR-CONSOLE-ACTIONS`), which meet it through clause (g) above all; #643 added the live transcript
+  (`REQ-LIVE-TRANSCRIPT`), which meets it through clauses (e), (k) and (l). `REQ-INSIGHTS-HTML-EXPORT` is unchanged: the static file keeps zero
   external requests and binds nothing.
 - **Why**: the console is the most powerful surface after a shell on the host, and a loopback port is reachable by
   every local account, by any page the operator's browser opens and, on Docker Desktop, by a job container
@@ -891,7 +892,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   because a security property nobody runs is a sentence, not a control.
 - **Traces to**: `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
   `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`,
-  `REQ-OPERATOR-CONSOLE-SCREENS`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`.
+  `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-LIVE-TRANSCRIPT`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`.
 - **Acceptance**:
   - (a) **Where it listens, and what it refuses to start on.** Given no `PI_CONSOLE_LISTEN`, the console listens on
     `127.0.0.1:4790`; given a non-loopback IP literal without `PI_CONSOLE_BIND_PUBLIC=1`, a hostname, or a unix
@@ -985,6 +986,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `admin/test/console-panels.test.mjs`, `admin/test/console-server.test.mjs`,
     `admin/test/read-model-pages.test.mjs` (`forgeLinkOf`), `admin/test/console-live.test.mjs` (a viewer's stream);
     the walk over every page for both roles, with a hostile-value variant, is `admin/test/console-pages.test.mjs`.
+    **Extended to the live transcript stream** (issue #643, `REQ-LIVE-TRANSCRIPT`): given a viewer's session,
+    `GET /api/transcript` is refused 403 before any slot is taken and the run page shows that transcripts are for
+    operators, with no entry text; given an operator's session, transcript text appears only in the run page's live
+    transcript section and its `entry` events, each entry's text inside an escaped `<pre>` after the control scrub,
+    so hostile entries (markup, control bytes, a forged `</pre>`) stay inert; given any session, no list, no hub
+    panel, no other page and no `/api/state` body carries transcript text; given `HEAD /api/transcript`, it is 405;
+    the transcript stream shares the slots and the session re-judging of (k) and its 2 MiB cut. Tests: `admin/test/console-transcript.test.mjs`,
+    `admin/test/console-pages.test.mjs` and `admin/test/console-actions.test.mjs` (the script's markup writes).
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
@@ -995,8 +1004,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the panels that changed; and shall bound every query a page accepts. The `/dispatch` panel shall show the parked
   runs too.
 - **Scope**: reads only. Every write and action, answering a parked run included, is #642's
-  (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; live logs, progress and
-  transcripts are #643's and #644's (`OQ-044`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
+  (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; the live transcript on
+  the run page is #643's (`REQ-LIVE-TRANSCRIPT`, resolving `OQ-044`) and progress is #644's. The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
   (e), (k) and (l) above all. `insights.html` stays the offline artifact, unchanged (`REQ-INSIGHTS-HTML-EXPORT`).
 - **Why**: before #641 the operator's live surfaces were the panel and a static insights file whose reload re-read
   the same file. Parked runs were shown nowhere in the admin, the run list stopped at 50 records with no search, only
@@ -1095,8 +1104,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Scope**: the console's write routes, the funnels and planners they call (`admin/src/job-actions.mjs`,
   `admin/src/write-plans.mjs`, the read model), the worker's trail comment for a console answer, and the panel's
   audit rows. A config edit lands in the same files the TUI writes and is never committed to git. A sandbox is not
-  reopened from the browser: the page shows the command (`REQ-RESURRECTABLE-SANDBOX`, unchanged). Live logs and
-  transcripts are #643's; approval gates are #649's.
+  reopened from the browser: the page shows the command (`REQ-RESURRECTABLE-SANDBOX`, unchanged). The live
+  transcript is #643's (`REQ-LIVE-TRANSCRIPT`, read only); approval gates are #649's.
 - **Why**: after #641 the console showed the whole deployment and could change one file. An operator who saw a failed
   job, a stuck queue or a parked question had to switch to a terminal to act on it, and the failed list was read only
   on every surface. A second write path for the browser would have been a second set of rules, free to accept what
@@ -1179,6 +1188,66 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   - (m) **Live pages follow a write.** Given an action that landed, every open live page shows the change within
     about two seconds with no reload, and a live panel holding a form in use is not redrawn under it. Tests:
     `admin/test/console-actions.test.mjs` (the hub is ticked after every apply), the browser lab.
+
+## REQ-LIVE-TRANSCRIPT
+
+- **Statement**: An operator shall be able to watch a running job's transcript live (what the agent said, which
+  tools it called with what arguments, and what they returned) from the console's run page on any host and from the
+  `/dispatch` panel's live tail, for a run on any host. What leaves the host that ran the job shall be the transcript
+  only, never the raw log and never the model's thinking; shall be redacted of the job's own secrets and of known
+  token shapes before it leaves the worker; shall be capped at 2,000 entries per job; and shall be removed 24 hours
+  after the run ends, and at most 7 days after its first entry when the run never ended. Publishing shall never fail,
+  slow or hold a job, shall add no network path to the job container, and shall be turned off by
+  `PI_LIVE_TRANSCRIPTS=0`. On the console the transcript shall reach the operator role alone.
+- **Scope**: the worker's live file and publisher (`DES-LIVE-TRANSCRIPT-STREAM`), the stream
+  (`INT-LIVE-TRANSCRIPT-STREAM`), the read model's readers, the panel's LIVE_TAIL and the console's run page and
+  transcript route (`DES-OPERATOR-CONSOLE`). Phase and step progress is #644's. The raw log stays host-local as
+  before (`PI_CAPTURE_JOB_LOGS`). Reads of the transcript are not audited (considered in
+  `DES-LIVE-TRANSCRIPT-STREAM`).
+- **Why**: the console shows every run's record fleet-wide but nothing of what a run is doing; the raw log exists
+  only when captured and only on its host, and before this only resume jobs wrote a transcript. Watching the agent
+  work is the primary feedback surface for a run (`REQ-LOCAL-JOB-VISIBILITY`'s reason, now for every job and every
+  host), and `OQ-044` asked where the console may show it. The answer moves PII to Valkey, so the bounds (redaction,
+  cap, retention, role, off switch) are part of the requirement, not of the implementation.
+- **Traces to**: `DES-LIVE-TRANSCRIPT-STREAM`, `INT-LIVE-TRANSCRIPT-STREAM`, `INT-CONSOLE-EVENT-STREAM`,
+  `INT-SESSION-STORE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`,
+  `REQ-CONSOLE-SECURITY`, `REQ-LOCAL-JOB-VISIBILITY`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`,
+  `OQ-044`.
+- **Acceptance**:
+  - (a) **The live file.** Given a job that is not a resume job, it gets an empty `<jobDir>/session/current.jsonl` in
+    a 0700 directory, mounted at `/session` with `PI_SESSION_FILE`, on Docker and on rootless Podman; its run record's
+    `session` reads `{ resumed: false, reason: "disabled" }` exactly as before, and nothing is promoted; given a resume
+    job, its argv and staged transcript are unchanged; given a refusal, no file; given a staging that fails, the job
+    runs without one and the failure is logged; given cleanup, the file is gone. Test:
+    `worker/test/live-file.test.mjs`.
+  - (b) **The publisher.** Given pi-shaped lines appended to the file, entries arrive in order, a partial last line is
+    held until it completes, a header rewrite and a truncation each publish `reset`, a line over 1 MiB is `skipped`,
+    a line that is not JSON becomes the fixed note and never its bytes, thinking is dropped and each tool call is its
+    own entry; the stream is capped near 2,000 entries, lives 7 days while live and 24 hours after its `end`;
+    `finish` reads the tail the last poll missed before the job directory is removed; a closed or refusing Valkey
+    never throws, never holds the job, and is counted; nothing of an entry's content reaches the worker log. Tests:
+    `worker/test/live-transcript.test.mjs`, `worker/test/live-file.test.mjs` (the order against cleanup, a throwing
+    opener), `worker/test/config.test.mjs` (`PI_LIVE_TRANSCRIPTS`), `worker/test/env-docs.test.mjs`.
+  - (c) **Redaction.** Given every secret-bearing env value in its literal, JSON-escaped and URL-encoded spellings,
+    each known token shape and an `Authorization` or `Bearer` credential, none reaches the stream; values under 8
+    characters and look-alikes stay; every structural key `buildContainerEnv` writes is in `NON_SECRET_ENV_KEYS` and
+    no other; control and bidi characters are escaped while real newlines and tabs stay. A canary runs a job whose
+    transcript echoes every secret it holds, in every spelling, and finds none in the stream. Tests:
+    `worker/test/redact-secrets.test.mjs`, `worker/test/live-transcript.test.mjs` (the canary).
+  - (d) **The readers.** Given a stream, pages come back after an exclusive cursor; `ended` is true once the cursor is
+    at or past the `end` entry, also on a resume after it; an unknown kind reads as a note and an unknown outcome as
+    `unknown`; a bad job id or cursor is refused before any key is built and a huge count is clamped to 200; a dead
+    or stalled client comes back `unreachable`; a transcript read never blocks the snapshot on the fleet reader's
+    client, and no blocking stream read exists in the read model. Test: `admin/test/live-transcript-reader.test.mjs`.
+  - (e) **The panel.** Given a run with a stream, LIVE_TAIL renders its entries, appends on later ticks and stops after
+    the `end`, naming the outcome; given none, it falls back to this host's `.log`; given a foreign run with neither,
+    it names the host and why; hostile entry text stays inert and inside the frame at every width; a read landing
+    after Esc is dropped; transcript text never enters the snapshot, the list or a shared renderer. Test:
+    `admin/test/dashboard-transcript.test.mjs`.
+  - (f) **The console.** Given an operator, the run page's live transcript and `GET /api/transcript` stream the entries
+    escaped, resume from `Last-Event-ID`, send `done` after the `end`, end with the session and share the hub's
+    slots; given a viewer, 403 and no transcript text on any page, panel or `/api/state`. Tests: `admin/test/console-transcript.test.mjs` (including
+    an end-to-end stream written by the worker's own publisher), and `REQ-CONSOLE-SECURITY` (l).
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -2866,8 +2935,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the session transcript the previous job for that key produced, instead of a fresh one. The key is
   derived, never looked up: `(forge, repository, head branch)` for a forge job, and the scheduler id for a
   cron job **once the local path is wired** (see Scope). Absent or `false` is today's behaviour exactly —
-  no transcript is written, no mount is created, and the docker argv is byte-identical to one built before
-  this feature existed.
+  no transcript is kept, nothing is written to the store, and nothing is resumed. (Until issue #643 that also
+  meant no mount and a byte-identical argv; since #643 every job runs on a live transcript file in its own job
+  directory, mounted at `/session` and deleted with the job, for `REQ-LIVE-TRANSCRIPT`.)
 - **Scope**: Forge triggers, all four forges. A CLI `pi-dispatch run` and a chained `/outbox` child have
   no trigger entry that could arm the flag and therefore never resume. **Cron is refused at load, not
   silently ignored** (issue #99): the session store is handed only to the forge preparers, so a `local`
@@ -2933,8 +3003,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   turns into one transcript and then resume whichever wrote last.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`,
   `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SESSION-STORE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-014`
-- **Acceptance**: Given a trigger without `run.resume`, no file is written under `PI_SESSIONS_DIR`, no
-  `/session` mount appears in the docker argv, and `PI_SESSION_FILE` is not in the container env. Given an
+- **Acceptance**: Given a trigger without `run.resume`, no file is written under `PI_SESSIONS_DIR`, nothing is
+  promoted, and the record's `session` reads `disabled`; since issue #643 such a job does get a `/session` mount
+  and `PI_SESSION_FILE`, for its empty live transcript file in its own job directory, deleted with it
+  (`REQ-LIVE-TRANSCRIPT` (a)), which is no session in this requirement's sense: no key, no store, no resume. Given an
   armed trigger whose key resolves and whose previous run completed, the job's prompt is the resumed shape
   and the record reads `session.resumed: true`. Given a fork pull request, no key resolves. Given a
   non-completed exit, the canonical transcript is unchanged. Given an armed trigger with `PI_SESSIONS_DIR`
@@ -3936,6 +4008,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-16 | Issue #643, live run transcripts. **NEW `REQ-LIVE-TRANSCRIPT`**: an operator watches a running job's transcript live from the console's run page and the `/dispatch` live tail, for a run on any host; what leaves the host is the transcript only (never the raw log or the thinking), redacted of the job's secrets and known token shapes, capped at 2,000 entries, removed 24 h after the end (7 days at most when the run never ended), never failing or slowing a job, with no new network path from the container, off with `PI_LIVE_TRANSCRIPTS=0`, operator only on the console; acceptance (a) to (f) with named tests (`worker/test/live-file.test.mjs`, `live-transcript.test.mjs`, `redact-secrets.test.mjs`, `admin/test/live-transcript-reader.test.mjs`, `dashboard-transcript.test.mjs`; the console's `admin/test/console-transcript.test.mjs`). **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement and Scope name the live transcript, and (l) is extended to the transcript stream (operator only, 403 for a viewer before a slot, escaped in a `<pre>`, never in a list, a hub panel or `/api/state`, `HEAD` 405, the slots and re-judging of (k)). **`REQ-RESUMABLE-SESSION` AMENDED**, Statement and Acceptance: a job without `run.resume` still keeps no transcript, writes nothing to the store and resumes nothing, but since #643 it does get a `/session` mount and `PI_SESSION_FILE` for its live file, so the "no mount, byte-identical argv" clauses are replaced. **`REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, Scope only: the transcript is #643's and delivered. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: the console line and the streamed container output are untouched, and `no-pii-in-logs` holds for the publisher, which logs the job id and counts only (`live_transcript_ended`, `live_transcript_write_failed`, `live_transcript_unstaged`), never an entry's content. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**: the record gains nothing. |
 | 2026-10-14 | No issue, found in a live lab on 4.3.0 (Forgejo 14; every forge has it): the answer to a parked run, arriving within ten minutes of the delivery that started that run, was swallowed by the semantic window against the finished run (`deduplicated`, `202`, nothing run, the label left on). **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED** (semantic layer only): a run that parks closes its own window through the job's compare-and-delete, the bullmq 5.80.4 evidence for why a ttl key outlives its job is cited, and Acceptance gains the parked case beside the unchanged coalescing of a run that did not park. The GUID layer UNCHANGED, checked. **`REQ-AWAIT-INPUT` AMENDED**: Acceptance gains the quick answer, and a resumed run that parks again. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: the key, the promotion and the chain bound do not move; the release runs after the promotion. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a release failure is logged and changes no outcome. **Code evidence**: worker/src/queue.mjs -> releaseSemanticWindow; worker/src/processor.mjs -> releaseParkedWindow; worker/src/index.mjs. |
 | 2026-10-12 | No issue: a runner MCP refusal named in the run record, and doctor on an MCP endpoint. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: the worker's fixed terminal sentences gain the runner's six exit-2 refusals of a job's MCP servers, `mcp-unavailable`, `mcp-config-invalid`, `mcp-config-mismatch`, `mcp-secret-missing`, `mcp-command-missing` and `mcp-shadowed`, which recorded and commented as `runner-policy` before; each sentence names the rule and what the operator checks, never the server, a host or a variable, and is quoted in the clause. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**, acceptance only: a server answering HTTP 401 records `mcp-unavailable` and comments that reason's sentence; doctor proves the route of a declared endpoint that only an enabled overlay MCP server dials and passes it on any answer (an `https://` server's closed socket included), rather than warning that `/v1/models` did not answer 200, and judges one a model also dials as a model server. **`REQ-EGRESS-ALLOWLIST` AMENDED**, acceptance only: the same exception on the `models` probe. `REQ-OPERATOR-FAILURE-NOTIFICATION` is UNCHANGED, checked: the hook's set spreads `RUNNER_POLICY_REASONS`, so the six page as `runner-policy` did, and the pickup's free `mcp-config-invalid` pages nobody by its `budgetReserved: false`. |
 | 2026-10-12 | No issue: the forge's own MCP server. **`REQ-MCP-OPERATOR-SERVERS` AMENDED**: the worker-authored `forge` entry is the one exception to "the operator's file" (a github or gitlab trigger names it in `run.mcp`; the forge's own MCP server, pinned in the job image, runs as the token the job already holds; the overlay may not use the name); acceptance gains its cases (the forge servers' merge and approval tools withheld among them) and traces gain `DES-FORGE-MCP`. `REQ-GLOBAL-PI-OVERLAY`, `REQ-TRIGGER-SECRETS` and `REQ-EGRESS-ALLOWLIST` are UNCHANGED, checked. The statement says withholding those tools is not a boundary (the token's role and branch protection are), and acceptance names the `GITLAB_URL` shapes that refuse `forge`. |
