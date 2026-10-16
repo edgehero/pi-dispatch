@@ -10,7 +10,7 @@
  *
  * The in-component views sharing this one overlay: LIST -- a framed panel of status, spend, the unified
  * TRIGGERS pane and an interactive runs list; RUN_DETAIL -- a drill-in of one run's PII-free `.json`
- * fields; LIVE_TAIL -- a tail of a running job's `.log`; TRIGGER_DETAIL -- one trigger's trust model;
+ * fields; LIVE_TAIL -- a running job's live transcript (issue #643, any host), else its `.log`; TRIGGER_DETAIL -- one trigger's trust model;
  * FAILED (`f`) and HELD_LIST (`h`) -- the failed and held jobs; ALLOCATION (`b`) -- the budget split;
  * PROJECTS (`j`) -- the projects with their spend and sizes; and HOSTS (`u`) -- each live host's slots,
  * budget and running jobs, with its last 7 days; PARKED (`k`) -- the runs waiting for an answer on their issue
@@ -19,13 +19,14 @@
  * PII discipline (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT): LIST and RUN_DETAIL surface only
  * PII-free run records, counts, budget, schedulers and the settings overlay. LIVE_TAIL renders tail bytes
  * obtained through the injected `tailLog` seam whose `fs` access lives in index.ts, so this module never
- * touches the filesystem -- the bytes reach the overlay alone, never `snapshot`, never a shared renderer,
+ * touches the filesystem, and transcript entries obtained through the injected `tailTranscript` seam (the
+ * fleet reader's held client) -- both reach the overlay alone, never `snapshot`, never a shared renderer,
  * never a message.
  */
 import { windowState } from "@edgehero/pi-dispatch/budget";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, createFleetReader, listRuns, FORGE_MCP_SERVER_NAME } from "./read-model.mjs";
+import { cancelHeldJob, createFleetReader, listRuns, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -34,6 +35,7 @@ import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@ed
 import { LIVE_FRESH_MS } from "@edgehero/pi-dispatch/capacity";
 import { basisNote, durationText, fleetRecordNotes, historyNotes, hostCaveats, milliText, noRunText, notSharedWhy, percentText, share, shareText } from "@edgehero/pi-dispatch/capacity-cli";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
+import { LIVE_MAX_ENTRIES } from "@edgehero/pi-dispatch/live-transcript";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
@@ -50,6 +52,11 @@ const REFRESH_MS = 1000;
 // Lines requested per tail fetch, and the on-screen window of them the LIVE_TAIL view scrolls through.
 const TAIL_LINES = 200;
 const TAIL_VIEWPORT = 20;
+// The live transcript's page (the read model's TRANSCRIPT_PAGE_MAX: a full page means more may wait) and the most pages
+// one tick reads: the stream's retained entries (LIVE_MAX_ENTRIES, 2,000) over a page each, plus one for the entries
+// that arrived while it read.
+const TRANSCRIPT_PAGE = TRANSCRIPT_PAGE_MAX;
+const TAIL_PAGES_MAX = Math.ceil(LIVE_MAX_ENTRIES / TRANSCRIPT_PAGE) + 1;
 // panel.mjs floors a box to this width; below it (or a missing/non-finite width) the panel degrades to
 // unframed plain lines rather than a ragged or over-width frame.
 const MIN_WIDTH = 8;
@@ -211,6 +218,11 @@ export function createDashboardDeps(paths: any, seams: any = {}) {
     // The PARKED view's Enter (issue #641): a parked run can be older than the 50 runs the snapshot carries, so its
     // record is read by id, off the reader's own client (the local file first, then the fleet mirror).
     runById: (jobId: string) => reader.runById(jobId),
+    // LIVE_TAIL's transcript (issue #643): the run's live transcript stream, read off the reader's own held client with
+    // non-blocking XRANGEs, so the tail of a run on ANY host costs this panel no second connection. `transcriptMeta`
+    // says whether the run has a stream at all (no stream: the view falls back to this host's `.log`).
+    tailTranscript: (jobId: string, after: string | null) => reader.transcriptSince(jobId, after),
+    transcriptMeta: (jobId: string) => reader.transcriptMeta(jobId),
     async cancelHeld({ jobId }: any) {
       return cancelHeldJob({ url: paths.valkeyUrl, jobId });
     },
@@ -326,6 +338,82 @@ export function makeDashboard({
   let tailSearchInput: any = null;
   let tailQuery: any = null;
   let tailMatchLine: any = null;
+  // LIVE_TAIL's TRANSCRIPT source (issue #643): the run's live transcript stream, read through `deps.tailTranscript`
+  // from `tailCursor` on each tick, so a refresh fetches only what is new. The entries are agent-written text, with the
+  // same posture as the `.log` bytes above: they live in these fields and reach the overlay through render() alone.
+  // `tailStreaming` latches once `deps.transcriptMeta` has said the run has a stream; until then each tick asks again
+  // and the view shows this host's `.log` (or why there is none). `tailEnded` is the `end` entry's outcome. `tailGen`
+  // numbers each opening, so a read that lands after Esc or after another job's tail opened is dropped, never appended
+  // to the wrong run's transcript. `tailHost` is the host the snapshot says runs the job, for the `.log` fallback's
+  // "this run is on host X". `tailWrapped` memoizes the wrapped lines by width and `tailVersion`.
+  let tailStreaming = false;
+  let tailEntries: any[] = [];
+  let tailCursor: string | null = null;
+  let tailEnded: string | null = null;
+  let tailStreamNote: string | null = null;
+  let tailVersion = 0;
+  let tailGen = 0;
+  let tailHost: string | null = null;
+  let tailWrapped: any = null;
+  const openTail = (jobId: string) => {
+    tailJobId = jobId;
+    tail = null;
+    tailTop = 0;
+    tailFollow = true;
+    tailStreaming = false;
+    tailEntries = [];
+    tailCursor = null;
+    tailEnded = null;
+    tailStreamNote = null;
+    tailVersion += 1;
+    tailGen += 1;
+    tailWrapped = null;
+    tailHost = activeHostOf(snapshot, jobId);
+    view = "LIVE_TAIL";
+  };
+  // One tick's tail read: the transcript stream when the run has one, else this host's `.log` (today's tail).
+  const readTail = async () => {
+    const jobId = tailJobId;
+    const gen = tailGen;
+    const current = () => gen === tailGen && view === "LIVE_TAIL" && !disposed;
+    tailHost = activeHostOf(snapshot, jobId) ?? tailHost;
+    if (typeof deps?.tailTranscript === "function") {
+      if (!tailStreaming && typeof deps?.transcriptMeta === "function") {
+        const meta = await deps.transcriptMeta(jobId);
+        if (!current()) return;
+        if (meta?.exists === true) tailStreaming = true;
+      }
+      if (tailStreaming) {
+        // Pages until the stream has nothing new, the end entry, or TAIL_PAGES_MAX pages: opening a long run reads its
+        // retained 2,000 entries in one tick instead of 200 a second, and the lines kept are the last TAIL_LINES anyway.
+        for (let page = 0; page < TAIL_PAGES_MAX && tailEnded === null; page++) {
+          const res = await deps.tailTranscript(jobId, tailCursor);
+          if (!current()) return;
+          if (!Array.isArray(res?.entries)) {
+            tailStreamNote = scrubControl(String(res?.unreachable ?? res?.invalid ?? "no answer"));
+            break;
+          }
+          tailStreamNote = null;
+          if (res.entries.length > 0) {
+            tailEntries = [...tailEntries, ...res.entries].slice(-TAIL_LINES);
+            tailVersion += 1;
+          }
+          if (typeof res.next === "string") tailCursor = res.next;
+          if (res.ended === true) tailEnded = typeof res.outcome === "string" && res.outcome !== "" ? res.outcome : "unknown";
+          if (res.entries.length < TRANSCRIPT_PAGE) break;
+        }
+        tail = { stream: true, entries: tailEntries, version: tailVersion, ended: tailEnded, note: tailStreamNote, lines: tail?.stream ? tail.lines : [] };
+        return;
+      }
+    }
+    if (deps.tailLog) {
+      const res = await deps.tailLog({ jobId, lines: TAIL_LINES, host: tailHost });
+      if (!current()) return;
+      tail = res && typeof res === "object" && res.missing && typeof deps?.tailTranscript === "function" ? { ...res, noStream: true } : res;
+    } else {
+      tail = { missing: true, noStream: true };
+    }
+  };
   // RUN_DETAIL's transient clipboard acknowledgment: set by y/Y, cleared by the NEXT handleInput or
   // refresh, so it renders for exactly the frames between two inputs -- simple and test-observable.
   let copiedNote: any = null;
@@ -430,8 +518,11 @@ export function makeDashboard({
       if (snapshot && typeof snapshot === "object") snapshot.fetchedAt = deps.now ? deps.now() : Date.now();
       // Only while the tail view is open, and only through the injected capability, re-read the tail keyed
       // by the id-only `tailJobId`. `await` unwraps a synchronous return too. The bytes stay in `tail`.
-      if (view === "LIVE_TAIL" && tailJobId && deps.tailLog) {
-        tail = await deps.tailLog({ jobId: tailJobId, lines: TAIL_LINES });
+      if (view === "LIVE_TAIL" && tailJobId && (deps.tailLog || typeof deps?.tailTranscript === "function")) {
+        // Caught on its own: a tail seam that throws costs the tail a note, never the snapshot this tick just read.
+        await readTail().catch((err: any) => {
+          tailStreamNote = scrubControl(String(err?.message ?? err));
+        });
       }
     } catch (err: any) {
       snapshot = { unreachable: err?.message ?? String(err) };
@@ -477,6 +568,16 @@ export function makeDashboard({
       // Clamp the tail scroll so a shrinking log can never scroll past the end; follow mode instead pins
       // the window to the bottom of every fresh tail.
       if (view === "LIVE_TAIL") {
+        // The transcript's entries become lines HERE, at the width this frame draws, so a resize re-wraps what is held;
+        // memoized by width and version, so a frame that changes neither does no work. The scroll keys read the same
+        // `tail.lines`, so scrolling counts the lines drawn.
+        if (tail?.stream) {
+          const inner = framedAt(width) ? Math.trunc(width) - 4 : null;
+          if (!tailWrapped || tailWrapped.inner !== inner || tailWrapped.version !== tail.version) {
+            tailWrapped = { inner, version: tail.version, lines: transcriptLines(tail.entries, inner, styler) };
+          }
+          tail = { ...tail, lines: tailWrapped.lines };
+        }
         const len = Array.isArray(tail?.lines) ? tail.lines.length : 0;
         const maxTop = Math.max(0, len - TAIL_VIEWPORT);
         tailTop = tailFollow ? maxTop : Math.min(Math.max(0, tailTop), maxTop);
@@ -490,7 +591,7 @@ export function makeDashboard({
         tail,
         tailTop,
         tailFollow,
-        tailAvailable: typeof deps?.tailLog === "function",
+        tailAvailable: typeof deps?.tailLog === "function" || typeof deps?.tailTranscript === "function",
         tailSearchInput,
         tailQuery,
         tailMatchLine,
@@ -934,6 +1035,14 @@ export function makeDashboard({
           tailFollow = true;
           tailSearchInput = null;
           tailMatchLine = null;
+          // The transcript goes with the view: nothing of it outlives the tail, and a read still in flight is dropped.
+          tailGen += 1;
+          tailStreaming = false;
+          tailEntries = [];
+          tailCursor = null;
+          tailEnded = null;
+          tailStreamNote = null;
+          tailWrapped = null;
           tui?.requestRender?.();
           return;
         }
@@ -1001,10 +1110,7 @@ export function makeDashboard({
           tui?.requestRender?.();
         } else if (row.kind === "active") {
           // Opening the tail: fire an immediate fetch so the first frame carries the tail, not the next tick.
-          tailJobId = row.jobId;
-          tailTop = 0;
-          tailFollow = true;
-          view = "LIVE_TAIL";
+          openTail(row.jobId);
           void refresh();
         } else {
           detailRun = row.record;
@@ -1020,10 +1126,7 @@ export function makeDashboard({
       // Enter takes on the ACTIVE row); inert otherwise, because there is no log to open.
       if (data === "l" || data === "L") {
         if (!snapshot?.activeJobId) return;
-        tailJobId = snapshot.activeJobId;
-        tailTop = 0;
-        tailFollow = true;
-        view = "LIVE_TAIL";
+        openTail(snapshot.activeJobId);
         void refresh();
         return;
       }
@@ -3486,6 +3589,67 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
   return out;
 }
 
+/**
+ * The host the snapshot says runs `jobId` (the registry row that publishes it, issue #641), or null: only a name in the
+ * worker-name charset, so a registry row cannot put anything else into the fallback's "this run is on host X".
+ */
+function activeHostOf(snapshot: any, jobId: any): string | null {
+  const row = (Array.isArray(snapshot?.active) ? snapshot.active : []).find((a: any) => a?.jobId === jobId);
+  return typeof row?.host === "string" && WORKER_NAME_RE.test(row.host) ? row.host : null;
+}
+
+// A line break inside an entry's text: a real one, or the worker's escaped form of one (`escapeControls` writes the
+// whole control class out as `\u{XXXX}`, newlines included). Splitting on the escaped form turns it into a LINE, never
+// back into the character, so nothing a reader could be fooled by is restored.
+const TRANSCRIPT_BREAK = /\\u\{000D\}\\u\{000A\}|\\u\{000A\}|\r?\n/;
+
+/** A transcript entry's header line: its kind, its tool, and the error and truncated markers. Never its text. */
+function transcriptHeader(e: any): string {
+  const kind = cellOf(e?.kind ?? "note");
+  if (e?.kind === "reset") return "> reset: the transcript started over";
+  if (e?.kind === "skipped") return "> skipped: an oversize or unreadable line";
+  const bits = [`> ${kind}`];
+  if (typeof e?.tool === "string" && e.tool !== "") bits.push(cellOf(e.tool));
+  if (e?.error === true) bits.push("ERROR");
+  if (e?.truncated === true) bits.push("(truncated)");
+  return bits.join(" ");
+}
+
+/** One scrubbed line cut into pieces of at most `w` columns, whole graphemes only (`wrapColumns`' cut, keeping spaces). */
+function hardWrap(line: string, w: number | null, styler: any): string[] {
+  if (w === null) return [line];
+  const out: string[] = [];
+  let rest = line;
+  while (styler.visibleLen(rest) > w) {
+    const head = cutUnits(rest, sliceColumns(rest, w).length);
+    if (!head) break; // one cluster wider than the budget: left whole, and the view's clipData cuts it
+    out.push(head);
+    rest = rest.slice(head.length);
+  }
+  out.push(rest);
+  return out;
+}
+
+/**
+ * The live transcript's entries as the LIVE_TAIL view's lines (issue #643): per entry a header and its text, each text
+ * line scrubbed FIRST (the control class substituted, the gate every tail byte passes) and then cut to `inner - 2`
+ * columns under a two-space indent; `inner` null (an unframed pane) cuts nothing. The `end` entry draws no line here:
+ * the view names it in its own "(run ended: ...)" line. At most the last TAIL_LINES lines are kept.
+ */
+export function transcriptLines(entries: any[], inner: number | null, styler: any): string[] {
+  const w = inner === null ? null : Math.max(1, inner - 2);
+  const out: string[] = [];
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (e?.kind === "end") continue;
+    out.push(transcriptHeader(e));
+    if (typeof e?.text !== "string" || e.text === "") continue;
+    for (const part of e.text.split(TRANSCRIPT_BREAK)) {
+      for (const piece of hardWrap(scrubControl(part), w, styler)) out.push(`  ${piece}`);
+    }
+  }
+  return out.slice(-TAIL_LINES);
+}
+
 /** The indices of tail lines containing `query` (case-insensitive substring) -- the LIVE_TAIL search
  * model, computed over the held tail bytes alone, so search reads nothing the view does not already. */
 // Exported for its own pin, as `targetUrl` is: what an operator can SEARCH FOR has to stay tied to what
@@ -3535,8 +3699,23 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
     return box({ title: boxTitle, footer: "Esc back", width, sections: [{ lines }] });
   }
   if (tail?.missing) {
-    const lines = [`live ${scrubControl(String(tailJobId ?? "-"))} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found)`];
-    if (!framed) return [boxTitle, "", ...lines, "", "Esc back"];
+    // ANOTHER HOST'S RUN (issue #643): with no stream to read and the raw log on that host, the honest sentence names the
+    // host and both reasons the stream can be absent; "no captured log" alone would send the operator looking at this
+    // host's PI_CAPTURE_JOB_LOGS for a log that was never going to be here. `elsewhere` arrives only from the read model's log tail
+    // with the run's host and this host's name both known, and it is a registry name in the worker-name charset.
+    const id = scrubControl(String(tailJobId ?? "-"));
+    const said = typeof tail.elsewhere === "string" && tail.elsewhere !== ""
+      ? [
+          `live ${id} -- this run is on host ${scrubControl(tail.elsewhere)}.`,
+          "Its live transcript is not in Valkey: that host publishes none (PI_LIVE_TRANSCRIPTS=0), the run has not written one yet, or it has expired.",
+          "Its raw log stays on that host.",
+        ]
+      : [
+          `live ${id} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found)`,
+          ...(tail.noStream ? ["and no live transcript in Valkey (PI_LIVE_TRANSCRIPTS=0, not written yet, or expired)"] : []),
+        ];
+    if (!framed) return [boxTitle, "", ...said, "", "Esc back"];
+    const lines = said.flatMap((l) => wrapColumns(l, Math.trunc(width) - 4, styler));
     return box({ title: boxTitle, footer: "Esc back", width, sections: [{ lines }] });
   }
   const all = Array.isArray(tail?.lines) ? tail.lines : [];
@@ -3544,6 +3723,12 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
   const maxTop = Math.max(0, len - TAIL_VIEWPORT);
   const top = Math.min(Math.max(0, tailTop), maxTop);
   const ended = snapshot?.activeJobId !== tailJobId;
+  // The transcript's own end entry is the better word than the active slot: it names the outcome, and it is right for a
+  // run on another host too. The source is named in the header, so a transcript cannot pass for the raw log.
+  const streamEnded = tail?.stream && typeof tail.ended === "string" ? `(run ended: ${scrubControl(tail.ended)})` : null;
+  const endedLine = streamEnded ?? (ended ? "(run ended -- Esc to go back)" : null);
+  const source = tail?.stream ? "live transcript, " : "";
+  const note = tail?.stream && typeof tail.note === "string" && tail.note !== "" ? `(transcript read failed: ${scrubControl(tail.note)}; retrying)` : null;
   // The state is named, not implied: a paused tail reads "paused", so stale lines cannot pass as live.
   let footer = `[${Math.min(top + TAIL_VIEWPORT, len)}/${len}] ${tailFollow ? "follow" : "paused"} · Up/Down PgUp/PgDn scroll, Esc back`;
   // An armed query joins the footer with its match position (`/err · 3/7`; 0/N before the first jump),
@@ -3563,8 +3748,9 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
     // them RAW, so the seam existed on one branch of an if (issue #367). Scrubbed rather than clipped,
     // because an unframed pane has no width to clip to; the class is the one `scrubControls` owns, so both
     // branches now SUBSTITUTE and the two panes cannot clip differently (issue #382).
-    const plain = [`live ${scrubControl(String(tailJobId ?? "-"))} -- ${len} line(s)`, ...all.slice(top, top + TAIL_VIEWPORT).map((l: string) => scrubControl(String(l)))];
-    if (ended) plain.push("(run ended -- Esc to go back)");
+    const plain = [`live ${scrubControl(String(tailJobId ?? "-"))} -- ${source}${len} line(s)`, ...all.slice(top, top + TAIL_VIEWPORT).map((l: string) => scrubControl(String(l)))];
+    if (note) plain.push(note);
+    if (endedLine) plain.push(endedLine);
     if (tailSearchInput) plain.push("/ " + tailSearchInput.value());
     return [boxTitle, "", ...plain, "", footer];
   }
@@ -3572,14 +3758,15 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
   // `clipData`, not `clip`: the framed branch DELETED the control class where the degrade above and every
   // other renderer of this content SUBSTITUTE it, so one `.log` line rendered a column narrower framed than
   // unframed (issue #382, item 1). Same gate, same class, one operation.
-  const lines: any[] = [clipData(`live ${cellOf(tailJobId)} -- ${len} line(s)`, inner)];
+  const lines: any[] = [clipData(`live ${cellOf(tailJobId)} -- ${source}${len} line(s)`, inner)];
   for (let i = top; i < Math.min(top + TAIL_VIEWPORT, len); i++) {
     // Substitute and clip FIRST (the untrusted-byte gate), color the result second -- see the doc comment above.
     const safe = clipData(all[i], inner);
     lines.push(tailQuery !== null && i === tailMatchLine ? styler.fg("warning", safe) : safe);
   }
   // The job left the active slot (ended, or a different job now runs): keep showing the last tail.
-  if (ended) lines.push(clipData("(run ended -- Esc to go back)", inner));
+  if (note) lines.push(clipData(note, inner));
+  if (endedLine) lines.push(clipData(endedLine, inner));
   // The search bar is the view's last body line, layered-input style: a 2-col `/ ` sigil plus the focused
   // line input (inverse-video cursor via styler.lineInput) filling the rest.
   if (tailSearchInput) lines.push(styler.fg("accent", "/ ") + styler.lineInput(tailSearchInput, Math.max(1, inner - 2)));

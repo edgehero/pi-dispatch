@@ -60,6 +60,9 @@ import { RUNS_INDEX, RUNS_INDEX_MAX, hostsIn, mergeRuns, readMirroredPage, readM
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
 import { sessionKeyFor } from "@edgehero/pi-dispatch/session-key";
+// The live transcript's key, kinds, outcomes and tool charset (issue #643), the worker's own, so the reader and the
+// publisher cannot drift on the stream's contract.
+import { LIVE_KINDS, LIVE_OUTCOMES, LIVE_TOOL_RE, liveKeyFor } from "@edgehero/pi-dispatch/live-transcript";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty, localRepoProblem } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
@@ -3833,6 +3836,15 @@ export function createFleetReader(
     async runById(jobId) {
       return readRunById(redis, { logsDir: paths.logsDir, jobId, fs });
     },
+    // The live transcript (issue #643), off this reader's held client and bounded by its timeout: `readTranscriptSince`
+    // and `readTranscriptMeta`, whose shapes these return. Non-blocking XRANGE reads only, so a tail open beside the
+    // panel never parks the snapshot's own reads behind it. Never throws.
+    async transcriptSince(jobId, after = null, { count = TRANSCRIPT_PAGE_MAX } = {}) {
+      return readTranscriptSince(redis, jobId, after, { count, timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    async transcriptMeta(jobId) {
+      return readTranscriptMeta(redis, jobId, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
     // The kill switch (issue #642): ONE funnel with the tools' `killSwitchSet`, so a resume across two disagreeing
     // Valkeys is refused here too. Returns `killSwitchSet`'s shape: `{ refused }`, or `{ results: [{ url, shown, res }],
     // disagreement }`, where `res` is `{ ok: true, paused, queues }`, or `{ unreachable, partial: { done, failed, error } }`
@@ -4044,6 +4056,177 @@ export async function readRunById(redis, { logsDir, jobId, fs = nodeFs, timeoutM
   const mirrored = await readMirroredRecord(redis, sanitizeJobId(jobId), { timeoutMs });
   if (mirrored && typeof mirrored === "object" && mirrored !== UNREADABLE_RECORD && !Array.isArray(mirrored)) return { record: mirrored, source: "mirror" };
   return { missing: true };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The live transcript stream (issue #643, INT-LIVE-TRANSCRIPT-STREAM): the worker publishes a running job's redacted
+// transcript to `run:live:<sanitized id>` as a capped Valkey stream; these read it, for the TUI's LIVE_TAIL and the
+// console's run page. THE ENTRIES ARE AGENT-WRITTEN TEXT: the worker redacts the job's secrets and escapes the control
+// class, and every surface still treats `text` as untrusted (scrub, then width; escape, then markup). Nothing here logs
+// or keeps an entry.
+//
+// NON-BLOCKING BY CONSTRUCTION. Every read is an XRANGE (or XREVRANGE / XLEN), which answers at once, and never a
+// blocking XREAD: the fleet reader holds ONE client for the whole snapshot, and a `BLOCK` read on it would park every
+// GET and MGET of the next tick behind it for as long as the block lasts. Polling at the surface's own refresh rhythm
+// costs one round trip a second; a blocking read would cost a second connection or a frozen panel.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** A stream entry id as Valkey writes it (`<ms>-<seq>`), bounded. The cursor is checked against it before any key or argument is built. */
+export const TRANSCRIPT_ID_RE = /^\d{1,16}-\d{1,10}$/;
+/** The most entries one read returns: the contract's page bound, so a hostile `count` cannot ask for the whole stream. */
+export const TRANSCRIPT_PAGE_MAX = 200;
+// The tool-name charset (`LIVE_TOOL_RE`: anything else reads as `?`) and the `end` entry's outcome vocabulary
+// (`LIVE_OUTCOMES`: anything else reads as `unknown`, never free text) are the worker's, imported above.
+/**
+ * A belt over the worker's own cap (8192 code points for an assistant's text, after which the escaped form can grow by at
+ * most ten units per character): a stream written by something other than this worker cannot hand a surface a megabyte
+ * line. Cut at a code point, and marked truncated, as the worker marks its own cuts.
+ */
+const TRANSCRIPT_TEXT_MAX_UNITS = 65536;
+const TRANSCRIPT_TIMEOUT_MS = 2500;
+
+function transcriptRefusal(jobId, after) {
+  if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { invalid: "a run id is letters, digits and . _ : -, at most 200 characters" };
+  if (after !== null && after !== undefined && (typeof after !== "string" || !TRANSCRIPT_ID_RE.test(after))) return { invalid: "a transcript cursor is a stream id (<ms>-<seq>)" };
+  return null;
+}
+
+/**
+ * Order two stream ids (both already matched TRANSCRIPT_ID_RE) the way Valkey orders them: by milliseconds, then by
+ * sequence, each as a NUMBER. One MULTI writes many entries in the same millisecond, so `<ms>-10` after `<ms>-9` is
+ * normal, and a string compare would put it first. BigInt, because 16 digits passes 2^53. null (no cursor yet, the
+ * stream's beginning) sorts before every id. The one ordering every transcript reader uses: this module's `ended`, and
+ * the console hub's cursors (console/live.mjs).
+ */
+export function compareTranscriptIds(a, b) {
+  if (a === b) return 0;
+  if (a === null) return -1;
+  if (b === null) return 1;
+  const [am, as] = a.split("-").map(BigInt);
+  const [bm, bs] = b.split("-").map(BigInt);
+  return am === bm ? (as < bs ? -1 : as > bs ? 1 : 0) : am < bm ? -1 : 1;
+}
+
+/**
+ * One raw XRANGE row (`[id, [field, value, ...]]`) as a display entry, or null for a row whose id is not a stream id.
+ * Only the contract's fields are read, each from its FIRST occurrence and only as a string; an unknown `kind` is kept as
+ * a `note` (a newer worker's kind still shows, as the plain line it is), so a reader one version behind degrades rather
+ * than drops.
+ */
+function transcriptEntryOf(row) {
+  const id = Array.isArray(row) ? row[0] : null;
+  if (typeof id !== "string" || !TRANSCRIPT_ID_RE.test(id)) return null;
+  const list = Array.isArray(row[1]) ? row[1] : [];
+  const f = {};
+  for (let i = 0; i + 1 < list.length; i += 2) {
+    const name = list[i];
+    const value = list[i + 1];
+    if (typeof name !== "string" || typeof value !== "string" || Object.hasOwn(f, name)) continue;
+    if (name === "kind" || name === "ts" || name === "text" || name === "tool" || name === "error" || name === "truncated" || name === "outcome") f[name] = value;
+  }
+  const kind = LIVE_KINDS.includes(f.kind) ? f.kind : "note";
+  let text = typeof f.text === "string" && kind !== "reset" && kind !== "skipped" && kind !== "end" ? f.text : null;
+  let truncated = f.truncated === "1";
+  if (text !== null && text.length > TRANSCRIPT_TEXT_MAX_UNITS) {
+    text = dropLoneHighSurrogate(text.slice(0, TRANSCRIPT_TEXT_MAX_UNITS));
+    truncated = true;
+  }
+  return {
+    id,
+    kind,
+    ts: typeof f.ts === "string" && /^\d{1,16}$/.test(f.ts) ? Number(f.ts) : null,
+    text,
+    tool: kind === "tool-call" || kind === "tool-result" ? (typeof f.tool === "string" && LIVE_TOOL_RE.test(f.tool) ? f.tool : "?") : null,
+    error: kind === "tool-result" && f.error === "1",
+    truncated,
+    outcome: kind === "end" ? (LIVE_OUTCOMES.includes(f.outcome) ? f.outcome : "unknown") : null,
+  };
+}
+
+function dropLoneHighSurrogate(s) {
+  const last = s.charCodeAt(s.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? s.slice(0, -1) : s;
+}
+
+function transcriptCount(count) {
+  return Number.isSafeInteger(count) && count >= 1 ? Math.min(count, TRANSCRIPT_PAGE_MAX) : TRANSCRIPT_PAGE_MAX;
+}
+
+async function boundedTranscriptRead(work, timeoutMs) {
+  const ms = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : TRANSCRIPT_TIMEOUT_MS;
+  try {
+    return await withTimeout(work(), ms, { unreachable: "timed out reaching the transcript" });
+  } catch (err) {
+    return { unreachable: transcriptFailure(err) };
+  }
+}
+
+/**
+ * Why a transcript read failed, WITHOUT the error's own text: a connection error's message names the server
+ * (`connect ECONNREFUSED 10.0.0.1:6379`), and this reason reaches the TUI's tail and the console. Only the error's code
+ * survives (`err.code`, a token such as ECONNREFUSED or ETIMEDOUT), so the operator still learns refused from reset.
+ */
+const TRANSCRIPT_ERROR_CODE_RE = /^E[A-Z0-9_]{2,31}$/;
+function transcriptFailure(err) {
+  const code = typeof err?.code === "string" && TRANSCRIPT_ERROR_CODE_RE.test(err.code) ? err.code : null;
+  return code ? `the transcript could not be read (${code})` : "the transcript could not be read";
+}
+
+/**
+ * A job's transcript entries after `after`, ON A CLIENT THE CALLER OWNS (never disconnected): `{ entries, next, ended,
+ * outcome }`, `{ invalid }` for a job id outside the run-id charset or a cursor that is not a stream id (both checked
+ * BEFORE the key is built), or `{ unreachable }`. Never throws.
+ *
+ *   - `after` absent or null reads from the start (`-`); otherwise the read is EXCLUSIVE (`(after`), so a cursor handed
+ *     back as `next` never returns its own entry twice.
+ *   - `count` is clamped to 1..TRANSCRIPT_PAGE_MAX (200); a page that comes back full means more may wait.
+ *   - `next` is the last entry's id, or `after` unchanged (null when there was none) when nothing is new.
+ *   - `ended` is true once the reader has read UP TO the stream's `end` entry: the stream's last entry is `end` and
+ *     `next` is at or past it. It is computed from the stream, not from the page, so a reader resuming after the end
+ *     (a reconnect whose cursor is the `end` entry's id) still learns that the run is over. `outcome` is the end
+ *     entry's outcome when ended, else null.
+ *
+ * Two commands, XRANGE for the page and an XREVRANGE COUNT 1 for the stream's last entry, issued together.
+ */
+export async function readTranscriptSince(redis, jobId, after = null, { count = TRANSCRIPT_PAGE_MAX, timeoutMs = TRANSCRIPT_TIMEOUT_MS } = {}) {
+  const refused = transcriptRefusal(jobId, after);
+  if (refused) return refused;
+  if (!redis) return { unreachable: "no Valkey client" };
+  const key = liveKeyFor(jobId);
+  const n = transcriptCount(count);
+  const start = typeof after === "string" ? `(${after}` : "-";
+  return boundedTranscriptRead(async () => {
+    const [rows, lastRows] = await Promise.all([redis.xrange(key, start, "+", "COUNT", n), redis.xrevrange(key, "+", "-", "COUNT", 1)]);
+    const entries = (Array.isArray(rows) ? rows : []).map(transcriptEntryOf).filter((e) => e !== null);
+    const next = entries.length > 0 ? entries[entries.length - 1].id : typeof after === "string" ? after : null;
+    const last = Array.isArray(lastRows) && lastRows.length > 0 ? transcriptEntryOf(lastRows[0]) : null;
+    const ended = last !== null && last.kind === "end" && next !== null && compareTranscriptIds(next, last.id) >= 0;
+    return { entries, next, ended, outcome: ended ? last.outcome : null };
+  }, timeoutMs);
+}
+
+/**
+ * What the job's stream holds, without its text, ON A CLIENT THE CALLER OWNS: `{ exists, ended, outcome, length,
+ * firstId, lastId }`, `{ invalid }` or `{ unreachable }`. `exists` false (length 0, every id null) is a job that never
+ * published, published with `PI_LIVE_TRANSCRIPTS=0`, or whose stream has expired (24 h after its end, 7 days after its
+ * first write); the stream itself cannot tell those apart, and a surface says so rather than picking one. `length` is
+ * what the stream holds NOW, after the worker's `MAXLEN ~ 2000` trim, so `firstId` may be later than the run's first
+ * entry. Never throws.
+ */
+export async function readTranscriptMeta(redis, jobId, { timeoutMs = TRANSCRIPT_TIMEOUT_MS } = {}) {
+  const refused = transcriptRefusal(jobId, null);
+  if (refused) return refused;
+  if (!redis) return { unreachable: "no Valkey client" };
+  const key = liveKeyFor(jobId);
+  return boundedTranscriptRead(async () => {
+    const [len, firstRows, lastRows] = await Promise.all([redis.xlen(key), redis.xrange(key, "-", "+", "COUNT", 1), redis.xrevrange(key, "+", "-", "COUNT", 1)]);
+    const length = Number.isSafeInteger(Number(len)) && Number(len) > 0 ? Number(len) : 0;
+    const first = Array.isArray(firstRows) && firstRows.length > 0 ? transcriptEntryOf(firstRows[0]) : null;
+    const last = Array.isArray(lastRows) && lastRows.length > 0 ? transcriptEntryOf(lastRows[0]) : null;
+    const exists = length > 0 && last !== null;
+    const ended = exists && last.kind === "end";
+    return { exists, ended, outcome: ended ? last.outcome : null, length: exists ? length : 0, firstId: exists ? first?.id ?? null : null, lastId: exists ? last.id : null };
+  }, timeoutMs);
 }
 
 /**
