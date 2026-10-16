@@ -132,6 +132,7 @@ import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@ed
 import { runDollars } from "./dollar-windows.mjs";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 import { tokensFilePath } from "@edgehero/pi-dispatch/console-tokens";
+import { defaultWorkerName } from "@edgehero/pi-dispatch/config";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
 // extension at a deployment built in another directory. Layered into process.env once at factory load
 // (the operator's env always wins), so resolvePaths stays env-only by contract while every one of its
@@ -254,6 +255,20 @@ function deploymentEnv(): any {
   const { env, notice } = panelEnv({ env: process.env, pointerDir: deploymentDir, owned });
   if (notice && notice !== serviceEnvNoticeShown) serviceEnvNoticePending = notice;
   return env;
+}
+
+/** This host's worker name, the way the worker resolves its own: the deployment's PI_WORKER_NAME, else the sanitized hostname. */
+function thisWorkerName(): string {
+  const declared = deploymentEnv()?.PI_WORKER_NAME;
+  return typeof declared === "string" && declared !== "" ? declared : defaultWorkerName();
+}
+
+/**
+ * The dashboard's LIVE_TAIL `.log` read (exported for its wiring test): `readLogTail`'s result verbatim, told the job's
+ * host and this host's name, so a run on another host with no local log comes back `{ missing, elsewhere }`.
+ */
+export function panelTailLog(paths: any) {
+  return ({ jobId, lines, host }: { jobId: string; lines: number; host?: string | null }) => readLogTail({ logsDir: paths.logsDir, jobId, lines, host: host ?? null, self: thisWorkerName() });
 }
 
 /** TEST-ONLY: arm the advisory directly (under the pinned devDep pi the natural computation is a no-op). */
@@ -1990,8 +2005,12 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
         // The kill switch's plan (issue #642) is the CLI's and the tools' (`killSwitchPlan`): both Valkeys on a pause when this
         // process's and the deployment's disagree, and a resume refused then, so the TUI cannot resume one and strand the other.
         ...withAuditedWrites(createDashboardDeps(paths, { dollarEnvFn: deploymentEnv, killSwitchPlanFn: ({ paused }: any) => killSwitchPlan({ paused }) }), (opts: any, fn: () => any) => panelWrite(auditDir(), opts, fn)),
-        // log read stays here; overlay-only, returns readLogTail's result verbatim
-        tailLog: ({ jobId, lines }: { jobId: string; lines: number }) => readLogTail({ logsDir: paths.logsDir, jobId, lines }),
+        // log read stays here; overlay-only, returns readLogTail's result verbatim. The live transcript (issue #643) comes
+        // through `createDashboardDeps` above, off the fleet reader's held client; this is the fallback for a run with no
+        // stream. `host` (the registry's host for the job) and `self` (this host's worker name, as the worker resolves it:
+        // PI_WORKER_NAME, else the sanitized hostname) are what let a missing log say "this run is on host X": without
+        // them `readLogTail` can never tell a foreign run from an uncaptured one, which is the gap #643 closed.
+        tailLog: panelTailLog(paths),
         // REQ-RESURRECTABLE-SANDBOX, both seams. The fs read and the spawn live HERE for the same reason
         // tailLog does: dashboard.ts renders and holds the tui, and touches no filesystem and no child
         // process of its own. It brackets the launch with tui.stop()/tui.start(); this side only builds
