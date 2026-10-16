@@ -390,6 +390,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       pagePanels: (page, ctx) => m.pages.pagePanels(page, ctx),
       queryKeyOf: (page, query) => m.pages.pageQueryString(page, query),
       peekSession: (id, file) => sessions.peek(id, file),
+      // Issue #643: the operator's live transcript streams read through the same reader (non-blocking XRANGE).
+      transcriptSince: (jobId, after, opts) => fleet.transcriptSince(jobId, after, opts),
       readTokens,
       readOnly: config.readOnly,
       now,

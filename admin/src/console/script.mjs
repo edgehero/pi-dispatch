@@ -32,8 +32,15 @@
  *     each job's result first, as text, with a button to reload.
  *   - while a form is in use (its preview open, a field typed into or focused, its editor open), a live panel holding it
  *     is NOT swapped, so an update cannot wipe a half-made change; the page reloads after a confirm anyway.
- * Server text is shown with `textContent`, never as markup; the two `innerHTML` writes are the panel swap and the
- * preview swap above, both of server-escaped fragments into elements the server marked for them.
+ *   - the run page's LIVE TRANSCRIPT (issue #643; `[data-transcript]`, drawn for an operator only): opens
+ *     `/api/transcript?id=<data-job>` with `EventSource`. Each `event: entry` carries `{html}`, server-rendered and
+ *     escaped, which is APPENDED to that one element (`insertAdjacentHTML("beforeend")`) and nowhere else. The view
+ *     follows the bottom unless the operator has scrolled up. `[data-transcript-status]` says "live", "reconnecting",
+ *     "ended (<outcome>)" or "not live", through `textContent`. `event: done` (the run is over) closes the stream, so it
+ *     is not reopened; `event: end` (the session ended) goes to `/login`. A dropped stream reconnects by itself and
+ *     resends the last entry's id as `Last-Event-ID`, so nothing is appended twice.
+ * Server text is shown with `textContent`, never as markup; the `innerHTML` writes are the panel swap, the preview
+ * swap and the transcript append above, all of server-escaped fragments into elements the server marked for them.
  */
 export const CONSOLE_SCRIPT = `"use strict";
 (function () {
@@ -246,6 +253,47 @@ export const CONSOLE_SCRIPT = `"use strict";
     es.addEventListener("end", function () {
       es.close();
       mark("signed out", "off");
+      location.assign("/login");
+    });
+  }
+  // ---- the live transcript (issue #643) ----
+  var tbox = document.querySelector("[data-transcript]");
+  var tjob = tbox ? tbox.getAttribute("data-job") : null;
+  if (tbox && tjob && typeof EventSource === "function") {
+    var tstatus = document.querySelector("[data-transcript-status]");
+    var tmark = function (text, cls) {
+      if (!tstatus) return;
+      tstatus.textContent = text;
+      tstatus.className = "t-status " + cls;
+    };
+    var tes = new EventSource("/api/transcript?id=" + encodeURIComponent(tjob));
+    tes.addEventListener("open", function () { tmark("live", "on"); });
+    tes.addEventListener("error", function () {
+      if (tes.readyState === 2) tmark("not live: reload after closing another console tab", "off");
+      else tmark("reconnecting", "off");
+    });
+    tes.addEventListener("entry", function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (!msg || typeof msg.html !== "string") return;
+      // Follow the bottom only when the reader is already there: one who scrolled up to read keeps their place.
+      var atBottom = tbox.scrollHeight - tbox.scrollTop - tbox.clientHeight < 24;
+      tbox.insertAdjacentHTML("beforeend", msg.html);
+      if (atBottom) tbox.scrollTop = tbox.scrollHeight;
+      tmark("live", "on");
+    });
+    tes.addEventListener("done", function (ev) {
+      tes.close();
+      var outcome = "unknown";
+      try {
+        var d = JSON.parse(ev.data);
+        if (d && typeof d.outcome === "string") outcome = d.outcome;
+      } catch (e) { /* keep unknown */ }
+      tmark("ended (" + outcome + ")", "ended");
+    });
+    tes.addEventListener("end", function () {
+      tes.close();
+      tmark("signed out", "off");
       location.assign("/login");
     });
   }

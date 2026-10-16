@@ -58,6 +58,7 @@ import {
   runsTable,
   RUN_ID_RE,
 } from "./panels.mjs";
+import { runTranscriptSection } from "./transcript.mjs";
 
 /**
  * The screens. `path` is the route, `auth` the least role that may open it, `live` whether the page opens the event
@@ -217,7 +218,7 @@ export function pageQueryString(name, query) {
 const PAGE_READS = Object.freeze({
   overview: ["snapshot"],
   runs: ["runsPage", "subscriptions"],
-  run: ["run", "subscriptions"],
+  run: ["run", "subscriptions", "transcriptMeta"],
   parked: ["snapshot"],
   insights: ["insights"],
   fleet: ["snapshot"],
@@ -323,6 +324,16 @@ export async function loadPageData(name, query, deps = {}) {
     }
     if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record).then(({ children, searched }) => ({ children, childrenSearched: searched })));
   }
+  if (reads.includes("transcriptMeta") && typeof deps.fleet?.transcriptMeta === "function") {
+    // Issue #643: whether the run has a live transcript stream, without a byte of its text (the stream's text goes to an
+    // operator's `/api/transcript` alone). Read for both roles, as all page data is; only an operator's page uses it.
+    try {
+      const meta = await deps.fleet.transcriptMeta(q.id);
+      data.transcript = meta?.unreachable || meta?.invalid ? { unreachable: Boolean(meta.unreachable), exists: false } : { exists: meta?.exists === true, ended: meta?.ended === true, outcome: typeof meta?.outcome === "string" ? meta.outcome : null, length: Number.isSafeInteger(meta?.length) ? meta.length : 0 };
+    } catch {
+      data.transcript = { unreachable: true, exists: false };
+    }
+  }
   if (reads.includes("insights")) {
     try {
       data.insights = await deps.insights(q.range ?? "7d");
@@ -387,7 +398,11 @@ export async function renderPage(name, ctx) {
   }
   const panels = panelFragments(name, ctx);
   const heading = name === "run" && ctx?.query?.id ? html`${meta.title} <span class="mono">${ctx.query.id}</span>` : meta.title;
-  const body = html`${headerHtml(name, ctx)}<main><h1>${heading}</h1>${panels.map(({ id, fragment }) => html`<section id="${id}" data-panel>${fragment}</section>`)}</main>`;
-  const status = name === "run" && !ctx?.data?.run?.record ? 404 : 200;
+  // The run detail's live transcript (issue #643) is a section of its own, never a panel: a panel is what the hub
+  // renders and swaps, and the transcript's entries are appended by the browser from the operator's own stream.
+  const extra = name === "run" ? html`<section id="transcript" class="transcript-section">${runTranscriptSection(viewOf(name, ctx))}</section>` : null;
+  const body = html`${headerHtml(name, ctx)}<main><h1>${heading}</h1>${panels.map(({ id, fragment }) => html`<section id="${id}" data-panel>${fragment}</section>`)}${extra}</main>`;
+  // A run with no record yet but a live transcript is a running job (its record is written at its end): 200, not 404.
+  const status = name === "run" && !ctx?.data?.run?.record && ctx?.data?.transcript?.exists !== true ? 404 : 200;
   return { status, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, live, query }) };
 }
