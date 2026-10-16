@@ -723,9 +723,16 @@ test("a one-line change in a 3000-line file previews small and shows the change;
 
 // ---- the browser script ----------------------------------------------------------------------------------------------
 
-test("the script writes markup in exactly two places: the panel swap behind data-panel, and the preview into the form's OWN [data-preview]", () => {
-  const writes = CONSOLE_SCRIPT.match(/[\w.]+\.(?:innerHTML|outerHTML)\s*=|insertAdjacentHTML|document\.write/g) ?? [];
-  assert.deepEqual(writes.map((w) => w.replace(/\s+/g, "")), ["area.innerHTML=", "el.innerHTML="]);
+test("the script writes markup in exactly three places: the panel swap behind data-panel, the preview into the form's OWN [data-preview], and the transcript append into [data-transcript]", () => {
+  const writes = CONSOLE_SCRIPT.match(/[\w.]+\.(?:innerHTML|outerHTML)\s*=|[\w.]*insertAdjacentHTML|document\.write/g) ?? [];
+  assert.deepEqual(writes.map((w) => w.replace(/\s+/g, "")), ["area.innerHTML=", "el.innerHTML=", "tbox.insertAdjacentHTML"]);
+  // Issue #643: `tbox` is bound once, to the page's [data-transcript] element, and the append writes the entry's
+  // server-rendered html (a string, checked) at its end and nowhere else.
+  assert.deepEqual(CONSOLE_SCRIPT.match(/\btbox\s*=(?!=)/g), ["tbox ="]);
+  assert.match(CONSOLE_SCRIPT, /var tbox = document\.querySelector\("\[data-transcript\]"\);/);
+  assert.match(CONSOLE_SCRIPT, /if \(!msg \|\| typeof msg\.html !== "string"\) return;\n[^]*?tbox\.insertAdjacentHTML\("beforeend", msg\.html\);/);
+  assert.match(CONSOLE_SCRIPT, /new EventSource\("\/api\/transcript\?id=" \+ encodeURIComponent\(tjob\)\)/, "the job id is encoded into the URL, never markup");
+  assert.match(CONSOLE_SCRIPT, /tes\.addEventListener\("done", function \(ev\) \{\n\s+tes\.close\(\);/, "done closes the stream, so it is not reopened");
   assert.ok(!/form\.innerHTML/.test(CONSOLE_SCRIPT), "never the form itself");
   // `area` is bound once, to the submitted form's own preview element, and never reassigned.
   assert.deepEqual(CONSOLE_SCRIPT.match(/\barea\s*=(?!=)/g), ["area ="]);

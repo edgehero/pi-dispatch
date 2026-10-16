@@ -32,11 +32,13 @@
 import * as nodeFs from "node:fs";
 import { createServer } from "node:http";
 import { readRawBody } from "@edgehero/pi-dispatch/http-body";
+import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { ACTIONS, actionNamed, confirmAction, previewAction } from "./actions.mjs";
 import { contentTypeRefusal, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
 import { loginCodePage, loginPage } from "./html.mjs";
 import { STATE_VERSION, stateOf as defaultStateOf } from "./live.mjs";
+import { RUN_ID_RE } from "./panels.mjs";
 import * as realPages from "./pages.mjs";
 import { CONSOLE_SCRIPT } from "./script.mjs";
 import { CONSOLE_CSS } from "./style.mjs";
@@ -251,6 +253,19 @@ async function getEvents(ctx) {
   rest.delete("page");
   const parsed = pageQueryOr400(ctx, name, rest);
   if (!parsed) return;
+  const presented = req.headers["last-event-id"];
+  const lastEventId = typeof presented === "string" && EVENT_ID_RE.test(presented) ? presented : null;
+  return openStream(ctx, () => deps.hub.subscribe({ res, sessionId: session.id, session: { name: session.name, role: session.role }, page: name, query: parsed.query, lastEventId }));
+}
+
+/**
+ * The admission and lifecycle every event stream shares (`/api/events` and `/api/transcript`): the hub must exist
+ * (503), then the console's cap, the viewers' share of it short of the operators' reserve, and the token's cap (429
+ * with Retry-After each), all counted together whichever kind of stream holds the slot. Then the headers, the first
+ * bytes, and `subscribe()` (which returns the hub's unsubscribe); `close` gives both slots back, however it ended.
+ */
+function openStream(ctx, subscribe) {
+  const { deps, res, session } = ctx;
   if (!deps.hub) return sendError(res, 503, "this console has no live updates; see its log");
   const busy = (sentence) => sendError(res, 429, sentence, { "retry-after": String(STREAM_RETRY_AFTER_SEC) });
   if (deps.streams.open >= deps.limits.streamsTotal) return busy("the console holds as many live streams as it allows; close a tab and try again");
@@ -273,10 +288,26 @@ async function getEvents(ctx) {
   res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" });
   // The first bytes, so the browser sees the stream open before the first panel is rendered.
   res.write("retry: 2000\n\n");
-  const presented = req.headers["last-event-id"];
-  const lastEventId = typeof presented === "string" && EVENT_ID_RE.test(presented) ? presented : null;
-  if (!released) unsubscribe = deps.hub.subscribe({ res, sessionId: session.id, session: { name: session.name, role: session.role }, page: name, query: parsed.query, lastEventId });
+  if (!released) unsubscribe = subscribe();
   if (released) unsubscribe();
+}
+
+/**
+ * One run's live transcript (issue #643, `/api/transcript?id=<jobId>`), operator only (the route table refuses a viewer
+ * 403 before this runs): `id`, exactly once, in the run-id charset, and no other parameter (400). `Last-Event-ID` is
+ * honoured only in the stream's own shape (`TRANSCRIPT_ID_RE`, `<ms>-<seq>`); anything else, a panel stream's id
+ * included, is no id at all, and the stream starts from the beginning. The slots are `/api/events`'s, shared.
+ */
+async function getTranscript(ctx) {
+  const { deps, req, res, session } = ctx;
+  for (const key of new Set(ctx.searchParams.keys())) if (key !== "id") return sendError(res, 400, "the transcript stream takes only id");
+  const ids = ctx.searchParams.getAll("id");
+  if (ids.length !== 1) return sendError(res, 400, ids.length === 0 ? "the transcript stream needs ?id= with a run's job id" : "id is given more than once");
+  const jobId = ids[0];
+  if (!RUN_ID_RE.test(jobId)) return sendError(res, 400, "id must be a run id (letters, digits and . _ : -, at most 200 characters)");
+  const presented = req.headers["last-event-id"];
+  const lastEventId = typeof presented === "string" && TRANSCRIPT_ID_RE.test(presented) ? presented : null;
+  return openStream(ctx, () => deps.hub.subscribeTranscript({ res, sessionId: session.id, session: { name: session.name, role: session.role }, jobId, lastEventId }));
 }
 
 /** One GET route per screen, from the pages' own table, so a screen cannot exist without its auth. */
@@ -323,6 +354,8 @@ export const ROUTES = Object.freeze([
   { method: "GET", path: "/api/state", auth: "viewer", write: false, handler: getState },
   // `noHead`: a HEAD would take a stream slot and hold it with no body ever sent, so it is 405 before anything runs.
   { method: "GET", path: "/api/events", auth: "viewer", write: false, noHead: true, handler: getEvents },
+  // Issue #643: one run's live transcript, an operator's only (agent-written text); a stream, so no HEAD either.
+  { method: "GET", path: "/api/transcript", auth: "operator", write: false, noHead: true, handler: getTranscript },
   // #640's reference write keeps its paths, as aliases of the `pause-windows` action (DES-OPERATOR-CONSOLE): the same
   // handler, the same ticket action, so a ticket from either path redeems on either.
   { method: "POST", path: "/api/pause-windows/preview", auth: "operator", write: true, action: PAUSE_WINDOWS_ACTION, handler: (ctx) => previewAction(ctx, actionNamed(PAUSE_WINDOWS_ACTION)) },

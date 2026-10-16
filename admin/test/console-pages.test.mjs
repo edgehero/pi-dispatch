@@ -321,6 +321,11 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   assert.match(first["parked.viewer"].html, /href="https:\/\/github\.com\/acme\/api\/issues\/131" rel="noreferrer noopener" target="_blank">acme\/api#131<\/a>/, "the parked run links to its issue");
   assert.match(first["parked.viewer"].html, /<td class="num">2<\/td>/, "with the session store's chain count");
   assert.match(first["run.viewer"].html, /awaiting-input/);
+  // Issue #643: the live transcript section, outside every panel. The fixture's run has ended and Valkey holds no
+  // stream for it, so the operator reads why and nothing is opened; a viewer reads that transcripts are operators'.
+  assert.match(first["run.operator"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">No live transcript: not published \(PI_LIVE_TRANSCRIPTS=0\), expired, or not started yet\. Reload to check again\.<\/p><\/section><\/main>/);
+  assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/main>/);
+  for (const key of ["run.operator", "run.viewer"]) assert.doesNotMatch(first[key].html, /data-transcript/, `${key}: no stream for an ended run without one`);
   assert.match(first["runs.viewer"].html, /<th scope="col">Job<\/th>/);
   assert.match(first["runs.viewer"].html, /href="\/runs\?before=\d+">Older runs<\/a>/, "the runs page pages by a cursor");
   assert.match(first["runs-filtered.viewer"].html, /value="web"/, "the filter form shows the query's values");
@@ -428,12 +433,13 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
 test("loadPageData reads only what a screen shows, the snapshot at most once, and keeps no env but the forge hosts", async () => {
   const { loadPageData, parsePageQuery, PAGES } = await import("../src/console/pages.mjs");
   for (const name of Object.keys(PAGES)) {
-    const calls = { snapshot: 0, runsPage: 0, runById: 0, insights: 0, audit: 0, subscriptions: 0 };
+    const calls = { snapshot: 0, runsPage: 0, runById: 0, transcriptMeta: 0, insights: 0, audit: 0, subscriptions: 0 };
     const deps = {
       fleet: {
         snapshot: async () => (calls.snapshot++, { parked: [] }),
         runsPage: async () => (calls.runsPage++, { runs: [], next: null, mirror: "off" }),
         runById: async () => (calls.runById++, { record: { jobId: "gh-1", startedAt: "2026-10-08T00:00:00Z" }, source: "local" }),
+        transcriptMeta: async () => (calls.transcriptMeta++, { exists: true, ended: false, outcome: null, length: 3, firstId: "1-0", lastId: "3-0" }),
       },
       insights: async () => (calls.insights++, {}),
       audit: async () => (calls.audit++, { rows: [], next: null }),
@@ -446,16 +452,36 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
     assert.equal(data.now, 1234, `${name}: the clock is read once, into the data`);
     assert.deepEqual(data.env, { GITLAB_URL: "https://gl.example" }, `${name}: only forge host variables are kept`);
     assert.ok(calls.snapshot <= 1, `${name}: snapshot at most once`);
-    const expected = { overview: ["snapshot"], runs: ["runsPage", "subscriptions"], run: ["runById", "runsPage", "subscriptions"], parked: ["snapshot"], insights: ["insights"], fleet: ["snapshot"], config: ["snapshot"], audit: ["audit"] }[name];
+    const expected = { overview: ["snapshot"], runs: ["runsPage", "subscriptions"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta"], parked: ["snapshot"], insights: ["insights"], fleet: ["snapshot"], config: ["snapshot"], audit: ["audit"] }[name];
     assert.deepEqual(Object.keys(calls).filter((k) => calls[k] > 0).sort(), [...expected].sort(), `${name} reads ${expected.join(", ")}`);
+    if (name === "run") assert.deepEqual(data.transcript, { exists: true, ended: false, outcome: null, length: 3 }, "the stream's facts only, never an id or a byte of text");
   }
   // A read that throws is a stated absence, never a thrown page.
-  const broken = { fleet: { snapshot: async () => { throw new Error("down"); }, runsPage: async () => { throw new Error("down"); }, runById: async () => { throw new Error("down"); } }, insights: async () => { throw new Error("down"); }, audit: async () => { throw new Error("down"); }, now: 1 };
+  const broken = { fleet: { snapshot: async () => { throw new Error("down"); }, runsPage: async () => { throw new Error("down"); }, runById: async () => { throw new Error("down"); }, transcriptMeta: async () => { throw new Error("down"); } }, insights: async () => { throw new Error("down"); }, audit: async () => { throw new Error("down"); }, now: 1 };
   assert.equal((await loadPageData("overview", {}, broken)).snapshot, null);
   assert.equal((await loadPageData("runs", { filter: {}, before: null }, broken)).runsPage, null);
   assert.deepEqual((await loadPageData("run", { id: "x" }, broken)).run, { missing: true });
+  assert.deepEqual((await loadPageData("run", { id: "x" }, broken)).transcript, { unreachable: true, exists: false }, "a transcript read that throws is a stated absence");
   assert.match((await loadPageData("insights", { range: "7d" }, broken)).insightsError, /could not be assembled/);
   assert.equal((await loadPageData("audit", { before: null }, broken)).audit, null);
+});
+
+test("the run page says the transcript could not be read when transcriptMeta is unreachable, never that it has not started", async () => {
+  const { loadPageData, renderPage } = await import("../src/console/pages.mjs");
+  const session = { name: "ops", role: "operator" };
+  const fleetWith = (meta) => ({ runById: async () => ({ missing: true }), runsPage: async () => ({ runs: [], next: null, mirror: "off" }), transcriptMeta: async () => meta });
+  for (const meta of [{ unreachable: "timed out reaching the transcript" }, { unreachable: "the transcript could not be read (ECONNREFUSED)" }]) {
+    const data = await loadPageData("run", { id: "gh-1" }, { fleet: fleetWith(meta), subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
+    assert.deepEqual(data.transcript, { unreachable: true, exists: false }, `${meta.unreachable}: a stated failure`);
+    const html = String((await renderPage("run", { query: { id: "gh-1" }, session, data, readOnly: false })).html);
+    assert.match(html, /The live transcript could not be read \(is Valkey reachable\?\)/, meta.unreachable);
+    assert.doesNotMatch(html, /not started yet/, "an unreachable Valkey is not an absent stream");
+    assert.doesNotMatch(html, /data-transcript/, "and no stream is opened on it");
+    assert.ok(!html.includes(meta.unreachable), "the reader's reason itself is not shown");
+  }
+  // The same page with the stream merely absent says why, and watches.
+  const absent = await loadPageData("run", { id: "gh-1" }, { fleet: fleetWith({ exists: false, ended: false, outcome: null, length: 0, firstId: null, lastId: null }), subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
+  assert.match(String((await renderPage("run", { query: { id: "gh-1" }, session, data: absent, readOnly: false })).html), /not started yet/);
 });
 
 test("the audit page's Older rows link carries readConsoleAudit's own cursor, which parsePageQuery takes back to the next page", async () => {

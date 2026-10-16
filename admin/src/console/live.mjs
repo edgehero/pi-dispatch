@@ -25,11 +25,27 @@
  * The line is written when a key starts failing, not every second it stays failed (a down Valkey would otherwise write
  * one a second per open page), and once more when it recovers.
  *
+ * A SECOND SUBSCRIPTION TYPE, THE LIVE TRANSCRIPT (issue #643, `subscribeTranscript`): one run's transcript stream for
+ * an operator. It shares everything above that is not a page: the slots (the server takes them for both kinds alike),
+ * the session re-check with `peek` and its `event: end`, the 2 MiB cut, the ping and the one timer. Its own step 5:
+ *
+ *   5. `transcriptSince` runs ONCE per distinct job per tick, from the OLDEST cursor among that job's streams, and the
+ *      page is fanned out to each stream from its own cursor (`id: <stream id>`, `event: entry`, `data: {"html"}`, the
+ *      html server-rendered by `transcript.mjs`). Streams at the tip, however many, cost one read; a stream that came
+ *      in behind (a reconnect with an old `Last-Event-ID`, or none) is caught up a few pages per tick
+ *      (`transcriptPagesPerTick`), the others waiting at most those ticks. A stream whose cursor reaches the `end`
+ *      entry gets `event: done` with `{"outcome"}` and is closed (the browser closes its EventSource on it, so it is
+ *      not reopened). A read that is unreachable skips that job this tick, logged once, as a failing page is.
+ *
+ * Transcript text never enters a view, a panel or `/api/state`: it goes from the read to the one stream that asked.
+ *
  * Every seam is injected (`now`, `timers`, `random`), so the tests drive ticks by hand and never wait 15 seconds.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { scrubControls } from "../panel.mjs";
+import { compareTranscriptIds, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
+import { transcriptEntryHtml } from "./transcript.mjs";
 
 /**
  * `pageMinMs`: pages whose data is read at most once per that many ms, however often the loop ticks. The runs page
@@ -37,7 +53,7 @@ import { scrubControls } from "../panel.mjs";
  * at 5 s its views still move, at a fifth of the cost. Between loads the last data is rendered again (cheap), so a new
  * view of the same page and query is drawn at once from it.
  */
-export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ runs: 5000 }) });
+export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ runs: 5000 }), transcriptPagesPerTick: 4 });
 
 const digestOf = (text) => createHash("sha256").update(text).digest("hex");
 
@@ -64,9 +80,11 @@ function codeOf(e) {
  * text), so a render is never shared across roles, nor across names: no stream is ever written a panel drawn for
  * another session's role.
  *
- * Returns `{ subscribe, endSession, close, tick, size }`. `subscribe({res, sessionId, session, page, query,
- * lastEventId})` returns an idempotent unsubscribe; the caller wires it to `res.on("close")`. The hub writes only the
- * stream's body; the caller has already sent the headers.
+ * Returns `{ subscribe, subscribeTranscript, endSession, close, tick, size }`. `subscribe({res, sessionId, session,
+ * page, query, lastEventId})` and `subscribeTranscript({res, sessionId, session, jobId, lastEventId})` return an
+ * idempotent unsubscribe; the caller wires it to `res.on("close")`. The hub writes only the stream's body; the caller
+ * has already sent the headers. `transcriptSince(jobId, after, {count})` is the fleet reader's (issue #643); without it
+ * a transcript stream gets nothing but pings.
  */
 export function makeLiveHub({
   loadPageData,
@@ -74,6 +92,8 @@ export function makeLiveHub({
   peekSession,
   readTokens,
   readOnly = false,
+  transcriptSince = null,
+  transcriptPagesPerTick = LIVE_DEFAULTS.transcriptPagesPerTick,
   now = () => Date.now(),
   intervalMs = LIVE_DEFAULTS.intervalMs,
   pingMs = LIVE_DEFAULTS.pingMs,
@@ -110,7 +130,17 @@ export function makeLiveHub({
   };
 
   const viewKeyOf = (sub) => `${sub.page}\n${sub.qkey}\n${sub.session.role}\n${sub.session.name}`;
+  const isPage = (sub) => sub.kind === "page";
+  const pageSubs = () => [...subs].filter(isPage);
   const nextSeq = () => `${epoch}-${(counter += 1)}`;
+
+  function startTimer() {
+    if (timer === null) {
+      lastPing = now();
+      timer = timers.setInterval(() => void tick(), intervalMs);
+      timer?.unref?.();
+    }
+  }
 
   function stopTimerIfIdle() {
     if (subs.size === 0 && timer !== null) {
@@ -121,8 +151,10 @@ export function makeLiveHub({
 
   function remove(sub) {
     if (!subs.delete(sub)) return;
-    const key = viewKeyOf(sub);
-    if (![...subs].some((s) => viewKeyOf(s) === key)) views.delete(key);
+    if (isPage(sub)) {
+      const key = viewKeyOf(sub);
+      if (!pageSubs().some((s) => viewKeyOf(s) === key)) views.delete(key);
+    }
     stopTimerIfIdle();
   }
 
@@ -191,7 +223,7 @@ export function makeLiveHub({
     for (const sub of [...subs]) if ((sub.res.writableLength ?? 0) > maxBufferBytes) cut(sub);
     // 3 and 4. one load per data key, one render per view.
     const byData = new Map();
-    for (const sub of subs) {
+    for (const sub of pageSubs()) {
       const dk = `${sub.page}\n${sub.qkey}`;
       if (!byData.has(dk)) byData.set(dk, { page: sub.page, query: sub.query, subs: [] });
       byData.get(dk).subs.push(sub);
@@ -251,14 +283,76 @@ export function makeLiveHub({
         }
       }
     }
+    // 5. the live transcripts: one read per job, fanned out.
+    await transcriptTick();
     // A key nobody shows any more is forgotten, failing or not, so a long-running console holds only what is open.
-    const shown = new Set([...subs].flatMap((sub) => [`data\n${sub.page}\n${sub.qkey}`, `view\n${viewKeyOf(sub)}`]));
+    const shown = new Set([...subs].flatMap((sub) => (isPage(sub) ? [`data\n${sub.page}\n${sub.qkey}`, `view\n${viewKeyOf(sub)}`] : [`transcript\n${sub.jobId}`])));
     for (const key of [...failing]) if (!shown.has(key)) failing.delete(key);
     for (const dk of [...loaded.keys()]) if (!shown.has(`data\n${dk}`)) loaded.delete(dk);
     // The keep-alive, so a proxy or the browser does not take a quiet stream for a dead one.
     if (t - lastPing >= pingMs) {
       lastPing = t;
       for (const sub of [...subs]) send(sub, ": ping\n\n");
+    }
+  }
+
+  const entryEvent = (id, htmlText) => `id: ${id}\nevent: entry\ndata: ${JSON.stringify({ html: htmlText })}\n\n`;
+
+  /** The run is over for this stream: `event: done` with the outcome, then close; the browser closes its EventSource. */
+  function done(sub, outcome) {
+    remove(sub);
+    try {
+      sub.res.write(`event: done\ndata: ${JSON.stringify({ outcome: typeof outcome === "string" ? outcome : "unknown" })}\n\n`);
+      sub.res.end();
+    } catch {
+      // already gone
+    }
+  }
+
+  /**
+   * Step 5. Per job: read from the oldest cursor, write each stream the entries past its own cursor, and repeat while
+   * a page came back full and a stream is still behind, up to `transcriptPagesPerTick` reads. A stream whose cursor is
+   * at the `end` entry (the read says `ended` and its cursor is the read's `next`) is done.
+   */
+  async function transcriptTick() {
+    if (typeof transcriptSince !== "function") return;
+    const byJob = new Map();
+    for (const sub of subs) {
+      if (sub.kind !== "transcript") continue;
+      if (!byJob.has(sub.jobId)) byJob.set(sub.jobId, []);
+      byJob.get(sub.jobId).push(sub);
+    }
+    for (const [jobId, group] of byJob) {
+      for (let page = 0; page < transcriptPagesPerTick; page += 1) {
+        const live = group.filter((s) => subs.has(s));
+        if (live.length === 0) break;
+        const from = live.reduce((min, s) => (compareTranscriptIds(s.cursor, min) < 0 ? s.cursor : min), live[0].cursor);
+        let read;
+        try {
+          read = await transcriptSince(jobId, from, { count: TRANSCRIPT_PAGE_MAX });
+        } catch (e) {
+          read = { unreachable: codeOf(e) };
+        }
+        if (!read || read.unreachable || read.invalid || !Array.isArray(read.entries)) {
+          failed(`transcript\n${jobId}`, "console: a live transcript could not be read; its streams wait for the next tick");
+          break;
+        }
+        recovered(`transcript\n${jobId}`, "console: a live transcript is read again");
+        // Rendered once per entry, whichever streams it goes to.
+        const rendered = read.entries.map((entry) => ({ id: entry.id, event: entryEvent(entry.id, String(transcriptEntryHtml(entry))) }));
+        for (const sub of live) {
+          if (!subs.has(sub)) continue;
+          for (const r of rendered) {
+            if (compareTranscriptIds(r.id, sub.cursor) <= 0) continue;
+            if (!send(sub, r.event)) break;
+            sub.cursor = r.id;
+          }
+          if (subs.has(sub) && read.ended && sub.cursor !== null && sub.cursor === read.next) done(sub, read.outcome);
+        }
+        // Another page only while this one was full (more may wait) and a stream is still behind the read.
+        const full = read.entries.length >= TRANSCRIPT_PAGE_MAX;
+        if (!full || !group.some((s) => subs.has(s) && compareTranscriptIds(s.cursor, read.next) <= 0)) break;
+      }
     }
   }
 
@@ -293,13 +387,9 @@ export function makeLiveHub({
         }
         return () => {};
       }
-      const sub = { res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), needsFull: true };
+      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), needsFull: true };
       subs.add(sub);
-      if (timer === null) {
-        lastPing = now();
-        timer = timers.setInterval(() => void tick(), intervalMs);
-        timer?.unref?.();
-      }
+      startTimer();
       const view = views.get(viewKeyOf(sub));
       if (view && view.seq !== null) {
         if (typeof lastEventId === "string" && lastEventId === view.seq) sub.needsFull = false;
@@ -308,6 +398,26 @@ export function makeLiveHub({
         // Nothing rendered for this view yet: render it now rather than leave the page blank for a tick.
         void tick();
       }
+      return () => remove(sub);
+    },
+
+    /**
+     * One run's live transcript (issue #643): entries after `lastEventId` (a stream id the caller validated, else null
+     * for the beginning). The first entries are read now rather than a tick later.
+     */
+    subscribeTranscript({ res, sessionId, session, jobId, lastEventId = null }) {
+      if (closed) {
+        try {
+          res.end();
+        } catch {
+          // already gone
+        }
+        return () => {};
+      }
+      const sub = { kind: "transcript", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, jobId: String(jobId), cursor: typeof lastEventId === "string" ? lastEventId : null };
+      subs.add(sub);
+      startTimer();
+      void tick();
       return () => remove(sub);
     },
 
