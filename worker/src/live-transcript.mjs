@@ -1,4 +1,4 @@
-import { constants as fsConstants, mkdirSync, writeFileSync } from "node:fs";
+import { constants as fsConstants, lstatSync as fsLstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { lstat as fsLstat, open as fsOpen } from "node:fs/promises";
 import { join } from "node:path";
 import { escapeControls } from "./projects.mjs";
@@ -272,7 +272,7 @@ export const outcomeOf = (outcome) => (LIVE_OUTCOMES.includes(outcome) ? outcome
  * transcripts off: the file is tailed and every line handed to `onParsed`, and nothing is queued or written to the
  * stream, so no `run:live:` key is ever touched.
  */
-export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(t ?? ""), now = () => Date.now(), pollMs = 500, log = () => {}, fs = { open: fsOpen, lstat: fsLstat }, timeoutMs = OP_TIMEOUT_MS, finishTimeoutMs = FINISH_TIMEOUT_MS, lineMaxBytes = LIVE_LINE_MAX_BYTES, pendingMax = PENDING_MAX, pendingMaxBytes = PENDING_MAX_BYTES, finalReadMaxBytes = LIVE_FINAL_READ_MAX_BYTES, readChunkBytes = READ_CHUNK_BYTES, stream = true, onParsed = null, onReset = null } = {}) {
+export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(t ?? ""), now = () => Date.now(), pollMs = 500, log = () => {}, fs = { open: fsOpen, lstat: fsLstat, lstatSync: fsLstatSync }, timeoutMs = OP_TIMEOUT_MS, finishTimeoutMs = FINISH_TIMEOUT_MS, lineMaxBytes = LIVE_LINE_MAX_BYTES, pendingMax = PENDING_MAX, pendingMaxBytes = PENDING_MAX_BYTES, finalReadMaxBytes = LIVE_FINAL_READ_MAX_BYTES, readChunkBytes = READ_CHUNK_BYTES, stream = true, onParsed = null, onReset = null } = {}) {
 	const key = liveKeyFor(jobId);
 	const id = sanitizeJobId(jobId);
 	let offset = 0;
@@ -298,9 +298,22 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	/**
 	 * The baseline, once: the file's size before anything of this attempt was read. Never rejects. Only `onParsed` reads
 	 * it, so without one no `lstat` is added and the stream reads the file exactly as it did before issue #644.
+	 *
+	 * SYNCHRONOUS when it can be. `start` runs at spawn, before pi can write a line; an awaited `lstat` resolves a tick
+	 * later, and a line pi (or a fast test writer) appended in between would be taken as an earlier run's and counted
+	 * as `prior` instead of this attempt's. The async path is kept for an injected `fs` without `lstatSync`.
 	 */
 	const takeBaseline = () => {
 		if (typeof onParsed !== "function") return undefined;
+		if (baselineTaken === null && typeof fs.lstatSync === "function") {
+			try {
+				const info = fs.lstatSync(file);
+				baseline = info.isFile() ? info.size : 0;
+			} catch {
+				baseline = 0;
+			}
+			baselineTaken = Promise.resolve();
+		}
 		baselineTaken ??= (async () => {
 			try {
 				const info = await fs.lstat(file);
