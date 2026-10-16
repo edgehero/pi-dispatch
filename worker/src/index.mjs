@@ -1319,7 +1319,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// promised: the run is recorded as that cancel (the existing path, "partial work may exist") even when the
 				// container happened to exit on its own, because the operator was told the record would say operator-cancel.
 				runContainer: (ctx) =>
-					boundAfterAbort(deps.runContainer({ ...ctx, name, signal }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
+					// `jobId` (issue #643) names the live transcript stream, as it names the run record.
+					boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: job.id }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
 						stopDidNotTake = true;
 					}).then(async (r) => {
 						await stopCancelPoll();

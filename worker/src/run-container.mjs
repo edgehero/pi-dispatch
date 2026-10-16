@@ -1,14 +1,17 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
 import { cpuCeilingCenti, cpuRangeRefusal, DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
-import { createJobNetwork, networkNameFor, removeJobNetwork } from "./egress.mjs";
+import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
+import { LIVE_FILE_NAME } from "./live-transcript.mjs";
 import { InfraRetry } from "./processor.mjs";
+import { makeRedactor, secretValuesOf } from "./redact-secrets.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
@@ -69,6 +72,10 @@ export function makeRunContainer({
 	// the wiring drops the cached runtime facts the ceiling came from and the next pickup reads them again. The local
 	// venue's is the job-user resolver's `invalidate`; a no-op elsewhere (Podman accepts any `--cpus`, measured).
 	onCpuCeilingStale = () => {},
+	// Issue #643: `({ file, jobId, redact }) => { start, finish } | null`, the live transcript publisher's opener
+	// (live-transcript.mjs `makeLiveTranscriptOpener`). Null publishes nothing: a deployment with PI_LIVE_TRANSCRIPTS=0,
+	// one without a Valkey client, and every caller that predates the feature.
+	openLiveTranscript = null,
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -88,7 +95,9 @@ export function makeRunContainer({
 	// `unenforced` (issue #596) is the size flags this runtime said it drops (`unenforcedSizeFlags`: `--memory-swap` where
 	// Docker reports SwapLimit false, `--cpu-shares` where it reports CPUShares false), logged per job as
 	// `size_bound_unenforced` so a run past its size's bound is named where it happens. The flags stay on the argv.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [] }) {
+	// `jobId` (issue #643) is the queue's job id, which names the live transcript stream as it names the run record
+	// (`run:live:` and `runs:rec:`, both through `sanitizeJobId`); absent, no stream is published.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -99,6 +108,12 @@ export function makeRunContainer({
 		if (user !== null && home !== CONTAINER_HOME) {
 			throw new Error(`runContainer: a job user (${user}) must be paired with HOME=${CONTAINER_HOME}`);
 		}
+
+		// Issue #643: the directory holding this job's transcript file, mounted at /session. A resume job's is its staged
+		// transcript, exactly as before; every other job's is the empty live file the preparer staged beside it
+		// (`prepared.live`, live-transcript.mjs `stageLiveFile`). Resume itself stays keyed on `prepared.session` alone:
+		// `awaitInput` below, the promotion and the record's `session` read nothing else.
+		const transcriptDir = prepared.session?.hostDir ?? prepared.live?.hostDir ?? null;
 
 		// Closed env allowlist: only the provider key + the declared PI_* vars. Throws (config) if
 		// the provider is unconfigured, which the processor turns into a policy refusal that refunds the
@@ -131,10 +146,12 @@ export function makeRunContainer({
 			// reason to make the worker read the manifest on its behalf.
 			packagePaths: job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths,
 			forwardEnv, // extra host var names to forward (e.g. a custom provider's key)
-			// REQ-RESUMABLE-SESSION: the fixed container path, emitted only when this job HAS a transcript.
-			// The constant is imported rather than re-typed so the mount below and this variable name one
-			// path -- two literals is how they drift with both suites green.
-			sessionFile: prepared.session ? CONTAINER_SESSION_FILE : undefined,
+			// REQ-RESUMABLE-SESSION: the fixed container path, emitted only when this job HAS a transcript file, which
+			// since issue #643 is every prepared job (the live file), resume or not. The constant is imported rather than
+			// re-typed so the mount below and this variable name one path -- two literals is how they drift with both
+			// suites green. On an empty file the runner opens a fresh session there (image/runner/src/session.mjs), the
+			// same path a cold-starting resume job takes, so the image needs no change.
+			sessionFile: transcriptDir ? CONTAINER_SESSION_FILE : undefined,
 			// Issue #189: the flow name, structurally, so the runner can verify it against the loaded
 			// skill set. Off `job` like maxTurns; absent (a bare run.task cron job) emits no variable.
 			flow: typeof job.flow === "string" && job.flow.trim() !== "" ? job.flow : undefined,
@@ -189,9 +206,9 @@ export function makeRunContainer({
 			jobDir: prepared.jobDir,
 			workspace: prepared.workspace,
 			outboxDir: prepared.outboxDir, // undefined for github jobs -> docker-run's guard skips the /outbox mount
-			// The job's OWN copy, under jobDir -- never the shared store. Undefined when the trigger did not
-			// arm run.resume or no key resolved, and docker-run's guard then skips the mount entirely.
-			sessionDir: prepared.session?.hostDir,
+			// The job's OWN copy, under jobDir -- never the shared store. Undefined only when no transcript file was staged
+			// (a caller that predates issue #643, or a staging that failed), and docker-run's guard then skips the mount.
+			sessionDir: transcriptDir ?? undefined,
 			globalPiDir, // undefined/null -> docker-run's guard skips the /opt/pi-global mount
 			name,
 			size, // issue #596: memory, swap equal to it, the CPU weight and /dev/shm, through containerSpec's one function
@@ -231,6 +248,29 @@ export function makeRunContainer({
 			throw new InfraRetry("container-never-started", { reason: "container-never-started" });
 		}
 
+		// Issue #643: the live transcript publisher, opened only beside a transcript file, an opener and a job id. Its
+		// redactor is built from THIS job's env (the secret-bearing keys, redact-secrets.mjs) plus the two credentials that
+		// are not in it by name or at all: the minted token and the exit-line key. An opener that throws costs the stream,
+		// never the run.
+		let live = null;
+		if (transcriptDir && typeof openLiveTranscript === "function" && jobId !== null && jobId !== undefined) {
+			try {
+				// `workerSet`: the proxy variables count as structural only with the values this worker wrote for this job's
+				// egress; a proxy URL an operator forwarded with PI_EGRESS=0 is redacted like any other forwarded value.
+				const workerSet = egressEnv({ proxy: egressProxy, armed: egress });
+				live = openLiveTranscript({ file: join(transcriptDir, LIVE_FILE_NAME), jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }) }) ?? null;
+			} catch {
+				live = null;
+			}
+		}
+		// Bounded and never throwing (live-transcript.mjs); called at most once, and always BEFORE this function resolves,
+		// so before the processor's `finally` removes the job directory the file lives in.
+		const finishLive = async (outcome) => {
+			try {
+				await live?.finish(outcome);
+			} catch {}
+		};
+
 		// Host-side per-job log sink, teed off `onOutput`. `name` is `pi-job-<jobId>`; the sink
 		// sanitizes internally. No container mount, no env var -- the sink lives on this side only.
 		const sink = openJobLog(name, { exitKey });
@@ -241,6 +281,9 @@ export function makeRunContainer({
 
 		const run = new Promise((resolve, reject) => {
 			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"] });
+			try {
+				live?.start();
+			} catch {}
 			if (exitKey !== null) {
 				// Written and closed at once: the runner drains stdin to EOF before anything else runs, so the key is out of
 				// the pipe before any tool exists. A CLI that died first makes this EPIPE, which is the run failing, reported
@@ -264,11 +307,16 @@ export function makeRunContainer({
 			// (CONST-RETRY-INFRA-ONLY). `reason` also cues the processor to release the budget slot,
 			// since a container that never started spent nothing.
 			child.on("error", (err) => {
+				void finishLive("failed");
 				sink.close().catch(() => {}); // best-effort teardown; a rejecting close cannot leak an unhandled rejection
 				reject(new InfraRetry("container-never-started", { cause: err, reason: "container-never-started" }));
 			});
 			child.on("close", async (code) => {
 				const aborted = signal?.aborted === true; // capture BEFORE the await
+				// Issue #643, ORDER LOAD-BEARING: the transcript's last lines are read and published HERE, before the sink
+				// closes and before this promise resolves, because the processor removes the job directory (and the file in
+				// it) as soon as it has the result. The outcome is the exit's own reading, the most this side knows.
+				await finishLive(liveOutcomeOf(code, aborted, neverStartedExits));
 				// A rejecting sink.close is swallowed so a misbehaving sink cannot hang the run; turns/tokens/session/usage/context/exitReason fall back to null.
 				let turns = null;
 				let tokens = null;
@@ -376,6 +424,23 @@ export function makeRunContainer({
 			}
 		}
 	};
+}
+
+/**
+ * The `end` entry's outcome from what `runContainer` knows when the container exits (issue #643): a worker stop and
+ * the runner's exit 2 are policy, exit 0 completed, exit 1 failed, and anything else (an OOM kill, a runtime's own
+ * code) `unknown`, since only the processor's classification can say more. One exception to `unknown`: an exit this
+ * runtime spells "never started" (`neverStartedExits`, 125 to 127 on Docker) is `failed`, the same word the spawn
+ * error path uses, because the container never ran: the attempt is over and did nothing, and the processor retries it
+ * as infrastructure under the same job id, whose first write then replaces this stream.
+ */
+export function liveOutcomeOf(code, aborted, neverStartedExits = []) {
+	if (aborted) return "policy";
+	if (code === 0) return "completed";
+	if (code === 2) return "policy";
+	if (code === 1) return "failed";
+	if (Array.isArray(neverStartedExits) && neverStartedExits.includes(code)) return "failed";
+	return "unknown";
 }
 
 /** The detached check's whole bound, retries included, so a daemon that stopped answering cannot hold the slot for long. */

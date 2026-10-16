@@ -70,6 +70,7 @@ import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
+import { makeLiveTranscriptOpener } from "./live-transcript.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
 import { authoredCron, envelopeJobPaths, loadSchedules, servedSchedules } from "./schedules.mjs";
@@ -603,6 +604,8 @@ export async function startWorker(
 		listRunningSandboxes: listRunningSandboxesFn = listRunningSandboxes,
 		makeRetentionSweep: makeRetentionSweepFn = makeRetentionSweep,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
+		// Issue #643: the preparer factory, a seam so a test can see what the wiring hands it (`stageLive`).
+		makePrepareWorkspace: makePrepareWorkspaceFn = makePrepareWorkspace,
 		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
 		makeImagePreflight: makeImagePreflightFn = makeImagePreflight,
 		makeScopeClaimSweeper: makeScopeClaimSweeperFn = makeScopeClaimSweeper,
@@ -1378,6 +1381,10 @@ export async function startWorker(
 	// would be bytes nothing reads. That is also what keeps a single-host deployment byte-identical, since
 	// no job then issues a single extra Valkey command.
 	const runMirror = config.workerNameDeclared ? makeRunMirrorFn({ redis, retentionDays: config.logRetentionDays, log }) : null;
+	// Issue #643 (DES-LIVE-TRANSCRIPT-STREAM): every running job's transcript, redacted, to its own capped Valkey stream,
+	// on every deployment unless PI_LIVE_TRANSCRIPTS=0. Not gated on a worker name, unlike the mirror above: the panel on
+	// a single host reads the same stream. Handed to both venues' runContainer, which publish only beside a staged file.
+	const openLiveTranscript = config.liveTranscripts ? makeLiveTranscriptOpener({ redis, log }) : null;
 	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null }) => {
 		// The project (issue #499) was resolved at the pickup gate and rides here as `project` (an id or null), so a live
 		// edit of projects.json mid-run cannot make the record disagree with what the job was counted against. A record
@@ -1553,6 +1560,7 @@ export async function startWorker(
 				egress: config.egress,
 				egressProxy: config.egressProxy,
 				openJobLog,
+				...(openLiveTranscript ? { openLiveTranscript } : {}),
 				globalPiDir: config.globalPiDir,
 				allowGlobalExtensions: config.allowGlobalExtensions,
 				packagePaths: getPackagePaths,
@@ -1890,6 +1898,7 @@ export async function startWorker(
 						egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
 						egressProxy: config.egressProxy,
 						openJobLog,
+						openLiveTranscript, // issue #643: null when PI_LIVE_TRANSCRIPTS=0, and nothing is published
 						globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
 						allowGlobalExtensions: config.allowGlobalExtensions,
 						// REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set
@@ -2335,8 +2344,11 @@ export async function startWorker(
 			// Off the REGISTRY's surface, like every other per-job backend fact. Rebuilding it at the call site
 			// is how a fact ends up dispatched on one path and hardcoded on another.
 			neverStartedExits: backends.neverStartedExits,
-			prepareWorkspace: makePrepareWorkspace({
+			prepareWorkspace: makePrepareWorkspaceFn({
 				jobsDir: config.jobsDir,
+				// Issue #643: with PI_LIVE_TRANSCRIPTS=0 no live file is staged either, so a job without a resume transcript
+				// runs exactly as it did before the feature (its session in memory, no /session mount).
+				...(config.liveTranscripts ? {} : { stageLive: null }),
 				// Issue #464: the boot's own check, asked again before every job against the same env.
 				ensureDir: (dir) => ensureJobsDirFn(dir, { env }),
 				forgeFor,

@@ -981,6 +981,7 @@ export const PODMAN_BACKEND_OPTIONS = Object.freeze([
 	"authFromPi",
 	"forgeHosts",
 	"onOutput",
+	"openLiveTranscript",
 	// the floor the per-job observation preflight judges, and the boot-built reaper
 	"backendFloor",
 	"reap",
@@ -1087,6 +1088,7 @@ export function makePodmanBackend(opts = {}) {
 		authFromPi = false,
 		forgeHosts = {},
 		onOutput,
+		openLiveTranscript = null,
 		backendFloor = {},
 		reap,
 		readInfo = makePodmanInfoReader(),
@@ -1116,6 +1118,7 @@ export function makePodmanBackend(opts = {}) {
 		egressProxy,
 		...(openJobLog ? { openJobLog } : {}),
 		...(onOutput ? { onOutput } : {}),
+		...(openLiveTranscript ? { openLiveTranscript } : {}),
 		globalPiDir,
 		allowGlobalExtensions,
 		packagePaths,

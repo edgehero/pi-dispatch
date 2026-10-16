@@ -400,9 +400,12 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 		// never PI_PACKAGES=. The delimiter is ":" because these are CONTAINER (POSIX) paths -- never the
 		// host's path.delimiter, which is ";" on Windows.
 		PI_PACKAGES: packagePaths.length > 0 ? packagePaths.join(":") : undefined,
-		// The persisted transcript inside the /session mount (REQ-RESUMABLE-SESSION). Emitted ONLY when
-		// this job actually has one -- absent means the runner builds pi's ephemeral in-memory session,
-		// which is every job before this feature and every job whose trigger did not arm run.resume. Never
+		// The transcript file inside the /session mount (REQ-RESUMABLE-SESSION). Emitted ONLY when this job
+		// actually has one -- absent means the runner builds pi's ephemeral in-memory session. Since issue #643
+		// every prepared job has one (a resume job's staged transcript, or every other job's empty live file,
+		// which the worker tails for the live stream), with one exception: with PI_LIVE_TRANSCRIPTS=0 no live file
+		// is staged (start.mjs hands the preparer `stageLive: null`), so a non-resume job then has none, as before
+		// the feature. Otherwise absence is a caller that staged none, or a staging that failed. Never
 		// an empty string, for PI_PACKAGES' reason: an empty value is a third state neither side reads the
 		// same way, and the one reading a container must not have to infer which was meant.
 		PI_SESSION_FILE: sessionFile || undefined,

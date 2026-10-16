@@ -553,12 +553,12 @@ test("no assignment in .env.example carries an inline comment, live or commented
 		"an inline comment is part of the value to systemd and to compose: put the comment on its own line above the key",
 	);
 	// NON-VACUITY, the discipline this file already keeps for its other scans: a regex that matches nothing
-	// passes every assertion above it. 121 is the count both mirrors carry today (VALKEY_PASSWORD and PI_VALKEY_PORT joined in issue #468,
+	// passes every assertion above it. 122 is the count both mirrors carry today (VALKEY_PASSWORD and PI_VALKEY_PORT joined in issue #468,
 	// PI_MODEL_ENDPOINTS_FILE in issue #503, PI_ALLOWED_MODELS in issue #502, the four PI_*_COST_USD dollar settings in issue #501,
 	// PI_PROJECTS_FILE in issue #499, PI_ENVELOPE_FILE in issue #504, PI_JOB_MEMORY and PI_JOB_CPUS in issue #596, and the four
-	// PI_HOST_* budget settings in its phase 2, FORGEJO_PERMISSION_TOKEN for OQ-043, and the eight PI_CONSOLE_* keys of
-	// issue #640).
-	assert.equal(scanned, 121, "the scan must actually reach every assignment in the file");
+	// PI_HOST_* budget settings in its phase 2, FORGEJO_PERMISSION_TOKEN for OQ-043, the eight PI_CONSOLE_* keys of
+	// issue #640, and PI_LIVE_TRANSCRIPTS in issue #643).
+	assert.equal(scanned, 122, "the scan must actually reach every assignment in the file");
 	assert.match("  PI_X=1 # c", /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses, indented or not");
 
 	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM

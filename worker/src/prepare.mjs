@@ -17,6 +17,7 @@ import { prepareLocalWorkspace } from "./prepare-local.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { recordedJobSize } from "./job-size.mjs";
 import { scheduledForMillis } from "./repeat-slot.mjs";
+import { stageLiveFile } from "./live-transcript.mjs";
 
 /**
  * The subdirectory of the per-job dir a trigger's injected skills are copied into, so they reach the
@@ -83,6 +84,9 @@ export function makePrepareWorkspace({
 	ensureDir = (dir) => ensureJobsDir(dir),
 	// Issue #524: how a thrown preparer's job dir is removed. A seam so the guard around it is testable.
 	removeDir = (dir) => rmSync(dir, { recursive: true, force: true }),
+	// Issue #643: stages the live transcript file of a job that has no resume transcript (live-transcript.mjs). A seam
+	// so a test can refuse it; null stages nothing, and every job then runs as it did before the feature.
+	stageLive = stageLiveFile,
 }) {
 	ensureDir(jobsDir);
 	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false, size = null, mcp = null } = {}) {
@@ -173,12 +177,12 @@ export function makePrepareWorkspace({
 			// The snapshot only for a confirmed portfolio job, and never for a chained child or a manual run, whatever its data
 			// says (the processor's gate already holds both; this keeps a direct caller to the same rule).
 			const snapshot = portfolio === true && typeof portfolioSnapshot === "function" && event.source === "cron" ? { portfolio: () => portfolioSnapshot(job) } : {};
-			return discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null } : {}), ...snapshot }), sandbox), jobDir);
+			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null } : {}), ...snapshot }), sandbox), jobDir));
 		}
 		const prepare = preparers[job.kind];
 		if (prepare) {
 			const host = forgeFor?.(job)?.host;
-			return discardOnPolicy(
+			return withLiveFile(discardOnPolicy(
 				stampSandbox(
 					await prepare(job, token, {
 						jobDir,
@@ -193,9 +197,25 @@ export function makePrepareWorkspace({
 					sandbox,
 				),
 				jobDir,
-			);
+			));
 		}
 		throw new Error(`unknown job kind: ${job.kind}`);
+	}
+
+	/**
+	 * Issue #643: every job gets a live transcript file, so its run can be watched (live-transcript.mjs). A resume
+	 * job's staged transcript IS that file, so it is left exactly as `resolveSession` made it; any other prepared job
+	 * gets an empty one at the same place, with no store key and nothing to promote. A refusal (no `jobDir`) passes
+	 * through. A file that could not be staged is said, and the job runs without one, as every job did before.
+	 */
+	function withLiveFile(prepared) {
+		if (!prepared?.jobDir || prepared.outcome === "policy" || prepared.session || typeof stageLive !== "function") return prepared;
+		const live = stageLive(prepared.jobDir);
+		if (!live) {
+			log("live_transcript_unstaged", { kind: prepared.sandbox?.kind ?? null });
+			return prepared;
+		}
+		return { ...prepared, live };
 	}
 }
 
