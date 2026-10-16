@@ -100,8 +100,8 @@ its own, manifest and all, in its place, which `pi-dispatch sandbox` would then 
 start (exit 2) when that directory belongs to another account, asks again each time it keeps a run (a directory made
 by someone else after boot deletes the run instead of keeping it there), and doctor fails on it, naming the owner.
 
-**The transcript is not kept.** If a job persisted a session (`docs/sessions.md`), its per-job copy is
-deleted *before* the directory is retained. Transcripts live under `PI_SESSIONS_DIR` and expire on
+**The transcript is not kept.** Every job's per-job transcript file (a resumed session's copy, or since #643 the
+live file every other job writes, `docs/sessions.md`) is deleted *before* the directory is retained. Transcripts live under `PI_SESSIONS_DIR` and expire on
 `PI_SESSIONS_TTL_DAYS`; carrying one into a directory with a different, pin-extendable lifetime would
 quietly extend that policy.
 

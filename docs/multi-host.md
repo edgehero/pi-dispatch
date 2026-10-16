@@ -73,13 +73,24 @@ nothing was changed.
 
 ### Not shared, on purpose
 
-A job's raw log (`PI_CAPTURE_JOB_LOGS`) stays on the host that wrote it. It is the one artifact here that
-holds issue text, comment text and tool output, and mirroring it would move that off the machine the
-operator chose to keep it on.
+A job's raw log (`PI_CAPTURE_JOB_LOGS`) stays on the host that wrote it. It holds everything the container
+printed, with no structure to clean it by, and mirroring it would move that off the machine the operator
+chose to keep it on.
 
 `/dispatch logs <id>` for a job that ran elsewhere now says so by name, rather than reporting no captured
 log as though none had been taken. The bytes are on that machine and this panel deliberately cannot reach
 them.
+
+**The live transcript is shared, and that is a choice you can undo.** Since #643 each worker publishes a
+running job's transcript (what the agent said, the tools it called, and what they returned) to Valkey,
+so the console's run page and the panel's live tail (`l`) show a run on any host while it runs. It is not
+the raw log: the worker reads pi's own transcript file, takes out the job's secrets and known token
+shapes, keeps at most 2,000 entries per job, and Valkey removes it 24 hours after the run ends (7 days if
+the worker died mid-run). It still holds issue text and tool output, so anyone who can read your Valkey
+can read it; on the console only the operator role sees it. Set `PI_LIVE_TRANSCRIPTS=0` on every worker to
+keep transcripts on their host, as before. What is and is not redacted is in
+[`SECURITY.md`](../SECURITY.md). When a run has no transcript in Valkey, the panel falls back to this
+host's raw log, or says which host ran it.
 
 **The run history is merged.** Each worker writes its record to its own disk as it always has, and also
 mirrors it into Valkey, so every panel lists the whole deployment's runs and labels each one with the host

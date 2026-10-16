@@ -2006,7 +2006,33 @@ adversarial passes did.
 
 ## OQ-044: Where the console shows a run's transcript
 
-- **Status**: `OPEN` (2026-10-14, issue #640), handed to #643; #641 checked it and shows no transcript.
+- **Status**: **RESOLVED 2026-10-16 (issue #643): ship.** A running job's transcript is published, redacted and
+  capped, to Valkey, and the console's run page and the `/dispatch` panel read it from there for a run on any host.
+  The raw log stays on its host, as before. Opened 2026-10-14 (issue #640); #641 checked it and showed no transcript.
+- **Decision** (`DES-LIVE-TRANSCRIPT-STREAM`, `INT-LIVE-TRANSCRIPT-STREAM`, `REQ-LIVE-TRANSCRIPT`):
+  - **What ships**: the transcript only (what the agent said, the tools it called with their arguments, and their
+    results), never the raw `.log`, and never the model's thinking. The worker tails the job's pi session file and
+    writes one capped Valkey stream per job, `run:live:<job id>`.
+  - **Who may read it**: the operator role only on the console (#640's run-text rule, unchanged: escaped after the
+    control scrub, never in a list, never in `/api/state` or the hub's panels), the `/dispatch` panel of anyone who
+    runs it on the deployment, and anyone with access to the deployment's Valkey.
+  - **Redacted**: every value of the job's own secret-bearing env, the minted forge token and the exit key, in their
+    literal, JSON-escaped and URL-encoded forms, and the known token shapes. A secret the agent transforms is not
+    caught (`SECURITY.md`, What is NOT defended).
+  - **Bounded**: 2,000 entries per job (`MAXLEN ~`), each text at most 4,096 code points (8,192 for an assistant's
+    text). The stream is removed 24 hours after the run ends, and at most 7 days after its first write when the
+    worker died before the end.
+  - **The off switch**: `PI_LIVE_TRANSCRIPTS=0`, for a deployment that must keep transcript text off its Valkey.
+    The default is on.
+- **The PII placement, stated before it shipped** (`SECURITY.md`, the operator console and the Valkey notes):
+  Valkey becomes a holder of transcripts. It was already a PII store: a forge job's BullMQ data carries the issue
+  or comment title, body and author for 31 days (`removeOnComplete` and `removeOnFail` in `worker/src/queue.mjs`).
+  What the transcript adds is tool output and the agent's own text, redacted, for 24 hours after the run. That is a
+  smaller addition, in time and in kind, than the store already held, and it is what makes a fleet console useful:
+  the record is fleet-wide because the mirror is, and now the live transcript is too.
+- **Why not the other answer** (showing transcripts only for the console's own host): a fleet operator would get
+  "not on this host" for most runs, and a console on a machine that is not a worker would show none. The session
+  file's whole-run copy and the raw log stay on the host; only the redacted, capped, short-lived stream moves.
 - **Question**: a run's `.log` (`PI_CAPTURE_JOB_LOGS`) and its session transcript live only on the host that ran the
   job, and `docs/multi-host.md` keeps them there on purpose: they are the artifacts that hold issue text, comment text
   and tool output. A console on one host of a fleet, or on a machine that is not a worker, can show run records for
@@ -2024,8 +2050,9 @@ adversarial passes did.
   to keep them on, and adds a store with its own retention; showing only local runs leaves a fleet operator a page
   that answers "not on this host" for most runs.
 - **Needs**: a decision in #643 (live logs), with the retention and the PII placement of any shipped copy stated in
-  `SECURITY.md` before it ships.
-- **Cross-links**: `REQ-CONSOLE-SECURITY`, `DES-OPERATOR-CONSOLE`, `REQ-DURABLE-RUN-HISTORY`, `REQ-RESUMABLE-SESSION`.
+  `SECURITY.md` before it ships. Met: both are in the decision above and in `SECURITY.md`.
+- **Cross-links**: `REQ-CONSOLE-SECURITY`, `DES-OPERATOR-CONSOLE`, `REQ-DURABLE-RUN-HISTORY`, `REQ-RESUMABLE-SESSION`,
+  `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM`, `INT-LIVE-TRANSCRIPT-STREAM`.
 
 ## Revision History
 
@@ -2136,3 +2163,4 @@ adversarial passes did.
 | 2026-10-14 | No issue. **`OQ-043` UNCHANGED, checked**, and the check found a second admin dependency it had not named: the Forgejo host's branch protection check listed `/branch_protections`, an admin route, so a `write` collaborator's job token failed every job with 403. That check now reads the branch object's `protected` (`REQ-BRANCH-PROTECTION-PRECONDITION`), and nothing a job does needs an admin's token any more; the lookup fallback stays the only residual. |
 | 2026-10-14 | Issue #640. **NEW `OQ-044`** (`OPEN`, handed to #643): where the console shows a run's transcript, given that `.log` files and session transcripts stay on the host that ran the job; #640 fixes only that run text reaches a page for the operator role alone, always escaped, never in a list. UNCHANGED, checked: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-INSIGHTS-HTML-EXPORT`, and `constitution.md` (no port clause, checked). |
 | 2026-10-14 | Issue #641, the console's screens. **`OQ-044` AMENDED, still `OPEN`, still #643's**: #641's run detail shows the record (from this host's file or the mirror, saying which) and no transcript or `.log` for any run, so nothing in it decides where transcripts are shown; the one free text the screens show is BullMQ's `failedReason`, to the operator only and in a detail view only (`REQ-CONSOLE-SECURITY` (l)). **`OQ-035` UNCHANGED, checked**: `failedReason` is still a bounded channel, not a classified one; the console shows it through the same belt, to the operator only, which narrows who reads it and changes nothing about what it may hold. |
+| 2026-10-16 | Issue #643, live run transcripts. **`OQ-044` RESOLVED: ship.** A running job's transcript (not the raw log, not the thinking) is published by the worker to one Valkey stream per job, redacted of the job's own secrets and known token shapes, capped at 2,000 entries, removed 24 h after the run ends (7 days at most while live), readable on the console by the operator role only and by the `/dispatch` panel; `PI_LIVE_TRANSCRIPTS=0` turns it off. The PII placement is stated in `SECURITY.md`: Valkey already held issue text in BullMQ job data for 31 days, and the transcript adds tool output, redacted, for 24 h. **`OQ-014` UNCHANGED, checked**: what a resumed job is handed is still one key's canonical transcript; the live file of a non-resume job is empty, per job, and never promoted. **`OQ-035` UNCHANGED, checked**: `failedReason` is untouched, and the transcript is a separate channel with its own redaction. |

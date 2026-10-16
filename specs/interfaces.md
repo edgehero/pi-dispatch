@@ -55,8 +55,9 @@ Evidence convention as in `constitution.md`.
   // HOISTED: the ROOT session id must exist BEFORE the meter does. createAgentSession would otherwise
   // build its own SessionManager and the id would be readable only afterwards, too late to split
   // rootTotal from otherTotal, and an undefined root files every call as unattributed.
-  // CONDITIONAL since issue #48: in-memory when PI_SESSION_FILE is unset (the default, and every job
-  // before that change), a persisted manager when it is set (REQ-RESUMABLE-SESSION). See (l).
+  // CONDITIONAL since issue #48: in-memory when PI_SESSION_FILE is unset (every job before that change), a
+  // persisted manager when it is set (REQ-RESUMABLE-SESSION). See (l). Since issue #643 the worker sets it for
+  // every job (the live transcript file), so in-memory is a hand-run container or a failed staging.
   const { sessionManager } = openSessionManager({ sessionFile, cwd: "/workspace" });
   const rootSessionId  = sessionManager.getSessionId();
 
@@ -1183,6 +1184,12 @@ refactor apart.
   `/job` would have required making part of that mount writable, which is the property `/job` exists to
   have. Its own contract is `INT-SESSION-STORE-CONTRACT`, and the symlink paragraph above is the
   precedent its `lstat` rule cites: the same attack, with the direction reversed.
+  **Since issue #643 every job gets `/session` and `PI_SESSION_FILE=/session/current.jsonl`**, not only a resume
+  job: a job with no resume transcript gets an empty live file at `<jobDir>/session/current.jsonl` (directory 0700,
+  file 0600), which pi writes the transcript into and the worker tails for `INT-LIVE-TRANSCRIPT-STREAM`. It has no
+  store key, is never read back or promoted, and is deleted with the job directory. The runner contract is the
+  existing one (an empty file opens a fresh session), so no image change; a caller that stages no file (a failed
+  staging) emits neither, as before.
 - **A repo skill is materialised WHOLE, and bounded** (issue #60). The allowlist accepts
   `.pi/APPEND_SYSTEM.md` (an exact path) and **every declared file under `.pi/skills/<name>/`**, not just
   each `SKILL.md`. It used to accept only the latter, which meant a skill shipping `references/`,
@@ -1597,9 +1604,10 @@ refactor apart.
     `--device-{read,write}-{bps,iops}`, `--oom-score-adj`, `--shm-size`, `--cpus`). Disk I/O, disk space and the
     network are NOT bounded per job.
   - **Mounts**: `/job:ro`, `/workspace:rw`, `/outbox:rw` (local jobs only), `/opt/pi-global:ro` (when
-    configured), and `/session:rw` — the last only when a trigger armed `run.resume` and the worker
-    resolved a key (`INT-SESSION-STORE-CONTRACT`). `/session` is a **per-job** directory under the job's
-    own dir; the shared store is never bind-mounted into anything.
+    configured), and `/session:rw`: a resume job's staged transcript when a trigger armed `run.resume` and the
+    worker resolved a key (`INT-SESSION-STORE-CONTRACT`), and since issue #643 every other job's empty live
+    transcript file (`INT-CONTAINER-JOB-INPUTS`, `INT-LIVE-TRANSCRIPT-STREAM`). `/session` is a **per-job**
+    directory under the job's own dir; the shared store is never bind-mounted into anything.
   - **The SELinux relabel option (issue #355).** Where `relabelsPrivateMounts` holds (a Podman daemon that reports
     SELinux, `name=selinux` or `host.security.selinuxEnabled`, on an endpoint on this host, from a Linux worker), the
     mounts the worker makes for this one job carry Podman's PRIVATE relabel option `Z`, in the same option list as
@@ -1885,7 +1893,7 @@ refactor apart.
     asserts MEMBERSHIP against the factory-derived pinned set pre-spend, exit 2, because pi silently
     ignores unknown `excludeTools` names -- then passes the list to `createAgentSession` and logs
     `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
-    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_AWAIT_INPUT` (`REQ-AWAIT-INPUT`, issue #625: `1` when the trigger armed `run.awaitInput` AND a transcript is staged, omitted otherwise, never `0` or empty. The runner offers the `await_human_input` tool through an inline extension factory, refuses a third value as a config error, and refuses `1` without `PI_SESSION_FILE` as `await-input-without-session`); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
+    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_AWAIT_INPUT` (`REQ-AWAIT-INPUT`, issue #625: `1` when the trigger armed `run.awaitInput` AND a resume transcript is staged (`prepared.session`; the live file every job gets since #643 does not count), omitted otherwise, never `0` or empty. The runner offers the `await_human_input` tool through an inline extension factory, refuses a third value as a config error, and refuses `1` without `PI_SESSION_FILE` as `await-input-without-session`); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
     trigger's `run.mcp` names, comma-joined, safe by the loader's name rule, omitted when the job names none, never
     empty; the runner holds `/job/mcp.json` to exactly these names); `HOME=/home/pi` (issue #341: set ONLY beside
     `--user`, assigned after the `PI_FORWARD_ENV` and `run.secrets` loops so neither can move it, and reserved so a
@@ -4010,7 +4018,9 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   host's worker schedules the trigger on, and refuses a trigger whose folder is not on this machine (another
   host's, `cronPlacement`).
 - **`run.resume` (github/gitlab/forgejo/azure triggers, optional boolean) — an opt-IN, and the polarity is deliberate.**
-  Absent or `false` = today's behaviour: no transcript on disk, no `/session` mount, byte-identical argv.
+  Absent or `false` = today's behaviour: no transcript kept, nothing in the store, nothing resumed. (Since issue
+  #643 such a job still gets a `/session` mount for its live transcript file, in its own job directory and deleted
+  with it; the flag decides resuming, not the mount.)
   `true` = this trigger's jobs continue the session the previous job for the same key produced
   (`REQ-RESUMABLE-SESSION`, `INT-SESSION-STORE-CONTRACT`). The polarity is the **opposite** of
   `run.packages` below, and the two flags gate different kinds of thing: staging a pi package is an
@@ -5453,7 +5463,7 @@ validator rather than a second copy of it.
   | Producer | Tokens |
   |---|---|
   | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `key-not-a-directory`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `context-too-full`, `compaction-summary-empty`, `too-large`, `unparseable`, `not-a-regular-file`, `venue-changed`, `pi-version-changed`, `transcript-replaced` |
-  | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job), `resumed`, `absent`, `unparseable` |
+  | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job; since issue #643 such a job runs on an empty live file, its runner reports `absent`, and `mergeSession` writes `disabled` for it, so the record is unchanged), `resumed`, `absent`, `unparseable` |
   | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `key-not-a-directory`, `transcript-diverted`, `too-large`, `locked`, `promote-failed` |
 
   Precedence has **two** rules, and for the feature's first year this entry recorded only the first.
@@ -6006,10 +6016,15 @@ validator rather than a second copy of it.
   <PI_SESSIONS_DIR>/<key>/current.jsonl.<pid>.<n>.<rand>.incoming  a promotion's in-flight copy; PER WRITER
   <PI_SESSIONS_DIR>/<key>/<sidecar>.incoming                 a sidecar's in-flight write; SHARED, deliberately
   <jobDir>/session/current.jsonl          this job's OWN copy; mounted /session:rw
-  PI_SESSION_FILE=/session/current.jsonl  emitted ONLY when the job has a transcript; never empty
+  PI_SESSION_FILE=/session/current.jsonl  emitted ONLY when the job has a transcript file (since #643, every
+                                          staged job: a resume copy or the empty live file); never empty
   ```
   `key` is `sha256(kind \0 repo \0 ref)` truncated — a hash, not a path built from a branch.
   `PI_SESSIONS_DIR` has **no default**; unset means the feature is unavailable.
+  **Since issue #643 the worker also reads the per-job copy while the job runs**, from its offset each poll, to
+  publish the live transcript (`INT-LIVE-TRANSCRIPT-STREAM`); a non-resume job's copy is an empty live file with no
+  key. That read writes nothing back, judges nothing for resuming and changes no edge of this contract: promotion
+  still happens only on a completed exit, through the `lstat` checks below.
 - **Read path**, host-side, fail-open at the first miss, every miss a named cold start: key resolves ->
   **the key's own name `lstat`s as a real directory** -> canonical file exists ->
   **`lstat` says regular file, not a symlink** -> size <= `PI_SESSION_MAX_BYTES`
@@ -8414,7 +8429,106 @@ script is its only intended client; it is documented so that what a stream may c
   logout; when the client's unsent buffer passes 2 MiB, without an `end` (the browser reconnects and, its
   `Last-Event-ID` being stale by then, gets every panel again); and when the console stops. `requestTimeout` and
   `headersTimeout` do not end it.
-- **Acceptance**: `REQ-CONSOLE-SECURITY` (k), `REQ-OPERATOR-CONSOLE-SCREENS` (j).
+- **The transcript stream** (issue #643, `REQ-LIVE-TRANSCRIPT`, `DES-OPERATOR-CONSOLE`): `GET /api/transcript?id=<jobId>`,
+  a second kind of event stream, opened by the run page's live transcript section.
+  - **Request**: a GET with the session cookie, operator role only: a viewer is answered 403 before any slot is
+    taken. `id` is a run id in the run-id charset, else 400. `Last-Event-ID`, when present, must match
+    `TRANSCRIPT_ID_RE` (`^\d{1,16}-\d{1,10}$`, a Valkey stream id, a different shape from the hub's
+    `<epoch>-<n>`); the stream then resumes after that entry. A malformed one, the hub's panel shape included, is ignored, and the
+    stream is read from its start. `HEAD` is answered `405`.
+  - **Admission and lifecycle**: the same slots as the hub's streams (per token, global, the operator reserve), the
+    same per-tick session re-judging with `peek` (`event: end` when the session ends), the same 2 MiB cut, the same
+    headers and `: ping`.
+  - **Events**:
+    ```
+    id: 1760600000123-0
+    event: entry
+    data: {"html":"<article>...</article>"}
+
+    event: done
+    data: {"outcome":"completed"}
+    ```
+    `entry`: one stream entry. Its `id:` is the entry's stream id, so a browser's reconnect resumes after the last
+    entry it received; `html` is that entry rendered on the server by the one escaping template (a header with the
+    kind, the tool, an error marker and the time in UTC, then the text in an escaped `<pre>`, tool-call arguments and
+    tool results in `<details>`, no markdown, no inline style). The client appends it to the `[data-transcript]`
+    element and runs nothing from it. `done`: the reader has read the stream's `end` entry; `data` carries the
+    outcome (`INT-LIVE-TRANSCRIPT-STREAM`), and the server closes the stream after it, so the browser does not
+    reconnect. `end`: the session is over, exactly as for the hub. `entry` data is `{html}`: an `<article class="t-entry t-<kind>">`
+    holding a `<header>` (kind, tool, an error marker, a `<time datetime>` in UTC, a truncated marker) and the text in
+    an escaped `<pre>`, tool-call arguments and tool results inside `<details>`; `done` data is `{outcome}` and nothing
+    else.
+  - **What it reads**: each tick, `transcriptSince` from the stream's own cursor on the fleet reader's client, at most
+    200 entries a read, non-blocking. It never carries the `.log`, and transcript text appears in no `panel` event.
+- **Acceptance**: `REQ-CONSOLE-SECURITY` (k) and (l), `REQ-OPERATOR-CONSOLE-SCREENS` (j), `REQ-LIVE-TRANSCRIPT` (f).
+
+## INT-LIVE-TRANSCRIPT-STREAM
+
+**worker → Valkey → the read model (the `/dispatch` panel and the console).** One Valkey stream per running job,
+holding a redacted, compact copy of its pi transcript (issue #643, `DES-LIVE-TRANSCRIPT-STREAM`,
+`REQ-LIVE-TRANSCRIPT`). The worker is its only writer; the read model is its only reader. The constants are the
+worker's, exported from `@edgehero/pi-dispatch/live-transcript` (`liveKeyFor`, `LIVE_KEY_PREFIX`,
+`LIVE_MAX_ENTRIES`, `LIVE_TTL_LIVE_MS`, `LIVE_TTL_ENDED_MS`, `LIVE_KINDS`, `LIVE_OUTCOMES`, `LIVE_TEXT_MAX`,
+`LIVE_ASSISTANT_TEXT_MAX`, `LIVE_LINE_MAX_BYTES`, `LIVE_TOOL_RE`, `UNPARSEABLE_NOTE`), so the reader and the
+publisher cannot drift.
+
+- **Key**: `run:live:<sanitized job id>`, the queue's job id through `sanitizeJobId`, the sanitizer the run mirror
+  uses for `runs:rec:`. Absent when the job never published, when `PI_LIVE_TRANSCRIPTS=0`, or after it expired; a
+  reader cannot tell those apart and a surface says so rather than picking one.
+- **Entries**: Valkey's own ids (`<ms>-<seq>`), written by `XADD <key> MAXLEN ~ 2000 * <fields>`. Every entry is a
+  flat field list and every value a string:
+  ```
+  kind       user | assistant | tool-call | tool-result | compaction | note | reset | skipped | end
+  ts         ms since epoch, decimal: the pi entry's own timestamp when present, else the publish time
+  text       redacted, escaped, cut; absent on reset, skipped and end
+  tool       on tool-call and tool-result only: [A-Za-z0-9_.:-]{1,64}, else "?"
+  error      "1" on a tool-result pi marked isError; absent otherwise
+  truncated  "1" when text was cut; absent otherwise
+  outcome    on end only: completed | policy | failed | unknown; never free text
+  ```
+- **Kinds**: `user`, `assistant`, `tool-call`, `tool-result`, `compaction` and `note` are the transcript. One
+  assistant message is one `assistant` entry for its text (omitted when blank) and one `tool-call` per call, whose
+  `text` is the arguments, JSON-stringified. A `tool-result`'s `text` is its text parts joined by newlines, each image
+  as `[image]`. A `note` is a line the worker composes (the session header as "session started", a model or thinking
+  level change, a context edit, a branch summary, a message of a role pi does not define as "a <role> message", a
+  turn that ended `error` or `aborted`, or the fixed `UNPARSEABLE_NOTE` for a line that is not JSON), except a custom
+  message's note, which carries the extension's own content, redacted, escaped and capped like any `text`. **Never in the stream**: thinking, the header's `cwd`, pi's
+  `usage`, `custom`, `session_info` and `label` entries, a provider's error message, and the bytes of a line that did
+  not parse.
+- **`reset`**: the source file shrank, was replaced or had its first line rewritten; the entries after it start the
+  transcript over (a reader may clear what it shows or mark the break). **`skipped`**: one line over 1 MiB was left
+  out unread.
+- **Text**: redacted first (`DES-LIVE-TRANSCRIPT-STREAM`, the redactor: `[redacted]` in place of each match), then
+  every control and bidi or invisible character written as `\u{XXXX}`, except real newlines (`\r\n` and lone `\r`
+  normalised to `\n`) and tabs, which stay real; then cut to `LIVE_TEXT_MAX` (4,096) code points, `LIVE_ASSISTANT_TEXT_MAX`
+  (8,192) for `assistant`, never inside an escape, with `truncated: "1"`. **It is agent-written text even so**: a
+  surface still scrubs and escapes it for its own medium and interprets none of it.
+- **Caps and TTLs**: `MAXLEN ~ 2000` (approximate, so the bound is a floor and the oldest entries go first); a
+  `PEXPIRE` of 7 days (`LIVE_TTL_LIVE_MS`) at an attempt's first write, and of 24 hours (`LIVE_TTL_ENDED_MS`) in the
+  same transaction as the `end` entry. A stream whose worker died mid-run has no `end` and lives out its 7 days.
+- **The end**: the last entry of a finished attempt is `end`, written after the worker's final read of the file
+  and before the job directory is removed. Its `outcome` is read from the container's exit (0 `completed`, 1
+  `failed`, 2 or a worker abort `policy`, any other code `unknown`, a container that never started `failed`). It can
+  differ from the run record's `outcome`, which the processor classifies afterwards with more facts; the record
+  (`INT-RUN-HISTORY-FILE-CONTRACT`) is the authority. A stream can lack its `end` when the abort grace ran out
+  before the worker's final read (`DES-LIVE-TRANSCRIPT-STREAM`, residuals).
+- **Retries**: a retry reuses the job id and so the key. An attempt's first write deletes the key in the same
+  `MULTI` as its first entries, so a stream holds one attempt and its `end` is that attempt's.
+- **Timing**: the key appears about one poll (500 ms) after the container starts, and entries trail the file by
+  at most a poll. Writes are best effort and bounded at 1 s each (3 s for the final read and `end`): entries
+  written while Valkey is unreachable are lost and counted, never buffered past 2,000.
+- **Reading** (`admin/src/read-model.mjs`): `readTranscriptSince(redis, jobId, after, { count, timeoutMs })` returns
+  `{ entries: [{ id, kind, ts, text, tool, error, truncated, outcome }], next, ended, outcome }`, `{ invalid }` or
+  `{ unreachable }`; `readTranscriptMeta(redis, jobId)` returns `{ exists, ended, outcome, length, firstId, lastId }`,
+  `{ invalid }` or `{ unreachable }`. The job id must match the run-id charset (`[A-Za-z0-9._:-]{1,200}`) and a cursor
+  `TRANSCRIPT_ID_RE` (`^\d{1,16}-\d{1,10}$`), both checked before a key is built. A read is non-blocking (`XRANGE`
+  after an exclusive cursor, `XREVRANGE COUNT 1`, `XLEN`), at most `TRANSCRIPT_PAGE_MAX` (200) entries, and never a
+  blocking `XREAD`. `ended` is true once the cursor is at or past the stream's `end` entry, also on an empty page. A
+  reader takes only the fields above, each once and only as a string; an unknown `kind` reads as `note`, an
+  unknown `outcome` as `unknown`, a `tool` outside the charset as `?`, and a `text` past 65,536 UTF-16 units is cut
+  and marked truncated. The fleet reader's `transcriptSince` and `transcriptMeta` run these on its own client,
+  bounded at 2 s.
+- **Acceptance**: `REQ-LIVE-TRANSCRIPT` (b) to (e).
 
 ## Revision History
 
@@ -8692,3 +8806,4 @@ script is its only intended client; it is documented so that what a stream may c
 | 2026-10-14 | Issue #640, the operator console. **NEW `INT-CONSOLE-TOKENS-FILE-CONTRACT`**: `PI_CONSOLE_TOKENS_FILE` (default `console-tokens.json` in the deployment folder), `{version: 1, generation, tokens: [{name, role, sha256, createdAt}]}`, a regular file at 0600 owned by the console's account (symlinks refused), the whole file refused on any problem, no operator token refuses `serve`; the token is `pdc_` plus base64url of 32 random bytes, shown once by `token add` or `token rotate` and never stored; sha256 is enough for 256 random bits; `sessions end-all` bumps `generation`; writes are an exclusive temporary file and a rename, by the CLI only, each audited; the pi extension guards the file. **NEW `INT-CONSOLE-AUDIT-LOG`**: `PI_LOGS_DIR/console-audit/YYYY-MM.jsonl` (directory 0700, files 0600, appended), rows `{at, seq, prev, actor, action, target, outcome, reason, beforeDigest, afterDigest, ticket}`, `prev` the sha256 of the previous raw line across months, the head recovered from the newest file's last line, a reaped head reported as where the chain starts rather than as broken, a failed append refusing its write, a best-effort mirror on the Valkey list `console:audit` (500 rows), the closed action and outcome vocabularies, and never a token, a code, a cookie, a session id or a body. **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED** (shape, validation and atomic rename unchanged; `writePauseWindows` gains an optional `expect` that refuses a file changed since the preview, and without one it now refuses a file that changed between its own read and its rename, where it used to overwrite that change; the Write protocol bullet says so). UNCHANGED, checked: `INT-DEPLOYMENT-POINTER-CONTRACT` (the console resolves its deployment through the pointer and adds no allowlisted key), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`. |
 | 2026-10-14 | Issue #641, the operator console's screens and live updates. **NEW `INT-CONSOLE-STATE-API`**: `GET /api/state`, one fleet reader snapshot as JSON for a session of either role (401 JSON without one); never a token, a secret's value or reference, a job's data or run text; a viewer's body carries no `failedReason`; a part that could not be read says `unreachable` rather than reading as zero; keys only added within `version: 1`. **NEW `INT-CONSOLE-EVENT-STREAM`**: `GET /api/events?page=` with the page's own query, two events (`panel`, one line of JSON `{id, html}` that replaces one `data-panel` region, and `end`, the session is over), a sequence `id` per page and query, every panel on connect unless `Last-Event-ID` is current, only changed panels after that, a 15 s ping, 429 past `PI_CONSOLE_MAX_STREAMS` per session or 32 in the process, and a client more than 2 MiB behind dropped to reconnect fresh. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the `kind` enum said `github`, `gitlab` or `local`, stale since the Forgejo and Azure forges (#61, #43) began writing `forgejo` and `azure`; it now lists the worker's `RUN_KINDS`, which the console's `kind` filter takes its vocabulary from, so a filter the spec allowed could no longer be refused by the code or the other way round. The record itself is UNCHANGED, checked: no field was added and none changed meaning. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: the audit screen reads the month files through the worker's new `readConsoleAudit` and writes nothing; no action or outcome was added. |
 | 2026-10-15 | Issue #642, writes and actions from the operator console. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: a write row gains optional `kind` (`[a-z0-9-]{1,40}`, a closed charset; `action` stays `write`), `reserve` (micro-dollars a paid action holds) and `count` (a bulk action's size, one row per job sharing the ticket); the actor role `panel` for the TUI's and the tools' writes (the OS login, scrubbed, no session) in the deployment's `PI_LOGS_DIR`, with a fresh 12-hex correlation id in `ticket`; the kinds written are listed (the console's configuration kinds are their action names, plus `pause-windows-set`); a malformed `kind`, `reserve` or `count` throws in the writer and is a broken link to the verifier; a panel write whose row cannot be appended is refused with `AUDIT_REFUSAL`; the panel's rows are not mirrored to Valkey; an answer is recorded by job id and sha256, never its text (the digest in `afterDigest`). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the forge job's optional job-level `console: {by}` (a console token name, rebuilt not copied, never inside `trigger`, part of no id, refused at enqueue outside the charset), the console answer's four differing fields (`console-` delivery id, `{id: null}` sender, GitHub `OWNER`, the scrubbed text of at most 8 KiB), a re-run's replaced delivery id and dropped `console`, and the write protocol of `writeTriggers` with `expect` re-read inside the lock before the rename. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**, the write protocol: the tmp file is the writer's own (`settings.json.<pid>.<12 hex>.tmp`, `wx`, removed on failure), CORRECTING the fixed `settings.json.tmp` this entry named, and `expect` re-read before the rename. New worker package exports: `./console-answer`, `./reserve-estimate`, `./schedules`, `./model-endpoints` and `./model-catalog` (the last two so the console's reserve reads the worker's own endpoint snapshot and price catalog; the admin bundles them, as it bundles every `@edgehero/pi-dispatch` subpath). RELEASE OBLIGATION, recorded so the release slice cannot miss it: the admin inlines `enqueueForgeJob`, so a console answer carries `console` whichever worker drains it, and only a worker of this release posts the trail comment (an older one runs the answer without it). The release must publish the worker and the admin together, and `docs/console.md` and doctor's version floor line (if one is added) must name that worker version, TBD at release. UNCHANGED, checked: `INT-CONSOLE-TOKENS-FILE-CONTRACT` (`by` reuses its name rule), `INT-RUN-HISTORY-FILE-CONTRACT` (a console job's record has no new field; a re-run is refused rather than rebuilt from it), `INT-SESSION-STORE-CONTRACT` (`isParked` judges a console answer as any reply), `INT-CONTAINER-JOB-INPUTS` (`console` never reaches `event.json`; the GitHub association `OWNER` does, as metadata), `INT-CANCEL-CHANNEL-CONTRACT` (the console's cancel is the CLI's request key), `INT-PAUSE-WINDOWS-FILE-CONTRACT`, `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT` and `INT-ENVELOPE-FILE-CONTRACT` (their writers already took `expect`). |
+| 2026-10-16 | Issue #643, live run transcripts. **NEW `INT-LIVE-TRANSCRIPT-STREAM`**: `run:live:<sanitized job id>`, one Valkey stream per running job written by the worker alone: flat string fields `kind` (`user`, `assistant`, `tool-call`, `tool-result`, `compaction`, `note`, `reset`, `skipped`, `end`), `ts`, `text` (redacted, controls written out except real newlines and tabs, cut at 4,096 code points or 8,192 for `assistant`), `tool`, `error`, `truncated`, and `outcome` on `end` only (`completed`, `policy`, `failed`, `unknown`, from the exit code, so it can differ from the record); `MAXLEN ~ 2000`, `PEXPIRE` 7 days at an attempt's first write (which deletes a previous attempt's stream) and 24 h with the `end`; what is never in it; the readers' shapes and validation (`TRANSCRIPT_ID_RE`, at most 200 a read, never a blocking `XREAD`). The constants are exported from the new worker subpath `@edgehero/pi-dispatch/live-transcript`; the off switch is `PI_LIVE_TRANSCRIPTS` (unset, empty or `1` on, `0` off, anything else refuses to boot), in both `.env.example` files. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: `GET /api/transcript?id=`, operator only (a viewer 403 before a slot), `HEAD` 405, the hub's slots, re-judging and 2 MiB cut, `entry` events whose `id:` is the stream id, `Last-Event-ID` validated as a stream id, `done` with the outcome after the `end`; the entry markup an `<article class="t-entry">` with an escaped `<pre>`, `done` data `{outcome}`. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: every job now gets `/session` and `PI_SESSION_FILE` (an empty live file for a job with no resume transcript; no store key, never promoted, deleted with the job dir; no image change); `PI_AWAIT_INPUT` stays keyed on a resume transcript; the runner sketch's in-memory comment corrected. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the mounts bullet, and **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the `run.resume` bullet: the flag decides resuming, not the mount. **`INT-SESSION-STORE-CONTRACT` AMENDED**: the `PI_SESSION_FILE` line, and the worker's read of the per-job copy during the run, which changes no edge. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED in substance, checked**: a non-resume job's `session` still reads `disabled` (`mergeSession` maps the runner's new `absent` back for exactly a job with a live file and no resolved session), and the record gains no field; one cell of the session-reason table says where `disabled` now comes from. |

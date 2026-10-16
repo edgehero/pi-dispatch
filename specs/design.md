@@ -2282,7 +2282,18 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `index.ts` (the log CONTENT goes through `clipData`, which SUBSTITUTES the control class rather than
   deleting it, and stays uncolored — only the chrome is themed), opening
   **pinned to the bottom in follow mode**: scrolling up pauses following, reaching the bottom re-arms it,
-  and the footer names the state (`follow`/`paused`) so stale lines cannot pass as live. Analytics
+  and the footer names the state (`follow`/`paused`) so stale lines cannot pass as live. **Since issue #643
+  LIVE_TAIL reads the run's live transcript first** (`DES-LIVE-TRANSCRIPT-STREAM`), for a run on any host:
+  `deps.transcriptMeta` and `deps.tailTranscript` come from `createDashboardDeps`, off the fleet reader's held
+  client with non-blocking `XRANGE` reads, paged from a cursor so a tick fetches only what is new (up to the
+  stream's 2,000 entries in one tick when a tail opens), and each entry becomes scrubbed, width-clipped lines at
+  the width the frame draws, re-wrapped on a resize. A read that lands after Esc or after another job's tail
+  opened is dropped by a generation counter, never appended to the wrong run. When the run has no stream the view
+  falls back to this host's `.log` through `deps.tailLog`, as before. That seam is now told the job's host (from
+  the snapshot) and this host's worker name (`PI_WORKER_NAME`, else the sanitized hostname, as the worker resolves
+  it), so a run on another host with neither a stream nor a local log says "this run is on host X" and why there is
+  no transcript (`PI_LIVE_TRANSCRIPTS=0`, not written yet, or expired), where it used to read as a log that was
+  never captured: `index.ts` had passed no host, so `readLogTail` could never return `elsewhere`. Analytics
   live on the **insights artifact** (`REQ-INSIGHTS-HTML-EXPORT`, issue #181), the ONE surface for
   "what is this deployment wired to do and what does it cost": bare `/dispatch insights` (and the
   overlay's `i` key, which resolves the overlay with a done-action so `index.ts` writes and opens
@@ -2597,7 +2608,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     run records may; the `.log` is overlay-viewer-only. The LIVE_TAIL view **preserves** exactly this
     boundary: the injected `deps.tailLog` seam renders `.log` bytes in-overlay only — never a tool result,
     never model context — and the USED_API surface stays the three pi members, because `tailLog` is an
-    internal overlay dependency injected through the existing `custom` seam, not a pi member. This is the
+    internal overlay dependency injected through the existing `custom` seam, not a pi member. The live
+    transcript (issue #643) is placed the same way: `tailTranscript` and `transcriptMeta` are overlay
+    dependencies whose entries live in the view's own fields and reach the overlay through render alone, never
+    `snapshot`, never a tool result, never model context. This is the
     same structural defence as `CONST-ISSUE-TEXT-IS-DATA`, one layer down: the boundary is where the data
     is placed, not a filter over its content. **A render-time control-byte scrub was added under issue
     #337 and is belt-and-braces, NOT a second boundary** -- the distinction matters because a filter that
@@ -9375,7 +9389,8 @@ a tunnel.
 - **Status**: issue #640, the security model and hardened skeleton of the console epic (#650); issue #641, the
   screens, the live updates and `/api/state` (the bullets from "The screens" to "Wiring" below); issue #642, the
   writes and actions (the bullets from "The action table" to "The sandbox, shown and not run" below, and the four
-  rejected options marked #642). Live logs arrive with #643. This entry supersedes three of the
+  rejected options marked #642); issue #643, the live transcript on the run page (the bullet "The live transcript"
+  below, over `DES-LIVE-TRANSCRIPT-STREAM`). This entry supersedes three of the
   rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
 - **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
@@ -9525,7 +9540,8 @@ a tunnel.
   (`ssh -L 4790:127.0.0.1:4790 host`) or to the socket (`ssh -L 4790:/path/console.sock host`), and the tunnel is the
   transport's security. A console on another host than the worker is allowed later, for reads: it needs only Valkey
   and the deployment folder, nothing in #640 depends on the host, and the audit's Valkey mirror (`console:audit`) is
-  how such a console would read the log. Where run transcripts can be shown is `OQ-044`, handed to #643.
+  how such a console would read the log. Where run transcripts can be shown was `OQ-044`, resolved by #643: from
+  the Valkey stream the worker publishes, so a console on any host shows any host's live run.
 - **The cookie's attributes**: `Secure` and the `__Host-` prefix are set only if Chrome, Firefox and Safari keep such
   a cookie on `http://127.0.0.1` and `http://localhost`, where the console is served without TLS; a browser that
   drops it would make login silently fail. Measured on 2026-10-14 with a server setting three cookies over plain
@@ -9637,7 +9653,31 @@ a tunnel.
   and belt-scrubbed (`DES-ADMIN-VIA-PI-EXTENSION`, the FAILED surface): it reaches a page only for the operator role,
   only in a detail view, never in a list, and never in a viewer's `/api/state`. The audit page is operator only,
   because its rows name people, session digests and refused hostnames. A test walks every page as a viewer with
-  hostile fixture values. #641 shows no transcript and no `.log` (`OQ-044`, #643).
+  hostile fixture values. #641 showed no transcript and no `.log`; #643 adds the live transcript on the run page,
+  under the same rule (below). No page shows a `.log`.
+- **The live transcript** (issue #643, `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM`): the run page
+  (`/run?id=`) gains a "Live transcript" section for the operator role. A viewer sees a sentence that transcripts are
+  shown to operators only, and nothing of the stream. A run with no stream says it is not published, expired or not
+  started yet, since the stream cannot tell those apart. While the stream exists, the section opens a second kind of
+  event stream, `GET /api/transcript?id=<jobId>` (`INT-CONSOLE-EVENT-STREAM`), operator only, implemented in
+  `live.mjs` beside the hub as a second subscription type:
+  - it shares the hub's slots (per token, global, the operator reserve), the per-tick session re-judging with
+    `peek` (`event: end` when the session ends) and the 2 MiB cut;
+  - each tick it reads `transcriptSince` from the stream's own cursor, non-blocking `XRANGE` on the fleet reader's
+    client, and writes each entry as `event: entry` with `id:` the stream entry id and data `{html}`;
+  - the html is rendered on the server by the one template: a header (kind, tool, an error marker, the time in UTC)
+    and the text in an escaped `<pre>`, tool-call arguments and tool results in `<details>`, no markdown and no
+    inline style;
+  - a reconnect's `Last-Event-ID`, validated as a stream id (`TRANSCRIPT_ID_RE`), resumes after that entry;
+  - once the reader has read the `end` entry it sends `event: done` with the outcome and closes.
+  The served script appends each entry's html to the `[data-transcript]` element, follows the bottom unless the
+  operator scrolled up, and shows live, ended or not live. The section is `<section id="transcript">`, deliberately not a
+  `data-panel`, so the hub never renders or swaps it; the script's states are live, reconnecting, ended with the
+  outcome, and not live, and with no stream the page says "No live transcript: not published (PI_LIVE_TRANSCRIPTS=0),
+  expired, or not started yet." A run page whose run has no record yet but a live stream answers 200, since a running
+  job has no record until it ends. The run-text rule holds unchanged: transcript text reaches the
+  operator role alone, escaped after the control scrub, only on the run page, never in a list, never in
+  `/api/state` and never in a hub panel.
 - **Wiring**: `serve` builds one `createFleetReader` on the deployment's Valkey, with `installPanelValkeyContext`
   applied as the panel applies it so TLS and auth deployments connect the same way, and with `PI_SESSIONS_DIR` when
   it is set; it builds the insights cache, the audit reader and the hub, passes them to `createConsoleServer` as named
@@ -9859,7 +9899,9 @@ a tunnel.
   deployment can comment on (mentions neutralised, the author named); a bulk action can start up to 100 paid
   retries from one confirm, each still reserved and refused by the worker's caps; and a panel write made from a
   shell that cannot append to the audit log is refused, so a full or unwritable `PI_LOGS_DIR` stops the TUI's and
-  the tools' writes until it is fixed.
+  the tools' writes until it is fixed. Since #643: the live transcript shows what the worker published, so a secret
+  the agent transformed (`DES-LIVE-TRANSCRIPT-STREAM`'s residual) reaches an operator's page, and a transcript tab
+  holds one of its token's stream slots like any live page.
 - **Traces to**: `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS`,
   `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
   `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT`,
@@ -9868,7 +9910,8 @@ a tunnel.
   `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`, `DES-AWAIT-INPUT-ENDS-THE-JOB`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
   `REQ-AWAIT-INPUT`, `REQ-OPERATOR-JOB-CANCEL`, `REQ-RESURRECTABLE-SANDBOX`, `REQ-INSIGHTS-HTML-EXPORT`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
-  `CONST-TRIGGER-AUTHOR-GATE`, `OQ-044`.
+  `CONST-TRIGGER-AUTHOR-GATE`, `OQ-044`, and since #643 `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM` and
+  `INT-LIVE-TRANSCRIPT-STREAM`.
 - **Code evidence**: admin/src/console/ (`cli.mjs`, `config.mjs`, `listen.mjs`, `guards.mjs`, `headers.mjs`,
   `html.mjs`, `server.mjs`, `sessions.mjs` (`peek` since #641), `login-codes.mjs`, `confirm.mjs`, `lock.mjs`, and
   since #641 `pages.mjs`, `panels.mjs`, `style.mjs`, `script.mjs`, `live.mjs`), worker/src/console-tokens.mjs,
@@ -9886,7 +9929,161 @@ a tunnel.
   worker/src/reserve-estimate.mjs (`estimateReserve`, `zeroRatedFor`, `callableModelRefs`),
   worker/src/file-expect.mjs, worker/src/queue.mjs (`enqueueForgeJob`'s `console`), worker/src/processor.mjs (the
   trail comment), worker/src/console-audit.mjs (`kind`, `reserve`, `count`), worker/src/triggers-file.mjs and
-  worker/src/runtime-settings.mjs (`expect`).
+  worker/src/runtime-settings.mjs (`expect`). Since #643: admin/src/console/live.mjs (the transcript subscription),
+  pages.mjs and script.mjs (the run page's section), the entry renderer `admin/src/console/transcript.mjs`, and admin/src/read-model.mjs
+  (`readTranscriptSince`, `readTranscriptMeta`, `TRANSCRIPT_ID_RE`, `TRANSCRIPT_PAGE_MAX`).
+
+## DES-LIVE-TRANSCRIPT-STREAM
+
+- **Status**: issue #643 (2026-10-16), resolving `OQ-044`. The worker half (the live file, the tailer, the
+  redactor, the stream) and the readers (the read model, the `/dispatch` panel) are built; the console's route and
+  run page are `DES-OPERATOR-CONSOLE`'s, amended the same day.
+- **Decision**: the worker tails each running job's pi session file and publishes a redacted, compact copy of it to
+  one capped Valkey stream per job, so an operator can watch what a run is doing from the console on any host and
+  from the `/dispatch` panel. Six parts:
+  1. **A live file for every job, through the existing session contract.** A job that is not a resume job now gets
+     `<jobDir>/session/current.jsonl`, staged empty (directory 0700, file 0600, `stageLiveFile` in
+     `worker/src/live-transcript.mjs`), mounted at `/session` with `PI_SESSION_FILE=/session/current.jsonl`, the same
+     layout `resolveSession` stages for a resume job. On an empty file the runner opens a fresh session at that path
+     (`image/runner/src/session.mjs`), the path a cold-starting resume job already takes, so **the job image needs no
+     change**. pi then appends one JSON line per entry as the agent works. A resume job is untouched: its staged
+     transcript is its live file. The file has no store key, is never promoted, is removed by the sandbox retention
+     before a run is kept, and is deleted with the job directory. Whether a job RESUMES stays keyed on
+     `prepared.session` alone (the await-input arming, the promotion and the record's `session` read nothing
+     else), so a non-resume job's run record is byte-identical to one written before the feature: the runner now
+     reports `absent` for it (it found an empty file), and `mergeSession` maps exactly that report, for a job with a
+     live file and no resolved session, back to `disabled`, the reason the runner gave for such a job before, because
+     the object describes resuming and the job was never armed to resume. A staging that fails is logged
+     (`live_transcript_unstaged`) and the job runs as every job did before, with no file and no stream.
+  2. **The tailer** (`makeLiveTranscript`), started by `runContainer` when the container spawns. The file is the
+     agent's (`/session` is mounted read-write), so the agent can replace it with a symlink to a host path or a FIFO,
+     and the worker reads as its own account: following a link would publish whatever host file it named, another
+     job's stored transcript being exactly pi-shaped. So each read `lstat`s first and refuses anything but a regular
+     file, opens with `O_NOFOLLOW` and `O_NONBLOCK` (a link or FIFO swapped in after the `lstat` is refused, not
+     followed or waited on), and refuses an open descriptor whose inode is not the one judged; a refusal is published
+     once as a fixed note and the file is never read again for that job. It polls: an `lstat`
+     every 500 ms and a read of the bytes appended since its offset, at most 4 MiB a poll. A line is complete at its
+     newline; a partial last line is held until it completes. A size below the offset, a new inode, or a first line
+     that changed means the file was rewritten (pi's header rewrite, a runner truncating an unparseable resume file):
+     a `reset` entry is published and the file is read again from 0. A line over 1 MiB is never parsed; one
+     `skipped` entry says so, and the rest of it is dropped as it arrives. A line that is not JSON becomes one fixed
+     `note` ("a transcript line that is not JSON was left out"), never its bytes.
+  3. **The mapping**, one pi entry to the display entries it becomes (`entriesOf`), against the pinned pi's
+     session-manager shapes: a user message is `user`; an assistant message is one `assistant` entry for its text
+     (when not blank) plus one `tool-call` per tool call, whose text is the arguments JSON-stringified; a tool result
+     (and pi's own `bashExecution`) is `tool-result`, its text parts joined by newlines and each image as `[image]`,
+     flagged when pi marked it an error; a compaction or branch summary is `compaction`; a model change, a thinking
+     level change, a context edit and a custom message are one short `note` each. **Never published**: the model's
+     thinking (a model's private reasoning is not shown); the session header's `cwd` (the header becomes the note
+     "session started"); `usage`, `custom`, `session_info` and `label` entries; a provider's error message (an
+     assistant turn that ended in `error` or `aborted` becomes a note naming only that stop reason token).
+  4. **The redactor** (`makeRedactor` and `secretValuesOf`, `worker/src/redact-secrets.mjs`), built per job in
+     `runContainer` from the job's own container env, and applied to every text before it is escaped and cut.
+     - **The key rule is inverted**: every container env key is secret-bearing unless it is in
+       `NON_SECRET_ENV_KEYS`, the structural keys `buildContainerEnv` writes (paths, flags, model names, counts, the
+       forge host variables, derived from their sources), held to the builder by a test. The proxy variables are
+       structural only when their value is exactly what the worker's `egressEnv` wrote for this job: an operator who
+       forwards `HTTPS_PROXY` with credentials (`PI_EGRESS=0`) gets them redacted (`secretValuesOf`'s `workerSet`). So the minted
+       forge token under each name, the provider credential, every `PI_FORWARD_ENV` value, every resolved trigger
+       secret and every model-endpoint key are redacted by construction, and a key added to the env later is
+       redacted until someone lists it: a missing entry costs readability, never a leak. The minted `token` and the
+       `exitKey` (which never enters the env) are added explicitly.
+     - **Rule 1, values**: each secret value of at least 8 characters in its literal, JSON-escaped (as
+       `JSON.stringify` writes it inside a string, which is how tool arguments reach the stream) and URL-encoded
+       (`encodeURIComponent`, both hex cases) forms, longest first, so a value containing another is taken whole.
+       Shorter values are a port, a flag or a word, and replacing them would shred the text.
+     - **Rule 2, shapes**, for a secret this job was never handed: GitHub's `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` and
+       `github_pat_`, GitLab's `glpat-`, `sk-ant-` and `sk-` keys, Slack's `xoxb-` and `xoxp-`, this project's console
+       tokens (`pdc_`), AWS access key ids (`AKIA...`), and the credential half of an `Authorization:` header or a bare
+       `Bearer`, keeping the scheme. Each body has a length floor and a left anchor, so `sk-learn` or `task-...` stays.
+     - **Rule 3, URL userinfo**: `scheme://user:password@` becomes `scheme://[redacted]@`; the scheme is required, so an
+       e-mail address is left alone. And the password inside a URL-shaped secret value (a forwarded proxy) is a value
+       of its own, raw and percent-decoded, so a tool printing it without its URL (`curl -U user:password`) is caught.
+       The `Authorization` header rule also takes a quoted credential after its scheme and a header with no scheme.
+     - A match becomes `[redacted]`. Redaction runs on an entry's WHOLE text when the entry is queued, before any cut,
+       so no cut can split a secret; a redactor that throws drops that entry rather than publish its raw text.
+  5. **Escaping and caps.** After redaction every text has its control and bidi characters written out as
+     `\u{XXXX}` (the worker's `escapeControls`), except that real newlines and tabs stay real characters, so a
+     multi-line message or tool output stays multi-line for a reader (`\r\n` and a lone `\r` become `\n`). Then it
+     is cut to 4,096 code points (8,192 for an `assistant` text), never inside an escape, and flagged `truncated`.
+     The tool name is redacted too and keeps its charset (`[A-Za-z0-9_.:-]{1,64}`), else it becomes `?`; a name
+     redaction changed is published as `?` (the model chooses tool names, and a token fits the charset). `ts` is the pi
+     entry's own timestamp when it lies between 0 and a day ahead, else the publish time.
+  6. **The stream** (`INT-LIVE-TRANSCRIPT-STREAM`): `run:live:<sanitized job id>`, through the sanitizer the run
+     mirror uses for `runs:rec:`. Each poll writes what it read in one `MULTI`: `XADD ... MAXLEN ~ 2000 *` per entry,
+     and at an attempt's first write a `DEL` of the key first (a retry reuses the job id, so the previous attempt's
+     stream is deleted and a stream holds one attempt) and a `PEXPIRE` of 7 days, so a worker that dies mid-run
+     cannot leave it forever. The key exists about one poll after the container starts. Every Valkey call is bounded
+     (1 s) and best effort: a failure drops and counts the batch, at most 2,000 entries and 8 MiB of field values wait for a
+     write (the oldest dropped past either), and nothing here throws into, fails or slows the job. **The end**: when the container
+     exits, `runContainer` calls `finish(outcome)` in its `close` handler, BEFORE its promise resolves and so before
+     the processor's `finally` removes the job directory: it waits for a poll in flight, reads the file to its end
+     (a partial last line taken as a line), flushing after every chunk, at most 64 MiB (`LIVE_FINAL_READ_MAX_BYTES`,
+     then `skipped` once), so a huge or sparse file the agent made cannot keep the worker reading or hold its memory, publishes `end` with the outcome and sets a `PEXPIRE` of 24 h,
+     all bounded at 3 s whatever Valkey does. Once `finish` settles, done or timed out, the publisher is closed: no read
+     starts, nothing is queued and nothing is written, so a stale attempt can never write into a retry's stream (a
+     timed-out finish loses its `end`; residual: a transaction already handed to the client before it settled can
+     still be resent by ioredis after a reconnect). The outcome is the exit's own reading (`liveOutcomeOf`): exit 0
+     `completed`, exit 1 `failed`, exit 2 or a worker abort `policy`, anything else `unknown`; a container that never
+     started ends `failed`. It is what `runContainer` knows, and it can differ from the run record's
+     classification, which the processor makes afterwards with more (an exit 1 classified as an infra retry, an OOM
+     confirmed by the supervisor, a completed run the cost settlement refuses); the record stays the authority.
+- **Logging**: the publisher logs the job id and counts only (`live_transcript_write_failed` once per job,
+  `live_transcript_ended` with `published`, `dropped`, `skipped`, `notes`, `resets`, `errors`, `refused`), never an entry's
+  content (`no-pii-in-logs`).
+- **The off switch**: `PI_LIVE_TRANSCRIPTS`. Unset, empty or `1` publishes; `0` publishes nothing (the opener is null,
+  and no live file is staged either, so a job without a resume transcript runs exactly as before the feature, its
+  session in memory and no `/session` mount). Any other value refuses to boot, for
+  `globalExtensionsEnabled`'s reason: `PI_LIVE_TRANSCRIPTS=false` read as on would be an operator believing PII
+  stays on the host while it does not. Documented in both `.env.example` files, which the env-docs test holds.
+- **Why**: the console (#640 to #642) shows every run's record fleet-wide and nothing of what a run is doing. The raw
+  log exists only with `PI_CAPTURE_JOB_LOGS=1` and only on the host that ran the job, runner stdout carries id-only
+  events, and before this only `run.resume` jobs wrote a transcript file at all. The transcript is the artifact that
+  answers "what is it doing", it is structured (no terminal escapes to parse), and pi already writes it, so the
+  worker only has to read a file it mounted. The worker, not the runner, publishes because a container that could
+  write to Valkey would be a new network path out of the box (`CONST-ISOLATION-CONTAINER-PER-JOB`); reading from
+  this side adds no route, and the file is in the job's own directory. A poll, not `fs.watch`, because the file is a
+  bind mount that crosses a VM on Docker Desktop and Podman machine, where change events are dropped or late. The
+  transcript is agent-writable, like stdout (#542, #545), so it is untrusted data at every step: redacted before it
+  leaves, escaped by every surface, interpreted by none.
+- **Rejected**:
+  - **The runner publishing** over a new network path from the container. It is a route out of the box for the
+    agent's process tree, with a credential to Valkey inside it, against `CONST-ISOLATION-CONTAINER-PER-JOB`; the
+    worker already has the file.
+  - **Mirroring the raw log.** It carries terminal escapes, the runner's own lines and whatever a tool printed, with
+    no structure to redact or cap by, and it is the artifact `docs/multi-host.md` keeps on its host on purpose.
+  - **Local only** (the other answer to `OQ-044`): a console on one host of a fleet, or on a machine that is not a
+    worker, would answer "not on this host" for most runs.
+  - **A blocking `XREAD` on the reader's shared client.** The fleet reader holds one client for the whole snapshot,
+    and a `BLOCK` read would park every read of the next tick behind it; a second connection per open tail is a
+    cost and a cap to manage. Readers use non-blocking `XRANGE` at their own refresh rhythm.
+  - **Shipping the thinking.** A model's private reasoning is not what an operator watches for, it is the part
+    most likely to restate a secret it saw, and it is not shown on any other surface.
+  - **Auditing transcript reads.** The console's audit vocabulary is writes and refusals; a read row per open tail
+    would be a new kind of row for a read the role guard already bounds. Considered, not built.
+- **Residuals**, stated rather than implied (each is in `SECURITY.md`):
+  - **A transformed secret is not caught**: base64, reversed, split across two tool calls, one character per line.
+    No rule that does not know the transformation can catch it. Redaction bounds an accident; it is not a boundary
+    against an agent trying to leak.
+  - **The tail can be lost when the abort grace runs out**: a cancelled or timed-out job whose container does not
+    close within the abort grace lets the processor clean up before `finish` runs, so the run's last lines and its
+    `end` entry are not published; the stream then expires on its 7-day TTL.
+  - **A rewrite to the same first line at a larger size** is not seen as a reset; pi rewrites only on a format
+    migration or a branch, neither of which a job does after its header.
+  - Readers see a stream at most one poll (about 500 ms) behind the file, and a Valkey outage loses the entries
+    written during it.
+- **Traces to**: `REQ-LIVE-TRANSCRIPT`, `REQ-CONSOLE-SECURITY`, `INT-LIVE-TRANSCRIPT-STREAM`, `INT-SESSION-STORE-CONTRACT`,
+  `INT-CONTAINER-JOB-INPUTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`.
+- **Code evidence**: worker/src/live-transcript.mjs (`stageLiveFile`, `makeLiveTranscript`, `entriesOf`,
+  `escapeText`, `makeLiveTranscriptOpener`, `liveKeyFor`, the `LIVE_*` constants, exported as
+  `@edgehero/pi-dispatch/live-transcript`), worker/src/redact-secrets.mjs (`makeRedactor`, `secretValuesOf`,
+  `NON_SECRET_ENV_KEYS`), worker/src/run-container.mjs (`openLiveTranscript`, `liveOutcomeOf`, the finish in the
+  `close` handler), worker/src/prepare.mjs (`withLiveFile`), worker/src/processor.mjs (`mergeSession`'s `absent` to
+  `disabled`), worker/src/config.mjs (`liveTranscriptsEnabled`), worker/src/start.mjs, worker/src/index.mjs (the
+  `jobId`), worker/src/backend-podman.mjs, worker/src/env-allowlist.mjs, admin/src/read-model.mjs
+  (`readTranscriptSince`, `readTranscriptMeta`, the fleet reader's `transcriptSince` and `transcriptMeta`),
+  admin/src/dashboard.ts (LIVE_TAIL), admin/src/index.ts (`panelTailLog`).
 
 ## Revision History
 
@@ -10193,3 +10390,4 @@ a tunnel.
 | 2026-10-14 | Issue #640, the operator console's security model and hardened skeleton. **NEW `DES-OPERATOR-CONSOLE`**: a separate process, the bin `pi-dispatch-console` of the admin package, on `node:http` alone, over the same read model as the pi extension. The property that replaces "binds no network port": it listens on loopback (`127.0.0.1:4790` by default, IP literals only, a public literal only with `PI_CONSOLE_BIND_PUBLIC=1`) or on a 0600 unix socket; every request but `/healthz` and login needs a named token's session; a write needs `Sec-Fetch-Site: same-origin` (or an exact `Origin`), JSON, the operator role, a console that is not read-only, and a single-use ticket bound to the previewed diff, and goes through the read model's funnels (`writePauseWindows` gains `expect`); every response carries one header set; every write, refusal and sign-in lands in a hash-chained audit log. Six threats found while surveying are recorded with their answers: the job container reaching loopback through the host gateway (the Host check refuses the gateway names, a token is required, and the unix socket removes the path), an SSH tunnel changing the port (the Host check is on the hostname, any port), a page on another localhost port being same-site (`same-site` is refused), the operator's pi session minting a token (the tokens file joins `guardedFiles()`), a job reading the tokens file through a mounted path (hashes only, and doctor fails a tokens file inside any path a job container can see), and two writers forking the chain (an append lock around the head read and the write, plus a single-instance lock on `serve`). Rejected, with reasons: mounting on the receiver (still), a framework or build step, TLS in the process, one shared token, a KDF for 256-bit tokens, `Secure` or `__Host-` before the browser lab, the token in a URL (the one-time code rides in the fragment), and a Valkey stream as the record. Measured on 2026-10-14 and recorded in the entry: a Docker Desktop job container reaches a host loopback listener through `host.docker.internal` on the default bridge and not on `--internal`, native Linux reaches it in neither posture; WebKit drops `Secure` and `__Host-` cookies on plain-http loopback, so the cookie is plain; in Chrome 155 a hostile page on another localhost port is same-site and its writes are refused on `Sec-Fetch-Site`, a rebound name gets 421, and the CSP blocks an injected inline script; and a real `ssh -L` tunnel to the unix socket signs in on a different port. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the extension still binds no port, stated as the extension's property, and the console is named as a second surface in a separate process; its Why bullet on the receiver says the receiver still carries no admin surface; the rejected served graph page and web panel are marked SUPERSEDED by `DES-OPERATOR-CONSOLE` where they stand, their text kept; mounting admin on the receiver stays rejected. **`DES-PANEL-SEPARATE-FROM-RECEIVER` UNCHANGED, checked**: still superseded, and its reasoning is what the console's separate process rests on. UNCHANGED, checked: `CONST-ISOLATION-CONTAINER-PER-JOB` (the console runs no agent and processes no adversarial input as instructions; run text is data it escapes), `CONST-BUDGET-BEFORE-TOKENS` (the console's one write moves a pause window through the same funnel as the panel, and paid actions are #642's), and `constitution.md` (it holds no port clause, checked). |
 | 2026-10-14 | Issue #641, the operator console's screens and live updates. **`DES-OPERATOR-CONSOLE` AMENDED**: eight read pages (overview, runs, run detail, parked inbox, insights with a range, fleet, configuration, audit), each an exact path with a bounded query, built from one `PAGES` table and from pure panel renderers that serve both the first load and every live update; `GET /api/state` and `GET /api/events` (`INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`); the stylesheet a served file, because the CSP blocks inline style. ONE FLEET READER: the panel's snapshot code moved from `dashboard.ts` into `read-model.mjs` as `createFleetReader`, unchanged, and both surfaces build one, which is what "no second read model" means; new readers for a run page (a score cursor, 100 a page, 2000 examined at most, the mirror read without pruning so a page read writes nothing), a run by id, parked runs (`answered` derived from a later run on the same kind and target, the chain count unknown rather than 0 where this host cannot see the store), secret profile names, the audit rows, and forge links derived from the deployment's own instance URL, never guessed. The insights assembly moved pi-free with the pricing passed in, so the console bundle carries `pi-ai` for prices and never the pi runtime. THE LIVE HUB: server-rendered panels over SSE, only changed panels sent, a snapshot on connect, `Last-Event-ID`, a 15 s ping, a 2 MiB slow-client drop, and one 1 s poll that runs only while a stream is open. THE STREAM LIFECYCLE, the gap #640 left: each tick re-judges every stream's session with a new `sessions.peek`, which never moves `lastSeen`, so an open tab never extends a session, and logout, revoke, rotate, end-all and expiry end a stream within a tick; `PI_CONSOLE_MAX_STREAMS` per session plus a global cap of 32, so streams never take all 64 connections (429 past either). THE ROLE RULE: records are PII-free and shown to both roles, the hostile-capable strings escaped; BullMQ `failedReason` only to the operator and only in a detail view; the audit page operator only. Rejected: JSON with client rendering (a second escaper), a single-page app or framework, polling from each browser, WebSockets (one-way updates need no upgrade handling on the trusted process). Two residuals added: one token's eight sessions can hold every stream slot, and a watched page still signs out at the idle limit. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the overlay's snapshot is the moved `createFleetReader`, behaviour unchanged, and a new PARKED view reads the snapshot's `parked`. UNCHANGED, checked: `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (the parked chain count re-derives the key and indexes nothing), `DES-AWAIT-INPUT-ENDS-THE-JOB` (parking is read, never changed; answering is #642's), `DES-PANEL-SEPARATE-FROM-RECEIVER` (still superseded, the console still never runs on the receiver), and `REQ-INSIGHTS-HTML-EXPORT`'s file (unchanged; the console renders the same sections live). |
 | 2026-10-15 | Issue #642, writes and actions from the operator console. **`DES-OPERATOR-CONSOLE` AMENDED**: THE ACTION TABLE, `ACTIONS` in `admin/src/console/actions.mjs`, one entry per write (`{name, kind, paid, bulk, preview, apply}`), from which the preview and confirm routes are generated, so the #640 dispatcher guards every action and the route-table tests cover every action; the pause-windows write is its first entry (routes `POST /api/act/<name>/preview` and `/confirm`; the old pause-windows routes stay as aliases). THE GENERIC PIPELINE: one preview issues a ticket holding the payload, the `expect` snapshots, the targets and the reserve; one confirm redeems it, appends the `ok` audit row (with `kind`, digests, `reserve`, `count`), applies through the funnel, appends a compensating `failed` row on a refusal or throw, and pokes the live hub; an append failure refuses. THE GROUPS: runs and jobs (cancel active with `REQ-OPERATOR-JOB-CANCEL`'s named refusal, cancel held, retry failed, remove failed, re-run, answer parked), fleet (pause and resume through the kill switch's one funnel, one queue), configuration (each through the `write-plans.mjs` planner and the panel's funnel), bulk. PAID ACTIONS AND THE RESERVE: `estimateReserve` (worker export `./reserve-estimate`) imports the worker's own rule (one slot, the per-job cap `effectiveCostCapMicros`, 0 for a job `zeroRatedFor` judges unable to spend), so the page shows what the worker will hold; the worker still reserves at pickup. PARKED ANSWERS: the receiver's phrase-free reply rebuilt field for field (the parked run's repo and target from its retained job, the comment trigger's run fields as the file says now), the text in `trigger.comment.body` fenced as data, a fresh `console-` delivery id, sender `{id: null}`, GitHub association `OWNER`, `console: {by}` at job level; the worker's one trail comment once every pre-spend gate and reserve has passed, just before the container starts, mentions neutralised by U+200B, dropped by the receiver's self-guard as `self`; the audit holds the answer's sha256, never the text. RE-RUN SOURCES: local from the retained job's folder, flow and task after the folder rule; cron from the trigger as the file says now (`./schedules`); forge with the issue from the retained job data and the run fields from the trigger as the file says now (refused when that trigger changed or is gone), a fresh delivery id, routed as the receiver routes, without `console`; refused by name on expired data, a `/command`, a parked answer, and a duplicate the semantic or minute window takes. BULK: at most 100, the ticket binding the exact list and each job's state, per-job re-check and results, one audit row per job with `count` and the shared ticket digest. ONE AUDIT CHAIN: the TUI's and the tools' writes as actor role `panel`, append before write, append failure refuses. THE SANDBOX: the command shown, never run. Rejected, with reasons: a browser terminal, committing configuration to git, posting the answer as the bot from the console process, re-running from the run record. Three residuals added: an operator token can quote text on any parked issue under the deployment's identity, one bulk confirm can start 100 paid retries (each still reserved), and an unwritable `PI_LOGS_DIR` stops the panel's writes. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the tools' and dialogs' pre-confirm checks moved to the pi-free `admin/src/write-plans.mjs` with their messages byte-identical and their tests unchanged; `writeTriggers` (inside its lock) and `writeSettings` take `expect`, sharing `worker/src/file-expect.mjs`'s snapshot encoding, and `writeOverlay`'s tmp file became its own; the fleet reader's `pause`/`resume` go through `killSwitchPlan`/`killSwitchSet`, so the two-Valkey disagreement refusal holds on the TUI too, a part-way stop is a result the footer says, and `pauseQueue` and the fleet-wide `cancelHeldJob` arrive; every panel write is audited as role `panel`; the setup wizard is not audited, and why (it runs before a logs directory exists and creates the files an audit would name; its host mutations are the worker CLI's own consented commands). The PARKED view still writes nothing. UNCHANGED, checked: `DES-AWAIT-INPUT-ENDS-THE-JOB` (parking and the `not-parked` gate are as they were; the console is one more source of the reply that gate judges), `DES-SANDBOX-IS-A-FRESH-CONTAINER` (no new way to open one), `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` (the priorities and revert actions call the same `applyPriorities` and `revertAllocation`; the allocation audit and `alloc:log` keep their rows), `DES-PANEL-SEPARATE-FROM-RECEIVER` (the console still never runs on the receiver), `DES-CANCEL-VIA-REDIS-REQUEST-KEY` (the console uses the CLI's request key). **Code evidence**: admin/src/job-actions.mjs, admin/src/write-plans.mjs, admin/src/audited-write.mjs, admin/src/read-model.mjs (`killSwitchPlan`, `setQueuePausedOne`, `cancelHeldJob`, `writeSettings`, `createFleetReader`), admin/src/index.ts, admin/src/dashboard.ts (`withAuditedWrites`, `switchFailure`), admin/src/secrets-command.ts, worker/src/console-answer.mjs, worker/src/reserve-estimate.mjs, worker/src/file-expect.mjs, worker/src/queue.mjs (`enqueueForgeJob`), worker/src/processor.mjs, worker/src/console-audit.mjs, worker/src/triggers-file.mjs, worker/src/runtime-settings.mjs, admin/src/console/actions.mjs, admin/src/console/job-data.mjs. |
+| 2026-10-16 | Issue #643, live run transcripts, resolving `OQ-044`. **NEW `DES-LIVE-TRANSCRIPT-STREAM`**: every job gets a live transcript file through the existing `PI_SESSION_FILE` contract (`<jobDir>/session/current.jsonl`, staged empty, mounted at `/session`; no image change; resume still keyed on `prepared.session` alone, and a non-resume job's record still says `disabled`, because `mergeSession` maps the runner's `absent` back for exactly that job); the worker tails it (a 500 ms poll, partial lines held, `reset` on a rewrite, `skipped` past 1 MiB, a fixed note for a line that is not JSON), maps each pi entry to compact display entries (thinking, the header's cwd, usage, custom, session_info, label entries and provider error messages never published), redacts with an inverted key rule (every env key secret-bearing unless in `NON_SECRET_ENV_KEYS`, plus the token and the exit key; literal, JSON-escaped and URL-encoded forms; known token shapes), escapes controls (real newlines and tabs kept), and writes `run:live:<id>` with `MAXLEN ~ 2000`, a 7-day TTL at the first write (which deletes a previous attempt's stream), and an `end` entry with the exit's outcome and a 24 h TTL, finished before the job directory is removed. Residuals: transformed secrets, and the tail lost when the abort grace runs out. Off switch `PI_LIVE_TRANSCRIPTS=0`. Rejected: the runner publishing over a new network path, raw-log mirroring, local only, a blocking `XREAD` on the shared client, shipping thinking, auditing reads. **`DES-OPERATOR-CONSOLE` AMENDED**: the run page's "Live transcript" section for the operator role and `GET /api/transcript` as a second subscription type in `live.mjs` (shared slots, `peek`, the 2 MiB cut, `entry` events with stream ids, `Last-Event-ID` resume, `done` after the end); the run-text rule unchanged; one residual added; the section `#transcript` outside the hub's panels. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: LIVE_TAIL reads the transcript stream for a run on any host, falls back to the local `.log`, and the fallback is told the job's host and this host's name so a foreign run says "this run is on host X"; the placement rule covers the transcript seams. |
