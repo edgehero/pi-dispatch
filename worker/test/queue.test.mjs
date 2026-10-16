@@ -1008,6 +1008,35 @@ test("enqueueTriggerRunReporting passes the schedule's data and options through 
 	assert.deepEqual(again.existing, { queuedAt: 1000, state: "completed" });
 });
 
+test("progress and statusComment ride forge job data only when armed, and never move a dedup key (issue #644)", async () => {
+	const { enqueueForgeJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	const base = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-pg", sender: { id: 42 }, matched: { index: 0, type: "label", label: "bug" } },
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+	};
+	for (const kind of ["github", "gitlab", "forgejo", "azure"]) {
+		await enqueueForgeJob(fakeQueue, kind, { ...base, progress: true, statusComment: true });
+		assert.equal(captured.data.progress, true, kind);
+		assert.equal(captured.data.statusComment, true, kind);
+		assert.equal("progress" in captured.data.trigger, false, "an execution knob, never in /job/event.json");
+		assert.equal("statusComment" in captured.data.trigger, false);
+		const dedup = captured.opts.deduplication.id;
+		for (const value of [undefined, false, "true"]) {
+			await enqueueForgeJob(fakeQueue, kind, { ...base, progress: value, statusComment: value });
+			assert.equal("progress" in captured.data, false, `${kind} ${value}`);
+			assert.equal("statusComment" in captured.data, false, `${kind} ${value}`);
+			assert.equal(captured.opts.deduplication.id, dedup);
+		}
+	}
+});
+
 test("awaitInput rides forge job data only when armed, and never moves a dedup key (issue #625)", async () => {
 	const { enqueueGitHubJob } = await import("../src/queue.mjs");
 	let captured;

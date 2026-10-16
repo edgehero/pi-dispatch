@@ -367,7 +367,7 @@ function resolveEnvName(provider) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -403,9 +403,9 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 		// The transcript file inside the /session mount (REQ-RESUMABLE-SESSION). Emitted ONLY when this job
 		// actually has one -- absent means the runner builds pi's ephemeral in-memory session. Since issue #643
 		// every prepared job has one (a resume job's staged transcript, or every other job's empty live file,
-		// which the worker tails for the live stream), with one exception: with PI_LIVE_TRANSCRIPTS=0 no live file
-		// is staged (start.mjs hands the preparer `stageLive: null`), so a non-resume job then has none, as before
-		// the feature. Otherwise absence is a caller that staged none, or a staging that failed. Never
+		// which the worker tails for the live stream and, since issue #644, for run progress), with one exception: with
+		// both PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0 no live file is staged (start.mjs hands the preparer
+		// `stageLive: null`), so a non-resume job then has none, as before the feature. Otherwise absence is a caller that staged none, or a staging that failed. Never
 		// an empty string, for PI_PACKAGES' reason: an empty value is a third state neither side reads the
 		// same way, and the one reading a container must not have to infer which was meant.
 		PI_SESSION_FILE: sessionFile || undefined,
@@ -439,6 +439,9 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 		// The trigger's run.awaitInput (issue #625): "1" offers the job the tool a parked run ends on. Absent means not
 		// armed, never "0" or an empty string, for PI_PACKAGES' reason.
 		PI_AWAIT_INPUT: awaitInput === true ? "1" : undefined,
+		// The trigger's run.progress (issue #644): "1" offers the job the report_progress tool. Absent means not armed,
+		// PI_AWAIT_INPUT's rule.
+		PI_REPORT_PROGRESS: reportProgress === true ? "1" : undefined,
 		// The job's EFFECTIVE allowed-model list (issue #502): its trigger's `run.models`, else the deployment's
 		// PI_ALLOWED_MODELS. Comma-joined `provider/model` entries, which the runner splits at each entry's first `/`
 		// (image/runner/src/config.mjs). Comma is safe because both list parsers refuse an entry carrying one. NULL is

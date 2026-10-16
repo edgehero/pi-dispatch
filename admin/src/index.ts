@@ -732,7 +732,10 @@ function registerTools(pi: ExtensionAPI): void {
       "issue/PR event, so set only the match + flow. Every kind may set model/provider/maxTurns (omit = deployment default). " +
       "`backend` (optional, any kind) names WHERE the job's container is built, chosen from the names this " +
       "deployment blesses in PI_BACKENDS; omitted, the job runs on the deployment default. A name this " +
-      "deployment does not bless is refused here, and refused again before the job spends.",
+      "deployment does not bless is refused here, and refused again before the job spends. " +
+      "`progress: true` (optional, any kind) offers the job a report_progress tool and shows the phases it reports; " +
+      "`statusComment: true` (optional, webhook kinds only, refused on cron) has the worker post one status comment " +
+      "on the issue or pull request and edit it as the run goes.",
     executionMode: "sequential",
     parameters: Type.Object({
       kind: Type.String(),
@@ -763,6 +766,10 @@ function registerTools(pi: ExtensionAPI): void {
       // the reason it must." The allowlist is checked in execute, below, because a schema enum would be
       // frozen at registration while PI_BACKENDS is read per call.
       backend: Type.Optional(Type.String()),
+      // Issue #644. Neither is a capability the model gains (buildTriggerEntry says why); checked with the loader's own
+      // validator before the confirm, so a status comment on cron is refused before the operator is asked.
+      progress: Type.Optional(Type.Boolean()),
+      statusComment: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // Judged BEFORE the confirm (`planTriggerAdd`): the tool-proof fields and their near misses (#501 part 7), the
@@ -787,7 +794,8 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Changes which flow a trigger runs (by array index from dispatch_triggers) and applies it live, and " +
       "optionally which `backend` (venue) its container is built in, chosen from the names PI_BACKENDS " +
-      "blesses, and which `provider` and `model` its jobs run on (omitted, the trigger keeps what it has). " +
+      "blesses, and which `provider` and `model` its jobs run on (omitted, the trigger keeps what it has), and " +
+      "`progress` / `statusComment` (booleans, as on dispatch_trigger_add; omitted, the trigger keeps what it has). " +
       "The operator MUST approve a confirm dialog showing the before->after; with no interactive " +
       "operator it is refused.",
     executionMode: "sequential",
@@ -799,6 +807,9 @@ function registerTools(pi: ExtensionAPI): void {
       // the operator is asked, so a confirm dialog never shows a value the write would then refuse.
       provider: Type.Optional(Type.String()),
       model: Type.Optional(Type.String()),
+      // Issue #644, merged only when sent and judged against the entry's own type (no status comment on cron).
+      progress: Type.Optional(Type.Boolean()),
+      statusComment: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // Judged BEFORE the confirm (`planTriggerEdit`): the tool-proof fields, the index, a non-empty flow, the backend
@@ -813,7 +824,7 @@ function registerTools(pi: ExtensionAPI): void {
         // changes just the flow leaves the entry byte-identical in every other key.
         const res: any = panelWrite(auditDir(), { kind: "trigger-edit", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: plan.mutate, expect: plan.expect }));
         if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, index: params.index, flow: plan.flow, ...(plan.backend !== undefined && { backend: plan.backend }), ...plan.ref };
+        return { applied: true, index: params.index, flow: plan.flow, ...(plan.backend !== undefined && { backend: plan.backend }), ...plan.ref, ...plan.flags };
       });
       return toolText(JSON.stringify(result));
     },

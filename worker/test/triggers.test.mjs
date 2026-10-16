@@ -1631,3 +1631,47 @@ test("run.awaitInput: true needs run.resume: true, and a non-boolean is refused"
 	const [cron] = parse([withRun(CRON, { awaitInput: false })]);
 	assert.equal("awaitInput" in cron.run, false, "a cron entry never carries the key");
 });
+
+// --- run.progress and run.statusComment (issue #644) ---
+
+test("run.progress and run.statusComment are carried on every forge type, and absent when not written", () => {
+	const flags = { progress: true, statusComment: true };
+	const [label, comment, issue, pr] = parse([
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", ...flags } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", flow: "fix", ...flags } },
+		{ on: { type: "issue", action: ["closed"] }, run: { kind: "forgejo", flow: "fix", ...flags } },
+		{ on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", flow: "review", progress: false, statusComment: false } },
+	]);
+	for (const t of [label, comment, issue]) {
+		assert.equal(t.run.progress, true, t.on.type);
+		assert.equal(t.run.statusComment, true, t.on.type);
+	}
+	assert.equal(pr.run.progress, false, "false is the documented default and is carried, run.resume's rule");
+	assert.equal(pr.run.statusComment, false);
+	const [plain] = parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } }]);
+	assert.equal("progress" in plain.run, false, "an unflagged trigger normalizes byte-identically");
+	assert.equal("statusComment" in plain.run, false);
+});
+
+test("run.progress and run.statusComment: a non-boolean is refused on every type, and a cron trigger takes progress but no status comment", () => {
+	for (const key of ["progress", "statusComment"]) {
+		for (const entry of [
+			{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", [key]: "true" } },
+			{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", [key]: 1 } },
+			{ on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "fix", [key]: null } },
+			{ on: { type: "pull_request", action: ["opened"] }, run: { kind: "github", flow: "fix", [key]: "false" } },
+		]) {
+			assert.throws(() => parse([entry]), (e) => isConfigError(e) && new RegExp(`run\\.${key} must be true or false`).test(e.message) && e.message.includes(PATH), `${key} on ${entry.on.type}`);
+		}
+		assert.throws(() => parse([withRun(CRON, { [key]: "yes" })]), (e) => isConfigError(e) && new RegExp(`run\\.${key} must be true or false`).test(e.message));
+	}
+	const [cron] = parse([withRun(CRON, { progress: true })]);
+	assert.equal(cron.run.progress, true, "the tool and the reducer need no forge");
+	assert.throws(() => parse([withRun(CRON, { statusComment: true })]), (e) => isConfigError(e) && /run\.statusComment is only available on a forge trigger/.test(e.message) && e.message.includes(PATH));
+	assert.throws(() => parse([withRun(CRON, { github: true, statusComment: true })]), (e) => isConfigError(e) && /run\.statusComment/.test(e.message), "run.github mints a token, it names no issue or pull request");
+	const [off] = parse([withRun(CRON, { statusComment: false })]);
+	assert.equal(off.run.statusComment, false);
+	const [plain] = parse([CRON]);
+	assert.equal("progress" in plain.run, false);
+	assert.equal("statusComment" in plain.run, false);
+});

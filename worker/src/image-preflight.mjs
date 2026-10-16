@@ -46,7 +46,7 @@ export function resolveJobImage(job, defaultImage) {
  *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
  *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported,
- *                            forgeMcpUnsupported)
+ *                            forgeMcpUnsupported, awaitInputUnsupported, progressUnsupported)
  *                            => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
@@ -224,6 +224,17 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-await-input-unsupported",
 		event: "refused_image_await_input_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for stopping to wait for an answer (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.awaitInput\`. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #644: a runner that predates run.progress reads no PI_REPORT_PROGRESS, so the agent is never offered the
+	// report_progress tool and the trigger's phases never appear, on a run that otherwise reads as fine. Refused for the
+	// awaitInput row's reason: the trigger asked for something this image cannot give.
+	Object.freeze({
+		token: "reportProgress",
+		needed: (job) => job?.progress === true,
+		result: "progressUnsupported",
+		reason: "job-image-progress-unsupported",
+		event: "refused_image_progress_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for reporting progress (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.progress\`. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

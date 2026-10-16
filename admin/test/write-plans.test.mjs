@@ -112,11 +112,13 @@ test("each trigger plan says what its tool says: every refusal and the confirm, 
       { kind: "label", flow: "fix", labels: ["bug"], provider: "anthropic" },
       { kind: "cron", flow: "fix", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", maxTurns: 0 },
       { kind: "telepathy", flow: "fix" },
+      { kind: "label", flow: "fix", labels: ["bug"], progress: true, statusComment: true },
+      { kind: "cron", flow: "fix", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", statusComment: true },
     ];
     for (const params of addCases) {
       assert.deepEqual(planSays(plans.planTriggerAdd({ params, paths, env })), await toolSays(t.dispatch_trigger_add, params), JSON.stringify(params));
     }
-    const editCases = [{ index: 0, flow: "review" }, { index: 0, flow: "review", backend: "local", model: "m1", provider: "openai" }, { index: 3, flow: "x" }, { index: 0, flow: "  " }, { index: 0, flow: "x", backend: "vapour" }, { index: 0, flow: "x", models: ["a/b"] }];
+    const editCases = [{ index: 0, flow: "review" }, { index: 0, flow: "review", backend: "local", model: "m1", provider: "openai" }, { index: 3, flow: "x" }, { index: 0, flow: "  " }, { index: 0, flow: "x", backend: "vapour" }, { index: 0, flow: "x", models: ["a/b"] }, { index: 0, flow: "x", progress: true, statusComment: false }];
     for (const params of editCases) {
       assert.deepEqual(planSays(plans.planTriggerEdit({ params, paths, env })), await toolSays(t.dispatch_trigger_edit, params), JSON.stringify(params));
     }
@@ -142,6 +144,43 @@ test("a trigger plan's mutate and expect drive the read-model funnel to the entr
     assert.equal(edit.message, "trigger #2 (comment) flow: fix -> review");
     writeTriggers({ triggersPath: paths.triggersPath, mutate: edit.mutate });
     assert.equal(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].run.flow, "review");
+  } finally {
+    restore();
+  }
+});
+
+test("run.progress and run.statusComment (issue #644): carried only as booleans, judged by the loader before the confirm, merged only when sent", () => {
+  const { paths, restore } = deployment();
+  try {
+    // The add: carried on every webhook kind and on cron, each only when a boolean, so an entry naming neither is unchanged.
+    for (const kind of ["label", "comment", "pull_request", "issue"]) {
+      const entry = plans.buildTriggerEntry(kind, { flow: "fix", labels: ["bug"], phrase: "@pi", action: ["opened"], progress: true, statusComment: false });
+      assert.equal(entry.run.progress, true, kind);
+      assert.equal(entry.run.statusComment, false, kind);
+      const plain = plans.buildTriggerEntry(kind, { flow: "fix", labels: ["bug"], phrase: "@pi", action: ["opened"] });
+      assert.equal("progress" in plain.run, false, kind);
+      assert.equal("statusComment" in plain.run, false, kind);
+    }
+    assert.equal(plans.buildTriggerEntry("cron", { id: "n", pattern: "0 3 * * *", folder: "/srv", flow: "f", task: "t", progress: true }).run.progress, true);
+    // A non-boolean, and a status comment on cron, refused with the loader's own words before the operator is asked.
+    assert.match(plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["bug"], progress: "yes" }, paths, env: {} }).refusal, /run\.progress must be true or false/);
+    assert.match(plans.planTriggerAdd({ params: { kind: "cron", flow: "f", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", statusComment: true }, paths, env: {} }).refusal, /run\.statusComment is only available on a forge trigger/);
+    const add = plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["go"], progress: true, statusComment: true }, paths, env: {} }).plan;
+    assert.match(add.message, /"progress":true,"statusComment":true/, "the confirm shows what is armed");
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: add.mutate }).ok);
+    // The edit: merged only when sent, the before and after on the confirm, and refused on cron by the entry's own type.
+    const edit = plans.planTriggerEdit({ params: { index: 0, flow: "fix", statusComment: true }, paths, env: {} }).plan;
+    assert.equal(edit.message, "trigger #1 (label) flow: fix -> fix, statusComment: - -> true");
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: edit.mutate }).ok);
+    const after = JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers;
+    assert.deepEqual(after[0].run, { kind: "github", flow: "fix", statusComment: true });
+    assert.equal(after[1].run.progress, true);
+    const flowOnly = plans.planTriggerEdit({ params: { index: 1, flow: "review" }, paths, env: {} }).plan;
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: flowOnly.mutate }).ok);
+    assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].run, { kind: "github", flow: "review", progress: true, statusComment: true }, "an edit that sends neither keeps both");
+    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv", flow: "f", task: "t" } }] }));
+    assert.match(plans.planTriggerEdit({ params: { index: 0, flow: "f", statusComment: true }, paths, env: {} }).refusal, /run\.statusComment is only available on a forge trigger/);
+    assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", progress: true }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f -> f, progress: - -> true");
   } finally {
     restore();
   }
