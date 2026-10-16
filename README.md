@@ -418,6 +418,10 @@ pi-dispatch import-pi   # stage a credential-free copy of ~/.pi/agent into ./pi-
 - **Jobs can ask and wait.** With `"awaitInput": true` beside `"resume": true`, the agent can post a question and end
   its run; your reply on the issue continues it. Nothing runs or is billed while it waits
   ([`docs/sessions.md`](docs/sessions.md#parked-jobs-the-agent-asks-then-waits)).
+- **Jobs show where they are.** Every running job's turn, steps and running tool show in the console and the panel.
+  With `"progress": true` the agent also names the phase of its plan it is in, and with `"statusComment": true` the
+  worker keeps one comment on the issue up to date with the numbers, never the agent's words
+  ([`docs/triggers.md`](docs/triggers.md#optional-run-fields)).
 
 ## Run as a service
 

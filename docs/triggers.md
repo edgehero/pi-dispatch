@@ -214,6 +214,35 @@ changes what code runs or what it costs.
   `portfolio-no-envelope` before it costs anything. A chained child never inherits the flag. A working flow to
   copy is in [`docs/portfolio-manager.md`](portfolio-manager.md).
 
+Two more fields change what you see of a run, not what it can do, so the AI tools that add and edit a trigger
+(`dispatch_trigger_add`, `dispatch_trigger_edit`) can set them too, behind the operator's confirm:
+
+- `"progress": true` gives that trigger's jobs one more tool, `report_progress`, with which the agent names the phase
+  of its plan it is in (up to 64 characters), optionally how far through it is (`done` of `total`) and a short note
+  (up to 200 characters). The console's run page and the `/dispatch` panel show the phases; the turns, steps and the
+  tool running show for every job without this field. The tool only records: it changes nothing and the run goes on.
+  Any trigger type, cron included. The phase names and notes are the agent's words, so they are redacted and shown to
+  operators only, never on the forge and never in the run record. The job image must declare the `reportProgress`
+  capability. The shipped image does. A job on an older image is refused before it costs anything. A job where another
+  extension registers a tool of the same name stops before its prompt (`report-progress-shadowed`).
+
+- `"statusComment": true` makes the worker post one comment on the issue or pull request when the job's container
+  starts, and edit it as the run goes, about every 30 seconds at most, ending with the outcome the run record gives
+  (`finished: completed`, `finished: policy` and so on), or `attempt ended, retrying` when an infrastructure failure
+  will be retried (the next attempt then ends it, also when that attempt is refused before it starts; a retry you
+  cancel with `pi-dispatch cancel` while it waits is the exception, and its comment keeps saying retrying): ``pi-dispatch job `<id>`: running. Turn 7, 12 steps (1 failed). Phase 2 of 4 (3/10).`` It holds numbers only, never
+  the agent's words, and it does not replace the agent's own comment or the worker's other comments. A retry edits the
+  same comment. Webhook triggers only: a cron trigger has nothing to comment on and is refused. It needs
+  `PI_RUN_PROGRESS` on (the default); with that at `0` the job runs without the comment, and the worker log says so
+  (`status_comment_skipped`, reason `progress-off`). When the comment's text could
+  contain the trigger phrase that started the job, the worker leaves the comment out rather than risk starting a job
+  of its own (reason `phrase-collision`). The same log line names the two rarer skips: `no-transcript` (the job had
+  no transcript to read progress from) and `no-forge-target` (no forge the worker can post to and edit on). Anyone who can read the issue can see how long the run took and how many steps it made, so it is off
+  by default.
+
+Both must be `true` or `false`. Like `models`, adding either to a trigger refuses its jobs that were already queued
+(`trigger-skew`): re-run them.
+
 ## Firing a cron trigger by hand
 
 `pi-dispatch run --trigger <id>` runs one cron trigger now, once, exactly as its schedule would. Its folder,
@@ -484,7 +513,8 @@ that cannot read it cannot see the gap. The check is strict: adding `models` to 
 it that were already queued (`trigger-skew`), and the comment says so. Re-run them. The worker finds a job's
 trigger by its position in the file. Inserting a trigger with the same flow, kind and type ahead of others
 moves the ones after it down. A queued job of a moved trigger can then be checked against its neighbour, and
-refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd`, `mcp` or `awaitInput`. The comment says the trigger
+refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd`, `mcp`, `awaitInput`, `progress` or
+`statusComment`. The comment says the trigger
 changed after the job was queued. Re-run those jobs too. Upgrade the worker and the receiver together, and restart the
 receiver after editing the file.
 

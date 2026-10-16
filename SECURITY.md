@@ -64,7 +64,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A job container's `/outbox` request file | **None** — agent-authored | An agent-initiated signal channel back to the host; validated host-side before anything is enqueued. **Local jobs only** — a github job has no `/outbox` mount at all |
 | A job container's `/outbox/priorities.json` | **None**, agent-authored | A portfolio job's plan. Read host-side on a `completed` exit only, `lstat`-checked, opened with `O_NOFOLLOW` and `fstat`ed, at most 16 KiB, and judged by the same parser and ladder as the operator's own plan. Its `reason` text is never logged and never enters the run record |
 | A portfolio job's `/job/portfolio.json` | **Host-written, read-only** | The facts the manager plans with. Ids, digests, integers, instants, enum tokens and operator labels (project ids and member labels as projects.json names them, a folder by its basename) only: no issue text, title, plan reason or path, because the next run reads it as facts |
-| A job container's `/session` transcript | **None**, agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges. Since #643 every job has one unless the worker sets `PI_LIVE_TRANSCRIPTS=0` (a non-resume job's is an empty live file in its own job folder, never promoted), and the worker also tails it during the run to publish a redacted copy to Valkey: parsed as data, redacted, escaped and capped before it leaves, never executed or fed to a model |
+| A job container's `/session` transcript | **None**, agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges. Since #643 every job has one unless the worker sets `PI_LIVE_TRANSCRIPTS=0` (a non-resume job's is an empty live file in its own job folder, never promoted), and the worker also tails it during the run to publish a redacted copy to Valkey: parsed as data, redacted, escaped and capped before it leaves, never executed or fed to a model. Since #644 the worker also reads run progress from it (turns, steps, the tool running, and the phases a `report_progress` call names): display only, never trusted, since the agent can write any line into it ([Run progress](#what-is-not-defended-v1)) |
 | A **resurrected sandbox**'s operator shell (`pi-dispatch sandbox`) | **Operator — the same trust as a terminal on this host** | A third channel, and the first the **operator** opens rather than the agent. Not a job container: no minted token, no provider key, no agent running, started only by a keypress. It re-mounts a finished run's workspace, which for a forge job holds attacker-influenced code — the same trust shape as checking out a stranger's pull request locally. Every isolation flag still applies; ports it publishes are `127.0.0.1`-only and last only while it does |
 | The **venue** a job's container is built in (`run.backend`, `PI_BACKENDS`) | **Operator — the same trust as the daemon they point the worker at** | A different axis from every row above. Those ask *who wrote this*; this asks *who is holding the execution*. Today there is one venue, the Docker daemon the worker's docker CLI resolves, which is the operator's own machine unless `DOCKER_HOST` or a docker context points it elsewhere; the worker reads that answer at boot and before each job, logs a redirect, and a floor asking `credentialTransit=enforced` refuses one. It judges the endpoint's form, so a unix socket or loopback port that is really a tunnel to another machine still reads as this host. A venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and the isolation flags in **this worker's argv do not reach it**. What bounds it is a declaration an operator reads (`docs/backends.md`), a floor they can require of every blessed venue, and a boot refusal when the two disagree. |
 | The operator console process (`pi-dispatch-console serve`) | **Operator, the same trust as the admin extension** | It runs as the deployment's account and writes through the same read-model funnels as the panel. It renders untrusted text (issue titles, and from #641 on run text) but only escaped, after the control-byte scrub, under a strict CSP and behind the operator role; it executes none of it and feeds none of it to a model. It listens on loopback or a 0600 unix socket, never on the receiver ([The operator console](#the-operator-console)) |
@@ -311,6 +311,10 @@ The threat model, and what answers each part:
   A viewer gets a sentence instead and the transcript route refuses a viewer outright; the text is escaped after the
   control-byte scrub, inside a `<pre>`, only on the run page, never in a list, never in `/api/state` and never in a
   live panel. A transcript tab holds one of its token's stream slots, like any live page.
+  **Since #644 the pages show run progress.** The counts (turn, steps, failed steps, the running tool's name held to a
+  fixed character set) are shown to both roles, in lists too, because they are integers and a checked name. The phase
+  names and the note an agent reports with `report_progress` are model text, and follow the transcript's rule: the
+  operator role alone, escaped, on the run page only, never in a list or `/api/state`.
 - **Forge links are never guessed.** A run's link points at `github.com` for GitHub and, for GitLab, Forgejo and
   Azure DevOps, at the instance URL the deployment itself is configured with, http or https only. When there is no
   such URL, or the target does not parse as that forge's repository and number, no link is drawn: a link to a host
@@ -581,10 +585,44 @@ Stated openly rather than discovered later:
     than 8 characters, or a credential the job found that matches no known shape, or personal data, which is not a
     secret and is shown on purpose. Redaction bounds an accident; it is not a barrier against an agent trying to
     leak: an agent that can echo a secret can also send it out through whatever network access it has.
-  - **When the tail is lost**: a cancelled or timed-out job whose container does not stop within the abort grace
-    can be cleaned up before the worker's last read, so its last lines and its end marker are not published.
+  - **When the tail is lost**: a cancelled or timed-out job whose container does not stop within the abort grace is
+    given up on, and the worker then makes its last read and publishes the end marker before cleanup (since #644).
+    Only when that last read itself runs out of time (10 seconds) are the last lines and the end marker lost.
   - Set `PI_LIVE_TRANSCRIPTS=0` on every worker if transcript text must not reach Valkey; any value but `0`, `1` or
     empty refuses to boot, so a typo cannot read as off. Treat a Valkey backup as personal data either way.
+- **Run progress is advisory, and the agent can forge it.** Since #644 the worker reads where each running job is
+  (the turn, the steps done and failed, the tool running, and on a trigger with `run.progress` the phase the agent
+  names through its `report_progress` tool) from the same transcript file, which the agent can write. So an operator
+  can be shown a phase or a step count that did not happen. Nothing trusts it: no classification, budget, exit outcome,
+  retry or alert reads it, and every field is capped, so a forged file can only mislead a display.
+  - **What reaches Valkey**: one key per job, `run:progress:<job id>`, with counts, checked tool names and, for a job
+    whose trigger set `run.progress`, the phase names and the latest note, redacted like the transcript and with
+    the transcript's residual (a secret the agent transforms is not caught). It is removed 24 hours after the run
+    ends, and at most 7 days after its first write when the worker died first. A running job's key is rewritten at
+    least every 30 seconds, so the console and the panel mark a key that has not changed for 3 minutes as stale (the
+    worker may be gone) instead of showing the job as still running. Every id in the file is capped at 128 characters
+    before the worker keeps it, so a forged line cannot make the worker hold a large id in memory. With `PI_LIVE_TRANSCRIPTS=0` and progress
+    on, no transcript text reaches Valkey, but those phase names and notes still do.
+  - **Who sees the phase names and notes**: the console's operator role and anyone who can read your Valkey. Never
+    the run record, which gains a `progress` summary of integers under fixed keys only, and never the forge.
+  - **The status comment is opt-in and carries no model text.** A forge trigger with `run.statusComment: true` gets
+    one comment from the worker on its issue or pull request, edited as the run goes. Its text is fixed words, the job
+    id and numbers, never a phase name, note or tool name, so nothing the agent writes reaches the public thread
+    through it. It is still a public record of the run's pace (how long it took, how many turns and steps, whether
+    steps failed) for everyone who can read the issue, which is why it is off by default.
+  - **It cannot start a job.** Every edit is a comment event the receiver drops: the editor is the harness's own
+    identity, and on GitHub, GitLab and Forgejo an edited comment never routes. The worker also skips the comment
+    (logged as `status_comment_skipped`, `phrase-collision`) when the phrase that started the job could appear in any
+    text it can hold, the retry's words included. The other skips are logged the same way: `progress-off`,
+    `no-transcript` and `no-forge-target`.
+  - **The same identity, one new kind of call**: the comment is posted and edited with the token the worker already
+    mints for its other comments, through each forge's comment edit endpoint (GitHub and Forgejo `PATCH` an issue
+    comment, GitLab `PUT`s a note, Azure DevOps `PATCH`es a pull request thread comment or a work item comment). It
+    edits only the comment it posted, by an id it checks before building a URL; a 403, 404 or 429 stops the editing.
+    The last edit, with the outcome from the run record, is still made after a 429 and tried once more a second later,
+    so the comment does not say "running" after the run; a 403 or 404 stops that one too.
+  - Set `PI_RUN_PROGRESS=0` on every worker to stop reading progress: no key, no record field and no status comment.
+    Any value but `0`, `1` or empty refuses to boot.
 - **Prompt injection is not prevented, only bounded.** Untrusted text is kept out of the trusted region
   of the prompt by *placement*, not by filtering — content-filtering natural language is not a security
   boundary and this project does not pretend otherwise. The bound is the container, the scoped token,

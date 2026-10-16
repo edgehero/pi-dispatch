@@ -237,6 +237,42 @@ is the worker's own message, trimmed and cleaned, but it can still carry a fragm
 only the operator role sees it, on the fleet page, in a "Why each failed" element below the failed jobs that you
 open per job, never in a list row.
 
+### Run progress
+
+Every running job shows where it is. The overview's and the fleet page's running jobs have a Progress column: the
+turn, the steps done and failed, the tool running now and for how long, and the phase (2 of 4) when the job reports
+phases. The run page has a Progress panel at the top: the same counters, the tools running, the last steps with how
+long each took, and the phase as numbers ("Phase 2 of 4: 3 of 10 done"). An operator also sees the phase names the
+agent gave, a bar for the current phase and the note the agent gave with its latest report (a report without a note
+clears it); a viewer sees the numbers and the tool names only. A finished run shows the summary its run record
+keeps: the turns and steps, the "Sum of step durations" (steps the agent ran side by side overlap, so this can be
+longer than the run), the longest step and the "Longest interrupted step" (a step still
+running when the run ended, such as a command that hung until the job timeout). A job that resumed a session shows
+what the earlier runs did as "Earlier runs of this session". A job with nothing yet says "No live progress: not published
+(PI_RUN_PROGRESS=0), expired, or no step has been recorded yet." The panel updates itself about every 2 seconds, so a
+run page is now a live page: with the live transcript open, an operator's run tab holds two of your token's
+live-page slots.
+
+- **The counts are automatic.** They need no trigger change and no new job image: the worker reads them from the
+  job's transcript.
+- **Phases are opt in.** A trigger with `"progress": true` gives its jobs a `report_progress` tool, and the agent
+  names its phases with it ([triggers](triggers.md#optional-run-fields)).
+- **It is advisory.** The agent can write its own transcript, so a phase or a count can be wrong on purpose. Nothing
+  decides anything from it.
+- **Phase names and notes are the agent's words.** They are redacted like the transcript and shown to operators
+  only, and never in a list, in `/api/state` or in the run record, which keeps numbers only.
+- **Where it comes from**: each worker writes one small Valkey key per running job, kept 24 hours after the run
+  ends. `PI_RUN_PROGRESS=0` on a worker stops it.
+- **A stale job says so.** The worker rewrites a running job's key at least every 30 seconds. When it has not changed
+  for 3 minutes the worker has probably stopped (a crash, a kill, a lost Valkey): the run page says "Stale: no update
+  for 4 min; the worker may be gone.", the Progress column ends with "no update for 4 min; the worker may be gone",
+  and the running ages stop counting.
+- **A retried job.** A retry keeps the job's id. While the next attempt runs, the run page shows it live under "An
+  earlier attempt of this run ended (failed); this is the attempt after it." A running job's row never shows the
+  final numbers of the attempt before it.
+
+The `/dispatch` panel's running rows show the same, with the phase name clipped.
+
 ### The live transcript
 
 An operator's run page shows what the run is doing: what the agent said, each tool it called with its arguments,
@@ -386,9 +422,10 @@ would put an interactive shell one stolen session away from anyone.
 
 ## Live updates
 
-The overview, runs, parked and fleet pages update themselves while open. Run detail, insights, configuration and
-the audit log are drawn once per load; reload them to refresh. The one exception is the run page's live
-transcript, which streams on its own ([The live transcript](#the-live-transcript)). A small marker in the corner says `live`, or `reconnecting` while the
+The overview, runs, parked, fleet and run pages update themselves while open; the run page reads its data about
+every 2 seconds, for its progress ([Run progress](#run-progress)), and its live transcript streams on its own
+([The live transcript](#the-live-transcript)). Insights, configuration and the audit log are drawn once per load;
+reload them to refresh. A small marker in the corner says `live`, or `reconnecting` while the
 browser reconnects. The console reads Valkey once a second for every open page together, and only while a page is
 open, so ten open tabs cost the deployment what one does; the runs page, whose filters make each view its own read,
 refreshes every 5 seconds. Only the parts of the page that changed are sent.
@@ -413,7 +450,8 @@ updates it has not read) is cut off and reconnects to a fresh copy of the page.
 `GET /api/state` returns the deployment's live snapshot as JSON, so a script never has to read a page. It needs a
 session like every page; both roles may read it, and a viewer's copy leaves out the failed jobs' reasons. The fields
 are described in `INT-CONSOLE-STATE-API` ([`specs/interfaces.md`](../specs/interfaces.md)): within its `version`,
-fields are only ever added. A part the console could not read is marked with a boolean (`fleetDegraded`,
+fields are only ever added. Each running job in `active` carries a `progress` object of numbers and the running
+tool's name (never a phase name or note), or null when it has none. A part the console could not read is marked with a boolean (`fleetDegraded`,
 `parkedUnknown`, `unreachable`), never with the error, and when Valkey cannot be read at all the answer is `503` with
 a short `error` sentence.
 
@@ -471,9 +509,10 @@ The console also reads, from the same deployment, `VALKEY_URL` (the queues, host
 (this host's run records and the audit log), `PI_PAUSE_WINDOWS_FILE`, the files the configuration page shows and
 edits (the triggers, settings, scoped limits, projects and envelope), `PI_SESSIONS_DIR` when it is on this host (the
 parked runs' resume counts) and `GITLAB_URL`, `FORGEJO_URL` and `AZURE_ORG_URL` (the forge links). The live
-transcripts come from Valkey; whether a worker publishes them is that worker's `PI_LIVE_TRANSCRIPTS`.
+transcripts and the run progress come from Valkey; whether a worker publishes them is that worker's
+`PI_LIVE_TRANSCRIPTS` and `PI_RUN_PROGRESS`.
 
 The design and its rejected alternatives are `DES-OPERATOR-CONSOLE` in [`specs/design.md`](../specs/design.md); the
-testable rules are `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and
-`REQ-LIVE-TRANSCRIPT` in [`specs/requirements.md`](../specs/requirements.md); the threat model and
+testable rules are `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS`,
+`REQ-LIVE-TRANSCRIPT` and `REQ-RUN-PROGRESS` in [`specs/requirements.md`](../specs/requirements.md); the threat model and
 what it does not defend are in [`SECURITY.md`](../SECURITY.md#the-operator-console).

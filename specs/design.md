@@ -2293,7 +2293,18 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the snapshot) and this host's worker name (`PI_WORKER_NAME`, else the sanitized hostname, as the worker resolves
   it), so a run on another host with neither a stream nor a local log says "this run is on host X" and why there is
   no transcript (`PI_LIVE_TRANSCRIPTS=0`, not written yet, or expired), where it used to read as a log that was
-  never captured: `index.ts` had passed no host, so `readLogTail` could never return `elsewhere`. Analytics
+  never captured: `index.ts` had passed no host, so `readLogTail` could never return `elsewhere`. **Since issue #644
+  the LIST's ACTIVE rows show run progress** (`DES-RUN-PROGRESS`), from the fleet snapshot's integer `progress`
+  (`INT-RUN-PROGRESS-KEY`): the turn, the steps, the running tool and for how long, and the phase's index of its
+  count (`turn 7 · 12 steps · bash 40s · phase 2/4`), in the rich and the plain form, inside the frame at every width,
+  for a job on any host: `running · turn 7 · 12 steps (1 failed) · bash 40s · phase 2/4 <name>`. The panel is the
+  operator's own surface, so it shows the current phase NAME too, read through a `progress` dependency of
+  `createDashboardDeps` (the fleet reader's `progress(jobId)`), scrubbed and clipped to 24 columns with `clipData`;
+  without that seam, or when it fails, the row keeps the integers and names no phase. An ENDED snapshot draws nothing
+  on the row (the row is active, so the key is an earlier attempt's: an infra retry keeps the job id), and a STALE one
+  (`progressStaleFor`: not ended and no write for 180 s) leads with `no update for 4m, the worker may be gone` and
+  gives its running tool no age (`activeProgressText`).
+  Analytics
   live on the **insights artifact** (`REQ-INSIGHTS-HTML-EXPORT`, issue #181), the ONE surface for
   "what is this deployment wired to do and what does it cost": bare `/dispatch insights` (and the
   overlay's `i` key, which resolves the overlay with a done-action so `index.ts` writes and opens
@@ -2611,7 +2622,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     internal overlay dependency injected through the existing `custom` seam, not a pi member. The live
     transcript (issue #643) is placed the same way: `tailTranscript` and `transcriptMeta` are overlay
     dependencies whose entries live in the view's own fields and reach the overlay through render alone, never
-    `snapshot`, never a tool result, never model context. This is the
+    `snapshot`, never a tool result, never model context. Run progress (issue #644) keeps the same placement: the
+    snapshot's `progress` holds integers and a checked tool name only, and the phase name the ACTIVE row shows is
+    model text that reaches the overlay through its own dependency and render alone, never `snapshot`, never a tool
+    result. The running tool's name is charset-bound but still model-chosen, and no model-callable tool returns it:
+    `dispatch_status` reads the queue state, the budget and the schedulers, not the fleet snapshot (checked). This is the
     same structural defence as `CONST-ISSUE-TEXT-IS-DATA`, one layer down: the boundary is where the data
     is placed, not a filter over its content. **A render-time control-byte scrub was added under issue
     #337 and is belt-and-braces, NOT a second boundary** -- the distinction matters because a filter that
@@ -9390,7 +9405,8 @@ a tunnel.
   screens, the live updates and `/api/state` (the bullets from "The screens" to "Wiring" below); issue #642, the
   writes and actions (the bullets from "The action table" to "The sandbox, shown and not run" below, and the four
   rejected options marked #642); issue #643, the live transcript on the run page (the bullet "The live transcript"
-  below, over `DES-LIVE-TRANSCRIPT-STREAM`). This entry supersedes three of the
+  below, over `DES-LIVE-TRANSCRIPT-STREAM`); issue #644, run progress (the bullet "Run progress" below, over
+  `DES-RUN-PROGRESS`). This entry supersedes three of the
   rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
 - **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
@@ -9678,6 +9694,33 @@ a tunnel.
   job has no record until it ends. The run-text rule holds unchanged: transcript text reaches the
   operator role alone, escaped after the control scrub, only on the run page, never in a list, never in
   `/api/state` and never in a hub panel.
+- **Run progress** (issue #644, `REQ-RUN-PROGRESS`, `DES-RUN-PROGRESS`, `INT-RUN-PROGRESS-KEY`):
+  - The active table (`activeTable`, shared by the overview and the fleet page) gains a "Progress" column for both
+    roles: integers and the running call's `LIVE_TOOL_RE`-checked tool name only (the turn, the steps, the failed
+    steps, the running tool and its age, the phase's index of its count), rendered escaped, from the fleet snapshot's
+    integer `progress` (`activeProgressOf`, `INT-CONSOLE-STATE-API`), so no list and no viewer sees model text. An
+    ENDED snapshot shows `-` (the job is active, so the key is an earlier attempt's), and a STALE one (`progressStaleFor`:
+    not ended and `updatedAt` older than 180 s, `PROGRESS_STALE_MS`) ends with "no update for 4 min; the worker may be
+    gone" and gives its running tool no age (`progressText`).
+  - The run page gains a "Progress" panel, its first panel (`p-progress`): counters, running tools, recent steps and
+    the phase's integers ("Phase 2 of 4: 3 of 10 done") for both roles; the phase names, the current phase with a
+    `<progress>` bar (an element, since the CSP forbids inline style) and the note for the operator role alone,
+    escaped after the control scrub (the run-text rule above: phase names and notes are model text). A finished run
+    shows its record's `progress`, re-checked with the worker's `recordedProgress`, labelled "Sum of step durations"
+    (`toolMs`, steps of a parallel batch overlapping) and "Longest interrupted step"; the live resume prior is "Earlier
+    runs of this session". With no key the panel says "No live progress: not published (PI_RUN_PROGRESS=0), expired, or
+    no step has been recorded yet." A STALE snapshot leads with "Stale: no update for 4 min; the worker may be gone."
+    and its open steps read as open at the last update, never as running with an age the console's clock keeps
+    growing. A retried job keeps its id, so a record and a key can be different attempts, judged by time: a key that
+    started after the record's `endedAt` is the running attempt's and is shown live under "An earlier attempt of this
+    run ended (`<outcome>`); this is the attempt after it."; the key's phase names join the record only when the key has
+    ended and started inside the record's attempt (no earlier than the record's `startedAt`, no later than its
+    `endedAt`; a key that started earlier is an earlier attempt's, left in place by an attempt refused before its
+    container); a record whose start or end cannot be read pairs with no key.
+  - **The run page is now a LIVE page**: the hub re-renders its panels by digest (no new route), and its data is read
+    at most once every 2 s (`LIVE_DEFAULTS.pageMinMs.run`). An operator's run tab therefore holds two streams, the
+    hub's and the transcript's, against the token's `PI_CONSOLE_MAX_STREAMS` (default 4). A running job with no
+    record yet answers 200 when it has a progress snapshot or a transcript.
 - **Wiring**: `serve` builds one `createFleetReader` on the deployment's Valkey, with `installPanelValkeyContext`
   applied as the panel applies it so TLS and auth deployments connect the same way, and with `PI_SESSIONS_DIR` when
   it is set; it builds the insights cache, the audit reader and the hub, passes them to `createConsoleServer` as named
@@ -9910,8 +9953,8 @@ a tunnel.
   `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`, `DES-AWAIT-INPUT-ENDS-THE-JOB`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
   `REQ-AWAIT-INPUT`, `REQ-OPERATOR-JOB-CANCEL`, `REQ-RESURRECTABLE-SANDBOX`, `REQ-INSIGHTS-HTML-EXPORT`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
-  `CONST-TRIGGER-AUTHOR-GATE`, `OQ-044`, and since #643 `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM` and
-  `INT-LIVE-TRANSCRIPT-STREAM`.
+  `CONST-TRIGGER-AUTHOR-GATE`, `OQ-044`, since #643 `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM` and
+  `INT-LIVE-TRANSCRIPT-STREAM`, and since #644 `REQ-RUN-PROGRESS`, `DES-RUN-PROGRESS` and `INT-RUN-PROGRESS-KEY`.
 - **Code evidence**: admin/src/console/ (`cli.mjs`, `config.mjs`, `listen.mjs`, `guards.mjs`, `headers.mjs`,
   `html.mjs`, `server.mjs`, `sessions.mjs` (`peek` since #641), `login-codes.mjs`, `confirm.mjs`, `lock.mjs`, and
   since #641 `pages.mjs`, `panels.mjs`, `style.mjs`, `script.mjs`, `live.mjs`), worker/src/console-tokens.mjs,
@@ -9931,7 +9974,9 @@ a tunnel.
   trail comment), worker/src/console-audit.mjs (`kind`, `reserve`, `count`), worker/src/triggers-file.mjs and
   worker/src/runtime-settings.mjs (`expect`). Since #643: admin/src/console/live.mjs (the transcript subscription),
   pages.mjs and script.mjs (the run page's section), the entry renderer `admin/src/console/transcript.mjs`, and admin/src/read-model.mjs
-  (`readTranscriptSince`, `readTranscriptMeta`, `TRANSCRIPT_ID_RE`, `TRANSCRIPT_PAGE_MAX`).
+  (`readTranscriptSince`, `readTranscriptMeta`, `TRANSCRIPT_ID_RE`, `TRANSCRIPT_PAGE_MAX`). Since #644:
+  admin/src/read-model.mjs (`parseProgress`, `readProgress`, `readProgressMany`, `activeProgressOf`, the fleet reader's
+  `progress` and `progressFor`), panels.mjs, pages.mjs and live.mjs (`pageMinMs.run`).
 
 ## DES-LIVE-TRANSCRIPT-STREAM
 
@@ -10036,6 +10081,22 @@ a tunnel.
   session in memory and no `/session` mount). Any other value refuses to boot, for
   `globalExtensionsEnabled`'s reason: `PI_LIVE_TRANSCRIPTS=false` read as on would be an operator believing PII
   stays on the host while it does not. Documented in both `.env.example` files, which the env-docs test holds.
+  **Since issue #644 the switch governs the stream only** (`DES-RUN-PROGRESS`): the same file is read for run
+  progress unless `PI_RUN_PROGRESS=0`, so the opener is null, and the live file left unstaged, only when BOTH are `0`.
+  With `PI_LIVE_TRANSCRIPTS=0` and progress on, the tailer runs exactly as above (the same refusals, polls, resets and
+  final read) with its stream mode off (`stream: false`): every parsed line goes to the progress reducer and nothing is
+  queued or written, so no `run:live:` key is touched, no `end` is written and no transcript text reaches Valkey. The
+  progress key then carries only counts, checked tool names and, for a job armed with `run.progress`, its redacted
+  phase names and note.
+- **The progress hook** (issue #644): `makeLiveTranscript` takes `onParsed(parsed, ts, { prior, replay })` and
+  `onReset()`. Each complete line's parsed object is handed to `onParsed` before and apart from the mapping above (so
+  the reducer reads the fields `entriesOf` drops: `toolCallId`, `durationMs`, the call arguments), never once the
+  publisher is closed, and a throw from it is swallowed. `prior` marks a line that ended at or before the BASELINE, the
+  file's size when the first read began (one `lstat`; anything but a regular file is 0), which on a resume is the
+  earlier runs' transcript; after a reset there is no prior any more, and `replay` marks a line that ended at or
+  before the rewritten file's size at the reset. The `ts` handed to `onParsed` is the line's timestamp bounded as the
+  stream's `ts` is (from 0 to a day past the read time, else the read time), since the reducer keeps it as a step's
+  `since`. The baseline `lstat` runs only when a hook is given, so without one the file is read exactly as before.
 - **Why**: the console (#640 to #642) shows every run's record fleet-wide and nothing of what a run is doing. The raw
   log exists only with `PI_CAPTURE_JOB_LOGS=1` and only on the host that ran the job, runner stdout carries id-only
   events, and before this only `run.resume` jobs wrote a transcript file at all. The transcript is the artifact that
@@ -10083,7 +10144,176 @@ a tunnel.
   `disabled`), worker/src/config.mjs (`liveTranscriptsEnabled`), worker/src/start.mjs, worker/src/index.mjs (the
   `jobId`), worker/src/backend-podman.mjs, worker/src/env-allowlist.mjs, admin/src/read-model.mjs
   (`readTranscriptSince`, `readTranscriptMeta`, the fleet reader's `transcriptSince` and `transcriptMeta`),
-  admin/src/dashboard.ts (LIVE_TAIL), admin/src/index.ts (`panelTailLog`).
+  admin/src/dashboard.ts (LIVE_TAIL), admin/src/index.ts (`panelTailLog`). Since #644: worker/src/live-transcript.mjs
+  (`onParsed`, `onReset`, `stream`, and the opener's `transcripts`, `progress` and `makeCommenter`).
+
+## DES-RUN-PROGRESS
+
+- **Status**: issue #644 (2026-10-16). The worker half (the reducer, the key, the record field, the switch), the job
+  tool (runner, image, triggers, receiver, preflight, the admin's trigger tools) and the forge status comment (the
+  hosts, the commenter, the wiring) are built, and so are the readers, the console's displays and the panel's ACTIVE
+  rows, recorded in `DES-OPERATOR-CONSOLE` and `DES-ADMIN-VIA-PI-EXTENSION`.
+- **Decision**: the worker reads where each running job is from the pi session file it already tails for the live
+  transcript (`DES-LIVE-TRANSCRIPT-STREAM`), keeps a small summary in one Valkey key per job, copies its integers into
+  the run record, and, for a forge trigger that opts in, renders it into one forge comment it edits. Five parts:
+  1. **Automatic steps, for every job** (`makeProgress`, `worker/src/run-progress.mjs`, fed every parsed line by the
+     tailer's `onParsed`). pi 1.2.0 saves each message at `message_end`: an assistant message is one TURN and carries
+     its tool calls (`{type: "toolCall", id, name, arguments}`); each result is a `toolResult` message with
+     `toolCallId`, `toolName`, `isError` and, when the tool actually ran, `durationMs` (pi-agent-core
+     `createToolResultMessage`). So a turn opens one STEP per call, keyed by its id, with the tool and the entry's time,
+     and the result closes it as `ok` or `error` with its own `durationMs`, null when pi wrote none (an unknown tool, a
+     validation failure). A call with no result yet is RUNNING. A result whose id is unknown, already closed, or a call
+     id reused, is ignored and counted as an anomaly (logged in the counts only), and so is a call or result whose id
+     is longer than 128 UTF-16 units (`PROGRESS_ID_MAX`): an id is a map key held while its step is open, so a forged
+     line holding one id of nearly a megabyte would otherwise pin that megabyte, 256 times over. An assistant message
+     whose `stopReason` is `"error"` or `"aborted"` opens no step (pi returns before it runs any tool, and the half
+     streamed calls stay in the saved message, so they would read as running and then as interrupted); an `"error"`
+     message is not a turn either and an `"aborted"` one is, which is how the runner counts turns (`turn-budget.mjs`:
+     a provider error and its retry count once). The time a step opens at is the line's own timestamp bounded as the
+     stream's `ts` is (from 0 to a day past the read, else the read time), since the line is the agent's to write.
+     When the container ends, every call still open becomes `interrupted`. Memory is bounded: 256 open calls (the
+     oldest dropped and counted), a ring of 20 recent steps, 8 running listed, 32 phase names, each key at most 128
+     units. The display name of a tool is the stream's charset
+     (`LIVE_TOOL_RE`) else `?`, and `?` when the job's redactor would change it; the record's name is a bucket of a
+     closed list, compared and never copied.
+  2. **Resume and rewrite awareness.** On a resume the file starts with the earlier runs' entries. The tailer takes
+     the file's size before its first read as the BASELINE; lines ending at or before it seed `prior: {turns, steps}`
+     and the phase list and current phase, never this attempt's counters, so a resumed run continues its phases and
+     still counts its own turns from 1. A retry (same job id, a fresh job directory) starts over, as the stream does. A
+     RESET (the file rewritten, read again from 0) keeps the counts already seen: the rewritten file's bytes up to its
+     size at the reset are REPLAYED and count nothing, except a result that closes a call still open, since that call
+     is this attempt's and its result arrived inside the rewrite. A call and result both written and rewritten between
+     two polls can be lost; pi rewrites only on a format migration or a branch, neither of which a job does.
+  3. **Phases, opt-in per trigger** (`run.progress`). The job is offered `report_progress`
+     (`image/runner/src/report-progress.mjs`), an inline extension factory registered only when `PI_REPORT_PROGRESS=1`,
+     with a shadow guard and a `tool_call` hook like `await_human_input`'s and no `terminate`: it validates
+     `{phase (1 to 64 code points, not blank), done? (integer from 0), total? (integer from 1), note? (at most 200 code
+     points)}`, `done <= total`, no other key, and answers "recorded", or an error result naming the fault. It has no
+     side effect: what it reports lives only in the transcript. The reducer reads a call's arguments only for a job
+     with `job.progress` and applies them only when the call's result arrives with `isError: false`, so a report the
+     runner refused is ignored. It re-validates the same bounds (with `done` and `total` at most 1,000,000, which the
+     runner does not cap), and ignores a call that fails them whole. The phase list keeps names in first-seen order
+     (a new name past 32 leaves the current phase as it was); the current phase is the index, `done` and `total`; the
+     note is the latest. Phase names and notes are model text: redacted with the job's redactor, control and bidi
+     characters written out (`escapeControls`), cut to 64 and 200 code points; a redactor that throws drops the report.
+  4. **The key** (`makeProgressWriter`, `INT-RUN-PROGRESS-KEY`): `run:progress:<id>`, the whole snapshot as one JSON
+     string, written on change at most once a second with a trailing write, best effort and bounded like the stream's
+     writes (1 s a call), 7 days from the attempt's first write and 24 hours after the final one, capped at 16 KiB.
+     `updatedAt` is the time of the write that carried it, and until the final write the snapshot is written again
+     every 30 s (`PROGRESS_HEARTBEAT_MS`) even when nothing moved, so a reader can tell a quiet run (a long tool, a slow
+     model) from a worker that died without its final write: readers call a key stale when it has not ended and its
+     `updatedAt` is older than 180 s (`PROGRESS_STALE_MS`, admin/src/read-model.mjs). The first write of an attempt
+     waits for one bounded read of the key an earlier attempt left and keeps its `commentId`; it is made at the sink's
+     start with the empty snapshot (turn 0), so a retry replaces the final snapshot of the attempt before it at once
+     rather than at its first transcript line. The FINISH (`makeProgressSink.finish`) runs inside the opener's finish,
+     after the stream's own (bounded at 3 s), so no line reaches the reducer after it: it hands the final snapshot
+     (open calls `interrupted`, `ended`, the exit's outcome) to the commenter, waits at most 2 s for a comment post
+     still in flight so its id rides the final write (the key is closed after it, and a retry that read no id would
+     post a second comment), then writes it with the 24 h TTL, all bounded together at 5 s. Worst case at a run's end:
+     3 s plus 5 s, the 5 s only when Valkey or the forge hangs.
+  5. **The record and the comment.** `runContainer` returns the reducer's `summary()` as `progress`, and the
+     processor carries it to `buildRecord` on every result and on a thrown error (as it does `resources`), and a
+     spent attempt that ends as an operator cancel instead of a retry keeps it (`endCancelled`, index.mjs), where
+     `recordedProgress` rebuilds it into integers and closed keys (`INT-RUN-HISTORY-FILE-CONTRACT`). `toolMs` is the
+     SUM of the closed steps' durations (steps of a parallel batch overlap, so it can pass the run's wall time), and
+     `longestInterruptedMs` the longest a step still open at the end had run. For a forge job
+     whose trigger set `run.statusComment`, the opener asks start.mjs for a commenter
+     (`makeStatusCommenter`, `worker/src/status-comment.mjs`, `INT-FORGE-STATUS-COMMENT-EDIT`), created at the sink's
+     start after the key's read so a retry edits the first attempt's comment, and fed each snapshot the writer writes;
+     it throttles its own edits to one per 30 s. Its FINAL edit comes from the run record, not from the exit: the exit
+     code is a weaker reading than the record's classification (an OOM kill exits 137 and is recorded `policy`; an
+     infrastructure exit is retried under the same job id). start.mjs registers each commenter in a registry
+     (`makeStatusCommentRegistry`) by job id; the sink's finish hands it the final snapshot, and `recordRun` settles it
+     with the record's outcome, or with "attempt ended, retrying" (`STATUS_RETRYING`) for an `InfraRetry` with
+     attempts left. An attempt that leaves no record (a hold, a record path that threw) is finished 5 minutes after
+     the container ended (`STATUS_FALLBACK_MS`; it was 30 s, which a slow record path could lose to, locking in the
+     exit's weaker reading) with the exit's outcome, so the comment never says "running" after the run; a record that
+     settles after that fallback, within 10 minutes (`STATUS_LATE_SETTLE_MS`, at most 256 such commenters kept), makes
+     one corrective edit when its text differs. A new attempt's commenter replaces the entry without a final edit and
+     edits the same comment. An attempt that registers no commenter at all (one refused before its container, after
+     an earlier attempt posted the comment and left it saying "attempt ended, retrying") is edited by `recordRun`
+     itself: one bounded `GET` of the key for the earlier attempt's `commentId`, then one bounded edit with the
+     record's outcome and the key's last snapshot (`settleUnregisteredStatus`), skipped on a phrase collision and when
+     the key holds no id.
+- **Advisory, never trusted.** `/session` is mounted read-write, so the agent can write any line into the file this
+  reads, and a forged line costs nothing (#545 is the same class for stdout). Progress therefore decides nothing: no
+  classification, budget, exit outcome, retry, alert or gate reads it, every field is bounded so a forged file cannot
+  grow it, and a forged `report_progress` call can at most show a false phase to an operator. The record's copy is
+  integers under closed keys, and the comment's text is fixed words and integers, so a forgery cannot put a string
+  into either.
+- **The off switch**: `PI_RUN_PROGRESS`. Unset, empty or `1` reads progress; `0` turns off the key, the record field
+  and the comment; anything else refuses to boot, for `PI_LIVE_TRANSCRIPTS`' reason. Independent of
+  `PI_LIVE_TRANSCRIPTS` (the file is staged when either is on). It does not change what a job is offered: a job armed
+  with `run.progress` still gets the tool and is still held to the image capability with progress off, and a trigger's
+  `run.statusComment` then posts nothing. Documented in both `.env.example` files, which the env-docs test holds.
+- **Logging**: job ids, reasons and counts only, never a phase name, note, tool name or comment text
+  (`run_progress_write_failed`, the `status_comment_*` events of `INT-FORGE-STATUS-COMMENT-EDIT`, among them
+  `status_comment_skipped` with `progress-off`, `no-transcript`, `no-forge-target` or `phrase-collision`).
+- **Why**: the live transcript (#643) shows everything a run does and summarises nothing; an operator watching a fleet
+  needs "turn 40, a test command running ten minutes, phase 3 of 5" at a glance, and the requester on the issue sees
+  nothing between the start and the end. Everything the automatic part needs is already in a file the worker reads,
+  so it costs no image change and no new path; a phase is the one fact only the agent has, so it is a tool call that
+  lands in the same file. Reading it on the worker side keeps the container without a network path, for the reason the
+  stream is published from there.
+- **Rejected**:
+  - **Runner stdout as the transport.** It is forgeable by any tool child exactly as the exit line was before #545,
+    carries no structure, and would need a second parser beside the transcript the worker already reads.
+  - **A runner network path** (the container writing progress to Valkey or the worker over a socket): a route out of
+    the box for the agent's process tree, against `CONST-ISOLATION-CONTAINER-PER-JOB`, to carry what the file already
+    holds.
+  - **Phase text in the record or the comment.** The record's PII-free property rests on holding no attacker-chosen
+    string, and a phase name is model text; a public comment must not carry text that could mention a user or hold a
+    link. Both carry the phase's INDEX and the list's LENGTH instead.
+  - **Per-tool live status inside a parallel batch.** pi saves a batch's results together once the whole batch is
+    done (pi-agent-core `agent-loop.js`), so the file shows every call of a batch running until all finish; durations
+    come from `durationMs`, never from the results' shared timestamp. Not observable from the file, so not shown.
+  - **Timestamps as durations**, for the same reason, and because a result that failed before it ran has no
+    duration at all: null is shown, not a guess.
+  - **Trusting the agent's `done`/`total` for anything.** They are drawn as a bar and counted nowhere.
+- **Residuals**, stated rather than implied (each is in `SECURITY.md`):
+  - A false phase or count: the agent can write any line into its transcript, so an operator can be shown a phase or a
+    step count that did not happen. Bounded to display.
+  - A phase name or note can carry text the agent read (issue text, a file); it is redacted like the transcript and
+    shares its residual (a transformed secret is not caught), and it is shown to the operator role alone.
+  - The status comment is a public edit stream on the issue: it reveals how long a run took, how many turns and steps
+    and whether steps failed, to everyone who can read the issue. That is why it is opt-in and off by default.
+  - #645's synthetic interrupted results are counted as ordinary results until their shape is settled
+    (marked in `run-progress.mjs`'s `finalSnapshot`).
+  - A job whose container outlives the abort grace (a stop that did not take) gets no exit to read. When the
+    processor gives up on it (`boundAfterAbort`, `stop_did_not_take`), it finishes the attempt's live publisher itself
+    through the finish runContainer handed it (`onLive`), with outcome `unknown`, and waits for that (bounded, 10 s)
+    before it records and removes the job directory, so the key gets its final write with `ended` and the heartbeat
+    stops; it once kept rewriting the key as running for as long as the worker lived. A worker that dies (a crash, a
+    kill) writes nothing more, heartbeat included, so its key lives out its 7 days without `ended` and readers call it
+    stale 180 s after its last write. As a bound behind both, the writer stops every write but the final one 7 days
+    after it started (`run_progress_expired`), so no heartbeat outlives the key's window and no write sets a TTL under
+    a second.
+  - An operator's cancel of a delayed retry removes the job from the CLI (`pi-dispatch cancel`) and writes no record,
+    so no worker edits the status comment again and it keeps saying "attempt ended, retrying".
+- **Traces to**: `REQ-RUN-PROGRESS`, `REQ-JOB-STATUS-COMMENTS`, `INT-RUN-PROGRESS-KEY`,
+  `INT-FORGE-STATUS-COMMENT-EDIT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONTAINER-RUNTIME-CONTRACT`, `DES-LIVE-TRANSCRIPT-STREAM`,
+  `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AWAIT-INPUT-ENDS-THE-JOB`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`.
+- **Code evidence**: worker/src/run-progress.mjs (`makeProgress`, `serializeProgress`, `makeProgressWriter`,
+  `makeProgressSink`, `recordToolOf`, the `PROGRESS_*` constants, exported as `@edgehero/pi-dispatch/run-progress`),
+  worker/src/live-transcript.mjs (`onParsed`, the baseline, `replay`, `stream: false`, the opener),
+  worker/src/status-comment.mjs (`renderStatusText`, `makeStatusCommenter`, `makeStatusCommentRegistry`,
+  `STATUS_RETRYING`, `STATUS_FALLBACK_MS`, `commentIdOf`),
+  worker/src/{github,gitlab,forgejo,azure}-host.mjs (`postStatusComment`'s `{ id }`, `editStatusComment`),
+  worker/src/start.mjs (`statusPost`, `statusEdit`, `makeProgressCommenter`, `statusTextMayMatch`, the registry and
+  `recordRun`'s settle, `settleUnregisteredStatus`, the opener's two switches, `stageLive`), worker/src/index.mjs
+  (`endCancelled` keeps `progress`, `boundAfterAbort`'s awaited give-up hook finishing the publisher),
+  worker/src/run-container.mjs (`reportProgress`, `progress` off `progressSummary`, `onLive`),
+  worker/src/processor.mjs (`progress` on every result, the `report-progress-shadowed` comment),
+  worker/src/run-history.mjs (`recordedProgress`, `PROGRESS_RECORD_TOOLS`, `PROGRESS_RUNNER_REASONS`),
+  worker/src/config.mjs (`runProgressEnabled`), worker/src/triggers.mjs (`validateProgressFlags`),
+  worker/src/triggers-file.mjs, worker/src/queue.mjs, worker/src/schedules.mjs, worker/src/env-allowlist.mjs,
+  worker/src/reserved-env.mjs, worker/src/redact-secrets.mjs, worker/src/image-preflight.mjs (the `reportProgress`
+  row), image/runner/src/report-progress.mjs, image/runner/src/config.mjs, image/runner/run-job.mjs, image/Dockerfile,
+  image/verify-image.sh, receiver/src/config.mjs and the four filters, admin/src/write-plans.mjs, admin/src/index.ts
+  (the trigger tools' parameters), admin/src/job-actions.mjs (`runFieldsOf`). admin/src/read-model.mjs,
+  admin/src/console/ (panels.mjs, pages.mjs, live.mjs), admin/src/dashboard.ts.
 
 ## Revision History
 
@@ -10391,3 +10621,5 @@ a tunnel.
 | 2026-10-14 | Issue #641, the operator console's screens and live updates. **`DES-OPERATOR-CONSOLE` AMENDED**: eight read pages (overview, runs, run detail, parked inbox, insights with a range, fleet, configuration, audit), each an exact path with a bounded query, built from one `PAGES` table and from pure panel renderers that serve both the first load and every live update; `GET /api/state` and `GET /api/events` (`INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`); the stylesheet a served file, because the CSP blocks inline style. ONE FLEET READER: the panel's snapshot code moved from `dashboard.ts` into `read-model.mjs` as `createFleetReader`, unchanged, and both surfaces build one, which is what "no second read model" means; new readers for a run page (a score cursor, 100 a page, 2000 examined at most, the mirror read without pruning so a page read writes nothing), a run by id, parked runs (`answered` derived from a later run on the same kind and target, the chain count unknown rather than 0 where this host cannot see the store), secret profile names, the audit rows, and forge links derived from the deployment's own instance URL, never guessed. The insights assembly moved pi-free with the pricing passed in, so the console bundle carries `pi-ai` for prices and never the pi runtime. THE LIVE HUB: server-rendered panels over SSE, only changed panels sent, a snapshot on connect, `Last-Event-ID`, a 15 s ping, a 2 MiB slow-client drop, and one 1 s poll that runs only while a stream is open. THE STREAM LIFECYCLE, the gap #640 left: each tick re-judges every stream's session with a new `sessions.peek`, which never moves `lastSeen`, so an open tab never extends a session, and logout, revoke, rotate, end-all and expiry end a stream within a tick; `PI_CONSOLE_MAX_STREAMS` per session plus a global cap of 32, so streams never take all 64 connections (429 past either). THE ROLE RULE: records are PII-free and shown to both roles, the hostile-capable strings escaped; BullMQ `failedReason` only to the operator and only in a detail view; the audit page operator only. Rejected: JSON with client rendering (a second escaper), a single-page app or framework, polling from each browser, WebSockets (one-way updates need no upgrade handling on the trusted process). Two residuals added: one token's eight sessions can hold every stream slot, and a watched page still signs out at the idle limit. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the overlay's snapshot is the moved `createFleetReader`, behaviour unchanged, and a new PARKED view reads the snapshot's `parked`. UNCHANGED, checked: `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (the parked chain count re-derives the key and indexes nothing), `DES-AWAIT-INPUT-ENDS-THE-JOB` (parking is read, never changed; answering is #642's), `DES-PANEL-SEPARATE-FROM-RECEIVER` (still superseded, the console still never runs on the receiver), and `REQ-INSIGHTS-HTML-EXPORT`'s file (unchanged; the console renders the same sections live). |
 | 2026-10-15 | Issue #642, writes and actions from the operator console. **`DES-OPERATOR-CONSOLE` AMENDED**: THE ACTION TABLE, `ACTIONS` in `admin/src/console/actions.mjs`, one entry per write (`{name, kind, paid, bulk, preview, apply}`), from which the preview and confirm routes are generated, so the #640 dispatcher guards every action and the route-table tests cover every action; the pause-windows write is its first entry (routes `POST /api/act/<name>/preview` and `/confirm`; the old pause-windows routes stay as aliases). THE GENERIC PIPELINE: one preview issues a ticket holding the payload, the `expect` snapshots, the targets and the reserve; one confirm redeems it, appends the `ok` audit row (with `kind`, digests, `reserve`, `count`), applies through the funnel, appends a compensating `failed` row on a refusal or throw, and pokes the live hub; an append failure refuses. THE GROUPS: runs and jobs (cancel active with `REQ-OPERATOR-JOB-CANCEL`'s named refusal, cancel held, retry failed, remove failed, re-run, answer parked), fleet (pause and resume through the kill switch's one funnel, one queue), configuration (each through the `write-plans.mjs` planner and the panel's funnel), bulk. PAID ACTIONS AND THE RESERVE: `estimateReserve` (worker export `./reserve-estimate`) imports the worker's own rule (one slot, the per-job cap `effectiveCostCapMicros`, 0 for a job `zeroRatedFor` judges unable to spend), so the page shows what the worker will hold; the worker still reserves at pickup. PARKED ANSWERS: the receiver's phrase-free reply rebuilt field for field (the parked run's repo and target from its retained job, the comment trigger's run fields as the file says now), the text in `trigger.comment.body` fenced as data, a fresh `console-` delivery id, sender `{id: null}`, GitHub association `OWNER`, `console: {by}` at job level; the worker's one trail comment once every pre-spend gate and reserve has passed, just before the container starts, mentions neutralised by U+200B, dropped by the receiver's self-guard as `self`; the audit holds the answer's sha256, never the text. RE-RUN SOURCES: local from the retained job's folder, flow and task after the folder rule; cron from the trigger as the file says now (`./schedules`); forge with the issue from the retained job data and the run fields from the trigger as the file says now (refused when that trigger changed or is gone), a fresh delivery id, routed as the receiver routes, without `console`; refused by name on expired data, a `/command`, a parked answer, and a duplicate the semantic or minute window takes. BULK: at most 100, the ticket binding the exact list and each job's state, per-job re-check and results, one audit row per job with `count` and the shared ticket digest. ONE AUDIT CHAIN: the TUI's and the tools' writes as actor role `panel`, append before write, append failure refuses. THE SANDBOX: the command shown, never run. Rejected, with reasons: a browser terminal, committing configuration to git, posting the answer as the bot from the console process, re-running from the run record. Three residuals added: an operator token can quote text on any parked issue under the deployment's identity, one bulk confirm can start 100 paid retries (each still reserved), and an unwritable `PI_LOGS_DIR` stops the panel's writes. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the tools' and dialogs' pre-confirm checks moved to the pi-free `admin/src/write-plans.mjs` with their messages byte-identical and their tests unchanged; `writeTriggers` (inside its lock) and `writeSettings` take `expect`, sharing `worker/src/file-expect.mjs`'s snapshot encoding, and `writeOverlay`'s tmp file became its own; the fleet reader's `pause`/`resume` go through `killSwitchPlan`/`killSwitchSet`, so the two-Valkey disagreement refusal holds on the TUI too, a part-way stop is a result the footer says, and `pauseQueue` and the fleet-wide `cancelHeldJob` arrive; every panel write is audited as role `panel`; the setup wizard is not audited, and why (it runs before a logs directory exists and creates the files an audit would name; its host mutations are the worker CLI's own consented commands). The PARKED view still writes nothing. UNCHANGED, checked: `DES-AWAIT-INPUT-ENDS-THE-JOB` (parking and the `not-parked` gate are as they were; the console is one more source of the reply that gate judges), `DES-SANDBOX-IS-A-FRESH-CONTAINER` (no new way to open one), `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` (the priorities and revert actions call the same `applyPriorities` and `revertAllocation`; the allocation audit and `alloc:log` keep their rows), `DES-PANEL-SEPARATE-FROM-RECEIVER` (the console still never runs on the receiver), `DES-CANCEL-VIA-REDIS-REQUEST-KEY` (the console uses the CLI's request key). **Code evidence**: admin/src/job-actions.mjs, admin/src/write-plans.mjs, admin/src/audited-write.mjs, admin/src/read-model.mjs (`killSwitchPlan`, `setQueuePausedOne`, `cancelHeldJob`, `writeSettings`, `createFleetReader`), admin/src/index.ts, admin/src/dashboard.ts (`withAuditedWrites`, `switchFailure`), admin/src/secrets-command.ts, worker/src/console-answer.mjs, worker/src/reserve-estimate.mjs, worker/src/file-expect.mjs, worker/src/queue.mjs (`enqueueForgeJob`), worker/src/processor.mjs, worker/src/console-audit.mjs, worker/src/triggers-file.mjs, worker/src/runtime-settings.mjs, admin/src/console/actions.mjs, admin/src/console/job-data.mjs. |
 | 2026-10-16 | Issue #643, live run transcripts, resolving `OQ-044`. **NEW `DES-LIVE-TRANSCRIPT-STREAM`**: every job gets a live transcript file through the existing `PI_SESSION_FILE` contract (`<jobDir>/session/current.jsonl`, staged empty, mounted at `/session`; no image change; resume still keyed on `prepared.session` alone, and a non-resume job's record still says `disabled`, because `mergeSession` maps the runner's `absent` back for exactly that job); the worker tails it (a 500 ms poll, partial lines held, `reset` on a rewrite, `skipped` past 1 MiB, a fixed note for a line that is not JSON), maps each pi entry to compact display entries (thinking, the header's cwd, usage, custom, session_info, label entries and provider error messages never published), redacts with an inverted key rule (every env key secret-bearing unless in `NON_SECRET_ENV_KEYS`, plus the token and the exit key; literal, JSON-escaped and URL-encoded forms; known token shapes), escapes controls (real newlines and tabs kept), and writes `run:live:<id>` with `MAXLEN ~ 2000`, a 7-day TTL at the first write (which deletes a previous attempt's stream), and an `end` entry with the exit's outcome and a 24 h TTL, finished before the job directory is removed. Residuals: transformed secrets, and the tail lost when the abort grace runs out. Off switch `PI_LIVE_TRANSCRIPTS=0`. Rejected: the runner publishing over a new network path, raw-log mirroring, local only, a blocking `XREAD` on the shared client, shipping thinking, auditing reads. **`DES-OPERATOR-CONSOLE` AMENDED**: the run page's "Live transcript" section for the operator role and `GET /api/transcript` as a second subscription type in `live.mjs` (shared slots, `peek`, the 2 MiB cut, `entry` events with stream ids, `Last-Event-ID` resume, `done` after the end); the run-text rule unchanged; one residual added; the section `#transcript` outside the hub's panels. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: LIVE_TAIL reads the transcript stream for a run on any host, falls back to the local `.log`, and the fallback is told the job's host and this host's name so a foreign run says "this run is on host X"; the placement rule covers the transcript seams. |
+| 2026-10-16 | Issue #644, run progress. **NEW `DES-RUN-PROGRESS`**: the worker reads where each running job is from the session file it already tails, through the tailer's new `onParsed` hook: a turn per assistant message, a step per tool call closed by its result as `ok` or `error` with the result's own `durationMs` (null when pi wrote none, never a timestamp gap, since pi saves a parallel batch's results together), open calls `interrupted` at the end, anomalies ignored and counted, memory bounded (256 open, 20 recent, 8 running, 32 phases); resume-aware through a baseline (the file's size before the first read: earlier lines seed `prior` and the phases) and reset-aware (the rewritten bytes replayed without counting twice); phases from the opt-in `report_progress` job tool, read only for a job with `run.progress` and only from a result with `isError: false`, redacted, escaped and cut; the whole snapshot in `run:progress:<id>` (once a second at most, 7 days, 24 h after the final write, 16 KiB, a retry keeping the earlier attempt's `commentId`); the record's `progress` of integers and closed keys; and, for a forge trigger with `run.statusComment`, one comment edited with fixed words and integers. Progress is advisory and decides nothing. Off switch `PI_RUN_PROGRESS=0`, independent of `PI_LIVE_TRANSCRIPTS`. Rejected: runner stdout as the transport, a runner network path, phase text in the record or the comment, per-tool live status inside a parallel batch, timestamps as durations, trusting `done` and `total`. Residuals: a false phase or count, a phase name carrying text the agent read, the comment as a public record of a run's pace, #645's synthetic results counted as ordinary ones, and a lost final write past the abort grace. **`DES-LIVE-TRANSCRIPT-STREAM` AMENDED**: `PI_LIVE_TRANSCRIPTS` now governs the stream alone; the file is staged and tailed when either switch is on, and with transcripts off and progress on the tailer runs in its stream-off mode, touching no `run:live:` key; the progress hook (`onParsed`, `onReset`, the baseline and `replay`) is described. **`DES-OPERATOR-CONSOLE` AMENDED**: a "Run progress" bullet (an integer Progress column in the active table for both roles; the run page's first panel, `p-progress`, whose phase names, `<progress>` bar and note reach the operator role alone; a finished run showing the record's `progress` re-checked with `recordedProgress`); the run page becomes a LIVE page (hub panels by digest, data at most every 2 s), so an operator's run tab holds two streams; a running job with no record answers 200 with a snapshot or a transcript; Status, Traces and Code evidence follow. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the LIST's ACTIVE rows show progress (`running · turn 7 · 12 steps (1 failed) · bash 40s · phase 2/4 <name>`), the integers from the snapshot and the phase name through a `progress` dependency, clipped to 24 columns with `clipData`; the placement rule covers progress (no model text in `snapshot`, and no model-callable tool returns the tool name). UNCHANGED, checked: `DES-AWAIT-INPUT-ENDS-THE-JOB` (`await_human_input` is counted as a step like any tool; parking reads nothing of progress), `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` (the terminal comments and the hook are untouched; the status comment is a separate opt-in comment, and `report-progress-shadowed` joins the runner reasons the hook already spreads), `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (progress reads the per-job copy and indexes nothing). |
+| 2026-10-16 | Issue #644, review round 1. **`DES-RUN-PROGRESS` CORRECTED**, six clauses. (1) Automatic steps: a call or result id longer than 128 UTF-16 units (`PROGRESS_ID_MAX`) is an anomaly, since an open step's id is a map key a forged line could make nearly a megabyte; an assistant message with `stopReason` `"error"` or `"aborted"` opens no step, and an `"error"` one is no turn while an `"aborted"` one is, matching the runner's turn count; a step's time is the line's timestamp bounded as the stream's (0 to a day ahead, else the read time). (2) The key: `updatedAt` is the time of the write, the snapshot is rewritten every 30 s (`PROGRESS_HEARTBEAT_MS`) until the end, and readers call a key stale past 180 s (`PROGRESS_STALE_MS`); the sink writes the empty turn 0 snapshot at its start, replacing the previous attempt's final one; the finish waits at most 2 s for a comment post in flight so its id rides the final write. (3) The comment's final edit comes from the run record through a registry in start.mjs (`makeStatusCommentRegistry`, settled by `recordRun`), "attempt ended, retrying" for an `InfraRetry` with attempts left, and the exit's outcome only after a 30 s fallback (`STATUS_FALLBACK_MS`) for an attempt that leaves no record; it was the exit's outcome, made beside the final write. (4) The record: `endCancelled` keeps `progress`, `toolMs` is stated as a sum of step durations, `longestInterruptedMs` is new. (5) The cancel residual gains the stale marking; the logging line names the four `status_comment_skipped` reasons. (6) Code evidence gains the registry, `recordRun`'s settle and `endCancelled`. **`DES-OPERATOR-CONSOLE` AMENDED**, the run progress bullets: an ended snapshot on an active row shows `-`, a stale one says so and stops its running ages, the run page labels "Sum of step durations", "Longest interrupted step" and "Earlier runs of this session", and a retried job's record and key are paired by time (a key newer than the record shown live under its own sentence; phase names join a record only from the same, ended attempt). **`DES-LIVE-TRANSCRIPT-STREAM` AMENDED**, the progress hook: the `ts` handed to `onParsed` is bounded. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the ACTIVE row: an ended snapshot draws nothing, a stale one leads with `no update for 4m, the worker may be gone` and drops its running age. Extended in the same round (four defects found on review): (7) a container that outlives the abort grace now gets its final write: `boundAfterAbort` awaits (bounded, 10 s) a give-up hook that finishes the live publisher runContainer handed over (`onLive`) with outcome `unknown`, before the job directory goes, where the heartbeat had rewritten the key as running for as long as the worker lived; the writer also stops every write but the final one 7 days after it started (`run_progress_expired`), so no write sets a TTL under 1 s (it could set PX 1), and the residual sentence about the heartbeat is made precise (a dead worker writes nothing more, the given-up container is finished, the 7-day bound sits behind both). (8) An attempt that registers no commenter (refused before its container) and a job whose comment says "attempt ended, retrying": `recordRun` reads the key's `commentId` (one bounded `GET`) and makes one bounded edit with the record's outcome (`settleUnregisteredStatus`), skipped on a phrase collision; an operator's cancel of a delayed retry writes no record and is named as a residual. (9) `STATUS_FALLBACK_MS` is 5 minutes (was 30 s, which a slow record path could lose to), and a record that settles after the fallback, within 10 minutes (`STATUS_LATE_SETTLE_MS`, at most 256 kept), makes one corrective edit when its text differs. (10) `DES-OPERATOR-CONSOLE`: the key's phase names join a record only when the key also started no earlier than the record's `startedAt` (an unreadable one pairs with nothing), since an attempt refused before its container leaves the earlier attempt's ended key in place. |
