@@ -432,6 +432,8 @@ function normalizeCron(on, run, index, path, state) {
 	const { progress, statusComment } = validateProgressFlags(run, `cron trigger "${id}"`, path, { onType: "cron" });
 	// Returned, statusComment's posture (issue #645): `true` is refused on cron, so run.recover survives only as `false`.
 	const recover = validateRecoverFlag(run, `cron trigger "${id}"`, path, { onType: "cron" });
+	// Returned, run.progress's posture (issue #646): steering is legal on cron, an operator can steer a folder job too.
+	const steer = validateSteerFlag(run, `cron trigger "${id}"`, path);
 	// Called and DISCARDED: on a cron trigger this can only refuse, and the refusal is the point. The
 	// returned `run` below deliberately grows no `replicas` key -- a cron entry can never carry one.
 	validateReplicas(run, `cron trigger "${id}"`, path);
@@ -463,7 +465,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 
@@ -643,6 +645,31 @@ export function validateRecoverFlag(run, at, path, { onType }) {
 		throw configError(`${at}: run.recover cannot be set beside run.command: a recovering run continues its transcript, and a command job's prompt is the one /name args line, so recovering it would dispatch the command a second time: ${path}`);
 	}
 	return run.recover;
+}
+
+/**
+ * Validate the per-trigger `run.steer` flag (issue #646, steering a running job): whether an operator (and, once comment
+ * routing lands, a collaborator using the trigger phrase) may send messages into the job while it runs. Strictly
+ * boolean, validateRecoverFlag's rule and for its reason: a truthy `"false"` would arm what the operator meant to leave
+ * off.
+ *
+ * Legal on every trigger type, cron included, unlike run.recover: a steering message is delivered into the live
+ * session and needs no issue or pull request to key anything by, so a folder job can be steered by its operator as
+ * well as a forge job can. The one refusal is beside `run.command`: a command job's prompt is one `/name args` line
+ * that dispatches a workflow, and a message pushed into that session would be read by whatever the command started,
+ * not by an agent the operator asked to listen. Refusing the pair says so before anything spends.
+ *
+ * Returns the flag, undefined when absent, so an unflagged trigger normalizes byte-identically to today's. Exported
+ * for the admin's trigger tools, which judge it before the operator's confirm with this message.
+ */
+export function validateSteerFlag(run, at, path) {
+	if (run.steer !== undefined && typeof run.steer !== "boolean") {
+		throw configError(`${at}: run.steer must be true or false when present: ${path}`);
+	}
+	if (run.steer === true && run.command !== undefined) {
+		throw configError(`${at}: run.steer cannot be set beside run.command: a command job's prompt is the one /name args line that dispatches a workflow, so a steering message would reach whatever the command started rather than an agent listening for it: ${path}`);
+	}
+	return run.steer;
 }
 
 /**
@@ -1740,6 +1767,7 @@ function normalizeLabel(on, run, index, path) {
 	const awaitInput = validateAwaitInputFlag(run, at, path);
 	const { progress, statusComment } = validateProgressFlags(run, at, path, { onType: on.type });
 	const recover = validateRecoverFlag(run, at, path, { onType: on.type });
+	const steer = validateSteerFlag(run, at, path);
 	const repository = validateRepository(run, "label", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1751,7 +1779,7 @@ function normalizeLabel(on, run, index, path) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1786,6 +1814,7 @@ function normalizeComment(on, run, index, path, state) {
 	const awaitInput = validateAwaitInputFlag(run, at, path);
 	const { progress, statusComment } = validateProgressFlags(run, at, path, { onType: on.type });
 	const recover = validateRecoverFlag(run, at, path, { onType: on.type });
+	const steer = validateSteerFlag(run, at, path);
 	const repository = validateRepository(run, "comment", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1797,7 +1826,7 @@ function normalizeComment(on, run, index, path, state) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1859,6 +1888,7 @@ function normalizeIssue(on, run, index, path) {
 	const awaitInput = validateAwaitInputFlag(run, at, path);
 	const { progress, statusComment } = validateProgressFlags(run, at, path, { onType: on.type });
 	const recover = validateRecoverFlag(run, at, path, { onType: on.type });
+	const steer = validateSteerFlag(run, at, path);
 	validateRepository(run, "issue", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1877,7 +1907,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1950,6 +1980,7 @@ function normalizePullRequest(on, run, index, path) {
 	const awaitInput = validateAwaitInputFlag(run, at, path);
 	const { progress, statusComment } = validateProgressFlags(run, at, path, { onType: on.type });
 	const recover = validateRecoverFlag(run, at, path, { onType: on.type });
+	const steer = validateSteerFlag(run, at, path);
 	validateRepository(run, "pull_request", at, path);
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
@@ -1973,7 +2004,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 

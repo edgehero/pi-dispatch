@@ -252,6 +252,16 @@ test("run.recover never reaches a cron schedule: the load refuses true, and fals
 	assert.equal("recover" in f.data, false, "a cron job never carries recover");
 });
 
+test("run.steer rides the scheduler data at JOB level only when armed, never inside trigger (issue #646)", () => {
+	const [s] = load([{ ...CRON, run: { ...CRON.run, steer: true } }]);
+	assert.equal(s.data.steer, true);
+	assert.deepEqual(s.data.trigger, { id: "nightly-tidy", pattern: "0 3 * * *" }, "an execution knob, never in /job/event.json");
+	const [f] = load([{ ...CRON, run: { ...CRON.run, steer: false } }]);
+	assert.equal("steer" in f.data, false, "false is the default: the stored schedule grows no key");
+	const [plain] = load([CRON]);
+	assert.equal("steer" in plain.data, false);
+});
+
 test("an unflagged cron trigger's data grows no portfolio key: the stored schedule is byte-identical (issue #505)", () => {
 	const [s] = load([CRON]);
 	assert.equal("portfolio" in s.data, false);

@@ -269,7 +269,7 @@ const skewFile = (run) => ({ readFileSync: () => JSON.stringify({ triggers: [{ o
 const arrived = (extra = {}) => ({ trigger: { matched: { index: 0, type: "label" } }, kind: "github", flow: "fix", ...extra });
 
 test("the skew check refuses a job whose AUTHORED trigger lists models it arrived without, and reads one row per field", async () => {
-	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["models", "maxCostUsd", "mcp", "awaitInput", "progress", "statusComment", "recover"], "a new narrowing field is one row here");
+	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["models", "maxCostUsd", "mcp", "awaitInput", "progress", "statusComment", "recover", "steer"], "a new narrowing field is one row here");
 	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ models: ["openai/gpt-x"] }) });
 	assert.deepEqual(await check(arrived()), { skewed: true, field: "models" }, "a stale receiver dropped the list");
 	assert.deepEqual(await check(arrived({ models: null })), { skewed: true, field: "models" }, "null is absent");
@@ -309,6 +309,16 @@ test("the skew check refuses a job whose AUTHORED trigger arms run.recover it ar
 	assert.deepEqual(await check(arrived()), { skewed: true, field: "recover" }, "a stale receiver dropped it");
 	assert.deepEqual(await check(arrived({ recover: true })), { ok: true });
 	assert.deepEqual(await makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ recover: false }) })(arrived()), { ok: true }, "false arms nothing");
+	assert.deepEqual(await check(arrived({ flow: "other" })), { ok: true }, "the identity guard fails open");
+});
+
+test("the skew check refuses a job whose AUTHORED trigger arms run.steer it arrived without (#646)", async () => {
+	// A receiver from before #646 drops the key as unknown: the run would open no inbox, and a steering message would be
+	// refused as for an unarmed job.
+	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ steer: true }) });
+	assert.deepEqual(await check(arrived()), { skewed: true, field: "steer" }, "a stale receiver dropped it");
+	assert.deepEqual(await check(arrived({ steer: true })), { ok: true });
+	assert.deepEqual(await makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ steer: false }) })(arrived()), { ok: true }, "false arms nothing");
 	assert.deepEqual(await check(arrived({ flow: "other" })), { ok: true }, "the identity guard fails open");
 });
 

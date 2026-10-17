@@ -371,7 +371,7 @@ function cronTriggerId(jobId) {
 /**
  * The run fields of a forge job built from a trigger entry's normalized `run` (parseTriggers' shape), exactly as the
  * receiver's filters spread them onto the job (receiver/src/filter*.mjs: one conditional spread per field, absent stays
- * absent, `awaitInput`, `progress`, `statusComment` and `recover` only when armed), with `flow` the flow that runs. ONE builder for the two console paths that make
+ * absent, `awaitInput`, `progress`, `statusComment`, `recover` and `steer` only when armed), with `flow` the flow that runs. ONE builder for the two console paths that make
  * a forge job from the triggers file (a parked answer and a forge re-run), so they cannot drift from each other; the
  * parked-answer test builds a receiver job and a console job for the same issue and compares them field for field,
  * which is what holds this builder to the filters.
@@ -399,6 +399,7 @@ function runFieldsOf(run, flow) {
     ...(run.progress === true ? { progress: true } : {}),
     ...(run.statusComment === true ? { statusComment: true } : {}),
     ...(run.recover === true ? { recover: true } : {}),
+    ...(run.steer === true ? { steer: true } : {}),
     ...(run.replicas !== undefined ? { replicas: run.replicas } : {}),
   };
 }

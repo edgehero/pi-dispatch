@@ -869,6 +869,27 @@ test("a matched rule's run.recover reaches the JOB only when armed, never inside
 	assert.equal(commented.job.recover, true);
 });
 
+test("a matched rule's run.steer reaches the JOB only when armed, never inside trigger (issue #646)", () => {
+	const cfg = forgeCfg({
+		triggers: {
+			label: [
+				{ index: 0, predicate: { any: ["pi:fix"] }, flow: "fix", steer: true },
+				{ index: 1, predicate: { any: ["pi:docs"] }, flow: "docs", steer: false },
+			],
+			comment: { index: 2, phrase: "@pi", defaultFlow: "triage", steer: true },
+			pullRequest: [],
+			knownFlows: new Set(["fix", "docs", "triage"]),
+		},
+	});
+	const armed = filter("issues", { sender: { id: 1 }, action: "labeled", issue: { number: 7, title: "T", body: "B", labels: [{ name: "pi:fix" }] } }, cfg, 99, "r1");
+	assert.equal(armed.job.steer, true);
+	assert.equal("steer" in armed.job.trigger, false, "an execution knob, never in /job/event.json");
+	const off = filter("issues", { sender: { id: 1 }, action: "labeled", issue: { number: 8, title: "T", body: "B", labels: [{ name: "pi:docs" }] } }, cfg, 99, "r2");
+	assert.equal("steer" in off.job, false, "absent, not present-and-false");
+	const commented = filter("issue_comment", { sender: { id: 1 }, action: "created", comment: { body: "@pi", author_association: "OWNER" }, issue: { number: 9, title: "T", body: "B", labels: [] } }, cfg, 99, "r3");
+	assert.equal(commented.job.steer, true);
+});
+
 // --- replicas ride the MATCHED rule onto the job (REQ-REPLICA-RUNS) ---
 
 test("replicas rides the matched rule onto the job, at JOB level and never inside trigger", () => {

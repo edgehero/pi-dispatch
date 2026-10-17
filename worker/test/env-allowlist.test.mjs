@@ -920,6 +920,20 @@ test("PI_RECOVER and PI_RECOVERING are \"1\" only when true, and otherwise absen
 	}
 });
 
+test("PI_STEER is \"1\" only when the steer option is strictly true, and otherwise absent; reserved and structural (issue #646)", { skip }, async () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	for (const value of [undefined, false, "1", 1, "true"]) {
+		assert.equal(buildContainerEnv({ ...args, steer: value }).PI_STEER, undefined, String(value));
+	}
+	assert.equal(buildContainerEnv({ ...args, steer: true }).PI_STEER, "1");
+	assert.equal(buildContainerEnv({ ...args, steer: true }).PI_RECOVER, undefined, "steering and recovery are armed apart");
+	assert.equal(buildContainerEnv({ ...args, recover: true }).PI_STEER, undefined);
+	// In the allowlist: a trigger cannot bind it through run.secrets, and it is not redacted as a secret value.
+	const { NON_SECRET_ENV_KEYS } = await import("../src/redact-secrets.mjs");
+	assert.ok(CONTAINER_ENV_NAMES.has("PI_STEER"), "PI_STEER is reserved");
+	assert.ok(NON_SECRET_ENV_KEYS.has("PI_STEER"), "PI_STEER is structural");
+});
+
 test("PI_MCP_SERVERS is emitted only when the job names servers, comma-joined, never empty (REQ-MCP-OPERATOR-SERVERS)", { skip }, () => {
 	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
 	for (const mcpServers of [undefined, []]) assert.equal(buildContainerEnv({ ...args, mcpServers }).PI_MCP_SERVERS, undefined);
@@ -1093,7 +1107,8 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, reportProgress: true, recover: true, recovering: true });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, reportProgress: true, recover: true, recovering: true, steer: true });
+	assert.equal(env.PI_STEER, "1", "the drift check must see PI_STEER (issue #646)");
 	assert.equal(env.PI_REPORT_PROGRESS, "1", "the drift check must see PI_REPORT_PROGRESS (issue #644)");
 	assert.equal(env.PI_RECOVER, "1", "the drift check must see PI_RECOVER (issue #645)");
 	assert.equal(env.PI_RECOVERING, "1", "the drift check must see PI_RECOVERING (issue #645)");

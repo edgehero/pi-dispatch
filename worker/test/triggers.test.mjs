@@ -1726,3 +1726,54 @@ test("run.recover is refused beside run.command on every forge type: a recovery 
 	const [off] = parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", command: "wf run", recover: false } }]);
 	assert.equal(off.run.recover, false, "false arms nothing, so it may sit beside a command");
 });
+
+// --- run.steer (issue #646) ---
+
+test("run.steer is carried on every forge type, and absent when not written", () => {
+	const [label, comment, issue, pr] = parse([
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", steer: true } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", flow: "fix", steer: true } },
+		{ on: { type: "issue", action: ["closed"] }, run: { kind: "forgejo", flow: "fix", steer: true } },
+		{ on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", flow: "review", steer: false } },
+	]);
+	for (const t of [label, comment, issue]) assert.equal(t.run.steer, true, t.on.type);
+	assert.equal(pr.run.steer, false, "false is the documented default and is carried, run.resume's rule");
+	const [plain] = parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } }]);
+	assert.equal("steer" in plain.run, false, "an unflagged trigger normalizes byte-identically");
+});
+
+test("run.steer: a non-boolean is refused on every type, naming the field", () => {
+	for (const entry of [
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", steer: "true" } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", steer: 1 } },
+		{ on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "fix", steer: null } },
+		{ on: { type: "pull_request", action: ["opened"] }, run: { kind: "github", flow: "fix", steer: "false" } },
+	]) {
+		assert.throws(() => parse([entry]), (e) => isConfigError(e) && /run\.steer must be true or false/.test(e.message) && e.message.includes(PATH), entry.on.type);
+	}
+	assert.throws(() => parse([withRun(CRON, { steer: "yes" })]), (e) => isConfigError(e) && /run\.steer must be true or false/.test(e.message));
+});
+
+test("run.steer is allowed on cron, unlike run.recover: an operator can steer a folder job", () => {
+	const [on] = parse([withRun(CRON, { steer: true })]);
+	assert.equal(on.run.steer, true);
+	const [off] = parse([withRun(CRON, { steer: false })]);
+	assert.equal(off.run.steer, false);
+	const [plain] = parse([CRON]);
+	assert.equal("steer" in plain.run, false);
+});
+
+test("run.steer is refused beside run.command on every type, cron included", () => {
+	for (const entry of [
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", command: "wf run", steer: true } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", command: "wf run", steer: true } },
+		{ on: { type: "issue", action: ["closed"] }, run: { kind: "forgejo", command: "wf run", steer: true } },
+		{ on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", command: "wf run", steer: true } },
+	]) {
+		assert.throws(() => parse([entry]), (e) => isConfigError(e) && /run\.steer cannot be set beside run\.command/.test(e.message) && e.message.includes(PATH), entry.on.type);
+	}
+	const { flow, task, ...cronNoFlow } = CRON.run;
+	assert.throws(() => parse([{ on: CRON.on, run: { ...cronNoFlow, command: "wf run", steer: true } }]), (e) => isConfigError(e) && /run\.steer cannot be set beside run\.command/.test(e.message) && e.message.includes(PATH), "cron");
+	const [off] = parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", command: "wf run", steer: false } }]);
+	assert.equal(off.run.steer, false, "false arms nothing, so it may sit beside a command");
+});

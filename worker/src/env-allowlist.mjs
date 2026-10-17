@@ -367,7 +367,7 @@ function resolveEnvName(provider) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, recover = false, recovering = false, allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, recover = false, recovering = false, steer = false, allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -448,6 +448,9 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 		// strictly `=== true`, so a truthy non-boolean an upstream bug passed arms nothing.
 		PI_RECOVER: recover === true ? "1" : undefined,
 		PI_RECOVERING: recovering === true ? "1" : undefined,
+		// Issue #646: the trigger armed run.steer, so the runner delivers the files the worker writes into its read-only
+		// /inbox mount. "1" or absent, PI_AWAIT_INPUT's rule, strictly `=== true` for PI_RECOVER's reason.
+		PI_STEER: steer === true ? "1" : undefined,
 		// The job's EFFECTIVE allowed-model list (issue #502): its trigger's `run.models`, else the deployment's
 		// PI_ALLOWED_MODELS. Comma-joined `provider/model` entries, which the runner splits at each entry's first `/`
 		// (image/runner/src/config.mjs). Comma is safe because both list parsers refuse an entry carrying one. NULL is
