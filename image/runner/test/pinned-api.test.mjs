@@ -2239,3 +2239,84 @@ test("pi persists each message on message_end and finds a persisted entry by ide
 	assert.match(session, /sourceInfo: createSyntheticSourceInfo\(`\$\{BUILTIN_PATH_PREFIX\}\$\{name\}`, \{ source: "builtin" \}\),/);
 	assert.match(agentDistFile("core", "source-info.js"), /export const BUILTIN_PATH_PREFIX = "builtin:";/);
 });
+
+// ── Issue #646: the delivery path the run's inbox rests on (src/inbox.mjs) ──────────────────────────────────────
+
+test("pi delivers an extension's custom message as a queued steer or follow-up while a run is active, with no input handlers or template expansion (issue #646)", { skip }, () => {
+	const session = agentDistFile("core", "agent-session.js");
+	const send = piMethod(session, "async sendCustomMessage");
+	// Streaming: queued on the agent, steer or follow-up by deliverAs. Synchronous up to the queue, so a push from inside
+	// the before-settle handler is queued before the boundary reads hasQueuedMessages().
+	assert.match(send, /else if \(this\.isStreaming && options\?\.triggerTurn !== false\) \{\n\s*if \(options\?\.deliverAs === "followUp"\) \{\n\s*this\.agent\.followUp\(appMessage\);\n\s*\}\n\s*else \{\n\s*this\.agent\.steer\(appMessage\);/, "a streaming custom message is no longer queued on the agent");
+	assert.equal(send.slice(0, send.indexOf("this.agent.steer(appMessage)")).includes("await"), false, "an await before the queue: a push from agent_before_settle may no longer be seen by the boundary");
+	// Not streaming and no triggerTurn: appended unanswered. The inbox never pushes then (its "active" window).
+	assert.match(send, /else \{\n\s*this\._appendCustomMessage\(appMessage\);\n\s*\}\n\s*\}$/);
+	for (const needle of ["_runInputHandlers", "expandPromptTemplate", "_expandSkillCommand"]) assert.equal(send.includes(needle), false, `sendCustomMessage now reaches ${needle}: a leading /name could expand`);
+	assert.match(session, /\n {4}get isStreaming\(\) \{\n {8}return this\._isAgentRunActive;\n {4}\}/, "isStreaming is no longer the run-active flag");
+	// The window: cleared just before agent_settled, with nothing asynchronous between, so the inbox's agent_settled close is exact.
+	assert.match(piMethod(session, "async _emitAgentSettled"), /this\._isAgentRunActive = false;\n\s*this\._isEmittingAgentSettled = true;\n\s*try \{\n\s*const aborted = this\._agentRunAbortRequested;\n\s*await this\._extensionRunner\.emit\(\{ type: "agent_settled", aborted \}\);/);
+	// A handler's ctx.isIdle() is the session's isIdle, false while the run flag holds: the inbox's second push condition.
+	assert.match(session, /\n\s*isIdle: \(\) => this\.isIdle,\n/);
+	assert.match(session, /\n {4}get isIdle\(\) \{\n {8}return !this\._isAgentRunActive && !this\.isCompacting;\n {4}\}/);
+	// An aborted run never reaches the boundary: the loop breaks on the abort flag first, then settles.
+	assert.match(piMethod(session, "async _startRun"), /while \(!this\._agentRunAbortRequested\) \{/);
+	// The extension API's sendMessage is this method.
+	assert.match(agentDistFile("core", "extensions", "loader.js"), /\n {8}sendMessage\(message, options\) \{\n {12}assertActive\(\);\n {12}runtime\.sendMessage\(message, options\);/);
+	assert.match(session, /runner\.bindCore\(\{\n\s*sendMessage: \(message, options\) => \{\n\s*this\.sendCustomMessage\(message, options\)\.catch\(/);
+	// Persisted at message_end as a custom_message entry, and seen by the model as user text.
+	assert.match(session, /if \(event\.message\.role === "custom"\) \{\n\s*\/\/ Persist as CustomMessageEntry\n\s*entryId = this\.sessionManager\.appendCustomMessageEntry\(event\.message\.customType, event\.message\.content, event\.message\.display, event\.message\.details\);/);
+	assert.match(agentDistFile("core", "messages.js"), /case "custom": \{\n\s*const content = typeof m\.content === "string" \? \[\{ type: "text", text: m\.content \}\] : m\.content;\n\s*return \{\n\s*role: "user",/);
+	assert.match(piMethod(agentDistFile("core", "session-manager.js"), "appendCustomMessageEntry"), /type: "custom_message",\n\s*customType,\n\s*content,\n\s*display,\n\s*details,/, "the entry seed() reads changed shape");
+	assert.deepEqual(
+		{
+			sendCustomMessage: sha256(send),
+			_runBeforeSettleBoundary: sha256(piMethod(session, "async _runBeforeSettleBoundary")),
+			_handlePostAgentRun: sha256(piMethod(session, "async _handlePostAgentRun")),
+			_buildBoundaryContext: sha256(piMethod(session, "_buildBoundaryContext")),
+		},
+		{
+			sendCustomMessage: "d6bca70e5fc1ba90d5bfa7a2968d12ffa844e517803fc202ddb601e328221696",
+			_runBeforeSettleBoundary: "3c9e980b7580502e25becd2743658d208ea03c17130f38d100f95840b14becc7",
+			_handlePostAgentRun: "98eff4922ed59a4216b7ac123a052bec5fa3e1fd65046702e52b478c73733639",
+			_buildBoundaryContext: "e2ab1960f79da4ab71d78d3404891dde4ffa723f199a7f7308b88099939861ec",
+		},
+		"a function the inbox's delivery rules rest on changed at this pin: re-read it and src/inbox.mjs's header",
+	);
+});
+
+test("a steer queued from agent_before_settle continues the run, and the agent loop polls steering after each turn's tool results (issue #646)", { skip }, () => {
+	const session = agentDistFile("core", "agent-session.js");
+	const settle = piMethod(session, "async _runBeforeSettleBoundary");
+	assert.match(settle, /const result = await this\._extensionRunner\.emitBoundary\(\{ type: "agent_before_settle"/);
+	assert.match(settle, /const shouldContinue = result\.continue \|\| this\.agent\.hasQueuedMessages\(\);/, "a queued message no longer continues the run from the boundary");
+	assert.match(piMethod(session, "_buildBoundaryContext"), /: finalRole === "assistant" && this\.agent\.hasQueuedMessages\(\)\),/, "a trailing assistant with a queued message can no longer continue");
+	// The boundary runs only when the post-run check found nothing queued, and a true answer continues the agent.
+	assert.match(piMethod(session, "async _startRun"), /if \(this\._agentRunAbortRequested \|\| !\(await this\._runBeforeSettleBoundary\(\)\)\)\n\s*break;\n\s*if \(this\._agentRunAbortRequested\)\n\s*break;\n\s*await this\.agent\.continue\(\);/);
+	// continue() from a trailing assistant drains the steering queue, then the follow-ups.
+	const agent = agentCoreDistFile("agent.js");
+	assert.match(piMethod(agent, "async continue"), /if \(lastMessage\.role === "assistant"\) \{\n\s*const queuedSteering = this\.steeringQueue\.drain\(\);\n\s*if \(queuedSteering\.length > 0\) \{\n\s*await this\.runPromptMessages\(queuedSteering, \{ skipInitialSteeringPoll: true \}\);\n\s*return;\n\s*\}\n\s*const queuedFollowUps = this\.followUpQueue\.drain\(\);/);
+	// The loop: steering is polled after turn_end (whose handlers it awaits, which is where the inbox reads), a turn
+	// whose tools terminated still delivers a queued steer (the parked residual), and follow-ups only when it would stop.
+	const loop = agentCoreDistFile("agent-loop.js");
+	const run = piFunction(loop, "runLoop");
+	assert.match(run, /await emit\(\{ type: "turn_end", message, toolResults \}\);\n\s*if \(decision\?\.action === "end"\) \{[\s\S]*?\}\n\s*explicitContinuation = decision\?\.action === "continue";\n\s*pendingMessages = \(await config\.getSteeringMessages\?\.\(\)\) \|\| \[\];\n\s*if \(hasMoreToolCalls \|\| pendingMessages\.length > 0\) \{/, "steering is no longer polled right after turn_end");
+	assert.match(run, /\/\/ Agent would stop here\. Check for follow-up messages\.\n\s*const followUpMessages = \(await config\.getFollowUpMessages\?\.\(\)\) \|\| \[\];/);
+	assert.match(run, /hasMoreToolCalls = !executedToolBatch\.terminate;/);
+	assert.match(piMethod(agent, "async processEvents"), /for \(const listener of this\.listeners\) \{\n\s*await listener\(event, signal\);/, "the agent no longer awaits its listeners: the turn_end read could miss the poll");
+	assert.equal(sha256(run), "a98c51c7f74da166ac6f187c2f6eff136f27141219ddd93436445aeac5284a28", "pi's agent loop changed at this pin: re-read when a steer and a follow-up are delivered, and src/inbox.mjs");
+});
+
+test("a message renderer is read only by the interactive TUI, so the inbox needs no shadow guard (issue #646)", { skip }, () => {
+	const dist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+	const readers = [];
+	const walk = (dir) => {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const path = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				if (entry.name !== "bundle") walk(path);
+			} else if (entry.name.endsWith(".js") && readFileSync(path, "utf8").includes("getMessageRenderer(")) readers.push(path.slice(dist.length + 1));
+		}
+	};
+	walk(dist);
+	assert.deepEqual(readers.sort(), [join("core", "extensions", "runner.js"), join("modes", "interactive", "interactive-mode.js")], "a renderer is read off the TUI now: re-read whether another extension's renderer for pi-dispatch-inbox can change what a job sees");
+});

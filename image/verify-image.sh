@@ -396,6 +396,31 @@ PROBE
 					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "recoverSession" /app/image/runner/src/recover.mjs 2>/dev/null \
 					|| fail "the image declares 'recover' but its baked runner never reads PI_RECOVERING, never runs its tools one at a time, or carries no recovery module"
 				;;
+			steer)
+				# Same evidence style as 'recover': the baked runner must read the variable and carry the inbox module.
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_STEER" /app/image/runner/src/config.mjs 2>/dev/null \
+					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "pi-dispatch-inbox" /app/image/runner/src/inbox.mjs 2>/dev/null \
+					|| fail "the image declares 'steer' but its baked runner never reads PI_STEER or carries the inbox module"
+				# And the mount the worker gives it: /inbox read-only, so the agent cannot plant a message in its own inbox or
+				# withdraw one. The /job:ro check's shape below: an every-uid fixture, a control write without :ro that must
+				# succeed (else EACCES would pass the check having tested nothing), a read through :ro, then the refused write.
+				inbox_dir=$(mktemp -d)
+				echo '{}' >"$inbox_dir/000001-00000000000000000000000000000001.json"
+				chmod 0777 "$inbox_dir"
+				chmod 0666 "$inbox_dir/000001-00000000000000000000000000000001.json"
+				docker run --rm --cap-drop=ALL -v "$inbox_dir:/inbox" --entrypoint sh "$IMAGE_REF" -c 'echo control > /inbox/control' 2>/dev/null \
+					|| { rm -rf "$inbox_dir"; fail "the control write to a writable /inbox failed, so the :ro check would prove nothing -- check that this host can bind-mount $inbox_dir"; }
+				docker run --rm --cap-drop=ALL -v "$inbox_dir:/inbox:ro" --entrypoint sh "$IMAGE_REF" -c 'ls /inbox/000001-00000000000000000000000000000001.json' >/dev/null 2>&1 \
+					|| { rm -rf "$inbox_dir"; fail "/inbox:ro could not even be listed, so the write refusal would prove nothing"; }
+				# Judged on the host, by what changed in the directory, not by the shell's exit status.
+				docker run --rm --cap-drop=ALL -v "$inbox_dir:/inbox:ro" --entrypoint sh "$IMAGE_REF" \
+					-c 'echo planted > /inbox/000002-00000000000000000000000000000002.json; rm -f /inbox/000001-00000000000000000000000000000001.json' >/dev/null 2>&1 || true
+				if [ -e "$inbox_dir/000002-00000000000000000000000000000002.json" ] || [ ! -e "$inbox_dir/000001-00000000000000000000000000000001.json" ]; then
+					rm -rf "$inbox_dir"
+					fail "/inbox is writable from inside. The agent could plant or withdraw a message in its own inbox."
+				fi
+				rm -rf "$inbox_dir"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done
