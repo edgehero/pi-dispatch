@@ -24,7 +24,7 @@
  */
 import * as nodeFs from "node:fs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
-import { ISSUE_ACTIONS, isMcpNearMiss, runModelFieldNearMiss, validateModelRef, validateProgressFlags } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, isMcpNearMiss, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
@@ -140,17 +140,25 @@ export function backendRefusal(backend, env) {
   return null;
 }
 
-/** The #644 flags a tool call carries, each only when it is a boolean (see buildTriggerEntry). */
+/** The #644 flags and #645's `recover` a tool call carries, each only when it is a boolean (see buildTriggerEntry). */
 function progressRun(f) {
   return {
     ...(typeof f.progress === "boolean" ? { progress: f.progress } : {}),
     ...(typeof f.statusComment === "boolean" ? { statusComment: f.statusComment } : {}),
+    ...(typeof f.recover === "boolean" ? { recover: f.recover } : {}),
   };
 }
 
-/** The loader's own refusal of the #644 flags as sent (a non-boolean, a status comment on cron), or null. */
-function progressRefusal(params, onType, at, path) {
-  return refusalOf(() => validateProgressFlags({ progress: params.progress, statusComment: params.statusComment }, at, path, { onType }));
+/**
+ * The loader's own refusal of the #644 flags and #645's `recover` as sent (a non-boolean, a status comment or a
+ * recovery on cron, a recovery beside a command), or null. `command` is the entry's own: the add tool writes none, and
+ * the edit tool passes the trigger's, so a recovery armed onto a command trigger is refused before the confirm.
+ */
+function progressRefusal(params, onType, at, path, command = undefined) {
+  return (
+    refusalOf(() => validateProgressFlags({ progress: params.progress, statusComment: params.statusComment }, at, path, { onType })) ??
+    refusalOf(() => validateRecoverFlag({ recover: params.recover, ...(command !== undefined ? { command } : {}) }, at, path, { onType }))
+  );
 }
 
 /**
@@ -186,6 +194,12 @@ function progressRefusal(params, onType, at, path) {
  * does nothing else, and the status comment is fixed worker text (ids and integers, never model text) on the item the
  * trigger already acts on. Each is carried only when it is a boolean, `once`'s rule, so an entry that names neither is
  * byte-identical; `statusComment` on cron is passed through for the shared validator to refuse.
+ *
+ * `run.recover` (issue #645) is on both paths too, and the resume test is the one it passes the other way. Resume is
+ * refused here because the agent's output is replayed into a LATER run, a channel that outlives the entry the operator
+ * approved. A recovery replays a run's checkpoint only into that same run's own continuation, after the worker lost it:
+ * the run that wrote the checkpoint is the one that reads it, and nothing reaches the next delivery. Carried only when
+ * it is a boolean, the rule above; `true` on cron is passed through for the shared validator to refuse.
  */
 export function buildTriggerEntry(kind, f) {
   if (kind === "cron") {
@@ -328,6 +342,7 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
   const model = refusalOf(() => validateModelRef({ provider: optStr(params.provider), model: optStr(params.model), maxTurns: params.maxTurns }, "the new trigger", paths.triggersPath));
   if (model !== null) return { refusal: model };
   // #644, the same rule: a non-boolean flag, or a status comment on a cron trigger, is refused with the loader's message.
+  // #645's `recover` rides the same check (refused on cron); the add tool writes no `command`, so none is passed.
   const progress = progressRefusal(params, params.kind, "the new trigger", paths.triggersPath);
   if (progress !== null) return { refusal: progress };
   const entry = buildTriggerEntry(params.kind, params);
@@ -347,7 +362,8 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
  * Plan a trigger edit (`dispatch_trigger_edit`): which flow trigger `index` runs, and optionally its `backend`,
  * `provider` and `model`, each merged only when sent so an edit of the flow leaves every other key byte-identical.
  * The model reference is judged alone and then MERGED with the entry's own `run` (PR #536's review), before the
- * confirm. `progress` and `statusComment` (issue #644) merge the same way. `{ plan: { index, flow, backend, ref, flags, mutate, target, expect, title, message, summary } }` or `{ refusal }`.
+ * confirm. `progress` and `statusComment` (issue #644) merge the same way, and so does `recover` (issue #645), judged
+ * against the entry's own `run.command` as well as its type. `{ plan: { index, flow, backend, ref, flags, mutate, target, expect, title, message, summary } }` or `{ refusal }`.
  */
 export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_edit", fs = nodeFs }) {
   const widening = wideningFieldRefusal(params, tool);
@@ -390,7 +406,7 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   if (merged !== null) return { refusal: merged };
   const modelLine = ["provider", "model"].filter((k) => ref[k] !== undefined).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${ref[k]}`).join("");
   // #644. Merged only when sent, like backend; judged against the entry's own on.type (no status comment on cron).
-  const progressFault = progressRefusal(params, cur.type, `trigger #${params.index + 1}`, paths.triggersPath);
+  const progressFault = progressRefusal(params, cur.type, `trigger #${params.index + 1}`, paths.triggersPath, rawRun.command);
   if (progressFault !== null) return { refusal: progressFault };
   const flags = progressRun(params);
   const flagLine = Object.keys(flags).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${flags[k]}`).join("");

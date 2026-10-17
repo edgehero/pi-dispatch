@@ -1675,3 +1675,54 @@ test("run.progress and run.statusComment: a non-boolean is refused on every type
 	assert.equal("progress" in plain.run, false);
 	assert.equal("statusComment" in plain.run, false);
 });
+
+// --- run.recover (issue #645) ---
+
+test("run.recover is carried on every forge type, and absent when not written", () => {
+	const [label, comment, issue, pr] = parse([
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", recover: true } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", flow: "fix", recover: true } },
+		{ on: { type: "issue", action: ["closed"] }, run: { kind: "forgejo", flow: "fix", recover: true } },
+		{ on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", flow: "review", recover: false } },
+	]);
+	for (const t of [label, comment, issue]) assert.equal(t.run.recover, true, t.on.type);
+	assert.equal(pr.run.recover, false, "false is the documented default and is carried, run.resume's rule");
+	const [plain] = parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } }]);
+	assert.equal("recover" in plain.run, false, "an unflagged trigger normalizes byte-identically");
+	// Loaded above with no run.resume beside it: recovery carries one run's own checkpoint, not the next run's transcript.
+	assert.notEqual(label.run.resume, true);
+});
+
+test("run.recover: a non-boolean is refused on every type, naming the field", () => {
+	for (const entry of [
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", recover: "true" } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", recover: 1 } },
+		{ on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "fix", recover: null } },
+		{ on: { type: "pull_request", action: ["opened"] }, run: { kind: "github", flow: "fix", recover: "false" } },
+	]) {
+		assert.throws(() => parse([entry]), (e) => isConfigError(e) && /run\.recover must be true or false/.test(e.message) && e.message.includes(PATH), entry.on.type);
+	}
+	assert.throws(() => parse([withRun(CRON, { recover: "yes" })]), (e) => isConfigError(e) && /run\.recover must be true or false/.test(e.message));
+});
+
+test("run.recover is refused on cron, carried there only as false", () => {
+	assert.throws(() => parse([withRun(CRON, { recover: true })]), (e) => isConfigError(e) && /run\.recover is only available on a forge trigger/.test(e.message) && e.message.includes(PATH));
+	assert.throws(() => parse([withRun(CRON, { github: true, recover: true })]), (e) => isConfigError(e) && /run\.recover is only available on a forge trigger/.test(e.message), "run.github mints a token, it gives a folder job no checkpoint key");
+	const [off] = parse([withRun(CRON, { recover: false })]);
+	assert.equal(off.run.recover, false);
+	const [plain] = parse([CRON]);
+	assert.equal("recover" in plain.run, false);
+});
+
+test("run.recover is refused beside run.command on every forge type: a recovery would dispatch the command again", () => {
+	for (const entry of [
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", command: "wf run", recover: true } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", command: "wf run", recover: true } },
+		{ on: { type: "issue", action: ["closed"] }, run: { kind: "forgejo", command: "wf run", recover: true } },
+		{ on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", command: "wf run", recover: true } },
+	]) {
+		assert.throws(() => parse([entry]), (e) => isConfigError(e) && /run\.recover cannot be set beside run\.command/.test(e.message) && e.message.includes(PATH), entry.on.type);
+	}
+	const [off] = parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", command: "wf run", recover: false } }]);
+	assert.equal(off.run.recover, false, "false arms nothing, so it may sit beside a command");
+});

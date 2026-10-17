@@ -575,7 +575,7 @@ function parkedTriggers(path, kind) {
     JSON.stringify({
       triggers: [
         { on: { type: "label", any: ["pi"] }, run: { kind, flow: "fix", resume: true, awaitInput: true } },
-        { on: { type: "comment", phrase: "@pi" }, run: { kind, flow: "fix", resume: true, awaitInput: true, progress: true, statusComment: true, model: "claude-sonnet-5-5", provider: "anthropic", maxCostUsd: "1.25", instructions: "be brief" } },
+        { on: { type: "comment", phrase: "@pi" }, run: { kind, flow: "fix", resume: true, awaitInput: true, progress: true, statusComment: true, recover: true, model: "claude-sonnet-5-5", provider: "anthropic", maxCostUsd: "1.25", instructions: "be brief" } },
       ],
     }),
   );

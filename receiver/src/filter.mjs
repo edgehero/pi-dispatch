@@ -192,6 +192,8 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 		// Issue #644: the progress tool and the forge status comment, each present only when armed, awaitInput's rule.
 		...(resolved.progress === true ? { progress: true } : {}),
 		...(resolved.statusComment === true ? { statusComment: true } : {}),
+		// Issue #645: durable runs, present only when armed, the same rule.
+		...(resolved.recover === true ? { recover: true } : {}),
 		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
 		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level like the rest, never
@@ -244,6 +246,7 @@ function routeIssueLabel(subset, triggers) {
 		awaitInput: rule.awaitInput,
 		progress: rule.progress,
 		statusComment: rule.statusComment,
+		recover: rule.recover,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.issue?.number, title: subset.issue?.title, body: subset.issue?.body },
@@ -315,6 +318,7 @@ function routeComment(subset, triggers, knownFlows) {
 		awaitInput: triggers.comment.awaitInput,
 		progress: triggers.comment.progress,
 		statusComment: triggers.comment.statusComment,
+		recover: triggers.comment.recover,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		...(parkedReply && { parkedReply: true }),
@@ -418,6 +422,7 @@ function routePullRequest(subset, triggers, action) {
 			awaitInput: rule.awaitInput,
 			progress: rule.progress,
 			statusComment: rule.statusComment,
+			recover: rule.recover,
 			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },
 			...(isReview ? { review: { id: review.id, body: review.body, state: review.state, author_association: review.author_association } } : {}),
@@ -538,6 +543,7 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		awaitInput: rule.awaitInput,
 		progress: rule.progress,
 		statusComment: rule.statusComment,
+		recover: rule.recover,
 		replicas: rule.replicas,
 		matched: matchedFor(rule),
 		target: targetFor(),

@@ -150,6 +150,8 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 		// Issue #644: the progress tool and the forge status comment, each present only when armed, awaitInput's rule.
 		...(resolved.progress === true ? { progress: true } : {}),
 		...(resolved.statusComment === true ? { statusComment: true } : {}),
+		// Issue #645: durable runs, present only when armed, the same rule.
+		...(resolved.recover === true ? { recover: true } : {}),
 		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
 		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
@@ -226,6 +228,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		awaitInput: rule.awaitInput,
 		progress: rule.progress,
 		statusComment: rule.statusComment,
+		recover: rule.recover,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.target?.number, title: subset.target?.title, body: subset.target?.body },
@@ -281,6 +284,7 @@ function routeComment(subset, triggers, knownFlows, targetType) {
 		awaitInput: triggers.comment.awaitInput,
 		progress: triggers.comment.progress,
 		statusComment: triggers.comment.statusComment,
+		recover: triggers.comment.recover,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		...(parkedReply && { parkedReply: true }),
@@ -319,6 +323,7 @@ function routePullRequest(subset, triggers, action) {
 			awaitInput: rule.awaitInput,
 			progress: rule.progress,
 			statusComment: rule.statusComment,
+			recover: rule.recover,
 			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },
 			target: {
