@@ -63,6 +63,11 @@ export function parseRunnerEnv(env) {
 		// INT-CONTAINER-JOB-INPUTS (issue #644): the trigger's run.progress -- whether the job is offered the
 		// report_progress tool. `false` (the default) is byte-identical to every job before the feature.
 		reportProgress: parseReportProgress(env, "PI_REPORT_PROGRESS"),
+		// INT-CONTAINER-JOB-INPUTS (issue #645): the trigger's run.recover. `recover` runs the tools one at a time so
+		// a crash leaves at most one call whose effect is unknown; `recovering` says this attempt resumes a checkpoint
+		// transcript the worker staged as PI_SESSION_FILE after an infrastructure failure. Both `false` (the default)
+		// are byte-identical to every job before the feature.
+		...parseRecover(env),
 		retry: {
 			maxRetries: parsePositiveInt(env, "PI_RETRY_MAX", 2),
 			baseDelayMs: parsePositiveInt(env, "PI_RETRY_BASE_MS", 2000),
@@ -210,6 +215,39 @@ function parseReportProgress(env, name) {
 	if (raw === undefined || raw === "") return false;
 	if (raw === "1") return true;
 	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to offer report_progress, or leave it unset)`);
+}
+
+// env-internal PI_RECOVER, PI_RECOVERING: the worker's own per-job inputs (issue #645), "1" or absent. Strict for
+// parseAwaitInput's reason. PI_RECOVERING is set only on a recovery attempt, beside PI_RECOVER and a staged checkpoint.
+function parseRecoverFlag(env, name, meaning) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return false;
+	if (raw === "1") return true;
+	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to ${meaning}, or leave it unset)`);
+}
+
+/**
+ * The two recovery flags, and the combinations that cannot be a real job (issue #645). Each refusal is a worker
+ * regression or a hand-run container, and each would otherwise run a recovery that lies about what it resumed:
+ *   - PI_RECOVERING without PI_RECOVER: the interrupted attempt ran its tools in parallel, so more than one call may
+ *     have been under way when it died, and the "only the first orphan can have started" reading recovery rests on
+ *     does not hold for that transcript.
+ *   - PI_RECOVERING without PI_SESSION_FILE: there is no checkpoint to resume, and the recovery prompt would tell
+ *     the model the workspace matches a transcript it cannot see.
+ *   - PI_RECOVERING with PI_COMMAND: a command job dispatches an extension handler, not a model turn, so there is
+ *     no tool loop to resume and the recovery prompt would be fed to a command run as prose.
+ * PI_SESSION_FILE and PI_COMMAND are read raw here rather than through their parsers so this stays one pure step;
+ * their own parsers still validate their shapes. Each refusal carries the plain `config` reason, deliberately: a
+ * reason of its own would be a new word in the run record's reason enum, which the worker owns, for a fault that
+ * only a worker and image of different releases can produce.
+ */
+function parseRecover(env) {
+	const recover = parseRecoverFlag(env, "PI_RECOVER", "run the job's tools one at a time so a crash can be recovered");
+	const recovering = parseRecoverFlag(env, "PI_RECOVERING", "resume the staged checkpoint after a crash");
+	if (recovering && !recover) throw configError("PI_RECOVERING is set but PI_RECOVER is not: the interrupted attempt did not run its tools one at a time");
+	if (recovering && !env.PI_SESSION_FILE) throw configError("PI_RECOVERING is set but PI_SESSION_FILE is not: there is no checkpoint to resume");
+	if (recovering && env.PI_COMMAND) throw configError("PI_RECOVERING is set on a command job (PI_COMMAND): a command run has no tool loop to resume");
+	return { recover, recovering };
 }
 
 /**

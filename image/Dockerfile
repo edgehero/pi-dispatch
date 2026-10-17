@@ -356,7 +356,14 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # report_progress tool. An older runner handed the variable would ignore it: the job runs without the tool and the
 # trigger's phases never appear. The worker refuses that pairing pre-spend (its `reportProgress` capability row,
 # reason job-image-progress-unsupported). verify-image.sh checks the baked runner reads the variable.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress"
+# `recover` (issue #645) tells the worker this runner reads PI_RECOVER and PI_RECOVERING: with PI_RECOVER it runs the
+# job's tools one at a time, so a crash leaves at most one call whose effect is unknown, and with PI_RECOVERING it
+# answers the interrupted calls of the staged checkpoint (re-running only the builtin file tools and the job's own
+# report_progress) and continues with a fixed recovery prompt (image/runner/src/recover.mjs). An older runner handed
+# the variables would ignore both: the interrupted run would resume into pi's "No result provided" for a push or a
+# comment that may have happened, and the model would repeat it. The worker sends them only to an image declaring
+# this token. verify-image.sh checks the baked runner reads the variables and carries the recovery module.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover"
 
 USER pi
 WORKDIR /workspace

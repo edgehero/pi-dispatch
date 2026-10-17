@@ -387,6 +387,15 @@ PROBE
 					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "report_progress" /app/image/runner/src/report-progress.mjs 2>/dev/null \
 					|| fail "the image declares 'reportProgress' but its baked runner never reads PI_REPORT_PROGRESS or carries the report_progress tool"
 				;;
+			recover)
+				# Same evidence style as 'reportProgress': the baked runner must read both variables and carry the module
+				# that answers the interrupted calls. A runner that does not would resume a crashed run into pi's
+				# "No result provided" and let the model repeat a push or a comment that may already have happened.
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_RECOVERING" /app/image/runner/src/config.mjs 2>/dev/null \
+					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "toolExecution = \"sequential\"" /app/image/runner/run-job.mjs 2>/dev/null \
+					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "recoverSession" /app/image/runner/src/recover.mjs 2>/dev/null \
+					|| fail "the image declares 'recover' but its baked runner never reads PI_RECOVERING, never runs its tools one at a time, or carries no recovery module"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done

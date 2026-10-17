@@ -11,7 +11,7 @@ function pins(pin = "1.0.3") {
 	return {
 		root: { overrides: { "@earendil-works/pi-ai": pin, "@earendil-works/pi-coding-agent": pin, "@earendil-works/pi-tui": pin } },
 		lock: { packages: { "": {}, "node_modules/@earendil-works/pi-ai": entry, "node_modules/@earendil-works/pi-coding-agent": entry, "node_modules/@earendil-works/pi-tui": entry, "node_modules/undici": { version: "8.10.2" } } },
-		runner: { dependencies: { "@earendil-works/pi-coding-agent": pin, "@earendil-works/pi-mcp": pin } },
+		runner: { dependencies: { "@earendil-works/pi-agent-core": pin, "@earendil-works/pi-coding-agent": pin, "@earendil-works/pi-mcp": pin } },
 		worker: { dependencies: { "@earendil-works/pi-ai": pin } },
 		admin: { devDependencies: { "@earendil-works/pi-coding-agent": pin } },
 		adminIndex: `x\nexport const SUPPORTED_PI_VERSION = "${pin}";\n`,
@@ -47,6 +47,8 @@ test("a pi package the overrides do not pin, or pin elsewhere, is named", () => 
 
 test("each hand-written pin is held to the runner's", () => {
 	for (const [label, edit] of [
+		["image/runner/package.json's @earendil-works/pi-mcp", (p) => (p.runner.dependencies["@earendil-works/pi-mcp"] = "1.0.2")],
+		["image/runner/package.json's @earendil-works/pi-agent-core", (p) => (p.runner.dependencies["@earendil-works/pi-agent-core"] = "1.0.2")],
 		["worker/package.json's @earendil-works/pi-ai", (p) => (p.worker.dependencies["@earendil-works/pi-ai"] = "1.0.2")],
 		["admin/package.json's devDependency @earendil-works/pi-coding-agent", (p) => (p.admin.devDependencies["@earendil-works/pi-coding-agent"] = "1.0.2")],
 		["admin/src/index.ts's SUPPORTED_PI_VERSION", (p) => (p.adminIndex = 'export const SUPPORTED_PI_VERSION = "1.0.2";')],
