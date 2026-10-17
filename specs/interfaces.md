@@ -6251,7 +6251,14 @@ validator rather than a second copy of it.
   way: `rmSync` does not follow a symlink, measured, so it removes the link and leaves the target and its
   contents. `PI_SESSIONS_TTL_DAYS=0` is unchanged and still sweeps nothing at all, deliberately, because
   it is an explicit operator instruction and what makes a wedged key recoverable there is the stale-lock
-  takeover rather than this. **What the fallback widens is stated**: a transcript-less key directory was
+  takeover rather than this. **Only a key-shaped name is judged** (issue #645): a name that is not 32 lower-case
+  hex characters (`SESSION_KEY_PATTERN`, derived from `session-key.mjs`'s `KEY_LENGTH`) is never removed, whatever
+  its age or type. A name starting with `.` is skipped silently, since that is where the store's own siblings live
+  (the checkpoint store's default home is `<PI_SESSIONS_DIR>/.checkpoints`); any other non-key name is said once
+  per pass as `session_not_reaped {key, reason: "not-a-key"}`. Before it, an aged non-key directory reached the
+  directory-mtime fallback and was removed whole. A `PI_CHECKPOINTS_DIR` equal to the store, holding it, or below one of
+  its key-shaped names is refused at load, since the two sweeps would then delete each other's folders.
+  **What the fallback widens is stated**: a transcript-less key directory was
   previously never swept, so anything inside one now goes with it, including files an operator put there;
   and the lockless-sweep race below, which this contract used to state only for an EXPIRED key, now reaches
   any long-lived transcript-less key, where the cost is the whole key rather than a momentarily missing
@@ -6463,6 +6470,301 @@ validator rather than a second copy of it.
   key directory with no transcript whose own mtime has expired, the reaper sweeps it; given a fresh
   transcript in a long-untouched directory, it does not; given any error but ENOENT reading the transcript,
   it keeps the key and says so.
+
+## INT-WORKSPACE-CHECKPOINT-STORE
+
+**worker <-> host store. There is no container side: nothing mounts the store.**
+
+- **Status**: as of this change **nothing calls the checkpointer**. `makeWorkspaceCheckpointer`
+  (`worker/src/workspace-checkpoint.mjs`) is built and tested, `loadConfig` resolves `checkpointsDir`, and doctor
+  reports on the directory (`checkpointStoreChecks`, warnings at most), but no job primes, snapshots or restores. A
+  later change wires it into durable runs (issue #645). This entry is the contract that wiring must keep, written
+  from the code as it stands.
+- **Contract**:
+  ```
+  <root>                                   PI_CHECKPOINTS_DIR, else <PI_SESSIONS_DIR>/.checkpoints, else none; 0700
+  <root>/<ck>/                             one per run; 0700; ck = first 32 hex of sha256("checkpoint\0" + runId)
+  <root>/<ck>/repo.git/                    bare store, this run's only object database
+  <root>/<ck>/home/                        empty; HOME and XDG_CONFIG_HOME of every store git
+  <root>/<ck>/lock                         exclusive create, "<pid> <tag>\n"; absent when free; taken over when stale
+  <root>/<ck>/base-too-large               marker "1\n": primeBase judged the base over maxBaseBytes
+  <root>/<ck>/CURRENT                      "<seq>\n", the commit point; absent until the first checkpoint
+  <root>/<ck>/cp-<seq>/manifest.json       0600; the schema below
+  <root>/<ck>/cp-<seq>/transcript.jsonl    0600; bytes [0, offset) of the job's transcript
+  <name>.<12 hex>.incoming                 an in-flight write beside any of the files above
+  refs/pi-dispatch/base                    the base commit, fetched at depth 1 by primeBase
+  refs/pi-dispatch/checkpoint              the newest imported checkpoint commit, moved by every import
+  refs/pi-dispatch/cp/<seq>                one per imported checkpoint
+  ```
+  The module's surface is `primeBase`, `snapshot`, `writeTranscript`, `readManifest`, `restore`, `baseSourceUrl`,
+  `remove`, `sweep` and `usage`. **None of them throws**: each returns a result, `{ skipped: reason }` for "could
+  not, try later" and `{ refused: reason }` for "must not", because the caller has paused a paid container to call
+  it and a throw unwinding through that pause handling loses a job for a checkpoint that was optional. Every
+  filesystem call is `fs/promises` and every git an async spawn, because a synchronous walk of 200,000 files stalls
+  the worker's heartbeat and lock renewals long enough for BullMQ to call the job stalled.
+- **Location** (`checkpointsDirPath`, `worker/src/config.mjs`): `PI_CHECKPOINTS_DIR`, else
+  `<PI_SESSIONS_DIR>/.checkpoints`, else `null`, resolved to an absolute path so doctor and the worker name the same
+  directory. `null` means the feature has nowhere to write, and a caller says so rather than writing somewhere. The
+  default sits inside the session store and only there, because a checkpoint holds a job's workspace and is as
+  PII-bearing as a transcript, so it inherits the operator's choice of a private host-only directory rather than
+  getting a default of its own on a path nobody chose. The DOT name keeps it out of the session reaper, which skips
+  dot names silently (`INT-SESSION-STORE-CONTRACT`, the key-shaped-names rule). The checkpointer creates the root
+  with mode 0700 and re-applies 0700 best effort. At `primeBase` the root, the run directory and `home/` must each
+  `lstat` as a real directory, so a symlink or a file at any of those names fails it (`internal-error`); every later
+  call `lstat`s the run directory too, and one that is not a real directory is `not-primed` to `snapshot`,
+  `writeTranscript` and `restore` and `{ absent: true }` to `readManifest`. Only final components are judged, so
+  the root's ancestors may be links. Both stores name their directories with 32 lower-case hex characters, so a
+  layout where one store is, holds or sits below the other would have each sweeper judge the other's entries;
+  `loadConfig` refuses that layout (`checkpointStoreCollision`, `INT-SESSION-STORE-CONTRACT`'s row of the same day).
+- **The per-run folder name** is `checkpointKey(runId)`: the first 32 hex characters of
+  `sha256("checkpoint\0" + runId)`. A HASH and not `sanitizeJobId(runId)`, because sanitising maps `..` to `..`
+  (the dot is in its kept set), so a sanitised id is not a safe directory name; a hash cannot name `..`, a slash or
+  another run's directory, has a fixed width, and keeps the store's listing free of anything a job id carries. The
+  `checkpoint\0` prefix gives it its own hash domain beside the session store's keys.
+- **The manifest** (`cp-<seq>/manifest.json`, one line of JSON, mode 0600). Every field is an integer, a boolean, an
+  enum, hex, a host name or a short token, and none is ever a path or a file name; `readManifest` and `restore` both
+  re-validate it with `manifestProblem`, so a manifest is never trusted because of where it sits.
+  - `v`: integer, exactly `1`.
+  - `runId`: string, `sanitizeJobId(runId)` cut to 200 characters, matching `[A-Za-z0-9._-]{1,200}`. The run
+    directory is found by the hash, never by this field; `restore` refuses a manifest whose `runId` is not its own
+    argument sanitised the same way (`run-mismatch`), so one run's manifest is never applied in another's name.
+  - `seq`: integer, 1 to 999,999,999, equal to `CURRENT`.
+  - `attempt`: integer, 0 to 10,000, the caller's.
+  - `host`: string, `[A-Za-z0-9._-]{1,64}`: the injected or `os.hostname()` name, with every other character
+    replaced by `_`, cut to 64, `unknown` when that leaves nothing.
+  - `kind`: enum, `live`, `exit` or `salvage`.
+  - `quiesced`: enum, `frozen` or `dead`. The CALLER's statement of how the workspace was held still; the module
+    neither pauses a container nor can check the claim, and refuses any other value (`bad-args`).
+  - `at`: integer, the injected clock's milliseconds.
+  - `transcript`: exactly `{ bytes, sha256 }`, an integer and 64 lower-case hex.
+  - `workspace.commit`, `workspace.baseSha`: hex of the store's object format (40 or 64).
+  - `workspace.objectFormat`: enum, `sha1` or `sha256`.
+  - `workspace.partial`, `workspace.ignoredDropped`: booleans. `partial` means something was unreadable and is
+    missing from the checkpoint; `ignoredDropped` means the byte cap's ignore tier ran.
+  - `workspace.counts`: integers `files`, `bytes`, `newBytes`, and `skipped`, exactly five integers `unreadable`,
+    `special`, `dotgit`, `badName`, `tooLarge` (the walk's exclusions, below).
+  - `workspace.git`: `state`, enum `parsed`, `unreadable` or `none`; `detached`, boolean; `branch`, null or a branch
+    name (at most 200 characters, segments of `[A-Za-z0-9._-]` not starting with a dot, none ending `.lock` or
+    holding `..`); `tip`, null or 40 or 64 hex. `branch` is only ever the CALLER's branch, recorded when the agent's
+    `HEAD` is exactly `ref: refs/heads/<that branch>`; a name read from `HEAD` is compared, never recorded. `none` is
+    no `.git` at all; `unreadable` is a `.git` that is not a real directory (a `gitdir:` file, a link) or a `HEAD`
+    that is neither a sha nor a branch ref. The tip comes from the loose ref (each directory on the way `lstat`ed,
+    the ref opened `O_NOFOLLOW`), else `packed-refs` (at most 1 MiB). It is RECORDED ONLY: the agent's commits are
+    not in the store (every dotgit is excluded), so a restore reproduces the work tree and not its history.
+  - `piVersion`, `imageDigest`, `venue`, `provider`, `model`: null or a token matching
+    `^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$`. A malformed value is dropped to `null` and its field NAME logged
+    (`checkpoint_meta_dropped`): fail open and say which.
+
+  Every object is CLOSED, at every level: a missing or extra key is `field:keys` at the top, `field:transcript`,
+  `field:workspace`, `field:counts` (for `counts` and `counts.skipped`) or `field:git`. An open nested object is
+  where a path or a payload string would ride along unvalidated into everything that reads a manifest.
+- **The commit point**, in `snapshot`'s order. Free refusals and caps first: arguments, the run directory and the
+  store's `HEAD` exist (`not-primed`), no `base-too-large` marker, the lock, `seq` above `CURRENT` (`stale-seq`;
+  an unreadable or malformed `CURRENT` does not refuse here and is replaced by a successful snapshot), the store's
+  object format and the base sha in it, free disk, the store's total size, the walk (which refuses `over-file-cap`
+  the moment its count passes `maxFiles`), the byte cap and its ignore tier, then every kept PATH matched against
+  the job's secrets. Then the one expensive step: reading new bytes into `fast-import`, scanning them and every
+  symlink target for job secrets.
+  Then the stat cache is updated, the store repacked when `seq` is a multiple of `repackEvery`, and the commit point
+  runs: `cp-<seq>/` is reserved (its leftover `.incoming` files removed), the transcript is copied, then the manifest
+  is written, then `CURRENT`. Each is an exclusive-create temp, written, fsynced and renamed over its name; the
+  manifest's directory and the run directory are fsynced after their renames (the first also covers the
+  transcript's, which shares the directory). **The guarantee**: a failure or crash at any step before `CURRENT`'s
+  rename leaves `CURRENT` naming the previous complete checkpoint, or absent; after it, the new one, complete. A
+  `cp-<seq>/` or a `refs/pi-dispatch/cp/<seq>` that `CURRENT` does not name is an orphan: nothing reads it, a later
+  snapshot may reuse that `seq`, and it goes with the run. Pinned by injecting a failure at each of nine filesystem
+  steps; the store's OBJECTS are written by git with git's own durability settings, which this module does not
+  change.
+- **The git environment and flags.** Every store git goes through one function (`startGit`), so every argv is
+  `STORE_GIT_FLAGS` followed by the subcommand, and every environment is exactly `storeGitEnv`
+  (`worker/src/git-hardening.mjs`), BUILT FROM NOTHING rather than spread from `process.env`: `PATH` (the
+  worker's, with every empty and relative entry dropped, since both resolve against the cwd; `/usr/bin:/bin` when
+  nothing absolute is left), `HOME` and `XDG_CONFIG_HOME` (both `<ck>/home`), `GIT_DIR` (`<ck>/repo.git`), `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_ATTR_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`,
+  `GIT_NO_REPLACE_OBJECTS=1`, `GIT_PROTOCOL_FROM_USER=0`, `LC_ALL=C`. `GIT_WORK_TREE` is added for ONE subcommand,
+  `check-ignore`, and can reach no other; every git runs with the run directory as its cwd except `check-ignore`,
+  which runs in `<ck>/home`. `STORE_GIT_FLAGS` is `GIT_SAFE_CONFIG` (`core.hooksPath=/dev/null`,
+  `core.fsmonitor=false`) plus `protocol.ext.allow=never`, an empty `credential.helper`, `commit.gpgSign=false`,
+  `tag.gpgSign=false`, `gc.auto=0`, `maintenance.auto=false`, `core.protectNTFS=true`, `core.protectHFS=true`,
+  `transfer.fsckObjects=true`, `fetch.fsckObjects=true`, `core.untrackedCache=false`, then `--no-pager`. The
+  store's own config gains `core.logAllRefUpdates=false`, `gc.auto=0` and `uploadpack.allowAnySHA1InWant=true` at
+  init (the last so a restore's caller can fetch the base by sha; the store holds only this run's objects, so "any
+  sha" is no wider than the repository). The subcommands are `init --bare --object-format=<fmt>`, `fetch`,
+  `ls-tree`, `rev-parse`, `check-ignore --no-index --stdin -z`, `fast-import`, `repack -adq`, `diff-tree` and
+  `cat-file --batch`. `primeBase`'s `file://` fetch passes `-c protocol.file.allow=always`, since
+  `GIT_PROTOCOL_FROM_USER=0` turns the user-policy protocols off, and a restore caller fetching from
+  `baseSourceUrl` needs the same. Each spawn
+  carries a `gitTimeoutMs` deadline, combined with its operation's own, and dies by SIGKILL; its stderr is kept,
+  bounded at 64 KiB, for tests only and never logged, because it can name agent paths. A test spies on every spawn
+  of a full prime, snapshot (with the ignore tier and a repack) and restore and holds each to both. Doctor warns
+  below git 2.32, the first that reads `GIT_CONFIG_GLOBAL`.
+  **Two git commands touch the workspace, and both are bounded.** `primeBase` fetches the base from
+  `<workspace>/.git` BEFORE the container starts, when that repository is still the worker's own fresh clone (the
+  caller's obligation). `check-ignore`, in the byte cap's tier, reads only ignore files: `--no-index`, `GIT_DIR`
+  still the store, no attributes and no filters, and its cwd is `<ck>/home`, never the workspace: git resolves a work
+  tree it is not inside from `GIT_WORK_TREE` alone and takes the paths relative to its top (measured on git 2.39).
+  Exit 1 is "nothing ignored"; any other failure keeps nothing back, so the snapshot refuses `over-byte-cap` rather
+  than storing everything it was asked to cut. The tier logs `checkpoint_ignore_tier` with `outcome` `failed`,
+  `none-ignored` or `dropped`. A `.gitignore` that is a FIFO would hang it, so a walk that saw one skips the tier
+  (`over-byte-cap`).
+- **The fast-import stream**, one per snapshot, `git fast-import --quiet --done --force --date-format=raw`:
+  ```
+  feature done
+  commit refs/pi-dispatch/checkpoint
+  mark :1
+  committer pi-dispatch <checkpoint@pi-dispatch.invalid> <unix seconds> +0000
+  data <n>
+  pi-dispatch checkpoint <seq>
+  from <baseSha>
+  deleteall
+  M <100644 or 100755> <oid> "<path>"                a regular file served from the stat cache
+  M <100644 or 100755> inline "<path>"               a regular file read now, then: data <n> LF <bytes> LF
+  M 120000 inline "<path>"                           a symlink, then: data <n> LF <target> LF
+
+  reset refs/pi-dispatch/cp/<seq>
+  from :1
+
+  done
+  ```
+  Every path is C-quoted, always, with every byte outside printable ASCII as an octal escape, so no name can end a
+  command or change its meaning. A file is `100755` when any execute bit is set. Each checkpoint commit's parent is
+  the BASE, never the previous checkpoint, and its tree is the whole walk (`deleteall`, then every kept path), so
+  each checkpoint stands alone and its diff against the base is exactly a restore's change list. Empty directories
+  are not recorded. A cached `M` names only an oid that exists in the store: `primeBase` caches a file's oid only
+  when the BASE TREE holds it (a checkout that converted the file on its way out has a different on-disk id). A
+  killed or failed import removes `objects/pack/tmp_*` and `fast_import_crash_*` (which quotes recent commands, so
+  agent path names).
+- **The walk and the stat cache.** The workspace is walked in Node: every stat is `lstat`, every open
+  `O_NOFOLLOW | O_NONBLOCK`, names are read as bytes. Excluded and COUNTED, never silent: a dotgit segment at any
+  depth under git's HFS and NTFS folding (`isDotGitSegment`: `.GIT`, `git~1`, ignorable code points, trailing dots
+  and spaces, an NTFS stream suffix), so a nested repository's files are captured and its `.git` is not (`dotgit`);
+  a name `validSegment` refuses (empty, `.`, `..`, a control byte, invalid UTF-8, over 255 bytes), a path over 4096
+  bytes, or a directory too deep to descend (64 segments) (`badName`); a FIFO, socket or device (`special`); an
+  EACCES or EPERM anywhere, which also sets `partial`, and no mode is ever changed (`unreadable`); a regular file
+  over `maxFileBytes`, or a link target empty or over 4096 bytes (`tooLarge`). The deadline and the file cap are
+  checked per ENTRY, so one directory of 200,000 names can neither run past the deadline nor grow the walk's list
+  without bound. A file is read only after its descriptor's `fstat` shows a regular file with the walk's device and
+  inode and exactly the walked size arrives; on a host with `/proc/self/fd` (Linux), the descriptor's link must also
+  resolve inside the workspace's realpath followed by `/`, which catches a directory swapped for a link between the
+  `lstat` and the open (`O_NOFOLLOW` guards only the last component). Anything else, or an ENOENT or ENOTDIR during
+  the walk, abandons the whole snapshot (`tree-changed`) rather than recording a mix. Where `/proc/self/fd` does not
+  exist (macOS) only the caller's pause and the device and inode check stand: an unpaused agent racing a directory
+  swap there could have a host file read and stored, which is the residual the pause precondition covers. The stat cache is in memory, per run: a file whose device, inode, size, mtime and ctime (in
+  nanoseconds) all match is not re-read. Losing it on a restart costs only re-reading.
+- **The secret scan.** `snapshot` is handed the job's secret values; every non-empty one is matched, as bytes,
+  against every kept PATH (a directory name is a substring of every path under it, so segments are covered), every
+  regular file READ for the snapshot and every symlink target. A path match refuses before `fast-import` starts.
+  One match refuses the whole snapshot
+  (`job-secret-in-tree`): the import is killed and cleaned as above, `CURRENT` and the stat cache are unchanged, and
+  no object holding those bytes is left in the store. NOT scanned, by construction: a file served from the stat
+  cache (base content, or bytes an earlier snapshot of this run read and scanned; a write changes the ctime, so a
+  secret written into one is re-read), and the transcript copy. The match is literal, so an encoded secret passes.
+- **Caps and their defaults** (`DEFAULT_CHECKPOINT_LIMITS`, overridable only through the factory's `limits`; no
+  environment variable sets them yet): `maxBaseBytes` 2 GiB (the walked base at prime; over it, the marker is
+  written and every later snapshot reports `base-too-large`); `maxNewBytes` 512 MiB (bytes not served from the
+  cache; over it, the ignore tier, then `over-byte-cap`); `maxFiles` 200,000 (files and links walked, judged as the
+  walk counts them, before the ignore tier; exactly `maxFiles` passes, one more is `over-file-cap`); `maxFileBytes` 64 MiB per file (excluded and counted; also the largest blob a
+  restore accepts); `maxStoreBytes` 20 GiB for the whole root, every run together (`store-full`); free disk at least
+  twice `maxNewBytes` AND at least 5% of the volume, from `statfs` (`disk-low`, also when `statfs` fails);
+  `snapshotTimeoutMs` 60 s per prime, snapshot or restore; `gitTimeoutMs` 60 s per git spawn; `ttlMs` 7 days for the
+  sweep; `lockStaleMs` 1 hour; `repackEvery` 20. Fixed: a link target of 1 to 4096 bytes, a path of at most 4096
+  bytes and 64 segments, a segment of at most 255 bytes.
+- **Skip and refuse reasons**, every one the code returns.
+  `primeBase`: skipped `bad-args`, `locked`, `lock-failed`, `workspace-not-directory`, `tree-changed`, `timeout`,
+  `over-file-cap`, `base-too-large`, `store-init-failed`, `base-fetch-failed`, `internal-error`.
+  `snapshot`: skipped `bad-args`, `not-primed`, `base-too-large`, `locked`, `lock-failed`, `stale-seq`,
+  `store-unreadable`, `disk-low`, `store-full`, `workspace-not-directory`, `tree-changed`, `timeout`,
+  `over-file-cap`, `over-byte-cap`, `import-failed`, `internal-error`; refused `job-secret-in-tree`.
+  `writeTranscript`: skipped `bad-args`, `not-primed`, `transcript-failed`.
+  `readManifest`: `{ absent: true }` (no run directory, a run directory that is not a real directory, or no
+  `CURRENT`), or `{ invalid: true, reason }` with
+  `bad-args`, `current-unreadable`, `current-malformed`, `manifest-unreadable`, `manifest-json`, `seq-mismatch`,
+  `transcript-mismatch` (the copy's length or sha256 differs from the manifest's, because a resume feeds it to a
+  paid model), `internal-error`, or `field:<name>` where name is one of `not-object`, `keys`, `v`, `runId`, `seq`,
+  `attempt`, `host`, `kind`, `quiesced`, `at`, `transcript`, `workspace`, `objectFormat`, `commit`, `baseSha`,
+  `flags`, `counts`, `git`, `piVersion`, `imageDigest`, `venue`, `provider`, `model`.
+  `restore`: skipped `bad-args`, `not-primed`, `workspace-not-directory`, `locked`, `lock-failed`,
+  `store-unreadable`, `timeout`, `internal-error`; refused `bad-manifest`, `run-mismatch`, `base-mismatch`,
+  `tampered`, `path-through-symlink`, `case-collision`, `path-conflict`.
+  `remove`: skipped `bad-args`, `remove-failed`. `sweep`: skipped `sweep-failed`. `usage`: skipped `usage-failed`.
+  Logs carry names, counts and codes, never a path or a value.
+- **The lock** is exclusive create, as in `INT-SESSION-STORE-CONTRACT` (mirrored, not imported). `locked` means a
+  lock is held and is younger than `lockStaleMs` by the injected clock, or changed while it was being judged; any
+  other create failure is `lock-failed`. A stale lock is taken over by RENAMING it to a unique sibling
+  (`lock.stale.<12 hex>`), which is atomic, so of two processes judging one stale lock exactly one moves it; the
+  mover then checks that what it moved still holds the bytes it judged stale, and a lock a rival wrote in between is
+  put back with `link` (which never overwrites) instead of removed; only then is the moved file unlinked and a new
+  lock created with `wx`. A release moves the lock the same way (`lock.release.<12 hex>`) and unlinks it only when
+  it holds the releaser's own tag, else puts it back, which closes the session store's release-by-path residual.
+  Residuals: while a lock is moved aside it is absent, and a third process creating one in that instant wins, the
+  put-back `link` then failing and the moved lock being dropped; and a lock with a future mtime is never stale.
+- **Restore** writes the checkpoint `manifest` names into `intoWorkspace`, which must ALREADY hold a checkout of
+  `manifest.workspace.baseSha` (the caller fetches it from `baseSourceUrl(runId)`, the store's `file://` URL). Before
+  the lock it refuses a manifest of another run (`run-mismatch`) and a checkout whose commit is not `baseSha`
+  (`base-mismatch`). That commit is parsed from FILES (`<intoWorkspace>/.git` a real directory, `HEAD` opened
+  `O_NOFOLLOW` as a sha, or `ref: refs/heads/<name>` resolved through the loose ref or `packed-refs`), not by `git
+  rev-parse`, although the target is a fresh host-made clone where rev-parse would be acceptable: every store git
+  keeps `GIT_DIR` at the store, which the spawn bolt holds, and the parser already exists for the snapshot side.
+  Under the lock it reads `diff-tree -r -z --raw --no-abbrev
+  --no-renames <baseSha> <commit>` and the commit's full tree, and JUDGES THE WHOLE CHANGE LIST BEFORE TOUCHING THE
+  DISK. Refused: a diff that does not parse, a path `validPath` rejects (the snapshot's own rule, from
+  `checkpoint-paths.mjs`, so a dotgit path is tampering), a gitlink in the result, or a mode other than `100644`,
+  `100755` or `120000` (`tampered`); a written path under a path the result makes a symlink
+  (`path-through-symlink`); two paths, or ancestors, that collide under `foldCase` (`case-collision`). Then it
+  applies the changes: deletions and type changes first (a gitlink on the base side is skipped, since the snapshot
+  cannot record one; emptied parents are pruned), then regular files, then symlinks LAST, so no write of a restore
+  traverses a link it created. Every existing ancestor must `lstat` as a real directory (a link refuses
+  `path-through-symlink`, anything else `path-conflict`); missing ones are made one segment at a time, mode 0755. A
+  target that is a directory refuses `path-conflict`. Blobs come from one `cat-file --batch`, whose header must name
+  the requested oid as a blob of at most `maxFileBytes` (`tampered`); a link target must be 1 to 4096 bytes with no
+  NUL (`tampered`). Files open `O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW` (`ELOOP` refuses `path-through-symlink`)
+  and their mode is set explicitly to 0644 or 0755. The bytes written are the blob's bytes exactly; nothing runs a
+  filter, an eol conversion or a checkout. **A refusal found on disk can come after writes**, so the caller
+  discards a refused workspace and never resumes in it. As of this change `restore` treats `.pi/` and the root
+  context files like any other path; a later change resets them on restore (`DES-CHECKPOINT-WALKER-NOT-GIT-ADD`).
+- **Sweep and remove.** `sweep({ active })` judges only names that are 32 lower-case hex and `lstat` as a real
+  directory (a link with such a name is left, never followed); a run in `active` is kept. A run's age is its newest
+  `cp-<seq>/manifest.json` mtime, else the directory's own, and one older than `ttlMs` by the injected clock is
+  removed whole. It yields between entries. It takes no run lock, so a run missing from `active` can be removed
+  mid-operation: the caller passes every run it holds. `remove(runId)` deletes one run's directory and its
+  in-memory state; `usage()` is the root's total bytes.
+- **Nothing mounts the store into a container.** No path under the root is ever handed to a container runtime, no
+  key or run directory name crosses the boundary, and the checkpointer runs host-side only. What it reads from a job
+  is the job's workspace from the host side, and the transcript at a path the caller passes.
+- **Why**: this is the third agent-authored tree the host reads back, after `INT-OUTBOX-CONTRACT` and
+  `INT-SESSION-STORE-CONTRACT`, and the largest: every byte, name and file TYPE in it is chosen by the agent, and it
+  is read and later WRITTEN on the host, outside the container. So the store copies the session store's habits
+  (`lstat` first, temp and rename, a derived name, never mounted) and adds the two this tree needs: no git command
+  ever reads the agent's repository configuration, and a restore re-validates every path with the same functions
+  the snapshot used, so a store tampered with on disk is refused rather than trusted. The design and its rejected
+  alternatives are `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`.
+- **Traces to**: no requirement yet; the requirement arrives with issue #645's recovery change.
+  `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`, `INT-SESSION-STORE-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
+  `DES-CONTAINER-BACKEND-REGISTRY` (`pausable`).
+- **Acceptance** (`worker/test/workspace-checkpoint.test.mjs`, `checkpoint-paths.test.mjs`, against real git):
+  Given a snapshot restored into a fresh base clone, the tree matches byte for byte, links and execute bits
+  included, in sha1 and in sha256 repositories, and under `.gitattributes` `ident`, `eol=crlf` and
+  `working-tree-encoding`. Given a hostile `.git/config` (a clean filter, an fsmonitor, a gpg program, an include),
+  none of it runs through snapshot, the ignore tier or restore; given a `gitdir:` redirect, `alternates` or a
+  symlinked `objects/`, nothing of the target reaches the store. Given nested repositories, their files are
+  captured and every `.git`, `.GIT` and `git~1` is excluded and counted; control-character names, a FIFO, an
+  unreadable entry and an oversized file are each counted, the FIFO without hanging and the unreadable entry with
+  `partial` and its mode unchanged. Given a job secret in any file read or any link target, the snapshot is refused,
+  `CURRENT` still names the previous checkpoint, and no object, temp pack or crash report holds it. Given a failure
+  at any of nine steps of the commit point, the call reports `internal-error`, `CURRENT` names a complete valid
+  checkpoint, and the lock is released. Given a link and a file under it, a gitlink, a dotgit path, a case
+  collision or a symlinked ancestor already on disk, the restore refuses and writes nothing through the link. Given
+  a run directory or a link with a key's name, the sweep removes only stale real run directories outside `active`.
+  Given any spawn, its argv starts with `STORE_GIT_FLAGS` and its env is exactly `storeGitEnv`, plus
+  `GIT_WORK_TREE` for `check-ignore` alone; both are also pinned as LITERALS. Given a secret in a file name, a
+  directory name or a link target, the snapshot is refused; `[""]` matches nothing. Given an open that lands on a
+  link, a FIFO, another inode, a short read, or (with a proc directory) a path outside the workspace, the snapshot is
+  `tree-changed`. Given a tree deeper than 64 segments or a path over 4096 bytes, the excess is counted, never
+  stored. Given exactly `maxFiles` the snapshot passes and one more refuses; an unchanged big base is not new bytes;
+  a failing `check-ignore` refuses `over-byte-cap`. Given a manifest of another run or a checkout off `baseSha`, a
+  restore refuses; given a gitlink in the snapshot tree, the change judge refuses before anything is written, and a
+  gitlink on the base side is skipped. Given a stale lock a rival retook, or a lock no longer the releaser's, it is
+  put back rather than removed. Given a 30-day-old run directory with a day-old manifest, the sweep keeps it.
 
 ## INT-CONFIG-OVERLAY-CONTRACT
 
@@ -9081,3 +9383,5 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-16 | Issue #643, live run transcripts. **NEW `INT-LIVE-TRANSCRIPT-STREAM`**: `run:live:<sanitized job id>`, one Valkey stream per running job written by the worker alone: flat string fields `kind` (`user`, `assistant`, `tool-call`, `tool-result`, `compaction`, `note`, `reset`, `skipped`, `end`), `ts`, `text` (redacted, controls written out except real newlines and tabs, cut at 4,096 code points or 8,192 for `assistant`), `tool`, `error`, `truncated`, and `outcome` on `end` only (`completed`, `policy`, `failed`, `unknown`, from the exit code, so it can differ from the record); `MAXLEN ~ 2000`, `PEXPIRE` 7 days at an attempt's first write (which deletes a previous attempt's stream) and 24 h with the `end`; what is never in it; the readers' shapes and validation (`TRANSCRIPT_ID_RE`, at most 200 a read, never a blocking `XREAD`). The constants are exported from the new worker subpath `@edgehero/pi-dispatch/live-transcript`; the off switch is `PI_LIVE_TRANSCRIPTS` (unset, empty or `1` on, `0` off, anything else refuses to boot), in both `.env.example` files. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: `GET /api/transcript?id=`, operator only (a viewer 403 before a slot), `HEAD` 405, the hub's slots, re-judging and 2 MiB cut, `entry` events whose `id:` is the stream id, `Last-Event-ID` validated as a stream id, `done` with the outcome after the `end`; the entry markup an `<article class="t-entry">` with an escaped `<pre>`, `done` data `{outcome}`. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: every job now gets `/session` and `PI_SESSION_FILE` (an empty live file for a job with no resume transcript; no store key, never promoted, deleted with the job dir; no image change); `PI_AWAIT_INPUT` stays keyed on a resume transcript; the runner sketch's in-memory comment corrected. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the mounts bullet, and **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the `run.resume` bullet: the flag decides resuming, not the mount. **`INT-SESSION-STORE-CONTRACT` AMENDED**: the `PI_SESSION_FILE` line, and the worker's read of the per-job copy during the run, which changes no edge. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED in substance, checked**: a non-resume job's `session` still reads `disabled` (`mergeSession` maps the runner's new `absent` back for exactly a job with a live file and no resolved session), and the record gains no field; one cell of the session-reason table says where `disabled` now comes from. |
 | 2026-10-16 | Issue #644, run progress. **NEW `INT-RUN-PROGRESS-KEY`**: `run:progress:<sanitized job id>`, one JSON string per running job written by the worker alone with `SET ... PX` (`v: 1`; `turn`, `steps`, `failed`, `interrupted`, `running` (at most 8, newest last), `recent` (the last 20 closed steps, each `ok`, `error` or `interrupted` with the result's own `durationMs` or null), `phase` and `phases` (at most 32 names) and `note`, `prior`, `startedAt`, `updatedAt`, `ended`, `outcome` and the forge comment's `commentId`); written on change at most once a second and once at the end, 7 days from the attempt's first write and 24 h after the final one; capped at 16 KiB by dropping `recent`, then `phases` from the tail, then the note, with `phase.index` left for readers to bound; tool names held to `LIVE_TOOL_RE` else `?`; phase names and notes are model text, redacted, escaped and cut, operator only, and never in the record or the comment; a retry reads the old key's `commentId` before it replaces the key. Constants exported from the new worker subpath `@edgehero/pi-dispatch/run-progress`. The readers: `parseProgress` (strict, an unnamed field invalidates the key, `commentId` dropped), `readProgress`, `readProgressMany` (one `MGET`, at most 50). **NEW `INT-FORGE-STATUS-COMMENT-EDIT`**: each host's `postStatusComment` now returns `{ id }` (Azure `<thread>:<comment>` or `wi:<comment>`), a new `editStatusComment` per forge (GitHub and Forgejo `PATCH .../issues/comments/{id}`, GitLab `PUT .../notes/{note}` on the target's collection, Azure the thread comment on 7.1 or the work item comment on 7.1-preview.4), ids checked before any URL, failures carrying `status`; the same identity and token path as every worker comment; never-throwing wrappers mapping 403, 404 and 429 to a stop; the text's grammar (fixed words, the job id, integers, never a phase name, note or tool name); one post, an edit at most every 30 s and only on a change, 120 at most, a final edit bounded at 4 s; the id kept in the progress key so a retry edits the same comment; the receiver's two drops of an edit, pinned on all four forges, and the worker's phrase-collision skip. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's first CONDITIONAL key, `progress`, at the tail after `stalledRepick` (integers and closed keys only, zeros left out, `tools` under nine closed names plus `other`, absent when the reducer did not run, `{}` when it ran and saw nothing, advisory); the reason enum gains `report-progress-shadowed` and `job-image-progress-unsupported`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.progress` (all five kinds) and `run.statusComment` (forge kinds; `true` refused on cron), strict booleans, at job level only when `true`, both rows of `AUTHORED_NARROWING_FIELDS`, and both model-callable through the two trigger tools, judged by the loader's validator before the confirm. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the `report-progress-shadowed` row. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_REPORT_PROGRESS` in the env list, and the capability token list gains `reportProgress`; CORRECTED at the same time, the list and the count of job-feature tokens had missed `awaitInput` since #625 (now nine rows, `forgeMcp`, `awaitInput` and `reportProgress` the last three). **`INT-CONTAINER-JOB-INPUTS` AMENDED**: the live file is staged when either switch is on, and the tool adds no input. **`INT-CONSOLE-STATE-API` AMENDED**: `active` rows gain `progress` (`turn`, `steps`, `failed`, `running` with `tool` and `since`, `phase` with `index`, `count`, `done` and `total`, `ended`), integers and a checked tool name only, `version` unchanged. UNCHANGED, checked: `INT-LIVE-TRANSCRIPT-STREAM` (the stream is written exactly as before when transcripts are on; with them off and progress on no `run:live:` key is touched), `INT-SESSION-STORE-CONTRACT` (progress reads the per-job copy as the stream does and writes nothing back), **`INT-CONSOLE-EVENT-STREAM` AMENDED**: no new route or event, but the run page is now a live page (its Progress panel, `p-progress`, is a hub `panel` re-rendered by digest, its data read at most every 2 s), so `page=run` is accepted, and an operator's run tab holds two streams (the hub's and the transcript's) of its token's `PI_CONSOLE_MAX_STREAMS` (default 4). |
 | 2026-10-16 | Issue #644, review round 1. **`INT-RUN-PROGRESS-KEY` CORRECTED**: `updatedAt` is the time of the write that carried it, and while the attempt has not ended the snapshot is written again every 30 s (`PROGRESS_HEARTBEAT_MS`); a new Staleness clause (not ended and `updatedAt` older than 180 s, `PROGRESS_STALE_MS`, `progressStaleFor`: the worker stopped writing; readers say so and stop their running ages; an ended key never is); the first write is the empty turn 0 snapshot, replacing the previous attempt's final one at once; the sink waits at most 2 s for a status comment post in flight before the final write; the 5 s bound covers that wait and the final write, no longer the comment's final edit; `turn` leaves out an assistant message with `stopReason` `"error"`, and such a message or an `"aborted"` one opens no step; an id longer than 128 UTF-16 units (`PROGRESS_ID_MAX`) is ignored; the constants list gains `PROGRESS_ID_MAX` and `PROGRESS_HEARTBEAT_MS`; the fleet's projection gains `updatedAt`. **`INT-FORGE-STATUS-COMMENT-EDIT` CORRECTED**: the final edit carries the run record's outcome, not the exit's, through a new The final outcome clause (`makeStatusCommentRegistry`, settled by `recordRun`; "attempt ended, retrying" for an `InfraRetry` with attempts left; the exit's outcome only after a 30 s fallback, `STATUS_FALLBACK_MS`, for an attempt with no record); the text gains the retrying state; the final edit is made after an earlier `http-429` stop and tried once more after 1 s on a 429 or a failure inside its 4 s, while 403 and 404 still end it, and it is no longer inside the sink's 5 s; a post in flight at the end is waited for so a retry edits it; the phrase check renders the retry too; `status_comment_skipped` names its four reasons (`progress-off`, `no-transcript`, `no-forge-target`, `phrase-collision`). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `progress` gains `longestInterruptedMs`, `toolMs` is stated as a sum of step durations that parallel steps overlap, and a cancel that replaces a retry (`endCancelled`) keeps `progress`. **`INT-CONSOLE-STATE-API` AMENDED**: `active[].progress` gains `updatedAt`, within `version: 1`. Extended in the same round: **`INT-RUN-PROGRESS-KEY`** TTLs gain the writer's 7-day stop (every write but the final one, the heartbeat with it, `run_progress_expired`; no write with a TTL under 1 s) and the processor's own final write, outcome `unknown`, for a container whose stop did not take (`onLive`). **`INT-FORGE-STATUS-COMMENT-EDIT`** The final outcome clause: `STATUS_FALLBACK_MS` is 5 minutes (was 30 s); a late settle within `STATUS_LATE_SETTLE_MS` (10 minutes, at most `STATUS_LATE_SETTLE_MAX`, 256) makes one corrective edit (`correct`) when its text differs; an attempt with no commenter gets one bounded edit from `recordRun` off the key's `commentId`, skipped on a phrase collision or a key with no id; an operator's cancel of a delayed retry writes no record and reaches none of it. |
+| 2026-10-17 | Issue #645 (durable runs), the reaper's half. **`INT-SESSION-STORE-CONTRACT` AMENDED**, one sentence: the session reaper judges only KEY-SHAPED names, 32 lower-case hex characters (`SESSION_KEY_PATTERN`, derived from `session-key.mjs`'s `KEY_LENGTH` rather than restated). A name starting with a dot is skipped silently, since that is where the store's own siblings live, and the checkpoint store's default home is `<PI_SESSIONS_DIR>/.checkpoints`; any other non-key name is said once per pass as `session_not_reaped {key, reason: "not-a-key"}`, a verdict and not `session_reaper_skipped` (`OQ-007`'s naming rule). Before it, an aged non-key DIRECTORY reached the directory-mtime fallback added by #336 and was removed whole, so the session TTL would have deleted every workspace checkpoint, and an operator's own directory parked in the store with it. A stray FILE with a non-key name, which said `key-not-a-directory` since #375, now says `not-a-key`, because the name is judged before the type. Because both stores name entries by 32 hex characters, a layout where one is the other, or holds the other, or sits below a key-shaped name of the other, makes each sweep delete the other's folders: `loadConfig` refuses it (`checkpointStoreCollision`, a config error naming `PI_CHECKPOINTS_DIR` and `PI_SESSIONS_DIR`) and doctor reports it as a failure. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: `not-a-key` is a log reason, not a `SESSION_REASONS` token, and no record carries it. **`OQ-037` UNCHANGED, checked**. **Code evidence**: worker/src/session-store.mjs -> reapSessions; worker/src/session-key.mjs -> SESSION_KEY_PATTERN; worker/test/session-store.test.mjs -> the key-shaped-names reaper test. |
+| 2026-10-17 | Issue #645, part 1: the checkpoint store. **NEW `INT-WORKSPACE-CHECKPOINT-STORE`**, written from `worker/src/workspace-checkpoint.mjs`, `worker/src/checkpoint-paths.mjs` and `STORE_GIT_FLAGS`/`storeGitEnv` in `worker/src/git-hardening.mjs` as they stand: the location (`PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`, else none, from `checkpointsDirPath`); the per-run folder `sha256("checkpoint\0" + runId)` cut to 32 hex, and why not `sanitizeJobId`, which keeps `..`; the layout (`repo.git`, `home/`, `lock`, `base-too-large`, `CURRENT`, `cp-<seq>/manifest.json` and `transcript.jsonl`); the manifest's every field and type; the commit-point order (transcript, manifest, `CURRENT`, each temp, fsync, rename) and its guarantee that `CURRENT` always names a complete checkpoint; the closed git environment and the flags of every store git; the fast-import stream; the refs `refs/pi-dispatch/base`, `/checkpoint` and `/cp/<seq>`; the caps and their defaults; every skip and refuse reason; the restore's refusals (including `run-mismatch` and `base-mismatch`, the checkout's commit parsed from files); the sweep's rules; the lock's takeover and release by rename, verify, then unlink or put back; the secret scan over paths, read bytes and link targets, and what it does not cover; the Linux `/proc/self/fd` containment check and the residual where no proc directory exists. Every manifest object is closed at every level. `check-ignore` runs with the run's `home/` as its cwd, and `storeGitEnv` drops empty and relative `PATH` entries. One residual is written down for the wiring change rather than fixed here: `quiesced` is the caller's claim, which the module cannot verify. The two stores colliding is refused by `loadConfig` (`checkpointStoreCollision`, the row above). **As of this change nothing calls the checkpointer**; doctor reads the directory and warns at most, and a later change wires it into durable runs. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the store is never mounted, and no path, key or run directory name crosses the boundary. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: no input, mount or env var a container receives changed. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: nothing resumes from a checkpoint yet. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: its dot-name rule, landed earlier in #645, is what keeps the default location out of the session reaper. **Code evidence**: worker/src/workspace-checkpoint.mjs -> makeWorkspaceCheckpointer, checkpointKey, DEFAULT_CHECKPOINT_LIMITS; worker/src/checkpoint-paths.mjs; worker/src/git-hardening.mjs -> STORE_GIT_FLAGS, storeGitEnv; worker/src/config.mjs -> checkpointsDirPath; worker/test/workspace-checkpoint.test.mjs; worker/test/checkpoint-paths.test.mjs. |
