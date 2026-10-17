@@ -1017,3 +1017,70 @@ test("the time handed to onParsed is bounded as the stream's is: not negative, a
 	await pub.finish("completed");
 	assert.deepEqual(seen, [read, read, read - 1001, read + 3600 * 1000, read, read], "a forged time is the read time; a fraction is cut");
 });
+
+// --- durable runs (issue #645): end offsets and the checkpoint consumer ----------------------------------------------
+
+test("onParsed is handed each line's END offset, the byte past its newline; the final unterminated tail gets none (#645)", async () => {
+	const seen = [];
+	const { pub, append } = fakeSetup({ stream: false, onParsed: (parsed, _ts, flags) => seen.push([parsed.type, flags.end]) });
+	const a = header();
+	const b = msg({ role: "user", content: "x" });
+	append(a + b);
+	await pub.poll();
+	append(msg({ role: "assistant", content: [] }).trimEnd());
+	await pub.finish("completed");
+	assert.deepEqual(seen, [
+		["session", Buffer.byteLength(a)],
+		["message", Buffer.byteLength(a + b)],
+		["message", undefined],
+	]);
+});
+
+test("the checkpoint factory: a third consumer fed every line with its end, reset with the file, and tailing a recover job with both switches off (#645)", async () => {
+	const dir = tempDir("pi-live-ckpt-");
+	const file = join(dir, "current.jsonl");
+	writeFileSync(file, "");
+	assert.equal(makeLiveTranscriptOpener({ redis: null, transcripts: false, progress: false }), null, "no reader at all: no opener");
+	const opened = [];
+	const consumed = [];
+	let resets = 0;
+	const handle = { consume: (parsed, _ts, end, flags) => consumed.push([parsed.type, end, flags.prior]), reset: () => (resets += 1), stats: () => ({ written: 0 }), close: async () => ({}), exit: async () => ({}) };
+	const open = makeLiveTranscriptOpener({ redis: null, transcripts: false, progress: false, pollMs: 3_600_000, checkpoint: (args) => (opened.push(args), handle) });
+	assert.equal(typeof open, "function", "a checkpointer alone turns the opener on");
+	assert.equal(open({ file, jobId: "j1", redact: (t) => String(t), job: {} }), null, "no checkpoint args (a job not armed): nothing reads the file");
+	const pub = open({ file, jobId: "j1", redact: (t) => String(t), job: {}, checkpoint: { runId: "r1", attempt: 0 } });
+	assert.deepEqual(opened, [{ runId: "r1", attempt: 0, sessionFile: file }], "the tailed file is the checkpoint's transcript");
+	assert.equal(pub.checkpoint, handle, "handed back for runContainer to close");
+	pub.start();
+	const a = header();
+	appendFileSync(file, a);
+	await pub.poll();
+	writeFileSync(file, header("s2"));
+	await pub.poll();
+	await pub.finish("completed");
+	assert.deepEqual(consumed, [
+		["session", Buffer.byteLength(a), false],
+		["session", Buffer.byteLength(header("s2")), false],
+	]);
+	assert.equal(resets, 1);
+	assert.equal(pub.progressSummary(), null, "no progress sink with progress off");
+	assert.equal(pub.stats().published, 0, "nothing reached a stream");
+	assert.deepEqual(pub.stats().checkpoint, { written: 0 });
+	// A factory that throws costs the checkpoints only; with nothing else reading, no publisher at all.
+	const throwing = makeLiveTranscriptOpener({ redis: null, transcripts: false, progress: false, checkpoint: () => {
+		throw new Error("boom");
+	} });
+	assert.equal(throwing({ file, jobId: "j2", redact: (t) => String(t), checkpoint: { runId: "r2" } }), null);
+	// A consumer that throws starves neither the other consumer nor the stream.
+	const order = [];
+	const both = makeLiveTranscriptOpener({ redis: fakeRedis(), transcripts: true, progress: false, pollMs: 3_600_000, checkpoint: () => ({ ...handle, consume: () => {
+		order.push("ckpt");
+		throw new Error("boom");
+	} }) });
+	const file2 = join(dir, "two.jsonl");
+	writeFileSync(file2, header());
+	const pub2 = both({ file: file2, jobId: "j3", redact: (t) => String(t), checkpoint: { runId: "r3" } });
+	await pub2.finish("completed");
+	assert.deepEqual(order, ["ckpt"]);
+	assert.ok(pub2.stats().published >= 2, "the header note and the end reached the stream");
+});

@@ -342,3 +342,32 @@ test("a registry of ONLY a non-local venue builds and dispatches (#354)", async 
 	assert.deepEqual(await reg.observationPreflight({ id: "j" }), { ok: true });
 	assert.equal(reg.reaps.length, 1);
 });
+
+test("the freezer verbs (#645): routed per venue onto runContainer's call bag and the surface; a venue without them gets none", async () => {
+	const seen = [];
+	const verbs = (name) => ({ pause: async (n) => (seen.push([name, "pause", n]), { ok: true }), unpause: async (n) => (seen.push([name, "unpause", n]), { ok: true }) });
+	const bags = [];
+	const recording = (name, extra = {}) => ({ ...bundle(name), runContainer: async (args) => (bags.push([name, args]), { code: 0 }), ...extra });
+	const reg = makeBackendRegistry({ bundles: [recording("local", verbs("local")), recording("far", verbs("far")), recording("plain")], defaultName: "local" });
+	await reg.runContainer({ job: { id: "a", backend: "far" }, name: "n1" });
+	const [, farBag] = bags[0];
+	await farBag.pause("pi-job-a");
+	await farBag.unpause("pi-job-a");
+	assert.deepEqual(seen, [["far", "pause", "pi-job-a"], ["far", "unpause", "pi-job-a"]], "the SAME venue that runs the container freezes it");
+	const args = { job: { id: "b", backend: "plain" }, name: "n2" };
+	await reg.runContainer(args);
+	assert.equal(bags[1][1], args, "a venue without verbs: the call bag is exactly the caller's");
+	assert.equal(reg.pausable({ backend: "far" }), true);
+	assert.equal(reg.pausable({ backend: "plain" }), false);
+	assert.deepEqual(await reg.pause("x", { backend: "plain" }), { ok: false, reason: "not-pausable" });
+	assert.deepEqual(await reg.unpause("x", { backend: "plain" }), { ok: false, reason: "not-pausable" });
+	assert.deepEqual(await reg.pause("x", {}), { ok: true }, "the default venue's own");
+	assert.deepEqual(seen.at(-1), ["local", "pause", "x"]);
+	await assert.rejects(reg.pause("x", { backend: "nowhere" }), (e) => e.code === BACKEND_NOT_REGISTERED);
+});
+
+test("the freezer verbs come as a pair and as functions, refused at boot otherwise (#645)", () => {
+	assert.throws(() => makeBackendRegistry({ bundles: [{ ...bundle("local"), pause: async () => ({ ok: true }) }], defaultName: "local" }), /pause without its pair/);
+	assert.throws(() => makeBackendRegistry({ bundles: [{ ...bundle("local"), unpause: async () => ({ ok: true }) }], defaultName: "local" }), /unpause without its pair/);
+	assert.throws(() => makeBackendRegistry({ bundles: [{ ...bundle("local"), pause: "yes", unpause: async () => ({ ok: true }) }], defaultName: "local" }), /has a pause that is not a function/);
+});

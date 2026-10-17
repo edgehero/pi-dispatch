@@ -263,7 +263,7 @@ export const outcomeOf = (outcome) => (LIVE_OUTCOMES.includes(outcome) ? outcome
  * ON A RETRY the job id, and so the key, is the same. The first write of an attempt deletes what an earlier attempt
  * left, in the same transaction, so a stream holds one attempt and its `end` is that attempt's.
  *
- * RUN PROGRESS (issue #644). `onParsed(parsed, ts, { prior, replay })` is handed every parsed line, before and apart
+ * RUN PROGRESS (issue #644). `onParsed(parsed, ts, { prior, replay, end })` is handed every parsed line, before and apart
  * from the stream mapping, and never once the publisher is closed; a throw from it is swallowed. `prior` marks a line
  * that ended at or before the BASELINE, the file's size when the first read began (`lstat`; a missing file or anything
  * but a regular file is 0): on a resume those are the earlier runs' lines. After a reset there is no prior any more, and
@@ -376,8 +376,8 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 		}
 	};
 
-	/** One complete line, `end` the file position just past it (where its newline was). */
-	const publishLine = (bytes, end) => {
+	/** One complete line, `end` the file position just past it (where its newline was); `complete` false for the final unterminated tail. */
+	const publishLine = (bytes, end, complete = true) => {
 		if (closed) return;
 		const ts = now();
 		let parsed;
@@ -395,7 +395,10 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 			// reducer keeps this as a step's `since` (the key's `running`, and `longestInterruptedMs` in the record).
 			const parsedTs = entryTs >= 0 && entryTs <= ts + TS_FUTURE_MS ? Math.trunc(entryTs) : ts;
 			try {
-				onParsed(parsed, parsedTs, replayUntil === null ? { prior: end <= baseline } : { prior: false, replay: end <= replayUntil });
+				// `end` (issue #645): the file position just past this line's newline, so a checkpoint consumer knows a
+				// complete-line boundary. Absent for the final read's unterminated tail, which ends at no newline.
+				const endOf = complete ? { end } : {};
+				onParsed(parsed, parsedTs, replayUntil === null ? { prior: end <= baseline, ...endOf } : { prior: false, replay: end <= replayUntil, ...endOf });
 			} catch {}
 		}
 		if (!stream) return;
@@ -540,7 +543,7 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 			if (final && atEnd && held.length > 0 && !skipping) {
 				const line = held;
 				held = Buffer.alloc(0);
-				publishLine(line, offset);
+				publishLine(line, offset, false);
 			}
 		} catch {
 			counts.errors += 1;
@@ -649,8 +652,8 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 
 /**
  * The opener `runContainer` is handed (start.mjs builds it when `PI_LIVE_TRANSCRIPTS` or `PI_RUN_PROGRESS` is on and a
- * Valkey client exists): `({ file, jobId, redact, job }) => { start, finish, progressSummary }`. A seam, so a test wires
- * a fake publisher or none.
+ * Valkey client exists, and since issue #645 whenever a run checkpointer exists): `({ file, jobId, redact, job,
+ * checkpoint }) => { start, finish, progressSummary, checkpoint } | null`. A seam, so a test wires a fake publisher or none.
  *
  *   - `transcripts` writes the stream (#643); `progress` builds the run progress sink (#644, run-progress.mjs) and hands
  *     it every parsed line. With transcripts off and progress on, the file is tailed and nothing reaches the stream.
@@ -658,19 +661,38 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
  *     (status-comment.mjs), asked only for a job whose trigger set `run.statusComment` and only with progress on; it
  *     may return null (start.mjs does for a job with no forge to post to). `job.progress === true` makes the sink read
  *     `report_progress` phases.
+ *   - `checkpoint` (issue #645) is the run checkpointer's `open` (run-checkpoint.mjs). Called per attempt, only when
+ *     runContainer hands open args (`checkpoint`: a `run.recover` job the processor armed), with `sessionFile` set to
+ *     the tailed file. Its handle is the THIRD consumer of every parsed line, beside the progress sink, and is returned
+ *     as `checkpoint` for runContainer to close and hand back. It turns the tailing on by itself: a recover job with
+ *     both switches off still has its file tailed (`stream: false`, no progress sink), because the live checkpoints
+ *     are driven by its lines. A factory that throws costs the checkpoints, never the stream or the run.
  *   - `finish(outcome)` finishes the stream first (its own bound, `FINISH_TIMEOUT_MS`, which also closes the publisher,
  *     so no line is handed to the sink after it), then the sink (a wait for a comment post in flight and the final
  *     write, its own bound of 5 s). Worst case at a run's end: 3 s plus 5 s, and the 5 s only when Valkey or the forge
- *     hangs. The comment's final edit is not in it: start.mjs makes that one from the run record.
+ *     hangs. The comment's final edit is not in it: start.mjs makes that one from the run record. The checkpoint handle
+ *     is NOT closed here: runContainer closes it, so it can stop new live checkpoints before this final read.
  *   - `progressSummary()` is the record's `progress` (run-history.mjs `recordedProgress`), or null with progress off.
  */
-export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Date.now(), pollMs = 500, transcripts = true, progress = false, makeCommenter = null, progressWriter = {} } = {}) {
-	if (!redis || (!transcripts && !progress)) return null;
-	return ({ file, jobId, redact, job = null }) => {
+export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Date.now(), pollMs = 500, transcripts = true, progress = false, makeCommenter = null, progressWriter = {}, checkpoint = null } = {}) {
+	const streamOn = Boolean(redis) && transcripts;
+	const progressOn = Boolean(redis) && progress;
+	if (!streamOn && !progressOn && typeof checkpoint !== "function") return null;
+	return ({ file, jobId, redact, job = null, checkpoint: checkpointArgs = null }) => {
+		let handle = null;
+		if (typeof checkpoint === "function" && checkpointArgs && typeof checkpointArgs === "object") {
+			try {
+				handle = checkpoint({ ...checkpointArgs, sessionFile: file }) ?? null;
+			} catch {
+				handle = null;
+			}
+		}
+		// Nothing would read the file: no stream, no progress, no checkpoints. runContainer runs the job as before.
+		if (!streamOn && !progressOn && handle === null) return null;
 		// A trigger that asked for a status comment on a deployment with progress off gets none: said once per job, never
 		// a silent no-op (the comment is driven by progress, so there is nothing to post).
-		if (!progress && job?.statusComment === true) log("status_comment_skipped", { jobId: sanitizeJobId(jobId), reason: "progress-off" });
-		const sink = progress
+		if (!progressOn && job?.statusComment === true) log("status_comment_skipped", { jobId: sanitizeJobId(jobId), reason: "progress-off" });
+		const sink = progressOn
 			? makeProgressSink({
 					redis,
 					jobId,
@@ -682,11 +704,34 @@ export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Da
 					makeCommenter: typeof makeCommenter === "function" && job?.statusComment === true ? (opts) => makeCommenter({ job, ...opts }) : null,
 				})
 			: null;
-		const live = makeLiveTranscript({ file, jobId, redis, redact, now, pollMs, log, stream: transcripts, ...(sink ? { onParsed: sink.consume, onReset: sink.reset } : {}) });
+		// Each consumer guarded on its own, so a throw in one never starves the other of the line.
+		const consumers = handle
+			? {
+					onParsed: (parsed, ts, flags) => {
+						try {
+							sink?.consume(parsed, ts, flags);
+						} catch {}
+						try {
+							handle.consume(parsed, ts, flags?.end, flags);
+						} catch {}
+					},
+					onReset: () => {
+						try {
+							sink?.reset();
+						} catch {}
+						try {
+							handle.reset();
+						} catch {}
+					},
+				}
+			: sink
+				? { onParsed: sink.consume, onReset: sink.reset }
+				: {};
+		const live = makeLiveTranscript({ file, jobId, redis, redact, now, pollMs, log, stream: streamOn, ...consumers });
 		let finishing = null;
 		return {
 			poll: live.poll,
-			stats: () => ({ ...live.stats(), ...(sink ? { progress: sink.stats() } : {}) }),
+			stats: () => ({ ...live.stats(), ...(sink ? { progress: sink.stats() } : {}), ...(handle ? { checkpoint: handle.stats() } : {}) }),
 			start() {
 				live.start();
 				try {
@@ -705,6 +750,7 @@ export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Da
 				return finishing;
 			},
 			progressSummary: () => (sink ? sink.summary() : null),
+			checkpoint: handle,
 		};
 	};
 }

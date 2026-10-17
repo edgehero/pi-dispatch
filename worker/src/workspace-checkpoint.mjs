@@ -71,6 +71,12 @@ export const DEFAULT_CHECKPOINT_LIMITS = Object.freeze({
 	maxFiles: 200_000,
 	maxFileBytes: 64 * MiB,
 	maxStoreBytes: 20 * GiB,
+	// The transcript copy's cap, judged against the caller's offset BEFORE a byte is copied. Without it a
+	// sparse session file (`truncate -s 100G`, one line appended) makes the copy write 100 GB of zeros onto
+	// the host while the paid container is frozen. 256 MiB is far above any real pi session (a long run's
+	// JSONL is tens of MiB; a model's context window bounds what one turn can add), equal to half the byte
+	// cap, and with at most two checkpoints kept per run it bounds one run's transcripts to 512 MiB.
+	maxTranscriptBytes: 256 * MiB,
 	snapshotTimeoutMs: 60_000,
 	gitTimeoutMs: 60_000,
 	ttlMs: 7 * 24 * 3600 * 1000,
@@ -874,16 +880,16 @@ export function makeWorkspaceCheckpointer({
 	}
 
 	/**
-	 * Free space must cover twice the byte cap AND 5% of the volume: a checkpoint that fills the disk takes
+	 * Free space must cover twice the byte cap plus the transcript about to be copied, AND 5% of the volume: a checkpoint that fills the disk takes
 	 * the worker's logs, the queue's AOF and every other job's workspace down with it, which is a far
 	 * worse outcome than one checkpoint skipped.
 	 */
-	async function diskOk() {
+	async function diskOk(transcriptBytes = 0) {
 		try {
 			const s = await statfs(storeDir);
 			const free = Number(s.bavail) * Number(s.bsize);
 			const total = Number(s.blocks) * Number(s.bsize);
-			return free >= 2 * L.maxNewBytes && free >= 0.05 * total;
+			return free >= 2 * L.maxNewBytes + transcriptBytes && free >= 0.05 * total;
 		} catch {
 			return false;
 		}
@@ -1010,7 +1016,7 @@ export function makeWorkspaceCheckpointer({
 	 * fsynced and renamed into place. The offset is the caller's: the transcript keeps growing while the
 	 * container runs, and the checkpoint must describe the bytes that match the workspace, not later ones.
 	 */
-	async function copyTranscript(dir, srcFile, offset) {
+	async function copyTranscript(dir, srcFile, offset, signal) {
 		const tmp = join(dir, `transcript.jsonl.${rand()}.incoming`);
 		const hash = createHash("sha256");
 		let bytes = 0;
@@ -1023,6 +1029,9 @@ export function makeWorkspaceCheckpointer({
 						if (!(await src.stat()).isFile()) throw Object.assign(new Error("transcript not a file"), { code: "ENOTREG" });
 						const chunk = Buffer.allocUnsafe(MiB);
 						while (bytes < offset) {
+							// The snapshot's deadline covers the copy too: bounded 1 MiB chunks, the signal checked
+							// before each, so a slow or huge source cannot hold the container frozen past it.
+							if (signal?.aborted) throw Object.assign(new Error("transcript copy timed out"), { code: "ETIMEDOUT" });
 							const { bytesRead } = await src.read(chunk, 0, Math.min(chunk.length, offset - bytes), bytes);
 							if (bytesRead === 0) break;
 							hash.update(chunk.subarray(0, bytesRead));
@@ -1052,8 +1061,15 @@ export function makeWorkspaceCheckpointer({
 			if (typeof runId !== "string" || !runId || !isInt(seq, 1, 999_999_999) || !isInt(offset)) return { skipped: "bad-args" };
 			const paths = runPaths(runId);
 			if (!(await lstatOrNull(paths.run))?.isDirectory()) return { skipped: "not-primed" };
+			if (offset > L.maxTranscriptBytes) return { skipped: "transcript-too-large" };
+			const signal = AbortSignal.timeout(L.snapshotTimeoutMs);
 			const dir = await reserveCp(paths, seq);
-			return { ok: true, ...(await copyTranscript(dir, srcFile, offset)) };
+			try {
+				return { ok: true, ...(await copyTranscript(dir, srcFile, offset, signal)) };
+			} catch (err) {
+				if (signal.aborted) return { skipped: "timeout" };
+				throw err;
+			}
 		} catch (err) {
 			log("checkpoint_failed", { phase: "transcript", code: err?.code ?? "internal" });
 			return { skipped: "transcript-failed" };
@@ -1102,11 +1118,15 @@ export function makeWorkspaceCheckpointer({
 		const signal = AbortSignal.timeout(L.snapshotTimeoutMs);
 		const cur = await readCurrent(paths);
 		if (cur.seq && seq <= cur.seq) return { skipped: "stale-seq" };
+		// Judged on the caller's OFFSET, before anything is read or written: the offset is the number of bytes
+		// the copy would write, whatever the source's apparent size (a sparse file reads as zeros).
+		const trOffset = isInt(transcript?.offset) ? transcript.offset : 0;
+		if (trOffset > L.maxTranscriptBytes) return { skipped: "transcript-too-large" };
 		const state = runState(runId);
 		const objectFormat = await storeObjectFormat(paths, state, signal);
 		if (!objectFormat || !HEX[objectFormat].test(baseSha)) return { skipped: "store-unreadable" };
-		if (!(await diskOk())) return { skipped: "disk-low" };
-		if ((await storeBytes()) > L.maxStoreBytes) return { skipped: "store-full" };
+		if (!(await diskOk(trOffset))) return { skipped: "disk-low" };
+		if ((await storeBytes()) + trOffset > L.maxStoreBytes) return { skipped: "store-full" };
 
 		const walk = await walkTree(workspace, signal);
 		if (walk.skipped) return { skipped: walk.skipped };
@@ -1151,7 +1171,13 @@ export function makeWorkspaceCheckpointer({
 
 		// ── the commit point ──
 		const dir = await reserveCp(paths, seq);
-		const tr = await copyTranscript(dir, transcript?.srcFile ?? null, isInt(transcript?.offset) ? transcript.offset : 0);
+		let tr;
+		try {
+			tr = await copyTranscript(dir, transcript?.srcFile ?? null, trOffset, signal);
+		} catch (err) {
+			if (signal.aborted) return { skipped: "timeout" };
+			throw err;
+		}
 		const manifest = {
 			v: 1,
 			runId: sanitizeJobId(runId).slice(0, 200),
@@ -1180,7 +1206,45 @@ export function makeWorkspaceCheckpointer({
 		await atomicWrite(dir, "manifest.json", `${JSON.stringify(manifest)}\n`);
 		await atomicWrite(paths.run, "CURRENT", `${seq}\n`);
 		log("checkpoint_snapshot", { seq, files: counts.files, newBytes: counts.newBytes, partial: counts.partial, ignoredDropped });
+		await pruneOld(paths, seq, cur.seq ?? null);
 		return { ok: true, seq, manifest };
+	}
+
+	/**
+	 * Keep the checkpoint `CURRENT` now names and the one it replaced; remove every other `cp-<seq>/` and
+	 * every other `refs/pi-dispatch/cp/<seq>` (so the next repack can drop their objects). Without it every
+	 * checkpoint's transcript copy stays forever, and a long run's store grows by one transcript per
+	 * snapshot until `store-full` stops checkpointing altogether.
+	 *
+	 * CRASH-SAFE BY ORDER: it runs only after `CURRENT`'s rename and directory fsync, and it never touches
+	 * the two it keeps, so a crash anywhere in here leaves `CURRENT` naming a complete checkpoint; what is
+	 * left over is pruned by the next snapshot. The previous one is kept as the fallback an operator (or a
+	 * later recovery change) can reach when the newest turns out to be the bad one. A failure here is
+	 * logged and does not fail the snapshot, which has already committed. It runs under the snapshot's lock.
+	 */
+	async function pruneOld(paths, seq, previous) {
+		const keep = new Set([seq, previous].filter((n) => n !== null));
+		try {
+			const refs = await runGit(paths, ["for-each-ref", "--format=%(refname)", "refs/pi-dispatch/cp/"]);
+			const doomed = refs.stdout
+				.toString("latin1")
+				.split("\n")
+				.filter((r) => /^refs\/pi-dispatch\/cp\/[1-9][0-9]*$/.test(r) && !keep.has(Number(r.slice("refs/pi-dispatch/cp/".length))));
+			if (doomed.length) {
+				const del = await runGit(paths, ["update-ref", "--stdin"], { input: doomed.map((r) => `delete ${r}\n`).join("") });
+				if (del.code !== 0) throw Object.assign(new Error("update-ref failed"), { code: "EGIT" });
+			}
+			let removed = 0;
+			for (const n of await fs.readdir(paths.run)) {
+				const m = /^cp-([1-9][0-9]*)$/.exec(n);
+				if (!m || keep.has(Number(m[1]))) continue;
+				await fs.rm(join(paths.run, n), { recursive: true, force: true });
+				removed++;
+			}
+			if (removed || doomed.length) log("checkpoint_pruned", { removed, refs: doomed.length });
+		} catch (err) {
+			log("checkpoint_prune_failed", { code: err?.code ?? "internal" });
+		}
 	}
 
 	// ── readManifest ────────────────────────────────────────────────────────────────────────────────────

@@ -68,6 +68,12 @@ export const OPTIONAL_PREFLIGHT_DEFAULTS = Object.freeze({
 	jobUserPreflight: () => ({ user: null, home: null }),
 });
 
+/** The freezer verbs a bundle MAY carry (issue #645, the `pausable` row), always as a pair. */
+export const PAUSE_VERBS = Object.freeze(["pause", "unpause"]);
+
+/** Whether a (validated) bundle carries both freezer verbs. */
+const isPausable = (bundle) => typeof bundle?.pause === "function" && typeof bundle?.unpause === "function";
+
 /** The venue's own member when it carries one, else the absent answer, as a promise either way. */
 async function optionalPreflight(bundle, fn, ...args) {
 	return typeof bundle[fn] === "function" ? bundle[fn](...args) : OPTIONAL_PREFLIGHT_DEFAULTS[fn]();
@@ -159,6 +165,13 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		for (const fn of Object.keys(OPTIONAL_PREFLIGHT_DEFAULTS)) {
 			if (bundle[fn] !== undefined && typeof bundle[fn] !== "function") throw new Error(`backend registry: ${JSON.stringify(bundle.name)} has a ${fn} that is not a function`);
 		}
+		// The freezer verbs (issue #645) are optional too, but only as a PAIR: a venue that could pause and not unpause
+		// would freeze a paid job for good at its first live checkpoint. Refused at boot, like a typo'd preflight.
+		const verbs = PAUSE_VERBS.filter((fn) => bundle[fn] !== undefined);
+		for (const fn of verbs) {
+			if (typeof bundle[fn] !== "function") throw new Error(`backend registry: ${JSON.stringify(bundle.name)} has a ${fn} that is not a function`);
+		}
+		if (verbs.length === 1) throw new Error(`backend registry: ${JSON.stringify(bundle.name)} carries ${verbs[0]} without its pair (pause and unpause come together, or neither)`);
 		byName.set(bundle.name, bundle);
 	}
 	if (byName.size === 0) throw new Error("backend registry: at least one backend must be registered");
@@ -215,7 +228,13 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		 * the abort path had to change: the container's NAME is not enough to find the runtime that holds
 		 * it once there is more than one, and `index.mjs` had only the name.
 		 */
-		runContainer: (args) => backendFor(args?.job).runContainer(args),
+		// The venue's freezer verbs ride on the call bag (issue #645), from the SAME bundle that runs the container, so a
+		// live checkpoint can never freeze a job through another venue's CLI. A venue without them gets none, and its
+		// container gets no live checkpoints; the call bag is then exactly the caller's.
+		runContainer: (args) => {
+			const bundle = backendFor(args?.job);
+			return bundle.runContainer(isPausable(bundle) ? { ...args, pause: bundle.pause, unpause: bundle.unpause } : args);
+		},
 		imagePreflight: (job) => backendFor(job).imagePreflight(job),
 		egressPreflight: (job) => backendFor(job).egressPreflight(job),
 		// The two OPTIONAL per-venue preflights (issue #354), dispatched through the same resolution as every
@@ -224,6 +243,18 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		observationPreflight: (job) => optionalPreflight(backendFor(job), "observationPreflight", job),
 		jobUserPreflight: (job, opts) => optionalPreflight(backendFor(job), "jobUserPreflight", job, opts),
 		stopContainer: (name, job) => backendFor(job).stopContainer(name, job),
+		// Issue #645: whether this job's venue can freeze it, and the verbs themselves, dispatched like every per-job
+		// function. A venue without verbs answers `{ ok: false, reason: "not-pausable" }`, never a throw: the caller is a
+		// best-effort checkpoint beside a running job.
+		pausable: (job) => isPausable(backendFor(job)),
+		pause: async (name, job) => {
+			const bundle = backendFor(job);
+			return isPausable(bundle) ? bundle.pause(name) : { ok: false, reason: "not-pausable" };
+		},
+		unpause: async (name, job) => {
+			const bundle = backendFor(job);
+			return isPausable(bundle) ? bundle.unpause(name) : { ok: false, reason: "not-pausable" };
+		},
 		// ON THE SURFACE, not reached for through `backendFor` by a call site. Both are per-job backend
 		// FACTS rather than functions, and an earlier draft left them off: the wiring rebuilt
 		// `neverStartedExits` at the call site and `index.mjs` imported `jobContainerName` from the local

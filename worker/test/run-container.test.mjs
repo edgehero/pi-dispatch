@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { makeLiveTranscriptOpener } from "../src/live-transcript.mjs";
+import { makeRunCheckpointer } from "../src/run-checkpoint.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // run-container imports env-allowlist -> @earendil-works/pi-ai, so this skips below the node floor
 // and runs in CI (PI_DISPATCH_REQUIRE_WORKER_TESTS=1 makes a skip a hard failure).
@@ -249,6 +254,32 @@ test("run.awaitInput reaches the container as PI_AWAIT_INPUT=1 only beside a sta
 	// No transcript staged (a fork, or a store that degraded): the runner would refuse the flag, so it is not armed.
 	assert.ok(!(await withSession({ ...JOB, awaitInput: true }, PREPARED)).some((a) => String(a).startsWith("PI_AWAIT_INPUT")));
 	assert.ok(!(await withSession(JOB, { ...PREPARED, session })).some((a) => String(a).startsWith("PI_AWAIT_INPUT")));
+});
+
+test("the recover and recovering call options reach the container as PI_RECOVER=1 and PI_RECOVERING=1 only when true (issue #645)", { skip }, async () => {
+	const argv = async (job, opts) => {
+		const rec = {};
+		// `stageLive: null`: PREPARED's job dir is a made-up host path, and an armed job would stage its transcript there.
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, packagePaths: STAGED, spawnFn: fakeSpawn(rec), stageLive: null });
+		await runContainer({ job, prepared: PREPARED, name: "j1", signal: new AbortController().signal, ...opts });
+		return rec.args.map(String);
+	};
+	const has = (args, name) => args.some((a) => a.startsWith(`${name}=`));
+	const both = await argv(JOB, { recover: true, recovering: true });
+	assert.ok(both.includes("PI_RECOVER=1"));
+	assert.ok(both.includes("PI_RECOVERING=1"));
+	const armedOnly = await argv(JOB, { recover: true });
+	assert.ok(armedOnly.includes("PI_RECOVER=1"));
+	assert.equal(has(armedOnly, "PI_RECOVERING"), false, "the two are read apart: armed is not the continuation");
+	for (const value of [undefined, false, "true", 1]) {
+		const args = await argv(JOB, { recover: value, recovering: value });
+		assert.equal(has(args, "PI_RECOVER"), false, String(value));
+		assert.equal(has(args, "PI_RECOVERING"), false, String(value));
+	}
+	// Off the call bag, never off `job`: the processor decides, so a job that merely carries the flag arms nothing.
+	const fromJob = await argv({ ...JOB, recover: true, recovering: true }, {});
+	assert.equal(has(fromJob, "PI_RECOVER"), false);
+	assert.equal(has(fromJob, "PI_RECOVERING"), false);
 });
 
 test("the trigger's run.mcp reaches the container env as PI_MCP_SERVERS, and a job without it emits none (REQ-MCP-OPERATOR-SERVERS)", { skip }, async () => {
@@ -1063,4 +1094,187 @@ test("issue #596: a size flag the runtime said it drops is logged per job, and s
 	logs.length = 0;
 	await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j2", signal: new AbortController().signal, hostCpus: 4 });
 	assert.deepEqual(logs, [], "a runtime that enforces both says nothing");
+});
+
+// --- durable runs (issue #645): the checkpoint handle ----------------------------------------------------------------
+
+const CKPT_AT = Date.parse("2026-10-17T10:00:00.000Z");
+const piLine = (o) => `${JSON.stringify({ timestamp: "2026-10-17T10:00:00.000Z", ...o })}\n`;
+const QUIET = piLine({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } });
+
+/** A job dir with its staged live file, as the preparer leaves it. */
+function stagedJob() {
+	const dir = tempDir("pi-rc-ckpt-");
+	const jobDir = join(dir, "job-ab12cd");
+	mkdirSync(join(jobDir, "session"), { recursive: true });
+	mkdirSync(join(jobDir, "workspace"));
+	const file = join(jobDir, "session", "current.jsonl");
+	writeFileSync(file, "");
+	return { jobDir, file, prepared: { workspace: join(jobDir, "workspace"), jobDir, live: { hostDir: join(jobDir, "session") } } };
+}
+
+/** A fake runtime: the `run` child runs `during()` and closes with what it returns (stays up on undefined); a `kill` or `rm` closes the run child 137. */
+function ckptSpawn(calls, during) {
+	let runChild = null;
+	return (cmd, args) => {
+		calls.push(args[0] === "run" ? "run" : `${args[0]} ${args.at(-1)}`);
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		if (args[0] !== "run") {
+			setImmediate(() => {
+				child.emit("close", 0);
+				runChild?.emit("close", 137);
+				runChild = null;
+			});
+			return child;
+		}
+		runChild = child;
+		setImmediate(async () => {
+			const code = await during();
+			if (code !== undefined && runChild) {
+				runChild.emit("close", code);
+				runChild = null;
+			}
+		});
+		return child;
+	};
+}
+
+const until = async (cond) => {
+	for (let i = 0; i < 400 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+	assert.ok(cond(), "the condition came true");
+};
+
+/** The recording checkpointer world: a fake store, a fake client, the venue's verbs. */
+function ckptWorld({ unpause = async () => ({ ok: true }) } = {}) {
+	const order = [];
+	const pointers = new Map();
+	const checkpointer = {
+		readManifest: async () => ({ absent: true }),
+		snapshot: async (args) => (order.push(`snapshot:${args.kind}:${args.quiesced}`), { ok: true, seq: args.seq, manifest: { host: "h" } }),
+	};
+	const redis = { get: async () => null, set: async (k, v) => (order.push("pointer"), pointers.set(k, v), "OK"), del: async () => 1 };
+	const runCheckpointer = makeRunCheckpointer({ checkpointer, redis, hostName: "h", now: () => CKPT_AT, limits: { minIntervalMs: 0, pauseMaxMs: 1_000 }, sleep: async () => {} });
+	const verbs = { pause: async (n) => (order.push(`pause:${n}`), { ok: true }), unpause: async (n) => (order.push(`unpause:${n}`), unpause(n)) };
+	const opener = makeLiveTranscriptOpener({ redis: null, transcripts: false, progress: false, pollMs: 5, now: () => CKPT_AT, checkpoint: (args) => runCheckpointer.open(args) });
+	return { order, pointers, opener, verbs };
+}
+
+test("an armed job: the live checkpoint runs through the venue's verbs, and the result hands back exit, close and stats (#645)", { skip }, async () => {
+	const { file, prepared } = stagedJob();
+	const w = ckptWorld();
+	const calls = [];
+	const result = await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, openLiveTranscript: w.opener, spawnFn: ckptSpawn(calls, async () => {
+		appendFileSync(file, QUIET);
+		await until(() => w.order.includes("pointer"));
+		return 1;
+	}) })({ job: JOB, prepared, name: "pi-job-r1", signal: new AbortController().signal, jobId: "r1", recover: true, checkpoint: { runId: "r1", attempt: 0, baseSha: "b".repeat(40) }, ...w.verbs });
+	assert.deepEqual(w.order, ["pause:pi-job-r1", "snapshot:live:frozen", "unpause:pi-job-r1", "pointer"]);
+	assert.equal(result.code, 1);
+	assert.equal(result.checkpointStopped, undefined, "a healthy thaw stops nothing");
+	assert.deepEqual(result.checkpoint.stats(), { written: 1, failed: 0, skipped: 0, lastSeq: 1 });
+	assert.deepEqual(await result.checkpoint.exit(), { seq: 2 }, "the processor's exit checkpoint, after the container");
+	assert.deepEqual(w.order.slice(4), ["snapshot:exit:dead", "pointer"], "no pause for a dead container");
+	assert.deepEqual(await result.checkpoint.close(), { written: 2, failed: 0, skipped: 0, lastSeq: 2 });
+	assert.deepEqual(calls, ["run"]);
+});
+
+test("an unpause that never takes: runContainer kills the container and the run resolves checkpointStopped (#645)", { skip }, async () => {
+	const { file, prepared } = stagedJob();
+	const w = ckptWorld({ unpause: async () => ({ ok: false, reason: "exit-1" }) });
+	const calls = [];
+	const logs = [];
+	const result = await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, openLiveTranscript: w.opener, log: (e) => logs.push(e), spawnFn: ckptSpawn(calls, async () => {
+		appendFileSync(file, QUIET);
+		return undefined; // the frozen container never exits on its own
+	}) })({ job: JOB, prepared, name: "pi-job-r2", signal: new AbortController().signal, jobId: "r2", recover: true, checkpoint: { runId: "r2", attempt: 0, baseSha: "b".repeat(40) }, ...w.verbs });
+	assert.deepEqual(calls, ["run", "kill pi-job-r2"]);
+	assert.equal(result.code, 137);
+	assert.equal(result.aborted, false, "not the worker's abort: an infrastructure exit");
+	assert.equal(result.checkpointStopped, true);
+	assert.ok(logs.includes("checkpoint_container_stopped"));
+	assert.deepEqual(w.order, ["pause:pi-job-r2", "snapshot:live:frozen", "unpause:pi-job-r2", "unpause:pi-job-r2", "unpause:pi-job-r2", "pointer"], "the committed checkpoint kept its pointer for the recovery");
+	assert.equal(result.checkpoint.stats().written, 1);
+});
+
+test("a recover job with both live switches off: the file is staged in its job dir and tailed for the checkpoints; not armed, no checkpoint args (#645)", { skip }, async () => {
+	const dir = tempDir("pi-rc-stage-");
+	const jobDir = join(dir, "job-q1w2e3");
+	mkdirSync(join(jobDir, "workspace"), { recursive: true });
+	const prepared = { workspace: join(jobDir, "workspace"), jobDir };
+	const consumed = [];
+	const opened = [];
+	const handle = { consume: (parsed, _ts, end) => consumed.push([parsed.type, end]), reset() {}, stats: () => ({ written: 0, failed: 0, skipped: 0, lastSeq: null }), close: async () => ({}), exit: async () => ({ skipped: "x" }) };
+	const opener = makeLiveTranscriptOpener({ redis: null, transcripts: false, progress: false, pollMs: 3_600_000, now: () => CKPT_AT, checkpoint: (args) => (opened.push(args), handle) });
+	const file = join(jobDir, "session", "current.jsonl");
+	const rec = {};
+	const spawnFn = (cmd, args) => {
+		rec.args = args;
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		setImmediate(() => {
+			appendFileSync(file, QUIET);
+			child.emit("close", 0);
+		});
+		return child;
+	};
+	const result = await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, openLiveTranscript: opener, spawnFn })({ job: JOB, prepared, name: "pi-job-r3", signal: new AbortController().signal, jobId: "r3", recover: true, checkpoint: { runId: "r3", attempt: 1, baseSha: "c".repeat(40) } });
+	assert.ok(existsSync(file), "staged by runContainer, since the preparer staged none");
+	assert.ok(rec.args.some((a) => String(a).startsWith("PI_SESSION_FILE=")), "the runner writes its session there");
+	assert.deepEqual(consumed, [["message", Buffer.byteLength(QUIET)]], "the final read fed the checkpoint consumer with the line's end");
+	assert.equal(opened[0].runId, "r3");
+	assert.equal(opened[0].containerName, "pi-job-r3");
+	assert.equal(opened[0].sessionFile, file);
+	assert.equal(opened[0].workspace, prepared.workspace);
+	assert.equal(opened[0].jobDir, jobDir);
+	assert.equal(opened[0].pause, null, "no verbs on the call bag: a venue that cannot pause");
+	assert.equal(typeof opened[0].onStop, "function");
+	assert.equal(typeof result.checkpoint.exit, "function");
+	// recover false: checkpoint args are never honoured, and the opener (checkpointer only) has nothing to read.
+	opened.length = 0;
+	const plain = await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, openLiveTranscript: opener, spawnFn: fakeSpawn({}) })({ job: JOB, prepared: { workspace: prepared.workspace, jobDir: join(dir, "job-none") }, name: "n", signal: new AbortController().signal, jobId: "r4", checkpoint: { runId: "r4" } });
+	assert.equal(opened.length, 0);
+	assert.equal(plain.checkpoint, undefined, "every other run resolves the object it always did");
+	assert.equal(existsSync(join(dir, "job-none")), false, "and stages nothing");
+});
+
+test("the runner's recovery counts reach the result through the REAL log sink, off the exit line like turns (#645)", { skip }, async () => {
+	const { makeLogSink } = await import("../src/run-history.mjs");
+	const fs = { mkdirSync() {}, createWriteStream: () => null };
+	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId: "j1", code: 0, turns: 3, ...fields })}\n`;
+	for (const [chunk, want] of [
+		[line({ recovery: { orphans: 3, replayed: 1, interrupted: 1, notStarted: 1 } }), { orphans: 3, replayed: 1, interrupted: 1, notStarted: 1 }],
+		[line({ recovery: { orphans: 2, replayed: -1, interrupted: "x" } }), { orphans: 2, replayed: null, interrupted: null, notStarted: null }],
+		[line({ recovery: "lots" }), undefined],
+		[line({}), undefined],
+		["no exit line at all\n", undefined],
+	]) {
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, onOutput: () => {}, openJobLog: makeLogSink({ logsDir: "/logs", enabled: false, fs }), spawnFn: fakeSpawnWithData({}, { chunks: [Buffer.from(chunk)], exitCode: 0 }) });
+		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+		assert.deepEqual(result.recovery, want, chunk);
+		if (want) assert.equal(result.turns, 3, "read from the same line");
+		else assert.equal(Object.hasOwn(result, "recovery"), false, "absent, so every other run resolves the object it always did");
+	}
+	// With an exit key, an unsigned line (a tool's forgery) carries nothing: the counts are nulled with every exit field.
+	let heard = false;
+	const unsigned = () => {
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.stdin = Object.assign(new EventEmitter(), { end() {} });
+		queueMicrotask(() => {
+			child.stdout.emit("data", Buffer.from(line({ recovery: { orphans: 9, replayed: 9, interrupted: 0, notStarted: 0 } })));
+			heard = true;
+			child.emit("close", 0);
+		});
+		return child;
+	};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, onOutput: () => {}, openJobLog: makeLogSink({ logsDir: "/logs", enabled: false, fs }), mintExitKey: () => "k".repeat(64), spawnFn: unsigned });
+	const forged = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+	assert.ok(heard, "the unsigned line was written before the exit");
+	assert.equal(forged.exitAuth, "unverified");
+	assert.equal(Object.hasOwn(forged, "recovery"), false);
 });

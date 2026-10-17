@@ -9,7 +9,7 @@ import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-
 import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
-import { LIVE_FILE_NAME } from "./live-transcript.mjs";
+import { LIVE_FILE_NAME, stageLiveFile } from "./live-transcript.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { makeRedactor, secretValuesOf } from "./redact-secrets.mjs";
 
@@ -77,6 +77,11 @@ export function makeRunContainer({
 	// Null publishes nothing: a deployment with PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0, one without a Valkey client,
 	// and every caller that predates the feature.
 	openLiveTranscript = null,
+	// Issue #645: stages the live transcript file for a `run.recover` job the preparer staged none for (both live switches
+	// off). A seam so a test can refuse it.
+	stageLive = stageLiveFile,
+	// Issue #645: the bound on each step of stopping a container whose unpause never took.
+	checkpointStopTimeoutMs = 15_000,
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -102,7 +107,10 @@ export function makeRunContainer({
 	// the processor can end it when it stops waiting for a container whose stop did not take (index.mjs
 	// `boundAfterAbort`). Without it the publisher ends only on the CLI child's `close` or `error`, which never comes
 	// for that container: the progress key's heartbeat rewrote it as running for its whole 7-day window.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null }) {
+	// `checkpoint` (issue #645) is the processor's open args for the run checkpointer (`{ runId, attempt, baseSha, branch,
+	// secretValues, meta }`), honoured only beside `recover: true`; `pause`/`unpause` are this job's venue's freezer verbs,
+	// which the backend registry puts on the call bag (absent for a venue that cannot freeze: no live checkpoints then).
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -118,7 +126,19 @@ export function makeRunContainer({
 		// transcript, exactly as before; every other job's is the empty live file the preparer staged beside it
 		// (`prepared.live`, live-transcript.mjs `stageLiveFile`). Resume itself stays keyed on `prepared.session` alone:
 		// `awaitInput` below, the promotion and the record's `session` read nothing else.
-		const transcriptDir = prepared.session?.hostDir ?? prepared.live?.hostDir ?? null;
+		let transcriptDir = prepared.session?.hostDir ?? prepared.live?.hostDir ?? null;
+		// Issue #645: an armed job keeps its transcript on the host whatever the live switches say. The checkpoints copy it,
+		// a salvage reads it from a crashed attempt's job dir, and the live checkpoints are driven by its lines, so with
+		// PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0 (no file staged by the preparer) it is staged here. Not for a resume
+		// job, whose staged transcript already is the file.
+		const armed = recover === true && checkpoint !== null && typeof checkpoint === "object";
+		if (transcriptDir === null && recover === true && typeof stageLive === "function") {
+			try {
+				transcriptDir = stageLive(prepared.jobDir)?.hostDir ?? null;
+			} catch {
+				transcriptDir = null;
+			}
+		}
 
 		// Closed env allowlist: only the provider key + the declared PI_* vars. Throws (config) if
 		// the provider is unconfigured, which the processor turns into a policy refusal that refunds the
@@ -177,6 +197,12 @@ export function makeRunContainer({
 			// Issue #644: whether the runner offers `report_progress`, off `job` like awaitInput (env-allowlist.mjs maps it to
 			// PI_REPORT_PROGRESS=1). The worker reads the phases it reports only for the same job (`job.progress` below).
 			reportProgress: job.progress === true ? true : undefined,
+			// Issue #645, durable runs: off the call bag, NOT off `job`. Whether this attempt keeps checkpoints and whether it
+			// is the continuation of a lost one are the processor's decisions, made against the checkpoint store and the
+			// image's `recover` capability; a `job.recover` read here would arm a container the processor never cleared.
+			// Strict `=== true` both ways, so a truthy non-boolean arms nothing.
+			recover: recover === true,
+			recovering: recovering === true,
 			// Issue #502: the effective allowed-model list, off `job` like excludeTools. index.mjs `effectiveJobOf` folds
 			// the deployment's PI_ALLOWED_MODELS in under the trigger's own, so `job.models` is already the one list.
 			allowedModels: Array.isArray(job.models) && job.models.length > 0 ? job.models : null,
@@ -261,13 +287,36 @@ export function makeRunContainer({
 		// are not in it by name or at all: the minted token and the exit-line key. An opener that throws costs the stream,
 		// never the run.
 		let live = null;
+		// Issue #645: a container whose unpause failed UNPAUSE_TRIES times never runs again, and the worker would wait on it
+		// for the whole job timeout. It is killed (SIGKILL reaches a frozen container: the runtime thaws it to deliver it),
+		// then removed if the kill was refused, and the run ends as an infrastructure exit (`checkpointStopped`).
+		let checkpointStopped = false;
+		const stopFrozen = async () => {
+			checkpointStopped = true;
+			log("checkpoint_container_stopped", { container: name });
+			const killed = await dockerStep(spawnFn, ["kill", name], checkpointStopTimeoutMs, bin);
+			if (killed.code !== 0) await dockerStep(spawnFn, ["rm", "-f", name], checkpointStopTimeoutMs, bin);
+		};
 		if (transcriptDir && typeof openLiveTranscript === "function" && jobId !== null && jobId !== undefined) {
 			try {
 				// `workerSet`: the proxy variables count as structural only with the values this worker wrote for this job's
 				// egress; a proxy URL an operator forwarded with PI_EGRESS=0 is redacted like any other forwarded value.
 				const workerSet = egressEnv({ proxy: egressProxy, armed: egress });
 				// `job` (issue #644) for its two switches, `progress` (read phases) and `statusComment` (the forge comment).
-				live = openLiveTranscript({ file: join(transcriptDir, LIVE_FILE_NAME), jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job }) ?? null;
+				// `checkpoint` (issue #645): the open args this side adds to the processor's, the container's name and venue
+				// verbs, the workspace and job dir, and `onStop` for an unpause that never took. Only for an armed job.
+				const checkpointArgs = armed
+					? {
+							...checkpoint,
+							containerName: name,
+							pause: typeof pause === "function" ? pause : null,
+							unpause: typeof unpause === "function" ? unpause : null,
+							workspace: prepared.workspace ?? null,
+							jobDir: prepared.jobDir ?? null,
+							onStop: () => stopFrozen(),
+						}
+					: null;
+				live = openLiveTranscript({ file: join(transcriptDir, LIVE_FILE_NAME), jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job, ...(checkpointArgs ? { checkpoint: checkpointArgs } : {}) }) ?? null;
 			} catch {
 				live = null;
 			}
@@ -282,6 +331,27 @@ export function makeRunContainer({
 				await live?.finish(outcome);
 			} catch {}
 		};
+		// Issue #645: the checkpoint handle the opener built for an armed job, or null. Never throws (run-checkpoint.mjs).
+		const ckpt = live?.checkpoint && typeof live.checkpoint.close === "function" ? live.checkpoint : null;
+		const closeCheckpoint = async () => {
+			try {
+				return await ckpt?.close();
+			} catch {
+				return null;
+			}
+		};
+		// What the processor is handed: `exit()` once the container is dead (an infra exit of an armed job), `close()`
+		// before its cleanup, `stats()` for the record's counts. Spread only when there is a handle, so every other run
+		// resolves the very object it always did.
+		const checkpointResult = ckpt
+			? {
+					checkpoint: {
+						exit: (opts) => ckpt.exit(opts),
+						close: () => closeCheckpoint(),
+						stats: () => ckpt.stats(),
+					},
+				}
+			: {};
 		if (live !== null && typeof onLive === "function") {
 			try {
 				onLive(finishLive);
@@ -324,12 +394,17 @@ export function makeRunContainer({
 			// (CONST-RETRY-INFRA-ONLY). `reason` also cues the processor to release the budget slot,
 			// since a container that never started spent nothing.
 			child.on("error", (err) => {
+				void closeCheckpoint();
 				void finishLive("failed");
 				sink.close().catch(() => {}); // best-effort teardown; a rejecting close cannot leak an unhandled rejection
 				reject(new InfraRetry("container-never-started", { cause: err, reason: "container-never-started" }));
 			});
 			child.on("close", async (code) => {
 				const aborted = signal?.aborted === true; // capture BEFORE the await
+				// Issue #645: no live checkpoint starts once the container is gone (a quiet point in the final read would
+				// pause a dead container). Closing first, and awaiting it after the final read, lets a live one in flight
+				// finish, its pointer included, before this promise resolves and the processor's cleanup can run.
+				const ckptClosed = closeCheckpoint();
 				// Issue #643, ORDER LOAD-BEARING: the transcript's last lines are read and published HERE, before the sink
 				// closes and before this promise resolves, because the processor removes the job directory (and the file in
 				// it) as soon as it has the result. The outcome is the exit's own reading, the most this side knows.
@@ -343,6 +418,8 @@ export function makeRunContainer({
 					progress = null;
 				}
 				const ranProgress = progress !== null && typeof progress === "object" ? { progress } : {};
+				await ckptClosed;
+				const stoppedForCheckpoint = checkpointStopped ? { checkpointStopped: true } : {};
 				// A rejecting sink.close is swallowed so a misbehaving sink cannot hang the run; turns/tokens/session/usage/context/exitReason fall back to null.
 				let turns = null;
 				let tokens = null;
@@ -364,12 +441,15 @@ export function makeRunContainer({
 				let resources = null;
 				// Issue #596: the image's supervisor reported the runner killed for memory (parseExitOomKilled).
 				let exitOomKilled = false;
+				// Issue #645: a recovered run's runner counts (parseExitRecovery), `{ orphans, replayed, interrupted, notStarted }`
+				// each an integer or null, or null when the line carried none.
+				let recovery = null;
 				try {
 					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -381,6 +461,7 @@ export function makeRunContainer({
 					exitWhy = null;
 					resources = null;
 					exitOomKilled = false;
+					recovery = null;
 					// The sink could not say, and a key was issued: nothing it returned was verified.
 					exitAuthResult = exitKey !== null ? "unverified" : null;
 				}
@@ -397,6 +478,7 @@ export function makeRunContainer({
 					exitWhy = null;
 					resources = null;
 					exitOomKilled = false;
+					recovery = null;
 				}
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
@@ -405,7 +487,9 @@ export function makeRunContainer({
 				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.
 				// `memoryLimit` only beside the OOM report, the one place it is read, for the same reason.
 				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true, memoryLimit } : {}) };
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress });
+				// `recovery` (issue #645) only when the exit line carried the block, so every other run resolves the object it always did.
+				const recovered = recovery !== null && typeof recovery === "object" ? { recovery } : {};
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...checkpointResult, ...stoppedForCheckpoint } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...checkpointResult, ...stoppedForCheckpoint });
 			});
 		});
 
