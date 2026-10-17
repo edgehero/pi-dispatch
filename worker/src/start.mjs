@@ -190,6 +190,25 @@ export async function closeQueueSettled(queue) {
 	} catch {}
 }
 
+/**
+ * Routes a queue's own `close` through `closeQueueSettled`'s wait, in place, so every closer that holds the queue (the
+ * closer list, the worker's shutdown) gets the settled close without a wrapper object. Idempotent, and a queue with no
+ * `close` or `waitUntilReady` is left as it is.
+ */
+export function settleCloseOf(queue) {
+	if (!queue || typeof queue.close !== "function" || queue.close.settled === true) return queue;
+	const close = queue.close.bind(queue);
+	const settled = async (...args) => {
+		try {
+			await queue.waitUntilReady?.();
+		} catch {}
+		return close(...args);
+	};
+	settled.settled = true;
+	queue.close = settled;
+	return queue;
+}
+
 export async function settleWithin(promise, ms, fallback) {
 	let timer = null;
 	try {
@@ -2265,6 +2284,11 @@ export async function startWorker(
 	// not when it receives it, and so does the test harness at teardown. A refactor that COPIES it there --
 	// a spread, a freeze, a snapshot inside `createWorker` -- un-registers the watchers in SILENCE and puts
 	// issue #295 back. Append only: two tests pin `[0]` as the runtime queue and `[1]` as the registry.
+	// Issue #664: the two long-lived queues close only after their connection's start has settled, as #661 made the
+	// reconcile queue and the recovery path's host queues do. Each is kept as the same object (the closer list and its
+	// tests name them), with its own `close` routed through `closeQueueSettled`'s wait; closed early, BullMQ's unawaited
+	// INFO rejected unhandled ("Connection is closed"), failing whichever test was running.
+	for (const q of new Set([runtimeQueue, cronQueue])) settleCloseOf(q);
 	const extraClosers = [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])];
 
 	// HOISTED out of the deps literal (issue #288): the terminal failed listener below needs the same

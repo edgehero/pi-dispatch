@@ -325,12 +325,17 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			// real shutdown releases this client itself, sequenced after the closer drain, but that shutdown
 			// lives inside the real createWorker and this file fakes createWorkerFn -- so the product's
 			// release is unreachable here by construction and `wiring.test.mjs` is where it is pinned.
-			captured?.redis?.disconnect?.();
 			// EVERY extraCloser, not just the first: since issue #57 a deployment that declares a worker name
 			// also opens a host-queue handle, and since issue #295 the three live-edit file watchers ride the
 			// same list -- so this loop is what proves, on every test in this file, that a watch does not
 			// outlive the boot that armed it.
 			for (const closer of captured?.extraClosers ?? []) await Promise.resolve(closer?.close?.()).catch(() => {});
+			// The client LAST, after the closers, and with `quit` (issue #664), the order the real shutdown uses. Cut
+			// first, with `disconnect`, a command a closer or a boot timer still had in flight was flushed with
+			// "Connection is closed", and wherever nothing awaited it that surfaced as an unhandled rejection in
+			// whichever test happened to be running (CI failed on it three times in a row on PR #663). `quit` lets the
+			// pending replies land; `disconnect` stays the fallback for a client that cannot quit.
+			await Promise.resolve(captured?.redis?.quit?.()).catch(() => captured?.redis?.disconnect?.());
 
 		// DELETE THE HOST QUEUE THIS RUN CREATED (issue #262). A declared `PI_WORKER_NAME` makes `startWorker`
 		// open `pi-jobs@<name>`, and BullMQ's meta key for it outlives the process: they accumulate across runs
@@ -5510,4 +5515,22 @@ test("closeQueueSettled waits for the queue's start before closing, and never th
 	assert.deepEqual(order, ["ready", "close"], "a failed start still closes, and neither failure escapes");
 	await closeQueueSettled(null);
 	await closeQueueSettled({});
+});
+
+// Issue #664: the long-lived queues' own close waits for their start to settle, in place (the closer list names them).
+test("settleCloseOf routes a queue's close through its start, in place and once", { skip }, async () => {
+	const { settleCloseOf } = await import("../src/start.mjs");
+	const order = [];
+	const q = { waitUntilReady: async () => void order.push("ready"), close: async () => void order.push("close") };
+	assert.equal(settleCloseOf(q), q, "the same object");
+	const once = q.close;
+	settleCloseOf(q);
+	assert.equal(q.close, once, "settling twice wraps once");
+	await q.close();
+	assert.deepEqual(order, ["ready", "close"]);
+	order.length = 0;
+	const failing = settleCloseOf({ waitUntilReady: async () => { order.push("ready"); throw new Error("Connection is closed."); }, close: async () => void order.push("close") });
+	await failing.close();
+	assert.deepEqual(order, ["ready", "close"], "a failed start still closes");
+	assert.equal(settleCloseOf(null), null);
 });
