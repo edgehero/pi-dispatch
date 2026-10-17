@@ -9,7 +9,9 @@ import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { MCP_REFUSAL_COMMENT } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
-import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS } from "./run-history.mjs";
+import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS, recoveryCounts } from "./run-history.mjs";
+import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as resetTrustPathsDefault } from "./trust-paths.mjs";
+import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
@@ -260,7 +262,140 @@ async function claimConsoleTrail(redis, job, log) {
 // `callableModelRefs` (the models a job may call) moved to reserve-estimate.mjs (issue #642) with the zero-rated test
 // it feeds, so the console's reserve estimate and this processor's reserve judge one rule (`zeroRatedFor`).
 
+// ── Durable runs (issue #645) ───────────────────────────────────────────────────────────────────────────────────────
+
+/** How many times one run may be continued from its checkpoint: a recovery job numbered past this is `recovery-cap`. */
+export const RECOVERY_CAP = 2;
+/** The reason an armed run's attempt RETURNS with when its continuation was queued instead of a retry thrown. */
+export const RECOVERY_ENQUEUED = "recovery-enqueued";
+/** A recovery job whose run already reached its final outcome elsewhere: refused silently, never commented. */
+export const RECOVERY_SUPERSEDED = "recovery-superseded";
+/** How long a recovery job waits before asking again whether its base run's container is still running here. */
+export const RECOVERY_WAIT_MS = 30_000;
+/** How long a recovery job waits before trying again after a never-started fault (it has no attempt to retry with). */
+export const RECOVERY_RETRY_WAIT_MS = 60_000;
+
+/**
+ * The comments of the durable-run refusals. Fixed and path-free, the TERMINAL_COMMENTS rule: the reader may be an issue
+ * author, and which file or which pi version is the operator's to read in the worker log.
+ */
+export const RECOVERY_COMMENTS = Object.freeze({
+	"recover-store-unset": "Refused: this trigger set `run.recover`, but this worker has no checkpoint store (neither PI_CHECKPOINTS_DIR nor PI_SESSIONS_DIR is set), so a lost run could not be continued while the job would still report success. Set one of them, or drop `run.recover` from this trigger. Not run.",
+	"recovery-unsafe-extensions": "Failed: this run was lost, and it is not continued from its checkpoint because the repository's `.pi/extensions/` could load code the agent wrote. Partial work may exist. Ask the operator to check the worker log.",
+	"recovery-failed": "Failed: this run was lost, continued from its checkpoint, and the continuation was lost too, so it is not continued again. Partial work may exist. Ask the operator to check the worker log.",
+	"recovery-cap": "Failed: this run was lost and continued from its checkpoint as many times as allowed, so it is not continued again. Partial work may exist. Ask the operator to check the worker log.",
+	"recovery-checkpoint-absent": "Failed: this run was lost, and its checkpoint could not be used to continue it (absent, damaged, or taken on another host, pi version or venue). Partial work may exist. Ask the operator to check the worker log.",
+});
+
+/**
+ * The run this attempt belongs to, decided from the job data alone (issue #645): `{ armed, runId, isRecovery, recovery,
+ * recoverSkipped, seq, recovered, checkpoints }`. The last three are filled in as the attempt goes, so the record can say
+ * them on every exit.
+ *
+ * `runId` is `job.recoveryOf` for a recovery job, else the queue's own id, DERIVED like the console trail's
+ * (`forgeDeliveryJobId` over kind, delivery id and replica: queue.mjs `enqueueForgeJob` names every forge job so). The
+ * processor is handed the effective job, which has no `.id`, and a derivation from data the queue itself keyed on is one
+ * answer for every attempt, retries and recoveries included; a new wiring argument would be a second. A recovery job's
+ * id (`<runId>.r<n>`) is never parsed: `recoveryOf` and `recovery` carry it.
+ *
+ * Not armed, with the reason the record names (fail open and say which): a local job (`local`, v1 recovers forge jobs
+ * only, so it runs exactly as it did before #645) and a forge job whose id cannot be derived (`no-run-id`).
+ */
+function durableOf(job) {
+	const d = { armed: false, runId: null, isRecovery: false, recovery: null, recoverSkipped: null, seq: null, recovered: null, checkpoints: null };
+	if (job?.recover !== true) return d;
+	if (job.kind === "local") {
+		d.recoverSkipped = "local";
+		return d;
+	}
+	if (typeof job.recoveryOf === "string" && job.recoveryOf !== "") {
+		d.runId = job.recoveryOf;
+		d.isRecovery = true;
+		d.recovery = job.recovery;
+	} else {
+		try {
+			d.runId = forgeDeliveryJobId(job.kind, job.trigger?.deliveryId, job.replica);
+		} catch {
+			d.recoverSkipped = "no-run-id";
+			return d;
+		}
+	}
+	d.armed = true;
+	return d;
+}
+
+/** The durable-run facts the record carries, added to a result only when there are any (so every other is unchanged). */
+function withDurable(result, d) {
+	if (result === null || typeof result !== "object") return result;
+	if (d.recoverSkipped === null && d.recovered === null && d.checkpoints === null) return result;
+	return { ...result, ...(d.recoverSkipped !== null ? { recoverSkipped: d.recoverSkipped } : {}), ...(d.recovered !== null ? { recovered: d.recovered } : {}), ...(d.checkpoints !== null ? { checkpoints: d.checkpoints } : {}) };
+}
+
+/** The same on a throw, so a retried or failed attempt's record says them too (buildRecord reads the error). */
+function tagDurable(e, d) {
+	if (e === null || typeof e !== "object") return;
+	try {
+		if (d.recoverSkipped !== null && e.recoverSkipped === undefined) e.recoverSkipped = d.recoverSkipped;
+		if (d.recovered !== null && e.recovered === undefined) e.recovered = d.recovered;
+		if (d.checkpoints !== null && e.checkpoints === undefined) e.checkpoints = d.checkpoints;
+	} catch {
+		// a frozen error keeps its own fields
+	}
+}
+
+/**
+ * The run reached its final outcome (a completed or policy result): remove its checkpoint store entry, its Valkey
+ * pointer and its budget ledger. Each best effort and logged by name, never thrown: every one has a TTL or a sweep
+ * behind it, and a cleanup fault must not turn a finished run into a failure.
+ */
+async function endDurableRun(d, deps) {
+	const log = typeof deps.log === "function" ? deps.log : () => {};
+	const quietly = async (what, fn) => {
+		try {
+			const r = await fn();
+			if (r && typeof r === "object" && (r.error || r.skipped)) log("durable_cleanup_failed", { what, code: String(r.error ?? r.skipped).slice(0, 40) });
+		} catch (error) {
+			log("durable_cleanup_failed", { what, code: typeof error?.code === "string" ? error.code : "error" });
+		}
+	};
+	if (deps.workspaceCheckpointer) await quietly("store", () => deps.workspaceCheckpointer.remove(d.runId));
+	// The wiring's seam when it hands one over; else run-checkpoint.mjs's own delete on this processor's client, so a bare
+	// wiring cannot leave a pointer that makes a later recovery think the run is still live. It answers false, never a
+	// throw, when Valkey did not answer: logged, and the pointer's 7-day expiry is the backstop.
+	await quietly("pointer", async () => {
+		const done = typeof deps.removeCheckpointPointer === "function" ? await deps.removeCheckpointPointer({ runId: d.runId }) : await removePointerDefault({ redis: deps.redis, runId: d.runId });
+		return done === false ? { error: "unanswered" } : null;
+	});
+	if (deps.runBudgetLedger) await quietly("ledger", () => deps.runBudgetLedger.remove(d.runId));
+}
+
 export async function runJob(job, deps) {
+	const durable = durableOf(job);
+	let result;
+	try {
+		result = await runAttempt(job, deps, durable);
+	} catch (e) {
+		tagDurable(e, durable);
+		// A RECOVERY job has one attempt (recovery-queue.mjs), so a never-started retry would fail it for good over a
+		// blip (a pointer read, a ledger write, a restore that met a lock). Every such throw becomes a wait hold instead:
+		// `makeProcessor` delays it without spending the attempt, and the run's recovery deadline (`recoverBy`, the
+		// host-lost sweep) bounds how long it can wait. Nothing was started, so nothing is lost by asking again.
+		if (durable.isRecovery && e instanceof InfraRetry && e.reason === "container-never-started" && !(e instanceof RecoveryWaitHold)) {
+			const hold = new RecoveryWaitHold(e.message, { cause: e, reason: e.reason, provider: e.provider, model: e.model, budgetReserved: e.budgetReserved, dollars: e.dollars, resources: e.resources, exitCode: e.exitCode, turns: e.turns, tokens: e.tokens, session: e.session, usage: e.usage, waitMs: RECOVERY_RETRY_WAIT_MS });
+			tagDurable(hold, durable);
+			deps?.log?.("recovery_retry_held", { delayMs: RECOVERY_RETRY_WAIT_MS });
+			throw hold;
+		}
+		throw e;
+	}
+	// The run's FINAL outcome cleans up after it. Not a queued recovery (its checkpoint is what the recovery restores),
+	// and not `recovery-superseded`: that one is decided on a pointer read that came back empty, and an empty read must
+	// never be the reason another run's store is deleted; the run that settled cleaned up after itself.
+	if (durable.armed && result?.reason !== RECOVERY_ENQUEUED && result?.reason !== RECOVERY_SUPERSEDED) await endDurableRun(durable, deps);
+	return withDurable(result, durable);
+}
+
+async function runAttempt(job, deps, durable) {
 	const {
 		redis,
 		caps, // { day, week, month }; week/month null when that window is disabled (REQ-SPEND-CAPS-MULTI-WINDOW)
@@ -460,8 +595,50 @@ export async function runJob(job, deps) {
 		// `builtinModel`). Read only by the zero-rated check; the default knows no builtin model, so an unwired
 		// processor judges overlay models alone and reserves for every other.
 		builtinModel = () => null,
+		// Issue #645, durable runs. Every one defaults to inert, and none is read unless the job armed `run.recover`, so an
+		// unwired processor runs every other job exactly as before. `workspaceCheckpointer` is workspace-checkpoint.mjs's
+		// (null when PI_CHECKPOINTS_DIR is unset), `runBudgetLedger` run-budget-ledger.mjs's, `readCheckpointPointer`
+		// `({ runId }) => pointer | null` and `enqueueRecovery` `({ job, cause, pointer }) => { enqueued, jobId, n } |
+		// { enqueued: false, reason }` (recovery-queue.mjs, bound to the real BullMQ job by the wiring). `stageRecovered`
+		// is the session store's (session-store.mjs). `resetTrustPaths` is trust-paths.mjs's. `runningJobs` is the
+		// processor's `{ list() }` of the jobs running on this host, and `hostName` this worker's name, as the checkpoint
+		// manifest records it.
+		workspaceCheckpointer = null,
+		runBudgetLedger = null,
+		readCheckpointPointer = null,
+		enqueueRecovery = null,
+		stageRecovered = null,
+		resetTrustPaths = resetTrustPathsDefault,
+		runningJobs = null,
+		hostName = null,
+		// `({ runId, pointer, attempt }) => { seq } | { skipped }` (start.mjs): a salvage checkpoint from a crashed attempt's
+		// job directory still on this host, asked for a recovery job before its manifest is read. Null takes none.
+		salvageCheckpoint = null,
+		// `(jobId) => record | null` (run-history.mjs `makeReadRecord`): the settled-run check a recovery asks first. Null
+		// skips it, and the pointer and store logic below still decide.
+		readRecord = null,
+		// `({ workspace, baseSha }) => boolean` (trust-paths.mjs): whether the base commit holds anything under
+		// `.pi/extensions/`, which makes a run unrecoverable (see its use).
+		baseHasExtensions = baseHasExtensionsDefault,
 		now = new Date(),
 	} = deps;
+	// `armed` can still drop to false for a fresh attempt whose base holds `.pi/extensions/` (below), before anything durable.
+	let { armed } = durable;
+	const { runId, isRecovery } = durable;
+	// The checkpoint a recovery job restores, read and judged among the free gates below.
+	let manifest = null;
+	let transcriptPath = null;
+	// Whether this attempt's dollar hold has a durable record (`recordHold`): only then do its settle and release go through
+	// the ledger's compare-and-set. A hold that failed to be recorded is given back directly, since no one else can see it.
+	let holdRecorded = false;
+	// Issue #645: the job-count slot an armed run carries from an earlier attempt (`claimSlot` answered "carried"). It is
+	// still counted, by the attempt that reserved it, so this attempt reserves none and refunds none.
+	let slotCarried = false;
+	// Whether an armed run's slot belongs to the RUN rather than to this attempt (any successful claim). Such a slot is not
+	// refunded by a never-started retry: the retry carries it (`claimSlot` answers "carried"), so refunding it here would
+	// let the retry run on a slot nothing counts. Only the run's final outcome gives a slot back (a refusal or
+	// config-refused, exactly as before).
+	let slotOwnedByRun = false;
 
 	// "Forge-backed" is the negation of local, not an enumeration of forges: a job that is not editing a
 	// folder on this host is working against a remote, and every gate below applies for the same reason
@@ -483,7 +660,8 @@ export async function runJob(job, deps) {
 	// refund, global-only as INT-RUN-HISTORY-FILE-CONTRACT has it. A scoped or project slot a failed refund left behind
 	// is in the `budget_release_failed` log line, not in this field.
 	let globalLedger = null;
-	const globalHeld = () => globalLedger !== null && held.includes(globalLedger);
+	// A carried slot (issue #645) is held too: by the run, under the attempt that reserved it.
+	const globalHeld = () => (globalLedger !== null && held.includes(globalLedger)) || slotCarried;
 	// Give back every held job-count slot, NEVER throwing: a refund that did not land must not replace the caller's
 	// classification with a Redis message. Logged with `at`; returns whether the list is empty afterwards.
 	const refundLedgers = async (at) => {
@@ -1032,6 +1210,115 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "sessions-dir-unset", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
+		// Issue #645, durable runs: `run.recover`'s free refusals, here beside run.resume's and for its reasons. Free (a
+		// value in hand, a Valkey GET, a manifest read off this host's disk), determinate, and strictly before the mint,
+		// the clone, the token-cap read and every reserve (CONST-BUDGET-BEFORE-TOKENS).
+		//
+		// The store's absence is run.resume's one fail-CLOSED case again: without a checkpoint store nothing is kept, a
+		// lost run is retried from scratch, and the job still looks protected. A wiring that has a store but not the
+		// rest of the machinery (a ledger, the pointer read, the enqueuer) is a defect of this build, not of the operator's
+		// settings, so it is a config refusal: refunded, `doctor`-pointed, never run half-armed.
+		if (armed && !workspaceCheckpointer) {
+			await comment(job, RECOVERY_COMMENTS["recover-store-unset"]);
+			log("refused_checkpoints_dir_unset", { kind: job.kind ?? null });
+			return { outcome: "policy", reason: "recover-store-unset", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+		if (armed && (!runBudgetLedger || typeof readCheckpointPointer !== "function" || typeof enqueueRecovery !== "function")) {
+			throw configError("run.recover is armed, and this worker was built without the run budget ledger, the checkpoint pointer read or the recovery enqueuer");
+		}
+		if (isRecovery) {
+			const n = durable.recovery;
+			// SETTLED, first of all: the run (its base attempt or an earlier recovery) already wrote a completed or policy
+			// record, so it reached its final outcome and there is nothing to continue. Silent, and cleans nothing (that
+			// outcome cleaned up after itself). Asked BEFORE the pointer and the store, because those can disagree after a
+			// cleanup that half failed (a store removal that failed beside a pointer delete that landed), and that
+			// disagreement must never put a failure comment under a run that completed.
+			if (typeof readRecord === "function") {
+				const ids = [runId, ...Array.from({ length: Number.isSafeInteger(n) && n > 1 ? Math.min(n, RECOVERY_CAP + 1) - 1 : 0 }, (_, k) => `${runId}.r${k + 1}`)];
+				for (const id of ids) {
+					let rec = null;
+					try {
+						rec = await readRecord(id);
+					} catch {
+						rec = null;
+					}
+					if (rec && typeof rec === "object" && rec.jobId === id && (rec.outcome === "completed" || rec.outcome === "policy")) {
+						log("recovery_superseded", { n: Number.isSafeInteger(n) ? n : null, by: "record" });
+						return { outcome: "policy", reason: RECOVERY_SUPERSEDED, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+					}
+				}
+			}
+			// THE CAP: a run continued twice is not continued a third time, whatever its checkpoint holds.
+			if (!Number.isSafeInteger(n) || n < 1 || n > RECOVERY_CAP) {
+				await comment(job, RECOVERY_COMMENTS["recovery-cap"]);
+				log("refused_recovery_cap", { n: Number.isSafeInteger(n) ? n : null, cap: RECOVERY_CAP });
+				return { outcome: "policy", reason: "recovery-cap", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+			// SUPERSEDED: the base run reached its final outcome after this recovery was queued (a completed or policy result
+			// removes the pointer), so there is nothing left to continue. Silent: that outcome already said what it had to.
+			// A read that THROWS is not an answer, so it is retried, never taken for "settled".
+			let pointer;
+			try {
+				pointer = await readCheckpointPointer({ runId });
+			} catch {
+				throw new InfraRetry("the run's checkpoint pointer could not be read", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			// The pointer read answers null for "no pointer" AND for "Valkey did not answer in time" (run-checkpoint.mjs never
+			// throws), so null alone must not decide: a silent refusal would drop a live run's continuation over a blip. A
+			// run's final outcome removes its STORE ENTRY before its pointer (`endDurableRun`), so superseded is a missing
+			// pointer AND a missing store. A missing pointer beside a store that is still there is ambiguous, and is
+			// retried loudly rather than guessed either way (continuing could re-run a run that completed).
+			if (pointer === null || pointer === undefined) {
+				const still = await workspaceCheckpointer.readManifest(runId);
+				if (still?.absent === true) {
+					log("recovery_superseded", { n });
+					return { outcome: "policy", reason: RECOVERY_SUPERSEDED, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				}
+				log("recovery_pointer_unread", { n });
+				throw new InfraRetry("the run's checkpoint pointer is missing while its checkpoint is still there", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			// THE BASE STILL RUNNING HERE: its container may still be alive and spending, so this recovery must neither
+			// settle its hold as crashed nor start a second agent on the same branch. It waits, without an attempt
+			// (`RecoveryWaitHold`), until that container is gone. Asked of this host only: the recovery is queued to the
+			// host the checkpoint is on, which is the host the base ran on.
+			// THIS job is in that list too (the processor admits a job before it runs it), under the id the recovery queue
+			// gave it (`<runId>.r<n>`, recovery-queue.mjs), so its own entry is excluded: without that every recovery would
+			// find itself running and wait for ever.
+			const ownId = `${runId}.r${n}`;
+			const live = typeof runningJobs?.list === "function" ? runningJobs.list() : [];
+			if (live.some((e) => typeof e?.id === "string" && e.id !== ownId && (e.id === runId || e.id.startsWith(`${runId}.r`)))) {
+				log("recovery_waits_for_base", { n, delayMs: RECOVERY_WAIT_MS });
+				throw new RecoveryWaitHold("the run this recovery continues is still running on this host", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false, waitMs: RECOVERY_WAIT_MS });
+			}
+			// SALVAGE, before the manifest is read: a crashed attempt whose job directory is still on this host (the worker
+			// died, the directory did not) gets one last checkpoint taken from it (`kind: "salvage"`), so the recovery
+			// continues from where the run really got to rather than from its last live checkpoint. The wiring's
+			// (start.mjs); it never throws by contract, and is guarded anyway: a failed salvage leaves the last committed
+			// checkpoint, which is still a correct place to continue from.
+			if (typeof salvageCheckpoint === "function") {
+				const salvaged = await Promise.resolve()
+					.then(() => salvageCheckpoint({ runId, pointer, attempt: pointer.attempt }))
+					.catch(() => ({ skipped: "error" }));
+				log("recovery_salvage", Number.isSafeInteger(salvaged?.seq) ? { seq: salvaged.seq } : { skipped: typeof salvaged?.skipped === "string" ? salvaged.skipped.slice(0, 40) : "unknown" });
+			}
+			// THE CHECKPOINT, judged before anything spends: valid (readManifest hashes the transcript against its
+			// manifest), taken on THIS host, by THIS image's pi version, in THIS job's venue. A transcript from another pi
+			// may hold tool-call arguments the current schema refuses (the run.resume rule), and a checkpoint from another
+			// venue was quiesced under another runtime's pause.
+			const read = await workspaceCheckpointer.readManifest(runId);
+			const m = read?.ok === true ? read.manifest : null;
+			const venue = resolveBackendName(job, blessedBackends[0]);
+			const why = m === null ? (read?.absent ? "absent" : "invalid") : typeof hostName === "string" && hostName !== "" && m.host !== normalizeHost(hostName) ? "host" : piVersion === null || m.piVersion !== piVersion ? "pi-version" : m.venue !== venue ? "venue" : null;
+			if (why !== null) {
+				await comment(job, RECOVERY_COMMENTS["recovery-checkpoint-absent"]);
+				// `why` is a fixed token, and `invalid`'s detail is the store's own fixed reason (`field:seq`, `transcript-mismatch`).
+				log("refused_recovery_checkpoint_absent", { n, why, ...(why === "invalid" && typeof read?.reason === "string" ? { detail: read.reason.slice(0, 40) } : {}) });
+				return { outcome: "policy", reason: "recovery-checkpoint-absent", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+			manifest = m;
+			transcriptPath = read.transcriptPath;
+		}
+
 		// REQ-PER-TRIGGER-SKILLS. A trigger that named a skills directory the worker cannot see would run
 		// its flow WITHOUT the skills it was written against, produce a plausible report, and exit 0. Free
 		// and determinate -- one lstat, no credential needed to know the answer -- so it belongs among the
@@ -1201,7 +1488,7 @@ export async function runJob(job, deps) {
 		// `podmanStore` (issue #429) only where the venue's job user carried one: the podman store the container ran in.
 		// `portfolio` (issue #505) only for a job the gate above confirmed: prepare then writes /job/portfolio.json, after
 		// asking the live file once more. Absent otherwise, so every other job's prepare call is unchanged.
-		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
+		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}), ...(isRecovery ? { pin: { sha: manifest.workspace.baseSha, from: workspaceCheckpointer.baseSourceUrl(runId) } } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
 
 		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
 		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)
@@ -1228,6 +1515,78 @@ export async function runJob(job, deps) {
 				log("refused_local_folder_project_changed", { pickup: pickupProject, resolved: resolvedProject });
 				return { outcome: "policy", reason: LOCAL_FOLDER_PROJECT_CHANGED, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 			}
+		}
+
+		// Issue #645: A BASE WITH `.pi/extensions/` IS NOT RECOVERABLE. A merge-gated extension may import a file outside
+		// `.pi/` (`../lib/x.js`) or a bare package resolved from the workspace's `node_modules`, and in a recovered run
+		// those come from the restored tree, which the agent wrote. The trust reset puts `.pi/` back but cannot enumerate
+		// what an extension imports, so the only sound answer is not to recover such a run at all. Decided here, at arm
+		// time, from the fresh clone's own `.git` (the worker's, before any container), so the run is simply not armed:
+		// no ledger claim, no checkpoints, no pointer, and it runs exactly as it did before #645, the record saying
+		// `recoverSkipped: "workspace-extensions"`. A base that could not be read is not armed either, fail closed, and
+		// says `base-unprimed`. The recovery side asks again before it restores (defence in depth).
+		if (armed && !isRecovery) {
+			let unsafe;
+			try {
+				unsafe = await baseHasExtensions({ workspace: prepared.workspace, baseSha: prepared.sha });
+			} catch {
+				unsafe = null;
+			}
+			if (unsafe !== false) {
+				armed = false;
+				durable.armed = false;
+				durable.recoverSkipped = unsafe === true ? "workspace-extensions" : "base-unprimed";
+				log("recover_not_armed", { reason: durable.recoverSkipped });
+			}
+		}
+
+		// Issue #645: A RECOVERY JOB'S WORKSPACE. The preparer cloned the checkpoint's base commit from the checkpoint store
+		// (`pin`), so the checkout is exactly the tree the checkpoint is a diff against; the restore applies the crashed
+		// run's work on top. All of it local and free, before the token-cap read and every reserve.
+		if (isRecovery) {
+			const baseSha = manifest.workspace.baseSha;
+			// The arm-time rule, again, on the base the store just handed over: a checkpoint of such a base can only exist
+			// from a worker that armed it before this rule, and is refused rather than restored. Unreadable: retried.
+			let unsafe;
+			try {
+				unsafe = await baseHasExtensions({ workspace: prepared.workspace, baseSha });
+			} catch {
+				unsafe = null;
+			}
+			if (unsafe === true) {
+				await comment(job, RECOVERY_COMMENTS["recovery-unsafe-extensions"]);
+				log("refused_recovery_unsafe_extensions", { n: durable.recovery });
+				return { outcome: "policy", reason: "recovery-unsafe-extensions", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+			if (unsafe !== false) throw new InfraRetry("whether the recovered base holds .pi/extensions could not be read", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			const restored = await workspaceCheckpointer.restore({ runId, manifest, intoWorkspace: prepared.workspace });
+			if (restored?.refused) {
+				// Determinate: the store refused its own checkpoint (tampered, another run's, a base that does not match).
+				await comment(job, RECOVERY_COMMENTS["recovery-checkpoint-absent"]);
+				log("refused_recovery_checkpoint_absent", { n: durable.recovery, why: "restore-refused", detail: String(restored.refused).slice(0, 40) });
+				return { outcome: "policy", reason: "recovery-checkpoint-absent", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+			if (!restored || restored.skipped || !Number.isSafeInteger(restored.written)) {
+				log("recovery_restore_skipped", { reason: typeof restored?.skipped === "string" ? restored.skipped.slice(0, 40) : "error" });
+				throw new InfraRetry("the checkpoint could not be restored", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			// THE TRUST PATHS: what pi loads as the repository's own code and instructions (`.pi/`, `.agents/`, the root
+			// AGENTS/CLAUDE files) goes back to the base commit's content, since the restored tree was written by the agent.
+			// A reset that failed means the recovery would start on the agent's configuration, so it does not start.
+			try {
+				await resetTrustPaths({ workspace: prepared.workspace, baseSha });
+			} catch (error) {
+				log("recovery_trust_reset_failed", { code: typeof error?.code === "string" ? error.code : "error" });
+				throw new InfraRetry("the recovered workspace's trust paths could not be reset", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			// THE CONVERSATION: the checkpoint's transcript, staged where every job's transcript file is. A resume job's is a
+			// session with its key (promoted on completion as before); any other job's is its live file.
+			const staged = typeof stageRecovered === "function" ? await stageRecovered({ jobDir: prepared.jobDir, transcriptPath, piVersion, job, resolved: prepared.recoveryResolved ?? {} }) : null;
+			if (!staged || typeof staged.hostDir !== "string") {
+				throw new InfraRetry("the checkpoint's transcript could not be staged", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			prepared = staged.key ? { ...prepared, session: staged } : { ...prepared, live: { hostDir: staged.hostDir } };
+			durable.recovered = { from: manifest.kind, n: durable.recovery, fromAttempt: manifest.attempt, checkpointSeq: manifest.seq, orphans: null, replayed: null, interrupted: null, notStarted: null };
 		}
 
 		// Daily TOKEN cap (issue #25): the deliberate check-AFTER control. Token cost is only known
@@ -1260,10 +1619,23 @@ export async function runJob(job, deps) {
 		// ledger's day counted, an EXPIRE that faults leaves its key without a TTL): `reserveBudget` does not say which of
 		// its windows landed, so giving them back could DECR a window that never rose. That is the pre-existing
 		// mid-reserve posture of one ledger, unchanged.
+		// Issue #645: an armed run's job-count slot is the RUN's, claimed once in its budget ledger. "new": this attempt
+		// reserves the ledgers below, exactly as every job did before. "carried": an earlier attempt (a retry's first try,
+		// or the attempt a recovery continues) reserved it and is still counted in it, so nothing is reserved again. A
+		// ledger that did not answer leaves the question open, so nothing is reserved and the attempt is retried.
+		if (armed) {
+			const claim = await runBudgetLedger.claimSlot(runId);
+			if (claim !== "new" && claim !== "carried") {
+				log("run_budget_claim_failed", { code: typeof claim?.error === "string" ? claim.error : "unknown" });
+				throw new InfraRetry("the run's budget ledger could not be read", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			slotCarried = claim === "carried";
+			slotOwnedByRun = true;
+		}
 		globalLedger = { scope: null, keyPrefix: null, caps, softHoldPct, reason: null };
 		let counted;
 		try {
-			counted = await reserveLedgers(redis, [...(scopedLedgers ?? []), globalLedger], held, { now });
+			counted = slotCarried ? { allowed: true } : await reserveLedgers(redis, [...(scopedLedgers ?? []), globalLedger], held, { now });
 		} catch (error) {
 			// Valkey failed mid-walk. No container can have started, and `held` lists exactly the reservations that
 			// landed, so they go back (last first, never throwing) before the error escapes; otherwise a repo and a
@@ -1306,6 +1678,29 @@ export async function runJob(job, deps) {
 			log("over_scope_budget", { scopeKey: counted.refusedBy.keyPrefix, ...(isProject ? { ledger: "project" } : {}), window: w, reserved: win.reserved, cap: win.cap, kind: job.kind === "local" ? "local" : "forge" });
 			// budgetReserved false: the GLOBAL slot was never touched (every scoped ledger reserves first).
 			return { outcome: "policy", reason: counted.refusedBy.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
+		// Issue #645: THIS CONTAINER'S NUMBER in the run (`nextSeq`: attempt 1 is 1, its retry 2, a recovery's container the
+		// next), which addresses its dollar hold in the run's ledger and names its checkpoints' attempt. Before the dollar
+		// reserve, because a hold is recorded under it: without a number there is no record, and without a record there is
+		// no hold. A recovery then settles AT THE FLOOR every hold of the run's earlier containers still `held`: those
+		// containers are dead (the base-still-running gate above holds this job until none of the run's is alive here),
+		// and their real spend is unknown, so the reservation already in every window is what they are charged
+		// (`settleCrashed`, bookkeeping only, no window key moves). A settle that failed is logged and the run goes on: the
+		// holds stay `held` and in the windows at the floor, which is the safe side, and nothing releases an earlier
+		// container's hold but that container itself.
+		if (armed) {
+			const seq = await runBudgetLedger.nextSeq(runId);
+			if (!Number.isSafeInteger(seq) || seq < 1) {
+				log("run_budget_seq_failed", { code: typeof seq?.error === "string" ? seq.error : "unknown" });
+				throw new InfraRetry("the run's container number could not be taken", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			durable.seq = seq;
+			if (isRecovery) {
+				const crashed = await runBudgetLedger.settleCrashed(runId, seq);
+				if (Array.isArray(crashed?.settled)) log("run_budget_settled_crashed", { holds: crashed.settled.length });
+				else log("run_budget_settle_crashed_failed", { code: typeof crashed?.error === "string" ? crashed.error : "unknown" });
+			}
 		}
 
 		// DOLLAR windows (issue #501, part 3), after EVERY job-count reserve and before the container: the last gate
@@ -1396,6 +1791,18 @@ export async function runJob(job, deps) {
 				}
 				dollarHold = reservation.hold;
 				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis: modelPrefixes.size > 0 ? "floor" : null });
+				// Issue #645: an armed run never runs a container without a DURABLE record of its hold (run-budget-ledger.mjs's
+				// contract), so a recovery after a crash can see it and settle it exactly once. A record that did not land
+				// throws a never-started retry before any container; the catch gives the hold back directly (`holdRecorded`
+				// false: no one else can see it to settle or release it).
+				if (armed) {
+					const rec = await runBudgetLedger.recordHold(runId, durable.seq, dollarHold);
+					if (rec?.ok !== true) {
+						log("run_budget_hold_unrecorded", { code: typeof rec?.error === "string" ? rec.error : "unknown" });
+						throw new InfraRetry("the run's dollar hold could not be recorded", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+					}
+					holdRecorded = true;
+				}
 			}
 		}
 
@@ -1425,7 +1832,34 @@ export async function runJob(job, deps) {
 		// then only a signed line is read (run-container.mjs, run-history.mjs `authenticExitLines`). An image that does not
 		// declare it is read as before, under the #542 trust rule below alone.
 		const exitAuth = (img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY);
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}) });
+		// Issue #645: a FRESH armed run seeds the checkpoint store from its clone, now, before the container: the one moment
+		// the workspace's `.git` is still the worker's own (workspace-checkpoint.mjs `primeBase`). After every reserve, so a
+		// refused job never writes to the store. A recovery's base is already there. A base that could not be primed means
+		// no checkpoint of this run can ever be restored: the run goes on unprotected and the record says so.
+		let checkpointArgs = null;
+		if (armed) {
+			const baseSha = isRecovery ? manifest.workspace.baseSha : prepared.sha;
+			if (!isRecovery) {
+				const objectFormat = typeof baseSha === "string" && baseSha.length === 64 ? "sha256" : "sha1";
+				let primed = null;
+				try {
+					primed = await workspaceCheckpointer.primeBase({ runId, workspace: prepared.workspace, baseSha, objectFormat });
+				} catch {
+					primed = null;
+				}
+				if (primed?.ok !== true) {
+					durable.recoverSkipped = "base-unprimed";
+					log("recover_base_unprimed", { reason: typeof primed?.skipped === "string" ? primed.skipped.slice(0, 40) : "error" });
+				}
+			}
+			// The live checkpointer's open arguments (run-checkpoint.mjs): the run, this container's number, the base, and
+			// the values a snapshot must refuse to store (the job's token and its resolved secrets). `attempt` IS the
+			// container number: unique across retries and recoveries, which a BullMQ attempt count is not. `meta` is what the
+			// manifest records and a recovery judges above: never a string the job chose.
+			const secretValues = [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== "");
+			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } };
+		}
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		containerRan = true;
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
@@ -1441,6 +1875,69 @@ export async function runJob(job, deps) {
 		// `oom_kill` counts the HOST's OOM killer too (`peakReachedLimit`). A report below it stays infrastructure.
 		const oomReported = exitOomKilled === true && exitAuthResult === "verified" && code === EXIT_SIGKILL;
 		const oomKilled = oomReported && peakReachedLimit(resources?.memPeak ?? null, memoryLimit);
+		// Issue #645: what the runner says it did with the crashed attempt's orphaned tool calls (the exit line's `recovery`).
+		if (durable.recovered !== null) {
+			const counts = recoveryCounts(ranRecovery);
+			if (counts !== null) durable.recovered = { ...durable.recovered, ...counts };
+		}
+		// A container the checkpointer stopped because it could not unpause it (`checkpointStopped`, code 137, not aborted)
+		// is an infrastructure exit like any other here: not the worker's abort, not an OOM (no supervisor report), so it
+		// reaches the unknown-exit arm below and recovers from the checkpoint that was committed before the pause.
+		// Issue #645: THE EXIT CHECKPOINT, then the checkpointer's close, before anything below can return or throw. Taken
+		// only on an exit this attempt may recover from: infrastructure (exit 1, an unknown code, a detached container),
+		// never a worker's abort, an OOM kill, a completed or policy exit (none of those recovers) nor a never-started one
+		// (nothing ran, and today's retry is cheaper). The container is dead, so nothing is paused. B1's handle is read
+		// defensively: absent, or without `exit`, means no exit checkpoint, never a failure. Neither call may throw out of here.
+		const neverStartedExit = isNeverStartedExit({ code, aborted, detached }, neverStartedExits(job));
+		const recoverable = armed && !aborted && !oomKilled && code !== EXIT_COMPLETED && code !== EXIT_POLICY && !neverStartedExit;
+		if (ranCheckpoint !== null && typeof ranCheckpoint === "object") {
+			if (recoverable && typeof ranCheckpoint.exit === "function") {
+				const taken = await Promise.resolve().then(() => ranCheckpoint.exit({ kind: "exit" })).catch(() => ({ skipped: "error" }));
+				log("checkpoint_exit", taken && Number.isSafeInteger(taken.seq) ? { seq: taken.seq } : { skipped: typeof taken?.skipped === "string" ? taken.skipped.slice(0, 40) : "unknown" });
+			}
+			const closed = typeof ranCheckpoint.close === "function" ? await Promise.resolve().then(() => ranCheckpoint.close()).catch(() => null) : null;
+			// `close()` answers the counts; `stats()` (a function on B1's handle) is the fallback when close did not.
+			const stats = closed ?? (typeof ranCheckpoint.stats === "function" ? await Promise.resolve().then(() => ranCheckpoint.stats()).catch(() => null) : null);
+			const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+			if (stats && count(stats.written) !== null && count(stats.failed) !== null && count(stats.skipped) !== null) durable.checkpoints = { written: stats.written, failed: stats.failed, skipped: stats.skipped };
+		}
+		// An infrastructure exit of an armed run: queue its continuation from the checkpoint instead of throwing a retry
+		// (CONST-RETRY-INFRA-ONLY holds: nothing is returned as success, and the queued recovery IS the retry, one that
+		// keeps the work). RETURNED, so BullMQ spends no second attempt that would start from scratch beside it. Not
+		// queued (no checkpoint, the cap, a claim already taken, Valkey) -> today's InfraRetry, unchanged.
+		// A RECOVERY job has one attempt, so a throw here would fail it with the generic failure comment and nothing else:
+		// when its container ran, ended infra and no further recovery was queued, it RETURNS `recovery-failed` with its own
+		// comment instead (the run's final outcome, so its checkpoint, pointer and ledger are cleaned up).
+		const notQueued = async (err) => {
+			if (!isRecovery) throw err;
+			await comment(job, RECOVERY_COMMENTS["recovery-failed"]);
+			return { outcome: "failed", reason: "recovery-failed", exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}), ...(progress ? { progress } : {}) };
+		};
+		const recoverOrThrow = async (err) => {
+			if (!recoverable) return notQueued(err);
+			let pointer = null;
+			try {
+				pointer = await readCheckpointPointer({ runId });
+			} catch {
+				pointer = null;
+			}
+			if (pointer === null || pointer === undefined) {
+				log("recovery_not_enqueued", { cause: "infra", reason: "no-checkpoint" });
+				return notQueued(err);
+			}
+			let queued;
+			try {
+				queued = await enqueueRecovery({ job, cause: "infra", pointer });
+			} catch {
+				queued = { enqueued: false, reason: "error" };
+			}
+			if (queued?.enqueued !== true) {
+				log("recovery_not_enqueued", { cause: "infra", reason: typeof queued?.reason === "string" && /^[a-z0-9-]{1,40}$/.test(queued.reason) ? queued.reason : "unknown" });
+				return notQueued(err);
+			}
+			log("recovery_enqueued_after_exit", { cause: "infra", n: Number.isSafeInteger(queued.n) ? queued.n : null, exitCode: code });
+			return { outcome: "failed", reason: RECOVERY_ENQUEUED, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}), ...(progress ? { progress } : {}) };
+		};
 		// Numbers only (bytes), never a path or a project: the operator's trace of a kill read as the host's. Never on a run
 		// the worker stopped itself (a timeout, a cancel, a shutdown): that 137 is the worker's own, the abort decides it
 		// below, and a line naming the host's OOM killer would send the operator after a kill that never happened.
@@ -1465,7 +1962,7 @@ export async function runJob(job, deps) {
 		// completed, runner policy, a worker abort or cancel, exit 1, an unknown exit, and a detached container. A
 		// never-started exit is not settled: the catch refunds it whole, and `isNeverStartedExit` is the one answer both
 		// ask. Before any classification below, so every return and every throw carries the same `dollars`.
-		const neverStarted = isNeverStartedExit({ code, aborted, detached }, neverStartedExits(job));
+		const neverStarted = neverStartedExit;
 		if (dollarHold !== null && !neverStarted) {
 			// The exit line is trusted only when the container exited ON ITS OWN (the worker did not abort, cancel, time
 			// out or detach it, so the runner had the chance to write its genuine last line) AND that line's own `code` is
@@ -1475,10 +1972,19 @@ export async function runJob(job, deps) {
 			const { settledMicros, basis } = dollarSettlement({ tokens, usage: usage ?? null, reservedMicros, trusted });
 			// The deployment, the repo or folder and the project windows settle to the job's cost; each model window to its
 			// own row of the usage ledger (`modelDollarSettlement`), never to the job's total.
+			// Issue #645: a recorded hold is settled through the run's ledger first, `held` -> `settled`, and only the call
+			// that MOVED it adjusts a window key. Anything else ("not-held": someone already finished it; a ledger error)
+			// leaves the reservation in every window, the floor, which is the safe side and what the record then says.
+			let ledgerMoved = true;
+			if (holdRecorded) {
+				const moved = await runBudgetLedger.settle(runId, durable.seq);
+				ledgerMoved = moved === "moved";
+				if (!ledgerMoved) log("run_budget_settle_skipped", { result: typeof moved === "string" ? moved : typeof moved?.error === "string" ? moved.error : "unknown" });
+			}
 			const jobPart = holdPart(dollarHold, (prefix) => jobCostPrefixes.has(prefix));
-			const { applied, of } = await settleDollars(redis, jobPart, settledMicros, { log });
+			const { applied, of } = ledgerMoved ? await settleDollars(redis, jobPart, settledMicros, { log }) : { applied: 0, of: 1 };
 			let modelBasis = null;
-			for (const part of dollarHold.ledgers ?? []) {
+			for (const part of ledgerMoved ? (dollarHold.ledgers ?? []) : []) {
 				const ref = modelPrefixes.get(part.keyPrefix);
 				if (ref === undefined) continue;
 				const m = modelDollarSettlement({ ref, basis, tokens, usage: usage ?? null, reservedMicros, trusted });
@@ -1492,7 +1998,8 @@ export async function runJob(job, deps) {
 			// A fault that adjusted no key leaves the whole reservation in every window, which is a floor whatever the
 			// basis would have been, and the record says so. A partial one is logged (dollar_settle_error) and recorded
 			// as computed: the keys that were adjusted hold the settled amount.
-			dollars = applied === 0 && of > 0 && settledMicros !== reservedMicros ? dollarsRecord({ reservedMicros, settledMicros: reservedMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis });
+			if (!ledgerMoved && modelPrefixes.size > 0) modelBasis = "floor";
+			dollars = applied === 0 && of > 0 && (settledMicros !== reservedMicros || !ledgerMoved) ? dollarsRecord({ reservedMicros, settledMicros: reservedMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis });
 			dollarHold = null;
 			log("dollar_settled", { reservedMicros: dollars.reservedMicros, settledMicros: dollars.settledMicros, basis: dollars.basis, ...(modelBasis !== null ? { modelBasis } : {}) });
 		} else if (dollars?.basis === "unreserved") {
@@ -1507,7 +2014,7 @@ export async function runJob(job, deps) {
 		// mid-job). It DID start, so this is never refunded as never-started: it keeps its slot and retries as infrastructure,
 		// BEFORE the exit-code switch, where the same code would read as a free never-started exit.
 		if (detached === true) {
-			throw new InfraRetry(`the container outlived its docker run, exit ${code}`, { reason: "container-detached", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources });
+			return await recoverOrThrow(new InfraRetry(`the container outlived its docker run, exit ${code}`, { reason: "container-detached", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources }));
 		}
 
 		// A WORKER-initiated stop (30-min timeout via cancelJob, graceful-shutdown docker stop, or an
@@ -1638,7 +2145,7 @@ export async function runJob(job, deps) {
 				// the whole infra class lives at the terminal seam -- start.mjs's failed listener, guarded on
 				// BullMQ's own finishedOn -- which also catches the stall-kill and wait-gate paths this
 				// function never sees (issue #288).
-				throw new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources });
+				return await recoverOrThrow(new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources }));
 			default:
 				// THE RUNTIME NEVER HANDED CONTROL TO THE RUNNER, in whatever integers this venue spells that
 				// (issue #227). For docker it is 125 (`docker run` itself failed), 126 (the entrypoint exists
@@ -1656,7 +2163,7 @@ export async function runJob(job, deps) {
 					// No `dollars` here: the hold is still standing, and the catch refunds it whole with the job-count slots.
 					throw new InfraRetry(`the runtime could not start the container, exit ${code}`, { reason: "container-never-started", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), resources });
 				}
-				throw new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources });
+				return await recoverOrThrow(new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources }));
 		}
 	} catch (e) {
 		// A CONFIG-tagged throw is a determinate policy refusal wearing an exception, and issue #310 is the
@@ -1690,7 +2197,13 @@ export async function runJob(job, deps) {
 			const hold = dollarHold;
 			dollarHold = null;
 			if ((e?.piDispatchConfig === true && !containerRan) || isNeverStartedRetry(e)) {
-				const { applied, of } = await releaseDollars(redis, hold, { log });
+				// Issue #645: a RECORDED hold is given back only by the call that moves it `held` -> `released` in the run's
+				// ledger; any other answer means someone else finished it or the ledger cannot say, and giving it back again
+				// could refund money twice, so it stays at the floor. An unrecorded hold (its record failed) is given back
+				// directly, as every hold was before: no one else can see it.
+				const releasable = !holdRecorded || (await runBudgetLedger.release(runId, durable.seq)) === "moved";
+				if (!releasable) log("run_budget_release_skipped", { seq: durable.seq });
+				const { applied, of } = releasable ? await releaseDollars(redis, hold, { log }) : { applied: 0, of: 1 };
 				const heldModel = (hold.ledgers ?? []).some((l) => modelPrefixesOf(modelDollars).has(l.keyPrefix));
 				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: applied === of ? 0 : hold.amountMicros, basis: applied === of ? "refunded" : "floor", modelBasis: heldModel ? (applied === of ? "refunded" : "floor") : null });
 			} else {
@@ -1749,10 +2262,13 @@ export async function runJob(job, deps) {
 		// here (exit-1 infra, unknown exit) means the container ran and legitimately spent its slot,
 		// so `reason` gates the release to the never-started case only. It releases only what `held` still
 		// lists and run once per invocation; a BullMQ retry reserves afresh, so this cannot double-release.
-		if (isNeverStartedRetry(e)) {
+		if (isNeverStartedRetry(e) && !slotOwnedByRun) {
 			// All-or-none (issues #242 and #499 part B): a never-started container follows EVERY job-count reserve, so
 			// every held ledger refunds together, last first, through the one helper -- and a scoped or project refusal
 			// returned above with the ledgers before it already given back.
+			// NOT for an armed run's slot (issue #645, `slotOwnedByRun`): the run's ledger says the slot is held, so the
+			// retry carries it instead of reserving; refunding it here would let that retry run on a slot nothing counts.
+			// The cost: a run whose every attempt never started keeps one slot counted, the safe side.
 			await refundLedgers("container-never-started");
 		}
 		// After the refund, so it says what the ledger holds: false when never-started gave the global slot back, true
@@ -1901,6 +2417,20 @@ export class NetnsKeeperYoungHold extends InfraRetry {
 		this.name = "NetnsKeeperYoungHold";
 		this.keeperYoung = young;
 		this.keeperRemedy = remedy;
+	}
+}
+
+/**
+ * A recovery job held while the run it continues still has a container running on this host (issue #645). An
+ * `InfraRetry` with `container-never-started`, so any path that does not know it still retries and refunds nothing it did
+ * not take; `makeProcessor` knows it by `recoveryWaitMs`, and moves the job to the delayed set for that long without
+ * spending an attempt (a recovery job has one), the move the two holds above make.
+ */
+export class RecoveryWaitHold extends InfraRetry {
+	constructor(message, { waitMs = RECOVERY_WAIT_MS, ...options } = {}) {
+		super(message, options);
+		this.name = "RecoveryWaitHold";
+		this.recoveryWaitMs = waitMs;
 	}
 }
 

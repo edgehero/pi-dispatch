@@ -24,7 +24,7 @@ import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } 
 import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
-import { makeHostRegistry } from "./host-registry.mjs";
+import { makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
 import { liveJobsFields, liveJobsOf } from "./live-jobs.mjs";
 import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
 import { makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
@@ -77,6 +77,10 @@ import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
 import { authoredCron, envelopeJobPaths, loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
+import { makeWorkspaceCheckpointer } from "./workspace-checkpoint.mjs";
+import { makeRunBudgetLedger } from "./run-budget-ledger.mjs";
+import { normalizeHost } from "./run-checkpoint.mjs";
+import { isRecoveryArmed, makeHostLostSweep, makeRecoveryEnqueuer, makeSalvager, pointedJobDirs, runIdOf, sweepOrphanJobDirs } from "./recovery-queue.mjs";
 
 
 /** How long boot will wait for `docker image inspect` before shipping without a digest. */
@@ -716,6 +720,18 @@ export async function startWorker(
 		watchProjects: watchProjectsFn = watchProjectsFile,
 		// The envelope watcher (issue #504 part B), injectable for the same reason.
 		watchEnvelope: watchEnvelopeFn = watchEnvelopeFile,
+		// Issue #645 (durable runs): the checkpoint collaborators, seams so a wiring test sees what the boot hands each and
+		// what the processor and the opener are given. `loadRunCheckpoint` is the module holding the run checkpointer and
+		// the pointer reads (run-checkpoint.mjs), imported at boot rather than statically, so a test can hand in a double.
+		makeWorkspaceCheckpointer: makeWorkspaceCheckpointerFn = makeWorkspaceCheckpointer,
+		loadRunCheckpoint = () => import("./run-checkpoint.mjs"),
+		makeRunBudgetLedger: makeRunBudgetLedgerFn = makeRunBudgetLedger,
+		makeRecoveryEnqueuer: makeRecoveryEnqueuerFn = makeRecoveryEnqueuer,
+		// The host-lost sweep's factory: a wiring test reaches its `onLost` (the comment, the page, the record) without a
+		// live queue, since the harness's clients are closed by the time a test could drive a sweep.
+		makeHostLostSweep: makeHostLostSweepFn = makeHostLostSweep,
+		// The boot sweep of orphaned job directories, a seam so a wiring test drives it against a directory of its own.
+		sweepOrphanJobDirs: sweepOrphanJobDirsFn = sweepOrphanJobDirs,
 	} = {},
 ) {
 	const config = loadConfigFn(env);
@@ -1380,6 +1396,75 @@ export async function startWorker(
 	// closing `runtimeQueue` twice would be closing another owner's connection.
 	const cronQueue = hostQueue ? makeQueue(valkeyConn(), { name: hostQueue }) : runtimeQueue;
 
+	// Issue #645 (durable runs): the checkpoint collaborators, built once here and handed to the processor and the live
+	// transcript opener. Only with a store (`config.checkpointsDir`, PI_CHECKPOINTS_DIR else <PI_SESSIONS_DIR>/.checkpoints):
+	// without one an armed job is refused by the processor before it spends (`recover-store-unset`), so nothing below may
+	// pretend to checkpoint into nowhere. The run checkpointer's module is loaded unconditionally, because its pointer read
+	// is what the STALL listener needs on every host of a fleet, store or not: the host that notices a stall is any host.
+	let runCheckpointModule = null;
+	try {
+		runCheckpointModule = await loadRunCheckpoint();
+	} catch (err) {
+		// Fail loudly: every armed job on this host then falls back to today's path, and the operator is told why at boot.
+		log("run_checkpoint_unavailable", { reason: scrubCredentials(err?.message) });
+	}
+	const durableHost = config.workerName;
+	// `snapshotTimeoutMs` 20 s, not the module's 60 s default: a LIVE checkpoint snapshots a PAUSED container, so this bound
+	// is how long a paid job can sit frozen (its provider stream stalled, its tool timers running on the clock). A tree too
+	// big to walk in 20 s is skipped (`timeout`) and the run goes on, with its exit checkpoint as the fallback; 60 s of
+	// freeze per checkpoint would be long enough for a provider to drop the stream the agent is waiting on.
+	const workspaceCheckpointer = config.checkpointsDir ? makeWorkspaceCheckpointerFn({ storeDir: config.checkpointsDir, now, log, hostName: durableHost, limits: { snapshotTimeoutMs: 20_000 } }) : null;
+	const runCheckpointer =
+		workspaceCheckpointer && typeof runCheckpointModule?.makeRunCheckpointer === "function"
+			? runCheckpointModule.makeRunCheckpointer({ checkpointer: workspaceCheckpointer, redis, hostName: durableHost, hostQueue, now, log })
+			: null;
+	// The per-run dollar ledger (run-budget-ledger.mjs): on every host, since a recovery settles the crashed attempt's hold
+	// wherever it runs, and an unarmed job never calls it.
+	const runBudgetLedger = makeRunBudgetLedgerFn({ redis, now, log });
+	const readCheckpointPointer = async ({ runId }) => {
+		if (typeof runCheckpointModule?.readCheckpointPointer !== "function") return null;
+		try {
+			return await runCheckpointModule.readCheckpointPointer({ redis, runId, timeoutMs: 2_000 });
+		} catch (err) {
+			log("checkpoint_pointer_read_failed", { code: typeof err?.code === "string" ? err.code : "error" });
+			return null;
+		}
+	};
+	// The queues a recovery can be routed to: the shared one, this host's own, or another host's (the crashed host's,
+	// when THIS host noticed the stall). Another host's handle is opened on first use and joins the closers then; the
+	// array is read at shutdown, not at handoff, which is what makes a late push sound (see `extraClosers` below).
+	const otherHostQueues = new Map();
+	const recoveryQueues = {
+		shared: () => runtimeQueue,
+		host: (name) => {
+			if (name === hostQueue) return cronQueue;
+			let q = otherHostQueues.get(name);
+			if (!q) {
+				q = makeQueue(valkeyConn(), { name });
+				otherHostQueues.set(name, q);
+				extraClosers.push(q);
+			}
+			return q;
+		},
+	};
+	const enqueueRecovery = makeRecoveryEnqueuerFn({ redis, queues: recoveryQueues, hostQueueName, now, log });
+	const salvageCheckpoint = makeSalvager({ jobsDir: config.jobsDir, hostName: durableHost, workspaceCheckpointer, runCheckpointer, log });
+	// The boot sweep of orphaned `jobs/job-*` directories: a crashed worker's processor never cleaned up after its jobs.
+	// Here, before `createWorker` starts consuming, so no job of THIS process owns any of them; the age bound (the job
+	// timeout plus the abort grace's margin) covers another process on this host. A directory a checkpoint pointer of this
+	// host still names is kept for its recovery's salvage, and when those pointers cannot be read the sweep is skipped
+	// rather than run blind.
+	// The pointer read is BOUNDED: a Valkey that does not answer must not hold the boot (every command of this client waits
+	// for a connection rather than failing), and an unanswered read is the same skip as a failed one.
+	try {
+		const keep = workspaceCheckpointer ? await settleWithin(pointedJobDirs({ redis, hostName: durableHost }), 5_000, null) : new Set();
+		if (keep === null) throw new Error("the checkpoint pointers were not read within 5 s");
+		await sweepOrphanJobDirsFn({ jobsDir: config.jobsDir, olderThanMs: JOB_TIMEOUT_MS + 5 * 60 * 1000, now, keep, log });
+	} catch (err) {
+		log("job_dir_sweep_skipped", { reason: scrubCredentials(err?.message) });
+	}
+	log("durable_runs", { checkpointsDir: config.checkpointsDir ?? null, checkpointer: Boolean(runCheckpointer), pointerReads: typeof runCheckpointModule?.readCheckpointPointer === "function" });
+
 	// REQ-LOCAL-JOB-VISIBILITY durable run history, all host-side. The raw `.log` sink is gated on
 	// captureJobLogs (raw container output is user-authored data, opt-in per no-pii-in-logs); the id-only
 	// `.json` record via recordRun is ALWAYS on, so every run leaves a stable, non-PII trace regardless.
@@ -1496,7 +1581,14 @@ export async function startWorker(
 	//
 	// Issue #644 (DES-RUN-PROGRESS): the same opener reads each job's progress off the same file unless PI_RUN_PROGRESS=0,
 	// so it is built when either switch is on; with transcripts off it tails the file and writes no stream.
-	const openLiveTranscript = config.liveTranscripts || config.runProgress ? makeLiveTranscriptOpenerFn({ redis, log, transcripts: config.liveTranscripts, progress: config.runProgress, makeCommenter: makeProgressCommenter }) : null;
+	//
+	// Issue #645: the run checkpointer is the file's third reader (an armed job's quiet points schedule its checkpoints), so
+	// with a checkpointer the opener is built even with both switches off; it then tails the file for the checkpoint alone
+	// (no stream, no progress key). `checkpoint` is called per attempt with the open() arguments the attempt supplies.
+	const openLiveTranscript =
+		config.liveTranscripts || config.runProgress || runCheckpointer
+			? makeLiveTranscriptOpenerFn({ redis, log, transcripts: config.liveTranscripts, progress: config.runProgress, makeCommenter: makeProgressCommenter, ...(runCheckpointer ? { checkpoint: (args) => runCheckpointer.open(args) } : {}) })
+			: null;
 	// Issue #644: the final edit for an attempt that registered no commenter, so nothing else would edit the comment again.
 	// That is an attempt refused before its container (a cost cap, a policy gate) after an earlier attempt posted the
 	// comment and left it saying "attempt ended, retrying": with no edit here it said so for good. The comment's id is
@@ -1507,10 +1599,12 @@ export async function startWorker(
 	const settleUnregisteredStatus = async (job, outcome) => {
 		try {
 			const data = job?.data ?? {};
-			if (statusTextMayMatch(data.trigger?.matched?.phrase, job.id)) return;
-			const key = await readProgressKeyFn({ redis, jobId: job.id });
+			// Issue #645: the progress key and the comment are the RUN's, so a recovery (`.rN`) finds the comment its run posted.
+			const runId = runIdOf(job);
+			if (statusTextMayMatch(data.trigger?.matched?.phrase, runId)) return;
+			const key = await readProgressKeyFn({ redis, jobId: runId });
 			if (!key?.commentId) return;
-			const text = renderStatusText({ jobId: job.id, snapshot: key.snapshot, outcome });
+			const text = renderStatusText({ jobId: runId, snapshot: key.snapshot, outcome });
 			const done = await settleWithin(statusEdit(data, key.commentId, text), STATUS_UNREGISTERED_EDIT_MS, null);
 			if (done === null) log("status_comment_final_timeout", { jobId: job.id });
 		} catch {
@@ -1536,9 +1630,13 @@ export async function startWorker(
 		// no-op.
 		try {
 			const attempts = Number.isSafeInteger(job?.opts?.attempts) ? job.opts.attempts : 1;
-			const retrying = !result && error instanceof InfraRetry && record.attempt < attempts;
+			// Issue #645: an attempt whose run continues as a recovery (`recovery-enqueued`) is retrying too, not failed: the
+			// recovery picks the same comment up (it is the run's) and ends it with its own outcome.
+			const retrying = (!result && error instanceof InfraRetry && record.attempt < attempts) || record.reason === "recovery-enqueued";
 			const outcome = retrying ? STATUS_RETRYING : record.outcome;
-			if (statusComments.has(job?.id)) void statusComments.settle(job?.id, outcome);
+			// The commenters are registered by the RUN id (the opener is handed it), so a `.rN` record settles its run's.
+			const runId = runIdOf(job);
+			if (statusComments.has(runId)) void statusComments.settle(runId, outcome);
 			else if (job?.data?.statusComment === true) void settleUnregisteredStatus(job, outcome);
 		} catch {}
 		// STRICTLY AFTER the file, and deliberately not awaited. After, because a crash between the two must
@@ -1565,6 +1663,17 @@ export async function startWorker(
 		readRecord,
 		readMirrored: runMirror ? (jobId) => readMirroredRecordFn(redis, sanitizeJobId(jobId)) : null,
 	});
+	// Issue #645: a run's record by job id, this host's file then the fleet's copy where a mirror is armed, for the
+	// processor's recovery gate (a recovery whose base run already settled is superseded, not run) and for the lost-lock
+	// check of a recovery's own returned failure below. A recovery may land on a host that never ran its base attempt, so
+	// a local-only read would miss exactly the fleet case. Never rejects; unreadable or unreachable is null.
+	const readRunRecord = async (jobId) => {
+		const local = readRecord(jobId);
+		if (local && local !== UNREADABLE_RECORD) return local;
+		if (!runMirror) return null;
+		const mirrored = await readMirroredRecordFn(redis, sanitizeJobId(jobId)).catch(() => null);
+		return mirrored && mirrored !== UNREADABLE_RECORD ? mirrored : null;
+	};
 	// The record a retry (or a pickup after a stall) is about to replace (issue #599), read BOTH ways: this host's file and
 	// the fleet's copy where a mirror is armed. Both, because each host keeps its own file: a job that ran on A, then B,
 	// then A again finds A's stale first attempt locally while B's second is in the mirror. `newerRecord` keeps the higher
@@ -2202,6 +2311,10 @@ export async function startWorker(
 	// One predicate for the completed listener and the lost-lock path below, so a record replays exactly the page its
 	// result would have sent.
 	const pagesAsPolicy = (result) => Boolean(onFailure) && result?.outcome === "policy" && HOOK_POLICY_REASONS.has(result.reason) && result.budgetReserved !== false;
+	// Issue #645: the one RETURNED failure that pages. A recovery whose container ran, ended infra and could not queue
+	// another recovery returns `failed`/`recovery-failed` (the processor posts its own sentence), so it reaches the
+	// completed listener and never the failed one: without this it would be the only paid terminal that pages nobody.
+	const pagesAsReturnedFailure = (result) => Boolean(onFailure) && result?.outcome === "failed" && result.reason === "recovery-failed";
 	// The infra-terminal sentence (issue #288). FIXED, never err.message: the message classes that reach
 	// a failedReason carry host paths and library words (the #310 record), and for a local job this text
 	// lands verbatim in the service log through the adapter's stdout fallthrough. The worker log already
@@ -2217,6 +2330,33 @@ export async function startWorker(
 		[NETNS_KEEPER_CRASH_LOOP]: "Failed before it started: this worker's rootless network keeper (pi-dispatch-netns-keeper), which its Podman egress proxy needs, kept restarting while the job waited for it, so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker and read the keeper's log (`journalctl --user -u pi-dispatch-netns-keeper.service`).",
 		// Issue #448 (gate round 2 of PR #473): the hold's own ending, so the comment names the cause and the fix.
 		[PODMAN_RESTART_HOLD_EXPIRED]: "Failed before it started: rootful Podman's service on this worker kept running with a containers.conf older than its files (or a file's change time stayed ahead of the host's clock) for an hour, so the job was held and never run. Nothing was spent. Ask the operator to restart it while no local job runs (`sudo systemctl restart podman.service`), then run the job again.",
+	});
+
+	// Issue #645: a recovery that waited past its deadline for the host holding its run's checkpoint, taken back off the
+	// queue by the host-lost sweep. Fixed text, like every failure sentence here. It says what happened and what is lost
+	// (the work since the run's start is on that host, not gone), and sends the operator to the host, the one fix.
+	const RECOVERY_HOST_LOST_COMMENT = "Failed: this run stopped on a worker that has not come back, and its checkpoint lives on that worker, so it could not be continued and will not be retried further. Ask the operator to check that worker, then run the job again.";
+	// Fleet-wide, on every host: whichever host's sweep claims a due recovery first tells its run. The record says it too,
+	// so the panel's history shows the run ended rather than a recovery that vanished.
+	const sweepHostLost = makeHostLostSweepFn({
+		redis,
+		queues: recoveryQueues,
+		now,
+		log,
+		// The registry's live rows (host-registry.mjs heartbeats, HOST_TTL_MS): a recovery whose host is still beating is
+		// delayed (a pause window, a full host), not lost. Names in the run checkpointer's spelling, as the pointer has them;
+		// null when the registry could not be read, which extends rather than fails.
+		liveHosts: async () => {
+			const read = await readLiveHosts(redis, { now, prune: false });
+			if (read?.unreachable || !Array.isArray(read?.hosts)) return null;
+			return new Set(read.hosts.map((h) => normalizeHost(h.name)));
+		},
+		onLost: async (job) => {
+			const at = new Date(now()).toISOString();
+			recordRun({ job: { id: job.id, name: job.name, data: job.data, opts: job.opts, attemptsMade: 0, timestamp: job.timestamp }, error: { reason: "recovery-host-lost" }, startedAt: null, endedAt: at });
+			await comment({ ...job.data, id: job.id }, RECOVERY_HOST_LOST_COMMENT);
+			onFailure?.({ jobId: job.id, outcome: "failed", reason: "recovery-host-lost" });
+		},
 	});
 
 	const worker = createWorkerFn({
@@ -2417,6 +2557,8 @@ export async function startWorker(
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
 			promoteSession: sessionStore.promoteSession,
+			// Issue #645: a recovery stages its checkpoint's transcript as the job's session (`reason: "recovered"`).
+			...(typeof sessionStore.stageRecovered === "function" ? { stageRecovered: sessionStore.stageRecovered } : {}),
 			isParked: sessionStore.isParked,
 			parkedLabel,
 			// The same value the store above was built from, passed explicitly so the processor's fail-closed
@@ -2558,6 +2700,18 @@ export async function startWorker(
 				if (!host) throw configError(`no forge host is configured for job kind ${JSON.stringify(job?.kind)}`);
 				return await host.isDefaultBranchProtected(job, token);
 			},
+			// Issue #645 (durable runs), built above. Null where this host has no store (`recover-store-unset` refuses an
+			// armed job before it spends); the ledger, the pointer read and the enqueue exist on every host.
+			workspaceCheckpointer,
+			runCheckpointer,
+			runBudgetLedger,
+			readCheckpointPointer,
+			enqueueRecovery,
+			// A recovery landing on the host that crashed takes one more checkpoint from the crashed attempt's job directory
+			// before it restores (recovery-queue.mjs `makeSalvager`): `salvageCheckpoint({ runId, pointer, attempt })`.
+			salvageCheckpoint,
+			readRecord: readRunRecord,
+			hostName: durableHost,
 		},
 	});
 
@@ -2594,6 +2748,7 @@ export async function startWorker(
 			if (pagesAsPolicy(result)) {
 				onFailure({ jobId: job?.id, outcome: "policy", reason: result.reason });
 			}
+			if (pagesAsReturnedFailure(result)) onFailure({ jobId: job?.id, outcome: "failed", reason: result.reason });
 		});
 		// The failed listener's body, for a failure the queue decided. Split out only so the lost-lock check below can
 		// run it after an await; a failure of any other reason runs it synchronously, exactly as before.
@@ -2622,6 +2777,35 @@ export async function startWorker(
 		// the completed listener would have sent for that record (a paid policy stop) is sent here instead, because
 		// that listener never saw the first finish. No record, an earlier attempt's, a `failed` one, or a lookup fault
 		// keeps the failure path below: the comment and the page.
+		// Issue #645 (durable runs): a terminal stall of an ARMED job whose run has a checkpoint pointer is not the end of
+		// the run. The worker that ran it died (that is what a stall is), so the processor never got to take its infra-exit
+		// path; this listener takes it instead: the recovery is enqueued (routed to the host holding the checkpoint), the
+		// crashed attempt's record is written (`failed`, `recovery-enqueued`: nothing else would write it, its processor is
+		// gone), and the failure comment and on_failure are SUPPRESSED, because the run is continuing. Anything short of an
+		// enqueued recovery (no pointer, the cap, an enqueue that failed) answers false, and the caller runs today's path:
+		// the comment and the page, loudly, never a run that silently stops.
+		const recoverStall = async (job) => {
+			if (!isRecoveryArmed(job?.data)) return false;
+			const runId = runIdOf(job);
+			const pointer = await readCheckpointPointer({ runId });
+			if (!pointer) {
+				log("job_recovery_skipped", { jobId: job.id, reason: "no-checkpoint" });
+				return false;
+			}
+			const r = await enqueueRecovery({ job, cause: "stall", pointer });
+			if (!r?.enqueued) return false;
+			// `attemptsMade` already counts this attempt here (moveToFailed added one), and `buildRecord` adds one for a record
+			// written while processing, so the record is handed the count from before the move: it then names THIS attempt.
+			const at = now();
+			recordRun({
+				job: { id: job.id, name: job.name, data: job.data, opts: job.opts, attemptsMade: Math.max(0, (Number.isSafeInteger(job.attemptsMade) ? job.attemptsMade : 1) - 1), timestamp: job.timestamp },
+				result: { outcome: "failed", reason: "recovery-enqueued" },
+				startedAt: Number.isFinite(job.processedOn) ? new Date(job.processedOn).toISOString() : null,
+				endedAt: new Date(at).toISOString(),
+			});
+			log("job_failed", { jobId: job.id, attempt: job.attemptsMade, reason: "recovery-enqueued" });
+			return true;
+		};
 		for (const w of allWorkers) w.on("failed", (job, err) => {
 			if (!(job?.finishedOn && err?.message === STALLED_FAILED_REASON)) return onFailed(job, err);
 			void (async () => {
@@ -2631,7 +2815,29 @@ export async function startWorker(
 				// can see why the record did not suppress it (a clock skew past the tolerance reads `older-than-job`).
 				const onReject = (reason, source) => log("job_lost_lock_record_rejected", { jobId: job.id, reason, source });
 				const record = await settledRecord(job.id, { attempt: job.attemptsMade, since: job.timestamp, onReject });
-				if (!record) return onFailed(job, err);
+				if (!record) {
+					// Issue #645: a RETURNED failure of this attempt that then lost its lock. `settledRecord` refuses every
+					// `failed` record (a failure is the failure path's to report), but two returned failures already said
+					// everything: `recovery-failed` posted its own sentence (so only its page is owed, once), and
+					// `recovery-enqueued` handed the run to a recovery (nothing is owed). Running the failure path for either
+					// would post a second failure comment, the second one false for a run that continues.
+					const own = await readRunRecord(job.id).catch(() => null);
+					if (own?.jobId === job.id && own.attempt === job.attemptsMade && own.outcome === "failed" && (own.reason === "recovery-failed" || own.reason === "recovery-enqueued")) {
+						log("job_lost_lock_after_completion", { jobId: job.id, outcome: own.outcome, reason: own.reason });
+						if (pagesAsReturnedFailure(own)) onFailure({ jobId: job.id, outcome: "failed", reason: own.reason });
+						return;
+					}
+					// No settled record: the attempt died running. A run that can continue from its checkpoint does; any
+					// fault on that path falls through to the failure comment and the page.
+					let recovered = false;
+					try {
+						recovered = await recoverStall(job);
+					} catch (e) {
+						log("job_recovery_enqueue_failed", { jobId: job.id, code: typeof e?.code === "string" ? e.code : "error" });
+					}
+					if (recovered) return;
+					return onFailed(job, err);
+				}
 				log("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(record.reason ? { reason: record.reason } : {}) });
 				if (pagesAsPolicy(record)) onFailure({ jobId: job.id, outcome: "policy", reason: record.reason });
 			})().catch(() => {}); // `settledRecord` never rejects; this only keeps a throwing log line from going unhandled
@@ -2730,6 +2936,24 @@ export async function startWorker(
 		// reaper. It is registered in `extraClosers` for issue #295's finding that UNREF'D IS NOT CLEANED UP --
 		// this handle holds an `rmSync`, and a tick landing mid-drain could delete a retained workspace behind a
 		// worker that already reported a clean shutdown.
+		// Issue #645: the two durable-run sweeps, run once here at boot and then on every tick. The host-lost sweep on every
+		// host (a fleet's recoveries are judged by whichever host gets there first); the checkpoint store's retention only
+		// where there is a store. A fault is a log line, never a refused boot: both are backstops over a TTL.
+		// The store sweep is given NO `active` list, deliberately: it removes a run's store only when its newest manifest is
+		// older than the store TTL (7 days), and a run running here has written to its store within the job timeout (30
+		// minutes: primeBase at its start, a checkpoint at most a minute apart), so no running run can be judged stale and an
+		// active list could change no verdict. A run waiting for its recovery is bounded the same way: the host-lost sweep
+		// gives up on it at RECOVERY_MAX_WAIT_MS, which IS that TTL. (The processor's running list holds job ids, not run
+		// ids, so passing it would also name a `.rN` job's store wrongly.)
+		const reapCheckpoints = workspaceCheckpointer ? async () => void (await workspaceCheckpointer.sweep()) : null;
+		const reapHostLost = async () => void (await sweepHostLost());
+		// NOT awaited: the host-lost sweep's first command waits for Valkey however long it is away, and the boot must not.
+		// Each settles into its own log line; neither can reject unhandled.
+		for (const [name, reap] of [["recovery_host_lost", reapHostLost], ...(reapCheckpoints ? [["checkpoint", reapCheckpoints]] : [])]) {
+			void Promise.resolve()
+				.then(reap)
+				.catch((err) => log(`${name}_reaper_skipped`, { reason: scrubCredentials(err?.message) }));
+		}
 		if (config.sweepIntervalHours > 0) {
 			const sweep = makeRetentionSweepFn({
 				reapers: [
@@ -2739,6 +2963,8 @@ export async function startWorker(
 					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "sandbox", reap: reapSandboxes },
 					{ name: "session", reap: () => sessionStore.reapSessions() },
+					{ name: "recovery_host_lost", reap: reapHostLost },
+					...(reapCheckpoints ? [{ name: "checkpoint", reap: reapCheckpoints }] : []),
 				],
 				intervalMs: config.sweepIntervalHours * 3600000,
 				log,
@@ -2791,6 +3017,10 @@ export async function startWorker(
 			captureJobLogs: config.captureJobLogs,
 			logRetentionDays: config.logRetentionDays,
 			sandboxRetentionHours: config.sandboxRetentionHours, // 0 = retention off; a run's directory is deleted as before
+			// Issue #645 (durable runs): where checkpoints go (null = none: an armed job is refused before it spends) and
+			// whether this host takes them (the store AND the run checkpointer); doctor reads the same directory.
+			checkpointsDir: config.checkpointsDir ?? null,
+			durableRuns: Boolean(runCheckpointer),
 		});
 		return worker;
 	} catch (err) {

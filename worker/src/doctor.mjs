@@ -1256,9 +1256,10 @@ export function parseGitVersion(text) {
  * sits under the OS temp dir, whether git is new enough, and whether each venue that runs jobs here can freeze one while
  * its workspace is read. Pure over its reads, so every arm is driven without a host.
  *
- * WARN AT MOST, with ONE exception, and that is deliberate rather than lenient: no job writes a checkpoint yet (the
- * checkpointer is wired in a later change), so a red doctor here would fail deployments over a store nothing uses. The
- * lines exist now so an operator meets the store's rules before a durable run does. The exception is a store that
+ * WARN AT MOST, with ONE exception, and that is deliberate rather than lenient: the store is written only by jobs whose
+ * trigger arms `run.recover` (the worker's run checkpointer, issue #645), so a red doctor here would fail every deployment
+ * that configured the store and armed nothing, and a problem with it costs a durable run its recovery (the run falls back
+ * to today's retry), never a job its run. The exception is a store that
  * COLLIDES with the session store (`checkpointStoreCollision`), which is ✗ because the worker itself refuses to load
  * that configuration: doctor's verdict follows the worker's.
  *
@@ -1597,7 +1598,7 @@ export async function collectChecks(shellVars, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
@@ -2687,6 +2688,17 @@ export async function collectChecks(shellVars, seams) {
 		// The one thing that is silently WRONG rather than merely undeclared. Without a declared name this
 		// host enqueues its own folder work to the SHARED queue, where a peer that has no such folder can
 		// pop it -- so the routing that makes a fleet safe is simply off, and nothing else says so.
+		// Issue #645: a durable run's checkpoint lives on ONE host, and its recovery is routed there through that host's own
+		// queue. Without a declared name the recovery goes to the SHARED queue, where a peer that holds no checkpoint can pop
+		// it and refuse it (`recovery-checkpoint-absent`), so every crash on this host ends the run instead of continuing it.
+		if (!declaredWorkerName && recovering > 0) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${recovering} trigger(s) arm run.recover, but this worker has peers and no PI_WORKER_NAME, so a crashed run's recovery is queued where a host without its checkpoint can take it`,
+				fix: "set PI_WORKER_NAME in this host's .env and restart: a recovery is routed to the host holding the run's checkpoint through that host's own queue, which only a named worker drains",
+			});
+		}
 		if (!declaredWorkerName) {
 			checks.push({
 				ok: false,
@@ -3562,8 +3574,8 @@ export async function collectChecks(shellVars, seams) {
 	}
 
 	// Issue #645: the checkpoint store, only where one is configured (PI_CHECKPOINTS_DIR, or the default inside
-	// PI_SESSIONS_DIR). Never a ✗: nothing runs on it yet, and a deployment without durable runs must not fail doctor over a
-	// store it does not use. One `git --version`, bounded like every other spawn here.
+	// PI_SESSIONS_DIR). Never a ✗: only a job that arms run.recover writes it, a fault costs that run its recovery and never
+	// the job, and a deployment without durable runs must not fail doctor over a store it does not use. One `git --version`, bounded like every other spawn here.
 	const checkpointsDir = checkpointsDirPath(env);
 	if (checkpointsDir) {
 		// The hardening flags lead even here, where no repository is read, because the bolt that pins every host-side git
@@ -5729,7 +5741,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
-	const none = { requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
+	const none = { requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -5765,6 +5777,8 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 			onceSpent: rawEntries.filter((t) => t?.on?.disarmed !== undefined).length,
 			requiring: triggers.filter((t) => t.run.packages === true).length,
 			resuming: triggers.filter((t) => t.run.resume === true).length,
+			// Issue #645: durable runs. Counted for the fleet line: a recovery is routed to the host holding its checkpoint.
+			recovering: triggers.filter((t) => t.run.recover === true).length,
 			// REQ-PER-TRIGGER-INSTRUCTION. Counted beside `resuming` for the same reason: it is a per-trigger
 			// choice that changes what every job of it is told, and an operator should see it before it fires.
 			instructing: triggers.filter((t) => typeof t.run.instructions === "string").length,

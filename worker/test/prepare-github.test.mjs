@@ -508,3 +508,43 @@ test("the SHARED preparer forwards replica/replicas to whichever builder the for
 	assert.equal(seen2[0].replica, undefined);
 	assert.equal(seen2[0].replicas, undefined);
 });
+
+// Issue #645, durable runs: a RECOVERY job clones from the checkpoint store at the checkpoint's base, never from the forge.
+test("a recovery pin clones from the checkpoint store at the pinned sha: no default-branch resolve, no token in any env, no session resolve", async () => {
+	const git = fakeGit();
+	const h = harness({ git });
+	const BASE = "c".repeat(40);
+	const from = "file:///var/lib/pi/checkpoints/abc/repo.git";
+	let sessionAsked = false;
+	const out = await prepareGithubWorkspace({ ...JOB, resume: true }, TOKEN, { ...h.deps, pin: { sha: BASE, from }, resolveSession: () => ((sessionAsked = true), { hostDir: "/x", key: "k", resume: true }) });
+	assert.equal(out.sha, BASE);
+	assert.deepEqual(h.shaCalls, [], "the forge's default branch is never resolved for a recovery");
+	const fetch = callFor(git, "fetch");
+	assert.ok(fetch.args.includes(from), "fetched from the store's URL");
+	assert.ok(fetch.args.includes(BASE), "by the pinned sha");
+	assert.ok(fetch.args.includes("protocol.file.allow=always"), "the file transport is allowed for this one fetch");
+	assert.ok(!fetch.args.includes("origin"), "never from the forge remote");
+	assert.equal(fetch.opts, undefined, "no env at all: no askpass, no token");
+	for (const c of git.calls) assert.ok(!JSON.stringify(c).includes(TOKEN), "the token reaches no git call");
+	assert.equal(h.materializeRecord[0].sha, BASE, ".pi/ is materialised from the pinned base");
+	assert.equal(sessionAsked, false, "no store transcript is staged: the processor stages the checkpoint's");
+	assert.equal(out.session, undefined);
+	assert.deepEqual(out.recoveryResolved, {}, "the head the key needs is handed back (none for an issue)");
+	// The forge remote is still added (tokenless), so the agent's push goes where it always did.
+	assert.ok(callFor(git, "remote").args.includes("https://github.com/owner/name.git"));
+});
+
+test("a recovery pin that is not a full sha and a file:// store is refused as infrastructure, before any git", async () => {
+	for (const pin of [{ sha: "abc", from: "file:///s" }, { sha: "c".repeat(40), from: "https://github.com/x/y.git" }, { sha: "c".repeat(40) }]) {
+		const git = fakeGit();
+		const h = harness({ git });
+		await assert.rejects(prepareGithubWorkspace(JOB, TOKEN, { ...h.deps, pin }), (e) => e.name === "InfraRetry");
+		assert.equal(git.calls.length, 0);
+	}
+});
+
+test("a store that cannot hand over its base is an InfraRetry, never sha-gone policy", async () => {
+	const git = fakeGit({ failOn: "fetch", error: Object.assign(new Error("fatal"), { stderr: "fatal: couldn't find remote ref" }) });
+	const h = harness({ git });
+	await assert.rejects(prepareGithubWorkspace(JOB, TOKEN, { ...h.deps, pin: { sha: "c".repeat(40), from: "file:///s/repo.git" } }), (e) => e.name === "InfraRetry" && e.reason === "container-never-started");
+});

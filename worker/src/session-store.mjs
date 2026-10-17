@@ -1347,5 +1347,80 @@ export function makeSessionStore({
 		return readSidecar(key, PARKED_FILE) !== null;
 	}
 
-	return { resolveSession, promoteSession, reapSessions, isParked };
+	/**
+	 * Stage a RECOVERED run's transcript (issue #645, durable runs): the checkpoint's `transcript.jsonl`, copied to
+	 * `jobDir/session/current.jsonl`, the path every job's transcript file has (a resume job's staged copy, or the live
+	 * file of issue #643). Returns the session object the processor carries, with `resume: true` and
+	 * `reason: "recovered"`, or `null` when nothing could be staged (the caller then does not start the run: a recovery
+	 * without its conversation is not a recovery).
+	 *
+	 * NOT `resolveSession`, and the store is not read at all: the canonical transcript is the one from BEFORE the crashed
+	 * run, and the checkpoint is that run's own continuation, written by this worker into its checkpoint store and
+	 * hash-checked against its manifest (workspace-checkpoint.mjs `readManifest`). None of resolveSession's gates (age,
+	 * chain, context, venue, pi version) applies: the processor already refused a checkpoint from another pi version or
+	 * venue before calling this.
+	 *
+	 * A KEY ONLY FOR A RESUME JOB. `job.resume === true` with a key gives the session the key, model and venue a resume
+	 * job's has, so a completed recovery promotes into the store exactly as the crashed run would have (`promoteSession`
+	 * is unchanged). Any other job gets `key: null`: its transcript is the live file, nothing is promoted, and the
+	 * processor hands it over as `prepared.live`, not as a session. `resolved` is the pull request head the preparer
+	 * resolved from the forge (`recoveryResolved`), never a payload field: the same rule `resolveSession` keys on.
+	 *
+	 * Never throws: a fault is logged by phase and returns null, and anything it staged is removed.
+	 */
+	function stageRecovered({ jobDir, transcriptPath, piVersion: _piVersion = null, job = null, resolved = {} } = {}) {
+		let hostDir = null;
+		let fd = null;
+		try {
+			if (typeof jobDir !== "string" || jobDir === "" || typeof transcriptPath !== "string" || transcriptPath === "") return null;
+			// lstat, and a regular file: a link at the checkpoint's name is not the checkpoint, whatever it points at.
+			const st = fs.lstatSync(transcriptPath);
+			if (!st.isFile()) {
+				log("session_store_failed", { phase: "stage-recovered", reason: "not-a-regular-file" });
+				return null;
+			}
+			hostDir = join(jobDir, "session");
+			fs.mkdirSync(hostDir, { recursive: true, mode: 0o700 });
+			const staged = join(hostDir, SESSION_FILE_NAME);
+			// Copied off the descriptor whose identity was checked, never re-resolved by path (resolveSession's rule).
+			fd = fs.openSync(transcriptPath, "r");
+			const opened = fs.fstatSync(fd);
+			if (!opened.isFile() || identityOf(opened) !== identityOf(st)) {
+				log("session_store_failed", { phase: "stage-recovered", reason: "transcript-replaced" });
+				fs.rmSync(hostDir, { recursive: true, force: true });
+				return null;
+			}
+			copyFromDescriptor(fd, staged, opened.size);
+			const key = sessionsDir && job?.resume === true ? sessionKeyFor(job, resolved ?? {}) : null;
+			log("session_resolved", { key, resume: true, reason: "recovered" });
+			return {
+				hostDir,
+				key,
+				...(key ? { modelId: modelIdentity(job), venue: normaliseVenue(resolveBackendName(job, defaultBackend)) } : {}),
+				resume: true,
+				reason: "recovered",
+				bytes: opened.size,
+			};
+		} catch (err) {
+			log("session_store_failed", { phase: "stage-recovered", reason: err?.code ?? "error" });
+			if (hostDir !== null) {
+				try {
+					fs.rmSync(hostDir, { recursive: true, force: true });
+				} catch {
+					// the job dir is removed at teardown either way
+				}
+			}
+			return null;
+		} finally {
+			if (fd !== null) {
+				try {
+					fs.closeSync(fd);
+				} catch {
+					// already closed or never valid
+				}
+			}
+		}
+	}
+
+	return { resolveSession, promoteSession, reapSessions, isParked, stageRecovered };
 }

@@ -420,7 +420,8 @@ export function parseExitOomKilled(text) {
  * record only as a count under one of these literals, compared and never copied; every other name counts as `other`.
  */
 export const PROGRESS_RECORD_TOOLS = Object.freeze(["read", "bash", "edit", "write", "grep", "find", "ls", "await_human_input", "report_progress"]);
-const PROGRESS_COUNT_KEYS = Object.freeze(["turns", "steps", "failed", "interrupted", "toolMs", "longestStepMs", "longestInterruptedMs", "phasesDeclared"]);
+// `replayed` (issue #645): the orphaned tool calls a recovered run's runner answered by running them again.
+const PROGRESS_COUNT_KEYS = Object.freeze(["turns", "steps", "failed", "interrupted", "replayed", "toolMs", "longestStepMs", "longestInterruptedMs", "phasesDeclared"]);
 
 /**
  * The record's `progress` (issue #644, INT-RUN-HISTORY-FILE-CONTRACT), REBUILT from what run-progress.mjs `summary`
@@ -442,6 +443,69 @@ export function recordedProgress(p) {
 		if (Object.keys(tools).length > 0) out.tools = tools;
 	}
 	return out;
+}
+
+/** Where a recovered run's checkpoint came from (issue #645): workspace-checkpoint.mjs's manifest `kind`. */
+export const RECOVERED_FROM = Object.freeze(["live", "exit", "salvage"]);
+
+/**
+ * Why a job that armed `run.recover` ran without it (issue #645), the record's `recoverSkipped`. A fixed enum: `local`
+ * (recovery is for forge jobs in v1, so a local job runs as it always did), `no-run-id` (the job's queue id could not be
+ * derived from its data, so nothing could be keyed by it), `base-unprimed` (the checkpoint store could not take the
+ * fresh clone's base, or its tree could not be read, so no checkpoint of this run can be restored), `workspace-extensions` (the
+ * base commit holds `.pi/extensions/`, whose imports could load agent-written code in a recovered run).
+ */
+export const RECOVER_SKIPPED_REASONS = Object.freeze(["local", "no-run-id", "base-unprimed", "workspace-extensions"]);
+
+/** The runner's recovery counts (issue #645, the exit line's `recovery`), in the record's order. */
+export const RECOVERY_COUNT_KEYS = Object.freeze(["orphans", "replayed", "interrupted", "notStarted"]);
+
+/** A recovery id is a queue job id: the charset `sanitizeJobId` keeps, plus the `:` a BullMQ id may hold. Never prose. */
+const RECOVERY_OF_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
+
+/**
+ * The runner's `recovery` block off an exit line (issue #645): `{ orphans, replayed, interrupted, notStarted }`, each a
+ * non-negative safe integer or null, REBUILT over RECOVERY_COUNT_KEYS, or null when the value is not an object or carries
+ * no count at all. A present value that is not a count is null on its own (advisory telemetry from inside the container,
+ * like `resources`, which no decision reads). Never throws.
+ */
+export function recoveryCounts(r) {
+	if (r === null || typeof r !== "object" || Array.isArray(r)) return null;
+	const out = {};
+	for (const key of RECOVERY_COUNT_KEYS) out[key] = Object.hasOwn(r, key) && isCount(r[key]) ? r[key] : null;
+	return RECOVERY_COUNT_KEYS.some((key) => out[key] !== null) ? out : null;
+}
+
+/** The decisive exit line's `recovery` block (`recoveryCounts`), or null. Never throws. */
+export function parseExitRecovery(text) {
+	const parsed = decisiveExitLine(text);
+	return parsed === null ? null : recoveryCounts(parsed?.recovery);
+}
+
+/**
+ * The record's `recovered` (issue #645), REBUILT: `{ from, n, fromAttempt, checkpointSeq, orphans, replayed, interrupted,
+ * notStarted }`, `from` a member of RECOVERED_FROM and every other field a non-negative safe integer or null. Null when
+ * `from` or `n` is not valid: a recovery whose source or number is unknown is not one this record can describe.
+ */
+export function recordedRecovered(r) {
+	if (r === null || typeof r !== "object" || Array.isArray(r)) return null;
+	if (!RECOVERED_FROM.includes(r.from) || !(Number.isSafeInteger(r.n) && r.n >= 1)) return null;
+	const int = (v) => (isCount(v) ? v : null);
+	const counts = recoveryCounts(r) ?? {};
+	return { from: r.from, n: r.n, fromAttempt: int(r.fromAttempt), checkpointSeq: int(r.checkpointSeq), ...Object.fromEntries(RECOVERY_COUNT_KEYS.map((k) => [k, counts[k] ?? null])) };
+}
+
+/** The record's `checkpoints` (issue #645): `{ written, failed, skipped }`, three counts, or null on any violation. */
+export function recordedCheckpoints(c) {
+	if (c === null || typeof c !== "object" || Array.isArray(c)) return null;
+	if (!isCount(c.written) || !isCount(c.failed) || !isCount(c.skipped)) return null;
+	return { written: c.written, failed: c.failed, skipped: c.skipped };
+}
+
+/** The record's `recoveryOf` (issue #645): the base run's queue id when it matches RECOVERY_OF_RE, else null. */
+export function recordedRecoveryOf(id) {
+	return typeof id === "string" && RECOVERY_OF_RE.test(id) ? id : null;
 }
 
 /** The validating rebuild behind `parseExitResources` and the record's `resources`: null on any violation. */
@@ -641,6 +705,9 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
 	const progress = recordedProgress(source.progress);
+	const recoveryOf = recordedRecoveryOf(data.recoveryOf);
+	const recovered = recordedRecovered(source.recovered);
+	const checkpoints = recordedCheckpoints(source.checkpoints);
 	return {
 		jobId: job.id,
 		kind: kind ?? null,
@@ -835,6 +902,19 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// `resources`. A CONDITIONAL key, unlike its neighbours: present only when the reducer ran for this job (the
 		// switch on and a transcript file present), so every record of a run without it is byte-identical to before.
 		...(progress !== undefined ? { progress } : {}),
+		// Durable runs (issue #645, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after `progress`, each a CONDITIONAL key
+		// like it, so a record of a job that never armed `run.recover` is byte-identical to before. Integers and fixed
+		// enums only, every one REBUILT here, never the source's object:
+		//   - `recoveryOf`: the base run's queue id, off this job's own data (a recovery job, `<runId>.r<n>`, writes its
+		//     own record beside the base's). The id class the record's own `jobId` already is, charset-checked;
+		//   - `recovered`: where the checkpoint came from (`live` | `exit` | `salvage`), the recovery number, the crashed
+		//     attempt's container number and checkpoint seq, and the runner's orphan counts;
+		//   - `recoverSkipped`: why an armed job ran without recovery (RECOVER_SKIPPED_REASONS);
+		//   - `checkpoints`: how many checkpoints this attempt wrote, failed and skipped.
+		...(recoveryOf !== null ? { recoveryOf } : {}),
+		...(recovered !== null ? { recovered } : {}),
+		...(RECOVER_SKIPPED_REASONS.includes(source.recoverSkipped) ? { recoverSkipped: source.recoverSkipped } : {}),
+		...(checkpoints !== null ? { checkpoints } : {}),
 	};
 }
 
@@ -1120,6 +1200,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const context = parseExitContext(exitText);
 			const resources = parseExitResources(exitText);
 			const oomKilled = parseExitOomKilled(exitText);
+			// Issue #645: a recovered run's runner counts, off the same decisive (and, with a key, signed) line.
+			const recovery = parseExitRecovery(exitText);
 			try {
 				if (stream !== null) {
 					const s = stream;
@@ -1146,7 +1228,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// `exitAuth` only when a key was issued, so a keyless close returns exactly the object it always did. `exitWhy`
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(keyed ? { exitAuth } : {}) };
+			// `recovery` (issue #645) only when the line carried one, for the same reason.
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };
