@@ -53,7 +53,7 @@ import {
 } from "../insights-html.mjs";
 import { fmtCost } from "../panel.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
-import { forgeLinkOf, isProgressSnapshot, progressStaleFor, secretProfileNames } from "../read-model.mjs";
+import { checkpointsText, forgeLinkOf, isProgressSnapshot, progressStaleFor, recordRecovery, recoveredText, secretProfileNames } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
 import { html, trustedRenderer } from "./html.mjs";
 
@@ -565,6 +565,23 @@ function runActions(r, view) {
   return html`<h3>Actions</h3><p>Open its retained workspace on the host: <code class="mono">${`pi-dispatch sandbox ${r.jobId}`}</code></p>${canAct(view) ? actForm("rerun", { hidden: [["jobId", r.jobId]], label: "Preview a re-run" }) : null}`;
 }
 
+/**
+ * The run summary's durable-run rows (issue #645): "Recovery of" (the base run, linked), "Recovery" (where it came from
+ * and the runner's counts, or why an armed job ran without recovery) and "Checkpoints". Every value is `recordRecovery`'s
+ * rebuild (integers, closed enums and a charset-checked id), so both roles see them; each row is null, and so not drawn,
+ * when the record holds nothing for it, which keeps every record of a job that never armed `run.recover` byte-identical.
+ */
+function recoveryRows(r) {
+  const rec = recordRecovery(r);
+  if (rec === null) return [];
+  const said = [rec.recovered ? recoveredText(rec.recovered) : null, rec.recoverSkipped ? `recovery skipped: ${rec.recoverSkipped}` : null].filter(Boolean);
+  return [
+    ["Recovery of", rec.recoveryOf !== null ? runLink(rec.recoveryOf) : null],
+    ["Recovery", said.length > 0 ? said.join("; ") : null],
+    ["Checkpoints", rec.checkpoints ? checkpointsText(rec.checkpoints) : null],
+  ];
+}
+
 export const runSummary = withRun("Run", (r, view, source) => {
   const started = msOf(r.startedAt);
   const ended = msOf(r.endedAt);
@@ -578,6 +595,7 @@ export const runSummary = withRun("Run", (r, view, source) => {
     ["Detail", r.why ?? null],
     ["Exit code", cell(r.exitCode)],
     ["Attempt", cell(r.attempt)],
+    ...recoveryRows(r),
     ["Host", cell(r.host)],
     ["Venue", cell(r.backend)],
     ["Project", cell(r.project)],

@@ -26,7 +26,7 @@
 import { windowState } from "@edgehero/pi-dispatch/budget";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, createFleetReader, listRuns, progressStaleFor, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
+import { cancelHeldJob, checkpointsText, createFleetReader, listRuns, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -3932,6 +3932,29 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   else if (r.budgetReserved === false) turnBits.push("no budget slot");
   if (r.attempt !== null && r.attempt !== undefined) turnBits.push(`attempt ${show(r.attempt)}`);
   out.push(kv("turns", turnBits.join(" · ")));
+
+  // DURABLE RUNS (issue #645): the record's `recoveryOf`, `recovered`, `recoverSkipped` and `checkpoints`, rebuilt by the
+  // worker's own rules (`recordRecovery`: integers, closed enums, a charset-checked id; anything else dropped). The
+  // "recovery" line says where the run came from (the source, checkpoint, recovery number and crashed attempt, then the
+  // base run's id) or why an armed job ran without recovery, and the runner's counts go on the line under it; the
+  // checkpoints this attempt wrote get their own line. THREE short lines rather than two long ones, measured: the value
+  // budget is 53 columns at DRILL_WIDTH, the counts alone take 43 and the checkpoints 35, so on one line `fitLine` cut
+  // the checkpoints off mid-word. The console's sentence ("recovered from a live checkpoint (...)") is 70 columns
+  // before its counts, so this pane says the same in its own compact words. An armed run that never crashed shows only
+  // its checkpoints line, and a record without these keys renders byte-identical.
+  const rec = recordRecovery(r);
+  if (rec !== null) {
+    const v = rec.recovered;
+    const head = [
+      v ? [`${v.from} checkpoint${Number.isSafeInteger(v.checkpointSeq) ? ` ${v.checkpointSeq}` : ""}`, `recovery ${v.n}`, ...(Number.isSafeInteger(v.fromAttempt) ? [`attempt ${v.fromAttempt}`] : [])].join(", ") : null,
+      rec.recoveryOf !== null ? `of ${show(rec.recoveryOf)}` : null,
+      rec.recoverSkipped !== null ? `skipped: ${rec.recoverSkipped}` : null,
+    ].filter(Boolean);
+    const counts = v ? recoveryCountsText(v) : "";
+    if (head.length > 0) out.push(kv("recovery", head.join(" · "), "warning"));
+    if (counts !== "") out.push(kv("", counts, "dim"));
+    if (rec.checkpoints) out.push(kv("checkpoints", checkpointsText(rec.checkpoints)));
+  }
 
   // Per-job token accounting (issue #25): total + cost-USD, or `-` when the container died before reporting.
   const cost = typeof r.tokens?.cost === "number" ? ` · $${r.tokens.cost.toFixed(4)}` : "";
