@@ -718,6 +718,50 @@ test("the session-store bounds default to their shipped values, pinned as litera
 	assert.equal(c.sessionsDir, null, "no default: unset means the feature is unavailable, not defaulted into a temp dir");
 });
 
+test("PI_CHECKPOINTS_DIR resolves, defaults inside the session store, and is null when neither is set (#645)", async () => {
+	const { CHECKPOINTS_SUBDIR, checkpointsDirPath } = await import("../src/config.mjs");
+	const { resolve } = await import("node:path");
+	assert.equal(CHECKPOINTS_SUBDIR, ".checkpoints", "a DOT name, which the session reaper skips silently");
+	assert.equal(loadConfig({}).checkpointsDir, null, "no store chosen, so nowhere to write: never a temp-dir default");
+	assert.equal(loadConfig({ PI_SESSIONS_DIR: "/srv/pi-sessions" }).checkpointsDir, "/srv/pi-sessions/.checkpoints");
+	assert.equal(loadConfig({ PI_SESSIONS_DIR: "/srv/pi-sessions", PI_CHECKPOINTS_DIR: "/srv/ckpt" }).checkpointsDir, "/srv/ckpt", "the explicit one wins");
+	assert.equal(loadConfig({ PI_CHECKPOINTS_DIR: "/srv/ckpt" }).checkpointsDir, "/srv/ckpt", "and needs no session store");
+	assert.equal(checkpointsDirPath({ PI_CHECKPOINTS_DIR: "rel/ckpt" }), resolve("rel/ckpt"), "resolved, so doctor and the worker name one absolute path");
+	assert.equal(checkpointsDirPath({ PI_SESSIONS_DIR: "", PI_CHECKPOINTS_DIR: "" }), null, "empty is unset");
+});
+
+test("a checkpoint store that collides with the session store is refused at load, naming both keys (#645)", async () => {
+	const { checkpointStoreCollision } = await import("../src/config.mjs");
+	const key = "0123456789abcdef0123456789abcdef";
+	assert.equal(checkpointStoreCollision(null, "/srv/s"), null, "no session store, nothing to collide with");
+	const refused = [
+		[{ PI_SESSIONS_DIR: "/srv/s", PI_CHECKPOINTS_DIR: "/srv/s" }, /same directory/],
+		[{ PI_SESSIONS_DIR: "/srv/s", PI_CHECKPOINTS_DIR: "/srv/s/" }, /same directory/],
+		[{ PI_SESSIONS_DIR: "/srv/s/inner", PI_CHECKPOINTS_DIR: "/srv/s" }, /session store is inside the checkpoint store/],
+		[{ PI_SESSIONS_DIR: "/srv/s", PI_CHECKPOINTS_DIR: `/srv/s/${key}` }, /inside a session key's directory/],
+		[{ PI_SESSIONS_DIR: "/srv/s", PI_CHECKPOINTS_DIR: `/srv/s/${key}/deeper` }, /inside a session key's directory/],
+		// A child literally named `..notes` is inside: `..` counts only as a whole path segment.
+		[{ PI_SESSIONS_DIR: "/srv/s/..notes", PI_CHECKPOINTS_DIR: "/srv/s" }, /session store is inside the checkpoint store/],
+	];
+	for (const [env, why] of refused) {
+		assert.throws(
+			() => loadConfig(env),
+			(e) => e.piDispatchConfig === true && /PI_CHECKPOINTS_DIR/.test(e.message) && /PI_SESSIONS_DIR/.test(e.message) && why.test(e.message) && /point it at a directory outside PI_SESSIONS_DIR/.test(e.message),
+			JSON.stringify(env),
+		);
+	}
+	for (const env of [
+		{ PI_SESSIONS_DIR: "/srv/s" },
+		{ PI_SESSIONS_DIR: "/srv/s", PI_CHECKPOINTS_DIR: "/srv/s/.checkpoints" },
+		{ PI_SESSIONS_DIR: "/srv/s", PI_CHECKPOINTS_DIR: "/srv/s/checkpoints" },
+		{ PI_SESSIONS_DIR: "/srv/s", PI_CHECKPOINTS_DIR: `/srv/s/${key.toUpperCase()}` },
+		{ PI_SESSIONS_DIR: "/srv/s", PI_CHECKPOINTS_DIR: "/srv/s2" },
+		{ PI_CHECKPOINTS_DIR: "/srv/s" },
+	]) {
+		assert.doesNotThrow(() => loadConfig(env), JSON.stringify(env));
+	}
+});
+
 test("the session-store bounds take explicit values and accept their 0 sentinels", () => {
 	const set = loadConfig({ PI_SESSIONS_TTL_DAYS: "7", PI_SESSION_MAX_BYTES: "1024", PI_SESSION_MAX_AGE_DAYS: "30", PI_SESSION_MAX_RESUME_CHAIN: "3" });
 	assert.equal(set.sessionsTtlDays, 7);
