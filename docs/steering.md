@@ -17,10 +17,10 @@ pi-dispatch steer 1234 "The failing test is in src/date.ts, not the parser. Leav
 
 Off by default. A trigger without `steer` behaves exactly as before.
 
-**What arrives in this release.** Messages are sent from the command line, by an operator. Two more ways to send
-them are coming in later changes: a comment on the issue or pull request that carries the trigger's phrase, from a
-person the trigger already accepts comments from, and the operator console and the `/dispatch` panel. Until then a
-comment on a running job's issue does what it always did.
+**Two ways to send a message.** An operator sends one from the command line ([below](#sending-a-message)), and a
+person the comment trigger already accepts comments from sends one by commenting with the trigger's phrase on the
+issue or pull request the job works on ([Steering from a comment](#steering-from-a-comment)). Sending from the
+operator console and the `/dispatch` panel is coming in a later change.
 
 ## Turn it on
 
@@ -70,8 +70,8 @@ message 9f2c...e1 for 1234 (steer): written. The run holds it, and the agent rea
 | `late` | The run ended before the message reached it. The agent never saw it. Exit 1 |
 
 The command refuses, and sends nothing, when the job is not running (a queued job has no run to steer yet), when
-the run is not accepting messages (its trigger has no `steer`, its container is not running yet or any more, or its
-venue cannot deliver: the command cannot tell these apart, so it names all three), when the run finished a moment
+the run is not accepting messages (its trigger has no `steer`, its container is not running yet or stopped more than
+15 minutes ago, or its venue cannot deliver: the command cannot tell these apart, so it names all three), when the run finished a moment
 ago (`closed`) or stopped refreshing (`gone`), when the run's inbox is full, and when the text is empty or too long.
 
 ### Taking a message back
@@ -85,19 +85,85 @@ it. One that was already `written` is withdrawn on a best effort basis: the agen
 worker removed it, and the run's transcript says whether it did. A `delivered` or `late` message cannot be taken
 back, and the command says so.
 
+## Steering from a comment
+
+When a job of a steer-armed trigger is running on an issue or pull request, a comment there that carries your
+comment trigger's phrase goes to that running job instead of starting a second one. For that, **the comment trigger
+needs `"steer": true` as well** (it is the trigger that decides whether its phrase comments may steer):
+
+```jsonc
+[
+  { "on": { "type": "label", "any": ["pi"] },
+    "run": { "kind": "github", "flow": "fix", "steer": true, "resume": true } },
+  { "on": { "type": "comment", "phrase": "@pi" },
+    "run": { "kind": "github", "flow": "fix", "steer": true, "resume": true } }
+]
+```
+
+With that, while the `pi` label's job is running on issue #7:
+
+```
+@pi the failing test is in src/date.ts, not the parser. Leave the parser alone.
+```
+
+reaches the running agent as a steer, and nothing new is queued. `resume` is not needed for steering itself; it
+decides what happens to a comment that arrives too late (see [Late messages](#late-messages)).
+
+- **Who can.** Exactly the people the comment trigger already accepts comments from, judged the same way it always
+  is: on GitHub an `OWNER`, `MEMBER` or `COLLABORATOR`; on GitLab, Forgejo and Azure DevOps someone the receiver has
+  confirmed has write access. A comment from anyone else is dropped as before and never reaches the run.
+- **A follow-up.** Put `later` right after the phrase, `@pi later also update the changelog`, to send a follow-up
+  instead of a steer: it waits until the agent would otherwise stop. The word only counts directly after the first
+  phrase in the comment, in lowercase, separated by spaces (not on the next line); anywhere else it is just a word.
+  Your whole comment is delivered, `later` included. (If you have a flow named `later`, `@pi later` also picks that
+  flow, which only matters for a comment that ends up starting a job.)
+- **Which run.** Every running job of a steer-armed trigger on that same issue or pull request takes the comment,
+  up to four (replicas of one start each get it), whichever trigger started it: steering is per issue or pull
+  request, not per trigger. A job on another issue never does.
+- **A redelivery is not a new comment.** If the forge delivers the same comment again (a retry, a manual redeliver),
+  it is not run a second time: while the run is going the run already has it, and afterwards the receiver
+  remembers for 31 days that it steered that delivery and answers `202 {"status":"steered","runs":0}` without
+  starting anything.
+- **When there is no running job** (it has not started yet, it already finished, or it is a different trigger's
+  job without `steer`), the comment does what it always did: it starts a job, or is coalesced with one that was just
+  started on the same issue.
+- **What does not steer.** A comment without the phrase (including a plain reply to a [parked](triggers.md) issue),
+  a comment on a trigger that runs a `command`, and anything that is not a new comment.
+- **What you see.** Nothing is posted when a comment steers a run: the run's own work, its live transcript and its
+  record (`steered`) show it. The webhook answers `202 {"status":"steered","runs":n}`, which the forge's delivery log
+  shows, and the receiver logs a `steered` line naming the runs.
+
+### Per forge
+
+The phrase and the `later` word work the same on every forge; only where you comment differs.
+
+| Forge | Where to comment | Example |
+|---|---|---|
+| GitHub | the issue, or the pull request's conversation (an inline review comment is not ingested) | `@pi later add a test for the leap year case` |
+| GitHub (polling) | the same; the poller steers exactly as the webhook does. Use the repository's exact name in `POLL_REPOS` if you also run the webhook for it: the two must spell it the same way to find each other's runs, and they see one comment under different delivery ids, so serving one repository by both can handle a comment twice | `@pi stop, the bug is in the caller` |
+| GitLab | the issue or the merge request (a note) | `@pi use the existing DateFormatter, do not add a new one` |
+| Forgejo | the issue or the pull request | `@pi later open the pull request as a draft` |
+| Azure DevOps | the work item's discussion, or the pull request's comments | `@pi the failing pipeline step is lint, not test` |
+
+The agent is told who sent a comment by their user id on that forge and the role the gate judged (on GitHub the
+comment's association, elsewhere "write access"), never by name. On Azure DevOps the id is the person's GUID, or a
+short digest of their address when the work item event carried only that.
+
 ## Steer or follow-up
 
 - **Steer** (the default): the message reaches the agent after the tool calls of its current turn have finished and
   before it next asks the model. Use it to correct course now.
-- **Follow-up** (`--later`): the message waits until the agent would otherwise stop, then the run continues with it.
-  Use it for "when you are done, also ...".
+- **Follow-up** (`--later` on the command line, `later` after the phrase in a comment): the message waits until the
+  agent would otherwise stop, then the run continues with it. Use it for "when you are done, also ...".
 
 Neither interrupts anything. A tool that is running (a long test suite, a build) finishes first; to stop a run, use
 `pi-dispatch cancel`. Messages reach the agent one per turn, in the order they were sent.
 
 If the agent has just asked a question and parked the run ([`await_human_input`](triggers.md)), nothing more is
 passed to it: a message sent then is held and becomes `late` when the run ends parked. Answer the question on the
-issue as usual. (One message the agent had already been handed in that same turn can still keep the run going.)
+issue as usual. A phrase comment held this way is handled like any late comment (below): with `resume` on the
+comment trigger it starts the resumed run, so an answer typed while the run was still finishing is not lost. (One
+message the agent had already been handed in that same turn can still keep the run going.)
 
 ## What the agent sees
 
@@ -117,7 +183,9 @@ of your operating rules).
 ```
 ````
 
-A follow-up adds one sentence saying it was meant to wait until the agent had finished. Your text is kept as you
+For a comment, the sender line names the person by forge user id and role instead: *A person with write access to
+this repository (github user id 1234, association MEMBER) sent this message about PR #7 while you were working.* A
+follow-up adds one sentence saying it was meant to wait until the agent had finished. Your text is kept as you
 wrote it, with a few exceptions: control characters and invisible characters (zero width spaces and joiners, the
 byte order mark, Unicode tag characters) are removed, tabs become spaces, line endings become plain newlines, and
 three look-alikes of a backtick (U+FF40, U+02CB and U+1FEF) become ordinary backticks. An emoji built with a zero
@@ -145,10 +213,42 @@ resumed or recovered run carries it like any other part of the conversation.
 ## Late messages
 
 When a run ends (completed, stopped, failed for good), its inbox is closed before its run record is written. Any
-message that had not reached the agent becomes `late`, and anything sent after that is refused as `closed`. In this
-release a late message from the command line is only reported: `pi-dispatch steer` says `late` if it sees it within
-its wait, and the run record counts it. No new job is started for it; start one yourself if the message still
-matters.
+message that had not reached the agent becomes `late`, and anything sent after that is refused as `closed`. A late
+message from the command line is only reported: `pi-dispatch steer` says `late` if it sees it within its wait, and
+the run record counts it. No new job is started for it; start one yourself if the message still matters.
+
+A late **comment** is never dropped silently. When the run ends:
+
+- **It starts the run again, as a resumed job**, when the comment trigger has `"resume": true`, the run was not
+  cancelled by an operator, and the comment is on the same issue or pull request. The job is the one the comment
+  would have started had no run been going, and it continues the conversation of the run that just ended. If
+  several comments came late, the first starts that job and the others reach it as steers when it starts. At most
+  one job is started per run end, and it goes to the same queue as the run (a host's own queue stays on that host).
+- **Otherwise it gets one reply** on the issue or pull request: *This run had already finished when your message
+  arrived, so it did not see it. Comment again with the trigger phrase to start a new run.* One reply covers every
+  late comment of that run end. It quotes nothing and mentions nobody.
+- A comment that was already carried into a resumed job and turns late again is answered, never carried a second
+  time, so late comments cannot chain run after run.
+- An operator's cancel always ends in the reply: cancelling means the work stops.
+
+A steer-armed run also stops coalescing comments when it ends, so a comment after the run starts a job of its own
+straight away instead of being swallowed by the ten minute window that normally merges repeated deliveries.
+
+Known edges:
+
+- A run stays reachable for up to 15 minutes after its container exits, until the worker records it, so a comment
+  sent while it is finishing, or while it waits for a retry or a recovery, still reaches it: the next attempt
+  delivers it, or it comes back late and is handled as above. (One rare exception: if another job on the same issue
+  was running and its worker died, the finishing run can stop being reachable early, and a comment then is treated
+  as a new delivery, which can be coalesced away inside the ten minute window.)
+- Replicas each reply: a comment that went to three replicas and came late to all of them gets up to three replies
+  (still only one resumed job).
+- A run continued by a [durable-run recovery](durable-runs.md) does not release the original delivery's window
+  when it ends; that window runs out its ten minutes as before.
+- If the inbox cannot be closed at the end (Valkey unreachable at that moment), late comments are not answered and
+  the window is not released. The worker logs `steer_settle_failed`.
+- Comments carried into a resumed job wait for it to start for up to a day. If it has not started by then (a long
+  pause window, a full fleet), they expire unanswered.
 
 A run that is retried after an infrastructure failure, or continued by a [durable-run recovery](durable-runs.md),
 is not over: its inbox stays open, and messages that had not been delivered are passed to the next attempt. One
@@ -157,9 +257,6 @@ receipt for it was signed by the attempt that crashed and cannot be checked any 
 
 A failed job retried from the console keeps its job id but is a new run: it starts with an empty inbox, and the
 messages of the run before it are not handed to it.
-
-When comments can steer a run, a late comment will get its own handling: it starts the run again as a resumed job
-when the trigger resumes, or gets one fixed reply saying the run had already finished.
 
 ## Venues that cannot deliver
 
@@ -190,6 +287,7 @@ only, never a message's text or its sender.
 ## Security
 
 Who can send a message, how it is kept from carrying authority, and what is not defended are in
-[`SECURITY.md`](../SECURITY.md). In short: in this release only someone who can reach the deployment's Valkey can
-send one, the job cannot write to its own inbox, and the text reaches the agent framed as data, which bounds it the
-same way the issue text is bounded, and no further.
+[`SECURITY.md`](../SECURITY.md). In short: an operator who can reach the deployment's Valkey, or a person the comment
+trigger already accepts comments from, using its phrase, on a trigger that opted in; the job cannot write to its own
+inbox; and the text reaches the agent framed as data, which bounds it the same way the issue text is bounded, and no
+further. A collaborator who can comment can now add words to a running job, not only start one.

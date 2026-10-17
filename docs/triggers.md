@@ -259,9 +259,12 @@ a trigger can set it behind the operator's confirm, and like `models`, adding it
 were already queued (`trigger-skew`). How a run is checkpointed and continued is in
 [`docs/durable-runs.md`](durable-runs.md).
 
-`"steer": true` opts a trigger into steering: while one of its jobs runs, operators (and, once comment routing
-lands, collaborators using the trigger phrase) can send it messages, which the agent reads between its steps. It is
-off by default. It needs a job image that declares the `steer` capability, or its jobs are refused before they cost
+`"steer": true` opts a trigger into steering: while one of its jobs runs, operators (from the command line) and the
+people your comment trigger accepts (with its phrase, on the job's issue or pull request) can send it messages, which
+the agent reads between its steps. On a **comment** trigger it also decides whether a phrase comment may steer a
+running job of the target instead of starting a new one, so set it on the comment trigger too if comments should
+steer; `<phrase> later ...` sends a follow-up. A comment that arrives after the run ended starts a resumed job when
+the comment trigger has `"resume": true`, or gets one fixed reply. It is off by default. It needs a job image that declares the `steer` capability, or its jobs are refused before they cost
 anything (`job-image-steer-unsupported`), and a venue that bind-mounts. Every trigger type may set it, cron
 included; it is refused beside `"command"`. It must be `true` or `false`, the AI tools that add and edit a trigger
 can set it behind the operator's confirm, and like `models`, adding it refuses the trigger's jobs that were already

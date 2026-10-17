@@ -67,7 +67,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A portfolio job's `/job/portfolio.json` | **Host-written, read-only** | The facts the manager plans with. Ids, digests, integers, instants, enum tokens and operator labels (project ids and member labels as projects.json names them, a folder by its basename) only: no issue text, title, plan reason or path, because the next run reads it as facts |
 | A job container's `/session` transcript | **None**, agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges. Since #643 every job has one unless the worker sets `PI_LIVE_TRANSCRIPTS=0` (a non-resume job's is an empty live file in its own job folder, never promoted), and the worker also tails it during the run to publish a redacted copy to Valkey: parsed as data, redacted, escaped and capped before it leaves, never executed or fed to a model. Since #644 the worker also reads run progress from it (turns, steps, the tool running, and the phases a `report_progress` call names): display only, never trusted, since the agent can write any line into it ([Run progress](#what-is-not-defended-v1)) |
 | The **checkpoint store** (`PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`) | **None** for its contents (agent-authored trees and transcripts); **Operator** for the directory | Since #645 a trigger with `run.recover` has its running jobs checkpointed into it: the job's whole workspace and its transcript, written by the worker from the host side, never mounted into any container. A recovery writes those bytes back into a new job's workspace, so a restore re-checks every path with the snapshot's own rules and then resets `.pi/`, `.agents/` and the root `AGENTS.md`/`CLAUDE.md` to the run's base commit, so nothing the agent wrote there loads as the repository's own; a repository with `.pi/extensions/` gets no recovery, because an extension's imports cannot be reset ([Durable runs](#what-is-not-defended-v1)) |
-| A steer-armed job's **inbox** (`run.steer`, `pi-dispatch steer`) | **Operator** for who may send (in this release only whoever can run `pi-dispatch steer` against the deployment's Valkey, which is the queue's own trust); **None** for the text, which reaches the agent as data | Since #646 a trigger with `run.steer` lets a message reach its running agent. The worker writes it into a per-job directory mounted **read-only** at `/inbox` (the agent can neither plant nor withdraw a message), framed as data with the same fence the issue text gets and with no operator authority, and the agent's receipt is counted only under a MAC keyed by a per-attempt key the agent cannot read. Collaborators' comments and the console arrive later and will be gated as their own rows say ([Steering](#what-is-not-defended-v1)) |
+| A steer-armed job's **inbox** (`run.steer`, `pi-dispatch steer`, a phrase comment) | **Operator** for who may send from the host (whoever can run `pi-dispatch steer` against the deployment's Valkey, which is the queue's own trust); **Collaborator** (write access) for a comment, whose author passes the same forge author gate that starting a job takes, on a comment trigger that also set `run.steer`; **None** for the text, which reaches the agent as data | Since #646 a trigger with `run.steer` lets a message reach its running agent. The worker writes it into a per-job directory mounted **read-only** at `/inbox` (the agent can neither plant nor withdraw a message), framed as data with the same fence the issue text gets and with no operator authority, and the agent's receipt is counted only under a MAC keyed by a per-attempt key the agent cannot read. A collaborator's phrase comment on the job's issue or pull request is routed there instead of starting a job; the console arrives later and will be gated by its session rules ([Steering](#what-is-not-defended-v1)) |
 | A **resurrected sandbox**'s operator shell (`pi-dispatch sandbox`) | **Operator — the same trust as a terminal on this host** | A third channel, and the first the **operator** opens rather than the agent. Not a job container: no minted token, no provider key, no agent running, started only by a keypress. It re-mounts a finished run's workspace, which for a forge job holds attacker-influenced code — the same trust shape as checking out a stranger's pull request locally. Every isolation flag still applies; ports it publishes are `127.0.0.1`-only and last only while it does |
 | The **venue** a job's container is built in (`run.backend`, `PI_BACKENDS`) | **Operator — the same trust as the daemon they point the worker at** | A different axis from every row above. Those ask *who wrote this*; this asks *who is holding the execution*. Today there is one venue, the Docker daemon the worker's docker CLI resolves, which is the operator's own machine unless `DOCKER_HOST` or a docker context points it elsewhere; the worker reads that answer at boot and before each job, logs a redirect, and a floor asking `credentialTransit=enforced` refuses one. It judges the endpoint's form, so a unix socket or loopback port that is really a tunnel to another machine still reads as this host. A venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and the isolation flags in **this worker's argv do not reach it**. What bounds it is a declaration an operator reads (`docs/backends.md`), a floor they can require of every blessed venue, and a boot refusal when the two disagree. |
 | The operator console process (`pi-dispatch-console serve`) | **Operator, the same trust as the admin extension** | It runs as the deployment's account and writes through the same read-model funnels as the panel. It renders untrusted text (issue titles, and from #641 on run text) but only escaped, after the control-byte scrub, under a strict CSP and behind the operator role; it executes none of it and feeds none of it to a model. It listens on loopback or a 0600 unix socket, never on the receiver ([The operator console](#the-operator-console)) |
@@ -236,7 +236,8 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   on an image without it is refused before it spends) and `exitAuth`, and a Valkey client.
   - **Framed as data, with no authority.** The worker, not the job, builds the words the agent reads: a heading saying
     the message is data and not instructions, who sent it (a console token's name, the command line or the dispatch
-    panel; a forge author only by numeric id and association), and the text verbatim inside the same fence the issue
+    panel; a forge author only by user id and association, each held to a closed charset: a number, or on Azure
+    DevOps a GUID or an `azid-` digest, never a login or display name), and the text verbatim inside the same fence the issue
     text gets, so a body holding backticks cannot close it. An operator's message carries no more authority than a
     comment: standing operator instructions live in the reviewed triggers file (`run.instructions`), so a leaked
     console token or a shell cannot rewrite a run's rules in flight. It is handed to pi as a custom message, never
@@ -258,6 +259,15 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
     caps, and the job reserves nothing extra.
   - **No text in logs or the record.** The CLI prints the message id and its state, never the text; logs carry ids,
     modes and counts; the run record gains only `steered` (three integers) and `steerSkipped` (an enum).
+  - **A comment steers only through the author gate** (issue #646 part 2). A phrase comment is routed into a running
+    job only after the receiver's unchanged author gate admitted it (GitHub's association, or the resolved write
+    access on GitLab, Forgejo and Azure DevOps), only when the comment trigger itself set `run.steer`, and only into
+    a steer-armed run of the same issue or pull request. A stranger's comment is dropped exactly as before and never
+    reaches an inbox. The comment is scrubbed and bounded by the same rule and caps as an operator's message before
+    any Valkey call, and a comment that cannot be steered falls back to the job it would always have started, so
+    steering never loses a delivery. A comment that arrives after the run ended starts at most one job per run end,
+    the one the same admitted comment would have started (only when the trigger resumes, and never after an
+    operator's cancel); every other late comment gets one fixed reply that quotes nothing and mentions nobody.
 
 - **Azure DevOps webhook authenticity is weaker than every other arm's, and this is not a footnote.**
   Service Hooks offer no HMAC of any kind — only HTTP Basic or a static header — so the credential proves
@@ -692,11 +702,25 @@ Stated openly rather than discovered later:
     Any value but `0`, `1` or empty refuses to boot.
 - **Steering is a second way to put text in front of a running agent** (issue #646). With `run.steer` on a
   trigger, whoever can send a message can add words to a run while it works ([`docs/steering.md`](docs/steering.md)).
-  - **Who can send, in this release.** Only an operator, from the command line on a host that reaches the
-    deployment's Valkey (`pi-dispatch steer`). Anyone who holds the Valkey URL and its credential can push into an
-    open run's inbox directly, as they can already enqueue jobs, cancel them and edit the queue: Valkey is the
-    deployment's own trust, so protect it as such. Collaborators' comments and the console arrive in later changes,
-    and each will be gated by the forge author check and the console's session rules respectively.
+  - **Who can send.** An operator, from the command line on a host that reaches the deployment's Valkey
+    (`pi-dispatch steer`), and, on a comment trigger that set `run.steer`, anyone that trigger's author gate admits,
+    by commenting with its phrase on the issue or pull request a steer-armed job is running on. **Arming a comment
+    trigger with `run.steer` widens what a collaborator can do**: from starting a job to adding words to one that is
+    already running, possibly one a different trigger started (a label job on the same issue). Anyone who holds the
+    Valkey URL and its credential can push into an open run's inbox directly, as they can already enqueue jobs, cancel
+    them and edit the queue: Valkey is the deployment's own trust, so protect it as such. The console arrives in a
+    later change, gated by its session rules.
+  - **What is not defended for comments.** The gate judges write access, not intent: a collaborator can steer a run
+    toward anything they could have written in the issue. Several comments can each cost a turn, up to the inbox's
+    16 messages, and a late comment can start one more paid job per run end when the trigger resumes (each still
+    reserved against the caps like any job). The forge author is named to the agent by id and gate role only, so the
+    agent cannot tell two collaborators apart by name. Nothing is posted when a comment steers, so the other people
+    on the issue learn of it from the run's work, not from a reply. A finishing run stays reachable for 15 minutes
+    after its container exits, so a comment then lands late rather than being coalesced away; it can still be lost to
+    the ten minute window in the rare case where another run on the same issue died and took the finishing run's
+    reachability with it. Replicas each post the late reply. A steered comment is remembered for 31 days by delivery
+    id, so a redelivery never starts the job the steer replaced; a webhook and the poller serving the same repository
+    see one comment under two ids and can each act on it. On Azure DevOps the gate itself is the weaker one described below.
   - **The text is not filtered.** It is framed and fenced as data, which is placement, not a guarantee: a message is
     exactly as able to talk the agent into something as the issue text is (the point below), and an operator's
     message gets no extra standing to do so. Everything that bounds an issue's text bounds a message's.
