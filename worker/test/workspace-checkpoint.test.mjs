@@ -11,13 +11,14 @@ import * as realFsp from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { STORE_GIT_FLAGS, storeGitEnv } from "../src/git-hardening.mjs";
-import { checkpointKey, defaultSpawnGit, makeWorkspaceCheckpointer } from "../src/workspace-checkpoint.mjs";
+import { checkpointKey, DEFAULT_CHECKPOINT_LIMITS, defaultSpawnGit, makeWorkspaceCheckpointer } from "../src/workspace-checkpoint.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /** A fixed clock: the checkpointer's lock staleness and sweep TTL read it, so it is always injected. */
 const NOW = 1_800_000_000_000;
 const PLENTY = async () => ({ bavail: 1e9, bsize: 4096, blocks: 2e9 });
 const IS_ROOT = process.getuid?.() === 0;
+const MiB = 1024 * 1024;
 
 /** The test's OWN git, never the subject's: a clean config so the developer's signing or hooks cannot leak in. */
 const GIT_ENV = {
@@ -1240,4 +1241,118 @@ test("every temp file is created with an exclusive flag (#645)", async () => {
 	const res = await checkpointer(env.storeDir, { fs: spyFs }).ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1, transcript: { srcFile: transcript, offset: 2 } });
 	assert.equal(res.ok, true);
 	assert.deepEqual(flags, ["wx", "wx", "wx"], "transcript, manifest, CURRENT");
+});
+
+// ── attack review: the transcript copy ──────────────────────────────────────────────────────────────────
+
+test("a sparse 1 GiB transcript over maxTranscriptBytes is skipped before a byte is written; the previous checkpoint stays (#645)", async () => {
+	const env = setup();
+	const { ck } = await primed(env, { limits: { maxTranscriptBytes: MiB } });
+	assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1 })).ok, true);
+	const sparse = join(env.root, "current.jsonl");
+	realFs.writeFileSync(sparse, "");
+	realFs.truncateSync(sparse, 1024 * MiB); // the `truncate -s` attack: 1 GiB logical, no blocks
+	realFs.appendFileSync(sparse, "{}\n");
+	const offset = 1024 * MiB + 3;
+	const before = (await ck.usage()).bytes;
+	assert.deepEqual(await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 2, transcript: { srcFile: sparse, offset } }), { skipped: "transcript-too-large" });
+	assert.deepEqual(await ck.writeTranscript("run-1", 2, sparse, offset), { skipped: "transcript-too-large" });
+	assert.equal(realFs.existsSync(join(env.storeDir, checkpointKey("run-1"), "cp-2")), false, "nothing reserved, nothing written");
+	assert.equal((await ck.usage()).bytes, before);
+	assert.equal((await ck.readManifest("run-1")).manifest.seq, 1);
+	assert.equal(DEFAULT_CHECKPOINT_LIMITS.maxTranscriptBytes, 256 * MiB);
+});
+
+test("the transcript copy honours the snapshot deadline: a slow source aborts as timeout and commits nothing (#645)", async () => {
+	const env = setup();
+	const { ck } = await primed(env);
+	assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1 })).ok, true);
+	const src = join(env.root, "slow.jsonl");
+	realFs.writeFileSync(src, "");
+	realFs.truncateSync(src, 8 * MiB);
+	let reads = 0;
+	const slowFs = {
+		...realFsp,
+		async open(p, ...rest) {
+			const fh = await realFsp.open(p, ...rest);
+			if (String(p) !== src) return fh;
+			return new Proxy(fh, {
+				get(t, prop) {
+					if (prop === "read") {
+						return async (...a) => {
+							reads++;
+							await new Promise((r) => setTimeout(r, 300));
+							return t.read(...a);
+						};
+					}
+					const v = t[prop];
+					return typeof v === "function" ? v.bind(t) : v;
+				},
+			});
+		},
+	};
+	const slow = checkpointer(env.storeDir, { fs: slowFs, limits: { snapshotTimeoutMs: 1500 } }).ck;
+	realFs.writeFileSync(join(env.ws, "a.txt"), "moved on\n");
+	assert.deepEqual(await slow.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 2, transcript: { srcFile: src, offset: 8 * MiB } }), { skipped: "timeout" });
+	assert.ok(reads < 8, `stopped early, after ${reads} of 8 chunks`);
+	assert.equal(realFs.existsSync(join(env.storeDir, checkpointKey("run-1"), "cp-2", "transcript.jsonl")), false);
+	assert.deepEqual(realFs.readdirSync(join(env.storeDir, checkpointKey("run-1"), "cp-2")).filter((n) => n.endsWith(".incoming")), [], "the temp copy is removed");
+	assert.equal((await ck.readManifest("run-1")).manifest.seq, 1);
+});
+
+test("the transcript's bytes count in the disk-low and store-full checks (#645)", async () => {
+	const env = setup();
+	const statfs = async () => ({ bavail: 3000, bsize: 1, blocks: 3000 });
+	const { ck } = await primed(env, { statfs, limits: { maxNewBytes: 1000 } });
+	const src = join(env.root, "t.jsonl");
+	realFs.writeFileSync(src, "x".repeat(2000));
+	assert.deepEqual(await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1, transcript: { srcFile: src, offset: 2000 } }), { skipped: "disk-low" }, "2 x 1000 + 2000 > 3000 free");
+	assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1, transcript: { srcFile: src, offset: 500 } })).ok, true);
+
+	const used = (await ck.usage()).bytes;
+	const tight = checkpointer(env.storeDir, { limits: { maxStoreBytes: used + 1000 } }).ck;
+	assert.deepEqual(await tight.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 2, transcript: { srcFile: src, offset: 2000 } }), { skipped: "store-full" });
+});
+
+test("after each committed checkpoint only the current and the previous remain, directories and refs both (#645)", async () => {
+	const env = setup();
+	const { ck, logs } = await primed(env);
+	const run = join(env.storeDir, checkpointKey("run-1"));
+	const cpRefs = () => storeGit(env.storeDir, "run-1", ["for-each-ref", "--format=%(refname)", "refs/pi-dispatch/cp/"]).toString().trim().split("\n").filter(Boolean).sort();
+	for (const seq of [1, 2, 3, 4]) {
+		realFs.writeFileSync(join(env.ws, "a.txt"), `round ${seq}\n`);
+		assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq })).ok, true);
+	}
+	assert.deepEqual(realFs.readdirSync(run).filter((n) => n.startsWith("cp-")).sort(), ["cp-3", "cp-4"]);
+	assert.deepEqual(cpRefs(), ["refs/pi-dispatch/cp/3", "refs/pi-dispatch/cp/4"]);
+	assert.ok(logs.some(([e]) => e === "checkpoint_pruned"));
+	const read = await ck.readManifest("run-1");
+	assert.equal(read.manifest.seq, 4);
+	const into = freshBase(ck, "run-1", env.baseSha);
+	await ck.restore({ runId: "run-1", manifest: read.manifest, intoWorkspace: into });
+	assert.equal(realFs.readFileSync(join(into, "a.txt"), "utf8"), "round 4\n", "the kept checkpoint still restores");
+});
+
+test("a crash between the commit and the prune leaves CURRENT valid; the next snapshot prunes the leftovers (#645)", async () => {
+	const env = setup();
+	const { ck } = await primed(env);
+	const run = join(env.storeDir, checkpointKey("run-1"));
+	for (const seq of [1, 2]) assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq })).ok, true);
+	const crashing = {
+		...realFsp,
+		async rm(p, o) {
+			if (/cp-\d+$/.test(String(p))) throw Object.assign(new Error("killed mid-prune"), { code: "EIO" });
+			return realFsp.rm(p, o);
+		},
+	};
+	const made = checkpointer(env.storeDir, { fs: crashing });
+	realFs.writeFileSync(join(env.ws, "a.txt"), "three\n");
+	assert.equal((await made.ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 3 })).ok, true, "the snapshot had already committed");
+	assert.deepEqual(made.logs.find(([e]) => e === "checkpoint_prune_failed")?.[1], { code: "EIO" });
+	const read = await ck.readManifest("run-1");
+	assert.equal(read.ok, true);
+	assert.equal(read.manifest.seq, 3);
+	assert.ok(realFs.existsSync(join(run, "cp-1")), "the leftover is still there");
+	assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 4 })).ok, true);
+	assert.deepEqual(realFs.readdirSync(run).filter((n) => n.startsWith("cp-")).sort(), ["cp-3", "cp-4"]);
 });
