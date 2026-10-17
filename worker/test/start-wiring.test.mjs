@@ -5471,3 +5471,26 @@ test("issue #645: a returned recovery-failed pages once and comments nothing mor
 	assert.deepEqual(posted, [FAILED_SENTENCE]);
 	assert.equal(other.filter((l) => l.event === "on_failure").length, 1);
 });
+
+// Issue #645's PR: a BullMQ queue closed while its connection's INFO is pending rejected unhandled inside BullMQ (CI,
+// the boot that refuses right after making the reconcile queue). The close now waits for the start to settle first.
+test("closeQueueSettled waits for the queue's start before closing, and never throws", { skip }, async () => {
+	const { closeQueueSettled } = await import("../src/start.mjs");
+	const order = [];
+	await closeQueueSettled({ waitUntilReady: async () => void order.push("ready"), close: async () => void order.push("close") });
+	assert.deepEqual(order, ["ready", "close"]);
+	order.length = 0;
+	await closeQueueSettled({
+		waitUntilReady: async () => {
+			order.push("ready");
+			throw new Error("Stream isn't writeable and enableOfflineQueue options is false");
+		},
+		close: async () => {
+			order.push("close");
+			throw new Error("closed twice");
+		},
+	});
+	assert.deepEqual(order, ["ready", "close"], "a failed start still closes, and neither failure escapes");
+	await closeQueueSettled(null);
+	await closeQueueSettled({});
+});

@@ -170,6 +170,24 @@ const STATUS_UNREGISTERED_EDIT_MS = 4_000;
  * full boot without racing every other timer the boot arms, and a guarantee the shutdown story rests on
  * deserves a deterministic pin rather than a census.
  */
+/**
+ * Closes a BullMQ Queue only after its connection's own start has settled, and never throws. BullMQ's
+ * `RedisConnection.init` sends an INFO (the server's version and type) that nothing in BullMQ awaits; a queue closed
+ * while that INFO is still pending on a fail-fast client (`enableOfflineQueue: false`) rejects it as an UNHANDLED
+ * rejection, inside BullMQ ("Stream isn't writeable and enableOfflineQueue options is false", measured in CI on the
+ * boot that refuses right after making the reconcile queue, issue #645's PR). Waiting for `waitUntilReady` (bounded
+ * by the client's own connect timeout, and its failure swallowed here) lets that INFO land or fail inside the init's
+ * own handling first. Exported for the test.
+ */
+export async function closeQueueSettled(queue) {
+	try {
+		await queue?.waitUntilReady?.();
+	} catch {}
+	try {
+		await queue?.close?.();
+	} catch {}
+}
+
 export async function settleWithin(promise, ms, fallback) {
 	let timer = null;
 	try {
@@ -1442,7 +1460,7 @@ export async function startWorker(
 			if (!q) {
 				q = makeQueue(valkeyConn(), { name });
 				otherHostQueues.set(name, q);
-				extraClosers.push(q);
+				extraClosers.push({ close: () => closeQueueSettled(q) });
 			}
 			return q;
 		},
@@ -2880,7 +2898,7 @@ export async function startWorker(
 				const r = await reconcileGated(rq, served, { registry, log, tz: hostTz, authored: authoredCron(config) });
 				log("schedules_installed", { installed: r.installed, removed: r.removed, ...(unserved.length > 0 && { unserved: unserved.length }) });
 			} finally {
-				await rq.close().catch(() => {});
+				await closeQueueSettled(rq);
 			}
 		} else {
 			log("schedules_installed", { installed: 0, removed: 0, ...(unserved.length > 0 && { unserved: unserved.length }) });
