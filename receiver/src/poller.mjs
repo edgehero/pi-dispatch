@@ -111,6 +111,7 @@ import { configError } from "@edgehero/pi-dispatch/config";
 import { judgeValkeyAtStart, makeRedisClient, parseConnection, valkeyClientContext } from "@edgehero/pi-dispatch/connection";
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { enqueueGitHubJob, makeQueue } from "@edgehero/pi-dispatch/queue";
+import { trySteer } from "./steer.mjs";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
 import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { parseSubset } from "./receiver.mjs";
@@ -347,7 +348,8 @@ export async function startPoller(env = process.env, deps = {}) {
 			}
 
 			cycleNo++;
-			out({ event: "poll_cycle", repos: repos.length, fetched: stats.fetched, enqueued: stats.enqueued, notModified: stats.notModified, ms: now() - startedAt });
+			// `steered` (issue #646) only when a comment steered a run this cycle, so a cycle line without one is unchanged.
+			out({ event: "poll_cycle", repos: repos.length, fetched: stats.fetched, enqueued: stats.enqueued, notModified: stats.notModified, ...(stats.steered > 0 ? { steered: stats.steered } : {}), ms: now() - startedAt });
 			if (stopped) break;
 
 			// The delay: the configured interval, raised by any x-poll-interval hint seen this cycle, and
@@ -390,7 +392,7 @@ export async function startPoller(env = process.env, deps = {}) {
 }
 
 function emptyStats() {
-	return { fetched: 0, enqueued: 0, notModified: 0, minDelaySeconds: 0 };
+	return { fetched: 0, enqueued: 0, notModified: 0, minDelaySeconds: 0, steered: 0 };
 }
 
 /** 1-30s of jitter for the post-rate-limit wake, spread by the injected `random`. */
@@ -976,21 +978,37 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 		ctx.out({ event: "dropped", delivery: deliveryId, reason: result.reason });
 		return;
 	}
-	const replicas = result.job.replicas ?? 1;
+	// Comment steering (issue #646), the webhook arms' `steerOrEnqueue` at the poller's seam: the same `trySteer` over
+	// the poller's own Valkey client, before any enqueue, only for a job the filter marked `steerMode`. A null falls
+	// through to the enqueue below unchanged, minus the marker.
+	let job = result.job;
+	if (job.steerMode !== undefined) {
+		const { steerMode: mode, ...rest } = job;
+		const steered = await trySteer({ redis: ctx.redis, job, kind: "github", now: ctx.now, log: ctx.out });
+		// A retried cycle's comment steered before: trySteer logged `steer_redelivered`; nothing to enqueue.
+		if (steered?.redelivered === true) return;
+		if (steered !== null) {
+			stats.steered = (stats.steered ?? 0) + 1;
+			ctx.out({ event: "steered", delivery: deliveryId, repo: job.repo, target: `${job.target.type}#${job.target.number}`, mode, runs: steered.steered, runIds: steered.runIds });
+			return;
+		}
+		job = rest;
+	}
+	const replicas = job.replicas ?? 1;
 	let created = 0;
 	for (let i = 1; i <= replicas; i++) {
-		const r = await ctx.enqueue(replicas > 1 ? { ...result.job, replica: i } : result.job);
+		const r = await ctx.enqueue(replicas > 1 ? { ...job, replica: i } : job);
 		// Issue #289, the receiver arms' honesty rule at the poller's own seam: a semantic-window swallow
 		// gets its own line with the surviving id, `enqueued` counts only what was CREATED, and a bare-id
 		// return from an enqueue seam predating the shape counts as created -- the old behaviour exactly.
 		if (r && typeof r === "object" && r.deduplicated === true) {
-			ctx.out({ event: "deduplicated", delivery: deliveryId, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, jobId: r.jobId, survivingJobId: r.survivingJobId });
+			ctx.out({ event: "deduplicated", delivery: deliveryId, repo: job.repo, target: `${job.target.type}#${job.target.number}`, flow: job.flow, jobId: r.jobId, survivingJobId: r.survivingJobId });
 		} else {
 			created += 1;
 		}
 	}
 	stats.enqueued += created;
-	if (created > 0) ctx.out({ event: "enqueued", delivery: deliveryId, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, replicas: created });
+	if (created > 0) ctx.out({ event: "enqueued", delivery: deliveryId, repo: job.repo, target: `${job.target.type}#${job.target.number}`, flow: job.flow, replicas: created });
 }
 
 /**

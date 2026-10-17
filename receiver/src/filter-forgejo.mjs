@@ -33,7 +33,7 @@
  * a paid run, and it must be visible that it was seen and refused.
  */
 
-import { escapeRegExp, firstMatchingRule, labelSet, matchedLabel, matchesRule } from "./predicate.mjs";
+import { escapeRegExp, firstMatchingRule, labelSet, matchedLabel, matchesRule, steerModeOf } from "./predicate.mjs";
 import { findCloseRule } from "./close.mjs";
 import { isRecognizedAction, mapAction } from "./forgejo-subset.mjs";
 import { hasParkedLabel } from "@edgehero/pi-dispatch/parked";
@@ -166,9 +166,13 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 		...(resolved.statusComment === true ? { statusComment: true } : {}),
 		// Issue #645: durable runs, present only when armed, the same rule.
 		...(resolved.recover === true ? { recover: true } : {}),
-		// Issue #646: steering a running job, present only when armed, the same rule. Carried only: routing a comment
-		// into a run that is already going is a later change, so nothing here reads it.
+		// Issue #646: steering a running job, present only when armed, the same rule.
 		...(resolved.steer === true ? { steer: true } : {}),
+		// Issue #646: how this phrase comment steers a job of its trigger that is already running, set only on the comment
+		// route of a steer-armed trigger (never a parked reply, never a command). The receiver reads it to try the run's
+		// inbox before it enqueues, and `enqueueForgeJob` names its fields, so it never reaches a queue. At JOB level, never
+		// inside `trigger`, which is copied verbatim into /job/event.json.
+		...(resolved.steerMode !== undefined ? { steerMode: resolved.steerMode } : {}),
 		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
 		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
@@ -278,6 +282,11 @@ function routeComment(subset, triggers, knownFlows) {
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		...(parkedReply && { parkedReply: true }),
+		// Issue #646: a phrase comment on a steer-armed trigger may steer a run of it that is already going. Only with the
+		// phrase (a parked reply is an answer to a parked run, never a steer) and never on a command rule (the loader refuses
+		// `steer` beside `command`; checked again here so a drifted file cannot reach a run). The author gate above already
+		// ran: this changes where an admitted comment goes, never who may send one. The `later` grammar is `steerModeOf`'s.
+		...(phraseHit && command === undefined && triggers.comment.steer === true && { steerMode: steerModeOf(body, phrase) }),
 		// The invoking comment rides on the trigger. No author_association: Forgejo has none, and the
 		// authority that admitted this comment was resolved from the API, not read off the body.
 		comment: { body: subset.comment.body },

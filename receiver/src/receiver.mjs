@@ -30,6 +30,7 @@ import { parseForgejoSubset } from "./forgejo-subset.mjs";
 import { filterAzure } from "./filter-azure.mjs";
 import { parseAzureSubset } from "./azure-subset.mjs";
 import { makeAzureVerifiedHandler } from "./verify-azure.mjs";
+import { trySteer } from "./steer.mjs";
 
 /** Write a small JSON body with an explicit status; a 204 carries no body. verify's `respond` is private. */
 function respond(res, status, obj) {
@@ -134,7 +135,13 @@ export function parseSubset(payload) {
  * undefined, i.e. never drops the harness's own comments. Absent property therefore means no route; the
  * failure of a forgotten property is a 404 an operator sees, never a paid recursion they get billed for.
  */
-export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null }) {
+export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null, steerRedis, now = Date.now }) {
+	// The Valkey client comment steering (issue #646) reads the live runs with and pushes into: by default the shared
+	// queue's own connection (`queue.client`, BullMQ's promise of its ioredis client), so steering opens no second
+	// connection and has no lifecycle of its own to close. Asked only for a job that carries `steerMode`, so a
+	// deployment with no steer-armed comment trigger never touches it. `steerRedis` is the seam.
+	const steerClient = typeof steerRedis === "function" ? steerRedis : () => queue?.client;
+	const steer = { steerClient, now, log };
 	// Which queue a delivery is enqueued onto (issue #57, `OQ-032`). The default is the shared queue for
 	// EVERY job, which is what this receiver did before multi-host existed -- so a deployment that wires no
 	// router, and every test that constructs one without it, is byte-identical.
@@ -147,7 +154,7 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 	// `resolveAuthority` is the GITHUB closer resolver (issue #231), riding top-level beside `selfId`
 	// because github's dependencies always have -- the other forges bundle theirs in per-forge objects.
 	// Optional, because only a close delivery an armed close rule matches ever consults it.
-	const github = cfg.servesGithub ? makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority }) : null;
+	const github = cfg.servesGithub ? makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority, steer }) : null;
 
 	// A TABLE, built once, rather than one `if` per forge. Two forges made that a single branch; four make
 	// it a chain, and a chain is where one arm quietly ends up checked after the fallthrough. A path present
@@ -155,9 +162,9 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 	// falls through to GitHub, which is what keeps `/` working -- and a configured-off GitHub answers the
 	// same 404 from the fallthrough itself, below.
 	const routes = {
-		"/gitlab": gitlab ? makeGitLabHandler({ queue, routeTo, cfg, log, ...gitlab }) : null,
-		"/forgejo": forgejo ? makeForgejoHandler({ queue, routeTo, cfg, log, ...forgejo }) : null,
-		"/azure": azure ? makeAzureHandler({ queue, routeTo, cfg, log, ...azure }) : null,
+		"/gitlab": gitlab ? makeGitLabHandler({ queue, routeTo, cfg, log, ...gitlab, steer }) : null,
+		"/forgejo": forgejo ? makeForgejoHandler({ queue, routeTo, cfg, log, ...forgejo, steer }) : null,
+		"/azure": azure ? makeAzureHandler({ queue, routeTo, cfg, log, ...azure, steer }) : null,
 	};
 
 	return async function receiverHandler(req, res) {
@@ -224,6 +231,37 @@ async function fanout(job, enqueue) {
 }
 
 /**
+ * Comment steering (issue #646), shared by all four arms for the four-copies reason `fanout` gives. Runs after the gate
+ * and before any enqueue, and only for a job the filter marked `steerMode` (a phrase comment from an admitted author on
+ * a steer-armed trigger): every other delivery passes through untouched, so its job is byte-identical to before.
+ *
+ * Returns `{ handled: true }` when a live run took the comment, after answering `202 {status:"steered", runs}`; else
+ * `{ job }`, the job to enqueue exactly as today, with `steerMode` removed (`enqueueForgeJob` names its fields and
+ * would drop it anyway; removing it here keeps it off every seam a test or a router sees). The `steered` line names the
+ * delivery, the target in the arm's own grammar, the mode, and the runs, never the comment's text.
+ */
+async function steerOrEnqueue({ steer, res, kind, delivery, job, target }) {
+	if (job.steerMode === undefined) return { job };
+	const { steerMode: mode, ...rest } = job;
+	let redis = null;
+	try {
+		redis = (await steer.steerClient()) ?? null;
+	} catch {
+		redis = null; // trySteer logs `steer_lookup_failed` for a missing client and the comment is enqueued
+	}
+	const steered = await trySteer({ redis, job, kind, now: steer.now, log: (line) => steer.log?.(line) });
+	if (steered === null) return { job: rest };
+	// A redelivery of a delivery steered earlier (its run has ended since): answered, never enqueued. trySteer logged it.
+	if (steered.redelivered === true) {
+		respond(res, 202, { status: "steered", runs: 0 });
+		return { handled: true };
+	}
+	steer.log?.({ event: "steered", delivery, repo: job.repo, target, mode, runs: steered.steered, runIds: steered.runIds });
+	respond(res, 202, { status: "steered", runs: steered.steered });
+	return { handled: true };
+}
+
+/**
  * One log-and-answer for a fanout outcome, shared by all four arms so a weakened copy cannot hide (the
  * four-copies doctrine above). Issue #289's honesty rule: `enqueued` is logged only when something was
  * CREATED, with `replicas` meaning jobs that now exist; every semantic-window swallow gets its own
@@ -256,7 +294,7 @@ function respondEnqueueOutcome({ log, res, delivery, repo, target, flow, outcome
  * uses, so a lookup is never spent on a delivery the gate then ignores -- every label, comment, PR and
  * review delivery, and every close nothing wants, stays payload-only and byte-identical to before.
  */
-function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority }) {
+function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority, steer }) {
 	return makeVerifiedHandler({ secret: cfg.webhookSecret }, async ({ rawBody, event, delivery }, res) => {
 		let subset;
 		try {
@@ -294,17 +332,22 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority 
 			return respond(res, 204);
 		}
 
+		const target = `${result.job.target.type}#${result.job.target.number}`;
+		const steered = await steerOrEnqueue({ steer, res, kind: "github", delivery, job: result.job, target });
+		if (steered.handled) return;
+		const job = steered.job;
+
 		// Fanout (REQ-REPLICA-RUNS) lives in `fanout` above; the 202/503 decision stays here, where it always was.
 		let outcome;
 		try {
-			outcome = await fanout(result.job, async (j) => await enqueueGitHubJob(await routeTo("github", j), j));
+			outcome = await fanout(job, async (j) => await enqueueGitHubJob(await routeTo("github", j), j));
 		} catch (err) {
 			// Own try/catch so a Valkey-down enqueue is a 503 (retryable), not verify's outer 500.
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // GitHub redelivers; dedup by GUID coalesces
 		}
 
-		return respondEnqueueOutcome({ log, res, delivery, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, outcome });
+		return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome });
 	});
 }
 
@@ -321,7 +364,7 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority 
  * The lookup runs only for events that could still fire -- after verification, and after the payload has
  * been projected -- so an unauthenticated flood cannot make this project call GitLab at all.
  */
-function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, resolveAuthority, now }) {
+function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, resolveAuthority, now, steer }) {
 	return makeGitLabVerifiedHandler({ mode, secret, ...(now ? { now } : {}) }, async ({ rawBody, delivery }, res) => {
 		let subset;
 		try {
@@ -344,18 +387,23 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 			return respond(res, 204);
 		}
 
+		// `!` for a merge request, `#` for an issue -- GitLab's own notation, and the same discrimination
+		// the semantic dedup key makes, because the two are separate number sequences.
+		const sep = result.job.target.type === "pull_request" ? "!" : "#";
+		const target = `${result.job.repo}${sep}${result.job.target.number}`;
+		const steered = await steerOrEnqueue({ steer, res, kind: "gitlab", delivery, job: result.job, target });
+		if (steered.handled) return;
+		const job = steered.job;
+
 		let outcome;
 		try {
-			outcome = await fanout(result.job, async (j) => await enqueueGitLabJob(await routeTo("gitlab", j), j));
+			outcome = await fanout(job, async (j) => await enqueueGitLabJob(await routeTo("gitlab", j), j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // GitLab redelivers; dedup by webhook-id coalesces
 		}
 
-		// `!` for a merge request, `#` for an issue -- GitLab's own notation, and the same discrimination
-		// the semantic dedup key makes, because the two are separate number sequences.
-		const sep = result.job.target.type === "pull_request" ? "!" : "#";
-		return respondEnqueueOutcome({ log, res, delivery, repo: result.job.repo, target: `${result.job.repo}${sep}${result.job.target.number}`, flow: result.job.flow, outcome });
+		return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome });
 	});
 }
 
@@ -372,7 +420,7 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
  * per construction, and serving two sources from one would mean either sharing a secret between forges or
  * letting the request choose which one it was checked against.
  */
-function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveAuthority }) {
+function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveAuthority, steer }) {
 	return makeVerifiedHandler({ secret }, async ({ rawBody, event, delivery }, res) => {
 		let subset;
 		try {
@@ -395,15 +443,20 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 			return respond(res, 204);
 		}
 
+		const target = `${result.job.target.type}#${result.job.target.number}`;
+		const steered = await steerOrEnqueue({ steer, res, kind: "forgejo", delivery, job: result.job, target });
+		if (steered.handled) return;
+		const job = steered.job;
+
 		let outcome;
 		try {
-			outcome = await fanout(result.job, async (j) => await enqueueForgeJob(await routeTo("forgejo", j), "forgejo", j));
+			outcome = await fanout(job, async (j) => await enqueueForgeJob(await routeTo("forgejo", j), "forgejo", j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // Forgejo redelivers; dedup by GUID coalesces
 		}
 
-		return respondEnqueueOutcome({ log, res, delivery, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, outcome });
+		return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome });
 	});
 }
 
@@ -421,7 +474,7 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
  * `"Display Name <email>"`. Both the resolver and the bot-loop guard handle both forms -- see
  * filter-azure.mjs, where the ordering constraint is stated in full.
  */
-function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, selfId, resolveAuthority }) {
+function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, selfId, resolveAuthority, steer }) {
 	return makeAzureVerifiedHandler({ mode, secret, headerName }, async ({ rawBody }, res) => {
 		let subset;
 		try {
@@ -452,17 +505,22 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 			return respond(res, 204);
 		}
 
+		// `!` for a pull request, `#` for a work item -- Azure numbers them separately, and this is the same
+		// discrimination the semantic dedup key makes.
+		const sep = result.job.target.type === "pull_request" ? "!" : "#";
+		const target = `${result.job.repo}${sep}${result.job.target.number}`;
+		const steered = await steerOrEnqueue({ steer, res, kind: "azure", delivery, job: result.job, target });
+		if (steered.handled) return;
+		const job = steered.job;
+
 		let outcome;
 		try {
-			outcome = await fanout(result.job, async (j) => await enqueueForgeJob(await routeTo("azure", j), "azure", j));
+			outcome = await fanout(job, async (j) => await enqueueForgeJob(await routeTo("azure", j), "azure", j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" });
 		}
 
-		// `!` for a pull request, `#` for a work item -- Azure numbers them separately, and this is the same
-		// discrimination the semantic dedup key makes.
-		const sep = result.job.target.type === "pull_request" ? "!" : "#";
-		return respondEnqueueOutcome({ log, res, delivery, repo: result.job.repo, target: `${result.job.repo}${sep}${result.job.target.number}`, flow: result.job.flow, outcome });
+		return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome });
 	});
 }
