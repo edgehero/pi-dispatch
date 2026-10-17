@@ -58,6 +58,12 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch cancel <jobId>  stop one job: a queued or held job is removed (the line says whether it had
                            made attempts; cancel records nothing), a running one is aborted on whichever
                            host owns it (its record says operator-cancel)
+  pi-dispatch steer <jobId> [--later] <text…|->
+                           send a message to a running job whose trigger has run.steer: the agent reads it
+                           after its current tool calls, or with --later once it would otherwise stop;
+                           - reads the text from stdin. Prints the message id and its state, never the text
+  pi-dispatch steer --withdraw <jobId> <msgId>
+                           take a message back: guaranteed while it is queued, best effort once written
 
 Config comes from the environment (see .env.example); flags override it per run.
 Prefer being walked through all of this? The operator panel's /dispatch setup does every step
@@ -257,6 +263,17 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		return runCancel(jobId, picked.urls[0], { write });
 	}
 
+	if (cmd === "steer") {
+		// cancel's footing (issue #646): VALKEY_URL only, the kill switch's resolver, and a refusal on a shell/.env
+		// disagreement, since a job id belongs to one Valkey. parseArgs is strict, so a word of the message that looks
+		// like a flag is refused rather than silently dropped from the text; `--` or stdin is the way to send one.
+		const picked = await killSwitchUrls(argv.slice(1), env, { later: { type: "boolean", default: false }, withdraw: { type: "boolean", default: false } });
+		if (picked.error) return fail(/^Unknown option|^Option '/.test(picked.error) ? `${picked.error}\n  A message word that starts with a dash needs -- before the text, or pass - and pipe the text on stdin. Nothing was sent` : picked.error);
+		if (picked.urls.length > 1) return fail(`${picked.disagreement}: a job lives in one of them. Say which: pi-dispatch steer ${picked.positionals[0] ?? "<jobId>"} --valkey-url <url> ...`);
+		const { runSteer } = await import("./steer-cli.mjs");
+		return runSteer({ positionals: picked.positionals, later: picked.values.later, withdraw: picked.values.withdraw }, picked.urls[0], { write });
+	}
+
 	write(`${USAGE}\n`);
 	return cmd && cmd !== "--help" && cmd !== "-h" ? 1 : 0; // asked-for help is success; a typo is not (the receiver's rule)
 }
@@ -264,13 +281,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 /**
  * The Valkey(s) a kill-switch verb acts on: the one rule of `killSwitchValkeyUrls` (valkey-endpoint.mjs), shared with the
  * panel. The verb's own flags are parsed with parseArgs over what follows the verb (PR #475's review, round 3: a hand
- * scan took `--valkey-url` for the job id in `cancel --valkey-url URL j1`). `{ urls, disagreement, positionals }` or
+ * scan took `--valkey-url` for the job id in `cancel --valkey-url URL j1`). `extraOptions` adds a verb's own parseArgs
+ * flags (steer's `--later` and `--withdraw`), returned in `values`. `{ urls, disagreement, positionals, values }` or
  * `{ error }`; a note (a URL that matches neither side) is written to stderr.
  */
-async function killSwitchUrls(args, env) {
+async function killSwitchUrls(args, env, extraOptions = {}) {
 	let parsed;
 	try {
-		parsed = parseArgs({ args, allowPositionals: true, options: { "valkey-url": { type: "string" } } });
+		parsed = parseArgs({ args, allowPositionals: true, options: { ...extraOptions, "valkey-url": { type: "string" } } });
 	} catch (error) {
 		return { error: error.message };
 	}
@@ -278,7 +296,7 @@ async function killSwitchUrls(args, env) {
 	const picked = killSwitchValkeyUrls({ env, flagUrl: parsed.values["valkey-url"] ?? null });
 	if (picked.error) return picked;
 	if (picked.note) process.stderr.write(`warning: ${picked.note}\n`);
-	return { ...picked, positionals: parsed.positionals };
+	return { ...picked, positionals: parsed.positionals, values: parsed.values };
 }
 
 /**

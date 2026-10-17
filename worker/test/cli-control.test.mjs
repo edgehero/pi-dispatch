@@ -87,3 +87,41 @@ test("cancel fails fast (does not hang) when Valkey is unreachable", { skip: nee
 	assert.equal(code, 1, "an unreachable Valkey is a clean error, not a hang");
 	assert.ok(Date.now() - start < 15000, "must fail fast, well under any CI timeout");
 });
+
+// Issue #646: the steer verb is routed, documented, and refuses for free before it reaches Valkey.
+test("usage lists steer and its withdraw form", async () => {
+	let code;
+	const out = await captureStdout(async (write) => {
+		code = await main(["--help"], {}, { write });
+	});
+	assert.equal(code, 0);
+	assert.match(out, /pi-dispatch steer <jobId> \[--later\] <text…\|->/);
+	assert.match(out, /pi-dispatch steer --withdraw <jobId> <msgId>/);
+	assert.match(out, /guaranteed while it is queued, best effort once written/);
+});
+
+test("steer refuses a flag-looking word, a missing message and a missing job id before Valkey", async () => {
+	// A Valkey that would hang if contacted; every one of these must return without it.
+	const env = { VALKEY_URL: "redis://127.0.0.1:1" };
+	const start = Date.now();
+	assert.equal(await main(["steer", "j1", "use", "--force"], env, { write: () => true }), 1, "an unknown flag is refused, not dropped from the text");
+	assert.equal(await main(["steer", "j1", "--later=yes"], env, { write: () => true }), 1);
+	assert.equal(await main(["steer"], env, { write: () => true }), 1);
+	assert.equal(await main(["steer", "j1"], env, { write: () => true }), 1);
+	assert.equal(await main(["steer", "--withdraw", "j1", "not-an-id"], env, { write: () => true }), 1);
+	assert.ok(Date.now() - start < 5000, "no network wait");
+});
+
+test("steer fails fast (does not hang) when Valkey is unreachable", { skip: needsDeps }, async () => {
+	const start = Date.now();
+	const code = await main(["steer", "j1", "hello"], { VALKEY_URL: "redis://127.0.0.1:1" });
+	assert.equal(code, 1, "an unreachable Valkey is a clean error, not a hang");
+	assert.ok(Date.now() - start < 15000, "must fail fast, well under any CI timeout");
+});
+
+test("steer --withdraw fails fast (does not hang) when Valkey is unreachable", { skip: needsDeps }, async () => {
+	const start = Date.now();
+	const code = await main(["steer", "--withdraw", "j1", "ab".repeat(16)], { VALKEY_URL: "redis://127.0.0.1:1" });
+	assert.equal(code, 1);
+	assert.ok(Date.now() - start < 15000, "must fail fast");
+});
