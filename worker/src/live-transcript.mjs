@@ -272,7 +272,7 @@ export const outcomeOf = (outcome) => (LIVE_OUTCOMES.includes(outcome) ? outcome
  * transcripts off: the file is tailed and every line handed to `onParsed`, and nothing is queued or written to the
  * stream, so no `run:live:` key is ever touched.
  */
-export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(t ?? ""), now = () => Date.now(), pollMs = 500, log = () => {}, fs = { open: fsOpen, lstat: fsLstat, lstatSync: fsLstatSync }, timeoutMs = OP_TIMEOUT_MS, finishTimeoutMs = FINISH_TIMEOUT_MS, lineMaxBytes = LIVE_LINE_MAX_BYTES, pendingMax = PENDING_MAX, pendingMaxBytes = PENDING_MAX_BYTES, finalReadMaxBytes = LIVE_FINAL_READ_MAX_BYTES, readChunkBytes = READ_CHUNK_BYTES, stream = true, onParsed = null, onReset = null } = {}) {
+export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(t ?? ""), now = () => Date.now(), pollMs = 500, log = () => {}, fs = { open: fsOpen, lstat: fsLstat, lstatSync: fsLstatSync }, timeoutMs = OP_TIMEOUT_MS, finishTimeoutMs = FINISH_TIMEOUT_MS, lineMaxBytes = LIVE_LINE_MAX_BYTES, pendingMax = PENDING_MAX, pendingMaxBytes = PENDING_MAX_BYTES, finalReadMaxBytes = LIVE_FINAL_READ_MAX_BYTES, readChunkBytes = READ_CHUNK_BYTES, stream = true, onParsed = null, onReset = null, onBaseline = null } = {}) {
 	const key = liveKeyFor(jobId);
 	const id = sanitizeJobId(jobId);
 	let offset = 0;
@@ -294,6 +294,22 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	let baseline = 0; // the file's size when the first read began: lines ending at or before it are `prior`
 	let baselineTaken = null;
 	let replayUntil = null; // set at a reset: the rewritten file's size then, lines ending at or before it are `replay`
+	let baselineReported = false;
+
+	/**
+	 * Issue #646: `onBaseline()` is called ONCE, when this attempt has read the file up to its baseline (every `prior`
+	 * line handed over), so a consumer can act on the whole of the staged transcript before anything new: the steer ack
+	 * learns which messages a restored transcript already holds before the relay writes a file. Also called, FAILING
+	 * OPEN, when the file was refused or a read failed: a consumer that waits for it must never wait forever, and the
+	 * cost of an early call is a message delivered twice, where a call that never came would deliver none.
+	 */
+	const reportBaseline = () => {
+		if (baselineReported || typeof onBaseline !== "function" || closed) return;
+		baselineReported = true;
+		try {
+			onBaseline();
+		} catch {}
+	};
 
 	/**
 	 * The baseline, once: the file's size before anything of this attempt was read. Never rejects. Only `onParsed` reads
@@ -304,7 +320,7 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	 * as `prior` instead of this attempt's. The async path is kept for an injected `fs` without `lstatSync`.
 	 */
 	const takeBaseline = () => {
-		if (typeof onParsed !== "function") return undefined;
+		if (typeof onParsed !== "function" && typeof onBaseline !== "function") return undefined;
 		if (baselineTaken === null && typeof fs.lstatSync === "function") {
 			try {
 				const info = fs.lstatSync(file);
@@ -484,9 +500,10 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	 * settled (`readAt`), and what a read still in flight then returns is never queued (`enqueue`).
 	 */
 	const readOnce = async (final = false) => {
-		if (refused) return;
+		if (refused) return reportBaseline();
 		await takeBaseline();
 		let handle = null;
+		let failed = false;
 		try {
 			let info;
 			try {
@@ -547,8 +564,10 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 			}
 		} catch {
 			counts.errors += 1;
+			failed = true;
 		} finally {
 			await handle?.close().catch(() => {});
+			if (refused || failed || offset >= baseline) reportBaseline();
 		}
 	};
 
@@ -673,12 +692,18 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
  *     hangs. The comment's final edit is not in it: start.mjs makes that one from the run record. The checkpoint handle
  *     is NOT closed here: runContainer closes it, so it can stop new live checkpoints before this final read.
  *   - `progressSummary()` is the record's `progress` (run-history.mjs `recordedProgress`), or null with progress off.
+ *   - `steer` (issue #646): the factory flag says this deployment can arm steering, so the opener is built even with
+ *     every other reader off; per job, `steer` is the ack consumer (steer-ack.mjs `makeSteerAck`) runContainer hands for
+ *     an ARMED attempt. It is the third consumer of every parsed line and hears `onBaseline`, and like the checkpoint
+ *     it turns the tailing on by itself (`stream: false`): the acks are what count a delivery, so a steer job with
+ *     transcripts, progress and checkpoints all off still has its file read. An unarmed job hands none, and its opener
+ *     is exactly what it was.
  */
-export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Date.now(), pollMs = 500, transcripts = true, progress = false, makeCommenter = null, progressWriter = {}, checkpoint = null } = {}) {
+export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Date.now(), pollMs = 500, transcripts = true, progress = false, makeCommenter = null, progressWriter = {}, checkpoint = null, steer = false } = {}) {
 	const streamOn = Boolean(redis) && transcripts;
 	const progressOn = Boolean(redis) && progress;
-	if (!streamOn && !progressOn && typeof checkpoint !== "function") return null;
-	return ({ file, jobId, redact, job = null, checkpoint: checkpointArgs = null }) => {
+	if (!streamOn && !progressOn && typeof checkpoint !== "function" && steer !== true) return null;
+	return ({ file, jobId, redact, job = null, checkpoint: checkpointArgs = null, steer: steerAck = null }) => {
 		let handle = null;
 		if (typeof checkpoint === "function" && checkpointArgs && typeof checkpointArgs === "object") {
 			try {
@@ -687,8 +712,8 @@ export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Da
 				handle = null;
 			}
 		}
-		// Nothing would read the file: no stream, no progress, no checkpoints. runContainer runs the job as before.
-		if (!streamOn && !progressOn && handle === null) return null;
+		// Nothing would read the file: no stream, no progress, no checkpoints, no steer acks. runContainer runs the job as before.
+		if (!streamOn && !progressOn && handle === null && !steerAck) return null;
 		// A trigger that asked for a status comment on a deployment with progress off gets none: said once per job, never
 		// a silent no-op (the comment is driven by progress, so there is nothing to post).
 		if (!progressOn && job?.statusComment === true) log("status_comment_skipped", { jobId: sanitizeJobId(jobId), reason: "progress-off" });
@@ -704,34 +729,37 @@ export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Da
 					makeCommenter: typeof makeCommenter === "function" && job?.statusComment === true ? (opts) => makeCommenter({ job, ...opts }) : null,
 				})
 			: null;
-		// Each consumer guarded on its own, so a throw in one never starves the other of the line.
-		const consumers = handle
-			? {
-					onParsed: (parsed, ts, flags) => {
-						try {
-							sink?.consume(parsed, ts, flags);
-						} catch {}
-						try {
-							handle.consume(parsed, ts, flags?.end, flags);
-						} catch {}
-					},
-					onReset: () => {
-						try {
-							sink?.reset();
-						} catch {}
-						try {
-							handle.reset();
-						} catch {}
-					},
-				}
-			: sink
-				? { onParsed: sink.consume, onReset: sink.reset }
+		// Each consumer guarded on its own, so a throw in one never starves another of the line. The steer ack (issue #646)
+		// is the third, beside the progress sink and the checkpoint handle.
+		const parsedConsumers = [];
+		if (sink) parsedConsumers.push({ consume: (parsed, ts, flags) => sink.consume(parsed, ts, flags), reset: () => sink.reset() });
+		if (handle) parsedConsumers.push({ consume: (parsed, ts, flags) => handle.consume(parsed, ts, flags?.end, flags), reset: () => handle.reset() });
+		if (steerAck) parsedConsumers.push({ consume: (parsed, ts, flags) => steerAck.consume(parsed, ts, flags), reset: () => steerAck.reset?.() });
+		const consumers =
+			parsedConsumers.length > 0
+				? {
+						onParsed: (parsed, ts, flags) => {
+							for (const c of parsedConsumers) {
+								try {
+									c.consume(parsed, ts, flags);
+								} catch {}
+							}
+						},
+						onReset: () => {
+							for (const c of parsedConsumers) {
+								try {
+									c.reset();
+								} catch {}
+							}
+						},
+					}
 				: {};
+		if (steerAck && typeof steerAck.onBaseline === "function") consumers.onBaseline = () => steerAck.onBaseline();
 		const live = makeLiveTranscript({ file, jobId, redis, redact, now, pollMs, log, stream: streamOn, ...consumers });
 		let finishing = null;
 		return {
 			poll: live.poll,
-			stats: () => ({ ...live.stats(), ...(sink ? { progress: sink.stats() } : {}), ...(handle ? { checkpoint: handle.stats() } : {}) }),
+			stats: () => ({ ...live.stats(), ...(sink ? { progress: sink.stats() } : {}), ...(handle ? { checkpoint: handle.stats() } : {}), ...(typeof steerAck?.stats === "function" ? { steer: steerAck.stats() } : {}) }),
 			start() {
 				live.start();
 				try {

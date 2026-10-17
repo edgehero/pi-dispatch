@@ -231,9 +231,13 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		// The venue's freezer verbs ride on the call bag (issue #645), from the SAME bundle that runs the container, so a
 		// live checkpoint can never freeze a job through another venue's CLI. A venue without them gets none, and its
 		// container gets no live checkpoints; the call bag is then exactly the caller's.
+		// Issue #646: a steer job is also told whether its venue BINDS mounts (the bundle's own `binds`), which runContainer
+		// arms steering on: a copying venue would upload the inbox once and never see a later message. Only for a steer job,
+		// so every other call bag stays exactly the caller's (plus the verbs above).
 		runContainer: (args) => {
 			const bundle = backendFor(args?.job);
-			return bundle.runContainer(isPausable(bundle) ? { ...args, pause: bundle.pause, unpause: bundle.unpause } : args);
+			const withVerbs = isPausable(bundle) ? { ...args, pause: bundle.pause, unpause: bundle.unpause } : args;
+			return bundle.runContainer(args?.job?.steer === true ? { ...withVerbs, binds: bundle.binds === true } : withVerbs);
 		},
 		imagePreflight: (job) => backendFor(job).imagePreflight(job),
 		egressPreflight: (job) => backendFor(job).egressPreflight(job),

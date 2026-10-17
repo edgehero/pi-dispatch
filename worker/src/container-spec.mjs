@@ -49,6 +49,13 @@ export const CONTAINER_SESSION_DIR = "/session";
 export const CONTAINER_SESSION_FILE = `${CONTAINER_SESSION_DIR}/current.jsonl`;
 
 /**
+ * Where a steer-armed job's inbox lands (issue #646, INT-STEER-INBOX-CONTRACT): the runner (image/runner/src/inbox.mjs
+ * `INBOX_DIR`) reads it, the worker's relay writes the host side. A constant path, like `/session`, so nothing about
+ * the host's layout is legible inside the job.
+ */
+export const CONTAINER_INBOX_DIR = "/inbox";
+
+/**
  * The job image's home, and the uid its `USER` directive runs as (issue #341, `DES-JOB-USER-INFERRED-READ-BACK-ON-
  * REQUEST`). A job run under `--user` needs `HOME=CONTAINER_HOME` beside it, because such a uid has no passwd entry in
  * the image: Docker gives it `HOME=/`, Podman `HOME=/workspace` (both measured). The builder does not pair them; a job
@@ -132,6 +139,8 @@ export function assertUserns(userns) {
  * @param sessionDir host path to this job's OWN copy of its session transcript (REQ-RESUMABLE-SESSION);
  *                   mounted /session:rw. Per-job, like jobDir -- never the shared store.
  * @param globalPiDir host path to the operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY); mounted /opt/pi-global:ro
+ * @param steerInboxDir host path to a steer-armed job's inbox (issue #646), `<jobDir>.inbox`; mounted /inbox:ro. Absent
+ *                   for every job that is not armed, so its argv is byte-identical to one built before the feature.
  * @param name       container name (for `docker stop` at the timeout)
  * @param size       the job's size, `{ memMiB, cpuCenti }` (issue #596, `job-size.mjs`); the built-in 4g and 2 when
  *                   absent. It becomes `memory`, `memorySwap` (equal: no swap beyond memory), `cpuShares` and `shmSize`
@@ -169,6 +178,7 @@ export function containerSpec({
 	outboxDir,
 	sessionDir,
 	globalPiDir,
+	steerInboxDir,
 	name,
 	size = DEFAULT_JOB_SIZE,
 	hostCpus = null,
@@ -222,6 +232,13 @@ export function containerSpec({
 	// weakening of that constraint but its inversion. Absent unless the trigger armed run.resume AND a key
 	// resolved, so an unarmed job's argv is byte-identical to one built before this feature existed.
 	if (sessionDir) mounts.push({ host: sessionDir, container: CONTAINER_SESSION_DIR, readOnly: false, ...own });
+
+	// A steer-armed job's inbox (issue #646, DES-STEER-VIA-READONLY-INBOX-MOUNT, INT-STEER-INBOX-CONTRACT). READ-ONLY: the
+	// worker writes the messages, the job only reads them, so the channel is one way and nothing the agent writes there
+	// can reach the worker (the delivery ack travels in the transcript, MACed, never through this directory). Per job and
+	// BESIDE the job directory, never inside it: `/job` is merge-gated input only. Relabelled like the other per-job
+	// directories (issue #355), since it is made for this one container. Absent unless armed.
+	if (steerInboxDir) mounts.push({ host: steerInboxDir, container: CONTAINER_INBOX_DIR, readOnly: true, ...own });
 
 	// The operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global skills, a global
 	// persona, layered UNDER each repo's own .pi/. Read-only -- it is operator-authored deploy-time config,

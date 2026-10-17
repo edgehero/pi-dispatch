@@ -184,7 +184,14 @@ export const AWAIT_INPUT_RUNNER_REASONS = Object.freeze(["await-input-shadowed",
  * registers `report_progress`, the job tool whose calls the worker reads as phases. Named for MCP_RUNNER_REASONS' reason.
  */
 export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS]);
+/**
+ * The runner's exit-2 refusals of a job armed with `run.steer` (issue #646), before the prompt: PI_STEER is set but
+ * `/inbox` is not a readable directory (`steer-inbox-missing`), or no exit key arrived to sign the delivery acks with
+ * (`steer-no-exit-key`). Both are a worker regression or a hand-run container, since the worker arms steering only
+ * with the mount and a key; named for MCP_RUNNER_REASONS' reason, the operator's fix is not a budget.
+ */
+export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer-no-exit-key"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -457,6 +464,52 @@ export const RECOVERED_FROM = Object.freeze(["live", "exit", "salvage"]);
  */
 export const RECOVER_SKIPPED_REASONS = Object.freeze(["local", "no-run-id", "base-unprimed", "workspace-extensions"]);
 
+/**
+ * Why a job that armed `run.steer` ran without it (issue #646), the record's `steerSkipped`. A fixed enum:
+ * `venue-copies` (the job's venue copies files instead of binding them, so a message written after the start would never
+ * reach the container), `no-exit-key` (the image does not declare `exitAuth`, so no delivery ack could be verified and
+ * every message would be reported late while the agent may have read it), `no-transcript` (no transcript file could be
+ * staged, or this worker has no tail or relay wired, so nothing could read the acks), `no-inbox` (the inbox directory
+ * could not be made). The job still runs, as it would without `run.steer`.
+ */
+export const STEER_SKIPPED_REASONS = Object.freeze(["venue-copies", "no-exit-key", "no-transcript", "no-inbox"]);
+
+/**
+ * The record's `steered` (issue #646): `{ delivered, late, withdrawn }`, three non-negative safe integers counted off the
+ * run's inbox at its final outcome (inbox-settle.mjs), or null on any violation. Rebuilt, never the source's object.
+ */
+export function recordedSteered(s) {
+	if (s === null || typeof s !== "object" || Array.isArray(s)) return null;
+	const ok = (v) => Number.isSafeInteger(v) && v >= 0;
+	if (!ok(s.delivered) || !ok(s.late) || !ok(s.withdrawn)) return null;
+	return { delivered: s.delivered, late: s.late, withdrawn: s.withdrawn };
+}
+
+/** The most message ids an exit line's `steer.deliveredIds` may name: the inbox's own cap (steer-inbox.mjs). */
+export const STEER_DELIVERED_IDS_MAX = 16;
+
+/**
+ * The runner's inbox counts off an exit line (issue #646, the exit line's `steer`): `{ delivered, pending }`, each a
+ * non-negative safe integer or null, plus `deliveredIds` when the line names any: the ids the runner saw pi persist (32
+ * lowercase hex each, at most STEER_DELIVERED_IDS_MAX, deduplicated; a list that is not an array of such ids, or longer
+ * than the cap, is dropped WHOLE, never cut). Null when the value is not an object or carries nothing. The counts are
+ * advisory telemetry like `recovery`; the ids are acted on (run-container.mjs marks them delivered, review finding F3)
+ * only off a line the exit key SIGNED, which is the only kind runContainer hands on when a key was issued.
+ */
+export function steerCounts(s) {
+	if (s === null || typeof s !== "object" || Array.isArray(s)) return null;
+	const out = { delivered: Object.hasOwn(s, "delivered") && isCount(s.delivered) ? s.delivered : null, pending: Object.hasOwn(s, "pending") && isCount(s.pending) ? s.pending : null };
+	const ids = Object.hasOwn(s, "deliveredIds") ? s.deliveredIds : undefined;
+	if (Array.isArray(ids) && ids.length > 0 && ids.length <= STEER_DELIVERED_IDS_MAX && ids.every((id) => typeof id === "string" && /^[0-9a-f]{32}$/.test(id))) out.deliveredIds = [...new Set(ids)];
+	return out.delivered === null && out.pending === null && out.deliveredIds === undefined ? null : out;
+}
+
+/** The decisive exit line's `steer` block (`steerCounts`), or null. Never throws. */
+export function parseExitSteer(text) {
+	const parsed = decisiveExitLine(text);
+	return parsed === null ? null : steerCounts(parsed?.steer);
+}
+
 /** The runner's recovery counts (issue #645, the exit line's `recovery`), in the record's order. */
 export const RECOVERY_COUNT_KEYS = Object.freeze(["orphans", "replayed", "interrupted", "notStarted"]);
 
@@ -708,6 +761,9 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const recoveryOf = recordedRecoveryOf(data.recoveryOf);
 	const recovered = recordedRecovered(source.recovered);
 	const checkpoints = recordedCheckpoints(source.checkpoints);
+	// Issue #646: only for a job that armed `run.steer`, so no other record can carry either key.
+	const steered = data.steer === true ? recordedSteered(source.steered) : null;
+	const steerSkipped = data.steer === true && STEER_SKIPPED_REASONS.includes(source.steerSkipped) ? source.steerSkipped : null;
 	return {
 		jobId: job.id,
 		kind: kind ?? null,
@@ -915,6 +971,13 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(recovered !== null ? { recovered } : {}),
 		...(RECOVER_SKIPPED_REASONS.includes(source.recoverSkipped) ? { recoverSkipped: source.recoverSkipped } : {}),
 		...(checkpoints !== null ? { checkpoints } : {}),
+		// Steering (issue #646, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after the durable-run keys, CONDITIONAL like
+		// them and only for a job whose data says `steer: true`, so every other record is byte-identical to before:
+		//   - `steered`: how many of the run's messages were delivered (a verified ack), late (the run ended first) and
+		//     withdrawn, counted off the inbox at the final outcome. Three integers, REBUILT (`recordedSteered`);
+		//   - `steerSkipped`: why an armed job ran without steering (STEER_SKIPPED_REASONS), a fixed enum.
+		...(steered !== null ? { steered } : {}),
+		...(steerSkipped !== null ? { steerSkipped } : {}),
 	};
 }
 
@@ -1202,6 +1265,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const oomKilled = parseExitOomKilled(exitText);
 			// Issue #645: a recovered run's runner counts, off the same decisive (and, with a key, signed) line.
 			const recovery = parseExitRecovery(exitText);
+			// Issue #646: a steer-armed runner's inbox counts, off the same line.
+			const steer = parseExitSteer(exitText);
 			try {
 				if (stream !== null) {
 					const s = stream;
@@ -1228,8 +1293,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// `exitAuth` only when a key was issued, so a keyless close returns exactly the object it always did. `exitWhy`
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
-			// `recovery` (issue #645) only when the line carried one, for the same reason.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(keyed ? { exitAuth } : {}) };
+			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

@@ -982,6 +982,8 @@ export const PODMAN_BACKEND_OPTIONS = Object.freeze([
 	"forgeHosts",
 	"onOutput",
 	"openLiveTranscript",
+	// issue #646: the inbox relay's opener, as start.mjs hands local's
+	"openInboxRelay",
 	// the floor the per-job observation preflight judges, and the boot-built reaper
 	"backendFloor",
 	"reap",
@@ -1116,6 +1118,7 @@ export function makePodmanBackend(opts = {}) {
 		forgeHosts = {},
 		onOutput,
 		openLiveTranscript = null,
+		openInboxRelay = null,
 		backendFloor = {},
 		reap,
 		readInfo = makePodmanInfoReader(),
@@ -1159,6 +1162,7 @@ export function makePodmanBackend(opts = {}) {
 		...(openJobLog ? { openJobLog } : {}),
 		...(onOutput ? { onOutput } : {}),
 		...(openLiveTranscript ? { openLiveTranscript } : {}),
+		...(openInboxRelay ? { openInboxRelay } : {}),
 		globalPiDir,
 		allowGlobalExtensions,
 		packagePaths,
