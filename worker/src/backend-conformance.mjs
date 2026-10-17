@@ -98,6 +98,37 @@ async function checkReaperTriState(backend, { withBrokenEnumeration }) {
 }
 
 /**
+ * THE FREEZER VERBS (issue #645), against the `pausable` word.
+ *
+ * A venue that CLAIMS the word (`enforced` or `asserted`) must carry `pause(name)` and `unpause(name)`: a checkpointer
+ * that reads the table, believes a freeze is available and then finds no verb would take every read live while the
+ * operator was told it was frozen. A venue declaring `absent` passes whatever it carries, since it claimed nothing.
+ *
+ * WHETHER A FREEZE TAKES is the runtime's and cannot be driven generically, for `probe`'s reason: `pauseProbe(backend)`
+ * is the adapter's own code, starting a container through its `runContainer` path and returning what `pause` and
+ * `unpause` answered as `{ paused, unpaused }`. Without one this abstains on the behaviour rather than passing it. A
+ * verb that THROWS is a failure of its own: the contract is `{ ok: false, reason }`, because its caller is a best-effort
+ * read beside a running job and a throw there is a job failure the freeze was never worth.
+ */
+async function checkPausable(backend, { pauseProbe }) {
+	const word = backend?.declares?.pausable;
+	const claimed = word === "enforced" || word === "asserted";
+	const verbs = typeof backend?.pause === "function" && typeof backend?.unpause === "function";
+	if (!claimed) return [pass("pausable", `declared ${JSON.stringify(word)}, which claims no freeze, so the verbs are not required`)];
+	if (!verbs) return [fail("pausable", `declared ${word}, but the bundle has no pause() and unpause(); a checkpointer that believes the word finds nothing to call`)];
+	if (typeof pauseProbe !== "function") return [abstain("pausable", "the verbs exist; no `pauseProbe` supplied, so no container was frozen and thawed")];
+	let got;
+	try {
+		got = await pauseProbe(backend);
+	} catch (error) {
+		return [fail("pausable", `a freeze round trip threw (${error?.message ?? error}); the verbs answer { ok: false, reason } and never throw`)];
+	}
+	if (got?.paused?.ok !== true) return [fail("pausable", `declared ${word}, and pause answered ${JSON.stringify(got?.paused)} on a running container`)];
+	if (got?.unpaused?.ok !== true) return [fail("pausable", `declared ${word}, and unpause answered ${JSON.stringify(got?.unpaused)} after a pause that took, which leaves a job frozen`)];
+	return [pass("pausable", "a running container was frozen and thawed through the bundle's own verbs")];
+}
+
+/**
  * THE BUNDLE'S SHAPE, and the name it answers to.
  *
  * Cheap, and it catches the mistake an adapter author actually makes: a bundle whose `name` does not match
@@ -201,8 +232,8 @@ function checkTransfers(backend) {
  * `probe` is the one thing an adapter must supply: `(backend, { exitCode, aborted }) => result`, arranging
  * for the backend's own `runContainer` to produce a container that exits that way. It cannot be written
  * generically -- how you make a container exit 2 is the runtime's business -- and it is the reason this is a
- * function taking probes rather than a fixed suite. `withBrokenEnumeration` drives the reaper's failure path, and
- * `readBack(backend)` reports the eight properties read off a live container (see READ_BACK_BY_A_LIVE_PROBE); each
+ * function taking probes rather than a fixed suite. `withBrokenEnumeration` drives the reaper's failure path,
+ * `pauseProbe(backend)` a freeze round trip (issue #645), and `readBack(backend)` reports the eight properties read off a live container (see READ_BACK_BY_A_LIVE_PROBE); each
  * one missing abstains.
  *
  * Returns `{ ok, findings }`. `ok` is false if ANY check failed; a check that abstained does not fail the
@@ -240,6 +271,7 @@ async function conformance(backend, probes) {
 		findings.push(abstain("abortable", "no `probe` supplied, so an abort could not be told from an OOM"));
 	}
 	findings.push(...(await checkReaperTriState(backend, probes)));
+	findings.push(...(await checkPausable(backend, probes)));
 	findings.push(...(await checkReadBack(backend, probes)));
 	return { ok: findings.every((f) => f.ok), findings };
 }

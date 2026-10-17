@@ -30,7 +30,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { JOB_NAME_PREFIX, execDockerBounded, jobContainerName, makeReaper, makeStopContainer } from "./backend-local.mjs";
+import { JOB_NAME_PREFIX, execDockerBounded, isRuntimeName, jobContainerName, makePauseVerbs, makeReaper, makeStopContainer } from "./backend-local.mjs";
 import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_NETWORK_HELPER_KEYS, PODMAN_WIDENING_KEYS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
@@ -1003,6 +1003,33 @@ export const PODMAN_BACKEND_OPTIONS = Object.freeze([
 	"makeStopContainer",
 ]);
 
+/**
+ * Whether this venue can FREEZE a job (issue #645, the `pausable` row), from a `podman info` read: `{ pausable, reason }`,
+ * with `pausable` `true`, `false`, or `null` when the read did not answer. Rootless Podman cannot pause on cgroup v1
+ * (`podman pause` refuses it there: the v1 freezer is a hierarchy the user is never delegated), and every podman venue
+ * is rootless because a rootful one is refused, so the cgroup version decides it. The version comes from the SAME read
+ * the venue admits jobs on and `podmanBoundsDelegated` judges, so the freeze and the bounds cannot disagree about which
+ * version this host runs. A version `podman info` did not give is not v1: the CLI is then left to answer for itself,
+ * which it does with a non-zero exit the verb returns as `{ ok: false }`. The bundle's verbs judge the KEPT read only, so
+ * an unanswered or not-yet-taken read (`pausable: null`) also leaves the CLI to answer.
+ */
+export function podmanPausable(read) {
+	if (read?.answered !== true || !read.info) return { pausable: null, reason: read?.reason ?? "unanswered" };
+	if (read.info.cgroupVersion === "v1") return { pausable: false, reason: "cgroup-v1-rootless" };
+	return { pausable: true, reason: null };
+}
+
+/** An execFile-shaped runner (resolves on exit 0, rejects with `.code` otherwise) as `execDockerBounded`'s `{ code, error }`. */
+function settledRun(execFn) {
+	return (cmd, args) =>
+		Promise.resolve()
+			.then(() => execFn(cmd, args))
+			.then(
+				() => ({ code: 0, error: null }),
+				(err) => ({ code: typeof err?.code === "number" ? err.code : null, error: err ?? { code: null } }),
+			);
+}
+
 /** The keeper read's bound: one `podman inspect`, on a pre-spend gate, like the proxy's own read beside it. */
 export const NETNS_KEEPER_READ_TIMEOUT_MS = 10_000;
 
@@ -1062,7 +1089,7 @@ export function keeperPreflight(proxyPreflight, { armed, proxy, info, spawnFn = 
 
 /**
  * The podman bundle: `{ name, declares, neverStartedExits, containerName, namePrefix, binds, runContainer,
- * imagePreflight, egressPreflight, stopContainer, reap, jobUserPreflight, observationPreflight }`.
+ * imagePreflight, egressPreflight, stopContainer, pause, unpause, reap, jobUserPreflight, observationPreflight }`.
  *
  * BUILT here from PR #425's factories with `bin: "podman"` (and `buildPodmanRunArgs` for the run), rather than taken
  * built as `makeLocalBackend` does, because the pairing IS the adapter: a run under one binary and a stop, a preflight or
@@ -1110,6 +1137,19 @@ export function makePodmanBackend(opts = {}) {
 	const spawnSeam = spawnFn ? { spawnFn } : {};
 	const execSeam = exec ? { exec } : spawnFn ? { exec: execViaSpawn(spawnFn) } : {};
 	const info = cachedPodmanInfo(readInfo, { log });
+	// The freezer verbs (issue #645) under the venue's own binary, through the same exec seam as the stop, so a test's fake
+	// child sees every podman spawn. In production the bounded runner; `makePauseVerbs` bounds an injected one too.
+	const verbs = makePauseVerbs({ bin: "podman", ...(execSeam.exec ? { run: settledRun(execSeam.exec) } : {}) });
+	// The name first, then cgroup v1, both BEFORE any spawn. The version comes from the KEPT answered `podman info`
+	// (`peek`), never a fresh read: a read here would be a second spawn with a bound of its own beside the verb's 15 s,
+	// and every job is admitted on an answered read (`observationPreflight`), so a running job always has one kept.
+	// With none kept (no job admitted yet) the verb runs and `podman pause`'s own refusal comes back as `{ ok: false }`.
+	const gated = (fn) => async (name) => {
+		if (!isRuntimeName(name)) return { ok: false, reason: "invalid-name" };
+		const can = podmanPausable(info.peek?.() ?? null);
+		if (can.pausable === false) return { ok: false, reason: can.reason };
+		return fn(name);
+	};
 
 	const runContainer = makeRunContainerFn({
 		image,
@@ -1195,6 +1235,8 @@ export function makePodmanBackend(opts = {}) {
 		imagePreflight: makeImagePreflightFn({ image, bin: "podman", ...spawnSeam }),
 		egressPreflight: keeperPreflight(makeEgressPreflightFn({ proxy: egressProxy, armed: egress, bin: "podman", ...spawnSeam }), { armed: egress, proxy: egressProxy, info, spawnFn }),
 		stopContainer: makeStopContainerFn({ bin: "podman", ...execSeam }),
+		pause: gated(verbs.pause),
+		unpause: gated(verbs.unpause),
 		reap: reap ?? makePodmanReaper({ log, ...execSeam }),
 		jobUserPreflight,
 		observationPreflight,
