@@ -24,6 +24,7 @@ import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableC
 import { makeWaitState } from "./wait-state.mjs";
 import { releaseSemanticWindow } from "./queue.mjs";
 import { runIdOf } from "./recovery-queue.mjs";
+import { settleInbox } from "./inbox-settle.mjs";
 
 
 export const QUEUE = "pi-jobs";
@@ -291,6 +292,27 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 		}
 
+		// THE RUN'S INBOX AT ITS FINAL OUTCOME (issue #646, inbox-settle.mjs). A steer-armed job's inbox is closed, and what
+		// became of its messages counted, IMMEDIATELY BEFORE EVERY RECORD WRITE in this function, so the record's `steered`
+		// is the inbox's final word and a message can no longer be pushed into a run whose outcome is being written. ONE
+		// helper, called on the line before each `recordRun`/`recordAfterGate` (a bolt in steer-settle.test.mjs refuses a
+		// record site without it), which itself decides whether the outcome is final: an InfraRetry with attempts left and
+		// a #645 recovery handoff leave the inbox open for the next attempt. It decorates the result (or the error) with
+		// `steered` and the attempt's `steerSkipped`, which the record rebuilds; never throws, and a non-steer job costs
+		// nothing. `steerRan` is what this attempt's runContainer said about steering (null before any container).
+		let steerRan = null;
+		const settleSteer = async ({ result = null, error = null } = {}) => {
+			if (job.data?.steer !== true) return;
+			const steered = await settleInbox({ redis, job, result, error, log: deps?.log ?? (() => {}), ...(typeof deps?.onLateForge === "function" ? { onLateForge: deps.onLateForge } : {}) });
+			const skipped = typeof steerRan?.steerSkipped === "string" ? steerRan.steerSkipped : null;
+			const target = result ?? error;
+			if (target === null || typeof target !== "object") return;
+			try {
+				if (steered) target.steered = steered;
+				if (skipped !== null) target.steerSkipped = skipped;
+			} catch {}
+		};
+
 		// THE EARLIER ATTEMPTS' SLOT TIME (issue #599): a retry, or a pickup after a stall, writes its record over the one
 		// before it (one file and one mirror key per job id), so that record is read NOW, before anything here can replace
 		// it, and its slot interval (with the ones it carried) rides every record this pickup writes (`earlier`). Only on
@@ -373,6 +395,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false, hostBudget: { memMiB: budgetNow.memMiB, cpuCenti: budgetNow.cpuCenti, hostShare: share } };
 					// Above the wait gate, so through the recorder's own arguments rather than the bound one below it: the
 					// same pickup project and size, by hand once.
+					await settleSteer({ result });
 					recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString(), project, size, earlier });
 					return result;
 				}
@@ -415,6 +438,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// resolver path or a vault topology -- `secret-profile-unknown` sets that rule.
 				if (sentence && deps?.comment) await Promise.resolve(deps.comment(job.data, sentence)).catch(() => {});
 				const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false };
+				await settleSteer({ result });
 				recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString(), earlier });
 				return result;
 			};
@@ -1214,6 +1238,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// refusals are the others): each is decided before or during the settings read, so no honest effective
 				// value exists yet -- buildRecord defaults both null.
 				const result = { outcome: "policy", reason: "settings-overlay-invalid", exitCode: null, turns: null, tokens: null, budgetReserved: false };
+				await settleSteer({ result });
 				recordAfterGate({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
 			}
@@ -1350,6 +1375,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						stopDidNotTake = true;
 						return finishLive?.("unknown");
 					}).then(async (r) => {
+						// Issue #646: what this attempt said about steering, for the record's `steerSkipped` (settleSteer above).
+						steerRan = r && typeof r === "object" ? { steerSkipped: r.steerSkipped ?? null } : null;
 						await stopCancelPoll();
 						const raced = r && r.aborted !== true && signal.aborted === true && signal.reason === "operator-cancel";
 						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });
@@ -1423,6 +1450,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				deps.log?.("cancel_acked_before_result", { jobId: job.id, was: `${result?.outcome}/${result?.reason ?? ""}` });
 				outcome = { ...result, outcome: "policy", reason: "operator-cancel" };
 			}
+			await settleSteer({ result: outcome });
 			recordAfterGate({ job, result: outcome, startedAt, endedAt: new Date().toISOString() });
 			return outcome;
 		} catch (error) {
@@ -1477,6 +1505,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null), ...(error?.dollars ? { dollars: error.dollars } : {}), ...(spent && error?.resources ? { resources: error.resources } : {}), ...(spent && error?.progress ? { progress: error.progress } : {}) };
 				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent, retryable, ...(retryable ? {} : { failure: scrubCredentials(String(error?.message ?? error)).slice(0, 300) }) });
 				if (deps?.comment) await Promise.resolve(deps.comment(job.data, beforeStart ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS["operator-cancel"])).catch(() => {});
+				await settleSteer({ result });
 				recordAfterGate({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
 			};
@@ -1510,6 +1539,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					throw new DelayedError();
 				}
 				const expired = Object.assign(new UnrecoverableError(`held ${Math.round((heldAt - since) / 60_000)} min for rootful Podman's service to restart, and it did not: ${error.message}`), { reason: PODMAN_RESTART_HOLD_EXPIRED, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				await settleSteer({ error: expired });
 				recordAfterGate({ job, error: expired, startedAt, endedAt: new Date().toISOString() });
 				throw expired;
 			}
@@ -1544,6 +1574,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const was = keeperHold.startedMs ?? young.startedMs;
 				await markKeeperLoop(job, was === young.startedMs ? [was] : [was, young.startedMs]);
 				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was, now: young.startedMs, heldMs, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				throw loop;
 			}
@@ -1551,6 +1582,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// The keeper this job was waiting on is no longer running on its bridge: it died young, the loop's other face.
 				await markKeeperLoop(job, [keeperHold.startedMs]);
 				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs, now: null, problem: error.keeperProblem ?? null, heldMs: keeperHold.at - keeperHold.since, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				throw loop;
 			}
@@ -1562,9 +1594,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			const loopSeen = job.data?.netnsKeeperLoopSeen;
 			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && Array.isArray(loopSeen) && loopSeen.length > 0) {
 				const loop = new InfraRetry(netnsKeeperLoopAgainSentence({ seen: loopSeen, problem: error.keeperProblem ?? null, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				throw loop;
 			}
+			await settleSteer({ error });
 			recordAfterGate({ job, error, startedAt, endedAt: new Date().toISOString() });
 			if (error instanceof InfraRetry) throw error; // retryable: BullMQ retries per attempts
 			// A non-retryable, non-infra error (our bug) must not retry forever. UnrecoverableError

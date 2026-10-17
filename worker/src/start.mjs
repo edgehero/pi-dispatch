@@ -71,6 +71,8 @@ import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { makeLiveTranscriptOpener } from "./live-transcript.mjs";
+import { makeInboxRelay } from "./inbox-relay.mjs";
+import { settleInbox } from "./inbox-settle.mjs";
 import { readProgressKey } from "./run-progress.mjs";
 import { makeStatusCommenter, makeStatusCommentRegistry, renderStatusText, STATUS_OUTCOMES, STATUS_RETRYING } from "./status-comment.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
@@ -666,6 +668,8 @@ export async function startWorker(
 		// Issue #644: the opener and the status commenter factories, seams so a wiring test sees the switches and the
 		// forge calls the wiring hands them.
 		makeLiveTranscriptOpener: makeLiveTranscriptOpenerFn = makeLiveTranscriptOpener,
+		// Issue #646: the steer inbox relay's factory, a seam so a wiring test sees the client and host it is bound to.
+		makeInboxRelay: makeInboxRelayFn = makeInboxRelay,
 		makeStatusCommenter: makeStatusCommenterFn = makeStatusCommenter,
 		// Issue #644: the progress key's bounded read, a seam so a wiring test can hand `recordRun` an earlier attempt's
 		// comment id without a Valkey.
@@ -1603,10 +1607,19 @@ export async function startWorker(
 	// Issue #645: the run checkpointer is the file's third reader (an armed job's quiet points schedule its checkpoints), so
 	// with a checkpointer the opener is built even with both switches off; it then tails the file for the checkpoint alone
 	// (no stream, no progress key). `checkpoint` is called per attempt with the open() arguments the attempt supplies.
+	//
+	// Issue #646: a steer-armed job's delivery acks are read off the same file (steer-ack.mjs, the fourth reader), so with a
+	// Valkey client the opener is built even with every other reader off (`steer: true`); a job that is not armed hands no
+	// ack consumer and is tailed exactly as before (or not at all).
+	const steerWired = Boolean(redis);
 	const openLiveTranscript =
-		config.liveTranscripts || config.runProgress || runCheckpointer
-			? makeLiveTranscriptOpenerFn({ redis, log, transcripts: config.liveTranscripts, progress: config.runProgress, makeCommenter: makeProgressCommenter, ...(runCheckpointer ? { checkpoint: (args) => runCheckpointer.open(args) } : {}) })
+		config.liveTranscripts || config.runProgress || runCheckpointer || steerWired
+			? makeLiveTranscriptOpenerFn({ redis, log, transcripts: config.liveTranscripts, progress: config.runProgress, makeCommenter: makeProgressCommenter, ...(runCheckpointer ? { checkpoint: (args) => runCheckpointer.open(args) } : {}), ...(steerWired ? { steer: true } : {}) })
 			: null;
+	// Issue #646 (DES-STEER-VIA-READONLY-INBOX-MOUNT): the inbox relay's opener, handed to both venues' runContainer, which
+	// opens one per steer-ARMED attempt. Bound here to the worker's client and to the host name the run checkpointer
+	// writes (`durableHost`), the one this host is known by in the fleet: the open key names it.
+	const openInboxRelay = steerWired ? (args) => makeInboxRelayFn({ redis, host: durableHost, now, log, ...args }) : null;
 	// Issue #644: the final edit for an attempt that registered no commenter, so nothing else would edit the comment again.
 	// That is an attempt refused before its container (a cost cap, a policy gate) after an earlier attempt posted the
 	// comment and left it saying "attempt ended, retrying": with no edit here it said so for good. The comment's id is
@@ -1832,6 +1845,7 @@ export async function startWorker(
 				egressProxy: config.egressProxy,
 				openJobLog,
 				...(openLiveTranscript ? { openLiveTranscript } : {}),
+				...(openInboxRelay ? { openInboxRelay } : {}),
 				globalPiDir: config.globalPiDir,
 				allowGlobalExtensions: config.allowGlobalExtensions,
 				packagePaths: getPackagePaths,
@@ -2169,7 +2183,8 @@ export async function startWorker(
 						egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
 						egressProxy: config.egressProxy,
 						openJobLog,
-						openLiveTranscript, // issues #643 and #644: null when PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0
+						openLiveTranscript, // issues #643 and #644: null when PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0 (and no Valkey client, #646)
+						openInboxRelay, // issue #646: the steer inbox relay, null without a Valkey client
 						globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
 						allowGlobalExtensions: config.allowGlobalExtensions,
 						// REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set
@@ -2371,7 +2386,14 @@ export async function startWorker(
 		},
 		onLost: async (job) => {
 			const at = new Date(now()).toISOString();
-			recordRun({ job: { id: job.id, name: job.name, data: job.data, opts: job.opts, attemptsMade: 0, timestamp: job.timestamp }, error: { reason: "recovery-host-lost" }, startedAt: null, endedAt: at });
+			// Issue #646: the run's final outcome, so its inbox is closed and counted here too (index.mjs's rule for every
+			// record it writes); a steer job's waiting messages are then `late`, never left `queued` until the key expires.
+			const lostError = { reason: "recovery-host-lost" };
+			if (job?.data?.steer === true) {
+				const steered = await settleInbox({ redis, job, error: lostError, log });
+				if (steered) lostError.steered = steered;
+			}
+			recordRun({ job: { id: job.id, name: job.name, data: job.data, opts: job.opts, attemptsMade: 0, timestamp: job.timestamp }, error: lostError, startedAt: null, endedAt: at });
 			await comment({ ...job.data, id: job.id }, RECOVERY_HOST_LOST_COMMENT);
 			onFailure?.({ jobId: job.id, outcome: "failed", reason: "recovery-host-lost" });
 		},
@@ -2782,6 +2804,11 @@ export async function startWorker(
 			// never sees: the stall-kill (maxStalledCount 0 fails a crashed worker's job at next pickup)
 			// and the wait-gate rethrow that escapes above the processor's catch.
 			if (job?.finishedOn) {
+				// Issue #646, review finding F2: a TERMINAL failure the processor never saw (a stall-kill of a crashed worker's
+				// job with no recovery enqueued, a rethrow above the processor's catch) is the run's final outcome too, so its
+				// inbox is closed here and what waits becomes `late` instead of sitting `queued` until the key expires. A
+				// terminal failure the processor did see was settled before its record; closing again changes nothing.
+				if (job.data?.steer === true) void settleInbox({ redis, job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" }, log });
 				void comment({ ...job.data, id: job.id }, (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason) ? FAILED_COMMENT_BY_REASON[err.reason] : null) ?? FAILED_COMMENT);
 				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
 			}

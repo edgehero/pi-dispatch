@@ -50,6 +50,8 @@
     "./console-tokens": "./src/console-tokens.mjs",
     "./console-audit": "./src/console-audit.mjs",
     "./console-answer": "./src/console-answer.mjs",
+    "./steer-inbox": "./src/steer-inbox.mjs",
+    "./steer-framing": "./src/steer-framing.mjs",
     "./live-transcript": "./src/live-transcript.mjs",
     "./run-progress": "./src/run-progress.mjs",
     "./reserve-estimate": "./src/reserve-estimate.mjs",

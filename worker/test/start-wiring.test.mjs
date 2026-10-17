@@ -4946,7 +4946,16 @@ test("PI_LIVE_TRANSCRIPTS=0 hands neither venue an opener and the preparer no li
 			setImmediate(() => c.emit("close", 0));
 			return c;
 		};
-		const opener = typeof opts.openLiveTranscript === "function" ? (o) => (spy.push(o.jobId), { start() {}, finish: async () => {} }) : opts.openLiveTranscript;
+		// The REAL opener decides whether this job is read at all (issue #646: with both switches off it is built for steer
+		// alone, and answers null for a job that hands no steer consumer); the spy records only an opener that said yes.
+		const opener =
+			typeof opts.openLiveTranscript === "function"
+				? (o) => {
+						if (opts.openLiveTranscript(o) === null) return null;
+						spy.push(o.jobId);
+						return { start() {}, finish: async () => {} };
+					}
+				: opts.openLiveTranscript;
 		const session = { key: "k", hostDir: "/host/jobs/r1/session", resume: true, reason: "resumed" };
 		await rc.makeRunContainer({ ...opts, hostEnv: { ANTHROPIC_API_KEY: "sk-ant-wiring-0001" }, packagePaths: [], openJobLog: undefined, openLiveTranscript: opener, spawnFn: child })({ job: { kind: "github", repo: "o/n", provider: "anthropic", model: "m", maxTurns: 5, resume: true }, prepared: { workspace: "/w", jobDir: "/host/jobs/r1", session }, name: "pi-job-r1", signal: new AbortController().signal, jobId: "r1" });
 	};
@@ -4954,9 +4963,12 @@ test("PI_LIVE_TRANSCRIPTS=0 hands neither venue an opener and the preparer no li
 	// Issue #644: the file has a second reader, run progress, so "off" is both switches off.
 	const off = await boot({ PI_LIVE_TRANSCRIPTS: "0", PI_RUN_PROGRESS: "0" });
 	assert.equal(off.runContainerCalls.length, 1, "local's factory was built");
-	assert.equal(off.runContainerCalls[0].openLiveTranscript ?? null, null, "local: no opener");
+	// Issue #646: an opener still, for steer-armed jobs alone; it reads nothing for any other job (the resume job below).
+	assert.equal(typeof off.runContainerCalls[0].openLiveTranscript, "function", "local: an opener, for steer alone");
 	assert.equal(off.podmanRcCalls.length, 1, "podman's factory was built");
-	assert.equal(off.podmanRcCalls[0].openLiveTranscript ?? null, null, "podman: no opener");
+	assert.equal(off.podmanRcCalls[0].openLiveTranscript, off.runContainerCalls[0].openLiveTranscript, "podman: the same opener");
+	assert.equal(typeof off.runContainerCalls[0].openInboxRelay, "function", "local: the steer inbox relay");
+	assert.equal(off.podmanRcCalls[0].openInboxRelay, off.runContainerCalls[0].openInboxRelay, "podman: the same relay opener");
 	assert.equal(off.prepareCalls[0].stageLive, null, "the preparer stages no live file");
 	const offSpy = [];
 	await runResume(off.runContainerCalls[0], offSpy);
@@ -5039,7 +5051,12 @@ test("the opener gets both switches and a commenter factory over never-throwing 
 
 	openers.length = 0;
 	await boot({ PI_LIVE_TRANSCRIPTS: "0", PI_RUN_PROGRESS: "0" });
-	assert.equal(openers.length, 0, "both off: no opener at all");
+	// Issue #646: a steer-armed job's acks are read off the file, so with a Valkey client the opener is still built, for
+	// steer alone: both switches off, and `steer: true`. A job that is not armed hands it no consumer and gets nothing.
+	assert.equal(openers.length, 1, "both off: the opener exists for steer-armed jobs alone");
+	assert.equal(openers[0].transcripts, false);
+	assert.equal(openers[0].progress, false);
+	assert.equal(openers[0].steer, true);
 });
 
 // Issue #644: the comment's final edit comes from the run record, not the exit code: an OOM kill exits 137 (the exit's

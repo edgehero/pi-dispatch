@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
-import { authenticExitLines, AWAIT_INPUT_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, AWAIT_INPUT_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -1480,7 +1480,13 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	const mcpSrc = ["../../image/runner/src/mcp.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
 	// The run.awaitInput refusals (issue #625) are thrown the same way, where the env is checked and the session built.
 	const awaitSrc = ["../../image/runner/src/config.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
+	// The run.steer refusals (issue #646) are thrown where the inbox is checked (image/runner/src/inbox.mjs).
+	const steerSrc = readFileSync(new URL("../../image/runner/src/inbox.mjs", import.meta.url), "utf8");
 	for (const reason of RUNNER_POLICY_REASONS) {
+		if (STEER_RUNNER_REASONS.includes(reason)) {
+			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(steerSrc), `image/runner no longer throws a configError tagged "${reason}"`);
+			continue;
+		}
 		if (AWAIT_INPUT_RUNNER_REASONS.includes(reason) || PROGRESS_RUNNER_REASONS.includes(reason)) {
 			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(awaitSrc), `image/runner no longer throws a configError tagged "${reason}"`);
 			continue;
@@ -1504,6 +1510,9 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	// The run.progress refusal (issue #644), both ways.
 	const progressThrown = new Set([...awaitSrc.matchAll(/configError\(.*, "(report-progress-[a-z-]+)"\)/g)].map((m) => m[1]));
 	assert.deepEqual([...progressThrown].sort(), [...PROGRESS_RUNNER_REASONS].sort());
+	// The run.steer refusals (issue #646), both ways.
+	const steerThrown = new Set([...steerSrc.matchAll(/configError\(.*, "(steer-[a-z-]+)"\)/g)].map((m) => m[1]));
+	assert.deepEqual([...steerThrown].sort(), [...STEER_RUNNER_REASONS].sort());
 	// The one completed reason the worker acts on is the runner's exported literal (issue #625).
 	for (const reason of RUNNER_COMPLETED_REASONS) assert.match(runnerSrc, new RegExp(`export const [A-Z_]+ = "${reason}";`));
 	for (const reason of ["cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]) {

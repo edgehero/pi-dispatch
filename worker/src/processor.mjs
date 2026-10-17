@@ -149,6 +149,10 @@ export const TERMINAL_COMMENTS = {
 	"await-input-without-session": "Stopped: this run may stop to wait for an answer but had nowhere to keep its work, so it ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",
 	// Issue #644. The runner's refusal of a job armed with run.progress, before the prompt.
 	"report-progress-shadowed": "Stopped: another extension in this job registers the tool a run uses to report its progress, so the run ended before the agent started. The operator needs to remove that extension or this trigger's run.progress. Not retried.",
+	// Issue #646. The runner's two refusals of a job armed with run.steer, each before the prompt. Both are a worker and
+	// image mismatch (the worker arms steering only with the inbox mount and an exit key), so both name that fix.
+	"steer-inbox-missing": "Stopped: this run may receive messages while it works but could not read where they arrive, so it ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",
+	"steer-no-exit-key": "Stopped: this run may receive messages while it works but had no key to confirm their delivery with, so it ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",
 	// Issue #596. Never the size or the project: both are operator configuration, and the reader may be an issue author
 	// who can act on neither. The worker log and the run record carry them.
 	[EXIT_OOM_KILLED]: "Stopped: the job's container ran out of memory and was stopped. Partial work may exist. Not retried, because the same size would stop the same way. The operator can raise this job's memory size.",

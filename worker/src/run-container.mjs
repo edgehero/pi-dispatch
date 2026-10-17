@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
@@ -10,8 +10,10 @@ import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from ".
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { LIVE_FILE_NAME, stageLiveFile } from "./live-transcript.mjs";
+import { steerTargetOf } from "./inbox-relay.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { makeRedactor, secretValuesOf } from "./redact-secrets.mjs";
+import { makeSteerAck } from "./steer-ack.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
@@ -82,6 +84,12 @@ export function makeRunContainer({
 	stageLive = stageLiveFile,
 	// Issue #645: the bound on each step of stopping a container whose unpause never took.
 	checkpointStopTimeoutMs = 15_000,
+	// Issue #646: `({ runId, jobId, inboxDir, targetKey, ref, forge }) => relay`, the inbox relay's opener (inbox-relay.mjs
+	// `makeInboxRelay`, bound in start.mjs to the worker's Valkey client and host name). Null arms no job: a steer job is
+	// then run without steering and its record says `steerSkipped: "no-transcript"`, never a silent no-op.
+	openInboxRelay = null,
+	// Issue #646: the host fs the inbox directory is made and removed through. A seam for the tests.
+	inboxFs = { mkdirSync, rmSync },
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -110,7 +118,10 @@ export function makeRunContainer({
 	// `checkpoint` (issue #645) is the processor's open args for the run checkpointer (`{ runId, attempt, baseSha, branch,
 	// secretValues, meta }`), honoured only beside `recover: true`; `pause`/`unpause` are this job's venue's freezer verbs,
 	// which the backend registry puts on the call bag (absent for a venue that cannot freeze: no live checkpoints then).
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null }) {
+	// `binds` (issue #646) is the venue's own statement that it bind-mounts (the backend bundle's `binds`, which the registry
+	// puts on the call bag of a steer job only): a copying venue would upload `/inbox` once, at the start, so no message
+	// written later would ever arrive. Absent is false: a job is steer-armed only on a venue that SAYS it binds.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -132,13 +143,67 @@ export function makeRunContainer({
 		// PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0 (no file staged by the preparer) it is staged here. Not for a resume
 		// job, whose staged transcript already is the file.
 		const armed = recover === true && checkpoint !== null && typeof checkpoint === "object";
-		if (transcriptDir === null && recover === true && typeof stageLive === "function") {
+
+		// Issue #646 (DES-STEER-VIA-READONLY-INBOX-MOUNT): whether this attempt is steer-ARMED. Asked by the job's data
+		// (`steer: true`, which the trigger's `run.steer` puts there and the image preflight already checked the image for),
+		// and armed only when every part of the channel exists: a venue that binds mounts, an exit key to verify the
+		// delivery acks with, and something to read those acks (a transcript tail) and to write the files (the relay).
+		// Each missing part is a NAMED skip on the record (`steerSkipped`); the job still runs, as it would without
+		// `run.steer`, and a message for it is refused at push because nothing ever registers it as open.
+		const steerAsked = job?.steer === true;
+		let steerSkipped = null;
+		if (steerAsked) {
+			if (binds !== true) steerSkipped = "venue-copies";
+			else if (exitKey === null) steerSkipped = "no-exit-key";
+			else if (typeof openInboxRelay !== "function" || typeof openLiveTranscript !== "function" || jobId === null || jobId === undefined) steerSkipped = "no-transcript";
+		}
+		if (transcriptDir === null && (recover === true || (steerAsked && steerSkipped === null)) && typeof stageLive === "function") {
 			try {
 				transcriptDir = stageLive(prepared.jobDir)?.hostDir ?? null;
 			} catch {
 				transcriptDir = null;
 			}
 		}
+		if (steerAsked && steerSkipped === null && transcriptDir === null) steerSkipped = "no-transcript";
+		// The inbox: `<jobDir>.inbox`, BESIDE the job directory (`/job` is merge-gated input only, and the processor removes
+		// the job directory itself), mode 0700, made fresh per attempt (a retry's messages are written again into its own),
+		// removed in this function's `finally`. Then the relay, built now (it starts with the container) because the env
+		// and the argv below depend on whether the attempt is armed.
+		const inboxDir = `${prepared.jobDir}.inbox`;
+		let inboxMade = false;
+		let relay = null;
+		if (steerAsked && steerSkipped === null) {
+			try {
+				inboxFs.rmSync(inboxDir, { recursive: true, force: true });
+				inboxFs.mkdirSync(inboxDir, { mode: 0o700 });
+				inboxMade = true;
+			} catch {
+				steerSkipped = "no-inbox";
+			}
+		}
+		if (steerAsked && steerSkipped === null) {
+			try {
+				// `runId` is the RUN's id (`jobId` here is `runIdOf(job)`, index.mjs), so a #645 recovery writes the same inbox.
+				relay = openInboxRelay({ runId: jobId, jobId, inboxDir, ...steerTargetOf(job) }) ?? null;
+			} catch {
+				relay = null;
+			}
+			if (relay === null) steerSkipped = "no-transcript";
+		}
+		const steerArmed = steerAsked && steerSkipped === null;
+		if (steerSkipped !== null) log("steer_skipped", { container: name, reason: steerSkipped });
+		// The ack consumer, handed to the live tail below. It verifies under THIS attempt's exit key, against the very string
+		// put in the container's PI_JOB_ID (`jobId: name` in the env below), which is what the runner MACs: one value on both
+		// sides by construction. The per-attempt key is the domain separation between attempts; the string only has to match.
+		const steerAck = steerArmed ? makeSteerAck({ exitKey, ackRunId: name, relay, jobId, log }) : null;
+		const removeInbox = () => {
+			if (!inboxMade) return;
+			try {
+				inboxFs.rmSync(inboxDir, { recursive: true, force: true });
+			} catch {
+				// best effort: a leftover directory holds framed text the worker wrote, beside the job dir the sweep removes
+			}
+		};
 
 		// Closed env allowlist: only the provider key + the declared PI_* vars. Throws (config) if
 		// the provider is unconfigured, which the processor turns into a policy refusal that refunds the
@@ -146,7 +211,17 @@ export function makeRunContainer({
 		// `piDispatchConfig` tag at all, so the throw fell through to a bare rethrow with the budget kept.
 		// The common case no longer reaches here either, because the processor probes the same resolution
 		// among its free gates, ahead of the mint and the clone.
-		const env = buildContainerEnv({
+		// Issue #646: a throw from here to the spawn (an unconfigured provider, a refused argv, a network that would not build)
+		// happens before the `finally` below exists, so the inbox directory made above is removed on the way out.
+		const beforeSpawn = (fn) => {
+			try {
+				return fn();
+			} catch (error) {
+				removeInbox();
+				throw error;
+			}
+		};
+		const env = beforeSpawn(() => buildContainerEnv({
 			provider: job.provider,
 			model: job.model,
 			maxTurns: job.maxTurns,
@@ -203,6 +278,9 @@ export function makeRunContainer({
 			// Strict `=== true` both ways, so a truthy non-boolean arms nothing.
 			recover: recover === true,
 			recovering: recovering === true,
+			// Issue #646: PI_STEER=1, only for an ARMED attempt (above), never off `job.steer` alone: the runner refuses the
+			// flag without a readable /inbox and a key, and a job the worker could not arm must not be refused for it.
+			steer: steerArmed,
 			// Issue #502: the effective allowed-model list, off `job` like excludeTools. index.mjs `effectiveJobOf` folds
 			// the deployment's PI_ALLOWED_MODELS in under the trigger's own, so `job.models` is already the one list.
 			allowedModels: Array.isArray(job.models) && job.models.length > 0 ? job.models : null,
@@ -214,7 +292,7 @@ export function makeRunContainer({
 			home: user !== null ? home : null, // issue #341: HOME only beside --user, assigned after the forward loops
 			modelEndpoints, // issue #503: the keyless branch of the credential, from the gate's own snapshot
 			exitAuth: exitKey !== null, // issue #545: PI_EXIT_AUTH=stdin, only when a key is actually handed over below
-		});
+		}));
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
 		// guard then omits the flag entirely, so the argv is byte-identical to one built before this feature.
@@ -230,7 +308,7 @@ export function makeRunContainer({
 			// an unremovable stale file makes the run itself fail to start, which is reported as that
 		}
 
-		const args = buildArgs({
+		const args = beforeSpawn(() => buildArgs({
 			// Same split as packagePaths above: the per-job value off `job`, the deployment value off the closure,
 			// so a trigger can name its own toolchain (INT-TRIGGERS-FILE-CONTRACT). Resolved through the SAME
 			// function the pre-spend preflight uses (image-preflight.mjs), so the tag that was checked is the tag
@@ -243,6 +321,8 @@ export function makeRunContainer({
 			// The job's OWN copy, under jobDir -- never the shared store. Undefined only when no transcript file was staged
 			// (a caller that predates issue #643, or a staging that failed), and docker-run's guard then skips the mount.
 			sessionDir: transcriptDir ?? undefined,
+			// Issue #646: the inbox, read-only at /inbox, for an armed attempt only; undefined leaves the argv byte-identical.
+			steerInboxDir: steerArmed ? inboxDir : undefined,
 			globalPiDir, // undefined/null -> docker-run's guard skips the /opt/pi-global mount
 			name,
 			size, // issue #596: memory, swap equal to it, the CPU weight and /dev/shm, through containerSpec's one function
@@ -261,7 +341,7 @@ export function makeRunContainer({
 			// Issue #545: `-i`, so the container's stdin is the pipe the key is written to. Absent otherwise, and the argv is
 			// byte-identical to one built before the signed exit line.
 			...(exitKey !== null ? { extraFlags: ["-i"] } : {}),
-		});
+		}));
 
 		// Issue #596: the memory bound this container actually got, in bytes, read off the argv the runtime is handed (both
 		// builders spell it `--memory=`, from the job's size), never re-derived from the environment or the size. The
@@ -279,6 +359,7 @@ export function makeRunContainer({
 		// A failure to build it is INFRA, not policy: nothing has been spent, a retry may well succeed, and
 		// `container-never-started` is literally true, so the reservation is given back (processor.mjs).
 		if (network && !(await createJobNetwork(spawnFn, { network, proxy: egressProxy, bin }))) {
+			removeInbox();
 			throw new InfraRetry("container-never-started", { reason: "container-never-started" });
 		}
 
@@ -316,7 +397,7 @@ export function makeRunContainer({
 							onStop: () => stopFrozen(),
 						}
 					: null;
-				live = openLiveTranscript({ file: join(transcriptDir, LIVE_FILE_NAME), jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job, ...(checkpointArgs ? { checkpoint: checkpointArgs } : {}) }) ?? null;
+				live = openLiveTranscript({ file: join(transcriptDir, LIVE_FILE_NAME), jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job, ...(checkpointArgs ? { checkpoint: checkpointArgs } : {}), ...(steerAck ? { steer: steerAck } : {}) }) ?? null;
 			} catch {
 				live = null;
 			}
@@ -330,6 +411,23 @@ export function makeRunContainer({
 			try {
 				await live?.finish(outcome);
 			} catch {}
+		};
+		// Issue #646: an armed attempt whose tail could not be opened can deliver messages that no ack will ever count; they
+		// settle as late. Said, never silent.
+		if (steerArmed && live === null) log("steer_acks_unread", { container: name });
+		// Issue #646: the relay's end, AFTER the tail's final read (`finishLive`), so a last-moment ack is handed to the relay
+		// and marked before the liveness keys go; the settle step's close (index.mjs) then sees it as delivered. Once.
+		let relayStopping = null;
+		const stopRelay = () => {
+			relayStopping ??= (async () => {
+				try {
+					await steerAck?.drain();
+				} catch {}
+				try {
+					await relay?.stop();
+				} catch {}
+			})();
+			return relayStopping;
 		};
 		// Issue #645: the checkpoint handle the opener built for an armed job, or null. Never throws (run-checkpoint.mjs).
 		const ckpt = live?.checkpoint && typeof live.checkpoint.close === "function" ? live.checkpoint : null;
@@ -371,6 +469,8 @@ export function makeRunContainer({
 			try {
 				live?.start();
 			} catch {}
+			// Issue #646: registered live with the container, so a push is accepted only while there is a run to read it.
+			void relay?.start();
 			if (exitKey !== null) {
 				// Written and closed at once: the runner drains stdin to EOF before anything else runs, so the key is out of
 				// the pipe before any tool exists. A CLI that died first makes this EPIPE, which is the run failing, reported
@@ -395,7 +495,7 @@ export function makeRunContainer({
 			// since a container that never started spent nothing.
 			child.on("error", (err) => {
 				void closeCheckpoint();
-				void finishLive("failed");
+				void finishLive("failed").then(stopRelay);
 				sink.close().catch(() => {}); // best-effort teardown; a rejecting close cannot leak an unhandled rejection
 				reject(new InfraRetry("container-never-started", { cause: err, reason: "container-never-started" }));
 			});
@@ -444,12 +544,14 @@ export function makeRunContainer({
 				// Issue #645: a recovered run's runner counts (parseExitRecovery), `{ orphans, replayed, interrupted, notStarted }`
 				// each an integer or null, or null when the line carried none.
 				let recovery = null;
+				// Issue #646: a steer-armed runner's inbox counts (parseExitSteer), `{ delivered, pending }`, or null.
+				let steerCounts = null;
 				try {
 					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -462,6 +564,7 @@ export function makeRunContainer({
 					resources = null;
 					exitOomKilled = false;
 					recovery = null;
+					steerCounts = null;
 					// The sink could not say, and a key was issued: nothing it returned was verified.
 					exitAuthResult = exitKey !== null ? "unverified" : null;
 				}
@@ -479,6 +582,7 @@ export function makeRunContainer({
 					resources = null;
 					exitOomKilled = false;
 					recovery = null;
+					steerCounts = null;
 				}
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
@@ -489,7 +593,27 @@ export function makeRunContainer({
 				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true, memoryLimit } : {}) };
 				// `recovery` (issue #645) only when the exit line carried the block, so every other run resolves the object it always did.
 				const recovered = recovery !== null && typeof recovery === "object" ? { recovery } : {};
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...checkpointResult, ...stoppedForCheckpoint } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...checkpointResult, ...stoppedForCheckpoint });
+				// Issue #646, review finding F3: the deliveries the runner's SIGNED exit line names are marked before the relay
+				// stops. The transcript is the agent's to break (a symlink swapped in makes the tail refuse it), so the acks
+				// it carries are not the only witness: the exit line is signed with the key the agent never sees, and with a
+				// key issued every field above is nulled unless it verified. The tail's acks are drained first, so these marks
+				// only add what the transcript could not say. Then the relay stops, after which the settle step closes.
+				if (steerArmed && exitAuthResult === "verified" && Array.isArray(steerCounts?.deliveredIds)) {
+					try {
+						await steerAck?.drain();
+					} catch {}
+					for (const id of steerCounts.deliveredIds) {
+						try {
+							await relay?.delivered(id);
+						} catch {}
+					}
+				}
+				await stopRelay();
+				// Issue #646: only for a job that asked for steering, so every other run resolves the object it always did.
+				// `steer` is the runner's own count (advisory, like `recovery`), without the ids; `steerSkipped` the verdict.
+				const steerShown = steerCounts !== null && typeof steerCounts === "object" ? { delivered: steerCounts.delivered ?? null, pending: steerCounts.pending ?? null } : null;
+				const steered = steerAsked ? { ...(steerArmed && steerShown !== null ? { steer: steerShown } : {}), ...(steerSkipped !== null ? { steerSkipped } : {}) } : {};
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...checkpointResult, ...stoppedForCheckpoint } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...checkpointResult, ...stoppedForCheckpoint });
 			});
 		});
 
@@ -532,6 +656,9 @@ export function makeRunContainer({
 			} catch {
 				// best effort: a leftover file is removed before this job's next attempt starts
 			}
+			// Issue #646: the relay is stopped on every path (a throw before the spawn included), then its directory goes.
+			await stopRelay();
+			removeInbox();
 		}
 	};
 }
