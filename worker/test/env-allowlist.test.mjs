@@ -901,6 +901,25 @@ test("PI_REPORT_PROGRESS is \"1\" only when the job is armed, and otherwise abse
 	assert.equal(buildContainerEnv({ ...args, reportProgress: true }).PI_AWAIT_INPUT, undefined, "the two tools are armed apart");
 });
 
+test("PI_RECOVER and PI_RECOVERING are \"1\" only when true, and otherwise absent; both are reserved and structural (issue #645)", { skip }, async () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	for (const value of [undefined, false, "1", 1, "true"]) {
+		const env = buildContainerEnv({ ...args, recover: value, recovering: value });
+		assert.equal(env.PI_RECOVER, undefined, String(value));
+		assert.equal(env.PI_RECOVERING, undefined, String(value));
+	}
+	assert.equal(buildContainerEnv({ ...args, recover: true }).PI_RECOVER, "1");
+	assert.equal(buildContainerEnv({ ...args, recover: true }).PI_RECOVERING, undefined, "armed and recovering are read apart");
+	assert.equal(buildContainerEnv({ ...args, recovering: true }).PI_RECOVERING, "1");
+	assert.equal(buildContainerEnv({ ...args, recovering: true }).PI_RECOVER, undefined);
+	// In the allowlist: a trigger cannot bind either through run.secrets, and neither is redacted as a secret value.
+	const { NON_SECRET_ENV_KEYS } = await import("../src/redact-secrets.mjs");
+	for (const name of ["PI_RECOVER", "PI_RECOVERING"]) {
+		assert.ok(CONTAINER_ENV_NAMES.has(name), `${name} is reserved`);
+		assert.ok(NON_SECRET_ENV_KEYS.has(name), `${name} is structural`);
+	}
+});
+
 test("PI_MCP_SERVERS is emitted only when the job names servers, comma-joined, never empty (REQ-MCP-OPERATOR-SERVERS)", { skip }, () => {
 	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
 	for (const mcpServers of [undefined, []]) assert.equal(buildContainerEnv({ ...args, mcpServers }).PI_MCP_SERVERS, undefined);
@@ -1074,8 +1093,10 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, reportProgress: true });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, reportProgress: true, recover: true, recovering: true });
 	assert.equal(env.PI_REPORT_PROGRESS, "1", "the drift check must see PI_REPORT_PROGRESS (issue #644)");
+	assert.equal(env.PI_RECOVER, "1", "the drift check must see PI_RECOVER (issue #645)");
+	assert.equal(env.PI_RECOVERING, "1", "the drift check must see PI_RECOVERING (issue #645)");
 	assert.equal(env.HOME, "/home/pi", "the drift check must see HOME, or a reservation it needs would go unchecked");
 	assert.equal(env.PI_EXIT_AUTH, "stdin", "the drift check must see PI_EXIT_AUTH too (issue #545)");
 	const dynamic = new Set(["ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]); // provider + mint: deployment state, refused pre-spend instead

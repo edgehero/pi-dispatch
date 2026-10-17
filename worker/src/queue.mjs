@@ -177,7 +177,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, maxCostUsd, image, backend, excludeTools, mcp, skillsDir, secrets, secretsProfile, chainDepth, parentJobId, jobId, enqueueNonce, now = new Date() }) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, maxCostUsd, image, backend, excludeTools, mcp, skillsDir, secrets, secretsProfile, recover, chainDepth, parentJobId, jobId, enqueueNonce, now = new Date() }) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -229,6 +229,10 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		// this differs from `replicas` -- that one is refused on a local job and this one is not.
 		...(secrets !== undefined && { secrets }),
 		...(secretsProfile !== undefined && { secretsProfile }),
+		// Issue #645: durable runs, enqueueForgeJob's rule (only when armed, job level, never part of the id). No local
+		// producer passes it today, and no trigger can: the loader refuses run.recover on cron. It is accepted here so a
+		// local producer that gains it later cannot quietly move the minute-windowed dedup key by doing so.
+		...(recover === true && { recover: true }),
 		...(chainDepth !== undefined && { chainDepth }),
 		...(parentJobId !== undefined && { parentJobId }),
 		// Issue #524: `enqueueLocalJobReporting`'s own mark, so it can tell whether ITS add is the one stored.
@@ -344,7 +348,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, progress, statusComment, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, progress, statusComment, recover, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
 	// else. Rebuilt from the one field rather than copied, `parkedReply`'s rule for durable job data, and refused when the
@@ -412,6 +416,9 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// for its reasons (byte-identical unflagged data; job level, never inside `trigger`).
 		...(progress === true && { progress: true }),
 		...(statusComment === true && { statusComment: true }),
+		// Issue #645: durable runs. Only when armed, the same rule and reasons; never part of an id either, since whether a
+		// lost run continues from its checkpoint says nothing about which delivery this is.
+		...(recover === true && { recover: true }),
 		// A phrase-free reply to a parked issue (issue #625), gated by the worker on the key's `parked` mark. Never part
 		// of an id: it says how the delivery was routed, not what it is.
 		...(parkedReply === true && { parkedReply: true }),

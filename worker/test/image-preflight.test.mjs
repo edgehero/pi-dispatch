@@ -319,14 +319,14 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
-test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp, awaitInput (#625) and reportProgress (#644), each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
+test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp, awaitInput (#625), reportProgress (#644) and recover (#645), each keyed once, each free for a job without its feature", async () => {
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
 	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
 	// A job carrying EVERY gated feature, on an image that declares none: the first row refuses.
-	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"], awaitInput: true, progress: true };
+	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"], awaitInput: true, progress: true, recover: true };
 	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("")) });
 	assert.deepEqual(await none(all), { replicaUnsupported: "i", declared: [] });
 	// Declare tokens one at a time: each declaration moves the refusal to the next row, then passes.
@@ -357,6 +357,22 @@ test("reportProgress (#644): a job armed with run.progress needs it; an unarmed 
 	assert.match(row.comment("img", "is absent"), /run\.progress/);
 	const fresh = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label([...declared, "reportProgress"].join(","))) });
 	assert.equal((await fresh({ kind: "github", progress: true })).ok, true);
+});
+
+test("recover (#645): a job armed with run.recover needs it; an unarmed one never does", async () => {
+	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
+	const declared = ["replicas", "commands", "excludeTools", "anyUid", "costCap", "modelPolicy", "exitAuth", "mcp", "forgeMcp", "awaitInput", "reportProgress"];
+	const old = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
+	assert.deepEqual(await old({ kind: "github", recover: true }), { recoverUnsupported: "i", declared });
+	for (const job of [{ kind: "github" }, { kind: "github", recover: false }, { kind: "github", recover: "true" }]) {
+		assert.equal((await old(job)).ok, true, JSON.stringify(job));
+	}
+	const row = CAPABILITY_GATES.find((gate) => gate.token === "recover");
+	assert.equal(row.reason, "job-image-recover-unsupported");
+	assert.equal(row.event, "refused_image_recover_unsupported");
+	assert.match(row.comment("img", "is absent"), /run\.recover/);
+	const fresh = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label([...declared, "recover"].join(","))) });
+	assert.equal((await fresh({ kind: "github", recover: true })).ok, true);
 });
 
 test("modelPolicy (#502): a job with an effective allowed-model list on an image without the token is refused, an unrestricted one is not", async () => {

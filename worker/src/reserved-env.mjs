@@ -46,6 +46,10 @@ export const CONTAINER_ENV_NAMES = new Set([
 	"PI_AWAIT_INPUT",
 	// Issue #644: a trigger binding it through run.secrets would offer itself a tool the operator did not arm.
 	"PI_REPORT_PROGRESS",
+	// Issue #645: a trigger binding either through run.secrets would arm checkpoints the operator did not, or make a fresh
+	// run believe it is a continuation and resume a checkpoint that is not its own.
+	"PI_RECOVER",
+	"PI_RECOVERING",
 	"PI_MCP_SERVERS",
 	// Issues #501, #502: the per-job dollar cap (written by the worker since #501, from the trigger's and the
 	// deployment's caps) and the allowed-model list (reserved until #502 writes it). Neither can be bound through

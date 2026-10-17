@@ -246,6 +246,12 @@ test("run.progress rides the scheduler data at JOB level only when armed (issue 
 	assert.equal("statusComment" in f.data, false, "a cron job never carries a status comment");
 });
 
+test("run.recover never reaches a cron schedule: the load refuses true, and false grows no key (issue #645)", () => {
+	assert.throws(() => load([{ ...CRON, run: { ...CRON.run, recover: true } }]), (e) => isConfigError(e) && /run\.recover is only available on a forge trigger/.test(e.message));
+	const [f] = load([{ ...CRON, run: { ...CRON.run, recover: false } }]);
+	assert.equal("recover" in f.data, false, "a cron job never carries recover");
+});
+
 test("an unflagged cron trigger's data grows no portfolio key: the stored schedule is byte-identical (issue #505)", () => {
 	const [s] = load([CRON]);
 	assert.equal("portfolio" in s.data, false);

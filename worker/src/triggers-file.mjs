@@ -501,6 +501,10 @@ export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	// Only `true` arms either, and the job data carries each only then, so `false` is nothing authored.
 	Object.freeze({ key: "progress", authored: (v) => v === true }),
 	Object.freeze({ key: "statusComment", authored: (v) => v === true }),
+	// Issue #645: durable runs. Dropped by a receiver from before #645 (which tolerates the key as unknown), a run the
+	// worker loses fails instead of continuing from its checkpoint, the opposite of what the trigger promised. Only
+	// `true` arms it, and the job data carries it only then, so `false` is nothing authored.
+	Object.freeze({ key: "recover", authored: (v) => v === true }),
 ]);
 
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {

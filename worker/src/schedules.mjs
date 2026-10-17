@@ -184,7 +184,8 @@ function normalizeCronSchedule({ on, run }, path, existsSync, fleet) {
 	// budget plan is the worker's decision to re-check against the live file, not a fact for the agent to read.
 	//
 	// `progress` (issue #644) only when armed, as on a forge job, so an unflagged schedule grows no key. A cron job never
-	// carries `statusComment`: the loader refuses `true` there, with no issue or pull request to post on.
+	// carries `statusComment`: the loader refuses `true` there, with no issue or pull request to post on. Nor `recover`
+	// (issue #645), for the same posture: the loader refuses `true` on cron, so there is no armed value to carry.
 	const data = { kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.backend !== undefined && { backend: run.backend }), ...(run.excludeTools !== undefined && { excludeTools: run.excludeTools }), ...(run.mcp !== undefined && { mcp: run.mcp }), ...(run.models !== undefined && { models: run.models }), ...(run.maxCostUsd !== undefined && { maxCostUsd: run.maxCostUsd }), ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, ...(run.portfolio !== undefined && { portfolio: run.portfolio }), ...(run.progress === true && { progress: true }), trigger: { id: on.id, pattern: on.pattern } };
 	// Retention only; the deterministic repeat:<id>:<millis> jobId supplies dedup, so no jobId here, and
 	// scheduler jobs are not retried (DES-CRON-VIA-BULLMQ-SCHEDULER) so no attempts/backoff.

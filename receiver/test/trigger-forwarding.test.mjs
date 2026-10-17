@@ -65,7 +65,8 @@ const MAX_RUN = {
 // The loader refuses some fields together (flow with command, command with instructions, waitFor with
 // replicas), so each entry is loaded twice and the two variants between them set every field.
 const VARIANTS = {
-	"flow+replicas": { flow: "work", instructions: "Keep it short.", replicas: 2 },
+	// Issue #645: run.recover is refused beside run.command, so it rides the flow variant. Only `true` rides the job.
+	"flow+replicas": { flow: "work", instructions: "Keep it short.", replicas: 2, recover: true },
 	"command+waitFor": { command: "wf run", waitFor: [{ profile: "jira" }] },
 };
 

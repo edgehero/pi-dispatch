@@ -46,7 +46,7 @@ export function resolveJobImage(job, defaultImage) {
  *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
  *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported,
- *                            forgeMcpUnsupported, awaitInputUnsupported, progressUnsupported)
+ *                            forgeMcpUnsupported, awaitInputUnsupported, progressUnsupported, recoverUnsupported)
  *                            => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
@@ -235,6 +235,17 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-progress-unsupported",
 		event: "refused_image_progress_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for reporting progress (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.progress\`. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #645: a runner that predates run.recover reads no PI_RECOVER and keeps no checkpoint, so a run the worker
+	// loses would fail exactly as an unarmed one does while the trigger promised it would continue. Refused for the
+	// awaitInput row's reason: the trigger asked for something this image cannot give, and saying so costs nothing.
+	Object.freeze({
+		token: "recover",
+		needed: (job) => job?.recover === true,
+		result: "recoverUnsupported",
+		reason: "job-image-recover-unsupported",
+		event: "refused_image_recover_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for continuing a lost run from its checkpoint (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.recover\`. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 
