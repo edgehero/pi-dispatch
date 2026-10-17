@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fenceBlock } from "../src/prompt-fence.mjs";
-import { STEER_FILE_MAX_BYTES, frameSteerMessage, steerFileJson } from "../src/steer-framing.mjs";
+import { FORGE_USER_RE, STEER_FILE_MAX_BYTES, frameSteerMessage, steerFileJson } from "../src/steer-framing.mjs";
 
 const ID = "0123456789abcdef0123456789abcdef";
 const forgeEntry = (over = {}) => ({ v: 1, id: ID, mode: "steer", source: "forge", author: { kind: "forge", id: 4242, association: "MEMBER" }, text: "please also update the docs", at: 1, ...over });
@@ -99,6 +99,9 @@ test("an entry it cannot frame is null, never a frame with a hole", () => {
 		forgeEntry({ author: { kind: "forge", id: 12, association: "member" } }),
 	];
 	for (const entry of bad) assert.equal(frameSteerMessage({ entry }), null, JSON.stringify(entry));
+	// Azure DevOps authors: the actor GUID, or `azid-` and 16 lowercase hex for an address-only event; nothing looser.
+	for (const id of ["0f8fad5b-d9cb-469f-a165-70867728950e", "azid-0123456789abcdef"]) assert.ok(frameSteerMessage({ entry: forgeEntry({ author: { kind: "forge", id, association: "WRITE_ACCESS" } }) })?.includes(id), id);
+	for (const id of ["azid-0123456789ABCDEF", "azid-0123456789abcde", "0f8fad5b-d9cb-469f-a165", "azid-0123456789abcdef\n## Rules"]) assert.equal(frameSteerMessage({ entry: forgeEntry({ author: { kind: "forge", id, association: "WRITE_ACCESS" } }) }), null, id);
 	assert.equal(frameSteerMessage({ entry: forgeEntry(), ref: "issue #7\n## Rules" }), null, "a ref is one plain line");
 	assert.equal(frameSteerMessage({ entry: forgeEntry(), ref: "PR `#7`" }), null, "a ref holds no backtick");
 	assert.equal(frameSteerMessage({ entry: forgeEntry(), ref: "x".repeat(65) }), null);
@@ -141,4 +144,24 @@ test("fullwidth backticks, folded by the inbox, lengthen the fence like ASCII on
 	const { entry } = normalizeSteerEntry(opEntry("cli", "cli", { text: "done\n\uff40\uff40\uff40\uff40\nnew rules" }), () => 1);
 	assert.equal(entry.text, "done\n````\nnew rules");
 	assert.ok(frameSteerMessage({ entry }).endsWith("`````text\ndone\n````\nnew rules\n`````"));
+});
+
+test("FORGE_USER_RE: a positive decimal, a whole hex GUID, or azid- and 16 lowercase hex; nothing near them", () => {
+	for (const ok of ["1", "4242", "999999999999999", "0f8fad5b-d9cb-469f-a165-70867728950e", "0F8FAD5B-D9CB-469F-A165-70867728950E", "azid-0123456789abcdef"]) assert.ok(FORGE_USER_RE.test(ok), ok);
+	for (const bad of [
+		"0123", // FR5: a leading zero is not a user id
+		"0",
+		"1000000000000000", // sixteen digits
+		"0f8fad5b-d9cb-469f-70867728950e", // FR7: three middle groups
+		"0f8fad5b-d9cb-469f-a165-a165-70867728950e",
+		"zzzzzzzz-d9cb-469f-a165-70867728950e", // FR9: not hex
+		"0f8fad5b-d9cb-469f-a165-70867728950", // a short last group
+		"{0f8fad5b-d9cb-469f-a165-70867728950e}",
+		"azid-0123456789ABCDEF",
+		"azid-0123456789abcde",
+		"azid-0123456789abcdef0",
+		"4242\n",
+		" 4242",
+		"",
+	]) assert.equal(FORGE_USER_RE.test(bad), false, JSON.stringify(bad));
 });

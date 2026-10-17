@@ -51,6 +51,10 @@ function fakeInbox({ onMark = null, fail = {}, failMark = null } = {}) {
 			calls.push(["unregister", args.runId, args.targetKey]);
 			return { ok: true };
 		},
+		async holdLive(args) {
+			calls.push(["hold", args.runId, args.targetKey, args.host, typeof args.now === "function" ? args.now() : args.now]);
+			return fail.hold ? { error: fail.hold } : { held: true };
+		},
 		async readInbox({ runId }) {
 			calls.push(["read", runId]);
 			if (fail.read) return { error: fail.read };
@@ -275,7 +279,7 @@ test("a write the disk refuses leaves the message queued for the next tick", asy
 	await relay.stop();
 });
 
-test("the tick is re-entrancy guarded; stop waits for it, unregisters, and nothing runs after", async () => {
+test("the tick is re-entrancy guarded; stop waits for it, HOLDS the liveness keys (F3: never unregisters), and nothing runs after", async () => {
 	let release;
 	const gate = new Promise((r) => (release = r));
 	const inbox = fakeInbox();
@@ -295,7 +299,8 @@ test("the tick is re-entrancy guarded; stop waits for it, unregisters, and nothi
 	release();
 	await stopping;
 	assert.equal(refreshes, 1);
-	assert.deepEqual(inbox.calls.at(-1), ["unregister", "run-1", null]);
+	assert.deepEqual(inbox.calls.at(-1), ["hold", "run-1", null, "h1", T0], "held, with the relay's host and clock");
+	assert.equal(inbox.calls.some(([c]) => c === "unregister"), false, "the run stays reachable until its settle closes it");
 	await relay.tick();
 	assert.equal(refreshes, 1, "no tick after stop");
 	relay.afterBaseline();
@@ -478,4 +483,17 @@ test("R19: a second afterBaseline has no effect: the first prior set rules", asy
 	assert.equal(inbox.state[e.id], "written", "re-baselined against the FIRST (empty) prior set");
 	assert.deepEqual(files(dir), [inboxFileName(0, e.id)]);
 	await relay.stop();
+});
+
+test("F3: a failed hold at stop is a logged fault by code, never a throw", async () => {
+	const inbox = fakeInbox();
+	inbox.holdLive = async () => ({ error: "ECONNRESET" });
+	const { relay, logs } = relayWith(inbox);
+	await relay.start();
+	await relay.stop();
+	assert.ok(logs.some(([e, f]) => e === "steer_relay_fault" && f.step === "hold" && f.code === "ECONNRESET"));
+	const never = fakeInbox();
+	const quiet = relayWith(never);
+	await quiet.relay.stop();
+	assert.equal(never.calls.some(([c]) => c === "hold"), false, "a relay that never started holds nothing");
 });

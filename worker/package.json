@@ -52,6 +52,7 @@
     "./console-answer": "./src/console-answer.mjs",
     "./steer-inbox": "./src/steer-inbox.mjs",
     "./steer-framing": "./src/steer-framing.mjs",
+    "./inbox-relay": "./src/inbox-relay.mjs",
     "./live-transcript": "./src/live-transcript.mjs",
     "./run-progress": "./src/run-progress.mjs",
     "./reserve-estimate": "./src/reserve-estimate.mjs",
