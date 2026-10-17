@@ -731,6 +731,54 @@ test("RUN_DETAIL shows a portfolio run's plan and the dollars a run settled, and
   assert.deepEqual(nulls, older, "a record with null fields renders byte-identical to one written before them");
 });
 
+test("RUN_DETAIL shows a durable run's recovery in short clipped lines, and drops what the contract does not allow (#645)", async () => {
+  const openRun = async (extra, width = 80) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], ...extra }] }) }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const raw = comp.render(width);
+    await comp.dispose();
+    return { raw, lines: raw.map(stripAnsi) };
+  };
+  const row = (lines, label) => lines.map((l) => l.trim()).find((l) => l.startsWith(`│ ${label} `)) ?? null;
+  const kvRow = (label, value) => `│ ${`${label.padEnd(12)} ${value}`.padEnd(66)} │`;
+  const recovered = { from: "live", n: 1, fromAttempt: 2, checkpointSeq: 4, orphans: 3, replayed: 2, interrupted: 1, notStarted: 0 };
+  const { lines } = await openRun({ recoveryOf: "gh-77", recovered, checkpoints: { written: 5, failed: 0, skipped: 1 } });
+  assert.equal(row(lines, "recovery"), kvRow("recovery", "live checkpoint 4, recovery 1, attempt 2 · of gh-77"));
+  const at = lines.findIndex((l) => l.trim().startsWith("│ recovery "));
+  assert.equal(lines[at + 1].trim(), kvRow("", "3 orphaned calls, 2 replayed, 1 interrupted"), "the counts under it");
+  assert.equal(lines[at + 2].trim(), kvRow("checkpoints", "5 written, 0 failed, 1 skipped"));
+  // An armed run that did not crash: its checkpoints alone, and no recovery line.
+  const quiet = (await openRun({ checkpoints: { written: 2, failed: 1, skipped: 0 } })).lines;
+  assert.equal(row(quiet, "checkpoints"), kvRow("checkpoints", "2 written, 1 failed, 0 skipped"));
+  assert.equal(row(quiet, "recovery"), null);
+  // No orphan left open says so; zero replayed or interrupted calls say nothing.
+  const clean = (await openRun({ recovered: { from: "exit", n: 2, fromAttempt: null, checkpointSeq: null, orphans: 0, replayed: 0, interrupted: 0, notStarted: null } })).lines;
+  assert.equal(row(clean, "recovery"), kvRow("recovery", "exit checkpoint, recovery 2"));
+  assert.equal(clean[clean.findIndex((l) => l.trim().startsWith("│ recovery ")) + 1].trim(), kvRow("", "0 orphaned calls"));
+  assert.equal(row((await openRun({ recoverSkipped: "base-unprimed" })).lines, "recovery"), kvRow("recovery", "skipped: base-unprimed"));
+  // Hostile values: a source outside the enum, a non-integer count, an id with markup, a free-text skip reason. All dropped.
+  const older = await openRun({});
+  for (const extra of [
+    { recovered: { ...recovered, from: "elsewhere" } },
+    { recovered: { ...recovered, n: 0 } },
+    { recovered: "live" },
+    { recoveryOf: "gh-1<script>" },
+    { recoveryOf: "-leading" },
+    { recoverSkipped: "because \u001b[31m" },
+    { checkpoints: { written: 1.5, failed: 0, skipped: 0 } },
+    { checkpoints: { written: 1, failed: -1, skipped: 0 } },
+  ]) assert.deepEqual((await openRun(extra)).lines, older.lines, JSON.stringify(extra));
+  // A count that is not one is left out on its own; the rest of the recovery still shows.
+  assert.equal(row((await openRun({ recovered: { ...recovered, fromAttempt: "2", orphans: "x" } })).lines, "recovery"), kvRow("recovery", "live checkpoint 4, recovery 1"));
+  // Every width the pane can take: no row wider than the terminal, in our terms.
+  for (const width of [30, 40, 60, 80, 120]) {
+    const { raw } = await openRun({ recoveryOf: `gh-${"9".repeat(190)}`, recovered: { ...recovered, from: "salvage", orphans: 123456789 }, recoverSkipped: "no-run-id", checkpoints: { written: 9007199254740991, failed: 9007199254740991, skipped: 9007199254740991 } }, width);
+    for (const l of raw) assert.ok(visibleLen(l) <= width, `width ${width}: ${JSON.stringify(stripAnsi(l))}`);
+  }
+});
+
 test("RUN_DETAIL names the reason's detail after it, and points an unboundable cost-cap at the one field that fixes it (#507)", async () => {
   // The record's `why` (a fixed token) beside its reason. Before, a run the cost guard refused as unboundable read only
   // "cost-cap" with $0, which looks like a cap set too low.

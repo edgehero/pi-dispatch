@@ -286,3 +286,39 @@ test("stale progress (issue #644): no write past three minutes says the worker m
   // An ended key on an ACTIVE row is an earlier attempt's: the cell shows nothing of it.
   assert.equal(progressText({ ...row, ended: true }, NOW), "-");
 });
+
+test("the run page's recovery rows (issue #645): where a durable run came from, its base run linked, its checkpoints, for both roles; hostile values dropped", async () => {
+  const record = {
+    jobId: "gh-77.r1",
+    outcome: "completed",
+    startedAt: new Date(NOW - 60_000).toISOString(),
+    endedAt: new Date(NOW).toISOString(),
+    recoveryOf: "gh-77",
+    recovered: { from: "live", n: 1, fromAttempt: 2, checkpointSeq: 4, orphans: 3, replayed: 2, interrupted: 1, notStarted: 0 },
+    checkpoints: { written: 5, failed: 0, skipped: 1 },
+  };
+  const q = parsePageQuery("run", "id=gh-77.r1").query;
+  const page = async (role, r) => (await pagePanels("run", ctxOf(role, { run: { record: r, source: "local" } }, q))).find((p) => p.id === "p-run").html;
+  for (const role of ["viewer", "operator"]) {
+    const html = String(await page(role, record));
+    assert.match(html, /<dt>Recovery of<\/dt><dd><a class="mono" href="\/run\?id=gh-77">gh-77<\/a><\/dd>/, `${role}: the base run, by the run-link helper`);
+    assert.match(html, /<dt>Recovery<\/dt><dd>recovered from a live checkpoint \(recovery 1, attempt 2, checkpoint 4\): 3 orphaned calls, 2 replayed, 1 interrupted<\/dd>/, role);
+    assert.match(html, /<dt>Checkpoints<\/dt><dd>5 written, 0 failed, 1 skipped<\/dd>/, role);
+  }
+  const skipped = String(await page("viewer", { ...record, recoveryOf: undefined, recovered: undefined, checkpoints: undefined, recoverSkipped: "local" }));
+  assert.match(skipped, /<dt>Recovery<\/dt><dd>recovery skipped: local<\/dd>/);
+  assert.doesNotMatch(skipped, /Recovery of|Checkpoints/);
+  assert.match(String(await page("viewer", { ...record, recovered: { from: "exit", n: 2, orphans: 0 } })), /<dd>recovered from an exit checkpoint \(recovery 2\): 0 orphaned calls<\/dd>/, "an attempt and a checkpoint the record lacks are left out");
+  // A record of a job that never armed recovery, and one whose every recovery value is hostile, render the same bytes.
+  const plain = { jobId: record.jobId, outcome: record.outcome, startedAt: record.startedAt, endedAt: record.endedAt };
+  const hostile = {
+    ...plain,
+    recoveryOf: 'gh-1"><script>alert(1)</script>',
+    recovered: { from: "<b>live</b>", n: 1, orphans: 3 },
+    recoverSkipped: "FREE TEXT SKIP",
+    checkpoints: { written: "5", failed: 0, skipped: 0 },
+  };
+  for (const role of ["viewer", "operator"]) assert.equal(String(await page(role, hostile)), String(await page(role, plain)), `${role}: every hostile value dropped`);
+  const half = String(await page("operator", { ...plain, recovered: { from: "salvage", n: 3, fromAttempt: -1, checkpointSeq: 1.5, orphans: "x", replayed: 2 } }));
+  assert.match(half, /<dd>recovered from a salvage checkpoint \(recovery 3\): 2 replayed<\/dd>/, "a count that is not one is dropped on its own");
+});

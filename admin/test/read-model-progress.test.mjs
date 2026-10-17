@@ -216,3 +216,36 @@ test("the fleet snapshot's active rows carry integers and a tool name only, a re
     await reader.dispose();
   }
 });
+
+test("parseProgress reads a recovered run's replayed count, optional and a whole number (#645)", () => {
+  const good = JSON.parse(serializeProgress(workerSnapshot()));
+  assert.equal(parseProgress(JSON.stringify({ ...good, replayed: 2 })).replayed, 2);
+  assert.equal("replayed" in parseProgress(JSON.stringify(good)), false, "absent stays absent");
+  for (const bad of [-1, 1.5, "2", null]) assert.ok(parseProgress(JSON.stringify({ ...good, replayed: bad })).invalid, JSON.stringify(bad));
+});
+
+// ---- durable-run record fields (issue #645) --------------------------------------------------------------------------
+
+test("recordRecovery rebuilds a record's recovery fields by the worker's rules and drops every hostile value (issue #645)", async () => {
+  const { recordRecovery, recoveredText, recoveryCountsText, checkpointsText } = await import("../src/read-model.mjs");
+  const recovered = { from: "live", n: 1, fromAttempt: 2, checkpointSeq: 4, orphans: 3, replayed: 2, interrupted: 1, notStarted: 0 };
+  const full = recordRecovery({ jobId: "gh-9.r1", recoveryOf: "gh-9", recovered, recoverSkipped: "base-unprimed", checkpoints: { written: 5, failed: 0, skipped: 1 } });
+  assert.deepEqual(full, { recoveryOf: "gh-9", recovered, recoverSkipped: "base-unprimed", checkpoints: { written: 5, failed: 0, skipped: 1 } });
+  assert.equal(recoveredText(full.recovered), "recovered from a live checkpoint (recovery 1, attempt 2, checkpoint 4): 3 orphaned calls, 2 replayed, 1 interrupted");
+  assert.equal(checkpointsText(full.checkpoints), "5 written, 0 failed, 1 skipped");
+  assert.equal(recoveryCountsText({ orphans: 1, replayed: 0, interrupted: null, notStarted: 2 }), "1 orphaned call, 2 not started");
+  // A record with none of the keys (a job that never armed run.recover) has no recovery at all, and neither does a non-record.
+  for (const r of [{ jobId: "gh-1" }, null, "gh-1", [], 7]) assert.equal(recordRecovery(r), null, JSON.stringify(r));
+  // Hostile values, each dropped on its own, never copied.
+  const one = (extra) => recordRecovery({ jobId: "gh-1", ...extra });
+  for (const id of ["gh-1<script>", "-gh-1", ".gh", "a b", "x".repeat(201), "", 7, null, { id: "gh-1" }, "gh-1\u001b[31m"]) assert.equal(one({ recoveryOf: id }), null, `recoveryOf ${JSON.stringify(id)}`);
+  for (const from of ["elsewhere", "LIVE", "", null, 1]) assert.equal(one({ recovered: { ...recovered, from } }), null, `from ${JSON.stringify(from)}`);
+  for (const n of [0, -1, 1.5, "1", null, Number.MAX_SAFE_INTEGER + 1]) assert.equal(one({ recovered: { ...recovered, n } }), null, `n ${JSON.stringify(n)}`);
+  for (const skip of ["because", "LOCAL", "", null, 3]) assert.equal(one({ recoverSkipped: skip }), null, `recoverSkipped ${JSON.stringify(skip)}`);
+  for (const c of [{ written: 1.5, failed: 0, skipped: 0 }, { written: 1, failed: -1, skipped: 0 }, { written: 1, failed: 0 }, { written: "1", failed: 0, skipped: 0 }, [1, 0, 0], "5"]) assert.equal(one({ checkpoints: c }), null, `checkpoints ${JSON.stringify(c)}`);
+  // A count that is not one is null on its own, an extra key is not carried, and the rest stands.
+  const partial = one({ recovered: { ...recovered, fromAttempt: "2", checkpointSeq: -4, orphans: 1.5, note: "FREE TEXT", interrupted: Infinity } });
+  assert.deepEqual(partial.recovered, { from: "live", n: 1, fromAttempt: null, checkpointSeq: null, orphans: null, replayed: 2, interrupted: null, notStarted: 0 });
+  assert.equal(recoveredText(partial.recovered), "recovered from a live checkpoint (recovery 1): 2 replayed");
+  assert.deepEqual(one({ checkpoints: { written: 1, failed: 0, skipped: 0, extra: "x" } }).checkpoints, { written: 1, failed: 0, skipped: 0 });
+});

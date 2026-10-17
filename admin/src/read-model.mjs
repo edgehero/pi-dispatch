@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensureAccountTempRoot, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { sanitizeJobId, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { RECOVER_SKIPPED_REASONS, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { FORGE_MCP_SERVER_NAME, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
@@ -4265,7 +4265,7 @@ export async function readTranscriptMeta(redis, jobId, { timeoutMs = TRANSCRIPT_
 const PROGRESS_TIMEOUT_MS = 2000;
 /** The most keys one `progressFor` MGET asks for: the console's active list is bounded well below it. */
 export const PROGRESS_BATCH_MAX = 50;
-const PROGRESS_FIELDS = Object.freeze(["v", "turn", "steps", "failed", "interrupted", "running", "recent", "phase", "phases", "note", "prior", "startedAt", "updatedAt", "ended", "outcome", "commentId"]);
+const PROGRESS_FIELDS = Object.freeze(["v", "turn", "steps", "failed", "interrupted", "running", "recent", "phase", "phases", "note", "prior", "startedAt", "updatedAt", "ended", "outcome", "commentId", "replayed"]);
 const PROGRESS_STATUSES = Object.freeze(["ok", "error", "interrupted"]);
 
 const isProgressCount = (v) => Number.isSafeInteger(v) && v >= 0;
@@ -4294,7 +4294,9 @@ export function parseProgress(raw) {
   if (!isPlainObject(p)) return bad("is not an object");
   if (p.v !== 1) return bad("is not version 1");
   for (const k of Object.keys(p)) if (!PROGRESS_FIELDS.includes(k)) return bad("carries a field the contract does not name");
-  for (const k of PROGRESS_FIELDS) if (k !== "commentId" && !Object.hasOwn(p, k)) return bad("is missing a field");
+  // `commentId` and `replayed` (issue #645: safe calls a recovered run re-executed, written only when above zero) are optional.
+  for (const k of PROGRESS_FIELDS) if (k !== "commentId" && k !== "replayed" && !Object.hasOwn(p, k)) return bad("is missing a field");
+  if (Object.hasOwn(p, "replayed") && !isProgressCount(p.replayed)) return bad("has a replayed that is not a whole number");
   for (const k of ["turn", "steps", "failed", "interrupted", "startedAt", "updatedAt"]) if (!isProgressCount(p[k])) return bad(`has a ${k} that is not a whole number`);
   if (typeof p.ended !== "boolean") return bad("has an ended that is not a boolean");
   if (p.outcome !== null && !LIVE_OUTCOMES.includes(p.outcome)) return bad("has an outcome outside the vocabulary");
@@ -4329,7 +4331,7 @@ export function parseProgress(raw) {
     if (!isPlainObject(p.prior) || !onlyKeys(p.prior, ["turns", "steps"]) || !isProgressCount(p.prior.turns) || !isProgressCount(p.prior.steps)) return bad("has a prior that is not one");
     prior = { turns: p.prior.turns, steps: p.prior.steps };
   }
-  return { v: 1, turn: p.turn, steps: p.steps, failed: p.failed, interrupted: p.interrupted, running, recent, phase, phases: [...p.phases], note: p.note === "" ? null : p.note, prior, startedAt: p.startedAt, updatedAt: p.updatedAt, ended: p.ended, outcome: p.outcome };
+  return { v: 1, turn: p.turn, steps: p.steps, failed: p.failed, interrupted: p.interrupted, running, recent, phase, phases: [...p.phases], note: p.note === "" ? null : p.note, prior, startedAt: p.startedAt, updatedAt: p.updatedAt, ended: p.ended, outcome: p.outcome, ...(Object.hasOwn(p, "replayed") ? { replayed: p.replayed } : {}) };
 }
 
 /** Whether `got` (a `readProgress` answer) is a snapshot rather than one of its three absences. */
@@ -4424,6 +4426,76 @@ export function progressStaleFor(p, now) {
   if (!Number.isSafeInteger(p.updatedAt) || !Number.isFinite(now)) return null;
   const age = now - p.updatedAt;
   return age > PROGRESS_STALE_MS ? age : null;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Durable runs (issue #645, INT-RUN-HISTORY-FILE-CONTRACT): a run record's tail fields `recoveryOf`, `recovered`,
+// `recoverSkipped` and `checkpoints`, for the console's run page and the `/dispatch` RUN_DETAIL. REBUILT by the worker's
+// own rules (`recordedRecovered`, `recordedCheckpoints`, `recordedRecoveryOf`, RECOVER_SKIPPED_REASONS), as the record's
+// `progress` is by `recordedProgress` (issue #644), so the reader and the writer cannot disagree on what a valid value
+// is. A record file is read back from disk or a mirror another host wrote, so it is NEVER trusted to be the worker's:
+// every field is an integer, a closed enum or a charset-checked run id, and anything else is dropped (never copied,
+// never shown as text). Nothing here is free text, so every role may see all of it.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * A record's durable-run facts: `{ recoveryOf, recovered, recoverSkipped, checkpoints }`, each null when absent or not
+ * valid, or null when the record carries none of them (every record of a job that never armed `run.recover`). The base
+ * run's id passes the worker's charset AND this reader's `RUN_ID_RE`, so the console can link it to a page that opens.
+ */
+export function recordRecovery(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) return null;
+  const of = Object.hasOwn(record, "recoveryOf") ? recordedRecoveryOf(record.recoveryOf) : null;
+  const out = {
+    recoveryOf: of !== null && RUN_ID_RE.test(of) ? of : null,
+    recovered: Object.hasOwn(record, "recovered") ? recordedRecovered(record.recovered) : null,
+    recoverSkipped: Object.hasOwn(record, "recoverSkipped") && RECOVER_SKIPPED_REASONS.includes(record.recoverSkipped) ? record.recoverSkipped : null,
+    checkpoints: Object.hasOwn(record, "checkpoints") ? recordedCheckpoints(record.checkpoints) : null,
+  };
+  return Object.values(out).some((v) => v !== null) ? out : null;
+}
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * A `recovered` value's runner counts in words: "3 orphaned calls, 2 replayed, 1 interrupted". A count the runner did
+ * not report (null) is left out, and so is a zero, except an orphan count of zero, which says the crash left nothing
+ * open ("0 orphaned calls"). "" when there is nothing to say. Takes `recordRecovery`'s `recovered` only.
+ */
+export function recoveryCountsText(rec) {
+  if (rec === null || typeof rec !== "object") return "";
+  const parts = [];
+  if (Number.isSafeInteger(rec.orphans)) parts.push(plural(rec.orphans, "orphaned call", "orphaned calls"));
+  if (Number.isSafeInteger(rec.replayed) && rec.replayed > 0) parts.push(`${rec.replayed} replayed`);
+  if (Number.isSafeInteger(rec.interrupted) && rec.interrupted > 0) parts.push(`${rec.interrupted} interrupted`);
+  if (Number.isSafeInteger(rec.notStarted) && rec.notStarted > 0) parts.push(`${rec.notStarted} not started`);
+  return parts.join(", ");
+}
+
+/**
+ * Where a recovered run came from, in words: "recovered from a live checkpoint (recovery 1, attempt 2, checkpoint 4)",
+ * the attempt and the checkpoint left out when the record holds none. Takes `recordRecovery`'s `recovered` only, whose
+ * `from` is a closed enum, so nothing here is a value the record could have spelled freely.
+ */
+export function recoveredHeadText(rec) {
+  if (rec === null || typeof rec !== "object") return "";
+  const bits = [`recovery ${rec.n}`];
+  if (Number.isSafeInteger(rec.fromAttempt)) bits.push(`attempt ${rec.fromAttempt}`);
+  if (Number.isSafeInteger(rec.checkpointSeq)) bits.push(`checkpoint ${rec.checkpointSeq}`);
+  return `recovered from ${rec.from === "exit" ? "an" : "a"} ${rec.from} checkpoint (${bits.join(", ")})`;
+}
+
+/** The whole sentence: `recoveredHeadText`, then `: ` and `recoveryCountsText` when there are counts. */
+export function recoveredText(rec) {
+  const head = recoveredHeadText(rec);
+  const counts = recoveryCountsText(rec);
+  return head === "" ? "" : counts === "" ? head : `${head}: ${counts}`;
+}
+
+/** A record's `checkpoints` in words: "4 written, 0 failed, 0 skipped". Takes `recordRecovery`'s `checkpoints` only. */
+export function checkpointsText(c) {
+  if (c === null || typeof c !== "object") return "";
+  return `${c.written} written, ${c.failed} failed, ${c.skipped} skipped`;
 }
 
 /**
