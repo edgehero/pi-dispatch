@@ -298,7 +298,31 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   key, was swallowed against the finished run whenever it came within ten minutes of the delivery that started that
   run, and quick answers are the normal case. Once a run has parked, the next delivery on its key is a deliberate
   answer, never a duplicate, so the worker deletes the key on the park, through the job's own compare-and-delete
-  (the key is freed only while it still names that job). Every other job keeps its window to the end of its ttl.
+  (the key is freed only while it still names that job). Every other job keeps its window to the end of its ttl,
+  except a steer-armed one (below).
+  **A steered comment never touches either layer, and a steer-armed run releases its window at its end** (issue
+  #646 part 2, `REQ-STEER-RUNNING-JOB`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`). A phrase comment the receiver hands
+  to a live run's inbox creates no job (`202 {status:"steered"}`), so it neither takes nor is swallowed by the
+  semantic window. Its exactly-once is the GUID's carried into the inbox: the message id is the first 32 hex of
+  `sha256("forge\0" + deliveryId)`, so a redelivery pushes `dup` and is still answered as steered, never enqueued
+  beside the run that holds it, and the stored fallback job keeps the delivery's own job id. After its run has ended
+  the inbox can no longer answer `dup`, so a steer also leaves `steer:steered:<forgeDeliveryJobId>` (EX 31 days, the
+  job retention this requirement's window rests on, NX, set only after a successful push), and a later delivery of
+  the same id that finds no run to take it is answered `202 {status:"steered", runs:0}` and never enqueued (review
+  round 1): without it, a redelivered steered comment would start the paid job the steer replaced. The marker is the
+  GUID layer's stand-in, retention-bounded like it. While the run lives,
+  the window it holds is exactly what keeps a non-steering duplicate from starting a second job. Once it is over, a
+  comment is no longer a steer, so the worker releases the run's window at its final outcome (the park's own
+  `releaseSemanticWindow`, the job's compare-and-delete), with or without late messages. A late message's resumed job
+  is added under its own delivery-GUID id with NO deduplication option (`enqueueLateForgeJob`): the run it follows
+  held that window, and the message is the follow-up the window must not swallow; the GUID layer still makes one job
+  of a comment that several replicas each held late. Between the container's exit and the final outcome the relay
+  holds the run reachable for 15 minutes (longer than the window), so a phrase comment then still lands in the run's
+  inbox rather than being enqueued into the window (review round 1). **Named gaps**: a held run can drop out of its
+  target early when another run on the same target died after refreshing the key, and a comment then is enqueued and
+  can be swallowed inside the ten minutes; a #645 recovery is its own job without the original's dedup id, so a
+  recovered run's release frees nothing and the original window runs out its ttl; and the webhook and the poller see
+  one comment under different delivery ids, the residual they already had.
 - **Evidence (upstream)**: `taskforcesh/bullmq @ v5.80.4 → src/commands/addStandardJob-9.lua:88-93`
   (`EXISTS jobIdKey` → `handleDuplicatedJob`; a duplicate add is a silent no-op, not a throw);
   `src/commands/includes/removeDeduplicationKeyIfNeededOnFinalization.lua` (a finishing job deletes its
@@ -312,7 +336,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `#5` and a merge request `!5` in one project firing the same flow, both run. Given a redelivery after retention has expired, a new job runs — this
   is accepted and documented, not a defect, but it must be a *chosen* window rather than an inherited
   default. Given a run that parks, a new delivery on its key inside the ten minutes creates a job, while a
-  run that ends without parking still coalesces one there.
+  run that ends without parking still coalesces one there. Given a steer-armed run's final outcome, its window is
+  released with or without late messages, and never for a job that is not steer-armed or not final; given a late
+  message's resumed job, it is added under the delivery's job id with no `deduplication` option
+  (`worker/test/steer-settle.test.mjs`, "THE WINDOW: released at a steer-armed run's final outcome (no late message
+  needed), never for a job that is not steer-armed or not final" and the `enqueueLateForgeJob` test). Given a
+  redelivered GUID that a live run already holds, the receiver answers steered and enqueues nothing; given a
+  redelivered GUID steered before whose run has ended, every arm answers `steered` with no runs and enqueues nothing,
+  the poller neither enqueues nor counts it, and a steer leaves the marker NX with the 31-day retention
+  (`receiver/test/steer.test.mjs`, "every arm: a redelivered GUID steered before, whose run has ended, answers
+  steered with no runs and enqueues NOTHING", "poller: a retried cycle's comment steered before is never enqueued,
+  and not counted again", "trySteer: a steer leaves the delivery's marker, NX with the 31-day retention").
 
 ## REQ-TRIGGER-AUTHOR-GATE
 
@@ -3456,18 +3490,28 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   it was handed over, `withdrawn` when its sender took it back first. Nothing shall interrupt a model stream or a tool
   that is running. Absent or `false` is today's behaviour exactly: the normalized entry, the job data, the env, the
   argv and the record are byte-identical.
-- **Scope (this release: issue #646, part 1, the operator path)**: messages are sent from the command line,
-  `pi-dispatch steer <jobId> [--later] <text…|->`, and taken back with `pi-dispatch steer --withdraw <jobId>
-  <msgId>`. Two surfaces arrive in follow-up changes of the same issue: a collaborator's comment carrying the
-  trigger's phrase (receiver routing on the four forges and the poller, the `later` grammar, the stored fallback job
-  and the forge branches of the late-message rule), and the operator console's and the `/dispatch` TUI's actions with
-  the state API's per-job inbox field. Until the first lands no forge text enters any inbox: the inbox module already
-  accepts a `forge` source and stores fallback jobs, and only tests exercise them. `run.steer` is legal on every
+- **Scope (this release: issue #646, parts 1 and 2, the operator path and forge comments)**: messages are sent
+  from the command line, `pi-dispatch steer <jobId> [--later] <text…|->`, and taken back with `pi-dispatch steer
+  --withdraw <jobId> <msgId>` (part 1). **Since part 2 a forge comment steers too**: a comment carrying the comment
+  trigger's phrase, from an author that trigger's gate admits (`CONST-TRIGGER-AUTHOR-GATE`), on an issue or pull
+  request where a run of a steer-armed trigger is live, is handed to that run's inbox (every live run of the target,
+  at most 4) instead of starting a second job, on all four forges' webhooks and on the GitHub poller. Steering is per
+  TARGET, not per trigger: any steer-armed run live on the issue or pull request takes the comment, whichever trigger
+  started it. It needs the COMMENT trigger to set `run.steer` as well as the running job's trigger (the comment's own
+  trigger decides whether a comment may steer, and what its fallback job is). A run stays reachable for 15 minutes
+  after its container exits, until its settle closes the inbox, so a comment in that gap or between two attempts is
+  delivered by the next attempt or settles `late`. A redelivery of a steered comment is never enqueued. The word `later` immediately after the first phrase (spaces or
+  tabs between, lowercase, a whole word) makes it a follow-up; the whole body is delivered, the word included. A
+  phrase-free reply to a parked issue and a command rule never steer. Where no run takes the comment, it is enqueued
+  exactly as before. A forge message that turns late takes the forge branches of the late-message rule (below). Still
+  to come in a follow-up change of the same issue: the operator console's and the `/dispatch` TUI's actions with the
+  state API's per-job inbox field (`listInboxPublic` is exported for it and exercised by tests only). `run.steer` is legal on every
   trigger type, cron included (an operator can steer a folder job, which no forge comment can reach), and refused at
   load beside `run.command` (a command job's prompt is one `/name args` line, so a message would reach whatever the
   command started rather than an agent listening for it). **Not in scope**: interrupting a running tool (pi cannot),
   inline pull request review comments (not ingested today), a forge reaction or reply at the moment a message is
-  steered, and terminal chat (#647, which will reuse this inbox).
+  steered, steering by editing a comment that already steered or started a run, and terminal chat (#647, which will
+  reuse this inbox).
 - **Why**: a run that is going the wrong way can today only be cancelled and started again, paying again for
   everything it did, and the person who notices has no way to say so to it. durable-pi's steering is the one feature
   of that harness that fits here: a message into the live session. It is built at the job boundary instead
@@ -3485,14 +3529,22 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and its record names why (`steerSkipped`: `venue-copies`, `no-exit-key`, `no-transcript`, `no-inbox`); a message
   for it is refused at push, because nothing ever registered it as open. A runner handed `PI_STEER` without a
   readable `/inbox` or without an exit key exits `2` before the prompt (`steer-inbox-missing`, `steer-no-exit-key`).
+  A comment the receiver cannot steer (no live run, every run `gone`, `closed` or `full`, a body over the cap or
+  empty after the scrub, a Valkey fault) is never dropped: it falls through to the enqueue it always had, and the
+  receiver logs why by a fixed reason (`steer_fell_through`, `steer_comment_skipped`, `steer_lookup_failed`), never
+  the text.
 - **Budget.** No new reserve. A turn a message causes counts against `maxTurns`, and the cost cap and the token cap
   bind as they do for any turn; a follow-up that continues a run is a metered turn like any other. The caps on the
   inbox (16 messages, 64 KiB of text, 8 KiB per message, per run, withdrawn messages counted) bound how many such
   turns a sender can cause.
 - **Late messages** (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`). At the run's final outcome its inbox is closed in one
   script before the record is written: every message still queued or written becomes `late`, and every later push is
-  refused. In this release an operator's late message is **reported only** (the CLI says `late`, the record counts
-  it), and no job starts.
+  refused. An operator's late message is **reported only** (the CLI says `late`, the record counts it), and no job
+  starts. A forge author's late message (part 2) either **starts the job its comment would have started** (when the
+  outcome is not `operator-cancel`, its trigger resumes and the stored fallback names this run's target: one job per
+  run end, carrying the run's other late comments as steers) or gets **one fixed reply** on the target saying the run
+  had already finished; a message carried once is only ever answered. A steer-armed run also releases its semantic
+  window at its final outcome, so a comment after it starts a job of its own (`REQ-DEDUP-BY-DELIVERY-GUID`).
 - **Parked runs** (`DES-STEER-HELD-WHILE-PARKED`). Once the agent has called `await_human_input`, nothing more is
   handed over; a message held then settles as `late` when the run ends parked.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-TRIGGER-AUTHOR-GATE`,
@@ -3564,6 +3616,41 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   - (j) **The CLI.** The cases under Fail loudly, the stdin bound, and withdraw's wording of the prior state
     (`worker/test/steer-cli.test.mjs`); usage and fail-fast against an unreachable Valkey
     (`worker/test/cli-control.test.mjs`).
+  - (k) **Comment routing (part 2).** Given a phrase comment on a steer-armed comment trigger, each of the four
+    filters puts `steerMode` at job level, `followUp` when `later` follows the first phrase; a comment the author gate
+    refuses never gets it; phrase-free, parked-reply and command paths are byte-identical to an unarmed trigger's
+    (`receiver/test/steer.test.mjs`, "the later grammar: lowercase whole word, right after the FIRST phrase, spaces or
+    tabs between" and the three per-forge filter tests). Given a live run, each forge's arm answers `202 steered` and
+    enqueues nothing; a stranger's phrase comment never reaches an inbox; no live run, a closed run or a Valkey fault
+    falls through to today's enqueue without `steerMode`; a redelivered GUID steered before whose run has ended
+    answers `steered` with no runs and enqueues nothing on every arm and on the poller; an unsendable body is
+    `steer_comment_skipped`; the fanout is exactly four; replicas all take the comment; each run's fallback is stored
+    before its push; one run of two refusing still steers and the half-miss is logged; a redelivered GUID is `dup`,
+    steered, not enqueued; the target key is the relay's own; the default client is the shared queue's connection; an
+    Azure sender's `azid-` digest is accepted as a forge author; the poller steers exactly as the webhook does and
+    counts it; and against a live Valkey a registered run takes the comment, a redelivery is `dup` and a closed run
+    falls through (`receiver/test/steer.test.mjs`). An Azure DevOps author id (GUID or `azid-` digest) is kept as
+    the string it is and a numeric id stays a number (`worker/test/steer-inbox.test.mjs`).
+  - (l) **Late forge messages (part 2).** Branch A enqueues the first late message's fallback on the run's queue
+    under its own GUID id with no dedup and pre-seeds the rest with `hop: 1`; branch B answers once for no resume, no
+    fallback or another target's fallback; an `operator-cancel` never starts the work again; a carried message is
+    answered, never carried again, while a fresh one beside it still resumes; a failing add or an unreadable fallback
+    answers instead, logged by code; a failed pre-seed keeps the job and answers the rest, and an unarmed fallback is
+    never pre-seeded; a host queue stays on its host and the host-lost sweep sends to the shared queue; the window is
+    released at a steer-armed run's final outcome with or without late messages and never otherwise; `settleInbox`
+    awaits the seam with the run's context; `makeLateForge` never throws; `enqueueLateForgeJob` carries the forge
+    job's id, data and retry policy without the window; `start.mjs` wires one `makeLateForge` into all three settle
+    sites, BY SHAPE; a second close of the same outcome (`first: false`) counts but answers nothing again; a fallback
+    for the same number but another target type never resumes (`worker/test/steer-settle.test.mjs`). `closeInbox`
+    says which call closed it; `holdLive` keeps a stopped run reachable for 15 minutes, the close removes both keys and
+    a hold after the close does nothing; the fallback hash holds at most 32 jobs per run, a redelivery overwrites and a
+    33rd is refused (`worker/test/steer-inbox.test.mjs`, F2, F3, F8); the relay's stop holds and never unregisters, and
+    a failed hold is a logged fault (`worker/test/inbox-relay.test.mjs`). Pre-seeding writes `queued` entries without the open key, in
+    order, with a day's TTL, and is refused when closed, all or nothing at the caps, and for an entry without
+    `hop >= 1` (`worker/test/steer-inbox.test.mjs`). End to end, a run that ends holding two late comments starts one
+    resumed job whose relay writes the second at its start, and that one, late again, is answered; and a comment
+    pushed after the container exited still lands, settles late and is answered ONCE across two settles
+    (`worker/test/steer-flow.integration.test.mjs`).
 
 ## REQ-RESURRECTABLE-SANDBOX
 
@@ -4482,6 +4569,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-17 | Issue #646, part 2, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round: Scope says steering is per target, not per trigger, that a run stays reachable for 15 minutes after its container exits until its settle closes the inbox (the relay's hold), and that a redelivered steered comment is never enqueued; Fail loudly's log list names `steer_comment_skipped` (renamed from `steer_skipped`, which is `runContainer`'s); acceptance (k) gains the redelivery marker, the skip name and the exact fanout, and (l) gains the single answer across two settles (`first`), the target-type mismatch, the hold, the 32-entry fallback cap and the end-to-end comment after exit. **`REQ-DEDUP-BY-DELIVERY-GUID` CORRECTED**: a steered delivery leaves `steer:steered:<delivery job id>` (EX 31 days, NX, after a successful push), so a redelivery after its run ended is answered `202 {status:"steered", runs:0}` and never enqueued, restoring this requirement's guarantee for steered comments; the exit-to-outcome gap is closed by the relay's hold and the named gaps become the hold's residual, the recovery's window and the webhook-and-poller delivery ids; Acceptance gains the marker cases. |
+| 2026-10-17 | Issue #646, part 2: forge comments. **`REQ-STEER-RUNNING-JOB` AMENDED**: Scope now includes forge comments (a phrase comment from an author the comment trigger's gate admits, on a target where a steer-armed run is live, goes to every live run of the target, at most 4, instead of starting a second job, on the four forges' webhooks and the GitHub poller; the comment trigger must set `run.steer` too; `later` right after the first phrase makes a follow-up; parked replies and command rules never steer); the console and the TUI are still to come; an edited comment is named out of scope. Fail loudly gains that a comment that cannot be steered falls through to its old enqueue with a logged reason. Late messages gains the forge branches (a resumed job for the first late message when the outcome is not `operator-cancel` and the stored fallback resumes and names this target, the others carried as steers; else one fixed reply; a carried message is only answered) and the window release at a steer-armed run's final outcome. Acceptance gains (k) comment routing and (l) late forge messages. Statement, Budget and Parked runs UNCHANGED, checked. **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: a steered delivery creates no job and never touches the semantic window; a forge message's inbox id derives from the delivery GUID, so the GUID layer's exactly-once extends to the inbox (`dup`); a steer-armed run releases its window at its final outcome, through the same compare-and-delete as a park, and a late message's resumed job is added with no dedup option; the window gap between a steer-armed run's container exit and its final outcome is named; Acceptance gains the release and the no-dedup resume. The GUID layer itself UNCHANGED, checked. **`REQ-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the gate runs before `steerMode` is set, in the pure filter, as before. |
 | 2026-10-17 | Issue #646, part 1, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round, acceptance only (the Statement, Scope, budget and late-message rule are unchanged): (d) gains the steer scrub (the tag block and zero width characters removed, three backtick look-alikes folded, no NFKC, an unpaired surrogate refused); (e) gains F5 (a waiting message whose verified ack is in the staged transcript is marked delivered at the baseline) and F1 (a closed inbox under a reused run id is reset before the run registers, an open one is kept, a closed one the reset could not reopen is never written into nor re-baselined); (g) gains F4 (an aborted run and an idle session get nothing from the timer) and the exit line's `deliveredIds`; (i) gains F2 (the failed listener's terminal branch settles the inbox) and F3 (`deliveredIds` parsed only as at most 16 ids, marked only off a verified exit line, still marked with the transcript swapped for a symlink), and the console-retry flow test. Each names its test. |
 | 2026-10-17 | Issue #646, part 1: steering, the operator path. **NEW `REQ-STEER-RUNNING-JOB`**: a trigger may set `run.steer: true`, and a message sent to its running job reaches the agent as a steer (after the current turn's tool calls, before the next model call) or a follow-up (when it would otherwise stop), framed and fenced as data, never through pi's input path, at most once per attempt and in order, its fate reported as `delivered`, `late` or `withdrawn`. Scope: this release is the operator path, the command line (`pi-dispatch steer <jobId> [--later] <text…\|->`, `pi-dispatch steer --withdraw <jobId> <msgId>`); a collaborator's phrase comment on the four forges and the poller, and the console and `/dispatch` TUI actions, arrive in follow-up changes of the same issue, and until then no forge text enters an inbox. Legal on cron, refused beside `run.command`. Fail loudly (the CLI's refusals and states, `job-image-steer-unsupported`, the `steerSkipped` reasons, the runner's `steer-inbox-missing` and `steer-no-exit-key`), budget (no new reserve; every caused turn counts), late messages (operator ones reported only), parked runs, and lettered acceptance (a) to (j) naming the tests. **`REQ-AWAIT-INPUT` UNCHANGED, checked**: a park is unchanged; the hold is `DES-STEER-HELD-WHILE-PARKED`. **`REQ-DEDUP-BY-DELIVERY-GUID` UNCHANGED, checked**: nothing in this release touches a delivery id or a window; the inbox id from the delivery GUID and the window release for steer-armed runs arrive with comment routing. |
 | 2026-10-17 | Issue #645, closing. **`REQ-RUN-RECOVERY` AMENDED**, Scope: the forge mirror of the workspace is no longer listed as out of scope pending work; it is declined in `OQ-045` (it could carry the tree only, never the transcript a recovery needs). Everything else UNCHANGED, checked. |

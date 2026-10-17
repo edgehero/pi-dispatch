@@ -4221,9 +4221,11 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 - **`run.steer` (every trigger type, cron included), optional boolean (`REQ-STEER-RUNNING-JOB`, issue #646),
   opt-IN.** Absent or `false` = today's behaviour, byte-identical normalized entry, job data, env and argv. `true`:
   while one of the trigger's jobs runs, a message sent to it reaches the agent between its steps
-  (`DES-STEER-VIA-READONLY-INBOX-MOUNT`, `INT-STEER-INBOX-CONTRACT`). In this release the sender is an operator at the
-  command line (`pi-dispatch steer`); a collaborator's phrase comment and the console arrive in follow-up changes of
-  the same issue. Judged by `validateSteerFlag` (`worker/src/triggers.mjs`), strictly boolean, in all five
+  (`DES-STEER-VIA-READONLY-INBOX-MOUNT`, `INT-STEER-INBOX-CONTRACT`). The senders are an operator at the command line
+  (`pi-dispatch steer`) and, since part 2, a phrase comment from an author the comment trigger's gate admits, when the
+  COMMENT trigger sets `run.steer` too (on a comment trigger the field means both "my jobs listen" and "my phrase
+  comments may steer a live run of the target instead of starting a job"); the console arrives in a follow-up change
+  of the same issue. Judged by `validateSteerFlag` (`worker/src/triggers.mjs`), strictly boolean, in all five
   normalizers. Legal on cron, unlike `run.recover`: a message is delivered into the live session and needs no issue or
   pull request to key anything by, so an operator can steer a folder job. Refused at load beside `run.command` (a
   command job's prompt is one `/name args` line that dispatches a workflow, so a message would reach whatever the
@@ -4233,12 +4235,17 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
     an image declaring `exitAuth` (`no-exit-key`), a worker with Valkey and a transcript file (`no-transcript`), and
     an inbox directory it could make (`no-inbox`).
   - It rides the job data at JOB level only when `true` (`job.steer`), never inside `trigger`, through every receiver
-    filter (carried only: routing a comment into a run is the comment routing change), `enqueueForgeJob`, the
+    filter, `enqueueForgeJob`, the
     console's `runFieldsOf`, `addLocalJob` and the cron scheduler data (`worker/src/schedules.mjs`). It is part of no
     job id or dedup key.
   - **Version skew**: a row of `AUTHORED_NARROWING_FIELDS`, authored when `true`: a receiver from before #646 drops
     the key, the run starts with no inbox and an operator's message is refused as for an unarmed job while the
-    trigger promised it would be heard; the worker refuses such a job pre-spend as `trigger-skew`.
+    trigger promised it would be heard; the worker refuses such a job pre-spend as `trigger-skew`. Part 2 adds no
+    field and no skew row: a phrase comment's `steerMode` lives only between the filter and the receiver's routing and
+    never reaches a queue. A part 1 receiver beside a part 2 worker enqueues every comment as before; a part 2
+    receiver beside a part 1 worker steers comments, but that worker answers no late forge message
+    (`steer_late_forge_unanswered`) and its framing refuses an Azure DevOps author id, so such a message settles
+    `late`. Run the receiver and the worker from the same release.
   - **Model-callable**: yes, behind the operator's confirm. It gives the model no capability (it decides whether a
     run listens for messages, not what a run may do). `dispatch_trigger_add` (every kind) and `dispatch_trigger_edit`
     take `steer`, carry it only when it is a boolean, merge an edit's only when sent, and judge it with the loader's
@@ -8830,15 +8837,17 @@ classification; worker/src/cancel-cli.mjs -> runCancel; admin/src/read-model.mjs
 
 ## INT-STEER-INBOX-CONTRACT
 
-**sender (the CLI in this release) -> Valkey -> the worker's relay -> `/inbox` (read-only) -> the runner -> pi; and
+**sender (the CLI, or since part 2 the receiver for a forge comment) -> Valkey -> the worker's relay -> `/inbox` (read-only) -> the runner -> pi; and
 back: the transcript -> the worker's ack consumer -> Valkey.** The durable inbox of a running, steer-armed job (issue
 #646, `REQ-STEER-RUNNING-JOB`, `DES-STEER-VIA-READONLY-INBOX-MOUNT`), the sibling of `INT-CANCEL-CHANNEL-CONTRACT`:
 transient, TTL-bounded keys that only a live run's relay keeps alive. One module holds every Valkey side,
 `worker/src/steer-inbox.mjs`, exported as `@edgehero/pi-dispatch/steer-inbox` (and the framing as
-`@edgehero/pi-dispatch/steer-framing`), so the CLI, the relay, the settle step and, in follow-up changes, the
-receiver and the console cannot drift. In this release the only sender is the CLI (`worker/src/steer-cli.mjs`);
-`liveRunsForTarget`, `storeFallback`, `readFallbacks` and `listInboxPublic` are exported for the comment routing
-and console changes and are exercised by tests only.
+`@edgehero/pi-dispatch/steer-framing`, and the relay's target derivation as `@edgehero/pi-dispatch/inbox-relay`), so
+the CLI, the relay, the settle step, the receiver and, in a follow-up change, the console cannot drift. Two senders:
+the CLI (`worker/src/steer-cli.mjs`, part 1) and the receiver for a forge comment (`receiver/src/steer.mjs`
+`trySteer`, part 2, `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`), which also stores the fallback job; the
+settle step reads the fallbacks and pre-seeds a resumed job (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`).
+`listInboxPublic` is exported for the console change and exercised by tests only.
 
 - **The run id.** Every key is per RUN: `runIdOf(job)` (`job.data.recoveryOf ?? job.id`, `recovery-queue.mjs`), so
   a #645 recovery and a BullMQ retry find the same inbox; spelled into a key through `sanitizeJobId`, the run
@@ -8854,27 +8863,61 @@ and console changes and are exercised by tests only.
   run:inbox:<runId>            LIST   entry JSON, append only (RPUSH), in acceptance order.
   run:inbox:state:<runId>      HASH   <id> -> queued | written | delivered | withdrawn | late, plus `_count` (messages
                                      ever accepted) and `_bytes` (their text bytes).
-  run:inbox:fallback:<runId>   HASH   <id> -> the job JSON a forge message would have started (comment routing).
+  run:inbox:fallback:<runId>   HASH   <id> -> the job JSON a forge message would have started (comment routing;
+                                     shape below).
   run:inbox:closed:<runId>     STRING "1", set by the final close.
+  steer:steered:<deliveryJobId> STRING "1", EX 31 days, NX: a delivery the receiver steered (part 2 review round 1),
+                                     keyed by the job id the comment would have been enqueued under
+                                     (`forgeDeliveryJobId`, e.g. `gh-<GUID>`). Written and read by the receiver only.
   ```
-- **TTLs** (`STEER_OPEN_TTL_MS` 30 s, `STEER_TARGET_TTL_MS` 60 s, `STEER_INBOX_TTL_MS` 1 h). The list and the state
-  hash get an hour at every accepted push; `registerLive` and its 2 s refresh renew the hour on the list, the state
-  and the fallback hash; the close sets `closed` with an hour and gives the list and the state an hour from then. A
-  crashed worker therefore leaves nothing past an hour and a run nothing past 30 s of liveness.
+- **TTLs** (`STEER_OPEN_TTL_MS` 30 s, `STEER_TARGET_TTL_MS` 60 s, `STEER_INBOX_TTL_MS` 1 h, `STEER_PRESEED_TTL_MS`
+  24 h). The list and the state hash get an hour at every accepted push; `storeFallback` gives the fallback hash an
+  hour; `registerLive` and its 2 s refresh renew the hour on the list, the state and the fallback hash; the close sets
+  `closed` with an hour and gives the list and the state an hour from then. A pre-seed (below) gives the list and the
+  state a day, because the run it fills has not started and may wait in the queue; that run's first refresh puts the
+  hour back. At the relay's stop the open key and the target member are HELD for `STEER_HOLD_TTL_MS` (15 min,
+  `holdLive`, below) until the close removes them. A crashed worker therefore leaves nothing past an hour (a day for a
+  pre-seeded run that never started), a running run nothing past 30 s of liveness after its relay goes quiet, and a
+  stopped one nothing past 15 minutes. The steered marker lives 31 days.
 - **The entry** (`normalizeSteerEntry`; only these fields are kept, rebuilt, never the caller's object):
   ```
   { "v": 1, "id": "<32 lowercase hex>", "mode": "steer" | "followUp",
     "source": "forge" | "console" | "cli" | "panel",
-    "author": { "kind": "forge", "id": <positive integer, up to 15 digits>, "association": "<[A-Z][A-Z_]{0,39}>" }
+    "author": { "kind": "forge", "id": <forge user id, FORGE_USER_RE>, "association": "<[A-Z][A-Z_]{0,39}>" }
             | { "kind": "operator", "by": "<TOKEN_NAME_RE: [a-z0-9][a-z0-9._-]{0,31}>" },
     "text": "<scrubbed, 1..8192 bytes>", "at": <ms>,
     "deliveryId"?: "<[A-Za-z0-9._:-]{1,128}>", "hop"?: <0..8> }
   ```
   The source and the author must agree: a `forge` source has a forge author, every other source an operator one. The
   CLI writes `source: "cli"`, `author: { kind: "operator", by: "cli" }`. `at` defaults to the caller's clock.
+  A forge user id (`FORGE_USER_RE`, `worker/src/steer-framing.mjs`, part 2) is a positive integer of up to 15 digits
+  (GitHub, GitLab, Forgejo), kept as a number, or an Azure DevOps actor id kept as the string it is: the actor's GUID
+  (`8-4-4-4-12` hex, either case), or `azid-` and 16 lowercase hex, the first 16 of `sha256(address)`, which the
+  Azure filter derives when the event names the actor only by address (`stableActorId`; `INT-AZURE-PAYLOAD-SUBSET`
+  is unchanged by this). Every form is charset-safe, so the attribution line never carries a sender's text. The
+  receiver writes `source: "forge"`, `mode` from the filter's `steerMode`, `deliveryId` the delivery's, and `author`
+  `{ kind: "forge", id: <sender id>, association }`, where the association is the comment's `author_association`
+  on GitHub and the fixed word `WRITE_ACCESS` (`FORGE_GATE_ASSOCIATION`) on GitLab, Forgejo and Azure DevOps, whose
+  gate is the receiver's resolved write-access verdict rather than a role it could name. An entry the framing could
+  not frame with the longest ref (`STEER_REF_WORST`) is refused at normalisation, so a message is never accepted that
+  the relay would then have to refuse.
 - **Ids.** A forge message's id is the first 32 hex of `sha256("forge\0" + deliveryId)` (`forgeMessageId`), so a
   redelivered webhook GUID is the same message and pushes `dup`; an operator message's is 16 random bytes in hex
-  (`operatorMessageId`).
+  (`operatorMessageId`). The same delivery in two runs' inboxes (a fanout to replicas) has the same id in each.
+- **The fallback job** (`storeFallback`, `readFallbacks`; part 2). `run:inbox:fallback:<runId>` maps a forge
+  message's id to the JSON of the job the receiver would have enqueued for that comment had no run been live: the
+  filter's job object without `steerMode`, plus `kind` (the forge) and `jobId` (its delivery job id,
+  `forgeDeliveryJobId`, or null). `enqueueLateForgeJob` rebuilds the job from it through `enqueueForgeJob`'s explicit
+  field list, so a field outside that list never reaches a queue; the stored `jobId` is informational and the id is
+  recomputed from `trigger.deliveryId`. The receiver stores it for each live run BEFORE that run's push
+  (`DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`), so a store whose push is then refused leaves an orphan that
+  nothing reads and the hour removes. `readFallbacks` answers `{ jobs: { id: job } }`, dropping a field whose name is
+  not a message id or whose value does not parse as an object. It holds the comment's text (inside `trigger`), like
+  the queued job it stands for; it is read only by the settle step. The store is one script (`FALLBACK`, review round
+  1; KEYS fallback; ARGV id, job JSON, max, ttl): refused `full` when the id is new and the hash already holds
+  `STEER_MAX_FALLBACKS` (32, twice the message cap, because a store precedes a push the run may refuse), else HSET
+  (a redelivered id overwrites its entry and is never counted) and the hour. `storeFallback` answers `{ ok: true }`,
+  `{ error: "full" }` or `{ error }`; the receiver then skips that run's push.
 - **Caps** (`STEER_MAX_MESSAGES` 16, `STEER_TOTAL_MAX_BYTES` 65,536, `STEER_TEXT_MAX_BYTES` 8,192 per message, the
   console answer's own bound, `ANSWER_TEXT_MAX_BYTES`). The text is scrubbed by `scrubSteerText`: first
   `console-answer.mjs`'s `scrubAnswerText` (CR and CRLF to LF, U+2028 and U+2029 to LF, a tab to a space, every other
@@ -8907,8 +8950,11 @@ and console changes and are exercised by tests only.
     unlinks it), `prior: null` no such message.
   - `CLOSE` (KEYS closed, open, list, state, and the target when the run has one; ARGV the raw run id, ttl): sets
     `closed` (PX the ttl), DELs the open key, ZREMs the run from its target, turns every `queued` or `written` id
-    into `late`, refreshes the list's and the state's hour, and returns `[list, state]`. `closeInbox` answers
-    `{ entries, state, count, bytes }`. After it every push is refused, and everything pushed before it is in its
+    into `late`, refreshes the list's and the state's hour, and returns `[list, state, first]`, `first` 1 only when
+    the closed key did not exist before this call (review round 1). `closeInbox` answers
+    `{ entries, state, count, bytes, first }`; a second close of the same run (a terminal thrown failure is settled by
+    the processor and then by the failed listener) gets the same entries with `first: false`, and only the first may
+    answer or resume them. After it every push is refused, and everything pushed before it is in its
     reply. Called only by the settle step, at a final outcome (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`).
   - `MARK` (KEYS state; ARGV id, to, from...): moves the id to `to` only when it is in one of `from`; returns
     `{1, prior}` or `{0, prior}`. `markState` answers `{ ok, prior }`. The relay's moves: `queued` to `written`
@@ -8917,8 +8963,27 @@ and console changes and are exercised by tests only.
     state to `late` for an entry the framing refuses.
   - Liveness (`registerLive`, `refreshLive`): one `MULTI` that SETs the open key PX 30 s and, for a forge job,
     ZREMRANGEBYSCOREs the target's members whose score has passed, ZADDs the run at `now + 30 s` and PEXPIREs the
-    target 60 s, then refreshes the list's, the state's and the fallback hash's hour. `unregisterLive` DELs the open
-    key and ZREMs the member; it is not a close, so a retry or a recovery finds the inbox open.
+    target 60 s, then refreshes the list's, the state's and the fallback hash's hour.
+  - `HOLD` (`holdLive`, the relay's stop since part 2 review round 1; KEYS closed, open, and the target when the run has
+    one; ARGV host, now ms, hold ms, the raw run id): nothing (returns 0) when the closed key exists; else SETs the
+    open key PX the hold, ZADDs the run at `now + hold`, raises the target's PTTL to the hold when it is shorter (never
+    lowers it), and returns 1. `holdLive` answers `{ held }` or `{ error }`. Not a close: a retry or a recovery finds
+    the inbox open, and a message pushed meanwhile is written by the next attempt or closed `late`. The hold is
+    `STEER_HOLD_TTL_MS`, 15 minutes, longer than the semantic window. **Residual**: a later `registerLive` by another
+    run on the same target sets the target's TTL back to 60 s, so a held member can expire with the key early if that
+    run then stops refreshing without a hold. `unregisterLive` (DEL the open key, ZREM the member, not a close) is
+    kept for a caller that must make a run unreachable at once; the relay no longer calls it.
+  - `PRESEED` (`preseedInbox`, part 2; KEYS closed, list, state; ARGV ttl, max count, max bytes, then id, entry
+    JSON, text bytes per message): fills the inbox of a run that has NOT STARTED (a late message's resumed job,
+    keyed by its new job id) with carried messages. No open-key check (no relay has registered it), but every other
+    rule of a push: `closed` when the closed key exists, a message whose id is already in the state hash skipped,
+    the two caps judged for the batch as a whole, all or nothing (`full`), before anything is written; then each new
+    entry RPUSHed and set `queued`, `_count` and `_bytes` raised, and the list and the state given
+    `STEER_PRESEED_TTL_MS`. `preseedInbox` takes 1 to 16 entries, each validated as a push validates it and each
+    required to carry `hop >= 1` (a carried message is never a first one; one carried that turns late again is
+    answered, never carried a second time), dedups repeated ids in the batch, and answers `{ seeded: n }` (n new),
+    `{ error: "closed" | "full" }`, a refusal, or `{ error: <code> }`. Worker only: no surface takes a message for a
+    run that is not live through it.
   - `RESET` (the relay's `start`, `resetClosedInbox`, review round 1; KEYS list, state, fallback, closed): when the
     closed key exists, DELs all four and returns 1, else returns 0 and touches nothing. It runs BEFORE `registerLive`,
     so no push can be accepted into the old run's keys. It exists for a run that reuses a run id whose run already
@@ -8971,8 +9036,9 @@ and console changes and are exercised by tests only.
   breaks the transcript (a symlink swapped in at `/session/current.jsonl` makes the tail refuse the file) can no
   longer make delivered messages settle as `late`.
 - **Who writes what.** The open key, the target member and the inbox's hour: the relay of an armed attempt alone,
-  from the container's start until it stops. The entries: the senders, through `PUSH`. The states: `PUSH`
-  (`queued`), the relay (`written`; `delivered` off a verified transcript ack, a verified prior line or a verified exit
+  from the container's start until it stops, when it holds the open key and the member for 15 minutes (`HOLD`). The entries: the senders, through `PUSH`, and the settle step, through
+  `PRESEED`, into a resumed job's inbox. The fallback hash: the receiver (`storeFallback`). The states: `PUSH` and
+  `PRESEED` (`queued`), the relay (`written`; `delivered` off a verified transcript ack, a verified prior line or a verified exit
   line's id; `late` for an unframable entry; `written` again at a re-baseline), `WITHDRAW` (`withdrawn`) and `CLOSE`
   (`late`). `RESET` deletes a closed inbox's keys at a new run's start. Nothing in the container touches Valkey.
 - **The record.** At the final outcome the settle step counts the closed states into the record's `steered:
@@ -8988,19 +9054,51 @@ and console changes and are exercised by tests only.
   transient, TTL-bounded keys of a live run, not durable configuration. Delete the whole `run:steer:*` and
   `run:inbox:*` keyspace while the fleet runs and every job behaves as before; the casualties are the messages in
   flight, and a sender is told (`gone`, or `late` at its next read). Why the target pointer is not a session index is
-  `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`.
+  `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`. The steered marker (`steer:steered:*`) is the one key here that
+  outlives a run: it is the delivery-GUID shield's stand-in for a comment that was never enqueued, the same class and
+  the same 31-day retention as the BullMQ job hash that shield rests on (`REQ-DEDUP-BY-DELIVERY-GUID`), holding
+  nothing but `1`. Deleting it loses exactly that shield: a later redelivery of a steered comment would start a job.
+- **The receiver's answer** (part 2). A webhook delivery whose comment at least one live run took (`ok` or `dup`)
+  is answered `202 {"status":"steered","runs":<n>}`, n the runs that took it, and nothing is enqueued; after such a
+  steer the receiver sets the steered marker (after the push, never before). One no run took, after a successful
+  live-run lookup, is checked against the marker: present (a redelivery of a delivery steered before, whose run has
+  ended), it is answered `202 {"status":"steered","runs":0}` and never enqueued (review round 1). Otherwise it is
+  enqueued and answered exactly as before (`202` queued or deduplicated, `503` on an enqueue fault); a lookup fault,
+  or a fanout in which every store or push errored, falls through without the marker check. The poller has no answer
+  to give: a marked redelivery is neither enqueued nor counted, and its `poll_cycle` line gains `steered: <n>` only
+  in a cycle where a comment steered. The target key's repo is the job's own spelling, for the poller its
+  `POLL_REPOS` entry's, which is what the poller's runs registered under; a deployment serving one repository by
+  both webhook and poller with a differently cased entry keys the two apart (its comments fall through to ordinary
+  jobs), and the two transports see one comment under different delivery ids (the old residual: it can be handled
+  twice).
 - **Logs** carry the job id, message ids, step names, codes and counts, never a message's text: the relay's
   `steer_relay_fault {jobId, step, code}` (once per step and code), `steer_frame_refused {jobId, id}`,
   `steer_inbox_reset {jobId}` and `steer_inbox_closed {jobId}` (once); the ack
   consumer's `steer_ack_unverified {jobId, id?}` (once per attempt); the settle step's `steer_settled_late`,
-  `steer_settle_failed {jobId, code}` and `steer_late_forge_unanswered {count}`; the runner's `steer_delivered {id,
+  `steer_settle_failed {jobId, code}` and, unwired, `steer_late_forge_unanswered {count}`; the late branches'
+  `steer_late_resumed {jobId, runId, n, queue}`, `steer_late_replied {runId, n}`, `steer_late_fallback_unread
+  {runId, code}`, `steer_late_fallback_mismatch {runId}`, `steer_late_resume_failed {runId, queue, code}`,
+  `steer_late_preseed_failed {jobId, runId, code}` and `steer_late_failed {runId, code}`, and the window release's
+  `parked_window_released {jobId, released}` or `parked_window_release_failed {jobId, code}` (the park's names, the
+  same function); the receiver's and the poller's `steered {delivery, repo, target, mode, runs, runIds}`,
+  `steer_fell_through {delivery, kind, reason, runs?, outcomes?}` (reason `no-delivery-id`, `entry-refused`,
+  `no-target`, `no-live-run`, or the one push outcome every run gave, `gone`, `closed` or `full`, else `mixed`),
+  `steer_comment_skipped {delivery, kind, reason}` (`no-body`, `malformed`, `empty`, `too-large`; renamed in review
+  round 1 so it no longer shares `runContainer`'s `steer_skipped`), `steer_lookup_failed {delivery, kind, reason}`
+  (`no-client` or a code), `steer_fallback_failed {delivery, kind, runId, reason}` (`full` at the cap),
+  `steer_partial {delivery, kind, runs, steered, outcomes}`, `steer_redelivered {delivery, kind, reason}` and
+  `steer_marker_failed {delivery, kind, op: "read" | "write", reason}`; the relay's `steer_relay_fault` gains the step
+  `hold`; the runner's `steer_delivered {id,
   mode, source}`, `steer_held_parked {pending}`, `steer_file_refused {id, reason}` and `steer_inbox_unreadable
   {code}`; `runContainer`'s `steer_skipped {container, reason}` and `steer_acks_unread {container}`.
 
 **Code evidence**: worker/src/steer-inbox.mjs (keys, scripts, caps, ids); worker/src/steer-framing.mjs
 (`frameSteerMessage`, `steerFileJson`, the file cap); worker/src/inbox-relay.mjs (`resetClosedInbox`, `makeInboxRelay`,
 `inboxFileName`, `steerTargetOf`); worker/src/steer-ack.mjs (`inboxAck`, `ackVerifies`, `makeSteerAck`);
-worker/src/inbox-settle.mjs (`settleInbox`, `isFinalOutcome`); worker/src/steer-cli.mjs (`runSteer`);
+worker/src/inbox-settle.mjs (`settleInbox`, `isFinalOutcome`, `makeLateForge`); worker/src/queue.mjs
+(`enqueueLateForgeJob`, `forgeJobOf`, `releaseSemanticWindow`); receiver/src/steer.mjs (`trySteer`, `steerAuthorOf`,
+`STEER_FANOUT_LIMIT`, `FORGE_GATE_ASSOCIATION`, `steeredMarkerKey`, `STEER_MARKER_TTL_S`); receiver/src/receiver.mjs (`steerOrEnqueue`); receiver/src/poller.mjs
+(`gate`); receiver/src/predicate.mjs (`steerModeOf`); worker/src/steer-cli.mjs (`runSteer`);
 worker/src/run-container.mjs (arming, the directory, `ackRunId: name`); image/runner/src/inbox.mjs (`createInbox`,
 `parseInboxEntry`, `inboxAck`, `assertSteerReady`).
 
@@ -9912,3 +10010,5 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-17 | Issue #645, part 2, review round 1. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the reason enum gains `recovery-unsafe-extensions` and `recovery-failed` (nine durable-run reasons, each with its outcome and comment), `recoverSkipped` gains `workspace-extensions`, `base-unprimed` also covers an unreadable extensions check, `recovery-host-lost` is described with the extended deadline, superseded with the settled-record check. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**: the counts now reach the record through the log sink's `close()` and `runContainer`'s `recovery` (present only when the block was there). **`INT-RECOVERY-JOB` CORRECTED**: the data strips `RECOVERY_STRIPPED_KEYS`; the pending member carries the host and the enqueue time; the deadline extends by `RECOVERY_EXTEND_MS` up to `RECOVERY_MAX_WAIT_MS`. **`INT-RUN-CHECKPOINT-POINTER` CORRECTED**: `recovery-failed` also removes it; the settled record is superseded's first test. **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED**: doctor's unnamed-fleet warning, and the extensions rule. **`INT-WORKSPACE-CHECKPOINT-STORE` UNCHANGED by this row, checked**: its transcript cap (`maxTranscriptBytes`, 256 MiB), chunked deadline-bound copy and pruning to two checkpoints were written by its author and agree with the code and with `DES-RUN-CHECKPOINT-PAIRED`. |
 | 2026-10-17 | Issue #646, part 1: steering, the operator path. **NEW `INT-STEER-INBOX-CONTRACT`**, written from `worker/src/steer-inbox.mjs`, `steer-framing.mjs`, `inbox-relay.mjs`, `steer-ack.mjs`, `inbox-settle.mjs`, `steer-cli.mjs` and `image/runner/src/inbox.mjs`: per RUN (`runIdOf`, through `sanitizeJobId`); the keys `run:steer:target:<hex32>` (ZSET scored `now + 30 s`, PEXPIRE 60 s), `run:steer:open:<runId>` (host, PX 30 s, the one authority), `run:inbox:<runId>` (LIST), `run:inbox:state:<runId>` (HASH with `_count` and `_bytes`), `run:inbox:fallback:<runId>`, `run:inbox:closed:<runId>`; the hour TTL and who renews it; the entry JSON and its source and author agreement; the ids (forge: sha256 of `forge\0` and the delivery GUID, 32 hex; operator: 16 random bytes); the caps (16 messages, 64 KiB, 8 KiB, refused never cut, withdrawn counted, the 16 KiB file measured at push); the scripts and their returns (PUSH `dup`, `closed`, `gone`, `full`, `ok` in that order of checks; WITHDRAW's prior; CLOSE's `[list, state]`; MARK's compare and set; the liveness MULTI); never throws; the file `<seq:06d>-<id>.json` (1-based list position), written `.<id>.tmp` 0444 and renamed after the mark, body `{"v":1,"id","mode","source","content"}`, the runner's refusals; the ack `HMAC-SHA256(exitKey, "pi-dispatch-inbox-ack\0" + runId + "\0" + id)` where the runner's runId is its `PI_JOB_ID`, the CONTAINER name, which the worker verifies against (`ackRunId: name`) under the same attempt's key; the record fields; the logs. **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**: a cross-reference to its sibling channel, and how the two differ (per run, no ack key, armed attempts only); nothing in it changes. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.steer` (every type, cron included, refused beside `run.command`, the image capability and the named arming skips, job level only when `true`, a skew row, model-callable behind the confirm), and the skew list's sentence gains it. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/inbox`, read only, beside the job directory, per attempt, why it is neither `/job` nor `/session`, and `PI_STEER`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the mount list gains `/inbox:ro` (relabelled where the rule holds); `PI_STEER` (only for an armed attempt, reserved, structural); the `steer` capability token and its evidence (two greps and the read-only mount check), eleven `CAPABILITY_GATES` rows, reason `job-image-steer-unsupported`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the two refusal rows (`2` / `steer-no-exit-key`, `2` / `steer-inbox-missing`) and the exit line's `steer: {delivered, pending}`, exit codes UNCHANGED, advisory, never recorded. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the conditional tail keys `steered` (`delivered`, `late`, `withdrawn`, counted at the final close, absent when the close failed or the outcome was not final) and `steerSkipped` (`venue-copies`, `no-exit-key`, `no-transcript`, `no-inbox`), and the reason enum gains `job-image-steer-unsupported` beside the already listed `steer-inbox-missing` and `steer-no-exit-key`. **`INT-LIVE-TRANSCRIPT-STREAM` AMENDED**: a delivered message appears as one `note` (`pi-dispatch-inbox: ` and the framed text, redacted and capped) through the existing custom-message rule, its `details` never; nothing queued, withdrawn or late appears. **`INT-WEBHOOK-PAYLOAD-SUBSET` UNCHANGED, checked**: nothing in this release reads a payload field, and the framing names a forge author only by the numeric id and association the subset already carries (no login). **`INT-SDK-SESSION-OPTIONS` UNCHANGED, checked**: the session is created with the same options; the inbox is one more inline extension factory in the existing `extensionFactories` list beside the await and progress tools, and adds no discovery path. **Code evidence**: worker/src/steer-inbox.mjs, worker/src/steer-framing.mjs, worker/src/inbox-relay.mjs, worker/src/steer-ack.mjs, worker/src/inbox-settle.mjs, worker/src/steer-cli.mjs, worker/src/run-container.mjs, worker/src/container-spec.mjs, worker/src/env-allowlist.mjs, worker/src/reserved-env.mjs, worker/src/redact-secrets.mjs, worker/src/image-preflight.mjs, worker/src/triggers.mjs, worker/src/triggers-file.mjs, worker/src/run-history.mjs, worker/src/live-transcript.mjs, image/runner/src/inbox.mjs, image/runner/src/config.mjs, image/runner/run-job.mjs, image/Dockerfile, image/verify-image.sh. |
 | 2026-10-17 | Issue #646, part 1, review round 1. **`INT-STEER-INBOX-CONTRACT` CORRECTED** to the code after the round: F6, the text is scrubbed by `scrubSteerText` (the console answer's scrub, then the Unicode tag block U+E0000 to U+E007F, U+200B to U+200D, U+2060 to U+2064, U+180E and U+FEFF removed, and U+FF40, U+02CB and U+1FEF folded to the ASCII backtick so the fence grows), no NFKC and why, an unpaired surrogate refused, the extra scrub kept off `scrubAnswerText`; F1, the `RESET` script (`resetClosedInbox`: only while `closed` exists, DEL of list, state, fallback and closed, run before `registerLive`; an open inbox kept; a failed reset never written into nor re-baselined, `steer_inbox_closed`); F5, a verified prior line marks a waiting message delivered at the baseline, and the residual named (a message delivered just before a crash can be delivered again by the recovery; unverified earlier lines deliberately not trusted); F3, the verified exit line's `deliveredIds` marked delivered after the transcript acks drain and before the relay stops; F2, the failed listener's terminal branch closes the inbox; who writes the states and the logs updated. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**: the exit line's `steer` gains `deliveredIds` (at most 16 32-hex ids in delivery order, dropped whole when malformed), which ARE acted on off a signed line, while `runContainer`'s result keeps `{ delivered, pending }`; the earlier "no decision reads it" now covers the counts only. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the runner's block is still not recorded, its ids only move inbox states before the close; F2's settle from the failed listener. **`INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-TRANSCRIPT-STREAM` and `INT-CANCEL-CHANNEL-CONTRACT` UNCHANGED by this row, checked.** **Code evidence**: worker/src/steer-inbox.mjs (`scrubSteerText`, `boundSteerText`), worker/src/inbox-relay.mjs, worker/src/steer-ack.mjs, worker/src/run-container.mjs, worker/src/run-history.mjs (`steerCounts`, `STEER_DELIVERED_IDS_MAX`), worker/src/start.mjs, image/runner/src/inbox.mjs (`counts`). |
+| 2026-10-17 | Issue #646, part 2: forge comments. **`INT-STEER-INBOX-CONTRACT` AMENDED**, from `receiver/src/steer.mjs`, `receiver/src/receiver.mjs`, `receiver/src/poller.mjs`, `worker/src/steer-inbox.mjs`, `steer-framing.mjs`, `inbox-settle.mjs` and `queue.mjs`: the receiver is the second sender (and the relay's `steerTargetOf` is exported as `@edgehero/pi-dispatch/inbox-relay` for it); a forge author id may be an Azure DevOps GUID or `azid-` digest (`FORGE_USER_RE`), kept as a string, and the association is the GitHub comment's or the fixed `WRITE_ACCESS` elsewhere; an entry the framing could not frame is refused at normalisation; the fallback hash's shape (the filter's job without `steerMode`, plus `kind` and `jobId`, stored before the push, rebuilt through `enqueueForgeJob`'s field list); the new `PRESEED` script (`preseedInbox`, a not-yet-started run, no open-key check, all or nothing at the caps, `hop >= 1` required, `STEER_PRESEED_TTL_MS` 24 h); the receiver's `202 {status:"steered", runs}` and the poller's `steered` count; the receiver's and the late branches' log lines. Everything else UNCHANGED, checked. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the `run.steer` bullet: a phrase comment is now a sender when the comment trigger sets `run.steer` too, the filters no longer only carry the field, and the version-skew line gains part 2's mixed-release behaviour (no new field or skew row). **`INT-WEBHOOK-PAYLOAD-SUBSET` UNCHANGED, checked**: no field is added (no login: the forge author is framed by id and association only); **`INT-AZURE-PAYLOAD-SUBSET` UNCHANGED, checked**: the `azid-` sender id was already derived by the filter and is only accepted further down. |
+| 2026-10-17 | Issue #646, part 2, review round 1. **`INT-STEER-INBOX-CONTRACT` CORRECTED** to the code after the round: a new key `steer:steered:<deliveryJobId>` (EX 31 days, NX, set by the receiver after a successful push) and the receiver's answer to a marked redelivery, `202 {status:"steered", runs:0}`, never enqueued (the poller neither enqueues nor counts it), with the two fall-throughs that skip the check named; `CLOSE` returns `first` and `closeInbox` answers it (a second close only counts); the new `HOLD` script (`holdLive`, the relay's stop: the open key and the target member kept for `STEER_HOLD_TTL_MS` 15 min, never when closed, the target TTL only raised) with its residual (another run's 60 s refresh can expire a held member early), `unregisterLive` no longer the relay's exit; the TTL bullet follows; the fallback store is a script capped at `STEER_MAX_FALLBACKS` 32 (a redelivered id overwrites, a 33rd new id is `full`); the `POLL_REPOS` spelling and the webhook-and-poller delivery ids; logs: `steer_skipped` renamed `steer_comment_skipped`, new `steer_redelivered`, `steer_marker_failed`, and the relay step `hold`; who writes the liveness keys and the OQ-008 bullet follow (the marker is the GUID shield's stand-in, not run state). Azure author ids (GUID or `azid-` and 16 hex, kept as strings) UNCHANGED, checked. |
