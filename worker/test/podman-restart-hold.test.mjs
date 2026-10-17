@@ -151,3 +151,34 @@ test("an operator's cancel ends a job podman.service's hold would delay, before 
 	await assert.rejects(() => harness().processor(shut.job, "tok", aborted("shutdown")), (err) => err.name === "DelayedError");
 	assert.equal(shut.moves.length, 1);
 });
+
+test("a recovery that waits for its base is delayed by its own wait, without an attempt, and records nothing (#645)", { skip }, async () => {
+	const { RecoveryWaitHold } = await import("../src/processor.mjs");
+	const { job, moves } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t" });
+	const seen = { containerCalls: 0, records: [], logs: [], comments: [] };
+	// The wait comes from runJob's own recovery gate; any stage that throws it reaches the same catch, so the preparer
+	// stands in for it here (processor-durable.test.mjs pins where runJob throws it).
+	const held = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis: { incr: async () => 1, decr: async () => 0, expire: async () => {} },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		now: () => NOW,
+		recordRun: (r) => seen.records.push(r),
+		timeoutMs: 100000,
+		deps: {
+			observationPreflight: async () => ({ ok: true }),
+			prepareWorkspace: async () => {
+				throw new RecoveryWaitHold("the run this recovery continues is still running on this host", { reason: "container-never-started", budgetReserved: false, waitMs: 30_000 });
+			},
+			runContainer: async () => (seen.containerCalls++, { code: 0, aborted: false, turns: 1 }),
+			cleanup: async () => {},
+			comment: async (_job, text) => void seen.comments.push(text),
+			log: (event, fields) => seen.logs.push({ event, ...fields }),
+		},
+	});
+	await assert.rejects(() => held(job, "tok", new AbortController().signal), (err) => err.name === "DelayedError");
+	assert.deepEqual(moves, [{ ts: NOW + 30_000, tok: "tok" }]);
+	assert.deepEqual([seen.containerCalls, seen.records.length], [0, 0], "nothing started, nothing recorded per wait");
+	assert.deepEqual(seen.logs.filter((l) => l.event === "recovery_wait_hold").map((l) => l.delayMs), [30_000]);
+});

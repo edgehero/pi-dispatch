@@ -643,3 +643,43 @@ test("a status comment post slower than the final write still lands its id, so t
 	assert.equal(posts.length, 1, "one post across both attempts");
 	assert.ok(edits.length >= 1 && edits.every(([id]) => id === "c-9"), "the retry edits the first comment");
 });
+
+// Issue #645: a recovered run's runner answers the crashed attempt's orphaned calls with marked synthetic results.
+const recovered = (id, mark, name = "bash") => ({ type: "message", message: { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: "x" }], isError: mark !== "replayed", details: { piDispatchRecovery: mark } } });
+
+test("recovery marks: interrupted and not-started count as interrupted, replayed as replayed, none as a step (#645)", () => {
+	const p = makeProgress({ now: clock() });
+	// The crashed attempt's calls are prior lines: they opened no step in this attempt.
+	p.consume(asst(call("a", "bash"), call("b", "edit"), call("c", "read")), T0, { prior: true });
+	p.consume(recovered("a", "interrupted"), T0 + 1);
+	p.consume(recovered("b", "not-started", "edit"), T0 + 2);
+	p.consume(recovered("c", "replayed", "read"), T0 + 3);
+	const s = p.snapshot();
+	assert.deepEqual([s.steps, s.failed, s.interrupted, s.replayed], [0, 0, 2, 1]);
+	assert.deepEqual(s.recent.map((r) => [r.tool, r.status]), [["bash", "interrupted"], ["edit", "interrupted"]]);
+	assert.equal(p.stats().anomalies, 0, "a marked result is not an unknown one");
+	assert.deepEqual(p.summary(), { interrupted: 2, replayed: 1 });
+	const rec = buildRecord({ job: { id: "j", data: {} }, result: { outcome: "completed", progress: p.summary() } });
+	assert.deepEqual(rec.progress, { interrupted: 2, replayed: 1 });
+});
+
+test("a marked result closes a step still open under its id without counting a step; an unknown mark is an ordinary result (#645)", () => {
+	const p = makeProgress({ now: clock() });
+	p.consume(asst(call("a", "bash"), call("b", "bash")), T0);
+	p.consume(recovered("a", "interrupted"), T0 + 5);
+	const forged = result("b", "bash", { durationMs: 3 });
+	forged.message.details = { piDispatchRecovery: "invented" };
+	p.consume(forged, T0 + 6);
+	const s = p.snapshot();
+	assert.deepEqual([s.steps, s.interrupted, s.running.length], [1, 1, 0]);
+	assert.equal(Object.hasOwn(s, "replayed"), false, "no replayed key unless something was replayed: the key's field set is unchanged");
+	const f = p.finalSnapshot("completed");
+	assert.equal(f.interrupted, 1, "nothing left open to interrupt again");
+});
+
+test("on a replay pass, a marked result for a call not open counts nothing (#645)", () => {
+	const p = makeProgress({ now: clock() });
+	p.consume(recovered("z", "replayed"), T0, { replay: true });
+	p.consume(recovered("y", "interrupted"), T0, { replay: true });
+	assert.deepEqual([p.snapshot().interrupted, p.snapshot().replayed ?? 0], [0, 0]);
+});

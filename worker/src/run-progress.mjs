@@ -103,6 +103,16 @@ function bounded(promise, ms) {
 	]).finally(() => clearTimeout(timer));
 }
 
+/** The marks a recovered run's runner puts on the results it synthesises for orphaned calls (issue #645). */
+export const RECOVERY_MARKS = Object.freeze(["replayed", "interrupted", "not-started"]);
+
+/** A toolResult's `details.piDispatchRecovery` when it is one of RECOVERY_MARKS, else null. */
+function recoveryMarkOf(message) {
+	const d = message?.details;
+	if (d === null || typeof d !== "object" || Array.isArray(d)) return null;
+	return RECOVERY_MARKS.includes(d.piDispatchRecovery) ? d.piDispatchRecovery : null;
+}
+
 /** The record's bucket for a tool name: the literal from the closed list it equals, else `other`. Never the input. */
 export function recordToolOf(name) {
 	for (const tool of PROGRESS_RECORD_TOOLS) if (name === tool) return tool;
@@ -144,6 +154,9 @@ export function makeProgress({ jobId: _jobId = null, phasesEnabled = false, reda
 	let steps = 0;
 	let failed = 0;
 	let interrupted = 0;
+	// Issue #645: orphaned tool calls a recovered run's runner answered by running them again (`piDispatchRecovery`
+	// "replayed"). Counted apart from `steps`: the call was made by the crashed attempt, and this attempt only closed it.
+	let replayed = 0;
 	let toolMs = 0;
 	let longestStepMs = 0;
 	let longestInterruptedMs = 0;
@@ -282,6 +295,9 @@ export function makeProgress({ jobId: _jobId = null, phasesEnabled = false, reda
 			updatedAt,
 			ended,
 			outcome,
+			// Only when a recovered run replayed something, so every other key keeps the field set INT-RUN-PROGRESS-KEY
+			// readers already accept (the admin's parser refuses a field it does not name).
+			...(replayed > 0 ? { replayed } : {}),
 		};
 	};
 
@@ -320,6 +336,26 @@ export function makeProgress({ jobId: _jobId = null, phasesEnabled = false, reda
 				touch();
 			} else if (message.role === "toolResult") {
 				const id = message.toolCallId;
+				// Issue #645: a recovered run's runner answers every tool call the crashed attempt left without a result, and
+				// marks the result `details.piDispatchRecovery`. Those calls were made BEFORE the crash, so they are prior lines
+				// and opened no step here: without this branch each such result would read as an anomaly and count nothing.
+				// "interrupted" (the call may have run, its outcome is unknown) and "not-started" (it never ran) both count as
+				// interrupted, the word this reducer already uses for a step whose result never came; "replayed" (run again)
+				// is its own count. The mark is read from an agent-writable file like everything here: advisory, never a
+				// decision. A step still open under the same id is closed by it, without counting a step.
+				const mark = recoveryMarkOf(message);
+				if (mark !== null) {
+					const step = isCallId(id) ? open.get(id) : undefined;
+					if (replay && step === undefined) return;
+					if (step !== undefined) open.delete(id);
+					if (mark === "replayed") replayed += 1;
+					else {
+						interrupted += 1;
+						pushRecent({ tool: step?.tool ?? displayTool(message.toolName), status: "interrupted", durationMs: null, at });
+					}
+					touch();
+					return;
+				}
 				if (!isCallId(id) || !open.has(id)) {
 					// Unknown, or a duplicate of a result already closed (a closed id is no longer open).
 					if (!replay) counts.anomalies += 1;
@@ -335,8 +371,8 @@ export function makeProgress({ jobId: _jobId = null, phasesEnabled = false, reda
 		snapshot,
 		finalSnapshot(result) {
 			if (!ended) {
-				// Every step still open is interrupted: the container is gone and its result will never come. #645's
-				// synthetic interrupted results are not specified yet, so until then such a result counts as an ordinary one.
+				// Every step still open is interrupted: the container is gone and its result will never come. A recovered run's
+				// synthetic result for such a call is counted when it arrives (`recoveryMarkOf` in `consume`).
 				const at = now();
 				for (const step of open.values()) {
 					interrupted += 1;
@@ -362,6 +398,7 @@ export function makeProgress({ jobId: _jobId = null, phasesEnabled = false, reda
 			put("steps", steps);
 			put("failed", failed);
 			put("interrupted", interrupted);
+			put("replayed", replayed);
 			put("toolMs", toolMs);
 			put("longestStepMs", longestStepMs);
 			put("longestInterruptedMs", longestInterruptedMs);

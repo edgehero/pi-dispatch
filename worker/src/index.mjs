@@ -23,6 +23,7 @@ import { governedDollars } from "./allocation.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { releaseSemanticWindow } from "./queue.mjs";
+import { runIdOf } from "./recovery-queue.mjs";
 
 
 export const QUEUE = "pi-jobs";
@@ -1340,11 +1341,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// promised: the run is recorded as that cancel (the existing path, "partial work may exist") even when the
 				// container happened to exit on its own, because the operator was told the record would say operator-cancel.
 				runContainer: (ctx) =>
-					// `jobId` (issue #643) names the live transcript stream, as it names the run record.
+					// `jobId` (issue #643) names the live transcript stream. Since issue #645 it is the RUN id (`runIdOf`): a recovery
+					// (`.rN`) continues its run's stream, progress key and status comment, while its record stays its own.
 					// Issue #644: `onLive` hands over the attempt's publisher finish, so giving up on a container whose stop did not
 					// take also ends its progress key (outcome `unknown`: nothing saw it exit) instead of leaving its heartbeat to
 					// rewrite the key as running for as long as the worker lives.
-					boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: job.id, onLive: (finish) => (finishLive = finish) }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
+					boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: runIdOf(job), onLive: (finish) => (finishLive = finish) }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
 						stopDidNotTake = true;
 						return finishLive?.("unknown");
 					}).then(async (r) => {
@@ -1402,6 +1404,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// this one no options today, so there is nothing to lose yet -- and the day it does, a
 				// replacing wrapper would lose it in the same silence.
 				...(deps.checkOnceSpent ? { checkOnceSpent: (j, opts) => deps.checkOnceSpent(j, { ...opts, queueJobId: job.id }) } : {}),
+				// Issue #645: a recovery is enqueued from the REAL BullMQ job (its `.id` is the run id of an original, its `.name`
+				// the add's name, its `.data` what the recovery copies), which only this scope holds; runJob's effectiveJob has
+				// none of them. Bound like collectChain above, and omitted when unwired so runJob keeps its inert default.
+				...(deps.enqueueRecovery ? { enqueueRecovery: (args) => deps.enqueueRecovery({ ...args, job }) } : {}),
+				// The jobs running on this host (`{ list() }`, ids and admission instants), so a recovery whose base job still runs
+				// HERE is delayed rather than started beside it. The processor's own ledger, unless a wiring hands one in.
+				runningJobs: deps.runningJobs ?? runningJobs,
 			});
 			// Gate round 4 of PR #479: stopped again as runJob returns, before anything is recorded (a result with no
 			// container never passed the exit stop above). A cancel that lands after is never acknowledged, and its
@@ -1503,6 +1512,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const expired = Object.assign(new UnrecoverableError(`held ${Math.round((heldAt - since) / 60_000)} min for rootful Podman's service to restart, and it did not: ${error.message}`), { reason: PODMAN_RESTART_HOLD_EXPIRED, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
 				recordAfterGate({ job, error: expired, startedAt, endedAt: new Date().toISOString() });
 				throw expired;
+			}
+			// Issue #645: a recovery job whose base attempt is still running on this host waits for it (`RecoveryWaitHold`, a
+			// never-started InfraRetry carrying `recoveryWaitMs`). A recovery job has ONE attempt, so a plain throw would fail
+			// it while the run is alive; the delay costs no attempt. It ends when the base settles, or at the run's recovery
+			// deadline, which the host-lost sweep enforces.
+			if (Number.isFinite(error?.recoveryWaitMs) && error.recoveryWaitMs > 0) {
+				deps?.log?.("recovery_wait_hold", { jobId: job.id, delayMs: error.recoveryWaitMs });
+				await job.moveToDelayed(now() + error.recoveryWaitMs, token);
+				throw new DelayedError();
 			}
 			// Issue #476: a job whose egress preflight found the rootless network keeper running on its own bridge but younger
 			// than the minimum age is HELD until it is old enough (one `moveToDelayed`, no attempt), the move the hold above

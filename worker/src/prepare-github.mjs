@@ -126,10 +126,18 @@ export async function prepareGithubWorkspace(
 		resolvePullRequestHead = null,
 		resolveSession = () => null,
 		piVersion = null,
+		// Issue #645, durable runs: `{ sha, from }` for a RECOVERY job. `sha` is the crashed attempt's base commit, off its
+		// validated checkpoint manifest, and `from` the checkpoint store's own `file://` URL (`baseSourceUrl`), which
+		// holds exactly that commit. The clone then fetches from the store: no default-branch resolve (the branch may have
+		// moved since, and the checkpoint is a diff against THIS commit, not the branch's tip), no network and no token.
+		// Null for every other job, which clones exactly as before.
+		pin = null,
 	} = {},
 ) {
-	// Fresh API resolve of the commit to clone at — never a webhook field, never the triggering branch.
-	const { sha } = await resolveDefaultBranchSha(job, token);
+	if (pin !== null && !validPin(pin)) throw new InfraRetry("prepare-github: the recovery pin is not a commit and a checkpoint store", { reason: "container-never-started" });
+	// Fresh API resolve of the commit to clone at: never a webhook field, never the triggering branch. A recovery job's
+	// commit is its checkpoint's base instead (above).
+	const { sha } = pin !== null ? { sha: pin.sha } : await resolveDefaultBranchSha(job, token);
 
 	const workspace = join(jobDir, "workspace");
 	mkdir(workspace, { recursive: true });
@@ -150,7 +158,21 @@ export async function prepareGithubWorkspace(
 			GIT_ASKPASS_TOKEN: token,
 		};
 
-		try {
+		if (pin !== null) {
+			// From the store, by sha (the store sets `uploadpack.allowAnySHA1InWant`). No `env`: the askpass variables are
+			// never handed to a fetch that needs no credential, so the token cannot reach the file transport or its
+			// error text. `protocol.file.allow=always` is scoped to this one command; `protocol.ext.allow=never` in the
+			// hardening flags still holds. A store that cannot hand over its own base is infrastructure, never `sha-gone`:
+			// the commit is gone from the STORE, not from the forge, and the forge's default branch is not consulted.
+			try {
+				await git(workspace, hardened(["-c", "protocol.file.allow=always", "fetch", "--depth=1", "--no-tags", "--no-recurse-submodules", pin.from, sha]));
+				await git(workspace, hardened(["checkout", "--detach", "FETCH_HEAD"]));
+			} catch (error) {
+				// `container-never-started`, literally true: the processor turns it into a recovery job's wait hold, since a
+				// recovery has no second attempt to retry with.
+				throw new InfraRetry("prepare-github: the checkpoint store's base commit could not be fetched", { cause: error, reason: "container-never-started" });
+			}
+		} else try {
 			await git(
 				workspace,
 				hardened(["fetch", "--depth=1", "--no-tags", "--no-recurse-submodules", "origin", sha]),
@@ -187,7 +209,12 @@ export async function prepareGithubWorkspace(
 				resolved = {};
 			}
 		}
-		const session = job.resume === true ? resolveSession(job, { jobDir, resolved, piVersion }) : null;
+		// A recovery job resolves NO session from the store: its transcript is the checkpoint's, which the processor stages
+		// after the restore (session-store.mjs `stageRecovered`). Resolving here would stage the canonical transcript, the
+		// one from before the crashed run, under the same path. The PR head above is still resolved, and handed back as
+		// `recoveryResolved`, so the staged checkpoint transcript gets the same key and is promoted on completion as a
+		// resume job's would be.
+		const session = job.resume === true && pin === null ? resolveSession(job, { jobDir, resolved, piVersion }) : null;
 
 		// Issue text is DATA: it enters the USER prompt (buildGithubPrompt), never a system prompt.
 		//
@@ -244,11 +271,16 @@ export async function prepareGithubWorkspace(
 		};
 		writeFile(join(jobDir, "event.json"), JSON.stringify(subset, null, 2), { mode: 0o444 });
 
-		return { workspace, jobDir, sha, materialised, ...(session ? { session } : {}) };
+		return { workspace, jobDir, sha, materialised, ...(session ? { session } : {}), ...(pin !== null ? { recoveryResolved: resolved } : {}) };
 	} finally {
 		// The askpass machinery must not outlive the prepare, and must never be agent-reachable.
 		rmSync(askpass.dir, { recursive: true, force: true });
 	}
+}
+
+/** A recovery pin: a full commit id and the checkpoint store's `file://` URL, nothing else (never a forge URL). */
+function validPin(pin) {
+	return pin !== null && typeof pin === "object" && typeof pin.sha === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pin.sha) && typeof pin.from === "string" && pin.from.startsWith("file://");
 }
 
 /**

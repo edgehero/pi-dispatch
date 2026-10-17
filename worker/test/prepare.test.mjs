@@ -715,3 +715,19 @@ test("the portfolio snapshot builder is handed to prepareLocal only for a confir
 		cleanup();
 	}
 });
+
+// Issue #645: the dispatcher hands a recovery pin to the forge preparer, and nothing to one that has none.
+test("a recovery pin reaches the forge preparer; a job without one calls it exactly as before", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const seen = [];
+		const prepareWorkspace = makePrepareWorkspace({ jobsDir, forgeFor: () => ({ host: {} }), preparers: { github: async (_j, _t, opts) => (seen.push(opts), { outcome: "ok" }) }, stageLive: null });
+		const pin = { sha: "c".repeat(40), from: "file:///s/repo.git" };
+		await prepareWorkspace({ kind: "github", repo: "o/n" }, "tok", { pin });
+		await prepareWorkspace({ kind: "github", repo: "o/n" }, "tok");
+		assert.deepEqual(seen[0].pin, pin);
+		assert.equal(Object.hasOwn(seen[1], "pin"), false);
+	} finally {
+		cleanup();
+	}
+});

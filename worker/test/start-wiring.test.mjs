@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, readProgressKey } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, readProgressKey, durable = {} } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -287,6 +287,9 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(makeLiveTranscriptOpener ? { makeLiveTranscriptOpener } : {}),
 			...(makeStatusCommenter ? { makeStatusCommenter } : {}),
 			...(readProgressKey ? { readProgressKey } : {}),
+			// Issue #645: the durable-run seams (makeWorkspaceCheckpointer, loadRunCheckpoint, makeRunBudgetLedger,
+			// makeRecoveryEnqueuer, sweepOrphanJobDirs), handed through whole.
+			...durable,
 			...(listRunningSandboxes ? { listRunningSandboxes } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(loadConfig ? { loadConfig } : {}),
@@ -2527,7 +2530,8 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	assert.equal(constructions[0].intervalMs, 24 * 3600000, "24h by default, in ms");
 	// The allocation audit files (issue #504 part B) second: boot reaps them right after the logs, and a tick re-runs that
 	// same closure in the same place.
-	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "sandbox", "session"], "boot's own order");
+	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
+	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "sandbox", "session", "recovery_host_lost"], "boot's own order");
 	assert.equal(captured.extraClosers.length, 3, "runtimeQueue + registry + the sweep (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
@@ -5120,4 +5124,350 @@ test("statusTextMayMatch: a phrase the status comment could contain is caught, n
 	for (const phrase of ["@pi", "/pi fix", "please fix", "Pi-Dispatch", ""]) assert.equal(statusTextMayMatch(phrase, "abc-7"), false, JSON.stringify(phrase));
 	assert.equal(statusTextMayMatch(undefined, "abc-7"), false);
 	assert.equal(statusTextMayMatch("my-job-id", "my-job-id"), true, "the job id is in the text");
+});
+
+// --- issue #645: durable runs ---------------------------------------------------------------------------------------
+
+/** A clock for the durable-run tests: every window here (the recovery deadline, the orphan age) is judged on it. */
+const DURABLE_NOW = Date.parse("2026-10-17T10:00:00.000Z");
+
+/** Enough turns of the loop for the stall listener's chain: the record lookup, the pointer read, the enqueue, the record. */
+async function settleDurable() {
+	for (let i = 0; i < 40; i++) await new Promise((r) => setImmediate(r));
+}
+
+/**
+ * The run-checkpoint module and the enqueuer as doubles: what the boot hands each is recorded, the pointer read answers
+ * `pointer`, and the enqueue answers `enqueue(args)` (enqueued, by default).
+ */
+function durableDoubles({ pointer = null, enqueue = null } = {}) {
+	const t = { opened: [], checkpointerArgs: [], pointerReads: [], enqueuerArgs: [], enqueued: [] };
+	t.runCheckpointer = { open: (args) => (t.opened.push(args), { consume() {}, exit: async () => ({ skipped: "test" }), close: async () => ({ written: 0, failed: 0, skipped: 0, lastSeq: null }) }) };
+	t.durable = {
+		loadRunCheckpoint: async () => ({
+			makeRunCheckpointer: (args) => (t.checkpointerArgs.push(args), t.runCheckpointer),
+			readCheckpointPointer: async ({ runId }) => (t.pointerReads.push(runId), pointer),
+		}),
+		makeRecoveryEnqueuer: (args) => {
+			t.enqueuerArgs.push(args);
+			return async (a) => (t.enqueued.push(a), enqueue ? enqueue(a) : { enqueued: true, jobId: `${a.job.id}.r1`, n: 1, queue: "pi-jobs" });
+		},
+	};
+	return t;
+}
+
+const ARMED_DATA = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, flow: "fix", recover: true };
+const stalledArmed = (id, over = {}) => ({ id, name: "github", data: ARMED_DATA, opts: { attempts: 2 }, attemptsMade: 1, finishedOn: 9, timestamp: DURABLE_NOW - 60_000, processedOn: DURABLE_NOW - 30_000, ...over });
+const FAILED_SENTENCE = "Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log.";
+
+test("issue #645: with a store, the boot builds every durable dep and hands it to the processor and the opener", { skip }, async () => {
+	const store = tempDir("pi-ckpt-store-");
+	const t = durableDoubles({ pointer: { v: 1, host: "h" } });
+	const openers = [];
+	const { captured, deps, logs } = await runStart({
+		// Both switches off: the checkpointer alone still builds the opener, since it reads the same file.
+		env: { PI_CHECKPOINTS_DIR: store, PI_LIVE_TRANSCRIPTS: "0", PI_RUN_PROGRESS: "0" },
+		makeLiveTranscriptOpener: (args) => (openers.push(args), () => ({ start() {}, finish: async () => {} })),
+		durable: t.durable,
+	});
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.equal(typeof deps.workspaceCheckpointer?.snapshot, "function", "the real workspace checkpointer, over the store");
+	assert.equal(deps.runCheckpointer, t.runCheckpointer, "the run checkpointer the module built");
+	assert.equal(t.checkpointerArgs.length, 1, "one per worker process: its semaphore is the host-wide bound");
+	const ck = t.checkpointerArgs[0];
+	assert.equal(ck.checkpointer, deps.workspaceCheckpointer, "over the same store the processor restores from");
+	assert.equal(ck.redis, captured.redis, "the pointer goes through the shared client");
+	assert.equal(ck.hostName, started.host, "the host the manifest and the pointer name is this worker's");
+	assert.equal(ck.hostQueue, null, "no declared name, no host queue: a recovery goes to the shared queue");
+	assert.equal(typeof deps.runBudgetLedger?.claimSlot, "function", "the per-run ledger");
+	assert.deepEqual(await deps.readCheckpointPointer({ runId: "gh-1" }), { v: 1, host: "h" });
+	assert.deepEqual(t.pointerReads, ["gh-1"]);
+	assert.equal(t.enqueuerArgs.length, 1);
+	assert.equal(t.enqueuerArgs[0].redis, captured.redis);
+	assert.equal(t.enqueuerArgs[0].queues.shared(), captured.extraClosers[0], "the shared queue is the runtime queue handle");
+	assert.equal(typeof t.enqueuerArgs[0].hostQueueName, "function");
+	assert.equal(typeof deps.enqueueRecovery, "function");
+	await deps.enqueueRecovery({ job: { id: "gh-1", data: ARMED_DATA }, cause: "infra", pointer: {} });
+	assert.equal(t.enqueued.length, 1, "the processor's enqueue IS the enqueuer the boot built");
+	assert.equal(typeof deps.salvageCheckpoint, "function");
+	assert.equal(deps.hostName, started.host);
+	assert.equal(openers.length, 1, "built with both switches off");
+	assert.equal(openers[0].transcripts, false);
+	assert.equal(openers[0].progress, false);
+	assert.equal(typeof openers[0].checkpoint, "function", "the opener gets the checkpoint factory");
+	openers[0].checkpoint({ runId: "gh-1", attempt: 1 });
+	assert.deepEqual(t.opened, [{ runId: "gh-1", attempt: 1 }], "which opens the run checkpointer per attempt");
+	assert.equal(started.checkpointsDir, store, "doctor-visible: where checkpoints go");
+	assert.equal(started.durableRuns, true);
+	assert.deepEqual(logs.find((l) => l.event === "durable_runs"), { event: "durable_runs", checkpointsDir: store, checkpointer: true, pointerReads: true, host: started.host });
+
+	// Without a store: nothing pretends to checkpoint; the pointer read and the enqueue still exist (a stall is noticed on
+	// any host), and the opener is exactly what it was.
+	const plain = durableDoubles();
+	const openers2 = [];
+	const off = await runStart({ makeLiveTranscriptOpener: (args) => (openers2.push(args), () => ({ start() {}, finish: async () => {} })), durable: plain.durable });
+	assert.equal(off.deps.workspaceCheckpointer, null);
+	assert.equal(off.deps.runCheckpointer, null);
+	assert.equal(plain.checkpointerArgs.length, 0);
+	assert.equal(typeof off.deps.enqueueRecovery, "function");
+	assert.equal("checkpoint" in openers2[0], false);
+	assert.equal(off.logs.find((l) => l.event === "worker_started").durableRuns, false);
+});
+
+test("issue #645: a run-checkpoint module that cannot load is said at boot, and every armed job keeps today's path", { skip }, async () => {
+	const { deps, logs } = await runStart({ env: { PI_CHECKPOINTS_DIR: tempDir("pi-ckpt-store-") }, durable: { loadRunCheckpoint: async () => { throw new Error("Cannot find module './run-checkpoint.mjs'"); } } });
+	assert.ok(logs.some((l) => l.event === "run_checkpoint_unavailable"));
+	assert.equal(deps.runCheckpointer, null);
+	assert.equal(await deps.readCheckpointPointer({ runId: "gh-1" }), null);
+});
+
+async function durableStallBoot(t) {
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const out = await runStartWithRecords({
+		env: { PI_LOGS_DIR: tempDir("pi-stall-"), PI_ON_FAILURE: "/nope/pi-notify-does-not-exist" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => host,
+		now: () => DURABLE_NOW,
+		durable: t.durable,
+	});
+	const drive = async (job, err) => {
+		const from = bootLines.length;
+		out.handlers.failed(job, err);
+		await settleDurable();
+		return parseLines(bootLines.slice(from));
+	};
+	return { ...out, posted, drive };
+}
+
+test("issue #645: a terminal stall of an armed job with a pointer enqueues its recovery, records the crash, and comments and pages nothing", { skip }, async () => {
+	const pointer = { v: 1, host: "h1", hostQueue: null, seq: 2, attempt: 1, at: DURABLE_NOW, jobDir: "job-ab12cd" };
+	const t = durableDoubles({ pointer });
+	const { drive, posted, records } = await durableStallBoot(t);
+	const lines = await drive(stalledArmed("gh-s1"), await stalledError());
+	assert.deepEqual(t.pointerReads, ["gh-s1"]);
+	assert.equal(t.enqueued.length, 1);
+	assert.equal(t.enqueued[0].cause, "stall");
+	assert.equal(t.enqueued[0].job.id, "gh-s1", "the real queue job, whose data the recovery copies");
+	assert.equal(t.enqueued[0].pointer, pointer);
+	assert.deepEqual(posted, [], "the run is continuing: no failure comment");
+	assert.ok(!lines.some((l) => l.event === "on_failure"), "and no page");
+	assert.equal(records.length, 1, "the crashed attempt's record, which its dead processor never wrote");
+	assert.equal(records[0].jobId, "gh-s1");
+	assert.equal(records[0].outcome, "failed");
+	assert.equal(records[0].reason, "recovery-enqueued");
+	assert.equal(records[0].attempt, 1, "the attempt that crashed, not one past it");
+	assert.equal(records[0].startedAt, new Date(DURABLE_NOW - 30_000).toISOString());
+	assert.deepEqual(lines.filter((l) => l.event === "job_failed").map((l) => [l.jobId, l.reason]), [["gh-s1", "recovery-enqueued"]], "one terminal line, saying why");
+
+	// A recovery's own stall goes through the same path, keyed by its RUN.
+	t.enqueued.length = 0;
+	t.pointerReads.length = 0;
+	await drive(stalledArmed("gh-s1.r1", { data: { ...ARMED_DATA, recoveryOf: "gh-s1", recovery: 1 } }), await stalledError());
+	assert.deepEqual(t.pointerReads, ["gh-s1"], "the pointer is the run's");
+	assert.equal(t.enqueued.length, 1);
+});
+
+test("issue #645: no pointer, an unarmed job, or a recovery that was not enqueued keeps today's failure comment and page", { skip }, async () => {
+	const none = durableDoubles({ pointer: null });
+	const a = await durableStallBoot(none);
+	const lines = await a.drive(stalledArmed("gh-n1"), await stalledError());
+	assert.deepEqual(a.posted, [FAILED_SENTENCE]);
+	assert.equal(lines.filter((l) => l.event === "on_failure").length, 1);
+	assert.deepEqual(lines.find((l) => l.event === "job_recovery_skipped"), { event: "job_recovery_skipped", jobId: "gh-n1", reason: "no-checkpoint", host: lines.find((l) => l.event === "job_recovery_skipped").host });
+	assert.equal(none.enqueued.length, 0);
+	assert.equal(a.records.length, 0, "no recovery record: the job_failed line and the comment are today's");
+
+	// Unarmed: the pointer is never even read.
+	a.posted.length = 0;
+	await a.drive(stalledArmed("gh-n2", { data: { ...ARMED_DATA, recover: undefined } }), await stalledError());
+	assert.deepEqual(none.pointerReads, ["gh-n1"]);
+	assert.deepEqual(a.posted, [FAILED_SENTENCE]);
+
+	// A pointer, but the enqueue says no (the cap, a Valkey fault): today's path, loudly.
+	const refused = durableDoubles({ pointer: { v: 1, host: "h1" }, enqueue: async () => ({ enqueued: false, reason: "enqueue-failed" }) });
+	const b = await durableStallBoot(refused);
+	const bl = await b.drive(stalledArmed("gh-n3"), await stalledError());
+	assert.equal(refused.enqueued.length, 1);
+	assert.deepEqual(b.posted, [FAILED_SENTENCE]);
+	assert.equal(bl.filter((l) => l.event === "on_failure").length, 1);
+	assert.equal(b.records.length, 0);
+
+	// An enqueue that throws (it must not, and if it does the run is still not dropped in silence).
+	const throwing = durableDoubles({ pointer: { v: 1, host: "h1" }, enqueue: async () => { throw new Error("boom"); } });
+	const c = await durableStallBoot(throwing);
+	const cl = await c.drive(stalledArmed("gh-n4"), await stalledError());
+	assert.deepEqual(c.posted, [FAILED_SENTENCE]);
+	assert.ok(cl.some((l) => l.event === "job_recovery_enqueue_failed"));
+
+	// A failure that is not a stall never asks: the processor owns that path.
+	const d = durableDoubles({ pointer: { v: 1, host: "h1" } });
+	const e = await durableStallBoot(d);
+	await e.drive(stalledArmed("gh-n5"), new Error("boom"));
+	assert.equal(d.pointerReads.length, 0);
+	assert.deepEqual(e.posted, [FAILED_SENTENCE]);
+});
+
+test("issue #645: the host-lost sweep is built over the recovery queues and the shared client, runs as a reaper, and tells a lost run", { skip }, async () => {
+	// The sweep's own decisions (the deadline on an injected clock, the ZREM claim, waiting vs started) are driven against a
+	// real queue in recovery-queue.test.mjs; here, what the boot hands it and what its `onLost` does. The harness closes the
+	// boot's clients when the boot returns, so the factory is a seam rather than a live sweep.
+	const posted = [];
+	const built = [];
+	let swept = 0;
+	let handed = null;
+	const out = await runStartWithRecords({
+		env: { PI_ON_FAILURE: "/nope/pi-notify-does-not-exist" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) }),
+		now: () => DURABLE_NOW,
+		makeRetentionSweep: (args) => ((handed = args), { start() {}, sweepOnce: async () => {}, close: async () => {} }),
+		durable: { makeHostLostSweep: (args) => (built.push(args), async () => (swept++, { claimed: 0, removed: 0, settled: 0 })) },
+	});
+	assert.equal(built.length, 1);
+	assert.equal(built[0].redis, out.captured.redis);
+	assert.equal(built[0].queues.shared(), out.captured.extraClosers[0], "routed through the same queue handles the enqueue uses");
+	assert.equal(built[0].now(), DURABLE_NOW, "on the boot's clock");
+	// The registry read that tells a delayed recovery from a lost one. The harness has closed the boot's client by now, so
+	// the read cannot be answered: null, which extends a deadline, never an empty fleet, which would fail the run.
+	assert.equal(typeof built[0].liveHosts, "function");
+	assert.equal(await built[0].liveHosts(), null);
+	await settleDurable();
+	assert.equal(swept, 1, "run once at boot");
+	await handed.reapers.find((r) => r.name === "recovery_host_lost").reap();
+	assert.equal(swept, 2, "and on every retention tick");
+	const id = "gh-hl.r1";
+	const from = bootLines.length;
+	await built[0].onLost({ id, name: "github", data: { ...ARMED_DATA, recoveryOf: "gh-hl", recovery: 1 }, opts: { attempts: 1 }, timestamp: DURABLE_NOW - 1 });
+	await settleDurable();
+	const lines = parseLines(bootLines.slice(from));
+	assert.equal(posted.length, 1);
+	assert.match(posted[0], /^Failed: this run stopped on a worker that has not come back/);
+	assert.deepEqual(lines.filter((l) => l.event === "on_failure").map((l) => l.jobId), [id], "the operator is paged");
+	assert.deepEqual(out.records.map((r) => [r.jobId, r.outcome, r.reason, r.endedAt]), [[id, "failed", "recovery-host-lost", new Date(DURABLE_NOW).toISOString()]], "and the history says the run ended");
+});
+
+test("issue #645: the boot sweeps orphaned job dirs older than the job timeout, keeps what a pointer of this host names, and salvage takes that one", { skip }, async () => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const { checkpointPointerKey } = await import("../src/run-checkpoint.mjs");
+	const name = `rqsv-${process.pid}`;
+	const jobsDir = tempDir("pi-jobs-orphans-");
+	const outside = tempDir("pi-jobs-outside-");
+	writeFileSync(join(outside, "keep.txt"), "mine");
+	const mk = (dir, ageMs) => {
+		mkdirSync(join(jobsDir, dir, "workspace"), { recursive: true });
+		mkdirSync(join(jobsDir, dir, "session"), { recursive: true });
+		writeFileSync(join(jobsDir, dir, "session", "current.jsonl"), "{\"a\":1}\n");
+		const at = new Date(DURABLE_NOW - ageMs);
+		utimesSync(join(jobsDir, dir), at, at);
+	};
+	mk("job-old001", 2 * 3600 * 1000);
+	mk("job-young1", 60 * 1000);
+	mk("job-point1", 2 * 3600 * 1000);
+	symlinkSync(outside, join(jobsDir, "job-link01"));
+	const redis = makeRedisClient(VALKEY_URL);
+	redis.on("error", () => {});
+	const runId = `gh-salv-${process.pid}`;
+	await redis.set(checkpointPointerKey(runId), JSON.stringify({ v: 1, host: name, hostQueue: `pi-jobs@${name}`, seq: 3, attempt: 1, at: DURABLE_NOW, jobDir: "job-point1" }), "PX", 60_000);
+	const snaps = [];
+	const manifest = { seq: 3, transcript: { bytes: 2 }, workspace: { baseSha: "b".repeat(40), git: { branch: null } }, piVersion: "1.2.0", imageDigest: null, venue: "local", provider: "anthropic", model: "m" };
+	try {
+		const { deps, logs } = await runStart({
+			env: { VALKEY_URL, PI_WORKER_NAME: name, PI_JOBS_DIR: jobsDir, PI_CHECKPOINTS_DIR: tempDir("pi-ckpt-store-") },
+			now: () => DURABLE_NOW,
+			durable: { makeWorkspaceCheckpointer: () => ({ readManifest: async () => ({ ok: true, manifest }), snapshot: async (a) => (snaps.push(a), { ok: true, seq: a.seq }), sweep: async () => ({ removed: 0, kept: 0 }) }) },
+		});
+		assert.equal(existsSync(join(jobsDir, "job-old001")), false, "an orphan past the job timeout is gone");
+		assert.equal(existsSync(join(jobsDir, "job-young1")), true, "a young one could be another process's running job");
+		assert.equal(existsSync(join(jobsDir, "job-point1")), true, "the dir a pointer of this host names is kept for its salvage");
+		assert.equal(existsSync(join(jobsDir, "job-link01")), true, "a link is never removed through");
+		assert.equal(existsSync(join(outside, "keep.txt")), true, "nor followed");
+		assert.deepEqual(logs.find((l) => l.event === "job_dirs_swept"), { event: "job_dirs_swept", removed: 1, kept: 3, failed: 0, host: name });
+		// The recovery, landing here, salvages it: one checkpoint of kind salvage past the pointer's seq, then the dir goes.
+		const pointer = JSON.parse(await redis.get(checkpointPointerKey(runId)));
+		assert.deepEqual(await deps.salvageCheckpoint({ runId, pointer, attempt: 2 }), { salvaged: true, seq: 4 });
+		assert.equal(snaps[0].kind, "salvage");
+		assert.equal(snaps[0].workspace, join(jobsDir, "job-point1", "workspace"));
+		assert.equal(existsSync(join(jobsDir, "job-point1")), false);
+	} finally {
+		await redis.del(checkpointPointerKey(runId)).catch(() => {});
+		redis.disconnect();
+	}
+});
+
+test("issue #645: a `.rN` job's record settles its RUN's status comment as retrying, and reads the run's progress key", { skip }, async () => {
+	const openers = [];
+	const finishes = [];
+	const reads = [];
+	const edits = [];
+	const host = fakeHost({ postStatusComment: async () => ({ id: "7" }), editStatusComment: async (job, target, id, text) => void edits.push([id, text]) });
+	const { recordRun } = await runStartWithRecords({
+		env: { PI_LIVE_TRANSCRIPTS: "0" },
+		makeAuth: async () => ({ mintToken: async () => "tok-1", selfId: 1, source: "gh" }),
+		makeHost: () => host,
+		makeLiveTranscriptOpener: (args) => (openers.push(args), () => ({ start() {}, finish: async () => {} })),
+		makeStatusCommenter: ({ jobId }) => ({ start() {}, update() {}, commentId: () => "7", finish: async (s, outcome) => void finishes.push([jobId, outcome]) }),
+		readProgressKey: async ({ jobId }) => (reads.push(jobId), { commentId: "7", snapshot: { turn: 2, steps: 1 } }),
+	});
+	const data = { kind: "github", repo: "o/n", target: { type: "issue", number: 3 }, statusComment: true };
+	// The opener registers the commenter under the id runContainer hands it: the RUN id (index.mjs `runIdOf`).
+	const c = openers[0].makeCommenter({ job: { ...data, id: "gh-r" }, jobId: "gh-r", commentId: null, onId() {} });
+	c.ended({ turn: 4 }, "unknown");
+	// The crashed attempt's record (the processor's infra exit, or the stall listener): the run is retrying, not failed.
+	recordRun({ job: { id: "gh-r", name: "github", attemptsMade: 0, opts: { attempts: 2 }, data }, result: { outcome: "failed", reason: "recovery-enqueued" }, startedAt: "a", endedAt: "b" });
+	assert.deepEqual(finishes, [["gh-r", "retrying"]]);
+	// The recovery's own record: the same comment, found through the run's key, with the record's outcome.
+	recordRun({ job: { id: "gh-r.r1", name: "github", attemptsMade: 0, opts: { attempts: 1 }, data: { ...data, recoveryOf: "gh-r", recovery: 1 } }, result: { outcome: "completed" }, startedAt: "a", endedAt: "b" });
+	await settleDurable();
+	assert.deepEqual(reads, ["gh-r"], "the run's progress key, never `gh-r.r1`'s");
+	assert.equal(edits.length, 1);
+	assert.match(edits[0][1], /`gh-r`/, "the comment names the run");
+});
+
+test("issue #645: the processor gets the run-record reader (local file first), so a recovery sees its base run's settled record", { skip }, async () => {
+	const logsDir = tempDir("pi-readrecord-");
+	writeFileSync(join(logsDir, "gh-base.json"), `${JSON.stringify(lostLockRecord("gh-base"))}\n`);
+	writeFileSync(join(logsDir, "gh-bad.json"), "{not json");
+	const { deps } = await runStart({ env: { PI_LOGS_DIR: logsDir } });
+	assert.equal(typeof deps.readRecord, "function");
+	assert.deepEqual(await deps.readRecord("gh-base"), lostLockRecord("gh-base"));
+	assert.equal(await deps.readRecord("gh-none"), null);
+	assert.equal(await deps.readRecord("gh-bad"), null, "an unreadable record is no answer, never a settled run");
+	// On a fleet the base attempt may have run elsewhere: the mirror answers what this host's files cannot.
+	const asked = [];
+	const fleet = await runStart({ env: { PI_LOGS_DIR: logsDir, PI_WORKER_NAME: `rr-${process.pid}` }, readMirroredRecord: async (_r, id) => (asked.push(id), lostLockRecord("repeat:a:1")) });
+	assert.deepEqual(await fleet.deps.readRecord("repeat:a:1"), lostLockRecord("repeat:a:1"));
+	assert.deepEqual(asked, ["repeat_a_1"]);
+});
+
+test("issue #645: a returned recovery-failed pages once and comments nothing more; lost after returning, it still pages once and never comments", { skip }, async () => {
+	const logsDir = tempDir("pi-recfailed-");
+	const { handlers, drive, posted } = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir } });
+	const fired = async (fn) => {
+		const from = bootLines.length;
+		fn();
+		await settleDurable();
+		return parseLines(bootLines.slice(from)).filter((l) => l.event === "on_failure");
+	};
+	const paid = await fired(() => handlers.completed({ id: "gh-r.r1" }, { outcome: "failed", reason: "recovery-failed", budgetReserved: true }));
+	assert.deepEqual(paid.map((l) => l.jobId), ["gh-r.r1"], "a paid terminal: the operator is paged");
+	assert.deepEqual(posted, [], "the processor posted its own sentence; the listener adds none");
+	assert.equal((await fired(() => handlers.completed({ id: "gh-q" }, { outcome: "failed", reason: "something-else" }))).length, 0, "only recovery-failed among returned failures");
+	// The same result, then the lock lost (Valkey away as it finished): one page, no failure comment on top.
+	writeFileSync(join(logsDir, "gh-l.r1.json"), `${JSON.stringify(lostLockRecord("gh-l.r1", { outcome: "failed", reason: "recovery-failed" }))}\n`);
+	const lost = await drive(lostLockJob("gh-l.r1", { data: { ...ARMED_DATA, recoveryOf: "gh-l", recovery: 1 } }), await stalledError());
+	assert.deepEqual(posted, []);
+	assert.equal(lost.filter((l) => l.event === "on_failure").length, 1);
+	assert.ok(!lost.some((l) => l.event === "job_failed"));
+	assert.equal(lost.filter((l) => l.event === "job_lost_lock_after_completion" && l.reason === "recovery-failed").length, 1);
+	// A crashed attempt already handed to a recovery (its record says recovery-enqueued): nothing is owed at all.
+	writeFileSync(join(logsDir, "gh-e.json"), `${JSON.stringify(lostLockRecord("gh-e", { outcome: "failed", reason: "recovery-enqueued" }))}\n`);
+	const handed = await drive(lostLockJob("gh-e", { data: ARMED_DATA }), await stalledError());
+	assert.deepEqual(posted, []);
+	assert.ok(!handed.some((l) => l.event === "on_failure" || l.event === "job_failed"));
+	// A failed record of another reason keeps the failure path: the comment and the page.
+	writeFileSync(join(logsDir, "gh-f.json"), `${JSON.stringify(lostLockRecord("gh-f", { outcome: "failed", reason: "infra" }))}\n`);
+	const other = await drive(lostLockJob("gh-f"), await stalledError());
+	assert.deepEqual(posted, [FAILED_SENTENCE]);
+	assert.equal(other.filter((l) => l.event === "on_failure").length, 1);
 });

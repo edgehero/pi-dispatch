@@ -2913,3 +2913,45 @@ test("with `details`, the model's own trailing list is kept, and a summary that 
 	}
 	assert.equal(fileListSuffix({ readFiles: [], modifiedFiles: [] }), "");
 });
+
+// Issue #645: a recovered run's transcript is the checkpoint's, staged at the path every job's transcript has.
+test("stageRecovered copies the checkpoint transcript to session/current.jsonl, keyed only for a resume job, and never reads the store (#645)", () => {
+	const { root, sessionsDir, store, jobDir } = fixture();
+	seed(sessionsDir, sessionKeyFor(ghIssue), { body: `${HEADER}{"canonical":true}\n` });
+	const cp = join(root, "transcript.jsonl");
+	writeFileSync(cp, `${HEADER}{"checkpoint":true}\n`);
+	const s = store.stageRecovered({ jobDir, transcriptPath: cp, piVersion: PI, job: { ...ghIssue, resume: true } });
+	assert.equal(readFileSync(join(jobDir, "session", SESSION_FILE_NAME), "utf8"), `${HEADER}{"checkpoint":true}\n`, "the checkpoint's bytes, not the canonical transcript");
+	assert.deepEqual([s.resume, s.reason, s.key, s.venue, s.hostDir], [true, "recovered", sessionKeyFor(ghIssue), "local", join(jobDir, "session")]);
+	assert.equal(s.bytes, Buffer.byteLength(`${HEADER}{"checkpoint":true}\n`));
+	// A non-resume job: the same file, no key, so nothing is promoted and the processor hands it over as the live file.
+	const { jobDir: j2, root: r2, store: st2 } = fixture();
+	const cp2 = join(r2, "t.jsonl");
+	writeFileSync(cp2, HEADER);
+	const s2 = st2.stageRecovered({ jobDir: j2, transcriptPath: cp2, job: ghIssue });
+	assert.equal(s2.key, null);
+	assert.equal(readFileSync(join(j2, "session", SESSION_FILE_NAME), "utf8"), HEADER);
+});
+
+test("a recovered resume session promotes on completion like any resume (#645)", () => {
+	const { root, sessionsDir, store, jobDir } = fixture();
+	const cp = join(root, "transcript.jsonl");
+	writeFileSync(cp, HEADER);
+	const s = store.stageRecovered({ jobDir, transcriptPath: cp, job: { ...ghIssue, resume: true } });
+	writeFileSync(join(jobDir, "session", SESSION_FILE_NAME), `${HEADER}{"more":true}\n`);
+	const p = store.promoteSession(s, { piVersion: PI });
+	assert.equal(p.promoted, true, JSON.stringify(p));
+	assert.equal(readFileSync(join(sessionsDir, s.key, SESSION_FILE_NAME), "utf8"), `${HEADER}{"more":true}\n`);
+});
+
+test("stageRecovered refuses a link at the checkpoint's name and a missing file, staging nothing (#645)", () => {
+	const { root, store, jobDir } = fixture();
+	const real = join(root, "real.jsonl");
+	writeFileSync(real, HEADER);
+	const link = join(root, "link.jsonl");
+	symlinkSync(real, link);
+	assert.equal(store.stageRecovered({ jobDir, transcriptPath: link, job: ghIssue }), null);
+	assert.equal(store.stageRecovered({ jobDir, transcriptPath: join(root, "absent"), job: ghIssue }), null);
+	assert.equal(existsSync(join(jobDir, "session")), false);
+	assert.equal(store.stageRecovered({}), null);
+});

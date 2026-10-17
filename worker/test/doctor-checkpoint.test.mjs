@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHECKPOINT_GIT_MIN, checkpointStoreChecks, parseGitVersion } from "../src/doctor.mjs";
 import { collectChecks } from "./helpers/doctor.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Doctor's checkpoint-store group (issue #645). Nothing for a deployment with no store configured; otherwise the store's
-// path, ownership and mode, the temp-dir warning, git's version and whether each venue can freeze a job. Never a ✗: no
-// job writes a checkpoint yet, so these lines may only advise.
+// path, ownership and mode, the temp-dir warning, git's version and whether each venue can freeze a job. Never a ✗: only
+// a job that arms run.recover writes the store, and a fault there costs that run its recovery, never the job.
 const posix = process.platform !== "win32";
 const uid = process.geteuid?.();
 const labels = (checks) => checks.map((c) => `${c.ok ? "ok" : c.warn ? "warn" : "fail"} ${c.label}`);
@@ -202,4 +202,29 @@ test("collectChecks prints the group only where a store is configured, and asks 
 	const failedGit = await collectChecks({ ...base, PI_SESSIONS_DIR: sessions }, seams);
 	assert.ok(failedGit.some((c) => c.warn && /`git --version` did not answer/.test(c.label)));
 	assert.equal(failedGit.some((c) => /checkpoint store: git 2\.43/.test(c.label)), false);
+});
+
+test("a trigger arming run.recover on a fleet worker with no PI_WORKER_NAME is warned: its recoveries would go to the shared queue (#645)", async () => {
+	const cwd = tempDir("pd-ckpt-fleet-");
+	const triggersFile = join(cwd, "triggers.json");
+	writeFileSync(triggersFile, `${JSON.stringify({ version: 1, triggers: [{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", recover: true } }, { on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix" } }] })}\n`);
+	// Nothing on this machine is asked: every spawn answers exit 1, and the fleet is whatever the test hands in.
+	const spawn = () => {
+		const handlers = {};
+		const stream = { on() { return this; } };
+		const child = { stdout: stream, stderr: stream, kill() {}, on(ev, cb) { handlers[ev] = cb; return this; } };
+		queueMicrotask(() => handlers.close?.(1));
+		return child;
+	};
+	const seams = (hosts) => ({ cwd, spawn, probeValkey: async () => true, readHosts: async () => ({ hosts }), fileExists: (p) => existsSync(p), nodeVersion: "22.19.0" });
+	const warned = (checks) => checks.filter((c) => /arm run\.recover/.test(c.label));
+	const base = { PI_LOGS_DIR: join(cwd, "logs"), PI_TRIGGERS_FILE: triggersFile };
+
+	const unnamed = warned(await collectChecks(base, seams([{ name: "peer-1" }])));
+	assert.equal(unnamed.length, 1, labels(unnamed).join("\n"));
+	assert.equal(unnamed[0].warn, true, "a warning, never a ✗");
+	assert.match(unnamed[0].label, /^1 trigger\(s\) arm run\.recover, but this worker has peers and no PI_WORKER_NAME/);
+	assert.match(unnamed[0].fix, /set PI_WORKER_NAME/);
+	assert.deepEqual(warned(await collectChecks({ ...base, PI_WORKER_NAME: "mini1" }, seams([{ name: "mini1" }, { name: "peer-1" }]))), [], "a named worker routes recoveries to its own queue");
+	assert.deepEqual(warned(await collectChecks(base, seams([]))), [], "a single host drains the shared queue alone");
 });

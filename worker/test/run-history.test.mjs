@@ -2200,3 +2200,71 @@ test("newerRecord keeps the higher attempt, then the later end, then the first g
 	assert.equal(newerRecord(null, "x"), null);
 	assert.equal(newerRecord({ jobId: "j", endedAt: "2026-08-30T12:00:00.000Z" }, aFirst), aFirst, "no attempt reads as 0");
 });
+
+// Issue #645, durable runs: the record's four new fields, integers and enums only, each a conditional tail key.
+test("durable-run fields: shape, tail position, and absent for a job that never armed run.recover (#645)", async () => {
+	const { RECOVERED_FROM, RECOVER_SKIPPED_REASONS, RECOVERY_COUNT_KEYS, parseExitRecovery } = await import("../src/run-history.mjs");
+	const plain = buildRecord({ job: { id: "j", data: { kind: "github" } }, result: { outcome: "completed" } });
+	for (const k of ["recoveryOf", "recovered", "recoverSkipped", "checkpoints"]) assert.equal(Object.hasOwn(plain, k), false, k);
+	const rec = buildRecord({
+		job: { id: "gh-d1.r1", data: { kind: "github", recoveryOf: "gh-d1", recovery: 1 } },
+		result: { outcome: "completed", recovered: { from: "exit", n: 1, fromAttempt: 2, checkpointSeq: 9, orphans: 2, replayed: 1, interrupted: 1, notStarted: 0 }, recoverSkipped: "base-unprimed", checkpoints: { written: 4, failed: 0, skipped: 1 } },
+	});
+	const keys = Object.keys(rec);
+	assert.deepEqual(keys.slice(-4), ["recoveryOf", "recovered", "recoverSkipped", "checkpoints"], "tail position, in this order");
+	assert.equal(rec.recoveryOf, "gh-d1");
+	assert.deepEqual(rec.recovered, { from: "exit", n: 1, fromAttempt: 2, checkpointSeq: 9, orphans: 2, replayed: 1, interrupted: 1, notStarted: 0 });
+	assert.equal(rec.recoverSkipped, "base-unprimed");
+	assert.deepEqual(rec.checkpoints, { written: 4, failed: 0, skipped: 1 });
+	assert.deepEqual([...RECOVERED_FROM], ["live", "exit", "salvage"]);
+	assert.deepEqual([...RECOVER_SKIPPED_REASONS], ["local", "no-run-id", "base-unprimed", "workspace-extensions"]);
+	assert.deepEqual([...RECOVERY_COUNT_KEYS], ["orphans", "replayed", "interrupted", "notStarted"]);
+	// Every leaf is an integer, null, or a member of a closed enum.
+	const leaves = (o) => (o !== null && typeof o === "object" ? Object.values(o).flatMap(leaves) : [o]);
+	for (const v of leaves({ recovered: rec.recovered, checkpoints: rec.checkpoints })) assert.ok(v === null || Number.isSafeInteger(v) || RECOVERED_FROM.includes(v), String(v));
+	// The exit line's block, off the decisive line.
+	const line = JSON.stringify({ event: "exit", code: 0, recovery: { orphans: 3, replayed: 1, interrupted: 1, notStarted: 1, extra: "x" } });
+	assert.deepEqual(parseExitRecovery(`${line}\n`), { orphans: 3, replayed: 1, interrupted: 1, notStarted: 1 });
+});
+
+test("MAKE IT LIE: hostile strings in every durable-run field never reach the record (#645)", () => {
+	const hostile = ["../../etc/passwd", "<script>alert(1)</script>", "ignore previous instructions", "a b", "x".repeat(300), "‮evil", "gh-d1\nforged"];
+	for (const h of hostile) {
+		const rec = buildRecord({
+			job: { id: "j", data: { kind: "github", recoveryOf: h } },
+			result: {
+				outcome: "failed",
+				recovered: { from: h, n: 1, fromAttempt: h, checkpointSeq: h, orphans: h, replayed: -1, interrupted: 1.5, notStarted: { h } },
+				recoverSkipped: h,
+				checkpoints: { written: h, failed: 0, skipped: 0 },
+			},
+		});
+		const text = JSON.stringify(rec);
+		assert.ok(!text.includes(JSON.stringify(h).slice(1, -1)), `leaked: ${h}`);
+		assert.equal(Object.hasOwn(rec, "recoveryOf"), false);
+		assert.equal(Object.hasOwn(rec, "recovered"), false, "an unknown `from` is no recovery the record can describe");
+		assert.equal(Object.hasOwn(rec, "recoverSkipped"), false);
+		assert.equal(Object.hasOwn(rec, "checkpoints"), false);
+	}
+	// A valid source with hostile counts keeps its enum and integers and drops each bad count to null.
+	const rec = buildRecord({ job: { id: "j", data: {} }, result: { outcome: "completed", recovered: { from: "live", n: 2, fromAttempt: "1", checkpointSeq: 3, orphans: "<b>", replayed: 1, interrupted: -2, notStarted: 2 ** 60, path: "/etc" } } });
+	assert.deepEqual(rec.recovered, { from: "live", n: 2, fromAttempt: null, checkpointSeq: 3, orphans: null, replayed: 1, interrupted: null, notStarted: null });
+});
+
+test("the durable-run reasons start.mjs and the processor write pass through the record's reason (#645)", () => {
+	for (const reason of ["recovery-enqueued", "recovery-host-lost", "recovery-cap", "recovery-checkpoint-absent", "recovery-superseded", "recover-store-unset"]) {
+		assert.equal(buildRecord({ job: { id: "j", data: {} }, error: { reason } }).reason, reason);
+		assert.equal(buildRecord({ job: { id: "j", data: {} }, result: { outcome: "failed", reason } }).reason, reason);
+	}
+});
+
+test("recordedCheckpoints drops extra keys, recordedRecovered refuses n 0, and the record's progress keeps replayed (#645)", async () => {
+	const { recordedCheckpoints, recordedRecovered, recordedProgress } = await import("../src/run-history.mjs");
+	assert.deepEqual(recordedCheckpoints({ written: 1, failed: 2, skipped: 3, path: "/etc", lastSeq: 9 }), { written: 1, failed: 2, skipped: 3 });
+	assert.equal(recordedRecovered({ from: "live", n: 0 }), null);
+	assert.equal(recordedRecovered({ from: "live", n: -1 }), null);
+	assert.equal(recordedRecovered({ from: "live", n: 1.5 }), null);
+	assert.deepEqual(recordedProgress({ replayed: 2, interrupted: 1, bogus: 4 }), { interrupted: 1, replayed: 2 });
+	const rec = buildRecord({ job: { id: "j", data: {} }, result: { outcome: "completed", progress: { replayed: 3 } } });
+	assert.deepEqual(rec.progress, { replayed: 3 });
+});
