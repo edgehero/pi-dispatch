@@ -9307,6 +9307,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		defaultLogsDir: (e) => cfg.defaultLogsDir(e, null),
 		defaultSettingsFile: (e) => cfg.defaultSettingsFile(e, null),
 		jobsDirPath: (e) => cfg.jobsDirPath(e),
+		// Issue #645: the checkpoint store, PI_CHECKPOINTS_DIR else inside PI_SESSIONS_DIR.
+		checkpointsDirPath: (e) => cfg.checkpointsDirPath(e),
 		accountTempRoot: (e) => cfg.accountTempRoot(e),
 		defaultSandboxDir: (e) => cfg.defaultSandboxDir(e),
 		legacyTempStateDir: (e) => cfg.legacyTempStateDir(e),

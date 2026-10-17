@@ -1666,6 +1666,52 @@ test("the reaper removes neither a stray file nor an aged link out of the store 
 	assert.equal(existsSync(join(target, "precious.txt")), true, "and nothing behind it is touched");
 });
 
+test("the reaper judges only KEY-SHAPED names: `.checkpoints` and a stray directory survive however old (#645)", () => {
+	// The checkpoint store's default home is `<PI_SESSIONS_DIR>/.checkpoints`. Before #645 every entry here was taken
+	// for a key and an aged non-key directory fell through to the directory-mtime fallback and was removed whole, so
+	// the session TTL would have deleted every workspace checkpoint. Real keys beside them are still swept, which is
+	// what makes this a narrowing of WHAT is judged rather than a reaper that stopped working.
+	// NOW itself is aged against a clock 40 days on with a 14-day TTL (NOW is only days after the epoch, so
+	// anything earlier would be a negative timestamp).
+	const later = NOW + 40 * 86400000;
+	const aged = NOW / 1000;
+	const { store, sessionsDir, logs } = fixture({ ttlDays: 14, now: () => later });
+
+	const checkpoints = join(sessionsDir, ".checkpoints");
+	mkdirSync(join(checkpoints, "some-job"), { recursive: true });
+	writeFileSync(join(checkpoints, "some-job", "HEAD"), "ref: refs/heads/main\n");
+	utimesSync(checkpoints, aged, aged);
+
+	const notAKey = join(sessionsDir, "operator-notes");
+	mkdirSync(notAKey, { recursive: true });
+	writeFileSync(join(notAKey, "keep.txt"), "mine\n");
+	utimesSync(notAKey, aged, aged);
+	// Upper-case hex of the right length is NOT a key: `digest("hex")` only ever mints lower case.
+	const shouting = join(sessionsDir, sessionKeyFor(ghIssue).toUpperCase());
+	mkdirSync(shouting, { recursive: true });
+	utimesSync(shouting, aged, aged);
+
+	const expired = sessionKeyFor({ ...ghIssue, target: { type: "issue", number: 8 } });
+	const file = seed(sessionsDir, expired, { venue: "local" });
+	utimesSync(file, aged, aged);
+
+	store.reapSessions();
+
+	assert.equal(existsSync(join(checkpoints, "some-job", "HEAD")), true, "the checkpoint store and its contents survive");
+	assert.equal(existsSync(join(notAKey, "keep.txt")), true, "a non-key directory survives");
+	assert.equal(existsSync(shouting), true, "a name that is almost a key is still not one");
+	assert.equal(existsSync(join(sessionsDir, expired)), false, "while a real expired key beside them is still swept");
+	assert.ok(logs.some(([event, f]) => event === "reaped_session" && f.key === expired));
+
+	const verdicts = logs.filter(([event]) => event === "session_not_reaped").map(([, f]) => `${f.key}:${f.reason}`).sort();
+	assert.deepEqual(
+		verdicts,
+		["operator-notes:not-a-key", `${sessionKeyFor(ghIssue).toUpperCase()}:not-a-key`].sort(),
+		"each non-key name is said once, and a DOT name not at all: it is the store's own sibling namespace",
+	);
+	assert.equal(logs.some(([event]) => event === "session_reaper_skipped"), false, "and none of it is a fault (OQ-007)");
+});
+
 test("the reaper removes an expired key, keeps a fresh one, and SWEEPS a key with no transcript (#336)", () => {
 	// The disk sweep keys on the TRANSCRIPT's mtime, and falls back to the key DIRECTORY's own mtime when there
 	// is no transcript to key on -- a first promotion that died before the swap. That key used to be skipped on
@@ -2004,7 +2050,9 @@ test("the reaper judges NOTHING through a link, and says so as a verdict rather 
 	assert.equal(existsSync(join(outside, SESSION_FILE_NAME)), true, "and its target is untouched");
 	assert.equal(existsSync(join(sessionsDir, "stray")), true, "so is a stray file");
 	const verdicts = logs.filter(([event]) => event === "session_not_reaped").map(([, f]) => `${f.key}:${f.reason}`).sort();
-	assert.deepEqual(verdicts, ["stray:key-not-a-directory", `${linked}:key-not-a-directory`].sort(), "both are named, once each");
+	// `stray` is not key-shaped, so since issue #645 it is turned away by NAME before its type is looked at; the link
+	// carries a real key's name and still reaches the #375 type check.
+	assert.deepEqual(verdicts, ["stray:not-a-key", `${linked}:key-not-a-directory`].sort(), "both are named, once each");
 	assert.equal(
 		logs.some(([event]) => event === "session_reaper_skipped"),
 		false,

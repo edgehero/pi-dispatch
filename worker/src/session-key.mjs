@@ -38,6 +38,13 @@ import { isForgeKind } from "./forges.mjs";
 const KEY_LENGTH = 32;
 
 /**
+ * What a key LOOKS like, derived from KEY_LENGTH rather than restated, because the session reaper (issue #645) uses it
+ * to decide which names in PI_SESSIONS_DIR are keys at all: a hand copy of `32` that drifted from this would make the
+ * reaper ignore every real key (they would all read as `not-a-key`) or judge names this module never mints.
+ */
+export const SESSION_KEY_PATTERN = new RegExp(`^[0-9a-f]{${KEY_LENGTH}}$`);
+
+/**
  * @param {object} job - The job data (`kind`, `repo`, `target`, `trigger`).
  * @param {object} [resolved] - `{ headRef, headRepo }` for a pull/merge-request target, from the FORGE
  *   API rather than the webhook payload. Absent or incomplete means no key, which is a cold start.

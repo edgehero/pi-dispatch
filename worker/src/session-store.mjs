@@ -16,7 +16,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { scrubCredentials } from "./redact.mjs";
-import { sessionKeyFor } from "./session-key.mjs";
+import { SESSION_KEY_PATTERN, sessionKeyFor } from "./session-key.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { UNATTRIBUTED_BACKEND } from "./backends.mjs";
 import { MODEL_REF_PATTERN } from "./model-ref.mjs";
@@ -1253,6 +1253,21 @@ export function makeSessionStore({
 			return;
 		}
 		for (const name of names) {
+			// ONLY A KEY-SHAPED NAME IS JUDGED (issue #645). Until then every entry of the store was taken for a key, so a
+			// directory that is not one -- the checkpoint store's default home, `<PI_SESSIONS_DIR>/.checkpoints`, or anything
+			// an operator parks here -- was removed whole once its own directory mtime aged past the TTL, by a pass that only
+			// ever had the right to expire sessions. A key is a hash this store mints (session-key.mjs), so the shape is an
+			// exact test and nothing that is a key can fail it.
+			//
+			// A DOT name is skipped silently: that is the namespace for the store's own siblings (`.checkpoints`) and for
+			// tooling litter (`.DS_Store`), and logging them would put a line in every pass that nobody can act on. Any OTHER
+			// non-key name is a verdict, `session_not_reaped` rather than `session_reaper_skipped`, for the reason the #375
+			// comment below gives: the pass established what the entry is and decided to leave it. Once per name per pass,
+			// which the loop gives for free since `readdirSync` names each entry once.
+			if (!SESSION_KEY_PATTERN.test(name)) {
+				if (!name.startsWith(".")) log("session_not_reaped", { key: name, reason: "not-a-key" });
+				continue;
+			}
 			try {
 				const dir = join(sessionsDir, name);
 				// THE ENTRY ITSELF FIRST (issue #375), so nothing here is ever judged THROUGH a link. Before this,

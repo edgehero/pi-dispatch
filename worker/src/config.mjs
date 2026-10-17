@@ -7,7 +7,8 @@
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { delimiter, isAbsolute, posix } from "node:path";
+import { delimiter, isAbsolute, posix, relative, resolve, sep } from "node:path";
+import { SESSION_KEY_PATTERN } from "./session-key.mjs";
 import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "./forges.mjs";
@@ -533,6 +534,9 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// not rest on where the other stores default: issue #290 moved logs and settings to ~/.pi-dispatch
 		// and this one still has no default, for the same reason it never did.
 		sessionsDir: env.PI_SESSIONS_DIR || null,
+		// Issue #645: where workspace checkpoints live. Resolved, defaulting INSIDE the session store and null when neither
+		// is set; `checkpointsDirPath` says why. Read here so doctor and the (later) checkpointer cannot derive it twice.
+		checkpointsDir: checkpointsStoreRefusingCollision(env),
 		sessionsTtlDays: nonNegativeInt(env, "PI_SESSIONS_TTL_DAYS", 14), // 0 = keep forever
 		// A bound on how large a transcript may be before it stops being resumed. Not disk hygiene: an
 		// oversized transcript is a prefill an operator never sized PI_MAX_TOKENS for.
@@ -1068,6 +1072,67 @@ export function modelEndpointsFilePath(env = process.env) {
 
 export function logsDirPath(env = process.env, home) {
 	return env.PI_LOGS_DIR || defaultLogsDir(env, home);
+}
+
+/** The checkpoint store's directory name under PI_SESSIONS_DIR when PI_CHECKPOINTS_DIR does not name one (issue #645). */
+export const CHECKPOINTS_SUBDIR = ".checkpoints";
+
+/**
+ * The checkpoint store (issue #645): `PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`, else `null`, resolved
+ * against the working directory so doctor and the worker name the same absolute path.
+ *
+ * DEFAULTED INSIDE THE SESSION STORE, and only there, on `sessionsDir`'s own reasoning: a checkpoint holds a job's
+ * workspace, which is as PII-bearing as a transcript, so it gets no default of its own on a path nobody chose (a temp
+ * dir above all). Where the operator already chose a private host-only directory for transcripts, a sibling inside it
+ * inherits that decision. The DOT name keeps it out of the session reaper, which judges only key-shaped names and skips
+ * dot names silently (`reapSessions`), so the session TTL never removes a checkpoint. `null` means the feature has
+ * nowhere to write, and whatever uses it says so rather than writing somewhere.
+ */
+export function checkpointsDirPath(env = process.env) {
+	if (env.PI_CHECKPOINTS_DIR) return resolve(env.PI_CHECKPOINTS_DIR);
+	if (env.PI_SESSIONS_DIR) return resolve(env.PI_SESSIONS_DIR, CHECKPOINTS_SUBDIR);
+	return null;
+}
+
+/**
+ * Why the checkpoint store and the session store cannot share this layout, or `null` when they can (issue #645). Both
+ * stores name their entries by 32 lower-case hex characters and each sweeps its own, so a layout where one store's
+ * entries are the other's makes each sweep delete the other's folders: the session reaper removes a key-shaped
+ * directory once it ages, whatever is inside it. Three layouts collide:
+ *
+ *   - the same directory (`PI_CHECKPOINTS_DIR` equal to `PI_SESSIONS_DIR`);
+ *   - the session store INSIDE the checkpoint store, where the checkpoint sweep judges the session store's folders;
+ *   - the checkpoint store inside the session store BELOW a key-shaped name (`<sessions>/<32 hex>[/...]`), which the
+ *     session reaper takes for a session key and removes whole.
+ *
+ * The default (`<sessions>/.checkpoints`) and any other non-key child are fine: the reaper judges only key-shaped names
+ * and skips dot names silently. Compared as resolved paths, the way both stores open them; a link between the two is
+ * not followed, which a later realpath-based check could add if a layout ever needs it.
+ */
+export function checkpointStoreCollision(sessionsDir, checkpointsDir) {
+	if (!sessionsDir || !checkpointsDir) return null;
+	const sessions = resolve(sessionsDir);
+	const checkpoints = resolve(checkpointsDir);
+	if (sessions === checkpoints) return "they are the same directory";
+	const inside = (child, parent) => {
+		const rel = relative(parent, child);
+		// `..` as a whole first segment only: a child literally named `..notes` is inside.
+		return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) ? rel : null;
+	};
+	if (inside(sessions, checkpoints) !== null) return "the session store is inside the checkpoint store";
+	const below = inside(checkpoints, sessions);
+	if (below !== null && SESSION_KEY_PATTERN.test(below.split(sep)[0])) return "the checkpoint store is inside a session key's directory, which the session reaper removes whole";
+	return null;
+}
+
+/** `checkpointsDirPath`, refused at load where it collides with the session store (`checkpointStoreCollision`). */
+function checkpointsStoreRefusingCollision(env) {
+	const dir = checkpointsDirPath(env);
+	const why = checkpointStoreCollision(env.PI_SESSIONS_DIR || null, dir);
+	if (why) {
+		throw configError(`PI_CHECKPOINTS_DIR (${dir}) and PI_SESSIONS_DIR (${resolve(env.PI_SESSIONS_DIR)}) collide: ${why}, so the session reaper and the checkpoint sweep would delete each other's folders. Unset PI_CHECKPOINTS_DIR (the default is <PI_SESSIONS_DIR>/.checkpoints) or point it at a directory outside PI_SESSIONS_DIR`);
+	}
+	return dir;
 }
 
 /**

@@ -59,7 +59,7 @@ import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 }
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectsFingerprint } from "./projects.mjs";
@@ -87,8 +87,8 @@ import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoade
 import { imageRefProblem, jobImageFix, pullOffered } from "./image-ref.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
-import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
-import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
+import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
+import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, podmanPausable, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
 import { JOB_NAME_PREFIX, endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
@@ -606,7 +606,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -1240,6 +1240,144 @@ function loadVerdict(spec, rawPath, cwd, io, platform = process.platform) {
 	} catch (err) {
 		return { ok: false, reason: envValueShown(err?.message ?? String(err)) };
 	}
+}
+
+/** The oldest git the checkpoint store accepts (issue #645), as `[major, minor]`. */
+export const CHECKPOINT_GIT_MIN = Object.freeze([2, 32]);
+
+/** `[major, minor]` out of `git --version`'s answer (`git version 2.43.0`, `git version 2.39.3 (Apple Git-146)`), or null. */
+export function parseGitVersion(text) {
+	const m = /\bgit version (\d{1,4})\.(\d{1,4})/.exec(String(text ?? ""));
+	return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+/**
+ * The checkpoint store's group (issue #645): where it is, whether it is a private directory of this account's, whether it
+ * sits under the OS temp dir, whether git is new enough, and whether each venue that runs jobs here can freeze one while
+ * its workspace is read. Pure over its reads, so every arm is driven without a host.
+ *
+ * WARN AT MOST, with ONE exception, and that is deliberate rather than lenient: no job writes a checkpoint yet (the
+ * checkpointer is wired in a later change), so a red doctor here would fail deployments over a store nothing uses. The
+ * lines exist now so an operator meets the store's rules before a durable run does. The exception is a store that
+ * COLLIDES with the session store (`checkpointStoreCollision`), which is ✗ because the worker itself refuses to load
+ * that configuration: doctor's verdict follows the worker's.
+ *
+ * 0700 AND THIS ACCOUNT'S, for the transcript store's reason: a checkpoint is a job's whole workspace, so as PII-bearing
+ * as a transcript, and an owner other than the worker could swap what a restore reads. A symbolic link is refused for the
+ * same reason (the store's contents would live wherever it points). Under the OS temp dir it is swept by the OS, which
+ * turns a durable run's resume into a silent cold start.
+ *
+ * GIT 2.32 because that is the first release that reads `GIT_CONFIG_GLOBAL`, which the store's git environment
+ * (`git-hardening.mjs`, `storeGitEnv`) points at /dev/null so no global config (a hook path, a filter, an fsmonitor)
+ * runs inside the store. An older git ignores the variable; the empty HOME beside it still hides `~/.gitconfig`, so the
+ * line warns rather than refuses, but the store then rests on one guard where it was built with two.
+ *
+ * PAUSABLE IS A FACT LINE (`ok: true`) either way, because nothing the operator does short of changing hosts clears it.
+ * What it costs is said in the line: a venue that cannot freeze a running job gets EXIT checkpoints only, taken once the
+ * container is gone, so a job there is not recovered from a worker that crashed mid-run. A checkpoint is never read
+ * from a workspace the job is still writing.
+ */
+export function checkpointStoreChecks({ dir, explicit = false, sessionsDir = null, fs = { lstatSync, statSync, accessSync }, uid, underTemp = () => false, gitVersion = null, venues = [DEFAULT_BACKEND], podmanRead = null }) {
+	const checks = [];
+	const shown = envValueShown(dir);
+	const where = explicit ? "PI_CHECKPOINTS_DIR" : "the default inside PI_SESSIONS_DIR";
+	const collision = checkpointStoreCollision(sessionsDir, dir);
+	if (collision) {
+		checks.push({
+			ok: false,
+			label: `checkpoint store ${shown} and the session store ${envValueShown(resolve(sessionsDir))} collide: ${collision}, so the session reaper and the checkpoint sweep would delete each other's folders, and the worker refuses to start with this configuration`,
+			fix: "unset PI_CHECKPOINTS_DIR (the default is <PI_SESSIONS_DIR>/.checkpoints) or point it at a directory outside PI_SESSIONS_DIR",
+		});
+	}
+	let st = null;
+	let missing = false;
+	try {
+		st = fs.lstatSync(dir);
+	} catch (err) {
+		if (err?.code === "ENOENT") missing = true;
+		else checks.push({ ok: false, warn: true, label: `checkpoint store ${shown} (${where}) could not be read (${err?.code ?? "error"})`, fix: "make it a directory this account can read, or point PI_CHECKPOINTS_DIR at one" });
+	}
+	if (missing) {
+		// The nearest ancestor that exists decides whether the checkpointer can create it, as `mkdir -p` would. One that
+		// exists and is NOT a directory (a file where a parent should be) is its own answer: `mkdir -p` fails on it.
+		let parent = dirname(dir);
+		let ancestor = null;
+		let blockedBy = null;
+		for (let i = 0; i < 64 && ancestor === null && blockedBy === null; i++) {
+			let pst = null;
+			try {
+				pst = fs.statSync(parent);
+			} catch {
+				pst = null;
+			}
+			if (pst?.isDirectory()) ancestor = parent;
+			else if (pst) blockedBy = parent;
+			else {
+				const up = dirname(parent);
+				if (up === parent) break;
+				parent = up;
+			}
+		}
+		let writable = false;
+		if (ancestor) {
+			try {
+				fs.accessSync(ancestor, fsConstants.W_OK | fsConstants.X_OK);
+				writable = true;
+			} catch {
+				writable = false;
+			}
+		}
+		checks.push(
+			writable
+				? { ok: true, label: `checkpoint store ${shown} (${where}) does not exist yet: it is created with mode 0700 inside ${envValueShown(ancestor)} when a durable run first writes one` }
+				: { ok: false, warn: true, label: `checkpoint store ${shown} (${where}) does not exist and cannot be created: ${ancestor ? `${envValueShown(ancestor)} is not writable by this account` : blockedBy ? `${envValueShown(blockedBy)} above it is not a directory` : "no directory above it exists"}`, fix: `create it as the worker's account: mkdir -p ${shown} && chmod 700 ${shown}` },
+		);
+	} else if (st) {
+		if (st.isSymbolicLink()) {
+			checks.push({ ok: false, warn: true, label: `checkpoint store ${shown} (${where}) is a symbolic link, so what a restore reads lives wherever it points`, fix: `replace it with a real directory: rm ${shown} && mkdir -p ${shown} && chmod 700 ${shown}` });
+		} else if (!st.isDirectory()) {
+			checks.push({ ok: false, warn: true, label: `checkpoint store ${shown} (${where}) is not a directory`, fix: `move it aside and create a directory there: mkdir -p ${shown} && chmod 700 ${shown}` });
+		} else {
+			// No uid (Windows): ownership and the mode bits mean nothing there, so neither is judged.
+			const problems = [];
+			if (Number.isInteger(uid) && st.uid !== uid) problems.push(`owned by uid ${st.uid}, not this account (uid ${uid})`);
+			if (Number.isInteger(uid) && (st.mode & 0o777) !== 0o700) problems.push(`mode ${(st.mode & 0o777).toString(8).padStart(4, "0")}, not 0700`);
+			checks.push(
+				problems.length === 0
+					? { ok: true, label: `checkpoint store ${shown} (${where}) is a private directory of this account's` }
+					: { ok: false, warn: true, label: `checkpoint store ${shown} (${where}) is ${problems.join(" and ")}: a checkpoint holds a job's whole workspace, as private as a transcript`, fix: `as the worker's account: chown "$(id -u)" ${shown} && chmod 700 ${shown}` },
+			);
+		}
+	}
+	if (underTemp(dir)) {
+		checks.push({ ok: false, warn: true, label: `checkpoint store ${shown} is under the OS temp dir, which the OS sweeps: a durable run would resume from nothing after a reboot or a cleaner pass`, fix: "point PI_CHECKPOINTS_DIR (or PI_SESSIONS_DIR) at a durable private directory" });
+	}
+	const version = parseGitVersion(gitVersion);
+	const [minMajor, minMinor] = CHECKPOINT_GIT_MIN;
+	if (version === null) {
+		checks.push({ ok: false, warn: true, label: "checkpoint store: `git --version` did not answer, so whether git is 2.32 or newer is not known", fix: "install git 2.32 or newer on the worker's PATH" });
+	} else if (version[0] < minMajor || (version[0] === minMajor && version[1] < minMinor)) {
+		checks.push({ ok: false, warn: true, label: `checkpoint store: git ${version.join(".")} is older than 2.32, which ignores GIT_CONFIG_GLOBAL, so the store's git keeps one of its two guards against this host's own config`, fix: "install git 2.32 or newer on the worker's PATH" });
+	} else {
+		checks.push({ ok: true, label: `checkpoint store: git ${version.join(".")} (2.32 or newer)` });
+	}
+	for (const venue of venues) {
+		const word = BACKENDS[venue]?.declares?.pausable ?? ABSENT;
+		let label;
+		const exitOnly = "so its jobs get exit checkpoints only, taken once the container is gone, and are not recovered from a worker crash mid-run";
+		if (word === ABSENT) label = `checkpoint store: ${venue} declares no freeze, ${exitOnly}`;
+		else if (venue === PODMAN_BACKEND) {
+			const can = podmanPausable(podmanRead);
+			label =
+				can.pausable === true
+					? `checkpoint store: ${venue} can freeze a job while its workspace is read (podman pause, cgroup v2)`
+					: can.pausable === false
+						? `checkpoint store: ${venue} cannot freeze a job here (rootless Podman on cgroup v1), ${exitOnly}`
+						: `checkpoint store: whether ${venue} can freeze a job is not known (podman info did not answer: ${can.reason}); on cgroup v1 it cannot, ${exitOnly}`;
+		} else label = `checkpoint store: ${venue} can freeze a job while its workspace is read (docker pause, the cgroup freezer)`;
+		checks.push({ ok: true, label });
+	}
+	return checks;
 }
 
 /**
@@ -3421,6 +3559,29 @@ export async function collectChecks(shellVars, seams) {
 				});
 			}
 		}
+	}
+
+	// Issue #645: the checkpoint store, only where one is configured (PI_CHECKPOINTS_DIR, or the default inside
+	// PI_SESSIONS_DIR). Never a ✗: nothing runs on it yet, and a deployment without durable runs must not fail doctor over a
+	// store it does not use. One `git --version`, bounded like every other spawn here.
+	const checkpointsDir = checkpointsDirPath(env);
+	if (checkpointsDir) {
+		// The hardening flags lead even here, where no repository is read, because the bolt that pins every host-side git
+		// argv to them (`prepare-local.test.mjs`) is worth more unbroken than one `--version` is without them.
+		const gitRead = await runCmdCapture(spawn, "git", [...GIT_READ_FLAGS, "--version"], { timeoutMs: runTimeouts.cmd, stdoutOnly: true });
+		checks.push(
+			...checkpointStoreChecks({
+				dir: checkpointsDir,
+				explicit: Boolean(env.PI_CHECKPOINTS_DIR),
+				sessionsDir: env.PI_SESSIONS_DIR || null,
+				fs: seams.checkpointFs,
+				uid: Object.hasOwn(seams, "checkpointUid") ? seams.checkpointUid : process.geteuid?.(),
+				underTemp: (path) => underTemp(path, env),
+				gitVersion: gitRead.code === 0 ? gitRead.output : null,
+				venues: blessedList ?? [DEFAULT_BACKEND],
+				podmanRead: podman?.observed?.read ?? null,
+			}),
+		);
 	}
 
 	// REQ-PER-TRIGGER-INSTRUCTION. A plain fact line, not a warning: standing text is an ordinary operator
