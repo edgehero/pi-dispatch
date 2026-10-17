@@ -37,7 +37,7 @@ import { ANSWER_TEXT_MAX_BYTES, boundAnswerText, scrubAnswerText } from "./conso
 import { TOKEN_NAME_RE } from "./console-tokens.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 // The author charsets come from the framing, so what the inbox accepts is exactly what the framing can attribute.
-import { ASSOCIATION_RE, FORGE_USER_RE, STEER_FILE_MAX_BYTES, STEER_ID_RE, STEER_REF_WORST, steerFileJson } from "./steer-framing.mjs";
+import { ASSOCIATION_RE, FORGE_USER_RE, frameSteerMessage, STEER_FILE_MAX_BYTES, STEER_ID_RE, STEER_REF_WORST, steerFileJson } from "./steer-framing.mjs";
 
 export const STEER_MAX_MESSAGES = 16;
 /** The console answer's own bound: one rule for a person's text typed at the deployment, whatever it is for. */
@@ -157,9 +157,11 @@ export function normalizeSteerEntry(entry, now = Date.now) {
 	if (entry.source === "forge") {
 		const id = typeof a?.id === "number" ? String(a.id) : a?.id;
 		if (a?.kind !== "forge" || typeof id !== "string" || !FORGE_USER_RE.test(id) || typeof a.association !== "string" || !ASSOCIATION_RE.test(a.association)) {
-			return { refusal: "a forge message needs a forge author with a numeric user id and an association" };
+			return { refusal: "a forge message needs a forge author with a forge user id and an association" };
 		}
-		author = { kind: "forge", id: Number(id), association: a.association };
+		// A numeric id stays a number (the record and the framing read it so); Azure DevOps's GUID or `azid-` digest stays
+		// the string it is. `Number()` on those was NaN, and the framing then refused the entry under the size message.
+		author = { kind: "forge", id: /^[0-9]+$/.test(id) ? Number(id) : id, association: a.association };
 	} else {
 		if (a?.kind !== "operator" || typeof a.by !== "string" || !TOKEN_NAME_RE.test(a.by)) return { refusal: "an operator message needs an operator author named by a token-name word" };
 		author = { kind: "operator", by: a.by };
@@ -177,6 +179,7 @@ export function normalizeSteerEntry(entry, now = Date.now) {
 		if (!Number.isSafeInteger(entry.hop) || entry.hop < 0 || entry.hop > 8) return { refusal: "the hop is not a small non-negative integer" };
 		out.hop = entry.hop;
 	}
+	if (frameSteerMessage({ entry: out, ref: STEER_REF_WORST, forge: "x".repeat(16) }) === null) return { refusal: "the message cannot be framed for the run (an author or reference outside its charset). Nothing was sent" };
 	if (steerFileJson({ entry: out, ref: STEER_REF_WORST, forge: "x".repeat(16) }) === null) {
 		return { refusal: `the message, framed for the run, would be above the ${STEER_FILE_MAX_BYTES}-byte inbox file limit (long runs of backticks, quotes and backslashes count extra); shorten it. Nothing was sent` };
 	}
@@ -208,8 +211,12 @@ if not cur then return false end
 if cur == 'queued' or cur == 'written' then redis.call('HSET', KEYS[1], ARGV[1], 'withdrawn') end
 return cur`;
 
-// The final close. KEYS: closed, open, list, state[, target]. ARGV: target member (the raw runId), ttl ms.
-const CLOSE_SCRIPT = `redis.call('SET', KEYS[1], '1', 'PX', ARGV[2])
+// The final close. KEYS: closed, open, list, state[, target]. ARGV: target member (the raw runId), ttl ms. The third
+// element says whether THIS call made the closing transition (1) or found the inbox already closed (0): a run whose
+// final outcome is settled twice (the processor's settle, then BullMQ's failed listener for the same thrown failure)
+// gets the same late entries back both times, and only the first may answer them.
+const CLOSE_SCRIPT = `local first = 1 - redis.call('EXISTS', KEYS[1])
+redis.call('SET', KEYS[1], '1', 'PX', ARGV[2])
 redis.call('DEL', KEYS[2])
 if #KEYS >= 5 then redis.call('ZREM', KEYS[5], ARGV[1]) end
 local st = redis.call('HGETALL', KEYS[4])
@@ -219,7 +226,7 @@ for i = 1, #st, 2 do
 end
 redis.call('PEXPIRE', KEYS[3], ARGV[2])
 redis.call('PEXPIRE', KEYS[4], ARGV[2])
-return {redis.call('LRANGE', KEYS[3], 0, -1), redis.call('HGETALL', KEYS[4])}`;
+return {redis.call('LRANGE', KEYS[3], 0, -1), redis.call('HGETALL', KEYS[4]), first}`;
 
 // Compare and set. KEYS: state. ARGV: id, to, from...
 const MARK_SCRIPT = `local cur = redis.call('HGET', KEYS[1], ARGV[1])
@@ -277,6 +284,72 @@ export async function pushSteer({ redis, runId, entry, now = Date.now } = {}) {
 	}
 }
 
+// The late branch's carry (issue #646, branch A): messages written into the inbox of a run that has NOT STARTED yet, so
+// no open-key check (there is no live relay to set one), but every other rule of a push: refused when closed (that run
+// already ended, and a reset at its start would delete them anyway), a message already present is skipped, and the
+// run's two caps hold for the batch as a whole, all or nothing, decided before anything is written.
+// KEYS: closed, list, state. ARGV: ttl ms, max count, max bytes, then (id, entry JSON, text bytes) per message.
+const PRESEED_SCRIPT = `if redis.call('EXISTS', KEYS[1]) == 1 then return {'closed', 0} end
+local count = tonumber(redis.call('HGET', KEYS[3], '_count') or '0') or 0
+local bytes = tonumber(redis.call('HGET', KEYS[3], '_bytes') or '0') or 0
+local add, addBytes = 0, 0
+for i = 4, #ARGV, 3 do
+	if redis.call('HEXISTS', KEYS[3], ARGV[i]) == 0 then
+		add = add + 1
+		addBytes = addBytes + tonumber(ARGV[i + 2])
+	end
+end
+if count + add > tonumber(ARGV[2]) or bytes + addBytes > tonumber(ARGV[3]) then return {'full', 0} end
+for i = 4, #ARGV, 3 do
+	if redis.call('HEXISTS', KEYS[3], ARGV[i]) == 0 then
+		redis.call('RPUSH', KEYS[2], ARGV[i + 1])
+		redis.call('HSET', KEYS[3], ARGV[i], 'queued')
+	end
+end
+if add > 0 then redis.call('HSET', KEYS[3], '_count', count + add, '_bytes', bytes + addBytes) end
+redis.call('PEXPIRE', KEYS[2], ARGV[1])
+redis.call('PEXPIRE', KEYS[3], ARGV[1])
+return {'ok', add}`;
+
+/**
+ * How long a carried message waits for its run to start: a day, not the inbox's hour, because the run is a queued job
+ * that may wait behind a full host or a pause window. The relay's first refresh puts the hour back once it is live.
+ */
+export const STEER_PRESEED_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Pre-seed a run that has not started with carried messages (DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY, branch A): the
+ * late messages after the first, written `queued` into the inbox of the job the first one started, so its relay writes
+ * them at its loop start as steers. Every entry must carry `hop >= 1`: a carried message is never a first one, and a
+ * carried message that is late again is answered, never carried a second time (that is what ends the chain). The
+ * entries are validated exactly as a push validates them. `{ seeded: n }` (n new; an id already there is skipped),
+ * `{ error: "closed" | "full" }`, a refusal, or `{ error: <code> }`. Worker only: no surface takes a message for a run
+ * that is not live through this.
+ */
+export async function preseedInbox({ redis, runId, entries, now = Date.now } = {}) {
+	if (!validRunId(runId)) return refused("no run id");
+	if (!Array.isArray(entries) || entries.length === 0 || entries.length > STEER_MAX_MESSAGES) return refused(`the carried messages are not a list of 1 to ${STEER_MAX_MESSAGES}`);
+	const argv = [];
+	const seen = new Set();
+	for (const raw of entries) {
+		if (!Number.isSafeInteger(raw?.hop) || raw.hop < 1) return refused("a carried message needs a hop of at least 1");
+		const norm = normalizeSteerEntry(raw, now);
+		if (norm.refusal) return refused(norm.refusal);
+		if (seen.has(norm.entry.id)) continue;
+		seen.add(norm.entry.id);
+		argv.push(norm.entry.id, JSON.stringify(norm.entry), String(Buffer.byteLength(norm.entry.text, "utf8")));
+	}
+	const k = inboxKeys(runId);
+	try {
+		const r = await redis.eval(PRESEED_SCRIPT, 3, k.closed, k.list, k.state, String(STEER_PRESEED_TTL_MS), String(STEER_MAX_MESSAGES), String(STEER_TOTAL_MAX_BYTES), ...argv);
+		if (!Array.isArray(r) || r.length !== 2) return { error: "bad-reply" };
+		if (r[0] === "ok") return { seeded: Number(r[1]) || 0 };
+		return r[0] === "closed" || r[0] === "full" ? { error: r[0] } : { error: "bad-reply" };
+	} catch (error) {
+		return { error: codeOf(error) };
+	}
+}
+
 /**
  * Withdraw one message: `{ prior }`, the state it was in. `queued` is a guaranteed withdrawal (the relay never wrote
  * it); `written` is best effort (the file was in the run's inbox, and the runner may have read it before the relay
@@ -295,9 +368,10 @@ export async function withdrawSteer({ redis, runId, id } = {}) {
 }
 
 /**
- * The final close (settle, at a FINAL outcome only): `{ entries, state, count, bytes }` with every message the run
- * ever accepted, the formerly queued or written ones now `late`. After it every push is refused. `targetKey` is the
- * run's pointer, null for a run without one.
+ * The final close (settle, at a FINAL outcome only): `{ entries, state, count, bytes, first }` with every message the
+ * run ever accepted, the formerly queued or written ones now `late`. After it every push is refused. `first` is true
+ * only for the call that closed it; a second close returns the same entries with `first: false`, and its caller must
+ * not answer them again. `targetKey` is the run's pointer, null for a run without one.
  */
 export async function closeInbox({ redis, runId, targetKey = null } = {}) {
 	if (!validRunId(runId)) return refused("no run id");
@@ -306,8 +380,8 @@ export async function closeInbox({ redis, runId, targetKey = null } = {}) {
 	const keys = [k.closed, steerOpenKey(runId), k.list, k.state, ...(targetKey ? [targetKey] : [])];
 	try {
 		const r = await redis.eval(CLOSE_SCRIPT, keys.length, ...keys, String(runId), String(STEER_INBOX_TTL_MS));
-		if (!Array.isArray(r) || r.length !== 2) return { error: "bad-reply" };
-		return { entries: entriesOf(r[0]), ...stateOf(r[1]) };
+		if (!Array.isArray(r) || r.length !== 3) return { error: "bad-reply" };
+		return { entries: entriesOf(r[0]), ...stateOf(r[1]), first: Number(r[2]) === 1 };
 	} catch (error) {
 		return { error: codeOf(error) };
 	}
@@ -418,8 +492,9 @@ export function refreshLive(args) {
 }
 
 /**
- * The relay's exit: drop the run from its target and delete the open key. Not a close (an InfraRetry or a recovery
- * handoff leaves the inbox open for the next attempt); `closeInbox` is the final one.
+ * Drop the run from its target and delete the open key, now. Not a close (the inbox stays open), and no longer the
+ * relay's exit, which holds the keys instead (`holdLive`, review round 1, F3); kept for a caller that must make a run
+ * unreachable at once.
  */
 export async function unregisterLive({ redis, runId, targetKey = null } = {}) {
 	if (!validRunId(runId)) return refused("no run id");
@@ -432,6 +507,49 @@ export async function unregisterLive({ redis, runId, targetKey = null } = {}) {
 		const failed = res.find(([err]) => err);
 		if (failed) return { error: codeOf(failed[0]) };
 		return { ok: true };
+	} catch (error) {
+		return { error: codeOf(error) };
+	}
+}
+
+/**
+ * How long a run that stopped (its container exited) still takes messages: 15 minutes, longer than the 10-minute
+ * semantic window a forge job holds (queue.mjs SEMANTIC_WINDOW_MS). While that window can still swallow a comment's
+ * enqueue, the run must still be reachable as a steer, or the comment is lost in the gap between the container's exit
+ * and the settle, or between two attempts (an InfraRetry's backoff, a #645 recovery waiting for its pickup). Past the
+ * window a comment that finds no run is enqueued normally and nothing swallows it, so a longer hold buys nothing.
+ */
+export const STEER_HOLD_TTL_MS = 15 * 60 * 1000;
+
+// The relay's exit. KEYS: closed, open[, target]. ARGV: host, now ms, hold ms, target member. Nothing when the inbox is
+// already closed (a settle that ran first owns the keys). The target's TTL is only ever lengthened here.
+const HOLD_SCRIPT = `if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+local hold = tonumber(ARGV[3])
+redis.call('SET', KEYS[2], ARGV[1], 'PX', hold)
+if #KEYS >= 3 then
+	redis.call('ZADD', KEYS[3], tonumber(ARGV[2]) + hold, ARGV[4])
+	if redis.call('PTTL', KEYS[3]) < hold then redis.call('PEXPIRE', KEYS[3], hold) end
+end
+return 1`;
+
+/**
+ * The relay's exit (review round 1, F3): NOT an unregister. The open key and the target member stay, for
+ * STEER_HOLD_TTL_MS, so a comment or an operator message in the gap before the settle (or before the next attempt's
+ * relay re-registers) still lands in the inbox: the next attempt writes it, or the settle closes it as `late`, which is
+ * answered or resumed. Never lost, and the record counts it. The settle's close removes both; a run that never settles
+ * (it cannot: a stall-kill settles in the failed listener) loses them at the TTL. `{ held: boolean }` or `{ error }`.
+ */
+export async function holdLive({ redis, runId, targetKey = null, host, now = Date.now, holdMs = STEER_HOLD_TTL_MS } = {}) {
+	if (!validRunId(runId)) return refused("no run id");
+	if (targetKey !== null && (typeof targetKey !== "string" || !targetKey.startsWith("run:steer:target:"))) return refused("the target key is not a steer target key");
+	if (typeof host !== "string" || host === "" || host.length > HOST_MAX) return refused("the host name is missing or too long");
+	const t = nowOf(now);
+	if (!isMs(t)) return refused("now is not a millisecond timestamp");
+	if (!Number.isSafeInteger(holdMs) || holdMs < 1) return refused("the hold is not a positive number of milliseconds");
+	const keys = [inboxKeys(runId).closed, steerOpenKey(runId), ...(targetKey ? [targetKey] : [])];
+	try {
+		const r = await redis.eval(HOLD_SCRIPT, keys.length, ...keys, host, String(t), String(holdMs), String(runId));
+		return { held: Number(r) === 1 };
 	} catch (error) {
 		return { error: codeOf(error) };
 	}
@@ -465,8 +583,23 @@ export async function isOpen({ redis, runId } = {}) {
 }
 
 /**
+ * The most fallback jobs one run holds (review round 1, F8): twice the message cap, because a fallback is stored BEFORE
+ * its push (receiver/src/steer.mjs), so a push the run then refuses (`full`, `gone`) still leaves one, and the hash must
+ * not grow with every comment a busy target gets. A store beyond it is refused, and the receiver falls through to an
+ * ordinary enqueue.
+ */
+export const STEER_MAX_FALLBACKS = 32;
+
+// KEYS: fallback. ARGV: id, job JSON, max, ttl ms. A message already held is overwritten (a redelivery), never counted.
+const FALLBACK_SCRIPT = `if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 and redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[3]) then return 'full' end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+return 'ok'`;
+
+/**
  * Store the job a forge message would have started had no run been live (PR 2's late branch A enqueues it). The job is
- * stored as JSON under the message id with the inbox's hour. `{ ok: true }` or `{ error }`.
+ * stored as JSON under the message id with the inbox's hour, at most STEER_MAX_FALLBACKS per run. `{ ok: true }`,
+ * `{ error: "full" }` or `{ error }`.
  */
 export async function storeFallback({ redis, runId, id, job } = {}) {
 	if (!validRunId(runId)) return refused("no run id");
@@ -480,11 +613,9 @@ export async function storeFallback({ redis, runId, id, job } = {}) {
 	if (typeof body !== "string" || !job || typeof job !== "object") return refused("the fallback job is not an object");
 	const k = inboxKeys(runId).fallback;
 	try {
-		const res = await redis.multi().hset(k, id, body).pexpire(k, STEER_INBOX_TTL_MS).exec();
-		if (!Array.isArray(res)) return { error: "bad-reply" };
-		const failed = res.find(([err]) => err);
-		if (failed) return { error: codeOf(failed[0]) };
-		return { ok: true };
+		const r = await redis.eval(FALLBACK_SCRIPT, 1, k, id, body, String(STEER_MAX_FALLBACKS), String(STEER_INBOX_TTL_MS));
+		if (r === "ok") return { ok: true };
+		return r === "full" ? { error: "full" } : { error: "bad-reply" };
 	} catch (error) {
 		return { error: codeOf(error) };
 	}

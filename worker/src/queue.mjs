@@ -351,7 +351,53 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, progress, statusComment, recover, steer, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, fields) {
+	const { jobId, data, dedupId } = forgeJobOf(kind, fields);
+	const added = await queue.add(kind, data, {
+		jobId,
+		deduplication: { id: dedupId, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
+		...forgeJobOpts(),
+	});
+	// Issue #289: WHICH of the two dedup layers spoke is readable off `queue.add`'s return, and only one
+	// of them is. Verified at bullmq 5.80.4's own Lua: a jobId collision (the GUID shield,
+	// REQ-DEDUP-BY-DELIVERY-GUID) returns THE SAME id -- structurally invisible here, and correctly so,
+	// because a forge retry of a delivery that IS queued deserves the answer "queued" -- while the
+	// `deduplication` option (the 10-minute semantic window) returns the EXISTING job's DIFFERENT id.
+	// So `added.id !== jobId` means this delivery was swallowed by the window and created nothing, which
+	// the receiver used to log as `enqueued` and answer as success. A defensive undefined (a fake queue
+	// predating the comparison) reads as not-deduplicated, today's behaviour exactly.
+	if (added?.id && added.id !== jobId) return { jobId, deduplicated: true, survivingJobId: added.id };
+	return { jobId, deduplicated: false };
+}
+
+// A forge job's retry policy and retention, one table for both of its enqueue paths (the window-deduplicated one above
+// and the late-message resume below). The retention is in SECONDS; the semantic window's ttl is in ms.
+// A function, so every add gets its own objects (bullmq keeps the options it is handed on the job).
+const forgeJobOpts = () => ({
+	attempts: 2,
+	backoff: { type: "exponential", delay: 60_000 },
+	removeOnComplete: { age: 31 * 24 * 3600 },
+	removeOnFail: { age: 31 * 24 * 3600 },
+});
+
+/**
+ * Enqueue the job a LATE forge message would have started (issue #646, DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY, branch
+ * A): `fields` is what the receiver stored as the message's fallback (the object it would have handed
+ * `enqueueForgeJob`), rebuilt here through the same explicit field list, under the same delivery-GUID id and the same
+ * retry policy, on whichever queue the caller names. NO `deduplication` option: the run it follows held this target's
+ * semantic window, and the message is exactly the follow-up that window must not swallow. The GUID layer still holds,
+ * so two runs that both ended holding the message (replicas a comment fanned out to) make one job between them.
+ * Returns `{ jobId }` (an id bullmq already held answers the same, by design); throws what `queue.add` throws, and
+ * the caller falls back to a reply.
+ */
+export async function enqueueLateForgeJob(queue, kind, fields) {
+	const { jobId, data } = forgeJobOf(kind, fields);
+	await queue.add(kind, data, { jobId, ...forgeJobOpts() });
+	return { jobId };
+}
+
+/** The forge job's id, its data (an explicit field list, see `enqueueForgeJob`) and its semantic dedup id. Throws on a bad delivery id or console name. */
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, progress, statusComment, recover, steer, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
 	// else. Rebuilt from the one field rather than copied, `parkedReply`'s rule for durable job data, and refused when the
@@ -469,30 +515,14 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 	// narrow to the matched action word, like the PR half already does.
 	const isCloseJob = matched?.type === "issue" || (matched?.type === "pull_request" && PR_CLOSE_WORDS.has(matched?.action));
 	const flowSlot = `${isCloseJob ? "closed:" : ""}${command !== undefined ? `cmd:${command}` : flow}`;
-	const added = await queue.add(kind, data, {
-		jobId,
-		// A command job (issue #189) fills the semantic key's flow slot with `cmd:<command>`: a command
-		// trigger carries no flow, so the slot would otherwise read `undefined` for every command and one
-		// command's 10-minute window would swallow a different command's delivery on the same target. The
-		// `cmd:` prefix keeps a command named X from coalescing against a flow named X -- `:` is outside
-		// the skill-name charset, so no real flow can spell the prefixed form -- and a flow job's key
-		// stays byte-identical to before the feature.
-		deduplication: { id: `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flowSlot}${replica !== undefined ? `:r${replica}` : ""}`, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
-		attempts: 2,
-		backoff: { type: "exponential", delay: 60_000 },
-		removeOnComplete: { age: 31 * 24 * 3600 }, // age in seconds -- do not cross units with the ms ttl above
-		removeOnFail: { age: 31 * 24 * 3600 },
-	});
-	// Issue #289: WHICH of the two dedup layers spoke is readable off `queue.add`'s return, and only one
-	// of them is. Verified at bullmq 5.80.4's own Lua: a jobId collision (the GUID shield,
-	// REQ-DEDUP-BY-DELIVERY-GUID) returns THE SAME id -- structurally invisible here, and correctly so,
-	// because a forge retry of a delivery that IS queued deserves the answer "queued" -- while the
-	// `deduplication` option (the 10-minute semantic window) returns the EXISTING job's DIFFERENT id.
-	// So `added.id !== jobId` means this delivery was swallowed by the window and created nothing, which
-	// the receiver used to log as `enqueued` and answer as success. A defensive undefined (a fake queue
-	// predating the comparison) reads as not-deduplicated, today's behaviour exactly.
-	if (added?.id && added.id !== jobId) return { jobId, deduplicated: true, survivingJobId: added.id };
-	return { jobId, deduplicated: false };
+	// A command job (issue #189) fills the semantic key's flow slot with `cmd:<command>`: a command
+	// trigger carries no flow, so the slot would otherwise read `undefined` for every command and one
+	// command's 10-minute window would swallow a different command's delivery on the same target. The
+	// `cmd:` prefix keeps a command named X from coalescing against a flow named X -- `:` is outside
+	// the skill-name charset, so no real flow can spell the prefixed form -- and a flow job's key
+	// stays byte-identical to before the feature.
+	const dedupId = `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flowSlot}${replica !== undefined ? `:r${replica}` : ""}`;
+	return { jobId, data, dedupId };
 }
 
 /**

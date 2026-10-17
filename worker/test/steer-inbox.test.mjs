@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { scrubAnswerText } from "../src/console-answer.mjs";
 import {
+	STEER_HOLD_TTL_MS,
 	STEER_INBOX_TTL_MS,
+	STEER_MAX_FALLBACKS,
+	STEER_PRESEED_TTL_MS,
 	STEER_MAX_MESSAGES,
 	STEER_TEXT_MAX_BYTES,
 	STEER_TOTAL_MAX_BYTES,
@@ -11,6 +14,7 @@ import {
 	scrubSteerText,
 	closeInbox,
 	forgeMessageId,
+	holdLive,
 	inboxKeys,
 	isOpen,
 	listInboxPublic,
@@ -19,6 +23,7 @@ import {
 	messageState,
 	normalizeSteerEntry,
 	operatorMessageId,
+	preseedInbox,
 	pushSteer,
 	readFallbacks,
 	readInbox,
@@ -159,7 +164,10 @@ test("a refused entry never reaches Valkey, and a Valkey fault is { error: code 
 	assert.deepEqual(await listInboxPublic({ redis: down, runId: "r" }), { error: "valkey" });
 	assert.deepEqual(await registerLive({ redis: down, runId: "r", host: "h", now: clock }), { error: "valkey" });
 	assert.deepEqual(await unregisterLive({ redis: down, runId: "r" }), { error: "valkey" });
-	assert.deepEqual(await storeFallback({ redis: down, runId: "r", id: hexId(), job: {} }), { error: "valkey" });
+	assert.deepEqual(await storeFallback({ redis: down, runId: "r", id: hexId(), job: {} }), { error: "ECONNREFUSED" });
+	assert.deepEqual(await holdLive({ redis: down, runId: "r", host: "h", now: clock }), { error: "ECONNREFUSED" });
+	assert.deepEqual(await storeFallback({ redis: { eval: async () => "maybe" }, runId: "r", id: hexId(), job: {} }), { error: "bad-reply" });
+	assert.deepEqual(await closeInbox({ redis: { eval: async () => [[], []] }, runId: "r" }), { error: "bad-reply" }, "a two-element close reply is the old script's, refused");
 	assert.deepEqual(await readFallbacks({ redis: down, runId: "r" }), { error: "valkey" });
 	assert.deepEqual(await pushSteer({ redis: { eval: async () => "maybe" }, runId: "r", entry: opEntry(), now: clock }), { error: "bad-reply" });
 });
@@ -416,4 +424,140 @@ test("the fallback store keeps one job per message id with the inbox's hour", { 
 	assert.deepEqual(await storeFallback({ redis, runId, id, job: { name: "comment", data: { kind: "github" } } }), { ok: true });
 	assert.deepEqual(await readFallbacks({ redis, runId }), { jobs: { [id]: { name: "comment", data: { kind: "github" } } } });
 	assert.ok((await redis.pttl(inboxKeys(runId).fallback)) > STEER_INBOX_TTL_MS - 5_000);
+});
+
+// --- PR 2: the late branch's carry (preseedInbox) --------------------------------------------------------------------
+
+const carried = (over = {}) => ({ v: 1, id: hexId(), mode: "steer", source: "forge", author: { kind: "forge", id: 42, association: "MEMBER" }, text: "carried text", at: T0, deliveryId: `d-${seq}`, hop: 1, ...over });
+
+test("preseed: a run that has not started takes carried messages as queued, without the open key, in order, with a day's TTL", { skip: live }, async () => {
+	const redis = await client();
+	const runId = runIdFor("preseed");
+	const a = carried();
+	const b = carried({ mode: "followUp" });
+	assert.equal(await isOpen({ redis, runId }), false, "no relay yet");
+	assert.deepEqual(await preseedInbox({ redis, runId, entries: [a, b, a], now: clock }), { seeded: 2 }, "a repeated id in the batch is one message");
+	const r = await readInbox({ redis, runId });
+	assert.deepEqual(r.entries.map((e) => [e.id, e.hop, e.mode]), [[a.id, 1, "steer"], [b.id, 1, "followUp"]]);
+	assert.deepEqual(r.state, { [a.id]: "queued", [b.id]: "queued" });
+	assert.deepEqual([r.count, r.bytes, r.closed], [2, 2 * Buffer.byteLength("carried text"), false]);
+	const ttl = await redis.pttl(inboxKeys(runId).list);
+	assert.ok(ttl > STEER_PRESEED_TTL_MS - 5_000 && ttl <= STEER_PRESEED_TTL_MS, "a day: the job may wait behind a full host");
+	assert.deepEqual(await preseedInbox({ redis, runId, entries: [a], now: clock }), { seeded: 0 }, "again is a no-op");
+	// Its relay's first registration puts the hour back, and a push then counts against the same caps.
+	await registerLive({ redis, runId, host: "h1", now: clock });
+	assert.ok((await redis.pttl(inboxKeys(runId).list)) <= STEER_INBOX_TTL_MS);
+	assert.equal(await pushSteer({ redis, runId, entry: a, now: clock }), "dup");
+});
+
+test("preseed: refused when closed, all or nothing at the caps, and only for carried (hop >= 1) valid entries", { skip: live }, async () => {
+	const redis = await client();
+	const closedRun = runIdFor("preseed-closed");
+	await closeInbox({ redis, runId: closedRun });
+	assert.deepEqual(await preseedInbox({ redis, runId: closedRun, entries: [carried()], now: clock }), { error: "closed" });
+	assert.deepEqual((await readInbox({ redis, runId: closedRun })).entries, []);
+
+	const full = runIdFor("preseed-full");
+	await registerLive({ redis, runId: full, host: "h1", now: clock });
+	for (let i = 0; i < STEER_MAX_MESSAGES - 1; i += 1) assert.equal(await pushSteer({ redis, runId: full, entry: opEntry(), now: clock }), "ok");
+	assert.deepEqual(await preseedInbox({ redis, runId: full, entries: [carried(), carried()], now: clock }), { error: "full" });
+	assert.equal((await readInbox({ redis, runId: full })).count, STEER_MAX_MESSAGES - 1, "nothing of the batch was written");
+	assert.deepEqual(await preseedInbox({ redis, runId: full, entries: [carried()], now: clock }), { seeded: 1 });
+
+	const big = "x".repeat(STEER_TEXT_MAX_BYTES - 16);
+	const bytes = runIdFor("preseed-bytes");
+	const many = Array.from({ length: Math.ceil(STEER_TOTAL_MAX_BYTES / big.length) + 1 }, () => carried({ text: big }));
+	assert.deepEqual(await preseedInbox({ redis, runId: bytes, entries: many, now: clock }), { error: "full" }, "the byte cap holds for the batch");
+
+	for (const bad of [[carried({ hop: 0 })], [carried({ hop: undefined })], [carried({ id: "nope" })], [carried({ source: "forge", author: { kind: "operator", by: "x" } })], [], null]) {
+		const r = await preseedInbox({ redis, runId: runIdFor("preseed-bad"), entries: bad, now: clock });
+		assert.equal(r.error, "refused", JSON.stringify(bad)?.slice(0, 60));
+	}
+});
+
+test("an Azure DevOps author id (GUID or azid digest) is kept as the string it is; a numeric id stays a number", () => {
+	const base = { id: "a".repeat(32), mode: "steer", source: "forge", text: "hi", at: 1, deliveryId: "d-1" };
+	for (const id of ["0f8fad5b-d9cb-469f-a165-70867728950e", "azid-0123456789abcdef"]) {
+		const got = normalizeSteerEntry({ ...base, author: { kind: "forge", id, association: "WRITE_ACCESS" } }, () => 1);
+		assert.equal(got.entry?.author.id, id, id);
+	}
+	assert.equal(normalizeSteerEntry({ ...base, author: { kind: "forge", id: "12", association: "MEMBER" } }, () => 1).entry.author.id, 12);
+	assert.match(normalizeSteerEntry({ ...base, author: { kind: "forge", id: "azid-XYZ", association: "MEMBER" } }, () => 1).refusal, /forge user id/);
+});
+
+test("I2: more than 16 carried messages is a refusal before Valkey", async () => {
+	const calls = [];
+	const redis = { eval: async (...a) => (calls.push(a), ["ok", 0]) };
+	const r = await preseedInbox({ redis, runId: "r", entries: Array.from({ length: STEER_MAX_MESSAGES + 1 }, () => carried()), now: clock });
+	assert.equal(r.error, "refused");
+	assert.equal(calls.length, 0);
+	assert.deepEqual(await preseedInbox({ redis, runId: "r", entries: Array.from({ length: STEER_MAX_MESSAGES }, () => carried()), now: clock }), { seeded: 0 });
+	assert.equal(calls.length, 1, "sixteen is the cap, not over it");
+});
+
+test("I7: pre-seeding an id the inbox already holds (delivered) writes nothing and leaves its state", { skip: live }, async () => {
+	const redis = await client();
+	const runId = runIdFor("preseed-held");
+	await registerLive({ redis, runId, host: "h1", now: clock });
+	const e = carried();
+	assert.equal(await pushSteer({ redis, runId, entry: e, now: clock }), "ok");
+	assert.deepEqual(await markState({ redis, runId, id: e.id, from: ["queued"], to: "delivered" }), { ok: true, prior: "queued" });
+	assert.deepEqual(await preseedInbox({ redis, runId, entries: [{ ...e, text: "other" }], now: clock }), { seeded: 0 });
+	const r = await readInbox({ redis, runId });
+	assert.equal(await redis.llen(inboxKeys(runId).list), 1, "no second RPUSH");
+	assert.deepEqual(r.state, { [e.id]: "delivered" });
+	assert.deepEqual([r.count, r.bytes], [1, Buffer.byteLength("carried text")], "the counters are untouched");
+});
+
+test("F2: closeInbox says which call made the closing transition", { skip: live }, async () => {
+	const redis = await client();
+	const runId = runIdFor("close-first");
+	await registerLive({ redis, runId, host: "h1", now: clock });
+	const e = opEntry();
+	assert.equal(await pushSteer({ redis, runId, entry: e, now: clock }), "ok");
+	const one = await closeInbox({ redis, runId });
+	const two = await closeInbox({ redis, runId });
+	assert.equal(one.first, true);
+	assert.equal(two.first, false);
+	assert.deepEqual(two.entries, one.entries, "the same entries both times");
+	assert.deepEqual(two.state, { [e.id]: "late" });
+});
+
+test("F3: holdLive keeps a stopped run reachable for 15 minutes; the close removes both keys; a hold after the close does nothing", { skip: live }, async () => {
+	const redis = await client();
+	const runId = runIdFor("hold");
+	const tk = target(31);
+	assert.equal(STEER_HOLD_TTL_MS, 15 * 60 * 1000);
+	await registerLive({ redis, runId, targetKey: tk, host: "h1", now: clock });
+	assert.deepEqual(await holdLive({ redis, runId, targetKey: tk, host: "h1", now: clock }), { held: true });
+	const open = await redis.pttl(steerOpenKey(runId));
+	assert.ok(open > STEER_HOLD_TTL_MS - 5_000 && open <= STEER_HOLD_TTL_MS, "the open key lives the hold");
+	assert.equal(Number(await redis.zscore(tk, String(runId))), T0 + STEER_HOLD_TTL_MS, "the member counts for the hold");
+	assert.ok((await redis.pttl(tk)) > STEER_HOLD_TTL_MS - 5_000, "the target key outlives its held member");
+	// Past the 30 s of a live registration, the run is still found and still takes a message.
+	assert.deepEqual(await liveRunsForTarget({ redis, targetKey: tk, now: () => T0 + 10 * 60 * 1000 }), [String(runId)]);
+	assert.equal(await pushSteer({ redis, runId, entry: opEntry(), now: clock }), "ok");
+	// The next attempt's registration takes over with its own 30 s.
+	await registerLive({ redis, runId, targetKey: tk, host: "h2", now: clock });
+	assert.ok((await redis.pttl(steerOpenKey(runId))) <= 30_000);
+	await holdLive({ redis, runId, targetKey: tk, host: "h2", now: clock });
+	await closeInbox({ redis, runId, targetKey: tk });
+	assert.equal(await isOpen({ redis, runId }), false);
+	assert.equal(await redis.zscore(tk, String(runId)), null);
+	assert.deepEqual(await holdLive({ redis, runId, targetKey: tk, host: "h2", now: clock }), { held: false }, "a settle that ran first owns the keys");
+	assert.equal(await isOpen({ redis, runId }), false);
+	assert.equal(await redis.zscore(tk, String(runId)), null);
+});
+
+test("F8: the fallback hash holds at most 32 jobs per run; a redelivery overwrites, a 33rd is refused", { skip: live }, async () => {
+	const redis = await client();
+	const runId = runIdFor("fallback-cap");
+	assert.equal(STEER_MAX_FALLBACKS, 32);
+	const ids = Array.from({ length: STEER_MAX_FALLBACKS }, () => hexId());
+	for (const id of ids) assert.deepEqual(await storeFallback({ redis, runId, id, job: { n: 1 } }), { ok: true });
+	assert.deepEqual(await storeFallback({ redis, runId, id: hexId(), job: { n: 1 } }), { error: "full" });
+	assert.deepEqual(await storeFallback({ redis, runId, id: ids[0], job: { n: 2 } }), { ok: true }, "a message already held is overwritten, never counted");
+	const read = await readFallbacks({ redis, runId });
+	assert.equal(Object.keys(read.jobs).length, STEER_MAX_FALLBACKS);
+	assert.deepEqual(read.jobs[ids[0]], { n: 2 });
 });

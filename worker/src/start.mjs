@@ -54,7 +54,7 @@ import { optionalUsdMicros } from "./money.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
-import { hostQueueName, makeQueue } from "./queue.mjs";
+import { hostQueueName, makeQueue, QUEUE } from "./queue.mjs";
 import { endpointShown, execDockerBounded, makeContainerGone, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
@@ -72,7 +72,7 @@ import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeL
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { makeLiveTranscriptOpener } from "./live-transcript.mjs";
 import { makeInboxRelay } from "./inbox-relay.mjs";
-import { settleInbox } from "./inbox-settle.mjs";
+import { makeLateForge, settleInbox } from "./inbox-settle.mjs";
 import { readProgressKey } from "./run-progress.mjs";
 import { makeStatusCommenter, makeStatusCommentRegistry, renderStatusText, STATUS_OUTCOMES, STATUS_RETRYING } from "./status-comment.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
@@ -2327,6 +2327,15 @@ export async function startWorker(
 		log("comment", { jobId: job?.id, text });
 	};
 
+	// Issue #646 (DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY): what a late forge message becomes at a steer-armed run's final
+	// outcome, for all three settle sites (the processor, the host-lost sweep, the failed listener): the run's semantic
+	// window released, then a resumed job on the queue that ran the run or one fixed reply through `comment` above. The
+	// recovery queues are the same handles a #645 recovery is routed through, so a host queue is reached by its name.
+	const lateForge = makeLateForge({ redis, queues: recoveryQueues, comment, log, now });
+	// The host-lost sweep's run ended on a host that is gone, so its resumed job goes to the shared queue, never to that
+	// host's queue, where nothing would ever take it.
+	const lateForgeShared = (entries, context) => lateForge(entries, { ...context, queueName: QUEUE });
+
 	// Issue #625: the forge's parked marker, set on a park and cleared when it no longer applies. comment()'s shape and its
 	// rule: it NEVER throws, because the marker decides nothing (the session store's sidecar does) and a forge that refuses
 	// the label must not flip an outcome. A local job has no forge and no marker. Issues only: a pull request's reply is
@@ -2414,7 +2423,7 @@ export async function startWorker(
 			// record it writes); a steer job's waiting messages are then `late`, never left `queued` until the key expires.
 			const lostError = { reason: "recovery-host-lost" };
 			if (job?.data?.steer === true) {
-				const steered = await settleInbox({ redis, job, error: lostError, log });
+				const steered = await settleInbox({ redis, job, error: lostError, log, onLateForge: lateForgeShared });
 				if (steered) lostError.steered = steered;
 			}
 			recordRun({ job: { id: job.id, name: job.name, data: job.data, opts: job.opts, attemptsMade: 0, timestamp: job.timestamp }, error: lostError, startedAt: null, endedAt: at });
@@ -2537,6 +2546,8 @@ export async function startWorker(
 		deps: {
 			collectChain,
 			collectPlan,
+			// Issue #646: the late-message branches at the processor's settle (index.mjs `settleSteer`).
+			onLateForge: lateForge,
 			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses
 			// only on a FOREIGN positive mark (index.mjs binds the real queue jobId so a retry of the
 			// spending delivery is excused). In the compose topology this check is the once-enforcement
@@ -2831,8 +2842,9 @@ export async function startWorker(
 				// Issue #646, review finding F2: a TERMINAL failure the processor never saw (a stall-kill of a crashed worker's
 				// job with no recovery enqueued, a rethrow above the processor's catch) is the run's final outcome too, so its
 				// inbox is closed here and what waits becomes `late` instead of sitting `queued` until the key expires. A
-				// terminal failure the processor did see was settled before its record; closing again changes nothing.
-				if (job.data?.steer === true) void settleInbox({ redis, job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" }, log });
+				// terminal failure the processor did see was settled before its record: this second close returns the same entries
+				// with `first: false` (steer-inbox.mjs closeInbox), so settleInbox answers nothing again (review round 1, F2).
+				if (job.data?.steer === true) void settleInbox({ redis, job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" }, log, onLateForge: lateForge });
 				void comment({ ...job.data, id: job.id }, (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason) ? FAILED_COMMENT_BY_REASON[err.reason] : null) ?? FAILED_COMMENT);
 				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
 			}

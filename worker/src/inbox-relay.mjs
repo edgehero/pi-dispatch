@@ -15,6 +15,8 @@ import * as inboxModule from "./steer-inbox.mjs";
  *      framed (steer-framing.mjs), written to `.<id>.tmp` with mode 0444, marked `written`, then renamed to
  *      `<seq:06d>-<id>.json`. The runner only ever sees complete files under the final pattern;
  *   3. unlinks the file of every message that is no longer waiting (`withdrawn`, `delivered`, `late`).
+ * At its stop it HOLDS the liveness keys for STEER_HOLD_TTL_MS rather than dropping them (`holdLive`), so the run still
+ * takes messages until its settle closes the inbox or its next attempt registers again.
  *
  * MARK BEFORE RENAME, not after. A `queued` message's withdrawal is promised as GUARANTEED (steer-inbox.mjs), so a file
  * the runner can read must never exist for a message that could still be withdrawn as `queued`. Marking `written` first
@@ -288,7 +290,12 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 			unlinkId(id);
 		},
 		tick,
-		/** Stop for good: the timer, a pass in flight, then the liveness keys. Not a close: the settle step closes. */
+		/**
+		 * Stop for good: the timer, a pass in flight, then HOLD the liveness keys (review round 1, F3; steer-inbox.mjs
+		 * `holdLive`). Not an unregister: until the settle closes the inbox (or the next attempt's relay re-registers the
+		 * run), a comment must still land in it rather than fall through to an enqueue the run's semantic window swallows.
+		 * What lands after this point is written by the next attempt or settles as `late`. Not a close either.
+		 */
 		async stop() {
 			if (stopped) return { ...counts };
 			stopped = true;
@@ -299,10 +306,10 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 			} catch {}
 			if (started) {
 				try {
-					const r = await inbox.unregisterLive({ redis, runId, targetKey });
-					if (r?.error) fault("unregister", codeOf(r));
+					const r = await inbox.holdLive({ redis, runId, targetKey, host, now });
+					if (r?.error) fault("hold", codeOf(r));
 				} catch (e) {
-					fault("unregister", codeOf(e));
+					fault("hold", codeOf(e));
 				}
 			}
 			return { ...counts };

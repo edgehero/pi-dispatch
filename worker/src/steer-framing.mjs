@@ -8,8 +8,9 @@
  *
  * WHAT THE FRAME SAYS, in order:
  *   1. a heading that names the message as data, not instructions;
- *   2. who sent it. A forge author is named only by what the payload subset holds (a numeric user id and the
- *      association the author gate judged: there is no login in it, INT-WEBHOOK-PAYLOAD-SUBSET); an operator by the
+ *   2. who sent it. A forge author is named only by what the payload subset holds (a user id, numeric on GitHub,
+ *      GitLab and Forgejo, a GUID or an `azid-` digest on Azure DevOps, and the association the author gate judged:
+ *      there is no login in it, INT-WEBHOOK-PAYLOAD-SUBSET); an operator by the
  *      surface (a console token's name, the command line, the dispatch panel). Every interpolated value is held to a
  *      closed charset first, so attribution can never carry text a sender chose;
  *   3. for a follow-up, the sentence that says it was meant to wait until the agent had finished;
@@ -39,8 +40,12 @@ export const STEER_FILE_MAX_BYTES = 16 * 1024;
 const REF_RE = /^[A-Za-z0-9#!._ ]{1,64}$/;
 /** A message id (it names the inbox file): 32 lowercase hex. steer-inbox.mjs re-exports it. */
 export const STEER_ID_RE = /^[0-9a-f]{32}$/;
-/** A forge user id: a positive integer within the safe range, as a number or its decimal spelling. Shared with the inbox. */
-export const FORGE_USER_RE = /^[1-9][0-9]{0,14}$/;
+/**
+ * A forge user id, shared with the inbox: a forge's numeric user id (GitHub, GitLab, Forgejo), or Azure DevOps's, its
+ * actor GUID, or `azid-` and 16 hex when the event carried only an address (receiver/src/filter-azure.mjs
+ * stableActorId). Every form is charset-safe, so the attribution line never carries attacker-chosen text.
+ */
+export const FORGE_USER_RE = /^(?:[1-9][0-9]{0,14}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|azid-[0-9a-f]{16})$/;
 /** An author association as the forges spell it (OWNER, MEMBER, COLLABORATOR, and the like). Shared with the inbox. */
 export const ASSOCIATION_RE = /^[A-Z][A-Z_]{0,39}$/;
 /** A forge kind word ("github", "gitlab"), optional. */

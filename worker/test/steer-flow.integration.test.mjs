@@ -4,10 +4,10 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } f
 import { join } from "node:path";
 import { inboxAck } from "../../image/runner/src/inbox.mjs";
 import { makeInboxRelay } from "../src/inbox-relay.mjs";
-import { settleInbox } from "../src/inbox-settle.mjs";
+import { makeLateForge, settleInbox, STEER_LATE_REPLY } from "../src/inbox-settle.mjs";
 import { makeLiveTranscriptOpener } from "../src/live-transcript.mjs";
 import { makeSteerAck } from "../src/steer-ack.mjs";
-import { isOpen, messageState, operatorMessageId, pushSteer } from "../src/steer-inbox.mjs";
+import { forgeMessageId, isOpen, messageState, operatorMessageId, pushSteer, registerLive, storeFallback, unregisterLive } from "../src/steer-inbox.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #646, end to end against a real Valkey: an operator's push (the CLI's call) becomes a file in the run's inbox
@@ -106,7 +106,7 @@ test("a pushed message becomes a file; a forged ack is ignored, the real one mar
 	await relay.stop();
 	assert.equal(await messageState({ redis, runId, id }), "delivered");
 	assert.deepEqual(readdirSync(inboxDir), [`000002-${second}.json`], "the delivered message's file is gone");
-	assert.equal(await isOpen({ redis, runId }), false, "unregistered at the exit; the inbox itself is still open for a retry");
+	assert.equal(await isOpen({ redis, runId }), true, "F3: HELD at the exit, so a message in the gap before the settle still lands; the inbox is open for a retry");
 
 	// The final outcome (index.mjs's settleSteer): closed and counted; the undelivered message is late, a later push refused.
 	const job = { id: runId, attemptsMade: 0, opts: { attempts: 1 }, data: { kind: "local", folder: "/x", steer: true } };
@@ -218,4 +218,103 @@ test("F1: a console retry under the same job id finds the inbox closed; its rela
 	assert.deepEqual(readdirSync(r2.inboxDir), [`000001-${fresh}.json`]);
 	await r2.tail.finish("completed");
 	await r2.relay.stop();
+});
+
+test("LATE, BRANCH A end to end: a run ends holding two late comments; the first starts a resumed job, the second is pre-seeded and its relay writes it at the start; late again, it is answered", { skip: live, timeout: 20_000 }, async () => {
+	const redis = await client();
+	const now = () => T0;
+	const logs = [];
+	const log = (e, f) => logs.push([e, f]);
+	const data = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, flow: "fix", steer: true };
+	const runId = "gh-flow-late-run";
+	const targetKey = (await import("../src/inbox-relay.mjs")).steerTargetOf(data).targetKey;
+	// The run is live (its relay registered it); the receiver pushes two comments, each after storing its fallback.
+	await registerLive({ redis, runId, targetKey, host: "flow-host", now });
+	const comment = (n) => ({ v: 1, id: forgeMessageId(`flow-guid-${n}`), mode: "steer", source: "forge", author: { kind: "forge", id: 42, association: "MEMBER" }, text: `late comment ${n}`, deliveryId: `flow-guid-${n}` });
+	for (const n of [1, 2]) {
+		const fields = { kind: "github", jobId: `gh-flow-guid-${n}`, repo: "o/r", target: { type: "issue", number: 7, title: "t", body: "b" }, flow: "fix", trigger: { deliveryId: `flow-guid-${n}` }, provider: "p", model: "m", maxTurns: 3, resume: true, steer: true };
+		assert.deepEqual(await storeFallback({ redis, runId, id: comment(n).id, job: fields }), { ok: true });
+		assert.equal(await pushSteer({ redis, runId, entry: comment(n), now }), "ok");
+	}
+	await unregisterLive({ redis, runId, targetKey }); // the container exited before its relay wrote either
+
+	// The final outcome: closed, both late, the first resumes on the run's queue, the second goes into the new job's inbox.
+	const adds = [];
+	const queue = { add: async (name, d, opts) => (adds.push({ name, data: d, opts }), { id: opts.jobId }) };
+	const comments = [];
+	const lateForge = makeLateForge({ redis, queues: { shared: () => queue, host: () => queue }, comment: async (d, text) => comments.push({ d, text }), log, now });
+	let released = 0;
+	const job = { id: runId, queueName: "pi-jobs", deduplicationId: "o/r#7:fix", removeDeduplicationKey: async () => (released += 1, true), attemptsMade: 0, opts: { attempts: 2 }, data };
+	assert.deepEqual(await settleInbox({ redis, job, result: { outcome: "completed" }, log, onLateForge: lateForge }), { delivered: 0, late: 2, withdrawn: 0 });
+	assert.equal(released, 1, "the run's window is released");
+	assert.equal(adds.length, 1);
+	const next = adds[0];
+	assert.equal(next.opts.jobId, "gh-flow-guid-1");
+	assert.equal("deduplication" in next.opts, false);
+	assert.equal(comments.length, 0);
+	assert.equal(await messageState({ redis, runId: "gh-flow-guid-1", id: comment(2).id }), "queued", "pre-seeded before the run is live");
+
+	// The resumed job starts: its relay (runId = its job id) writes the carried message at the start, framed as a steer.
+	const dir = tempDir("pi-steer-flow-");
+	const inboxDir = join(dir, "job-next.inbox");
+	mkdirSync(inboxDir, { mode: 0o700 });
+	const transcript = join(dir, "current.jsonl");
+	writeFileSync(transcript, "");
+	const nextRun = next.opts.jobId;
+	const nextTarget = (await import("../src/inbox-relay.mjs")).steerTargetOf(next.data);
+	const relay = makeInboxRelay({ redis, runId: nextRun, jobId: nextRun, inboxDir, targetKey: nextTarget.targetKey, ref: nextTarget.ref, forge: nextTarget.forge, host: "flow-host", now, log, pollMs: 3_600_000 });
+	const ack = makeSteerAck({ exitKey: KEY, ackRunId: `pi-job-${nextRun}`, relay, jobId: nextRun, log });
+	const tail = makeLiveTranscriptOpener({ redis: null, transcripts: false, progress: false, steer: true, pollMs: 3_600_000, now })({ file: transcript, jobId: nextRun, job: { steer: true }, steer: ack });
+	await relay.start();
+	tail.start();
+	await tail.poll();
+	await relay.tick();
+	await relay.tick();
+	const names = readdirSync(inboxDir);
+	assert.deepEqual(names, [`000001-${comment(2).id}.json`], "only the carried message: the first one is the job's own prompt");
+	const body = JSON.parse(readFileSync(join(inboxDir, names[0]), "utf8"));
+	assert.equal(body.mode, "steer");
+	assert.equal(body.source, "forge");
+	assert.match(body.content, /late comment 2/);
+	assert.equal(await messageState({ redis, runId: nextRun, id: comment(2).id }), "written");
+	await tail.finish("completed");
+	await relay.stop();
+
+	// That run ends without delivering it: late again, hop 1, so it is answered, never carried a second time.
+	const nextJob = { id: nextRun, queueName: "pi-jobs", attemptsMade: 0, opts: { attempts: 2 }, data: next.data };
+	assert.deepEqual(await settleInbox({ redis, job: nextJob, result: { outcome: "completed" }, log, onLateForge: lateForge }), { delivered: 0, late: 1, withdrawn: 0 });
+	assert.equal(adds.length, 1, "no second job");
+	assert.equal(comments.length, 1);
+	assert.equal(comments[0].text, STEER_LATE_REPLY);
+	assert.equal(comments[0].d.id, nextRun);
+	assert.deepEqual(logs.find(([e]) => e === "steer_late_resumed")[1], { jobId: "gh-flow-guid-1", runId, n: 2, queue: "pi-jobs" });
+	assert.deepEqual(logs.find(([e]) => e === "steer_late_replied")[1], { runId: nextRun, n: 1 });
+	assert.ok(!JSON.stringify(logs).includes("late comment"), "no message text in any log line");
+});
+
+test("F3 + F2 end to end: a comment pushed after the container exited still lands, settles late and is answered ONCE across two settles", { skip: live, timeout: 20_000 }, async () => {
+	const redis = await client();
+	const now = () => T0;
+	const data = { kind: "github", repo: "o/r", target: { type: "issue", number: 9 }, flow: "fix", steer: true };
+	const { steerTargetOf, makeInboxRelay: relayOf } = await import("../src/inbox-relay.mjs");
+	const t = steerTargetOf(data);
+	const runId = "gh-flow-gap-run";
+	const dir = tempDir("pi-steer-flow-");
+	const inboxDir = join(dir, "job-gap.inbox");
+	mkdirSync(inboxDir, { mode: 0o700 });
+	const relay = relayOf({ redis, runId, inboxDir, targetKey: t.targetKey, ref: t.ref, forge: t.forge, host: "flow-host", now, pollMs: 3_600_000 });
+	await relay.start();
+	await relay.stop(); // the container exited; the settle has not run yet
+	const { liveRunsForTarget } = await import("../src/steer-inbox.mjs");
+	assert.deepEqual(await liveRunsForTarget({ redis, targetKey: t.targetKey, now }), [runId], "the receiver still finds the run");
+	const msg = { v: 1, id: forgeMessageId("gap-guid"), mode: "steer", source: "forge", author: { kind: "forge", id: 42, association: "MEMBER" }, text: "in the gap", deliveryId: "gap-guid" };
+	assert.equal(await pushSteer({ redis, runId, entry: msg, now }), "ok", "accepted, not swallowed by an enqueue the window would eat");
+	const comments = [];
+	const lateForge = makeLateForge({ redis, queues: { shared: () => null, host: () => null }, comment: async (d, text) => comments.push(text), now });
+	const job = { id: runId, queueName: "pi-jobs", attemptsMade: 0, opts: { attempts: 2 }, data };
+	assert.deepEqual(await settleInbox({ redis, job, error: new Error("for good"), onLateForge: lateForge }), { delivered: 0, late: 1, withdrawn: 0 }, "the record counts it as late, not lost");
+	assert.deepEqual(await settleInbox({ redis, job, error: { reason: "infra" }, onLateForge: lateForge }), { delivered: 0, late: 1, withdrawn: 0 });
+	assert.deepEqual(comments, [STEER_LATE_REPLY], "answered once");
+	assert.equal(await isOpen({ redis, runId }), false, "the settle removed the held keys");
+	assert.deepEqual(await liveRunsForTarget({ redis, targetKey: t.targetKey, now }), []);
 });
