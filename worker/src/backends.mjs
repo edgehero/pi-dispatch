@@ -61,13 +61,14 @@
  *
  * `OQ-012` already draws this line for images -- "a required OCI label proves INTENT, not conformance" --
  * and the same is true one level out. The value of the table is not that a vendor is verified; it is that a
- * MISMATCH becomes a refusal instead of a silent downgrade. `backend-conformance.mjs` verifies THREE of the
- * thirteen -- exit-code fidelity, the abort flag's independence from the code, and the read-only downgrade a
- * copying runtime takes -- plus the shape of a bundle and the internal consistency of its declaration. EIGHT more
+ * MISMATCH becomes a refusal instead of a silent downgrade. `backend-conformance.mjs` verifies FOUR of the
+ * fourteen -- exit-code fidelity, the abort flag's independence from the code, the read-only downgrade a
+ * copying runtime takes, and (issue #645) that a venue claiming `pausable` carries the verbs, driven through a freeze
+ * only when the adapter supplies a probe -- plus the shape of a bundle and the internal consistency of its declaration. EIGHT more
  * are read back off a live container (issues #278 and #344): for `local` by `doctor --live` (`live-probes.mjs`), for
  * any other runtime through the harness's `readBack` probe, which the adapter supplies. The remaining TWO the harness
  * names with what each would take rather than passing them in silence. So a backend can still declare all of this
- * and do most of it: these words are a contract with three of them checked and eight readable, which is more than
+ * and do most of it: these words are a contract with four of them checked and eight readable, which is more than
  * none and less than proof -- the read-back is of a fixture with the job image, not of every job.
  *
  * THE PROPERTIES ARE NOT A RENDERING OF `ISOLATION_FLAGS`, and must not become one. That array is the
@@ -231,6 +232,17 @@ const PROPERTIES_TABLE = {
 	},
 	localFolders: {
 		question: "a local folder can be bind-mounted and edited in place (DES-WORKER-ON-HOST finding 2)",
+		armedBy: null,
+	},
+	pausable: {
+		// Issue #645. OPTIONAL in the sense that matters: nothing a job needs rests on it, so `absent` is an honest word for
+		// a venue that cannot freeze and costs that venue nothing but a live (unfrozen) checkpoint read. Pausing uses the
+		// cgroup freezer (`docker pause`, `podman pause`): every process in the container stops where it stands and
+		// nothing is killed. It exists so the HOST can read a job's bind-mounted workspace as one consistent state while
+		// nothing in the container runs; it grants the container nothing, and no mount, flag or network changes
+		// (CONST-ISOLATION-CONTAINER-PER-JOB is untouched by it). The bundle's `pause(name)` / `unpause(name)` resolve
+		// `{ ok }` and never throw, so a freeze that does not take on one host degrades the read, never the job.
+		question: "a running job can be frozen by the cgroup freezer and thawed again, so the host reads its workspace while nothing in the container runs",
 		armedBy: null,
 	},
 };
@@ -640,6 +652,11 @@ const BACKENDS_TABLE = {
 			credentialTransit: ENFORCED,
 			// The whole reason `DES-WORKER-ON-HOST` reversed the containerised worker.
 			localFolders: ENFORCED,
+			// `docker pause` on the name (`makePauseVerbs`), the freezer of whichever cgroup version the daemon runs. The
+			// one host this does not hold on is a ROOTLESS Docker on cgroup v1, which cannot freeze; there the CLI's own
+			// non-zero exit comes back as `{ ok: false }` and the read goes unfrozen, rather than the word being lowered
+			// for every rootful host because of it.
+			pausable: ENFORCED,
 		},
 		/**
 		 * WHO is asserting each `asserted` property. Required for every property this backend declares
@@ -728,6 +745,12 @@ const BACKENDS_TABLE = {
 			// A bind mount of the operator's folder, as on `local`, never relabelled (on an SELinux host it needs the
 			// `semanage fcontext` doctor names), and writable because the job runs as the account that owns it.
 			localFolders: ENFORCED,
+			// `podman pause` on the name, AND ONLY ON CGROUP V2: rootless Podman cannot freeze on v1 (the freezer needs a
+			// cgroup the user owns, which v1 never delegates). The venue already reads which version from `podman info`
+			// (`isolation`'s observation needs v2 too), so the bundle answers `{ ok: false, reason: "cgroup-v1-rootless" }`
+			// there without spawning (`podmanPausable`), and doctor says so. Not an `observedBy` entry: that machinery
+			// lowers a word to `asserted`, which would name an asserter for a freeze nobody provides.
+			pausable: ENFORCED,
 		},
 		// Nothing asserted: every word above is this worker's own argv or an observation of this host.
 		asserts: {},

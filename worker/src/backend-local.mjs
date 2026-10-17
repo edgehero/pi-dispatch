@@ -139,6 +139,15 @@ export const BACKEND_PROVIDED = ["name", "declares", "namePrefix", "containerNam
  */
 export const BACKEND_VALUES = ["neverStartedExits"];
 
+/**
+ * Functions a bundle carries that `makeLocalBackend` builds ITSELF unless the caller passes its own (issue #645): the
+ * freezer verbs. Optional to pass rather than required like `BACKEND_FUNCTIONS`, because every caller of this factory
+ * (start.mjs and the tests) predates them and the local adapter knows how to spell them for docker; a test seam is
+ * the only reason to pass one. Still a NAMED list, so a misspelt `pasue` is refused as an unknown member like any other
+ * key rather than silently replaced by the default.
+ */
+export const BACKEND_OPTIONAL_FUNCTIONS = ["pause", "unpause"];
+
 export function makeLocalBackend(parts = {}) {
 	const { runContainer, imagePreflight, egressPreflight, stopContainer, reap } = parts ?? {};
 	const missing = Object.entries({ runContainer, imagePreflight, egressPreflight, stopContainer, reap })
@@ -155,9 +164,14 @@ export function makeLocalBackend(parts = {}) {
 	// control again, arriving through a dropped argument.
 	for (const key of Object.keys(parts ?? {})) {
 		if (BACKEND_FUNCTIONS.includes(key) || BACKEND_VALUES.includes(key)) continue;
+		if (BACKEND_OPTIONAL_FUNCTIONS.includes(key)) {
+			if (typeof parts[key] !== "function") throw new Error(`backend "${DEFAULT_BACKEND}": ${key} must be a function when it is passed`);
+			continue;
+		}
 		throw new Error(`backend "${DEFAULT_BACKEND}": unknown bundle member ${JSON.stringify(key)} (this factory takes ${BACKEND_FUNCTIONS.join(", ")} and sets ${BACKEND_PROVIDED.join(", ")} itself)`);
 	}
 
+	const verbs = makePauseVerbs({ bin: "docker" });
 	return {
 		name: DEFAULT_BACKEND,
 		// The declaration is READ from the table, never re-typed here. An adapter that stated its own
@@ -175,6 +189,10 @@ export function makeLocalBackend(parts = {}) {
 		egressPreflight,
 		stopContainer,
 		reap,
+		// The freezer verbs (issue #645), `pausable` in the table. Never throw; `{ ok: false, reason }` is the caller's cue to
+		// carry on without a frozen read.
+		pause: parts.pause ?? verbs.pause,
+		unpause: parts.unpause ?? verbs.unpause,
 		// The integers this runtime uses for "the runner never ran". The processor asks the BACKEND rather
 		// than assuming docker's triple, because those numbers collide with the runner's own exit channel.
 		neverStartedExits: LOCAL_NEVER_STARTED_EXITS,
@@ -216,6 +234,76 @@ export function makeStopContainer({ exec = execDocker, bin = "docker" } = {}) {
 	return async function stopContainer(name) {
 		return exec(bin, ["stop", "-t", "5", name]);
 	};
+}
+
+/**
+ * The bound on one `pause` or `unpause` (issue #645). 15 s, not `execDockerBounded`'s 5 s default: a freeze waits for
+ * every task in the container's cgroup to reach the frozen state, and a container mid-`fork` storm or in
+ * uninterruptible I/O takes visibly longer than a CLI round trip, while a caller holding a job's checkpoint cannot wait
+ * on a wedged daemon forever. Past it the verb answers `{ ok: false, reason: "timeout" }` and the child is SIGKILLed.
+ */
+export const PAUSE_TIMEOUT_MS = 15_000;
+
+/**
+ * A runtime's container name, which is also what keeps the argument from reading as a FLAG: `docker pause --help`
+ * exits 0 and freezes nothing, so a name beginning with `-` would come back as a successful pause of no container.
+ * `jobContainerName` only mints names of this shape (the runtimes' own rule), so refusing anything else costs no job.
+ */
+const RUNTIME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+/** Whether `name` is a runtime container name the freezer verbs accept. Exported so a venue's own gate checks it FIRST. */
+export function isRuntimeName(name) {
+	return typeof name === "string" && RUNTIME_NAME.test(name);
+}
+
+/**
+ * `{ pause(name), unpause(name) }` for the venue's CLI (`docker pause` / `podman pause` and their `unpause`), each
+ * resolving `{ ok: true }` or `{ ok: false, reason }` and NEVER rejecting (issue #645, the `pausable` row).
+ *
+ * WHAT IT IS FOR. Pausing uses the cgroup freezer: every process in the container stops where it stands, nothing is
+ * killed, and the bind-mounted workspace holds still, so the host can read it as one consistent state while nothing in
+ * the container runs. That is the whole of it; a frozen container is granted nothing and its mounts do not change.
+ *
+ * NEVER THROWS, because its caller is a best-effort read beside a running job: a freeze that did not take means the
+ * read is taken live or skipped, never that the job fails. A failure is a fixed token (`timeout`, `exit-<n>`,
+ * `<bin>-not-found`, `spawn-failed`, `invalid-name`) and never the CLI's stderr, which can repeat a `DOCKER_HOST` with
+ * credentials in it (issue #339's reason for `execDockerBounded` not reading it by default).
+ *
+ * BOUNDED TWICE ON PURPOSE. `execDockerBounded` (the default `run`) settles on its own timer and kills the child, which
+ * is the bound in production; the race below is the same bound for an injected `run`, so "never hangs" is a property of
+ * the verb rather than of whichever seam a caller passed. `docker stop` is not bounded here, which is why this uses
+ * `execDockerBounded` and not `makeStopContainer`'s `exec`: the abort path does not await its stop and this caller does.
+ */
+export function makePauseVerbs({ bin = "docker", timeoutMs = PAUSE_TIMEOUT_MS, run = (cmd, args, opts) => execDockerBounded(args, { bin: cmd, timeoutMs: opts.timeoutMs }) } = {}) {
+	const verb = (word) =>
+		async function pauseVerb(name) {
+			if (!isRuntimeName(name)) return { ok: false, reason: "invalid-name" };
+			let timer = null;
+			const expired = new Promise((resolve) => {
+				timer = setTimeout(() => resolve({ code: null, error: { timedOut: true } }), timeoutMs);
+			});
+			let result;
+			try {
+				result = await Promise.race([Promise.resolve().then(() => run(bin, [word, name], { timeoutMs })), expired]);
+			} catch (err) {
+				result = { code: null, error: err };
+			} finally {
+				clearTimeout(timer);
+			}
+			if (!result?.error && result?.code === 0) return { ok: true };
+			return { ok: false, reason: pauseFailure(bin, result) };
+		};
+	return { pause: verb("pause"), unpause: verb("unpause") };
+}
+
+/** The fixed token for a verb that did not take; values Node supplies only, never CLI text. */
+function pauseFailure(bin, result) {
+	const error = result?.error ?? null;
+	if (error?.timedOut || error?.killed) return "timeout";
+	if (error?.code === "ENOENT") return `${bin}-not-found`;
+	if (typeof result?.code === "number") return `exit-${result.code}`;
+	if (typeof error?.code === "number") return `exit-${error.code}`;
+	return "spawn-failed";
 }
 
 /**

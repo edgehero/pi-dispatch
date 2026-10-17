@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, REAPER_STEP_TIMEOUT_MS, reaperExec, ENDPOINT_LISTED_STATES, ENDPOINT_SHOWN_MAX, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint, quotedShown } from "../src/backend-local.mjs";
+import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, REAPER_STEP_TIMEOUT_MS, reaperExec, ENDPOINT_LISTED_STATES, ENDPOINT_SHOWN_MAX, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makePauseVerbs, PAUSE_TIMEOUT_MS, makeReaper, makeStopContainer, parseDockerEndpoint, quotedShown } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
@@ -1015,4 +1015,72 @@ test("issue #596, makeJobContainerLister lists every job container still there w
 	assert.deepEqual(await list(), []);
 	out = null;
 	await assert.rejects(list(), /down/, "unanswered is never an empty host");
+});
+
+test("the freezer verbs spawn `<bin> pause <name>` / `unpause <name>` with the 15 s bound, docker by default (#645)", async () => {
+	const calls = [];
+	const run = async (cmd, args, opts) => {
+		calls.push([cmd, args, opts.timeoutMs]);
+		return { code: 0, stdout: "", error: null };
+	};
+	assert.equal(PAUSE_TIMEOUT_MS, 15_000);
+	const docker = makePauseVerbs({ run });
+	assert.deepEqual(await docker.pause("pi-job-a"), { ok: true });
+	assert.deepEqual(await docker.unpause("pi-job-a"), { ok: true });
+	const podman = makePauseVerbs({ bin: "podman", run });
+	await podman.pause("pi-job-b");
+	assert.deepEqual(calls, [
+		["docker", ["pause", "pi-job-a"], 15_000],
+		["docker", ["unpause", "pi-job-a"], 15_000],
+		["podman", ["pause", "pi-job-b"], 15_000],
+	]);
+});
+
+test("a freezer verb that fails, throws or hangs answers { ok: false } and never rejects (#645)", async () => {
+	const failing = makePauseVerbs({ run: async () => ({ code: 1, stdout: "", error: Object.assign(new Error("x"), { code: 1 }) }) });
+	assert.deepEqual(await failing.pause("pi-job-a"), { ok: false, reason: "exit-1" });
+	// A non-zero code with NO error object. `execDockerBounded` never produces it (a non-zero exit always arrives with
+	// execFile's error), but an injected `run` may, and the verb must not read a missing error as success: only a code
+	// of exactly 0 with no error is `{ ok: true }`.
+	const bareCode = makePauseVerbs({ run: async () => ({ code: 125, stdout: "", error: null }) });
+	assert.deepEqual(await bareCode.pause("pi-job-a"), { ok: false, reason: "exit-125" });
+	// And an error with a code of 0 (or none) is a failure too: the error wins.
+	const errorAtZero = makePauseVerbs({ run: async () => ({ code: 0, error: new Error("killed") }) });
+	assert.equal((await errorAtZero.pause("pi-job-a")).ok, false);
+	const noAnswer = makePauseVerbs({ run: async () => undefined });
+	assert.deepEqual(await noAnswer.pause("pi-job-a"), { ok: false, reason: "spawn-failed" });
+	const missing = makePauseVerbs({ bin: "podman", run: async () => ({ code: null, error: Object.assign(new Error("spawn podman ENOENT"), { code: "ENOENT" }) }) });
+	assert.deepEqual(await missing.unpause("pi-job-a"), { ok: false, reason: "podman-not-found" });
+	const throwing = makePauseVerbs({ run: () => {
+		throw new Error("synchronous boom");
+	} });
+	assert.deepEqual(await throwing.pause("pi-job-a"), { ok: false, reason: "spawn-failed" });
+	const timedOut = makePauseVerbs({ run: async () => ({ code: null, stdout: "", error: { timedOut: true } }) });
+	assert.deepEqual(await timedOut.pause("pi-job-a"), { ok: false, reason: "timeout" });
+	// An INJECTED run that never settles is bounded by the verb itself, not only by execDockerBounded's timer.
+	const hanging = makePauseVerbs({ timeoutMs: 20, run: () => new Promise(() => {}) });
+	assert.deepEqual(await hanging.pause("pi-job-a"), { ok: false, reason: "timeout" });
+});
+
+test("a name that would read as a FLAG is refused before any spawn (#645)", async () => {
+	// `docker pause --help` exits 0 and freezes nothing, which would come back as a successful pause.
+	let spawned = 0;
+	const verbs = makePauseVerbs({ run: async () => {
+		spawned++;
+		return { code: 0 };
+	} });
+	for (const bad of ["--help", "-a", "", "a b", null, undefined, 7]) {
+		assert.deepEqual(await verbs.pause(bad), { ok: false, reason: "invalid-name" }, String(bad));
+	}
+	assert.equal(spawned, 0);
+});
+
+test("the local bundle carries the freezer verbs by default, and refuses a non-function override (#645)", () => {
+	const b = makeLocalBackend(fns());
+	assert.equal(typeof b.pause, "function");
+	assert.equal(typeof b.unpause, "function");
+	const own = async () => ({ ok: true });
+	assert.equal(makeLocalBackend({ ...fns(), pause: own }).pause, own, "a passed verb is the seam, used as given");
+	assert.throws(() => makeLocalBackend({ ...fns(), pause: "docker pause" }), /pause must be a function/);
+	assert.throws(() => makeLocalBackend({ ...fns(), pasue: own }), /unknown bundle member "pasue"/);
 });

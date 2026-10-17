@@ -235,8 +235,48 @@ test("a run with no probes ABSTAINS rather than passing the checks it could not 
 	}
 });
 
+test("a venue that CLAIMS pausable must carry the verbs; one declaring it absent need not (#645)", async () => {
+	const base = { probe: honestProbe, withBrokenEnumeration: async () => ({ reaped: false }) };
+	const local = await runBackendConformance(referenceBackend(), base);
+	assert.equal(typeof referenceBackend().pause, "function", "the local bundle builds its own verbs");
+	assert.equal(findings(local, "pausable")[0].unverifiable, true, "verbs present, no probe: the freeze itself is not credited");
+
+	const noVerbs = await runBackendConformance(referenceBackend({ pause: undefined, unpause: undefined }), base);
+	assert.equal(noVerbs.ok, false);
+	assert.match(findings(noVerbs, "pausable")[0].detail, /has no pause\(\) and unpause\(\)/);
+
+	// ASSERTED claims a freeze as much as enforced does, so it needs the verbs too.
+	const asserted = await runBackendConformance(referenceBackend({ pause: undefined, unpause: undefined, declares: { ...BACKENDS.local.declares, pausable: "asserted" } }), base);
+	assert.equal(findings(asserted, "pausable")[0].ok, false);
+	assert.match(findings(asserted, "pausable")[0].detail, /declared asserted, but the bundle has no pause\(\) and unpause\(\)/);
+	// One verb without the other is no freeze either: a pause with no unpause leaves a job frozen.
+	const halfVerbs = await runBackendConformance(referenceBackend({ unpause: undefined }), base);
+	assert.equal(findings(halfVerbs, "pausable")[0].ok, false);
+
+	const absent = await runBackendConformance(referenceBackend({ pause: undefined, unpause: undefined, declares: { ...BACKENDS.local.declares, pausable: "absent" } }), base);
+	assert.equal(findings(absent, "pausable")[0].ok, true, "absent claims no freeze");
+	assert.equal(findings(absent, "pausable")[0].unverifiable, undefined);
+});
+
+test("a freeze round trip is judged through the adapter's pauseProbe, and a throwing verb fails (#645)", async () => {
+	const base = { probe: honestProbe, withBrokenEnumeration: async () => ({ reaped: false }) };
+	const roundTrip = async (b) => ({ paused: await b.pause("pi-job-j1"), unpaused: await b.unpause("pi-job-j1") });
+	const ok = { pause: async () => ({ ok: true }), unpause: async () => ({ ok: true }) };
+	const held = await runBackendConformance(referenceBackend(ok), { ...base, pauseProbe: roundTrip });
+	assert.equal(held.ok, true);
+	assert.equal(findings(held, "pausable")[0].unverifiable, undefined, "a probe that froze and thawed is a pass, not an abstention");
+
+	const noFreeze = await runBackendConformance(referenceBackend({ ...ok, pause: async () => ({ ok: false, reason: "exit-125" }) }), { ...base, pauseProbe: roundTrip });
+	assert.match(findings(noFreeze, "pausable")[0].detail, /pause answered/);
+	const stuck = await runBackendConformance(referenceBackend({ ...ok, unpause: async () => ({ ok: false, reason: "timeout" }) }), { ...base, pauseProbe: roundTrip });
+	assert.match(findings(stuck, "pausable")[0].detail, /leaves a job frozen/);
+	const throws = await runBackendConformance(referenceBackend({ ...ok, pause: async () => { throw new Error("boom"); } }), { ...base, pauseProbe: roundTrip });
+	assert.equal(throws.ok, false);
+	assert.match(findings(throws, "pausable")[0].detail, /never throw/);
+});
+
 test("the harness NAMES what it cannot verify, so a green run is not mistaken for a conformant backend", () => {
-	// Two of the thirteen properties are reached by neither this harness nor a live read-back (issue #344 moved
+	// Two of the fourteen properties are reached by neither this harness nor a live read-back (issue #344 moved
 	// ephemeral and jobToJobIsolation to the read-back). Listing them, with why, is what stops the suite overclaiming.
 	assert.deepEqual(Object.keys(UNVERIFIED_BY_THIS_HARNESS), ["secretsCustody", "credentialTransit"]);
 	assert.deepEqual([...READ_BACK_BY_A_LIVE_PROBE], ["isolation", "ephemeral", "mountSet", "egress", "jobToJobIsolation", "imagePinning", "nonRoot", "localFolders"], "the read-back list in PROPERTY_NAMES order, pinned literally");
@@ -244,10 +284,11 @@ test("the harness NAMES what it cannot verify, so a green run is not mistaken fo
 		assert.ok(PROPERTY_NAMES.includes(property), `${property} must be a real property`);
 		assert.ok(UNVERIFIED_BY_THIS_HARNESS[property].length > 20, `${property} must say WHY it is unreachable`);
 	}
-	// Three lists, PAIRWISE DISJOINT and together covering all thirteen (issue #278): checked here, read back off a
+	// Three lists, PAIRWISE DISJOINT and together covering all fourteen (issue #278): checked here, read back off a
 	// live container, or named as unverified. A property in two is double-counted; one in none is one nobody is
-	// thinking about.
-	const checked = ["exitCodes", "abortable", "readOnlyJobInputs"];
+	// thinking about. `pausable` (issue #645) is checked here: the verbs against the word, and a freeze round trip
+	// through the adapter's `pauseProbe`, abstaining without one.
+	const checked = ["exitCodes", "abortable", "readOnlyJobInputs", "pausable"];
 	const lists = [checked, [...READ_BACK_BY_A_LIVE_PROBE], Object.keys(UNVERIFIED_BY_THIS_HARNESS)];
 	for (let i = 0; i < lists.length; i++) {
 		for (let j = i + 1; j < lists.length; j++) {
@@ -403,4 +444,96 @@ test("the REAL podman bundle passes the harness's shape, declaration, exit, abor
 	for (const run of runs) assert.ok(run.includes("--userns=keep-id") && run.includes("--user=1234:1234"));
 	// The read-back is the live conformance script's (a real container); offline, all eight abstain rather than pass.
 	for (const property of READ_BACK_BY_A_LIVE_PROBE) assert.equal(findings(r, property)[0].unverifiable, true, property);
+});
+
+test("the REAL podman bundle exposes the freezer verbs it declares, spawning `podman pause <name>` (#645)", { skip: podmanSkip }, async () => {
+	const fake = fakePodmanCli();
+	const backend = realPodmanBundle(fake);
+	assert.equal(backend.declares.pausable, BACKENDS.podman.declares.pausable);
+	assert.equal(backend.declares.pausable, "enforced");
+	const pauseProbe = async (b) => ({ paused: await b.pause("pi-job-j1"), unpaused: await b.unpause("pi-job-j1") });
+	const r = await runBackendConformance(backend, { pauseProbe });
+	assert.ok(findings(r, "pausable").every((f) => f.ok && !f.unverifiable), JSON.stringify(findings(r, "pausable")));
+	assert.deepEqual(fake.state.calls.filter((c) => c[1] === "pause" || c[1] === "unpause"), [["podman", "pause", "pi-job-j1"], ["podman", "unpause", "pi-job-j1"]]);
+});
+
+test("rootless podman on cgroup v1 is NOT pausable: the verbs refuse before any spawn (#645)", { skip: podmanSkip }, async () => {
+	const fake = fakePodmanCli();
+	// The verbs judge the KEPT answered read, which every job's admission takes; taken here once, as admission would.
+	let reads = 0;
+	const readInfo = podman.cachedPodmanInfo(async () => {
+		reads++;
+		return { answered: true, info: { cgroupVersion: "v1", rootless: true } };
+	});
+	await readInfo();
+	const backend = podman.makePodmanBackend({
+		image: "pi-job:x",
+		readInfo,
+		platform: "linux",
+		euid: 1234,
+		egid: 1234,
+		home: "/home/op",
+		env: {},
+		spawnFn: fake.spawnFn,
+	});
+	assert.deepEqual(await backend.pause("pi-job-j1"), { ok: false, reason: "cgroup-v1-rootless" });
+	assert.deepEqual(await backend.unpause("pi-job-j1"), { ok: false, reason: "cgroup-v1-rootless" });
+	assert.equal(fake.state.calls.length, 0, "a v1 host never forks a CLI that can only say no");
+	assert.equal(reads, 1, "and the verbs read no `podman info` of their own: a second spawn would sit outside the 15 s bound");
+	assert.deepEqual(podman.podmanPausable({ answered: true, info: { cgroupVersion: "v2" } }), { pausable: true, reason: null });
+	assert.deepEqual(podman.podmanPausable({ answered: false, reason: "timeout" }), { pausable: null, reason: "timeout" }, "an unanswered read is not a no");
+	assert.equal(podman.podmanPausable({ answered: true, info: { cgroupVersion: null } }).pausable, true, "an unreported version leaves the CLI to answer");
+});
+
+test("a podman pause that fails comes back { ok: false } with its exit, and never throws (#645)", { skip: podmanSkip }, async () => {
+	const backend = podman.makePodmanBackend({
+		image: "pi-job:x",
+		readInfo: async () => ({ answered: true, info: { cgroupVersion: "v2", rootless: true } }),
+		platform: "linux",
+		euid: 1234,
+		egid: 1234,
+		home: "/home/op",
+		env: {},
+		exec: async () => {
+			throw Object.assign(new Error("podman exited 125"), { code: 125 });
+		},
+	});
+	assert.deepEqual(await backend.pause("pi-job-j1"), { ok: false, reason: "exit-125" });
+});
+
+test("on podman the NAME is refused before the cgroup gate, and nothing spawns (#645)", { skip: podmanSkip }, async () => {
+	const fake = fakePodmanCli();
+	let reads = 0;
+	const backend = podman.makePodmanBackend({
+		image: "pi-job:x",
+		readInfo: async () => {
+			reads++;
+			return { answered: true, info: { cgroupVersion: "v1", rootless: true } };
+		},
+		platform: "linux",
+		euid: 1234,
+		egid: 1234,
+		home: "/home/op",
+		env: {},
+		spawnFn: fake.spawnFn,
+	});
+	assert.deepEqual(await backend.pause("--help"), { ok: false, reason: "invalid-name" }, "invalid-name, not the cgroup answer: the name is judged first");
+	assert.deepEqual(await backend.unpause("-a"), { ok: false, reason: "invalid-name" });
+	assert.equal(fake.state.calls.length + reads, 0, "no podman info and no podman pause");
+});
+
+test("with no answered podman info kept, the verb runs and podman's own answer decides (#645)", { skip: podmanSkip }, async () => {
+	const fake = fakePodmanCli();
+	const backend = podman.makePodmanBackend({
+		image: "pi-job:x",
+		readInfo: async () => ({ answered: true, info: { cgroupVersion: "v1", rootless: true } }),
+		platform: "linux",
+		euid: 1234,
+		egid: 1234,
+		home: "/home/op",
+		env: {},
+		spawnFn: fake.spawnFn,
+	});
+	assert.deepEqual(await backend.pause("pi-job-j1"), { ok: true }, "the fake podman exits 0; a real v1 one refuses and that comes back as { ok: false }");
+	assert.deepEqual(fake.state.calls, [["podman", "pause", "pi-job-j1"]], "exactly the verb, no info read");
 });
