@@ -243,6 +243,22 @@ Two more fields change what you see of a run, not what it can do, so the AI tool
 Both must be `true` or `false`. Like `models`, adding either to a trigger refuses its jobs that were already queued
 (`trigger-skew`): re-run them.
 
+`"recover": true` opts a trigger into durable runs: when the worker loses one of its runs part way (a crash, a
+kill, a host that went away, or a container that died on an infrastructure fault), the run continues from its last
+checkpoint instead of failing or starting over, at most twice. A graceful stop of the worker is not a loss: it stops
+the run as before. It needs a checkpoint store (`PI_SESSIONS_DIR`, whose `.checkpoints` folder holds them, or
+`PI_CHECKPOINTS_DIR`), or its jobs are refused before they cost anything (`recover-store-unset`), and a job image
+that declares the `recover` capability; a job on an image without it is refused the same way
+(`job-image-recover-unsupported`). On a fleet, name every worker (`PI_WORKER_NAME`) so a recovery reaches the
+machine holding the checkpoint. A repository whose default branch has `.pi/extensions/` is not recovered: its runs
+run as before.
+Webhook triggers only: a cron trigger is refused, because its job edits your folder in place and a continuation
+would replay over changes the lost run already made. It is also refused beside `"command"`, because continuing a
+command job would dispatch the command a second time. It must be `true` or `false`, the AI tools that add and edit
+a trigger can set it behind the operator's confirm, and like `models`, adding it refuses the trigger's jobs that
+were already queued (`trigger-skew`). How a run is checkpointed and continued is in
+[`docs/durable-runs.md`](durable-runs.md).
+
 ## Firing a cron trigger by hand
 
 `pi-dispatch run --trigger <id>` runs one cron trigger now, once, exactly as its schedule would. Its folder,
@@ -513,8 +529,8 @@ that cannot read it cannot see the gap. The check is strict: adding `models` to 
 it that were already queued (`trigger-skew`), and the comment says so. Re-run them. The worker finds a job's
 trigger by its position in the file. Inserting a trigger with the same flow, kind and type ahead of others
 moves the ones after it down. A queued job of a moved trigger can then be checked against its neighbour, and
-refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd`, `mcp`, `awaitInput`, `progress` or
-`statusComment`. The comment says the trigger
+refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd`, `mcp`, `awaitInput`, `progress`,
+`statusComment` or `recover`. The comment says the trigger
 changed after the job was queued. Re-run those jobs too. Upgrade the worker and the receiver together, and restart the
 receiver after editing the file.
 

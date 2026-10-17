@@ -158,7 +158,8 @@ One command puts a live terminal view over the whole deployment:
   edit to the reviewed `triggers.json`, which neither the console nor a model callable tool makes for you.
   A portfolio manager's cron trigger carries `[portfolio]`: its jobs write the budget split. The trigger tools can
   turn on `progress` (the job gets a `report_progress` tool to name its phases) and `statusComment` (one forge comment
-  the worker edits as the run goes, numbers only), behind your confirm.
+  the worker edits as the run goes, numbers only), and `recover` (a run the worker loses continues from its last
+  checkpoint), behind your confirm.
 - **Quiet hours.** Pause windows per folder or repo, timezone aware. A paused job waits, never drops, and
   costs nothing.
 - **Scoped limits.** Job caps per repo, folder or project (day, week, month), refused before any spend, plus a

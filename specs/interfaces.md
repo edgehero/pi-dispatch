@@ -834,6 +834,24 @@ refactor apart.
   diagnostic, read from the container log only: the worker does not parse it into the run record, whose
   `turns` stays the budgeted count, and like `turns` it feeds no exit-code or retry classification. The
   catch-path line omits it too.
+  **A recovering run's exit line carries `recovery`** (issue #645, `DES-RECOVERY-REPLAY-CLASSES`): `recovery: {
+  orphans, replayed, interrupted, notStarted }`, four non-negative integers (the calls the loss left without a result,
+  and how each was answered), on every exit line the runner writes once recovery has run, the decided line and the
+  catch path alike, and absent on every other run, so their lines are byte-identical to before. **Exit codes are
+  UNCHANGED**: a recovered run exits as any run does. The worker rebuilds the block over the four closed keys
+  (`recoveryCounts`, `parseExitRecovery`, `worker/src/run-history.mjs`: a present value that is not a count is null on
+  its own, a block with no count at all is null) into the record's `recovered`; it is telemetry from inside the
+  container, like `resources`, and no decision reads it. The path: the log sink's `close()` parses the decisive exit
+  line (`makeLogSink`), `runContainer` returns `recovery` only when the line carried the block, and the processor
+  merges it into the record's `recovered`. Three combinations of the recovery inputs are refused as `2`
+  / `config` before anything spends (`parseRecover`, `image/runner/src/config.mjs`): `PI_RECOVERING` without
+  `PI_RECOVER` (the lost attempt ran its tools in parallel, so the "only the first orphan can have started" reading
+  does not hold), without `PI_SESSION_FILE` (no checkpoint to resume) and beside `PI_COMMAND` (a command run has no
+  tool loop to resume); and a recovering run whose staged transcript did not resume (empty or quarantined) is refused
+  as `2` / `config` before its prompt. The plain `config` reason, deliberately: only a worker and an image of
+  different releases, or a hand-run container, can produce these, and a reason of their own would be a new word in
+  the record's enum for that. An orphan still unanswered after recovery is a `config` refusal too, rather than a
+  transcript handed to the model with pi's "No result provided".
   **The exit line's `reason` is read for one purpose and cannot move a job between classes** (issue #437).
   `parseExitReason` returns it only when it is a member of the worker's CLOSED `RUNNER_POLICY_REASONS`
   (`provider-auth-refused`, and since issues #501/#502 `cost-cap`, `model-not-allowed`,
@@ -1195,6 +1213,17 @@ refactor apart.
   only when both are `0`. The `report_progress` tool (`run.progress`, `PI_REPORT_PROGRESS`) adds no input here: what
   the agent reports lives only in that transcript, as the tool call and its result, and no `/job` file, mount or
   network path carries it.
+  **Since issue #645 a `run.recover` job keeps its transcript file whatever the switches say**: the worker's run
+  checkpointer copies it into each checkpoint and drives its live checkpoints from its lines, so with both
+  `PI_LIVE_TRANSCRIPTS=0` and `PI_RUN_PROGRESS=0` (no file staged by the preparer) `runContainer` stages the live file
+  itself. **A recovery job's inputs are the lost run's**, restored by the host before the container starts and through
+  the existing mounts only: `/workspace` is a fresh clone of the checkpoint's base commit, fetched from the checkpoint
+  store's own `file://` URL by sha with no token and no default-branch resolve (`pin`, `prepareGithubWorkspace`), with
+  the checkpoint's tree written over it and the trust paths reset to the base (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`);
+  `/session/current.jsonl` is the checkpoint's transcript, copied by `stageRecovered` (reason `recovered`; a resume
+  job's carries its key, so a completed recovery promotes it). No input names the checkpoint: the container sees a
+  workspace and a transcript, never the store, a path into it or a run directory name. The job's prompt file is
+  written as for any job and not read by a recovering runner, which sends the fixed recovery prompt instead.
 - **A repo skill is materialised WHOLE, and bounded** (issue #60). The allowlist accepts
   `.pi/APPEND_SYSTEM.md` (an exact path) and **every declared file under `.pi/skills/<name>/`**, not just
   each `SKILL.md`. It used to accept only the latter, which meant a skill shipping `references/`,
@@ -1707,7 +1736,13 @@ refactor apart.
     `report_progress` tool; its evidence is a grep of `image/runner/src/config.mjs` for the variable and of
     `image/runner/src/report-progress.mjs` for the tool, and a job armed with `run.progress` on an image without it is
     refused pre-spend, `job-image-progress-unsupported`, because an older runner would ignore the variable and the
-    trigger's phases would never appear on a run that reads as fine) -- the third (issue #291) declares that the baked runner reads
+    trigger's phases would never appear on a run that reads as fine) and `recover` (`REQ-RUN-RECOVERY`, issue #645: the
+    baked runner reads `PI_RECOVER` and `PI_RECOVERING`, runs an armed job's tools one at a time and carries the
+    recovery module; its evidence is a grep of `image/runner/src/config.mjs` for `PI_RECOVERING`, of
+    `image/runner/run-job.mjs` for the sequential setting and of `image/runner/src/recover.mjs` for `recoverSession`,
+    and a job armed with `run.recover` on an image without it is refused pre-spend, `job-image-recover-unsupported`,
+    because an older runner would ignore both variables and a lost run would resume into pi's "No result provided"
+    for a push or a comment that may have happened) -- the third (issue #291) declares that the baked runner reads
     `PI_EXCLUDE_TOOLS`, and a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a "read-only"
     trigger with every tool the file says to remove: a permission quietly not enforced. `verify-image.sh` fails on any
@@ -1728,8 +1763,8 @@ refactor apart.
     network; one that could not enforce it would exit `model-policy-unenforceable`. The pi-upgrade-check workflow
     requires this repo's image to carry this token as well. The worker's `modelPolicy` row in `CAPABILITY_GATES`
     (below) is what reads it: a job with a list on an image without it is refused pre-spend. The worker's side of the
-    nine job-feature tokens (each token above but `anyUid` and `exitAuth`: `forgeMcp` the seventh, `awaitInput` the eighth
-    and `reportProgress` the ninth, in that order) is ONE table
+    ten job-feature tokens (each token above but `anyUid` and `exitAuth`: `forgeMcp` the seventh, `awaitInput` the eighth,
+    `reportProgress` the ninth and `recover` the tenth, in that order) is ONE table
     since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which jobs need
     it, the result key, the record reason, the log event and the comment. The preflight refuses the first row a job
     needs and the image lacks, in the order the branches had, so the behaviour is unchanged and a new image-gated
@@ -1906,7 +1941,7 @@ refactor apart.
     asserts MEMBERSHIP against the factory-derived pinned set pre-spend, exit 2, because pi silently
     ignores unknown `excludeTools` names -- then passes the list to `createAgentSession` and logs
     `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
-    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_AWAIT_INPUT` (`REQ-AWAIT-INPUT`, issue #625: `1` when the trigger armed `run.awaitInput` AND a resume transcript is staged (`prepared.session`; the live file every job gets since #643 does not count), omitted otherwise, never `0` or empty. The runner offers the `await_human_input` tool through an inline extension factory, refuses a third value as a config error, and refuses `1` without `PI_SESSION_FILE` as `await-input-without-session`); `PI_REPORT_PROGRESS` (`REQ-RUN-PROGRESS`, issue #644: `1` when the trigger armed `run.progress`, omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule; not keyed on a staged transcript, since the tool keeps nothing. The runner offers the `report_progress` tool through an inline extension factory, refuses a third value as a config error, and refuses another extension's tool of that name as `report-progress-shadowed`. Reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot bind it through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`), so the live transcript's redactor leaves its value alone); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
+    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_AWAIT_INPUT` (`REQ-AWAIT-INPUT`, issue #625: `1` when the trigger armed `run.awaitInput` AND a resume transcript is staged (`prepared.session`; the live file every job gets since #643 does not count), omitted otherwise, never `0` or empty. The runner offers the `await_human_input` tool through an inline extension factory, refuses a third value as a config error, and refuses `1` without `PI_SESSION_FILE` as `await-input-without-session`); `PI_REPORT_PROGRESS` (`REQ-RUN-PROGRESS`, issue #644: `1` when the trigger armed `run.progress`, omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule; not keyed on a staged transcript, since the tool keeps nothing. The runner offers the `report_progress` tool through an inline extension factory, refuses a third value as a config error, and refuses another extension's tool of that name as `report-progress-shadowed`. Reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot bind it through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`), so the live transcript's redactor leaves its value alone); `PI_RECOVER` and `PI_RECOVERING` (`REQ-RUN-RECOVERY`, issue #645: `PI_RECOVER=1` when the processor armed the job's `run.recover` (a forge job, a checkpoint store, an image with `recover`), and `PI_RECOVERING=1` beside it only on a recovery job, whose staged checkpoint transcript is `PI_SESSION_FILE`; each omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule, and taken from the processor's call bag, never from `job.recover`, so a container the processor did not clear is never armed. With `PI_RECOVER` the runner sets `toolExecution = "sequential"` right after `createAgentSession`; with `PI_RECOVERING` it answers the transcript's orphaned calls and sends the fixed recovery prompt. The three refused combinations are `INT-RUNNER-EXIT-CODE-PROTOCOL`'s. Both reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot arm checkpoints or make a fresh run believe it is a continuation through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`)); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
     trigger's `run.mcp` names, comma-joined, safe by the loader's name rule, omitted when the job names none, never
     empty; the runner holds `/job/mcp.json` to exactly these names); `HOME=/home/pi` (issue #341: set ONLY beside
     `--user`, assigned after the `PI_FORWARD_ENV` and `run.secrets` loops so neither can move it, and reserved so a
@@ -4112,6 +4147,34 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
     only when it is a boolean (so an entry that names neither is byte-identical), merge an edit's only when sent, and
     judge them with the loader's own validator against the entry's `on.type` before the operator's confirm
     (`admin/src/write-plans.mjs`), so a status comment on cron is refused before the operator is asked.
+- **`run.recover` (github/gitlab/forgejo/azure triggers), optional boolean (`REQ-RUN-RECOVERY`, issue #645),
+  opt-IN.** Absent or `false` = today's behaviour, byte-identical normalized entry, job data, env and argv. `true`: a
+  run of this trigger that the worker loses part way (its worker dies, or its container ends on an infrastructure
+  exit) continues from its last checkpoint, at most twice, instead of failing or starting over
+  (`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`). Judged by `validateRecoverFlag` (`worker/src/triggers.mjs`), strictly
+  boolean, in all five normalizers. Refused at load on a cron trigger (`run.recover is only available on a forge
+  trigger`: a cron job's `/workspace` is the operator's folder, edited in place, so a recovered run would replay over a
+  tree the lost run already changed) and beside `run.command` (a command job's prompt is one `/name args` line, so
+  recovering it would dispatch the command a second time); `false` is carried on cron, `run.statusComment`'s rule.
+  Deliberately not tied to `run.resume`: resume carries a transcript from one run to the NEXT, recovery carries one
+  run's checkpoint into its own continuation, and either is useful without the other.
+  - It needs a checkpoint store on the worker (`PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`): without
+    one the job is refused pre-spend with a comment (`recover-store-unset`). It needs an image declaring `recover`
+    (`job-image-recover-unsupported`). On a fleet, the worker holding a run's checkpoint should be named
+    (`PI_WORKER_NAME`), so its recovery is routed to that worker's queue; doctor warns when a trigger arms
+  `run.recover` on a worker with peers and no declared name. A run whose base commit holds `.pi/extensions/` is not
+  armed (`recoverSkipped: "workspace-extensions"`).
+  - It rides the job data at JOB level only when `true` (`job.recover`), through every receiver filter,
+    `enqueueForgeJob` and the console's `runFieldsOf`; `addLocalJob` accepts it so a future local producer cannot move
+    the minute-windowed dedup key, but no local producer passes it, and a local job carrying it is not armed
+    (`recoverSkipped: "local"`). It is part of no job id or dedup key.
+  - **Version skew**: a row of `AUTHORED_NARROWING_FIELDS`, authored when `true`: a receiver from before #645 drops
+    the key, and the run would fail instead of continuing on a clean record; the worker refuses such a job pre-spend
+    as `trigger-skew`.
+  - **Model-callable**: yes. It gives the model no capability (it decides how a lost run is handled, not what a run
+    may do). `dispatch_trigger_add` and `dispatch_trigger_edit` take `recover`, carry it only when it is a boolean,
+    merge an edit's only when sent, and judge it with the loader's own validator against the entry's `on.type` and
+    its `run.command` before the operator's confirm.
 - **`run.packages` (ALL FOUR trigger kinds, optional boolean) — an opt-OUT**: absent or `true` = the
   worker emits `PI_PACKAGES` with the container paths of the pi packages the operator staged into the
   global overlay (`INT-PI-PACKAGES-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`), so the flow gets
@@ -4660,7 +4723,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `:ro` mount sees an older file) would enqueue the job WITHOUT its list, and the job would run on the
   deployment's list or on none while every record reads like a correct run. The worker's own read of the
   triggers file catches it, `run.waitFor`'s skew check generalised to a table of authored NARROWING fields
-  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, `mcp`, since #625 `awaitInput` when `true`, and since #644 `progress` and `statusComment` when `true`): when
+  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, `mcp`, since #625 `awaitInput` when `true`, since #644 `progress` and `statusComment` when `true`, and since #645 `recover` when `true`): when
   the entry at the job's matched index (identity-checked on flow, command, kind and on-type) sets the field and
   the job ARRIVED without it (`job.data.models` or `job.data.maxCostUsd`, read before the env fill), the job is refused pre-spend as
   `trigger-skew`, naming the field. The same limits as the wait check: it reads `PI_TRIGGERS_FILE`, else
@@ -5038,7 +5101,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|job-image-progress-unsupported|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|job-image-progress-unsupported|job-image-recover-unsupported|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -5104,7 +5167,14 @@ validator rather than a second copy of it.
                    "phasesDeclared"?: <int>, "lastPhaseIndex"?: <int>,                    // and closed keys only, a zero left out
                    "tools"?: { "read"?: <int>, "bash"?: <int>, "edit"?: <int>, "write"?: <int>, "grep"?: <int>,
                                "find"?: <int>, "ls"?: <int>, "await_human_input"?: <int>,
-                               "report_progress"?: <int>, "other"?: <int> } } }
+                               "report_progress"?: <int>, "other"?: <int> } },
+    "recoveryOf"?: "<the base run's queue id>",                                       // issue #645: CONDITIONAL keys, present only
+    "recovered"?: { "from": "live" | "exit" | "salvage", "n": <int>,                  // when the job armed run.recover and has
+                    "fromAttempt": <int> | null, "checkpointSeq": <int> | null,        // the fact; integers, fixed enums and a
+                    "orphans": <int> | null, "replayed": <int> | null,                 // charset-checked run id only
+                    "interrupted": <int> | null, "notStarted": <int> | null },
+    "recoverSkipped"?: "local" | "no-run-id" | "base-unprimed" | "workspace-extensions",
+    "checkpoints"?: { "written": <int>, "failed": <int>, "skipped": <int> } }
   ```
   **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
   after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
@@ -5256,6 +5326,37 @@ validator rather than a second copy of it.
   them. An earlier attempt's progress is not carried: a retry records its own attempt's counts. A spent attempt that
   ends as an operator cancel instead of a retry (`endCancelled`, `worker/src/index.mjs`) keeps its `progress` beside its
   `resources`.
+  **The durable-run fields (issue #645, `REQ-RUN-RECOVERY`) are additive, TAIL position after `progress`, each a
+  CONDITIONAL key like it**, rebuilt by the worker (`recordedRecoveryOf`, `recordedRecovered`, `recordedCheckpoints`,
+  `RECOVER_SKIPPED_REASONS`, `worker/src/run-history.mjs`), so a record of a job that never armed `run.recover` is
+  byte-identical to before. `recoveryOf`: on a recovery job's own record (`<runId>.r<n>`, written beside the base's),
+  the run it continues, the queue id class `jobId` already is, charset-checked (`[A-Za-z0-9][A-Za-z0-9._:-]{0,199}`).
+  `recovered`: where the restored checkpoint came from (`live`, a checkpoint of the running container; `exit`, one
+  taken after it ended; `salvage`, one taken from a crashed attempt's job folder), the recovery number `n` (1 or 2),
+  the lost container's number and the checkpoint's `seq`, and the runner's four counts off the exit line's
+  `recovery` (`INT-RUNNER-EXIT-CODE-PROTOCOL`), each null when not reported; null whole when `from` or `n` is not
+  valid. `recoverSkipped`: why an armed job ran without recovery, a closed enum: `local` (a local job, not armed in
+  this release), `no-run-id` (the job's queue id could not be derived from its data), `base-unprimed` (the store could
+  not take the fresh clone's base, or whether the base holds extensions could not be read, so the run is not
+  protected), `workspace-extensions` (the base commit holds anything under `.pi/extensions/`, so the run is not armed:
+  `DES-RECOVERY-TRUST-PATHS-FROM-BASE`). `checkpoints`: how many checkpoints
+  this attempt wrote, failed and skipped, the three counts or null on any violation. The runner's counts are advisory
+  like `resources`; every value is an integer or a member of a closed list, so no string from a job reaches them.
+  **Nine reasons** come with them. `recovery-enqueued` (outcome `failed`): the attempt was lost to infrastructure and
+  its continuation was queued, written by the processor on an infrastructure exit (returned, not thrown) and by the
+  failed listener on a stall; such a record pages nothing and comments nothing, and settles the status comment as
+  retrying. `recovery-failed` (outcome `failed`, returned): a recovery whose container ran and ended on an
+  infrastructure exit could not queue another (the cap, no pointer, a fault); the run's final outcome, its own
+  comment, paged once. `recovery-host-lost` (outcome `failed`): a queued recovery's host was absent from a readable
+  host registry at its deadline (six hours, extended an hour at a time while the host is alive, its queue paused or
+  the registry unreadable), or the seven-day maximum passed; taken off the queue by the host-lost sweep, written with
+  no start and no attempt; commented and paged. `recovery-unsafe-extensions` (outcome `policy`, pre-spend, commented):
+  a recovery whose base holds `.pi/extensions/`. `recovery-cap`, `recovery-checkpoint-absent` and `recover-store-unset` (outcome `policy`, pre-spend, each
+  commented): a recovery job numbered past the cap, a recovery whose checkpoint is absent, damaged, from another host,
+  pi version or venue or refused by the restore, and an armed job on a worker with no checkpoint store.
+  `recovery-superseded` (outcome `policy`, pre-spend, silent): the run reached its final outcome after the recovery was
+  queued, decided first by a completed or policy record of the base run or an earlier recovery.
+  `job-image-recover-unsupported` (outcome `policy`, pre-spend, commented): the `CAPABILITY_GATES` row.
   **Readers of `queuedAt` and `capacity` (issue #599)**: the capacity report (`worker/src/capacity.mjs`,
   `INT-CAPACITY-REPORT`) reads them with `host`, `project`, `startedAt`, `endedAt`, `size` and `resources.cpuUsec`,
   judges every value again as untrusted, and writes nothing to any record. A record without the `capacity` key (from
@@ -6475,11 +6576,15 @@ validator rather than a second copy of it.
 
 **worker <-> host store. There is no container side: nothing mounts the store.**
 
-- **Status**: as of this change **nothing calls the checkpointer**. `makeWorkspaceCheckpointer`
-  (`worker/src/workspace-checkpoint.mjs`) is built and tested, `loadConfig` resolves `checkpointsDir`, and doctor
-  reports on the directory (`checkpointStoreChecks`, warnings at most), but no job primes, snapshots or restores. A
-  later change wires it into durable runs (issue #645). This entry is the contract that wiring must keep, written
-  from the code as it stands.
+- **Status**: **called by the recovery flow since issue #645 part 2** (`REQ-RUN-RECOVERY`). start.mjs builds one
+  checkpointer per worker when `checkpointsDir` resolves (with a `snapshotTimeoutMs` of 20 s instead of the module's
+  60 s, because a live snapshot is taken with a paid container frozen). A fresh `run.recover` job's processor calls
+  `primeBase` before the container; the run checkpointer (`DES-RUN-CHECKPOINT-PAIRED`) calls `snapshot` for live
+  (`frozen`), exit and salvage (`dead`) checkpoints and `readManifest` for the next `seq`; a recovery job calls
+  `readManifest`, `baseSourceUrl` (the `file://` URL its clone fetches the base from) and `restore`; a run's final
+  outcome calls `remove`; the retention tick calls `sweep()` (with no `active` list: the 7-day TTL is far past any run
+  a host holds, the job timeout plus the six-hour recovery deadline). Doctor still warns at most. This entry is the
+  contract that wiring keeps, written from the code as it stands.
 - **Contract**:
   ```
   <root>                                   PI_CHECKPOINTS_DIR, else <PI_SESSIONS_DIR>/.checkpoints, else none; 0700
@@ -6489,8 +6594,8 @@ validator rather than a second copy of it.
   <root>/<ck>/lock                         exclusive create, "<pid> <tag>\n"; absent when free; taken over when stale
   <root>/<ck>/base-too-large               marker "1\n": primeBase judged the base over maxBaseBytes
   <root>/<ck>/CURRENT                      "<seq>\n", the commit point; absent until the first checkpoint
-  <root>/<ck>/cp-<seq>/manifest.json       0600; the schema below
-  <root>/<ck>/cp-<seq>/transcript.jsonl    0600; bytes [0, offset) of the job's transcript
+  <root>/<ck>/cp-<seq>/manifest.json       0600; the schema below; at most two cp-<seq>/ kept (current, previous)
+  <root>/<ck>/cp-<seq>/transcript.jsonl    0600; bytes [0, offset) of the job's transcript, offset <= maxTranscriptBytes
   <name>.<12 hex>.incoming                 an in-flight write beside any of the files above
   refs/pi-dispatch/base                    the base commit, fetched at depth 1 by primeBase
   refs/pi-dispatch/checkpoint              the newest imported checkpoint commit, moved by every import
@@ -6560,20 +6665,30 @@ validator rather than a second copy of it.
   where a path or a payload string would ride along unvalidated into everything that reads a manifest.
 - **The commit point**, in `snapshot`'s order. Free refusals and caps first: arguments, the run directory and the
   store's `HEAD` exist (`not-primed`), no `base-too-large` marker, the lock, `seq` above `CURRENT` (`stale-seq`;
-  an unreadable or malformed `CURRENT` does not refuse here and is replaced by a successful snapshot), the store's
-  object format and the base sha in it, free disk, the store's total size, the walk (which refuses `over-file-cap`
+  an unreadable or malformed `CURRENT` does not refuse here and is replaced by a successful snapshot), the
+  transcript `offset` against `maxTranscriptBytes` (`transcript-too-large`, judged on the offset because that is the
+  number of bytes the copy would write: a sparse session file of 100 GB logical size reads as zeros), the store's
+  object format and the base sha in it, free disk and the store's total size (both counting the transcript's
+  `offset` bytes about to be copied), the walk (which refuses `over-file-cap`
   the moment its count passes `maxFiles`), the byte cap and its ignore tier, then every kept PATH matched against
   the job's secrets. Then the one expensive step: reading new bytes into `fast-import`, scanning them and every
   symlink target for job secrets.
   Then the stat cache is updated, the store repacked when `seq` is a multiple of `repackEvery`, and the commit point
-  runs: `cp-<seq>/` is reserved (its leftover `.incoming` files removed), the transcript is copied, then the manifest
-  is written, then `CURRENT`. Each is an exclusive-create temp, written, fsynced and renamed over its name; the
+  runs: `cp-<seq>/` is reserved (its leftover `.incoming` files removed), the transcript is copied (in 1 MiB
+  chunks, the snapshot's deadline checked before each, so a slow or huge source ends as `timeout` with the temp copy
+  removed and nothing committed), then the manifest is written, then `CURRENT`. Each is an exclusive-create temp, written, fsynced and renamed over its name; the
   manifest's directory and the run directory are fsynced after their renames (the first also covers the
   transcript's, which shares the directory). **The guarantee**: a failure or crash at any step before `CURRENT`'s
   rename leaves `CURRENT` naming the previous complete checkpoint, or absent; after it, the new one, complete. A
-  `cp-<seq>/` or a `refs/pi-dispatch/cp/<seq>` that `CURRENT` does not name is an orphan: nothing reads it, a later
-  snapshot may reuse that `seq`, and it goes with the run. Pinned by injecting a failure at each of nine filesystem
-  steps; the store's OBJECTS are written by git with git's own durability settings, which this module does not
+  `cp-<seq>/` or a `refs/pi-dispatch/cp/<seq>` that `CURRENT` does not name is an orphan: nothing reads it, and a
+  later snapshot may reuse that `seq`. **Pruning**, after `CURRENT`'s rename and its directory's fsync and under the
+  same lock: every `refs/pi-dispatch/cp/<seq>` (`for-each-ref`, then one `update-ref --stdin` of deletes) and every
+  `cp-<seq>/` except the new checkpoint's and the one `CURRENT` named before it is removed, so a long run keeps two
+  transcripts, not one per snapshot, and the next repack drops the pruned commits' objects. The previous one is
+  kept as the fallback when the newest turns out to be the bad one. A crash or failure while pruning leaves
+  `CURRENT` naming the complete new checkpoint (pruning never touches the two it keeps), is logged
+  (`checkpoint_prune_failed {code}`) without failing the already committed snapshot, and the next snapshot prunes
+  what was left. Pinned by injecting a failure at each of nine filesystem steps, and in the prune; the store's OBJECTS are written by git with git's own durability settings, which this module does not
   change.
 - **The git environment and flags.** Every store git goes through one function (`startGit`), so every argv is
   `STORE_GIT_FLAGS` followed by the subcommand, and every environment is exactly `storeGitEnv`
@@ -6590,8 +6705,8 @@ validator rather than a second copy of it.
   store's own config gains `core.logAllRefUpdates=false`, `gc.auto=0` and `uploadpack.allowAnySHA1InWant=true` at
   init (the last so a restore's caller can fetch the base by sha; the store holds only this run's objects, so "any
   sha" is no wider than the repository). The subcommands are `init --bare --object-format=<fmt>`, `fetch`,
-  `ls-tree`, `rev-parse`, `check-ignore --no-index --stdin -z`, `fast-import`, `repack -adq`, `diff-tree` and
-  `cat-file --batch`. `primeBase`'s `file://` fetch passes `-c protocol.file.allow=always`, since
+  `ls-tree`, `rev-parse`, `check-ignore --no-index --stdin -z`, `fast-import`, `repack -adq`, `for-each-ref`,
+  `update-ref --stdin`, `diff-tree` and `cat-file --batch`. `primeBase`'s `file://` fetch passes `-c protocol.file.allow=always`, since
   `GIT_PROTOCOL_FROM_USER=0` turns the user-policy protocols off, and a restore caller fetching from
   `baseSourceUrl` needs the same. Each spawn
   carries a `gitTimeoutMs` deadline, combined with its operation's own, and dies by SIGKILL; its stderr is kept,
@@ -6664,8 +6779,11 @@ validator rather than a second copy of it.
   written and every later snapshot reports `base-too-large`); `maxNewBytes` 512 MiB (bytes not served from the
   cache; over it, the ignore tier, then `over-byte-cap`); `maxFiles` 200,000 (files and links walked, judged as the
   walk counts them, before the ignore tier; exactly `maxFiles` passes, one more is `over-file-cap`); `maxFileBytes` 64 MiB per file (excluded and counted; also the largest blob a
-  restore accepts); `maxStoreBytes` 20 GiB for the whole root, every run together (`store-full`); free disk at least
-  twice `maxNewBytes` AND at least 5% of the volume, from `statfs` (`disk-low`, also when `statfs` fails);
+  restore accepts); `maxTranscriptBytes` 256 MiB, the transcript copy's `offset` (`transcript-too-large`; far above a
+  real pi session, whose JSONL is tens of MiB, half the byte cap, and with two checkpoints kept it bounds one run's
+  transcripts to 512 MiB); `maxStoreBytes` 20 GiB for the whole root, every run together, plus the transcript about
+  to be copied (`store-full`); free disk at least twice `maxNewBytes` plus that transcript AND at least 5% of the
+  volume, from `statfs` (`disk-low`, also when `statfs` fails);
   `snapshotTimeoutMs` 60 s per prime, snapshot or restore; `gitTimeoutMs` 60 s per git spawn; `ttlMs` 7 days for the
   sweep; `lockStaleMs` 1 hour; `repackEvery` 20. Fixed: a link target of 1 to 4096 bytes, a path of at most 4096
   bytes and 64 segments, a segment of at most 255 bytes.
@@ -6673,9 +6791,9 @@ validator rather than a second copy of it.
   `primeBase`: skipped `bad-args`, `locked`, `lock-failed`, `workspace-not-directory`, `tree-changed`, `timeout`,
   `over-file-cap`, `base-too-large`, `store-init-failed`, `base-fetch-failed`, `internal-error`.
   `snapshot`: skipped `bad-args`, `not-primed`, `base-too-large`, `locked`, `lock-failed`, `stale-seq`,
-  `store-unreadable`, `disk-low`, `store-full`, `workspace-not-directory`, `tree-changed`, `timeout`,
-  `over-file-cap`, `over-byte-cap`, `import-failed`, `internal-error`; refused `job-secret-in-tree`.
-  `writeTranscript`: skipped `bad-args`, `not-primed`, `transcript-failed`.
+  `transcript-too-large`, `store-unreadable`, `disk-low`, `store-full`, `workspace-not-directory`, `tree-changed`,
+  `timeout`, `over-file-cap`, `over-byte-cap`, `import-failed`, `internal-error`; refused `job-secret-in-tree`.
+  `writeTranscript`: skipped `bad-args`, `not-primed`, `transcript-too-large`, `timeout`, `transcript-failed`.
   `readManifest`: `{ absent: true }` (no run directory, a run directory that is not a real directory, or no
   `CURRENT`), or `{ invalid: true, reason }` with
   `bad-args`, `current-unreadable`, `current-malformed`, `manifest-unreadable`, `manifest-json`, `seq-mismatch`,
@@ -6720,8 +6838,9 @@ validator rather than a second copy of it.
   NUL (`tampered`). Files open `O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW` (`ELOOP` refuses `path-through-symlink`)
   and their mode is set explicitly to 0644 or 0755. The bytes written are the blob's bytes exactly; nothing runs a
   filter, an eol conversion or a checkout. **A refusal found on disk can come after writes**, so the caller
-  discards a refused workspace and never resumes in it. As of this change `restore` treats `.pi/` and the root
-  context files like any other path; a later change resets them on restore (`DES-CHECKPOINT-WALKER-NOT-GIT-ADD`).
+  discards a refused workspace and never resumes in it. `restore` treats `.pi/` and the root context files like any
+  other path; the recovery resets them, and `.agents/`, to the base commit after the restore
+  (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`).
 - **Sweep and remove.** `sweep({ active })` judges only names that are 32 lower-case hex and `lstat` as a real
   directory (a link with such a name is left, never followed); a run in `active` is kept. A run's age is its newest
   `cp-<seq>/manifest.json` mtime, else the directory's own, and one older than `ttlMs` by the injected clock is
@@ -6738,7 +6857,7 @@ validator rather than a second copy of it.
   ever reads the agent's repository configuration, and a restore re-validates every path with the same functions
   the snapshot used, so a store tampered with on disk is refused rather than trusted. The design and its rejected
   alternatives are `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`.
-- **Traces to**: no requirement yet; the requirement arrives with issue #645's recovery change.
+- **Traces to**: `REQ-RUN-RECOVERY`, `INT-RUN-CHECKPOINT-POINTER`,
   `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`, `INT-SESSION-STORE-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
   `DES-CONTAINER-BACKEND-REGISTRY` (`pausable`).
 - **Acceptance** (`worker/test/workspace-checkpoint.test.mjs`, `checkpoint-paths.test.mjs`, against real git):
@@ -6764,7 +6883,121 @@ validator rather than a second copy of it.
   a failing `check-ignore` refuses `over-byte-cap`. Given a manifest of another run or a checkout off `baseSha`, a
   restore refuses; given a gitlink in the snapshot tree, the change judge refuses before anything is written, and a
   gitlink on the base side is skipped. Given a stale lock a rival retook, or a lock no longer the releaser's, it is
-  put back rather than removed. Given a 30-day-old run directory with a day-old manifest, the sweep keeps it.
+  put back rather than removed. Given a 30-day-old run directory with a day-old manifest, the sweep keeps it. Given a sparse
+  transcript of 1 GiB logical size over a small `maxTranscriptBytes`, the snapshot is skipped with nothing reserved or
+  written; given a slow transcript source, the copy stops at the deadline as `timeout`; given four checkpoints, two
+  directories and two refs remain; given a failure in the prune, `CURRENT` names the new complete checkpoint.
+
+## INT-RUN-CHECKPOINT-POINTER
+
+**worker -> Valkey -> every worker of the deployment.** Where a durable run's latest checkpoint is (issue #645,
+`REQ-RUN-RECOVERY`, `DES-RUN-CHECKPOINT-PAIRED`). Written by the worker whose host took the checkpoint, read by any
+worker that must route the run's recovery (the host that noticed a stall can be any host), by the recovery job and by
+the boot's orphan sweep. The constants are exported from `@edgehero/pi-dispatch/run-checkpoint`
+(`CHECKPOINT_POINTER_PREFIX`, `CHECKPOINT_POINTER_TTL_MS`, `checkpointPointerKey`, `validPointer`,
+`readCheckpointPointer`, `writeCheckpointPointer`, `removeCheckpointPointer`).
+
+- **Key**: `run:checkpoint:<sanitized run id>`, the RUN id (`recoveryOf ?? job.id`) through `sanitizeJobId`, never a
+  recovery job's own id, so a run has one pointer across its attempts and recoveries.
+- **Value**: one JSON string, written whole by `SET <key> <json> PX <ttl>`:
+  ```
+  { "v": 1,
+    "host":      "<host token>",       // [A-Za-z0-9._-]{1,64}: the host whose store holds the checkpoint
+    "hostQueue": "<queue name>" | null, // that host's own queue (pi-jobs@<name>) when PI_WORKER_NAME is declared, else null
+    "seq":       <int>,                 // 1 to 999,999,999: the checkpoint's sequence number in the store
+    "attempt":   <int>,                 // 0 to 10,000: the run's container number that took it
+    "at":        <int>,                 // ms since epoch, the worker's clock at the write
+    "jobDir":    "job-<chars>" }        // the taking attempt's job folder BASENAME, ^job-[A-Za-z0-9_-]{1,64}$, never a path
+  ```
+  A reader accepts a plain object with EXACTLY these seven keys, each typed as above, and treats anything else
+  (malformed JSON, a value over 4 KiB, a missing or extra key) as no pointer. A pointer is peer-written data, and it
+  decides where a recovery is queued and which folder a salvage looks at, so nothing loose rides along.
+- **When it is written**: after every committed checkpoint (live, exit or salvage), never before: a reader that finds
+  a pointer finds a checkpoint behind it. A failed write leaves the previous pointer (stale, never ahead) and is logged
+  (`checkpoint_pointer_failed`).
+- **TTL**: 7 days (`CHECKPOINT_POINTER_TTL_MS`, the store's own `ttlMs`), set again by every write.
+- **Removed** at the run's final outcome (a completed or policy result of an armed run, and `recovery-failed`,
+  `endDurableRun`), after the store entry, so "pointer and store both gone" is the superseded test's second half
+  (`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`; its first is the base run's settled record).
+  Not removed by a queued recovery, nor by `recovery-superseded`.
+- **Failure**: every call is bounded (1 s by default, 2 s for the wiring's reads) and never throws: a read that fails
+  or times out answers null, which is why a recovery never reads a lone null as superseded.
+- **Readers**: the processor's infra-exit path and the failed listener (routing), the recovery job (superseded, the
+  salvage), the run checkpointer (the next `seq`), the boot's orphan sweep (`pointedJobDirs`: a `SCAN` of
+  `run:checkpoint:*`, bounded at 10,000 keys, refusing rather than answering partially, so a folder a recovery is about
+  to salvage is never swept).
+- **Acceptance**: `REQ-RUN-RECOVERY` (c) and (f); `worker/test/run-checkpoint.test.mjs` ("validPointer: exactly the
+  pointer's keys, every value typed; anything loose is null", "the pointer round trip: written with its TTL, read back
+  validated, removed").
+
+## INT-RUN-BUDGET-LEDGER
+
+**worker -> Valkey -> the worker's later attempts and recoveries.** The durable record of every dollar hold one
+`run.recover` run has taken (issue #645, `DES-RUN-BUDGET-LEDGER`). Written and read by the processor alone, through
+`makeRunBudgetLedger` (`@edgehero/pi-dispatch/run-budget-ledger`: `RUN_BUDGET_KEY_PREFIX`, `RUN_BUDGET_TTL_MS`,
+`RUN_BUDGET_MAX_KEYS`, `RUN_BUDGET_STATES`, `runBudgetKeyFor`, `validHold`). A job that never armed `run.recover`
+never touches it.
+
+- **Key**: `run:budget:<sanitized run id>`, one hash per run.
+- **Fields**:
+  ```
+  slot      "held"                                    set once, when the run's job-count slots are reserved
+  seq       <int>                                     the last container number handed out (1, 2, 3, ...)
+  h<seq>    {"amountMicros":<int>,"keys":[...],        the hold container <seq> ran under, as reserveDollars returned
+             "ledgers":[{"keyPrefix":..,"keys":[..]}]}  it: at most 16 distinct budget:usd:* keys, ledgers optional
+  s<seq>    held | settled | released | settled-crashed   that hold's state
+  at        <ms>                                      the injected clock at the last write; for doctor, never a decision
+  ```
+- **States**: `held` is the only state a transition starts from; `settled` (the container's exit settled it),
+  `released` (a never-started container's hold was given back) and `settled-crashed` (a later recovery wrote off a
+  crashed container's hold at the floor, bookkeeping only) are terminal and never change again.
+- **Scripts**, each one `EVAL`, each refreshing the TTL on a write:
+  - `claimSlot`: `HSETNX slot held`; answers `new` (this call set it) or `carried`.
+  - `nextSeq`: `HINCRBY seq 1`; the new container number.
+  - `recordHold(seq, hold)`: writes `h<seq>` and `s<seq> = held` only when `s<seq>` is absent; answers `ok` or
+    `exists`. The hold is validated first (`validHold`: a non-negative safe integer amount, the keys and the ledgers'
+    flattened keys equal and under their prefixes).
+  - `settle(seq)` and `release(seq)`: `held` to `settled` or `released`, only from `held`; answers `moved` or
+    `not-held`. Only `moved` licenses the caller to adjust or refund a window key.
+  - `settleCrashed(belowSeq)`: every `s<k> = held` with `k < belowSeq` to `settled-crashed` in one script, answering
+    the seqs it moved; nothing written (and the TTL untouched) when none moved, so an expired ledger is not revived.
+- **TTL**: 35 days (`RUN_BUDGET_TTL_MS`), past the longest dollar window a hold sits in, refreshed by every write.
+  Deleted at the run's final outcome (`remove`).
+- **Failure**: every method returns `{ error }` on a Valkey fault or a bad argument and never throws, and logs
+  `run_budget_ledger_error` with the operation and the error code only (never a run id, a key or a value). The
+  processor turns a failed `claimSlot`, `nextSeq` or `recordHold` into a never-started `InfraRetry` before tokens; a
+  failed `settleCrashed` is logged and the run goes on with the holds at the floor.
+- **Acceptance**: `REQ-RUN-RECOVERY` (e); `worker/test/run-budget-ledger.test.mjs`.
+
+## INT-RECOVERY-JOB
+
+**worker -> BullMQ -> the worker holding the checkpoint.** The job that continues a lost `run.recover` run, and the
+two Valkey keys that keep it to one per recovery number and bound its wait (issue #645,
+`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`). Exported from `@edgehero/pi-dispatch/recovery-queue` (`RECOVERY_CAP`,
+`RECOVERY_TTL_MS`, `RECOVERY_CLAIM_TTL_MS`, `RECOVER_CLAIM_PREFIX`, `RECOVER_PENDING_KEY`, `recoveryJobId`,
+`recoveryClaimKey`, `pendingMember`, `runIdOf`).
+
+- **Job id**: `<runId>.r<n>`, n = 1 or 2. Refused before the claim (`job-id-refused`) when the id would hold a colon
+  count other than none or exactly two, which BullMQ 5.80.4 refuses.
+- **Queue**: `pi-jobs@<pointer.host>` when the pointer names a host queue, else the shared `pi-jobs`.
+- **Data**: the lost job's data less `RECOVERY_STRIPPED_KEYS` (the per-attempt hold marks index.mjs writes with
+  `updateData`: `podmanRestartHoldSinceMs`, `podmanRestartHoldLastMs`, `netnsKeeperHoldSinceMs`,
+  `netnsKeeperHoldLastMs`, `netnsKeeperHoldStartedMs`, `netnsKeeperLoopSeen`, and `enqueueNonce`; `recoveryDataOf`),
+  plus `recoveryOf` (the run id, a string), `recovery` (n, an integer) and `recoverBy` (ms since epoch, the first
+  host-lost deadline). The name is the lost job's.
+- **Options**: `attempts: 1`, no `deduplication`, `removeOnComplete` and `removeOnFail` 31 days (the forge jobs'
+  retention).
+- **Claim**: `run:recover:claim:<sanitized run id>:<n>`, `SET <key> <host> PX 7d NX` (`RECOVERY_CLAIM_TTL_MS`, the
+  pointer's life). Deleted again only when this call's add failed.
+- **Pending**: the sorted set `run:recover:pending`, member `{"q":"<queue>","id":"<job id>","host":"<checkpoint
+  host>","at":<enqueue ms>}` (JSON; a member without a valid host or `at` is dropped as malformed), score the current
+  deadline. Added by the claim's winner after the add; claimed by the host-lost sweep's `ZREM` once due; re-added with
+  a later score when extended; put back with its score when handling it faulted.
+- **Deadline**: first `recoverBy`, the enqueue time plus six hours (`RECOVERY_TTL_MS`); at a due deadline the sweep
+  extends it by an hour (`RECOVERY_EXTEND_MS`) while the host is in the live host registry, the queue is paused or the
+  registry is unreadable, never past the enqueue time plus seven days (`RECOVERY_MAX_WAIT_MS`). Lost: `host-absent` or
+  `max-wait` in the log, `recovery-host-lost` in the record.
+- **Acceptance**: `REQ-RUN-RECOVERY` (f); `worker/test/recovery-queue.test.mjs`.
 
 ## INT-CONFIG-OVERLAY-CONTRACT
 
@@ -8860,7 +9093,8 @@ worker's, exported from `@edgehero/pi-dispatch/live-transcript` (`liveKeyFor`, `
 publisher cannot drift.
 
 - **Key**: `run:live:<sanitized job id>`, the queue's job id through `sanitizeJobId`, the sanitizer the run mirror
-  uses for `runs:rec:`. Absent when the job never published, when `PI_LIVE_TRANSCRIPTS=0`, or after it expired; a
+  uses for `runs:rec:`. Since issue #645 the id is the RUN id (`runIdOf`), so a recovery job `<runId>.r<n>` writes its
+  run's stream, its first write replacing the lost attempt's entries as a retry's does. Absent when the job never published, when `PI_LIVE_TRANSCRIPTS=0`, or after it expired; a
   reader cannot tell those apart and a surface says so rather than picking one.
 - **Entries**: Valkey's own ids (`<ms>-<seq>`), written by `XADD <key> MAXLEN ~ 2000 * <fields>`. Every entry is a
   flat field list and every value a string:
@@ -8929,7 +9163,9 @@ constants are the worker's, exported from `@edgehero/pi-dispatch/run-progress` (
 (`LIVE_TTL_LIVE_MS`, `LIVE_TTL_ENDED_MS`, `LIVE_OUTCOMES`, `LIVE_TOOL_RE`), so the reader and the writer cannot drift.
 
 - **Key**: `run:progress:<sanitized job id>`, the queue's job id through `sanitizeJobId`, as `run:live:` is. Absent when
-  the job never wrote one, when `PI_RUN_PROGRESS=0`, or after it expired; a reader cannot tell those apart.
+  the job never wrote one, when `PI_RUN_PROGRESS=0`, or after it expired; a reader cannot tell those apart. **Since
+  issue #645 the id is the RUN id** (`runIdOf`): a recovery job `<runId>.r<n>` writes its run's key, so it reads the
+  `commentId` the run's first attempt stored and edits the same status comment, as a retry does.
 - **Value**: one string, the snapshot serialized as JSON, written whole by `SET <key> <json> PX <ttl>`. Every write
   carries the whole state, so a lost write is repaired by the next one. The shape (`v: 1`):
   ```
@@ -8948,7 +9184,8 @@ constants are the worker's, exported from `@edgehero/pi-dispatch/run-progress` (
     "startedAt": <ms>, "updatedAt": <ms>,                           // updatedAt: the time of the write that carried it
     "ended": <bool>,
     "outcome": "completed" | "policy" | "failed" | "unknown" | null, // on the final write only
-    "commentId": "<forge status comment id>" | null }                // COMMENT_ID_RE, INT-FORGE-STATUS-COMMENT-EDIT
+    "commentId": "<forge status comment id>" | null,                 // COMMENT_ID_RE, INT-FORGE-STATUS-COMMENT-EDIT
+    "replayed"?: <int> }              // issue #645: calls a recovered run's runner re-ran; present only when above zero
   ```
   Every integer is a safe non-negative integer; `done` and `total` are at most 1,000,000 with `done <= total` and
   `total >= 1`. `since` is the assistant entry's time and `at` the result's (the pi entry's own timestamp when it lies
@@ -8999,7 +9236,10 @@ constants are the worker's, exported from `@edgehero/pi-dispatch/run-progress` (
   fails or slows the job.
 - **Reading** (`admin/src/read-model.mjs`): `parseProgress(raw)` validates strictly (`v` 1, every named key with its
   type and cap, a tool name outside `LIVE_TOOL_RE` read as `?`, `phase.index` bounded): a field it does not name makes
-  the WHOLE key `{ invalid }`, so adding a field to the snapshot means raising `v`. `commentId` is validated and then
+  the WHOLE key `{ invalid }`, so adding a field to the snapshot means raising `v`. **`replayed` (issue #645) is the
+  one exception, and a stated one**: it was added at `v: 1` as an OPTIONAL key, written only when a recovered run
+  replayed a call, so every other key is unchanged; a reader from before #645 refuses such a key whole (that run shows
+  no progress on an older console or panel), and the current reader accepts it as an optional count. `commentId` is validated and then
   dropped, so no reader hands a forge id on. `readProgress(redis, jobId, { timeoutMs })` returns that snapshot, `{
   absent }`, `{ invalid }` (also for a run id outside the run-id charset, refused before any read) or `{ unreachable
   }`; `readProgressMany(redis, jobIds)` reads at most `PROGRESS_BATCH_MAX` (50) distinct ids in ONE `MGET`, ids
@@ -9384,4 +9624,6 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-16 | Issue #644, run progress. **NEW `INT-RUN-PROGRESS-KEY`**: `run:progress:<sanitized job id>`, one JSON string per running job written by the worker alone with `SET ... PX` (`v: 1`; `turn`, `steps`, `failed`, `interrupted`, `running` (at most 8, newest last), `recent` (the last 20 closed steps, each `ok`, `error` or `interrupted` with the result's own `durationMs` or null), `phase` and `phases` (at most 32 names) and `note`, `prior`, `startedAt`, `updatedAt`, `ended`, `outcome` and the forge comment's `commentId`); written on change at most once a second and once at the end, 7 days from the attempt's first write and 24 h after the final one; capped at 16 KiB by dropping `recent`, then `phases` from the tail, then the note, with `phase.index` left for readers to bound; tool names held to `LIVE_TOOL_RE` else `?`; phase names and notes are model text, redacted, escaped and cut, operator only, and never in the record or the comment; a retry reads the old key's `commentId` before it replaces the key. Constants exported from the new worker subpath `@edgehero/pi-dispatch/run-progress`. The readers: `parseProgress` (strict, an unnamed field invalidates the key, `commentId` dropped), `readProgress`, `readProgressMany` (one `MGET`, at most 50). **NEW `INT-FORGE-STATUS-COMMENT-EDIT`**: each host's `postStatusComment` now returns `{ id }` (Azure `<thread>:<comment>` or `wi:<comment>`), a new `editStatusComment` per forge (GitHub and Forgejo `PATCH .../issues/comments/{id}`, GitLab `PUT .../notes/{note}` on the target's collection, Azure the thread comment on 7.1 or the work item comment on 7.1-preview.4), ids checked before any URL, failures carrying `status`; the same identity and token path as every worker comment; never-throwing wrappers mapping 403, 404 and 429 to a stop; the text's grammar (fixed words, the job id, integers, never a phase name, note or tool name); one post, an edit at most every 30 s and only on a change, 120 at most, a final edit bounded at 4 s; the id kept in the progress key so a retry edits the same comment; the receiver's two drops of an edit, pinned on all four forges, and the worker's phrase-collision skip. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's first CONDITIONAL key, `progress`, at the tail after `stalledRepick` (integers and closed keys only, zeros left out, `tools` under nine closed names plus `other`, absent when the reducer did not run, `{}` when it ran and saw nothing, advisory); the reason enum gains `report-progress-shadowed` and `job-image-progress-unsupported`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.progress` (all five kinds) and `run.statusComment` (forge kinds; `true` refused on cron), strict booleans, at job level only when `true`, both rows of `AUTHORED_NARROWING_FIELDS`, and both model-callable through the two trigger tools, judged by the loader's validator before the confirm. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the `report-progress-shadowed` row. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_REPORT_PROGRESS` in the env list, and the capability token list gains `reportProgress`; CORRECTED at the same time, the list and the count of job-feature tokens had missed `awaitInput` since #625 (now nine rows, `forgeMcp`, `awaitInput` and `reportProgress` the last three). **`INT-CONTAINER-JOB-INPUTS` AMENDED**: the live file is staged when either switch is on, and the tool adds no input. **`INT-CONSOLE-STATE-API` AMENDED**: `active` rows gain `progress` (`turn`, `steps`, `failed`, `running` with `tool` and `since`, `phase` with `index`, `count`, `done` and `total`, `ended`), integers and a checked tool name only, `version` unchanged. UNCHANGED, checked: `INT-LIVE-TRANSCRIPT-STREAM` (the stream is written exactly as before when transcripts are on; with them off and progress on no `run:live:` key is touched), `INT-SESSION-STORE-CONTRACT` (progress reads the per-job copy as the stream does and writes nothing back), **`INT-CONSOLE-EVENT-STREAM` AMENDED**: no new route or event, but the run page is now a live page (its Progress panel, `p-progress`, is a hub `panel` re-rendered by digest, its data read at most every 2 s), so `page=run` is accepted, and an operator's run tab holds two streams (the hub's and the transcript's) of its token's `PI_CONSOLE_MAX_STREAMS` (default 4). |
 | 2026-10-16 | Issue #644, review round 1. **`INT-RUN-PROGRESS-KEY` CORRECTED**: `updatedAt` is the time of the write that carried it, and while the attempt has not ended the snapshot is written again every 30 s (`PROGRESS_HEARTBEAT_MS`); a new Staleness clause (not ended and `updatedAt` older than 180 s, `PROGRESS_STALE_MS`, `progressStaleFor`: the worker stopped writing; readers say so and stop their running ages; an ended key never is); the first write is the empty turn 0 snapshot, replacing the previous attempt's final one at once; the sink waits at most 2 s for a status comment post in flight before the final write; the 5 s bound covers that wait and the final write, no longer the comment's final edit; `turn` leaves out an assistant message with `stopReason` `"error"`, and such a message or an `"aborted"` one opens no step; an id longer than 128 UTF-16 units (`PROGRESS_ID_MAX`) is ignored; the constants list gains `PROGRESS_ID_MAX` and `PROGRESS_HEARTBEAT_MS`; the fleet's projection gains `updatedAt`. **`INT-FORGE-STATUS-COMMENT-EDIT` CORRECTED**: the final edit carries the run record's outcome, not the exit's, through a new The final outcome clause (`makeStatusCommentRegistry`, settled by `recordRun`; "attempt ended, retrying" for an `InfraRetry` with attempts left; the exit's outcome only after a 30 s fallback, `STATUS_FALLBACK_MS`, for an attempt with no record); the text gains the retrying state; the final edit is made after an earlier `http-429` stop and tried once more after 1 s on a 429 or a failure inside its 4 s, while 403 and 404 still end it, and it is no longer inside the sink's 5 s; a post in flight at the end is waited for so a retry edits it; the phrase check renders the retry too; `status_comment_skipped` names its four reasons (`progress-off`, `no-transcript`, `no-forge-target`, `phrase-collision`). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `progress` gains `longestInterruptedMs`, `toolMs` is stated as a sum of step durations that parallel steps overlap, and a cancel that replaces a retry (`endCancelled`) keeps `progress`. **`INT-CONSOLE-STATE-API` AMENDED**: `active[].progress` gains `updatedAt`, within `version: 1`. Extended in the same round: **`INT-RUN-PROGRESS-KEY`** TTLs gain the writer's 7-day stop (every write but the final one, the heartbeat with it, `run_progress_expired`; no write with a TTL under 1 s) and the processor's own final write, outcome `unknown`, for a container whose stop did not take (`onLive`). **`INT-FORGE-STATUS-COMMENT-EDIT`** The final outcome clause: `STATUS_FALLBACK_MS` is 5 minutes (was 30 s); a late settle within `STATUS_LATE_SETTLE_MS` (10 minutes, at most `STATUS_LATE_SETTLE_MAX`, 256) makes one corrective edit (`correct`) when its text differs; an attempt with no commenter gets one bounded edit from `recordRun` off the key's `commentId`, skipped on a phrase collision or a key with no id; an operator's cancel of a delayed retry writes no record and reaches none of it. |
 | 2026-10-17 | Issue #645 (durable runs), the reaper's half. **`INT-SESSION-STORE-CONTRACT` AMENDED**, one sentence: the session reaper judges only KEY-SHAPED names, 32 lower-case hex characters (`SESSION_KEY_PATTERN`, derived from `session-key.mjs`'s `KEY_LENGTH` rather than restated). A name starting with a dot is skipped silently, since that is where the store's own siblings live, and the checkpoint store's default home is `<PI_SESSIONS_DIR>/.checkpoints`; any other non-key name is said once per pass as `session_not_reaped {key, reason: "not-a-key"}`, a verdict and not `session_reaper_skipped` (`OQ-007`'s naming rule). Before it, an aged non-key DIRECTORY reached the directory-mtime fallback added by #336 and was removed whole, so the session TTL would have deleted every workspace checkpoint, and an operator's own directory parked in the store with it. A stray FILE with a non-key name, which said `key-not-a-directory` since #375, now says `not-a-key`, because the name is judged before the type. Because both stores name entries by 32 hex characters, a layout where one is the other, or holds the other, or sits below a key-shaped name of the other, makes each sweep delete the other's folders: `loadConfig` refuses it (`checkpointStoreCollision`, a config error naming `PI_CHECKPOINTS_DIR` and `PI_SESSIONS_DIR`) and doctor reports it as a failure. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: `not-a-key` is a log reason, not a `SESSION_REASONS` token, and no record carries it. **`OQ-037` UNCHANGED, checked**. **Code evidence**: worker/src/session-store.mjs -> reapSessions; worker/src/session-key.mjs -> SESSION_KEY_PATTERN; worker/test/session-store.test.mjs -> the key-shaped-names reaper test. |
-| 2026-10-17 | Issue #645, part 1: the checkpoint store. **NEW `INT-WORKSPACE-CHECKPOINT-STORE`**, written from `worker/src/workspace-checkpoint.mjs`, `worker/src/checkpoint-paths.mjs` and `STORE_GIT_FLAGS`/`storeGitEnv` in `worker/src/git-hardening.mjs` as they stand: the location (`PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`, else none, from `checkpointsDirPath`); the per-run folder `sha256("checkpoint\0" + runId)` cut to 32 hex, and why not `sanitizeJobId`, which keeps `..`; the layout (`repo.git`, `home/`, `lock`, `base-too-large`, `CURRENT`, `cp-<seq>/manifest.json` and `transcript.jsonl`); the manifest's every field and type; the commit-point order (transcript, manifest, `CURRENT`, each temp, fsync, rename) and its guarantee that `CURRENT` always names a complete checkpoint; the closed git environment and the flags of every store git; the fast-import stream; the refs `refs/pi-dispatch/base`, `/checkpoint` and `/cp/<seq>`; the caps and their defaults; every skip and refuse reason; the restore's refusals (including `run-mismatch` and `base-mismatch`, the checkout's commit parsed from files); the sweep's rules; the lock's takeover and release by rename, verify, then unlink or put back; the secret scan over paths, read bytes and link targets, and what it does not cover; the Linux `/proc/self/fd` containment check and the residual where no proc directory exists. Every manifest object is closed at every level. `check-ignore` runs with the run's `home/` as its cwd, and `storeGitEnv` drops empty and relative `PATH` entries. One residual is written down for the wiring change rather than fixed here: `quiesced` is the caller's claim, which the module cannot verify. The two stores colliding is refused by `loadConfig` (`checkpointStoreCollision`, the row above). **As of this change nothing calls the checkpointer**; doctor reads the directory and warns at most, and a later change wires it into durable runs. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the store is never mounted, and no path, key or run directory name crosses the boundary. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: no input, mount or env var a container receives changed. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: nothing resumes from a checkpoint yet. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: its dot-name rule, landed earlier in #645, is what keeps the default location out of the session reaper. **Code evidence**: worker/src/workspace-checkpoint.mjs -> makeWorkspaceCheckpointer, checkpointKey, DEFAULT_CHECKPOINT_LIMITS; worker/src/checkpoint-paths.mjs; worker/src/git-hardening.mjs -> STORE_GIT_FLAGS, storeGitEnv; worker/src/config.mjs -> checkpointsDirPath; worker/test/workspace-checkpoint.test.mjs; worker/test/checkpoint-paths.test.mjs. |
+| 2026-10-17 | Issue #645, part 1: the checkpoint store. **NEW `INT-WORKSPACE-CHECKPOINT-STORE`**, written from `worker/src/workspace-checkpoint.mjs`, `worker/src/checkpoint-paths.mjs` and `STORE_GIT_FLAGS`/`storeGitEnv` in `worker/src/git-hardening.mjs` as they stand: the location (`PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`, else none, from `checkpointsDirPath`); the per-run folder `sha256("checkpoint\0" + runId)` cut to 32 hex, and why not `sanitizeJobId`, which keeps `..`; the layout (`repo.git`, `home/`, `lock`, `base-too-large`, `CURRENT`, `cp-<seq>/manifest.json` and `transcript.jsonl`); the manifest's every field and type; the commit-point order (transcript, manifest, `CURRENT`, each temp, fsync, rename) and its guarantee that `CURRENT` always names a complete checkpoint; the closed git environment and the flags of every store git; the fast-import stream; the refs `refs/pi-dispatch/base`, `/checkpoint` and `/cp/<seq>`; the caps and their defaults; every skip and refuse reason; the restore's refusals (including `run-mismatch` and `base-mismatch`, the checkout's commit parsed from files); the sweep's rules; the lock's takeover and release by rename, verify, then unlink or put back; the secret scan over paths, read bytes and link targets, and what it does not cover; the Linux `/proc/self/fd` containment check and the residual where no proc directory exists. Every manifest object is closed at every level. `check-ignore` runs with the run's `home/` as its cwd, and `storeGitEnv` drops empty and relative `PATH` entries. The transcript copy is capped by `maxTranscriptBytes` (256 MiB, judged on the offset before anything is written, `transcript-too-large`, the previous checkpoint kept), streams in 1 MiB chunks under the snapshot's deadline (`timeout`), and its bytes count in the `disk-low` and `store-full` checks; after each committed checkpoint every `cp-<seq>/` and `refs/pi-dispatch/cp/<seq>` but the current and the previous is pruned under the lock, crash-safely because `CURRENT` already names the new one (attack review: a sparse session file filled the host disk while the container was frozen, and old transcript copies were never pruned). One residual is written down for the wiring change rather than fixed here: `quiesced` is the caller's claim, which the module cannot verify. The two stores colliding is refused by `loadConfig` (`checkpointStoreCollision`, the row above). **As of this change nothing calls the checkpointer**; doctor reads the directory and warns at most, and a later change wires it into durable runs. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the store is never mounted, and no path, key or run directory name crosses the boundary. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: no input, mount or env var a container receives changed. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: nothing resumes from a checkpoint yet. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: its dot-name rule, landed earlier in #645, is what keeps the default location out of the session reaper. **Code evidence**: worker/src/workspace-checkpoint.mjs -> makeWorkspaceCheckpointer, checkpointKey, DEFAULT_CHECKPOINT_LIMITS; worker/src/checkpoint-paths.mjs; worker/src/git-hardening.mjs -> STORE_GIT_FLAGS, storeGitEnv; worker/src/config.mjs -> checkpointsDirPath; worker/test/workspace-checkpoint.test.mjs; worker/test/checkpoint-paths.test.mjs. |
+| 2026-10-17 | Issue #645, part 2: durable runs (`run.recover`). **NEW `INT-RUN-CHECKPOINT-POINTER`**: `run:checkpoint:<sanitized run id>`, JSON `{v: 1, host, hostQueue, seq, attempt, at, jobDir}` with exactly those keys, each typed (a job folder basename, never a path), `SET ... PX` 7 days, written only after a committed checkpoint, removed at the run's final outcome after the store entry, bounded and never throwing; its readers. **NEW `INT-RUN-BUDGET-LEDGER`**: `run:budget:<sanitized run id>`, fields `slot`, `seq`, `h<seq>`, `s<seq>`, `at`; states `held`, `settled`, `released`, `settled-crashed`, terminal states never moving; the scripts `claimSlot`, `nextSeq`, `recordHold`, `settle`, `release`, `settleCrashed`; 35-day TTL; `{ error }` and never a throw. **NEW `INT-RECOVERY-JOB`**: the id `<runId>.r<n>`, the queue, the data (`recoveryOf`, `recovery`, `recoverBy`), the options (`attempts: 1`, no deduplication, 31-day retention), the claim key `run:recover:claim:<run>:<n>` (`SET NX`, 7 days) and the pending set `run:recover:pending` (scored by `recoverBy`, six hours). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the conditional tail keys `recoveryOf`, `recovered` (`from` live, exit or salvage; `n`; `fromAttempt`; `checkpointSeq`; the four runner counts), `recoverSkipped` (`local`, `no-run-id`, `base-unprimed`, from `RECOVER_SKIPPED_REASONS`) and `checkpoints` (`written`, `failed`, `skipped`); the reason enum gains `job-image-recover-unsupported`, `recover-store-unset`, `recovery-enqueued`, `recovery-host-lost`, `recovery-cap`, `recovery-checkpoint-absent` and `recovery-superseded`, each with its outcome and comment. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.recover` (forge only, refused on cron and beside `run.command`, the store and the image capability it needs, job level only when `true`, a skew row, model-callable). **`INT-CONTAINER-JOB-INPUTS` AMENDED**: an armed job keeps its transcript file with both switches off; a recovery's `/workspace` is the base cloned from the store by sha with the checkpoint written over it and the trust paths reset, and its `/session` file is the checkpoint's transcript; no input names the store. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_RECOVER` and `PI_RECOVERING` (from the processor's call bag, reserved, structural), the `recover` capability token and its evidence, ten `CAPABILITY_GATES` rows. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the exit line's `recovery: {orphans, replayed, interrupted, notStarted}`, exit codes UNCHANGED, the `2` / `config` refusals of the recovery inputs and of a staged transcript that did not resume. **`INT-RUN-PROGRESS-KEY` AMENDED**: the key is the run id; the optional `replayed`, and that it was added at `v: 1` as an optional key (an older reader refuses such a key whole). **`INT-LIVE-TRANSCRIPT-STREAM` AMENDED**: the key is the run id. **`INT-WORKSPACE-CHECKPOINT-STORE` AMENDED**: Status (called by the recovery flow: who calls each method, the 20 s live snapshot bound, `sweep()` without `active` and why that is safe), the trust-path sentence, Traces to. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: `stageRecovered` writes only into the job folder and reads no key; promotion is unchanged. **`INT-SDK-SESSION-OPTIONS` UNCHANGED, checked**: the session is created with the same options; `toolExecution` is set on the agent after creation. **Code evidence**: worker/src/run-checkpoint.mjs, worker/src/run-budget-ledger.mjs, worker/src/recovery-queue.mjs, worker/src/run-history.mjs, worker/src/triggers.mjs, worker/src/env-allowlist.mjs, worker/src/image-preflight.mjs, worker/src/run-container.mjs, worker/src/prepare-github.mjs, worker/src/session-store.mjs, worker/src/run-progress.mjs, image/runner/src/config.mjs, image/runner/run-job.mjs. |
+| 2026-10-17 | Issue #645, part 2, review round 1. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the reason enum gains `recovery-unsafe-extensions` and `recovery-failed` (nine durable-run reasons, each with its outcome and comment), `recoverSkipped` gains `workspace-extensions`, `base-unprimed` also covers an unreadable extensions check, `recovery-host-lost` is described with the extended deadline, superseded with the settled-record check. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**: the counts now reach the record through the log sink's `close()` and `runContainer`'s `recovery` (present only when the block was there). **`INT-RECOVERY-JOB` CORRECTED**: the data strips `RECOVERY_STRIPPED_KEYS`; the pending member carries the host and the enqueue time; the deadline extends by `RECOVERY_EXTEND_MS` up to `RECOVERY_MAX_WAIT_MS`. **`INT-RUN-CHECKPOINT-POINTER` CORRECTED**: `recovery-failed` also removes it; the settled record is superseded's first test. **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED**: doctor's unnamed-fleet warning, and the extensions rule. **`INT-WORKSPACE-CHECKPOINT-STORE` UNCHANGED by this row, checked**: its transcript cap (`maxTranscriptBytes`, 256 MiB), chunked deadline-bound copy and pruning to two checkpoints were written by its author and agree with the code and with `DES-RUN-CHECKPOINT-PAIRED`. |

@@ -92,6 +92,15 @@ keep transcripts on their host, as before. What is and is not redacted is in
 [`SECURITY.md`](../SECURITY.md). When a run has no transcript in Valkey, the panel falls back to this
 host's raw log, or says which host ran it.
 
+**Checkpoints stay on the machine that took them.** A trigger with `"recover": true` has its running jobs
+checkpointed into that host's own store, and a lost run's recovery is sent to that host's queue
+(`pi-jobs@<name>`). That needs `PI_WORKER_NAME` on every machine: without names, a recovery goes to the shared queue,
+and a machine without the checkpoint refuses it (`recovery-checkpoint-absent`); doctor warns when a trigger sets
+`recover` on an unnamed worker with peers. A recovery not taken within six hours is checked against the host
+registry: while its machine still reports in (or the queue is paused) the wait is extended, up to seven days; once
+the machine is gone it is taken off the queue by any worker and reported as `recovery-host-lost`. Continuing a
+run on another machine is not supported yet; see [`durable-runs.md`](durable-runs.md).
+
 **The run history is merged.** Each worker writes its record to its own disk as it always has, and also
 mirrors it into Valkey, so every panel lists the whole deployment's runs and labels each one with the host
 that produced it. The files stay the record; the mirror is a view of them, and it is never allowed to

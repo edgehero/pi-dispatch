@@ -1287,8 +1287,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`INT-FORGE-STATUS-COMMENT-EDIT`), the `report_progress` job tool and its capability, the two trigger fields
   (`INT-TRIGGERS-FILE-CONTRACT`), the read model's readers, the console's displays and the panel's ACTIVE rows
   (`DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`). Not in scope: per-tool live status inside a parallel batch
-  (pi saves a batch's results together, so the file cannot show it), a progress value the job can trust, and #645's
-  recovered runs, whose synthetic interrupted results are counted as ordinary results until their shape is settled.
+  (pi saves a batch's results together, so the file cannot show it) and a progress value the job can trust. A recovered
+  run (#645, `REQ-RUN-RECOVERY`) is in scope: its runner's synthetic answers to the calls the loss cut off are marked
+  (`details.piDispatchRecovery`), and the reducer counts an `interrupted` or `not-started` one as `interrupted` and a
+  re-run one as `replayed`, never as a step; a recovery's progress key, stream and status comment are its run's.
 - **Why**: #643 lets an operator read a running job's transcript, but nothing summarises where a run is: an operator
   watching a fleet scrolls transcripts to learn that a job is on turn 40 with a test command running for ten minutes.
   The requester, on the issue, sees nothing between the start and the end. pi already writes everything the automatic
@@ -1320,6 +1322,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     "longestInterruptedMs: an open step's time from its call to the end, beside toolMs as a sum (#644)"),
     `worker/test/live-transcript.test.mjs` ("the time handed to onParsed is bounded as the stream's is: not negative,
     at most a day ahead, an integer (#644)").
+    Since #645: a result marked `details.piDispatchRecovery` closes a step still open under its id without counting a
+    step, `interrupted` and `not-started` count as `interrupted`, `replayed` as the key's and the record's `replayed`
+    (written only above zero), an unknown mark is an ordinary result, and on a replay pass a marked result for a call
+    not open counts nothing. Tests: `worker/test/run-progress.test.mjs` ("recovery marks: interrupted and not-started
+    count as interrupted, replayed as replayed, none as a step (#645)", "a marked result closes a step still open under
+    its id without counting a step; an unknown mark is an ordinary result (#645)", "on a replay pass, a marked result
+    for a call not open counts nothing (#645)").
   - (b) **The key.** Given a running job, the key is written at most once a second with a trailing write, its TTL 7
     days from the first write and 24 hours after the final one; the final write has `ended` and the exit's outcome; a
     retry carries the earlier attempt's `commentId`; the value fits 16 KiB; a client that is not ready, refuses, hangs
@@ -3172,15 +3181,28 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   costs the key one run rather than every future run on it until an operator removes a file by hand. Two jobs on one pull request inside one runtime is
   an observed shape (`REQ-QUEUE-BURST-NO-DROP`), and last-write-wins there would interleave two agents'
   turns into one transcript and then resume whichever wrote last.
+- **A checkpoint is not a session** (issue #645, `REQ-RUN-RECOVERY`). A durable run's checkpoints belong to that
+  one run: they hold its own transcript and workspace, are kept in the checkpoint store and not in the session store,
+  are never promoted into a key, and are never resumed by a later run. A recovery job stages its checkpoint's
+  transcript as its own session file (`stageRecovered`, reason `recovered`), resolving nothing from the store; for a
+  resume job that staged transcript carries the job's key, so a COMPLETED recovery promotes it exactly as the lost
+  run would have, and a non-completed one promotes nothing. So **retry still means re-run**, the rule
+  `CONST-RETRY-INFRA-ONLY`'s first revision row records (promote on every exit and "retry" quietly stops meaning
+  re-run), with one exception, opted into by `run.recover`: a run lost to infrastructure is continued by its recovery
+  job instead of re-run. A queue retry of such a run, when no recovery could be queued, still re-runs from scratch.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`,
-  `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SESSION-STORE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-014`
+  `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SESSION-STORE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-014`,
+  `REQ-RUN-RECOVERY`
 - **Acceptance**: Given a trigger without `run.resume`, no file is written under `PI_SESSIONS_DIR`, nothing is
   promoted, and the record's `session` reads `disabled`; since issue #643 such a job does get a `/session` mount
   and `PI_SESSION_FILE`, for its empty live transcript file in its own job directory, deleted with it
   (`REQ-LIVE-TRANSCRIPT` (a)), which is no session in this requirement's sense: no key, no store, no resume. Given an
   armed trigger whose key resolves and whose previous run completed, the job's prompt is the resumed shape
   and the record reads `session.resumed: true`. Given a fork pull request, no key resolves. Given a
-  non-completed exit, the canonical transcript is unchanged. Given an armed trigger with `PI_SESSIONS_DIR`
+  non-completed exit, the canonical transcript is unchanged; this holds for a `run.recover` run too, whose
+  continuation after a loss runs on its own checkpoint's transcript and promotes only when it completes (`REQ-RUN-RECOVERY`,
+  `worker/test/session-store.test.mjs`'s "a recovered resume session promotes on completion like any resume (#645)").
+  Given an armed trigger with `PI_SESSIONS_DIR`
   unset, the job is refused before a budget slot is reserved. Given `PI_SESSION_MAX_AGE_DAYS` set and a
   transcript whose header timestamp predates it, the job runs cold with `session.reason:
   conversation-too-old` even though the file's mtime is fresh, and that token is what the record shows.
@@ -3201,6 +3223,166 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   another, its next job cold-starts with `venue-changed` and never stages the transcript the other venue
   wrote; given a key promoted before venues were recorded, it resumes for a job resolving to `local` and for
   no other venue.
+
+## REQ-RUN-RECOVERY
+
+- **Statement**: A forge trigger may set `run.recover: true`. A run of such a trigger that is lost to infrastructure
+  part way, because its worker died (the queue fails the job on its stall) or because its container ended on an
+  infrastructure exit, shall then continue from its last checkpoint instead of failing or starting over: the same
+  workspace, the same conversation, the tool calls the loss cut off answered before the model is asked anything, and a
+  fixed message telling the agent what happened and how to check for an effect that may already have occurred. A run
+  shall be continued at most twice. A policy exit, a completed run, the worker's own abort (a timeout, a cancel, a
+  shutdown), an OOM kill and a container that never started shall never be continued. Absent or `false` is today's
+  behaviour exactly: no checkpoint is taken, nothing is written to the checkpoint store, the tools run in pi's default
+  order, and a lost run is retried or failed as before.
+- **Scope**: forge triggers, all four forges. **Cron is refused at load** (`run.recover is only available on a forge
+  trigger`): a cron job edits the operator's folder in place, so a continuation would replay a transcript over a
+  tree the lost run already changed, with nothing to put it back. **Beside `run.command` it is refused at load**: a
+  command job's prompt is one `/name args` line, and continuing it would dispatch the command a second time. **A
+  local job is not armed in this release**: no producer passes the flag today, and a local job that carried it would
+  run exactly as before with `recoverSkipped: "local"` in its record. **A run whose base commit holds anything under
+  `.pi/extensions/` is not armed** (`recoverSkipped: "workspace-extensions"`): a merge-gated extension can import a
+  file outside `.pi/` or a package from `/workspace/node_modules`, which in a recovered run the agent wrote, and the
+  trust-path reset cannot enumerate an extension's imports (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`); such a run runs
+  exactly as before. Not in scope: continuing on a host other than
+  the one holding the checkpoint, a local folder's recovery, and the forge mirror of the workspace (`OQ-045`).
+- **Why**: a run that dies part way (a worker that is killed or loses its host, a container that dies on an
+  infrastructure fault) is re-run from scratch today: the retry re-clones a freshly resolved default branch, the
+  transcript was promoted only on a completed exit, and a crashed worker's job is failed outright
+  (`maxStalledCount: 0`, `CONST-RETRY-INFRA-ONLY`). So an hour of paid work is either paid again or lost, and the
+  re-run may repeat a push or a comment the lost attempt already made. pi-durable's one feature that fits this
+  project, a run that continues from its last durable state, is built here at the job boundary instead, on the
+  checkpoint store (`INT-WORKSPACE-CHECKPOINT-STORE`): checkpointed, not exactly once.
+- **What the agent is told.** A recovering run answers every tool call the loss cut off before the model sees the
+  transcript (`DES-RECOVERY-REPLAY-CLASSES`): a builtin file tool (`read`, `ls`, `grep`, `find`, `edit`, `write`) and
+  the job's own `report_progress` are re-run, because their effect is confined to the restored workspace; every other
+  call (bash, MCP, codemode, an extension's tool, an unknown name) gets a fixed result saying it was interrupted (it
+  may or may not have taken effect) or not started. Then the run continues with a fixed recovery prompt instead of the
+  task prompt: the workspace was restored, `.pi/`, `.agents/` and the root `AGENTS.override.md`, `AGENTS.md` and
+  `CLAUDE.md` were reset to the commit the run started from, and before repeating anything outside the workspace the agent checks whether it already happened (fetch and
+  compare, push with `--force-with-lease`, list pull requests for the branch, read the issue's comments). pi's own
+  "No result provided" answer to an orphaned call never reaches the model.
+- **Fail loudly, never into a fresh paid run.** An armed job on a worker with no checkpoint store is refused before
+  it spends (`recover-store-unset`), with a comment naming the fix: a run that the trigger promised would continue
+  and that would only be retried is the silent half-on state `REQ-RESUMABLE-SESSION`'s store refusal exists to
+  prevent. An armed job on an image without the `recover` capability is refused before it spends
+  (`job-image-recover-unsupported`). A recovery job whose checkpoint is absent, damaged, from another host, another pi
+  version or another venue, or refused by the store's restore, is refused with a comment
+  (`recovery-checkpoint-absent`); it never degrades into a fresh run. A recovery whose base holds `.pi/extensions/`
+  (a checkpoint from before the arm-time rule) is refused with a comment (`recovery-unsafe-extensions`). A recovery
+  job numbered past the cap is refused (`recovery-cap`). A recovery whose container ran, ended on an infrastructure
+  exit and could not queue another returns `recovery-failed` with its own comment and pages once. A never-started
+  fault of a recovery job (a pointer read, a ledger write, a restore that met a lock) is held 60 s and asked again,
+  never a spent attempt. A recovery whose run already reached its final outcome (a completed or policy record of the
+  base run or an earlier recovery, read locally then from the fleet mirror; or its pointer and store both gone) is
+  dropped silently (`recovery-superseded`). One whose host is gone is taken off the queue, commented and paged
+  (`recovery-host-lost`): at its six-hour deadline the wait is extended by an hour at a time while the host still
+  beats in the host registry, its queue is paused or the registry cannot be read, up to seven days. Where it fails OPEN it says so: an armed run whose base the store could
+  not take runs unprotected with `recoverSkipped: "base-unprimed"`, and a venue that cannot freeze a container gets
+  exit checkpoints only (doctor names it).
+- **Traces to**: `CONST-RETRY-INFRA-ONLY`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TOKEN-SCOPED-PER-JOB`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-PI-VERSION-PINNED`, `REQ-RESUMABLE-SESSION`, `REQ-RUN-PROGRESS`,
+  `REQ-LIVE-TRANSCRIPT`, `DES-RUN-CHECKPOINT-PAIRED`, `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`,
+  `DES-RECOVERY-REPLAY-CLASSES`, `DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`, `DES-RUN-BUDGET-LEDGER`,
+  `DES-RECOVERY-TRUST-PATHS-FROM-BASE`, `INT-WORKSPACE-CHECKPOINT-STORE`, `INT-RUN-CHECKPOINT-POINTER`,
+  `INT-RUN-BUDGET-LEDGER`, `INT-RECOVERY-JOB`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `OQ-041`, `OQ-045`.
+- **Acceptance**:
+  - (a) **The trigger field.** Given `run.recover` on any forge type it is carried, absent when not written; a
+    non-boolean is refused on every type naming the field; `true` is refused on cron (carried there only as `false`)
+    and beside `run.command`; the job data carries it only when `true`, through every receiver filter and the
+    console's `runFieldsOf`, never in an id or dedup key; a job whose authored trigger arms it and which arrived
+    without it is `trigger-skew`; the env carries `PI_RECOVER=1` only for a job the processor armed and
+    `PI_RECOVERING=1` only for a recovery; an armed job on an image without `recover` is refused before any spend.
+    Tests: `worker/test/triggers.test.mjs` ("run.recover is carried on every forge type, and absent when not written",
+    "run.recover: a non-boolean is refused on every type, naming the field", "run.recover is refused on cron, carried
+    there only as false", "run.recover is refused beside run.command on every forge type: a recovery would dispatch
+    the command again"), `worker/test/queue.test.mjs`, `worker/test/schedules.test.mjs`, `receiver/test/filter.test.mjs`,
+    `receiver/test/trigger-forwarding.test.mjs`, `worker/test/env-allowlist.test.mjs`, `worker/test/model-policy.test.mjs`
+    (the skew rows), `worker/test/image-preflight.test.mjs` ("recover (#645): a job armed with run.recover needs it;
+    an unarmed one never does"), `admin/test/write-plans.test.mjs`, `admin/test/job-actions.test.mjs`.
+  - (b) **The runner.** `PI_RECOVER` and `PI_RECOVERING` are off when absent or empty, on at `1`, and a config error
+    otherwise; `PI_RECOVERING` is refused without `PI_RECOVER`, without `PI_SESSION_FILE` and on a command job, and a
+    recovering run whose staged transcript does not resume is refused before the prompt; an armed run's tools run one
+    at a time from the first turn; the counts on the exit line reach the record through the log sink, present only
+    when the block was there (`worker/test/run-container.test.mjs`'s "the runner's recovery counts reach the result
+    through the REAL log sink, off the exit line like turns (#645)"). The orphans are the unanswered calls of the last assistant message that did not end
+    in an error or an abort, in order; a closed batch has none. Only an active builtin file tool whose registry source
+    is pi's own, or the job's inline `report_progress`, replays; a tool an extension shadows, an excluded tool and an
+    unknown name hold. Replay runs in order until the first hold; the first orphan held is `interrupted` and every
+    orphan after a hold is `not-started`; each answer is persisted before the next; an extension's `tool_call` hook
+    applies to a replayed call; no orphan is left for pi to answer; the exit line carries the four integer counts.
+    Tests: `image/runner/test/recover.test.mjs` (among them "the first orphan held is interrupted; every orphan after a
+    hold is not started, replayable or not", "[read answered, edit, bash, write]: edit is replayed, and bash, not the
+    first orphan, never started", "a real session: an extension's tool_call hook that blocks write blocks the replayed
+    write too", "KILL MID-TOOL, sequential: the write's result is on disk, bash is answered as interrupted, and the
+    model never sees \"No result provided\"", "KILL MID-BATCH, parallel (pi's default): no result reaches the disk, so
+    every call is an orphan; sequential execution is required"), `image/runner/test/pinned-api.test.mjs`.
+  - (c) **The checkpoints.** A live checkpoint is triggered only at a quiet point, never by a prior or replayed line,
+    at most one in flight and one a minute; it pauses, reads the transcript offset while paused, snapshots, unpauses
+    and only then writes the pointer; failures back off and degrade the attempt after three in a row; an unpause that
+    fails three times stops the container, which is then an infrastructure exit; at most two snapshots run on a host;
+    a venue that cannot pause gets exit checkpoints only; the exit checkpoint waits for a live one in flight. Tests:
+    `worker/test/run-checkpoint.test.mjs` (among them "ORDER: pause, snapshot with the offset read while paused,
+    unpause, then the pointer", "only quiet points trigger, and never a prior or replayed line", "an unpause that
+    fails UNPAUSE_TRIES times reports stop and calls onStop; the committed checkpoint keeps its pointer", "a venue that
+    cannot pause gets no live checkpoints, and exit() still works"), `worker/test/live-transcript.test.mjs` ("the
+    checkpoint factory: a third consumer fed every line with its end, reset with the file, and tailing a recover job
+    with both switches off (#645)").
+  - (d) **The processor.** Every new refusal comes before the mint, the claim and every reserve; a superseded
+    recovery (its pointer AND its store gone) is refused silently, and a missing pointer beside a store still there,
+    or a pointer read that throws, is retried, never superseded; a recovery whose base still runs on this host is held
+    without spending an attempt; a recovery clones from the store at the checkpoint's base, then restores, resets the
+    trust paths and stages the checkpoint's transcript, and runs recovering; a restore the store refuses is
+    `recovery-checkpoint-absent`, and a failed trust reset or staging never starts the container; a fresh armed job
+    primes the store before its container; an infra exit (exit 1, an unknown code, a detached or checkpointer-stopped
+    container) takes an exit checkpoint, enqueues a recovery and returns; one not enqueued throws today's
+    `InfraRetry`; completed and policy exits enqueue nothing and remove the store entry, the pointer and the ledger; a
+    local job is not armed; a job that never armed `run.recover` touches none of it. Since review round 1: a fresh
+    run whose base holds `.pi/extensions` is not armed (no ledger, no prime, no checkpoint args) and a recovery of one
+    is `recovery-unsafe-extensions` before the restore and any reserve; every never-started fault of a recovery is a
+    60 s wait hold; a recovery whose container ran and could not queue another returns `recovery-failed`; the
+    base-running check excludes the recovery's own entry; a settled record of the base run supersedes. Tests:
+    `worker/test/processor-durable.test.mjs` (among them "a fresh run whose base holds .pi/extensions is not armed: no
+    ledger, no prime, no checkpoint args, recoverSkipped workspace-extensions", "every never-started fault of a
+    RECOVERY job becomes a 60 s wait hold, never a spent attempt", "a recovery whose container ran and ended infra, with
+    no further recovery queued, RETURNS recovery-failed with its comment", "the base-running check excludes the
+    recovery's own entry, with the REAL running-jobs list"), `worker/test/trust-paths.test.mjs` ("baseHasExtensions
+    reads the BASE commit, not the working tree, in any casing"), `worker/test/prepare-github.test.mjs` ("a recovery pin clones from the
+    checkpoint store at the pinned sha: no default-branch resolve, no token in any env, no session resolve"),
+    `worker/test/session-store.test.mjs` ("stageRecovered copies the checkpoint transcript to session/current.jsonl,
+    keyed only for a resume job, and never reads the store (#645)"), `worker/test/trust-paths.test.mjs`.
+  - (e) **The money.** A carried slot reserves no job-count ledger; a hold that could not be recorded is released and
+    the attempt never starts; a recorded hold is settled or released only by the call that moves it from `held`; a
+    recovery settles every earlier crashed hold at the floor exactly once, also under two racing recoveries; over
+    random crash points the dollar keys never exceed the containers started times the cap. Tests:
+    `worker/test/run-budget-ledger.test.mjs` ("two settleCrashed calls racing on two clients settle each hold exactly
+    once between them", "property: over random interleavings on two clients, no hold leaves a terminal state and none
+    moves twice"), `worker/test/processor-durable.test.mjs` ("PROPERTY: over random crash points, the dollar keys
+    never exceed (containers started) x cap").
+  - (f) **The queue.** The recovery id is `<runId>.r<n>`, refused where BullMQ would refuse it; it goes to the
+    checkpoint host's queue when the pointer names one, else the shared queue, with one attempt, no deduplication and
+    the forge retention; a third recovery is refused by the cap; two enqueuers racing make one job; a waiting
+    recovery past its deadline is removed and its run told, once across sweepers, unless its host is alive, its queue
+    paused or the registry unreadable (extended, up to the seven-day maximum); the recovery's data drops the lost
+    attempt's per-attempt hold keys; a stall of an armed job with a
+    pointer enqueues its recovery, records the lost attempt and comments and pages nothing, while no pointer or a
+    refused enqueue keeps today's failure comment and page; a `.rN` job's stream, progress key and status comment are
+    its run's. Tests: `worker/test/recovery-queue.test.mjs` (among them "LIVE: a recovery is NOT swallowed by the
+    original's dedup window (the add carries no deduplication)", "LIVE: two enqueuers racing on one run produce
+    exactly one recovery job, one claim and one pending member"), `worker/test/start-wiring.test.mjs` ("issue #645: a
+    terminal stall of an armed job with a pointer enqueues its recovery, records the crash, and comments and pages
+    nothing", "issue #645: no pointer, an unarmed job, or a recovery that was not enqueued keeps today's failure
+    comment and page", "issue #645: a returned recovery-failed pages once and comments nothing more; lost after
+    returning, it still pages once and never comments", "issue #645: the processor gets the run-record reader (local
+    file first), so a recovery sees its base run's settled record"), `worker/test/recovery-queue.test.mjs`'s "a deadline
+    is not a verdict: an alive host, a paused queue or an unreadable registry extends it, up to the hard maximum".
+  - (g) **The record.** The durable-run fields are integers, fixed enums and a charset-checked run id, at the
+    record's tail, absent for a job that never armed `run.recover`, and no hostile string reaches them; the six
+    durable-run reasons pass through. Tests: `worker/test/run-history.test.mjs` ("durable-run fields: shape, tail
+    position, and absent for a job that never armed run.recover (#645)", "MAKE IT LIE: hostile strings in every
+    durable-run field never reach the record (#645)", "the durable-run reasons start.mjs and the processor write pass
+    through the record's reason (#645)").
 
 ## REQ-AWAIT-INPUT
 
@@ -4179,6 +4361,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-17 | Issue #645, part 2, review round 1. **`REQ-RUN-RECOVERY` CORRECTED** to the code after the round: Scope gains that a run whose base commit holds anything under `.pi/extensions/` is not armed (`recoverSkipped: "workspace-extensions"`, the trust reset cannot enumerate what an extension imports from outside `.pi/` or from `/workspace/node_modules`), and Fail loudly gains its recovery-time refusal `recovery-unsafe-extensions`; a recovery whose container ran and could not queue another returns `recovery-failed` (own comment, one page) where it used to fail with the generic comment; a never-started fault of a recovery is a 60 s wait without spending its one attempt; superseded is decided first by the base run's (and earlier recoveries') settled records, read locally and then from the fleet mirror; the host-lost deadline extends by an hour while the host is alive in the registry, its queue is paused or the registry is unreadable, up to seven days; the recovery prompt names the reset paths and the commit the run started from; the runner's counts reach the record through the log sink. Acceptance (b), (d), (f) gain the round's tests. Statement UNCHANGED, checked. |
+| 2026-10-17 | Issue #645, part 2: durable runs. **NEW `REQ-RUN-RECOVERY`**: a forge trigger's `run.recover: true` makes a run lost to infrastructure (a terminal stall, or an infrastructure exit of its container) continue from its last checkpoint, at most twice, with the cut-off tool calls answered (builtin file tools and `report_progress` re-run, everything else `interrupted` or `not-started`) and a fixed recovery prompt; never a policy exit, a completed run, a worker abort, an OOM kill or a never-started container. Scope: forge triggers; cron and `run.command` refused at load; a local job not armed (`recoverSkipped: "local"`); another host, local folders and the forge mirror are `OQ-045`. The loud refusals (`recover-store-unset`, `job-image-recover-unsupported`, `recovery-checkpoint-absent`, `recovery-cap`, `recovery-host-lost`; `recovery-superseded` silent) and the fail-open `base-unprimed`. Acceptance (a) to (g) names the tests in `image/runner/test/recover.test.mjs`, `worker/test/run-checkpoint.test.mjs`, `worker/test/processor-durable.test.mjs`, `worker/test/run-budget-ledger.test.mjs`, `worker/test/recovery-queue.test.mjs`, `worker/test/trust-paths.test.mjs` and the amended suites. **`REQ-RESUMABLE-SESSION` AMENDED**: a new bullet, a checkpoint is not a session (per run, in its own store, never promoted into a key or resumed by a later run; a recovery stages it as `recovered` and a completed recovery of a resume job promotes it); "retry means re-run" holds except under `run.recover`; the non-completed-exit acceptance sentence is qualified for a recovered run; Traces to gains `REQ-RUN-RECOVERY`. The Statement is **UNCHANGED, checked**. **`REQ-RUN-PROGRESS` AMENDED**: Scope no longer excludes recovered runs; (a) gains the recovery marks (`interrupted` and `not-started` count as interrupted, `replayed` its own count, none a step). **`REQ-LIVE-TRANSCRIPT` UNCHANGED, checked**: a recovery's stream is its run's key, replaced at the recovery's first write as a retry's is. **`REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked**: a recovery edits its run's status comment; the lost attempt's settles as retrying. |
 | 2026-10-16 | Issue #644, review round 1. **`REQ-RUN-PROGRESS` CORRECTED**, Acceptance only, the Statement unchanged. (a) gains: an id longer than 128 UTF-16 units is an anomaly; a message that ended in a provider error or an abort opens no step, the error no turn and the abort one; a refused prior `report_progress` sets no phase; `longestInterruptedMs` beside `toolMs` as a sum; the reducer's time bounded as the stream's. (b) gains: `updatedAt` is the write's time with a 30 s heartbeat until the end; the empty turn 0 snapshot at the sink's start replaces the previous attempt's final one; a slow comment post is waited for so its id reaches the key. (c) gains: a cancel that replaces a retry keeps `progress`. (e) CORRECTED: the final edit's outcome is the run record's (it was the exit's), "attempt ended, retrying" for an infrastructure retry, the exit's only after a 30 s fallback with no record; a 429 stop does not stop the final edit, which is retried once after a short pause; the phrase check covers the retry's words. (g) gains: the stale rule (not ended, no write for 180 s) and its words on the run page, the active tables and the ACTIVE row, running ages stopped; an ended key on an active row shows nothing; a retried job's record and key paired by time; the labels "Sum of step durations", "Longest interrupted step" and "Earlier runs of this session"; `/api/state`'s `active[].progress` carries `updatedAt`. Named tests added in (a), (b), (c), (e) and (g). **`REQ-JOB-STATUS-COMMENTS` CORRECTED**, the #644 clause: the last edit carries the run record's outcome or "attempt ended, retrying", not the exit's, and the skip names its four reasons (`progress-off`, `no-transcript`, `no-forge-target`, `phrase-collision`). Extended in the same round: (b) gains the writer's 7-day stop (no write with a TTL under 1 s) and the final write, outcome `unknown`, for a container the processor gives up on after the abort grace; (e) the fallback is 5 minutes (was 30 s), a record after it corrects the comment once within 10 minutes, and an attempt refused before its container still ends the comment an earlier attempt posted; (g) the key's phase names join a record only when the key started inside the record's attempt (no earlier than its `startedAt`). Named tests added in (b), (e) and (g). `REQ-JOB-STATUS-COMMENTS`' #644 clause gains: a next attempt refused before its container still makes the last edit. |
 | 2026-10-16 | Issue #644, run progress. **NEW `REQ-RUN-PROGRESS`**: an operator sees where a running job is (turn, steps done and failed, the tool running, and with `run.progress` the phase the agent reports through the `report_progress` tool) in the console, the `/dispatch` panel and, with `run.statusComment` on a forge trigger, one edited forge comment; the automatic counters need no trigger or image change; progress is advisory and feeds no decision; phase names and notes reach the operator role alone and never the record or the forge; the record gains integers and closed keys only; nothing fails, slows or holds a job or adds a network path; off with `PI_RUN_PROGRESS=0`; acceptance (a) to (f) with named tests from the worker, runner, receiver and admin suites, and (g), the displays (the read model's strict reader, the console's Progress column and panel, the panel's ACTIVE row). **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the who-authors clause gains the `report-progress-shadowed` sentence and the one opt-in status comment the worker posts and edits (fixed words, the job id and integers, the only comment it edits, replacing none of the others, skipped on a phrase collision); Acceptance gains the status comment's case and its tests; traces gain `REQ-RUN-PROGRESS` and `INT-FORGE-STATUS-COMMENT-EDIT`. **`REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-LIVE-TRANSCRIPT` AMENDED**, Scope only: progress is `REQ-RUN-PROGRESS`. UNCHANGED, checked: `REQ-OPERATOR-FAILURE-NOTIFICATION` (the hook's set spreads `RUNNER_POLICY_REASONS`, so `report-progress-shadowed` pages as `runner-policy` did, and the free `job-image-progress-unsupported` refusal pages nobody), `REQ-DURABLE-RUN-HISTORY` (the record stays PII-free: the new field holds no string from the transcript), `REQ-CONSOLE-SECURITY` (the run-text rule covers phase names and notes as it covers the transcript: operator only, escaped, never in a list or `/api/state`), `REQ-AWAIT-INPUT` (`await_human_input` is one of the record's closed tool names and is otherwise untouched). |
 | 2026-10-16 | Issue #643, live run transcripts. **NEW `REQ-LIVE-TRANSCRIPT`**: an operator watches a running job's transcript live from the console's run page and the `/dispatch` live tail, for a run on any host; what leaves the host is the transcript only (never the raw log or the thinking), redacted of the job's secrets and known token shapes, capped at 2,000 entries, removed 24 h after the end (7 days at most when the run never ended), never failing or slowing a job, with no new network path from the container, off with `PI_LIVE_TRANSCRIPTS=0`, operator only on the console; acceptance (a) to (f) with named tests (`worker/test/live-file.test.mjs`, `live-transcript.test.mjs`, `redact-secrets.test.mjs`, `admin/test/live-transcript-reader.test.mjs`, `dashboard-transcript.test.mjs`; the console's `admin/test/console-transcript.test.mjs`). **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement and Scope name the live transcript, and (l) is extended to the transcript stream (operator only, 403 for a viewer before a slot, escaped in a `<pre>`, never in a list, a hub panel or `/api/state`, `HEAD` 405, the slots and re-judging of (k)). **`REQ-RESUMABLE-SESSION` AMENDED**, Statement and Acceptance: a job without `run.resume` still keeps no transcript, writes nothing to the store and resumes nothing, but since #643 it does get a `/session` mount and `PI_SESSION_FILE` for its live file, so the "no mount, byte-identical argv" clauses are replaced. **`REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, Scope only: the transcript is #643's and delivered. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: the console line and the streamed container output are untouched, and `no-pii-in-logs` holds for the publisher, which logs the job id and counts only (`live_transcript_ended`, `live_transcript_write_failed`, `live_transcript_unstaged`), never an entry's content. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**: the record gains nothing. |

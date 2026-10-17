@@ -228,7 +228,15 @@ and merges it.
 - **The overlay's `extensions/` load by default** while staged packages are withheld per trigger. Two
   different switches, deliberately: see `docs/global-pi-overlay.md`.
 - **A serviced repo's `.pi/extensions` really does load in a job.** `/workspace` is the base repo's
-  default-branch sha, so it is merge-gated content, never a fork's branch.
+  default-branch sha, so it is merge-gated content, never a fork's branch. A recovered `run.recover` run is the
+  exception that keeps the rule: its workspace is restored to its own run's `baseSha` (not a fresh default-branch
+  resolve) with the lost attempt's tree written over it, and `worker/src/trust-paths.mjs` then resets `.pi/`,
+  `.agents/` and the root `AGENTS.md`/`CLAUDE.md` files to `baseSha`'s content before the container starts, so what
+  pi loads is still merge-gated and never what the agent wrote (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`). The reset
+  cannot see what an extension IMPORTS (a file outside `.pi/`, a package from `/workspace/node_modules`, both
+  agent-written in a restored tree), so a run whose base commit holds anything under `.pi/extensions/` is never
+  armed for recovery (`recoverSkipped: "workspace-extensions"`, `baseHasExtensions`), and a recovery that meets one
+  anyway is refused (`recovery-unsafe-extensions`).
 - **The staged-package manifest is read at each job start**, not once at boot. It *was* a boot read, and
   that was right while the staged set only changed when an operator edited a reviewed file; issue #102 made
   `pi install` then re-stage routine, and under a boot read a re-stage that drops a package makes every

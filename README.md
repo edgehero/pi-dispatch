@@ -422,6 +422,11 @@ pi-dispatch import-pi   # stage a credential-free copy of ~/.pi/agent into ./pi-
   With `"progress": true` the agent also names the phase of its plan it is in, and with `"statusComment": true` the
   worker keeps one comment on the issue up to date with the numbers, never the agent's words
   ([`docs/triggers.md`](docs/triggers.md#optional-run-fields)).
+- **Lost runs can continue.** With `"recover": true` a run the worker loses part way (a crash, a lost machine, a
+  container that died) continues from its last checkpoint, at most twice, instead of starting over (not for a
+  repository with pi extensions). Checkpoints hold
+  the transcript and the workspace on disk for up to 7 days: read [`docs/durable-runs.md`](docs/durable-runs.md)
+  before you turn it on.
 
 ## Run as a service
 
