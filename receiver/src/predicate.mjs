@@ -60,3 +60,21 @@ export function matchesRule(L, rule) {
 export function escapeRegExp(literal) {
 	return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/**
+ * Which way a phrase comment steers a running job (issue #646): `"followUp"` when the word right after the FIRST
+ * occurrence of the phrase is `later` (lowercase, a whole word, separated from the phrase by spaces or tabs only),
+ * else `"steer"`. The caller has already established that the body holds the phrase.
+ *
+ * The first occurrence only, and the word immediately after it only: anywhere else `later` is ordinary prose ("fix it
+ * later today" further down must not turn a correction into a follow-up). A newline between the phrase and the word
+ * does not count, because a phrase on its own line followed by a paragraph that opens with "Later" or "later" is
+ * prose, not a grammar word. Case-sensitive for the same reason. The delivered text is always the whole body: the
+ * word chooses the mode, it is never stripped.
+ */
+export function steerModeOf(body, phrase) {
+	if (typeof body !== "string" || typeof phrase !== "string" || phrase === "") return "steer";
+	const at = body.indexOf(phrase);
+	if (at < 0) return "steer";
+	return /^[ \t]+later(?=\s|$)/.test(body.slice(at + phrase.length)) ? "followUp" : "steer";
+}
