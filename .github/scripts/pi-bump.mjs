@@ -68,6 +68,7 @@ export const EXACT_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 export const PI_PIN_SITES = Object.freeze([
 	{ path: "image/runner/package.json", json: ["dependencies", `${SCOPE}pi-coding-agent`] },
 	{ path: "image/runner/package.json", json: ["dependencies", `${SCOPE}pi-mcp`] },
+	{ path: "image/runner/package.json", json: ["dependencies", `${SCOPE}pi-agent-core`] },
 	{ path: "worker/package.json", json: ["dependencies", `${SCOPE}pi-ai`] },
 	{ path: "admin/package.json", json: ["devDependencies", `${SCOPE}pi-coding-agent`] },
 	{ path: "admin/src/index.ts", line: /^export const SUPPORTED_PI_VERSION = "([^"]*)";$/m },

@@ -2116,3 +2116,126 @@ test("pi's connect runs in the order the runner's readiness observes: initialize
 	// The transport's send takes the client's `{ signal }` (pi-mcp 1.2.0), which the runner's observed subclass forwards.
 	assert.match(client, /\.send\(message, \{ signal: entry\.sendController\.signal \}\)/, "pi-mcp no longer hands send a signal: re-read the observed transport's send (src/mcp.mjs)");
 });
+
+// ── Issue #645: the pi facts durable runs rest on (src/recover.mjs, run-job.mjs) ───────────────────────────────────
+//
+// Recovery answers the tool calls a crash left without a result. Each fact below is one it cannot detect the loss of
+// at runtime: a parallel executor that started persisting per call, a runToolCall that stopped running the hooks, or a
+// transform that stopped answering orphans would each leave recovery running cleanly and labelling calls wrongly. The
+// functions are held by hash, so a pin bump that changes one fails here and the fix is to re-read it and re-check
+// src/recover.mjs, never to update the hash alone.
+
+/** The pinned pi-agent-core's dist file, resolved from pi-coding-agent, which is the copy the session runs on. */
+function agentCoreDistFile(...segments) {
+	const fromPi = import.meta.resolve("@earendil-works/pi-agent-core", pathToFileURL(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))));
+	return readFileSync(join(dirname(fileURLToPath(fromPi)), ...segments), "utf8");
+}
+
+/** The text of one class method `name(...) {...}` at pi's four-space method indent in a dist file. */
+function piMethod(source, name) {
+	const start = source.indexOf(`\n    ${name}(`);
+	assert.ok(start >= 0, `pi no longer defines the method ${name}`);
+	return source.slice(start + 1, source.indexOf("\n    }\n", start) + 6);
+}
+
+test("the runner's pi-agent-core is the copy pi-coding-agent loads, and exports runToolCall (issue #645)", { skip }, async () => {
+	const runner = fileURLToPath(import.meta.resolve("@earendil-works/pi-agent-core"));
+	const fromPi = fileURLToPath(import.meta.resolve("@earendil-works/pi-agent-core", pathToFileURL(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")))));
+	assert.equal(runner, fromPi, "two copies: runToolCall would be a different copy's than the session's agent loop");
+	const core = await import("@earendil-works/pi-agent-core");
+	assert.equal(typeof core.runToolCall, "function");
+	assert.equal(typeof mod.runToolCall, "undefined", "pi-coding-agent re-exports runToolCall now: import it from there and drop the extra pin");
+	const runJob = readFileSync(fileURLToPath(new URL("../run-job.mjs", import.meta.url)), "utf8");
+	assert.match(runJob, /\nimport \{ runToolCall \} from "@earendil-works\/pi-agent-core";\n/);
+	const runnerPackage = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
+	assert.equal(runnerPackage.dependencies["@earendil-works/pi-agent-core"], runnerPackage.dependencies["@earendil-works/pi-coding-agent"], "pinned exactly, at pi's own pin");
+});
+
+test("pi's agent loop: the parallel executor persists after the whole batch, the sequential one per call, chosen by Agent.toolExecution (issue #645)", { skip }, () => {
+	const loop = agentCoreDistFile("agent-loop.js");
+	const agent = agentCoreDistFile("agent.js");
+	const choose = piFunction(loop, "executeToolCalls");
+	assert.match(choose, /if \(config\.toolExecution === "sequential" \|\| hasSequentialToolCall\) \{\n\s*return executeToolCallsSequential\(/, "the sequential switch moved");
+	const sequential = piFunction(loop, "executeToolCallsSequential");
+	assert.match(sequential, /for \(const toolCall of toolCalls\) \{[\s\S]*?await emitToolResultMessage\(toolResultMessage, emit\);[\s\S]*?\n {4}\}/, "the sequential executor no longer emits each result inside its loop");
+	const parallel = piFunction(loop, "executeToolCallsParallel");
+	assert.match(parallel, /const orderedFinalizedCalls = await Promise\.all\([\s\S]*?for \(const finalized of orderedFinalizedCalls\) \{[\s\S]*?await emitToolResultMessage\(/, "the parallel executor now emits results before the whole batch settles: re-read whether run.recover still needs sequential");
+	assert.match(piFunction(loop, "emitToolResultMessage"), /await emit\(\{ type: "message_end", message: toolResultMessage \}\);/);
+	const loopConfig = piMethod(agent, "createLoopConfig");
+	assert.match(loopConfig, /\n {12}toolExecution: this\.toolExecution,\n {12}beforeToolCall: this\.beforeToolCall,\n {12}afterToolCall: this\.afterToolCall,/, "Agent no longer reads toolExecution and the hooks off itself at each run");
+	assert.match(agent, /\n {8}this\.toolExecution = runtimeOptions\.toolExecution \?\? "parallel";\n/, "the default is no longer parallel");
+	// createAgentSession never sets it, so run-job's assignment after it is the only setting.
+	assert.equal(agentDistFile("core", "sdk.js").includes("toolExecution"), false, "createAgentSession now sets toolExecution: re-read whether run-job's assignment survives");
+	// The setter copies (recoverSession assigns a new array), and message_end appends to the live array.
+	assert.match(agent, /set messages\(nextMessages\) \{\n\s*messages = nextMessages\.slice\(\);/);
+	assert.match(piMethod(agent, "async processEvents"), /case "message_end":\n\s*this\._state\.streamingMessage = undefined;\n\s*this\._state\.messages\.push\(event\.message\);/);
+	assert.deepEqual(
+		{
+			executeToolCalls: sha256(choose),
+			executeToolCallsSequential: sha256(sequential),
+			executeToolCallsParallel: sha256(parallel),
+			createLoopConfig: sha256(loopConfig),
+		},
+		{
+			executeToolCalls: "c74a7a024a3dd029c49239d8082845557291d5baa0f5e2f212cc2fca01ad2f0a",
+			executeToolCallsSequential: "7bddf4983cc0cc970a8c7e917454818aa6fabdaae6f04d9fb9e5609ac2af8f79",
+			executeToolCallsParallel: "4e32722424ca76f291134029ecb001309c5b711ba69f97a15498d5ad32c7de1c",
+			createLoopConfig: "1b82239c8db59bca81b1939bd2e6fe82045f1acaaa4d9a4c198b8b69a860e72e",
+		},
+		"a function run.recover's sequential execution rests on changed at this pin: re-read it and src/recover.mjs",
+	);
+});
+
+test("runToolCall runs a call through prepare, beforeToolCall, execute and afterToolCall, emitting nothing (issue #645)", { skip }, () => {
+	const loop = agentCoreDistFile("agent-loop.js");
+	const run = piFunction(loop, "runToolCall");
+	assert.match(run, /const preparation = await prepareToolCall\(context, assistantMessage, toolCall, options, signal, options\.tools\);/, "runToolCall no longer prepares against the tools it is handed, with its options as the hooks");
+	assert.match(run, /return finalizeExecutedToolCall\(context, assistantMessage, preparation, executed, options, signal\);/, "runToolCall no longer runs afterToolCall");
+	assert.doesNotMatch(run, /emit/, "runToolCall now emits events: recovery appends the message itself and would persist it twice");
+	assert.match(piFunction(loop, "prepareToolCall"), /if \(beforeResult\?\.block\) \{\n\s*const result = createErrorToolResult\(beforeResult\.reason \|\| "Tool execution was blocked"\);/, "a blocked call is no longer an error result with the hook's reason");
+	assert.match(agentCoreDistFile("agent-loop.d.ts"), /export declare function runToolCall\(toolCall: AgentToolCall, options: RunToolCallOptions\): Promise<AgentToolCallOutcome>;/);
+	// The context it is handed is { messages, tools }: at this pin the system prompt is a system message in the transcript.
+	assert.match(agentCoreDistFile("types.d.ts"), /export interface AgentContext \{\n[^}]*messages: AgentMessage\[\];\n[^}]*tools\?: AgentTool<any>\[\];\n\}/, "AgentContext changed shape: re-check the context recoverSession builds");
+	// The session's hooks are the extensions' tool_call and tool_result handlers, installed on the Agent.
+	const session = agentDistFile("core", "agent-session.js");
+	const hooks = piMethod(session, "_installAgentToolHooks");
+	assert.match(hooks, /this\.agent\.beforeToolCall = \(context\) => this\._beforeToolCall\(context\);\n\s*this\.agent\.afterToolCall = \(context\) => this\._afterToolCall\(context\);/);
+	assert.match(piMethod(session, "async _beforeToolCall"), /runner\.emitToolCall\(\{\n\s*type: "tool_call",/);
+	assert.deepEqual(
+		{ runToolCall: sha256(run), createToolResultMessage: sha256(piFunction(loop, "createToolResultMessage")), _installAgentToolHooks: sha256(hooks) },
+		{
+			runToolCall: "aae379b928b24a234bc2164f6181277ba06b2dfc0fedc395dab11eab4f7d9c10",
+			createToolResultMessage: "81eca3f2efbf301fd9acf758c91a34cb5a7b69cbe95090bb20b64114e500ce64",
+			_installAgentToolHooks: "21abd6c39b5ff4224de554261ff4113893169bf0addf3bea187134097feb05af",
+		},
+		"a function recovery's replay rests on changed at this pin: re-read it and src/recover.mjs (createToolResultMessage is the shape recoverSession copies)",
+	);
+});
+
+test("pi-ai answers an orphaned tool call with \"No result provided\" and drops error and aborted assistant messages (issue #645)", { skip }, () => {
+	const transform = readFileSync(join(piAiDist(), "api", "transform-messages.js"), "utf8");
+	const fn = piFunction(transform, "transformMessages");
+	assert.match(fn, /content: \[\{ type: "text", text: "No result provided" \}\],\n\s*isError: true,/, "the synthetic answer changed: re-read what recovery replaces");
+	assert.match(fn, /if \(assistantMsg\.stopReason === "error" \|\| assistantMsg\.stopReason === "aborted"\) \{\n\s*continue;/, "error and aborted assistants are no longer dropped: findOrphans skips them on this rule");
+	assert.match(fn, /else if \(msg\.role === "user"\) \{\n\s*\/\/ A new user turn interrupts tool flow - insert synthetic results for orphaned calls\n\s*closePendingToolCalls\(\);/, "a user turn no longer closes a batch: findOrphans reads a user tail as closed on this rule");
+	assert.match(fn, /if \(msg\.role === "assistant"\) \{\n\s*\/\/ If we have pending orphaned tool calls from a previous assistant, insert synthetic results now\n\s*closePendingToolCalls\(\);/, "a later assistant no longer closes a batch first");
+	assert.match(fn, /else if \(msg\.role === "system"\) \{\n\s*if \(pendingToolCalls\.length > 0\) \{\n\s*heldSystemMessages\.push\(msg\);/, "system messages are no longer transparent to an open batch");
+	// Agent.continue() refuses a trailing assistant, one reason recovery prompts rather than continues.
+	assert.match(piMethod(agentCoreDistFile("agent.js"), "async continue"), /throw new Error\("Cannot continue from message role: assistant"\);/);
+	assert.equal(sha256(fn), "763e70ef425f0e3bc19918beb7b2d709fa6955dba5b4a901bb7bbea71a911fcd", "pi-ai's orphan handling changed at this pin: re-read it and findOrphans (src/recover.mjs)");
+});
+
+test("pi persists each message on message_end and finds a persisted entry by identity, then by position (issue #645)", { skip }, () => {
+	const session = agentDistFile("core", "agent-session.js");
+	assert.match(session, /event\.message\.role === "toolResult"\) \{\n\s*\/\/ Regular LLM message - persist as SessionMessageEntry\n\s*entryId = this\.sessionManager\.appendMessage\(event\.message\);/, "a toolResult is no longer persisted on its message_end");
+	const manager = agentDistFile("core", "session-manager.js");
+	assert.match(piMethod(manager, "appendMessage"), /const entry = \{\n\s*type: "message",[\s\S]*?\n\s*message,\n\s*\};\n\s*this\._appendEntry\(entry\);/, "appendMessage no longer stores the message object it is handed");
+	assert.match(piMethod(manager, "_persist"), /appendFileSync\(this\.sessionFile, `\$\{JSON\.stringify\(entry\)\}\\n`\);/, "an entry is no longer written as it is appended");
+	const find = piMethod(session, "_findPersistedMessageEntryId");
+	assert.match(find, /if \(entry\.type === "message" && entry\.message === message\)\n\s*return entry\.id;/);
+	assert.match(find, /const messageIndex = this\.agent\.state\.messages\.indexOf\(message\);/);
+	assert.equal(sha256(find), "3798d6fc1527d4bbf7127a2b59607a5c3e7c55f1c9e6e4d82085b79f1cc7ea7f", "pi's persisted-entry lookup changed: re-check that recoverSession's append keeps it consistent");
+	// The builtin tools' registry source, which replayClass reads.
+	assert.match(session, /sourceInfo: createSyntheticSourceInfo\(`\$\{BUILTIN_PATH_PREFIX\}\$\{name\}`, \{ source: "builtin" \}\),/);
+	assert.match(agentDistFile("core", "source-info.js"), /export const BUILTIN_PATH_PREFIX = "builtin:";/);
+});

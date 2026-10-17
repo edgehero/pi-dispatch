@@ -8,6 +8,10 @@ import {
 	ModelRuntime,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+// Issue #645: pi-coding-agent does not re-export runToolCall, the one call that runs a tool through the session's own
+// hooks without the agent loop. Pinned exactly in package.json, and pinned-api.test.mjs holds that this resolves to
+// the copy pi-coding-agent itself loads, so the hooks and tools it is handed are that copy's.
+import { runToolCall } from "@earendil-works/pi-agent-core";
 import {
 	assertAwaitInputHasSession,
 	assertJobInputsReadable,
@@ -47,6 +51,7 @@ import { assertExcludeToolsKnown, excludableToolNames } from "./src/tools.mjs";
 import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/mcp.mjs";
 import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-input.mjs";
 import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
+import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
 // and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
@@ -224,6 +229,12 @@ async function main() {
 	// and openSessionManager is TOTAL, so the hoist below holds on every path including a degraded one.
 	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
 	const rootSessionId = sessionManager.getSessionId();
+	// Issue #645: a recovery attempt resumes the checkpoint the worker staged, or it does not run. An empty or quarantined
+	// one (openSessionManager degrades an unparseable file to a fresh session) would send the recovery prompt to a model
+	// with no transcript, telling it the work so far is restored when none is, and the task prompt would never be sent.
+	// Refused here, before anything spends. REJECTED: falling back to the task prompt, which would start the task over
+	// on a workspace the interrupted attempt had already changed, with no record of what it changed.
+	if (cfg.recovering && !sessionResumed) throw configError(`PI_RECOVERING is set but the staged checkpoint holds no transcript to resume (${sessionReason})`);
 
 	// Declared before the meter so onStop can close over it; assigned the moment the session exists.
 	let session;
@@ -430,6 +441,16 @@ async function main() {
 		...(cfg.excludeTools.length > 0 && { excludeTools: cfg.excludeTools }),
 	}));
 
+	// Issue #645: a job armed with run.recover runs its tools one at a time. pi-agent-core's parallel executor (the
+	// default, and createAgentSession sets nothing else) persists a batch's results only after the WHOLE batch, so a
+	// crash mid-batch leaves every call an orphan whatever actually ran, and recovery could not tell a push that
+	// happened from one that never started. Sequentially, each result is persisted as it lands, so only the first
+	// orphan can have started (src/recover.mjs). Set here, before any turn: Agent reads the field each time it builds
+	// a loop config. The cost is wall time on a batch of independent calls, which is why it is opt-in.
+	// REJECTED: marking each tool `executionMode: "sequential"`. That reaches only tools this runner registers, not
+	// the builtins or an extension's.
+	if (cfg.recover) session.agent.toolExecution = "sequential";
+
 	// The in-container read-back (issue #291): what was asked for and what the session actually holds,
 	// on every flagged job's log. Names only, from a set the loader validated -- no payload text, no
 	// values -- so the line is PII-free by construction.
@@ -538,7 +559,10 @@ async function main() {
 	const budget = attachTurnBudget(session, cfg.maxTurns, {
 		onAbort: (turns) => log("turn_budget_exceeded", { turns, maxTurns: cfg.maxTurns }),
 	});
-	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason } });
+	// The recovery counts (issue #645), on every exit line of a recovering run once recovery has run: integers only.
+	let recovery = null;
+	const recoveryField = () => (recovery ? { recovery } : {});
+	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField() });
 
 	// FALLBACK ONLY. The process-wide meter is the single source of truth whenever it installed, so
 	// the per-session accumulator is attached only when it did NOT -- the two are never both counting
@@ -554,7 +578,19 @@ async function main() {
 		// A stop that came before the prompt (a call an extension made while it loaded, or while the session was
 		// built) found no session to abort, so it ends the job here instead: the prompt is never sent, and the exit
 		// line names the stop (issue #543).
-		if (meter.state.stopReason === null) await session.prompt(prompt);
+		if (meter.state.stopReason === null) {
+			if (cfg.recovering) {
+				// Issue #645: answer the interrupted batch first, then go on with the fixed recovery prompt instead of
+				// the task prompt, which the checkpoint transcript already holds. Here, after the shadow checks and the
+				// MCP start, so the extensions' hooks and the job's servers are what a replayed call meets. No tool
+				// replayed here makes a model call, so the turn budget sees nothing until the prompt. No signal: the
+				// replayed tools are the bounded file tools, and a SIGTERM ends this process outright.
+				recovery = await recoverSession({ session, sessionManager, runToolCall, log });
+				await session.prompt(RECOVERY_PROMPT);
+			} else {
+				await session.prompt(prompt);
+			}
+		}
 	} catch (error) {
 		rejected = classifyPromptRejection(error, { retryInFlight });
 		if (!rejected) throw error;
@@ -638,7 +674,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField() });
 	return outcome.code;
 }
 
