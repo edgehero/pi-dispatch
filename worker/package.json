@@ -108,6 +108,7 @@
     "./run-history": "./src/run-history.mjs",
     "./run-mirror": "./src/run-mirror.mjs",
     "./session-key": "./src/session-key.mjs",
+    "./workspace-checkpoint": "./src/workspace-checkpoint.mjs",
     "./sandbox": "./src/sandbox.mjs",
     "./sandbox-store": "./src/sandbox-store.mjs",
     "./subscriptions": "./src/subscriptions.mjs",
