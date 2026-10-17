@@ -6202,9 +6202,19 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - *Residual:* an answer that lands while the parked run is still finishing, before the release, is still
     swallowed. On an issue it cannot be routed then (the label is set after the release); on a pull request the
     person would have to answer the agent's question before the fixed comment appears.
+- **A steered run that parks holds its messages** (issue #646, `DES-STEER-HELD-WHILE-PARKED`). With `run.steer` a
+  message can reach a running agent (`DES-STEER-VIA-READONLY-INBOX-MOUNT`), and pi polls its steering queue after a
+  terminating tool, so a message handed over after `await_human_input` would un-park the run. The runner therefore
+  hands over nothing once the tool has run; a held message stays on disk and settles as `late` when the run ends
+  parked. In this release (the operator path) such a message is reported only. Once comment routing lands, a forge
+  author's held message becomes the resumed job, carrying exactly that message, which narrows the swallowed-answer
+  residual above for a steer-armed run: a reply that arrives while the run is still finishing is held and run rather
+  than deduplicated. One message pi had already queued in the same turn can still un-park the run, and its ack shows
+  it. Nothing about the park itself changes: the exit, the promotion, the `parked` mark, the window release and the
+  fixed comment are as above.
 - **Traces to**: `REQ-AWAIT-INPUT`, `REQ-RESUMABLE-SESSION`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
   `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`,
-  `REQ-DEDUP-BY-DELIVERY-GUID`, `DES-QUEUE-BULLMQ-OVER-CUSTOM`.
+  `REQ-DEDUP-BY-DELIVERY-GUID`, `DES-QUEUE-BULLMQ-OVER-CUSTOM`, `DES-STEER-HELD-WHILE-PARKED`.
 
 ## DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED
 
@@ -6663,6 +6673,240 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Code evidence**: worker/src/trust-paths.mjs (`resetTrustPaths`, `TRUST_ROOT_NAMES`, `isTrustRootName`);
   worker/src/processor.mjs; worker/test/trust-paths.test.mjs.
 
+## DES-STEER-VIA-READONLY-INBOX-MOUNT
+
+- **Status**: issue #646, part 1 (2026-10-17), the operator path (`REQ-STEER-RUNNING-JOB`). Implemented in
+  `worker/src/steer-inbox.mjs`, `worker/src/inbox-relay.mjs`, `worker/src/steer-framing.mjs`,
+  `worker/src/prompt-fence.mjs`, `worker/src/steer-ack.mjs`, `worker/src/inbox-settle.mjs`, the steer parts of
+  `worker/src/run-container.mjs` and `worker/src/container-spec.mjs`, and `image/runner/src/inbox.mjs`.
+- **Decision**: a message reaches a running job through **files in a per-attempt host directory mounted read-only at
+  `/inbox`**, and its delivery comes back through **the transcript the worker already tails**, under an HMAC the
+  agent cannot compute. One way in, one way back, and neither is a new reach for the container.
+  - **In.** A sender pushes the message into the run's Valkey inbox (`INT-STEER-INBOX-CONTRACT`). The worker's relay,
+    opened by `runContainer` for a steer-ARMED attempt beside the live tail, ticks every 2 s (the cancel poll's shape:
+    re-entrancy guarded, every fault swallowed and logged by code): it refreshes the run's liveness, writes each
+    `queued` message in list order into `<jobDir>.inbox` (framed, written to `.<id>.tmp` mode 0444, marked
+    `written`, then renamed to `<seq:06d>-<id>.json`), and unlinks the file of every message that is no longer
+    waiting. **Mark before rename**: a `queued` message's withdrawal is promised as guaranteed, so no file the runner
+    can read may exist for a message that could still be withdrawn as `queued`; a withdraw that wins the race leaves
+    only the temporary file, which is removed.
+  - **What the agent reads is built on the worker side** (`frameSteerMessage`): a heading naming the message as data,
+    not instructions; who sent it (a forge author by numeric user id and association only, an operator by surface: a
+    console token's name, the command line, the dispatch panel), every interpolated value held to a closed charset;
+    for a follow-up, that it was meant to wait; that it carries no operator authority, with a pointer to rule 2 of the
+    operating rules; then the text verbatim inside `fenceBlock`, the same fence the trigger's own text gets (moved to
+    `prompt-fence.mjs` so there is one fence rule). The runner hands `content` to pi unchanged, so a runner bug cannot
+    drop the framing. **An operator message gets no more authority than a comment**: standing operator authority
+    lives in the reviewed triggers file (`run.instructions`), and a console token or a shell is a weaker, unreviewed
+    channel; were its words framed as rules, a leaked token would rewrite a run's guardrails in flight.
+  - **Handed over by the runner** through `api.sendMessage` (pi's `sendCustomMessage`) with `customType:
+    "pi-dispatch-inbox"`, `deliverAs` the message's mode, and `details: { id, mode, source, ack }`. pi delivers a
+    steer after the current turn's tool results and before the next model call, and a follow-up when the agent would
+    otherwise stop, restarting the loop; it persists the message as a `custom_message` entry at its `message_end`, so a
+    #645 recovery replays it. The runner reads the directory every second (`readdir`, names matching
+    `^\d{6}-[0-9a-f]{32}\.json$`, sorted, each file at most 16 KiB and validated) and again at every `turn_end`, and
+    pushes only while a run is active, at most one of its messages in flight (cleared on that message's own
+    `message_end`), never once closed, never once parked (`DES-STEER-HELD-WHILE-PARKED`). **Active** (review round 1,
+    F4) is from each `agent_start` to its `agent_end` AND pi saying the session is busy (`ctx.isIdle() === false`, read
+    at each push): only then does `sendCustomMessage` queue the message on the agent. Outside it a custom message is
+    appended to the transcript with a valid ack and never shown to the model. The window closes at `agent_end`, not at
+    `agent_settled`, because an aborted run skips `agent_before_settle` and then awaits every extension's
+    `agent_settled` handler in load order, and a timer poll firing in between appended exactly such an entry. The
+    `agent_before_settle` push is exempt from the `agent_end` window (it comes after `agent_end` but still inside pi's
+    run), and still needs the session busy.
+  - **The closing moment is `agent_before_settle`.** There the runner reads the directory once, synchronously inside
+    the handler pi awaits, and pushes a waiting message, which keeps the loop going (pi's `_runBeforeSettleBoundary`
+    continues on `hasQueuedMessages()`, pinned). With nothing waiting the inbox closes for good: a later file stays on
+    disk and the worker settles it as `late`. `agent_settled` closes it too, for a run that ends without the boundary.
+  - **Back.** The worker's ack consumer (`makeSteerAck`) is a third `onParsed` consumer of the live tail, forced on
+    for an armed attempt with the stream off if need be. A `custom_message` of our type counts as a delivery only
+    when `details.ack` is `HMAC-SHA256(exitKey, "pi-dispatch-inbox-ack\0" + PI_JOB_ID + "\0" + id)`, compared in
+    constant time under the exit key this attempt minted (issue #545), which travels to the runner on stdin and lives
+    in its non-dumpable process. `/session` is agent-writable, so without the MAC the agent could mark any message
+    delivered; a line that does not verify is ignored, counted and logged once per attempt (`steer_ack_unverified`).
+    A verified ack marks the message `delivered` and unlinks its file. `runContainer` drains the marks in flight
+    after the tail's final read and before it stops the relay, so a last-moment ack is counted before the settle step
+    reads the states. **A second witness, the signed exit line** (review round 1, F3): the transcript is the agent's to
+    break (a symlink swapped in at `/session/current.jsonl` makes the tail refuse the file, and every delivered message
+    would then settle `late`), so the runner's exit line names the ids it saw persisted (`steer.deliveredIds`, at most
+    16), and when that line VERIFIED under the attempt's exit key `runContainer` drains the transcript acks, marks those
+    ids `delivered`, and only then stops the relay. An unverified line marks nothing.
+  - **Arming** (`runContainer`): a job asks with `job.steer === true`, and is armed only when every part of the
+    channel exists: a venue that says it binds mounts (`binds`, which the backend registry hands a steer job only), an
+    exit key (an image declaring `exitAuth`), a transcript tail and a relay (a worker with Valkey), a transcript file,
+    and an inbox directory it could make. Each missing part is a named skip (`steerSkipped`), and the job runs as it
+    would without the field. Only an armed attempt gets `PI_STEER=1` and the mount, so an unarmed argv is
+    byte-identical to one built before this entry.
+- **Recovery and retries.** The inbox is keyed by the RUN id (`runIdOf`), so a #645 recovery and a BullMQ retry write
+  the same inbox, each into a fresh directory of its own. Writing waits for the live tail's first pass over the
+  staged transcript (`onBaseline`, which fails open on a refused or unreadable file). At that moment the relay
+  re-baselines: a message the inbox calls `delivered` whose id is not among the transcript's prior lines goes back to
+  `written` and is handed over again, because the transcript this attempt starts from never saw it; one whose id is
+  there stays `delivered` and is never written into the new directory. A waiting message whose prior line VERIFIES
+  under this attempt's key is marked `delivered` at the baseline, never re-written (review round 1, F5). The runner
+  also seeds its seen set from the transcript's `pi-dispatch-inbox` entries before the prompt, but only from entries
+  whose ack verifies under the CURRENT attempt's key. Neither can verify a line an EARLIER attempt wrote, since its key
+  is gone, so across attempts the relay's re-baseline is the guard, and the residual below follows.
+  - **A run id that is reused after its run ended** (review round 1, F1). A console retry of a failed job keeps its
+    job id, so its run id, and met the previous run's CLOSED inbox: every push refused for an hour, and the re-baseline
+    handing that run's delivered messages to a run never sent them. The relay now resets a closed inbox in one script
+    before it registers the run (`resetClosedInbox`); an OPEN inbox (a recovery, an `InfraRetry` with attempts left) is
+    kept, since those attempts continue one run. A reset that fails leaves the relay refusing to write into or
+    re-baseline the closed inbox (`steer_inbox_closed`), so the job runs with its messages refused, never with the old
+    run's handed to it.
+- **Rejected**:
+  - *stdin.* Taken by issue #545: the worker writes the exit key and closes the pipe at once, and the runner drains it
+    to EOF before any tool exists, so the key is out of the pipe before the agent can run anything. A message channel
+    there would keep the key's pipe open for the whole run, or need a framing protocol multiplexed with the key. And
+    `DES-SANDBOX-IS-A-FRESH-CONTAINER` rejected a stdin channel to the agent for reasons this design answers only in
+    the framed, read-only form recorded there.
+  - *A writable mount for messages or acks.* A writable `/inbox` lets the agent plant a message in its own inbox,
+    withdraw one by deleting it, or write an ack file; a second writable directory for acks is the same thing in two
+    halves. The transcript already holds what pi persisted, so the ack rides there, MACed. `verify-image.sh` proves
+    `/inbox` read-only inside the image (a control write without `:ro`, a listing through `:ro`, then a refused
+    plant and delete judged on the host).
+  - *The container talking to Valkey.* A network path from the untrusted side to the queue's own database, a
+    credential inside the job, and an end to the `--internal` network that holds only the job and the allowlist
+    proxy (`CONST-EGRESS-POLICY-IN-THE-ARGV`). The worker is the only process that touches the inbox keys.
+  - *`session.steer()`, `followUp()` or `sendUserMessage`.* They run the extensions' input handlers and expand prompt
+    templates and `/skill:` commands, so a message that begins with `/name` would run a staged template.
+    `sendCustomMessage` skips all of that: the text arrives exactly as the worker framed it (pinned by a test that
+    drives the real session at the pin).
+  - *`fs.watch`.* The directory is a bind mount whose writer is on the host, and inotify across a bind mount is not
+    delivered on every venue (a VM-backed Docker Desktop shares files through a filesystem that drops the events). A
+    `readdir` every second costs nothing, and the `turn_end` and `agent_before_settle` reads make delivery prompt
+    where it matters.
+  - *`prompt()` again after the run settles,* to answer a message that came too late. A custom message sent after
+    settle with no new prompt is appended to the transcript and never answered, so its ack would claim a delivery
+    the agent never acted on; and prompting again would keep a container alive, holding the minted token and the
+    provider key, waiting for messages after its work ended, which is the extra container lifetime
+    `DES-SANDBOX-IS-A-FRESH-CONTAINER` refuses. So the runner closes at `agent_before_settle` and a later message is
+    `late` (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`).
+  - *A copying venue.* A runtime that uploads mounts once at the start would never see a message written later. Such
+    a venue is not armed (`steerSkipped: "venue-copies"`); every in-tree backend binds.
+  - *A shadow guard on the custom type,* as the await and progress tools have. Nothing here can be answered by
+    another extension: the message is pushed straight onto the agent's queue. `registerMessageRenderer` is read only
+    by the interactive TUI, and an extension that sends a message of our type itself cannot forge the ack.
+- **Residuals, named.** A `written` message's withdrawal is best effort: the runner may have read the file before
+  the relay unlinks it, and a verified ack then turns it `delivered` anyway. An armed attempt whose tail could not be
+  opened delivers messages no ack counts (`steer_acks_unread`), which settle as `late` though the agent may have read
+  them, unless the runner's signed exit line names them (F3). A baseline that fails open can hand a message over
+  twice. **A message delivered just before a crash can be delivered again by the recovery** (F5): its state is still
+  `written`, its line is in the restored transcript, and that line was signed with the lost attempt's key, which no
+  later attempt holds. Unverified earlier lines are deliberately not trusted, since the agent could plant them in a
+  transcript a recovery restores and so mark delivered a message it was never sent; a framed duplicate is the cheaper
+  error. pi drains its steering queue one message per turn, so a burst arrives over several turns.
+- **Traces to**: `REQ-STEER-RUNNING-JOB`, `INT-STEER-INBOX-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`,
+  `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-TRANSCRIPT-STREAM`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  `DES-SANDBOX-IS-A-FRESH-CONTAINER`, `DES-LIVE-TRANSCRIPT-STREAM`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
+  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-EGRESS-POLICY-IN-THE-ARGV`.
+
+## DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX
+
+- **Status**: issue #646, part 1 (2026-10-17). Written by the relay in this release; the receiver's lookup of a
+  target's live runs (`liveRunsForTarget`) is exported and arrives in use with comment routing.
+- **Decision**: whether a run takes messages, and which runs a forge target has live, are two short-lived Valkey keys
+  written only by the relay of an armed attempt, never an index of jobs.
+  - `run:steer:open:<runId>`: the host name, `PX` 30 s. **The one authority** on whether a run takes messages: the
+    push script refuses `gone` without it, and the CLI refuses an active job without it.
+  - `run:steer:target:<sha256(kind\0repo\0targetType\0number), first 32 hex>`: a ZSET, member the run id, score the
+    instant it stops counting (`now + 30 s`), `PEXPIRE` 60 s. Each refresh drops members whose score has passed, so a
+    target steered by many runs over its life does not grow, and a reader ignores a member the moment its score
+    passes, whatever the key's own TTL says. Only a forge job has one (`steerTargetOf`); a local or cron job is
+    reached through its open key alone, by the operator surfaces.
+  - The relay sets both at the container's start (`registerLive`), refreshes them every 2 s in one `MULTI` that also
+    refreshes the inbox keys' hour, and removes them when it stops (`unregisterLive`: not a close, so a retry or a
+    recovery finds the inbox open). The final close (`closeInbox`) drops them too, in its own script.
+  - Several runs on one target (replicas, or parallel armed jobs) are several members; a message is meant to fan out
+    to each live one (comment routing). A #645 recovery keeps its run id, so it re-registers the same member; a
+    BullMQ retry keeps its job id.
+- **Why this is not the index `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` rejects.** That entry refuses a durable query
+  surface mapping jobs to transcripts: a second retention authority beside the reaper, and the first cross-record
+  content query. These keys are liveness, nothing more. They are gone within 30 s of their relay going quiet; they
+  name a run id, never a transcript, a session key, a branch or a path; nothing reads them for history, and no record
+  carries them. They are the class of `cancel:req` and the host registry's beat, and they pass
+  `INT-CANCEL-CHANNEL-CONTRACT`'s falsification test: delete the whole keyspace while the fleet runs and every job
+  behaves as before, and the only casualty is a message sent in that moment, whose sender is told (`gone`). Which
+  transcript a job resumes is still computed from the job, and nothing in the steer path reads or writes the session
+  store.
+- **Rejected**:
+  - *A "message job" the worker decides on*: enqueue the message as a job of its own, and let the worker find the
+    run. It would wait behind the very run it targets (the same target, the same concurrency), the semantic dedup
+    window of the delivery that started that run would swallow it (`REQ-DEDUP-BY-DELIVERY-GUID`), and on a fleet the
+    worker that picked it up would still need to know which host holds the target's run, which is this map anyway.
+  - *Scanning the queues' active jobs for the target.* Per queue, per host, and a read of every active job's data to
+    answer one question, for every comment; and an active job is not yet a run that can take a message (its container
+    may not have started, its attempt may not be armed).
+  - *Recording the target in the run record or the session store.* That is the index, arriving from the other side.
+- **Traces to**: `REQ-STEER-RUNNING-JOB`, `INT-STEER-INBOX-CONTRACT`, `INT-CANCEL-CHANNEL-CONTRACT`,
+  `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`, `REQ-DEDUP-BY-DELIVERY-GUID`, `OQ-008`.
+
+## DES-STEER-HELD-WHILE-PARKED
+
+- **Status**: issue #646, part 1 (2026-10-17). `image/runner/src/inbox.mjs` (`isParked`, read from the await tool's
+  state).
+- **Decision**: once the agent has called `await_human_input` (`REQ-AWAIT-INPUT`), the runner hands over nothing
+  more. A message that arrives then, or was waiting, stays on disk, is logged by count (`steer_held_parked
+  {pending}`, never text), and is settled as `late` when the run ends parked.
+- **Why**: pi's loop polls its steering queue after a terminating tool, so a message queued there would un-park the
+  run: it would go on working after it posted its question, with the label set and the key about to be marked
+  `parked`, and the person's answer would then arrive at a run that no longer waits for it. The park is the run's own
+  decision to end and wait (`DES-AWAIT-INPUT-ENDS-THE-JOB`); a message must not reverse it from outside.
+- **What becomes of a held message.** In this release an operator's held message is `late` and reported only, like
+  any late operator message. With comment routing, a held forge message takes the late-message rule's resumed-job
+  branch: `run.awaitInput` requires `run.resume`, so it becomes the resumed job, carrying exactly that message
+  (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`).
+- **Residual, named**: a message pi had already queued in that same turn (the one in flight when the tool ran) still
+  un-parks the run, one at most, and its verified ack shows it as `delivered`.
+- **Rejected**: *pushing anyway and letting the agent decide.* It un-parks the run, as above. *Holding the message
+  inside a live container until the answer comes.* That is waiting in a container, which `DES-AWAIT-INPUT-ENDS-THE-JOB`
+  rejected first.
+- **Traces to**: `REQ-STEER-RUNNING-JOB`, `REQ-AWAIT-INPUT`, `DES-AWAIT-INPUT-ENDS-THE-JOB`,
+  `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`.
+
+## DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY
+
+- **Status**: issue #646, part 1 (2026-10-17): the close and the operator branch. The forge branches arrive with
+  comment routing, in a follow-up change of the same issue. `worker/src/inbox-settle.mjs` (`settleInbox`,
+  `isFinalOutcome`), called from `worker/src/index.mjs` and the host-lost sweep in `worker/src/start.mjs`.
+- **Decision**: at a run's FINAL outcome, immediately before its record is written, its inbox is closed in one Lua
+  script (`closeInbox`): `closed` is set, the open key and the target member go, every `queued` or `written` message
+  becomes `late`, and the script returns every entry and state. After it every push is refused (`closed`), and
+  everything pushed before it is in its reply, so no message is accepted and then silently never answered. The
+  counts of `delivered`, `late` and `withdrawn` become the record's `steered`.
+  - **Final** is every returned result except a #645 handoff (`recovery-enqueued`, whose recovery keeps the run id
+    and must find the inbox open, and `recovery-superseded`, whose run settled elsewhere), and every thrown error that
+    ends the job: anything that is not an `InfraRetry`, or an `InfraRetry` on the job's last attempt. An `InfraRetry`
+    with attempts left is not final: the next attempt re-registers the run and writes the waiting messages again. A
+    bolt test holds every record write in `index.mjs` to a settle on the line before it, and the host-lost sweep's
+    record settles too. Since review round 1 (F2) so does the failed listener's terminal branch (`job.finishedOn`,
+    `start.mjs`), for a terminal failure the processor never saw: a stall-kill of a crashed worker's job, a rethrow
+    above its catch; a failure the processor did see was already settled, and closing again changes nothing. A bolt
+    covers it.
+  - **An operator's late message is reported only** in this release: the CLI says `late` (exit 1) when it sees it
+    within its poll, the record counts it, and no job starts. An operator who reads `late` can start a run; a CLI
+    message that silently queued a paid job would be a spend nobody confirmed.
+  - **A forge author's late message** (comment routing, not in this release): **(A)** when the outcome is not
+    `operator-cancel` and the job the comment would have started resumes, that job is enqueued for the first late
+    message on the queue that ran the run (its own delivery-GUID id, no dedup), and the remaining late messages are
+    pre-seeded into its inbox with `hop: 1`, arriving as steers at its loop start; **(B)** otherwise, including any
+    message with `hop >= 1`, the worker posts one fixed reply per target saying the run had already finished and how
+    to start a new one. At most one extra job per run end. The steer-armed run's semantic window is released at its
+    final outcome then too, so a comment after the run is not swallowed. In this release `settleInbox` already hands
+    the late forge entries to a seam (`onLateForge`), which is a logging no-op (`steer_late_forge_unanswered
+    {count}`); no forge message can be in an inbox yet.
+  - **Never throws.** A Valkey fault is logged by code (`steer_settle_failed`), and the record is written without
+    `steered`: a run's outcome never waits on, or is rewritten by, its inbox.
+- **Rejected**:
+  - *Leaving the inbox open until its TTL.* A push would be accepted for a run that is over, and its sender told
+    nothing for an hour.
+  - *Starting a job for an operator's late message.* Above: a spend nobody confirmed. The console and the CLI show
+    `late`, and the operator decides.
+  - *Delivering a late message into the target's next run without saying so.* The next run may be hours away, about
+    something else, or never come.
+- **Traces to**: `REQ-STEER-RUNNING-JOB`, `CONST-RETRY-INFRA-ONLY`, `REQ-RUN-RECOVERY`, `REQ-DEDUP-BY-DELIVERY-GUID`,
+  `DES-STEER-HELD-WHILE-PARKED`, `INT-STEER-INBOX-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`.
+
 ## DES-SANDBOX-IS-A-FRESH-CONTAINER
 
 - **Decision**: To let an operator inspect what a run built, **retain the run's inputs and start a new
@@ -6684,7 +6928,23 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     not worth reopening `CONST-ISOLATION-CONTAINER-PER-JOB` for.
   - *A stdin channel to the running agent.* Same objection plus a worse one: it makes the operator an
     input to a session whose prompt already carries untrusted issue text, so the two trust classes meet
-    inside a running agent rather than at a boundary.
+    inside a running agent rather than at a boundary. **Still rejected as stdin, and admitted since issue #646
+    in one framed, read-only form** (`DES-STEER-VIA-READONLY-INBOX-MOUNT`, `REQ-STEER-RUNNING-JOB`): a trigger that
+    sets `run.steer` lets a message reach its running agent through files the worker writes into a per-attempt
+    directory mounted read-only at `/inbox`. stdin itself stays out (issue #545 uses it for the exit key, written
+    and closed before any tool exists). The objection above is answered on four counts, and each is a property of
+    the mechanism rather than a promise. **The same trust and framing as the text that started the run**: a message
+    is framed by the worker as data, not instructions, with its sender named only by closed-charset fields, and
+    fenced with the fence the issue text gets, so the trust classes still meet at a boundary the worker draws,
+    exactly where they meet for the invoking comment. **No operator authority**: an operator's message is framed
+    with no more authority than a comment's, since standing operator authority lives in the reviewed triggers file
+    (`run.instructions`), so a console token or a shell cannot rewrite a run's guardrails in flight. **One way, read
+    only**: the job cannot write `/inbox` (proved by `verify-image.sh`), the delivery ack travels back in the
+    transcript under a MAC keyed by the attempt's exit key, and the container gains no network path, credential or
+    process channel. **No extra container lifetime**: nothing keeps a container alive to wait for a message; the
+    runner closes its inbox when the run settles, a message after that is `late`, and the container ends when its
+    run does. What this does not change is the rest of this bullet's neighbours: no `docker exec` into a job, no
+    TTY, no published port, `--rm` kept.
   - *`docker commit` the container at exit.* This preserves strictly more — installed packages, process
     residue — and costs gigabytes per run to do it. It serves a 5% case that image+workspace already
     serves, and the extra it preserves is mostly the part that should have been in the image. The honest
@@ -6709,7 +6969,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     retention policy", is unchanged: nothing moved into `makeLogReaper`, and the new work is a sweeper
     INJECTED into the sandbox reaper so `sandbox-store.mjs` stays docker-free in its own tests.
 - **Traces to**: `REQ-RESURRECTABLE-SANDBOX`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
-  `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SANDBOX-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`
+  `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SANDBOX-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`,
+  `DES-STEER-VIA-READONLY-INBOX-MOUNT`
 
 ## DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK
 
@@ -11099,3 +11360,5 @@ a tunnel.
 | 2026-10-17 | Issue #645, part 1: the checkpoint store. **NEW `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`**: a host-side Node walker, `lstat` only and every open `O_NOFOLLOW`, feeds one `git fast-import` into a host-owned bare store per run while the job's container is held still, and a restore writes blob bytes exactly over a fresh base checkout after judging the whole change list with the snapshot's own path rules. Rejected, each with its reason: `git add -A` or `stash create` against the agent's tree (the agent's `.git/config` filters and hooks, `.gitattributes` changing the stored bytes, nested repositories as gitlinks, one unreadable file aborting); the same walker on an unpaused container (no `openat` in Node, so a directory swapped for a symlink between `lstat` and open copies host files, and a moving tree is torn); a `docker exec` walker inside the container (torn, image dependent); one store per repository (gc and repack races); `git checkout` for the restore overlay (re-applies smudge and eol); a tarball (no deduplication). It records the whole-snapshot refusal on a job secret, over every kept path, every byte read and every link target, and that a later change resets `.pi/` and the root context files on restore. It records the Linux `/proc/self/fd` containment check on every file opened, with the residual where no proc directory exists, and that `check-ignore` runs with the run's `home/` as its cwd and keeps nothing back when it fails. Recorded as found rather than settled: the module never pauses, it records the caller's `quiesced` claim (`frozen` or `dead`), and doctor's `pausable` line still words a venue that cannot freeze as checkpointing while the job runs, which the wiring change reconciles. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the store is never mounted into any container. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: nothing a container receives changed. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: nothing resumes from a checkpoint yet, and nothing calls the checkpointer. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: `pausable` is cited, not changed. **Code evidence**: worker/src/workspace-checkpoint.mjs -> walkTree, importTree, judgeChanges, restoreLocked; worker/src/checkpoint-paths.mjs; worker/test/workspace-checkpoint.test.mjs. |
 | 2026-10-17 | Issue #645, part 2: durable runs (`run.recover`). **NEW `DES-RUN-CHECKPOINT-PAIRED`**: a live checkpoint is pause, the transcript offset read from the file while paused (the end of its last complete line), snapshot, unpause in a `finally` (three failed unpauses stop the container, an infrastructure exit), then the pointer, written only after the commit; triggered only at quiet points (an assistant message without calls, or the result answering the last open call), 60 s apart, one in flight, at most two snapshots a host, backed off and degraded after three failures; an exit checkpoint (dead, no pause) on a recoverable exit; a salvage checkpoint from a crashed attempt's job folder; venues without pause get exit checkpoints only. Rejected: a checkpoint per result, the tailer's offset, waiting for a slot, stop and start as a freeze. **NEW `DES-RECOVERY-REPLAY-CLASSES`**: the orphans, the replay set (`read`, `ls`, `grep`, `find`, `edit`, `write` from pi's builtin source, and the inline `report_progress`), the ordering rule (replay until the first hold; that one `interrupted` if it is the first orphan, else `not-started`, and all after it `not-started`), why sequential execution and why no intent entry, `runToolCall` with the session's hooks, the fixed prompt, the exit line's counts. Rejected: appending before `createAgentSession`, `ctx.executeTool`, `continue()`, replaying bash, per-tool `executionMode`. **NEW `DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`**: one path for a stall and an infrastructure exit, the `.r<n>` id and why not `:`, no deduplication, one attempt, the cap of two, the NX claim with a loser that adds idempotently, routing by the pointer's host queue, the six-hour host-lost deadline and its fleet-wide sweep, superseded (pointer AND store gone; a lone missing pointer is retried), the 30 s wait hold. **NEW `DES-RUN-BUDGET-LEDGER`**: the slot claimed once and carried, the container number, the recorded-hold contract, settle and release by compare-and-set, crashed holds settled at the floor once (`settled-crashed`), why the floor and not the usage. **NEW `DES-RECOVERY-TRUST-PATHS-FROM-BASE`**: `.pi/`, `.agents/` and the root context files reset to the base commit, case-insensitively, and why it is mandatory (an agent could write an extension and crash itself). **`DES-CHECKPOINT-WALKER-NOT-GIT-ADD` AMENDED**: the caller of `quiesced` and doctor's line are reconciled, the trust-path reset is done, Traces to names `REQ-RUN-RECOVERY`. **Rejected alternatives (pi-durable) AMENDED**: the durability bullet is answered at our layer; pi-durable stays declined on its other grounds. **`DES-LIVE-TRANSCRIPT-STREAM` AMENDED**: `onParsed` gains `end`, the checkpoint handle is the third consumer and turns tailing on, the stream's key is the run id. **`DES-RUN-PROGRESS` AMENDED**: recovery marks and `replayed`, and the run-id key. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: `pausable` is used as declared, the verbs ride the call bag from the same bundle. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: a recovery is a fresh container from a restored workspace, no container is kept. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked**: a recovered loss is not terminal, so it comments and pages nothing; the new comments are fixed text. **Code evidence**: worker/src/run-checkpoint.mjs, worker/src/recovery-queue.mjs, worker/src/run-budget-ledger.mjs, worker/src/trust-paths.mjs, worker/src/processor.mjs, worker/src/start.mjs, worker/src/live-transcript.mjs, worker/src/run-progress.mjs, image/runner/src/recover.mjs. |
 | 2026-10-17 | Issue #645, part 2, review round 1. **`DES-RECOVERY-TRUST-PATHS-FROM-BASE` CORRECTED**: a new bullet, what the reset cannot cover: a merge-gated extension can import outside `.pi/` or from `/workspace/node_modules`, so `baseHasExtensions` (the base commit's `ls-tree`) keeps a run whose base holds `.pi/extensions/` from being armed (`workspace-extensions`) and a recovery of one is refused (`recovery-unsafe-extensions`); rejected: resetting what an extension imports, running with extensions off. **`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST` CORRECTED**: a recovery that ran and could not queue another returns `recovery-failed` (own comment, paged once, final-outcome cleanup) instead of failing with the generic comment; every never-started fault of a recovery is a 60 s `RecoveryWaitHold`; the data strips the per-attempt hold keys (`recoveryDataOf`); superseded reads the base run's and earlier recoveries' settled records first (local, then the mirror); the base-running check excludes the recovery's own entry; the host-lost deadline extends by an hour while the host is alive, its queue paused or the registry unreadable, up to seven days (`RECOVERY_MAX_WAIT_MS`), lost as `host-absent` or `max-wait`. **`DES-RECOVERY-REPLAY-CLASSES` CORRECTED**: the prompt names `.pi/`, `.agents/` and the root context files reset to the commit the run started from. Lab: `DES-RUN-CHECKPOINT-PAIRED`'s salvage and boot-sweep bullet CORRECTED, the `<jobDir>.cid` file is removed with its folder, and a stale orphan `.cid` is swept (the lab found one left per crashed attempt). |
+| 2026-10-17 | Issue #646, part 1: steering, the operator path. **NEW `DES-STEER-VIA-READONLY-INBOX-MOUNT`**: messages reach a running job as files the worker's relay writes (framed on the worker side, `.<id>.tmp` mode 0444, marked `written`, renamed to `<seq:06d>-<id>.json`, mark before rename so a queued withdrawal stays guaranteed) into a per-attempt `<jobDir>.inbox` mounted read-only at `/inbox`; the runner polls every second and at `turn_end`, hands each to pi with `sendCustomMessage` (`pi-dispatch-inbox`, `deliverAs` the mode), only while a run is active, one in flight, closing at `agent_before_settle`; the delivery is counted from the tailed transcript under `HMAC-SHA256(exitKey, "pi-dispatch-inbox-ack\0" + PI_JOB_ID + "\0" + id)`; arming needs binds, an exit key, a tail and relay, a transcript file and the directory, else a named `steerSkipped`; recovery and retries are guarded by the relay's re-baseline (the runner's seed verifies under the current attempt's key only, so it never matches an earlier attempt's entry). Rejected: stdin (#545's), a writable message or ack mount, container to Valkey, `session.steer()` and friends (template and `/skill:` expansion), `fs.watch`, `prompt()` after settle, a copying venue, a shadow guard. **NEW `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`**: `run:steer:open:<runId>` (host, PX 30 s) is the one authority on whether a run takes messages; `run:steer:target:<digest>` is a ZSET scored `now + 30 s`, PEXPIRE 60 s, pruned on refresh; written by the relay alone; why it is not the index `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` refuses (liveness only, names a run id, read for nothing historical, passes the cancel keyspace's falsification test). Rejected: a message job, scanning active jobs, recording the target. **NEW `DES-STEER-HELD-WHILE-PARKED`**: after `await_human_input` nothing is handed over; a held message is `late`; the one-message residual. **NEW `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`**: the close at every final outcome before the record (`isFinalOutcome`: every returned result but a #645 handoff, every throw that ends the job, an InfraRetry only on its last attempt), operator late messages reported only in this release, the forge branches (A, a resumed job with `hop: 1` seeding; B, one fixed reply) and the window release stated as arriving with comment routing, with the logging seam `onLateForge` in their place. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` AMENDED**: the stdin bullet now says rejected as stdin and admitted in the framed, read-only inbox form, answered on four counts (the invoking text's trust and framing, no operator authority, one way and read only, no extra container lifetime); Traces to gains the new entry. **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**: a steered run that parks holds its messages, and how comment routing will narrow the swallowed-answer residual. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: which transcript a job resumes is still computed from the job; the steer keys name a run, never a transcript, and nothing in the steer path reads or writes the session store. **Code evidence**: worker/src/steer-inbox.mjs, worker/src/inbox-relay.mjs, worker/src/steer-framing.mjs, worker/src/prompt-fence.mjs, worker/src/steer-ack.mjs, worker/src/inbox-settle.mjs, worker/src/run-container.mjs, worker/src/container-spec.mjs, worker/src/live-transcript.mjs, worker/src/index.mjs, worker/src/start.mjs, image/runner/src/inbox.mjs, image/runner/run-job.mjs. |
+| 2026-10-17 | Issue #646, part 1, review round 1. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` CORRECTED** to the code after the round: F4, the runner's push window is now each `agent_start` to its `agent_end` AND `ctx.isIdle() === false` (an aborted run skips `agent_before_settle`, and a timer poll from another extension's `agent_settled` handler appended a message the model never saw), with the `agent_before_settle` push exempt from the `agent_end` window and still needing the session busy; F3, the signed exit line is a second delivery witness (`steer.deliveredIds`, marked after the transcript acks drain and before the relay stops, nothing off an unverified line), so a symlink-swapped transcript no longer turns deliveries `late`; F5, a waiting message whose prior line verifies under the current key is marked delivered at the baseline, and the residual is named (a message delivered just before a crash can be delivered again by the recovery, since earlier-attempt lines never verify and unverified ones are deliberately not trusted); F1, a run id reused after its run ended (a console retry keeps the job id) gets its closed inbox reset in one script before the run registers, an open inbox is kept, a failed reset leaves the relay refusing to write or re-baseline (`steer_inbox_closed`). **`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` CORRECTED**: F2, the failed listener's terminal branch settles the inbox too (a stall-kill or a rethrow the processor never saw), under a bolt. **`DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX` and `DES-STEER-HELD-WHILE-PARKED` UNCHANGED by this row, checked.** **Code evidence**: worker/src/inbox-relay.mjs (`resetClosedInbox`, the closed check, `priorAcked`), worker/src/steer-ack.mjs, worker/src/run-container.mjs, worker/src/start.mjs, image/runner/src/inbox.mjs. |

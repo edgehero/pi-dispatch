@@ -427,6 +427,10 @@ pi-dispatch import-pi   # stage a credential-free copy of ~/.pi/agent into ./pi-
   repository with pi extensions). Checkpoints hold
   the transcript and the workspace on disk for up to 7 days: read [`docs/durable-runs.md`](docs/durable-runs.md)
   before you turn it on.
+- **Running jobs can be steered.** With `"steer": true`, `pi-dispatch steer <jobId> "..."` sends a running job a
+  message, which the agent reads after its current tool calls (or, with `--later`, once it would otherwise stop). It
+  reaches the agent as data, never as new rules, and costs only the turns it causes
+  ([`docs/steering.md`](docs/steering.md)).
 
 ## Run as a service
 

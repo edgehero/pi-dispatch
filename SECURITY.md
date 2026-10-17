@@ -67,6 +67,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A portfolio job's `/job/portfolio.json` | **Host-written, read-only** | The facts the manager plans with. Ids, digests, integers, instants, enum tokens and operator labels (project ids and member labels as projects.json names them, a folder by its basename) only: no issue text, title, plan reason or path, because the next run reads it as facts |
 | A job container's `/session` transcript | **None**, agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges. Since #643 every job has one unless the worker sets `PI_LIVE_TRANSCRIPTS=0` (a non-resume job's is an empty live file in its own job folder, never promoted), and the worker also tails it during the run to publish a redacted copy to Valkey: parsed as data, redacted, escaped and capped before it leaves, never executed or fed to a model. Since #644 the worker also reads run progress from it (turns, steps, the tool running, and the phases a `report_progress` call names): display only, never trusted, since the agent can write any line into it ([Run progress](#what-is-not-defended-v1)) |
 | The **checkpoint store** (`PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`) | **None** for its contents (agent-authored trees and transcripts); **Operator** for the directory | Since #645 a trigger with `run.recover` has its running jobs checkpointed into it: the job's whole workspace and its transcript, written by the worker from the host side, never mounted into any container. A recovery writes those bytes back into a new job's workspace, so a restore re-checks every path with the snapshot's own rules and then resets `.pi/`, `.agents/` and the root `AGENTS.md`/`CLAUDE.md` to the run's base commit, so nothing the agent wrote there loads as the repository's own; a repository with `.pi/extensions/` gets no recovery, because an extension's imports cannot be reset ([Durable runs](#what-is-not-defended-v1)) |
+| A steer-armed job's **inbox** (`run.steer`, `pi-dispatch steer`) | **Operator** for who may send (in this release only whoever can run `pi-dispatch steer` against the deployment's Valkey, which is the queue's own trust); **None** for the text, which reaches the agent as data | Since #646 a trigger with `run.steer` lets a message reach its running agent. The worker writes it into a per-job directory mounted **read-only** at `/inbox` (the agent can neither plant nor withdraw a message), framed as data with the same fence the issue text gets and with no operator authority, and the agent's receipt is counted only under a MAC keyed by a per-attempt key the agent cannot read. Collaborators' comments and the console arrive later and will be gated as their own rows say ([Steering](#what-is-not-defended-v1)) |
 | A **resurrected sandbox**'s operator shell (`pi-dispatch sandbox`) | **Operator — the same trust as a terminal on this host** | A third channel, and the first the **operator** opens rather than the agent. Not a job container: no minted token, no provider key, no agent running, started only by a keypress. It re-mounts a finished run's workspace, which for a forge job holds attacker-influenced code — the same trust shape as checking out a stranger's pull request locally. Every isolation flag still applies; ports it publishes are `127.0.0.1`-only and last only while it does |
 | The **venue** a job's container is built in (`run.backend`, `PI_BACKENDS`) | **Operator — the same trust as the daemon they point the worker at** | A different axis from every row above. Those ask *who wrote this*; this asks *who is holding the execution*. Today there is one venue, the Docker daemon the worker's docker CLI resolves, which is the operator's own machine unless `DOCKER_HOST` or a docker context points it elsewhere; the worker reads that answer at boot and before each job, logs a redirect, and a floor asking `credentialTransit=enforced` refuses one. It judges the endpoint's form, so a unix socket or loopback port that is really a tunnel to another machine still reads as this host. A venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and the isolation flags in **this worker's argv do not reach it**. What bounds it is a declaration an operator reads (`docs/backends.md`), a floor they can require of every blessed venue, and a boot refusal when the two disagree. |
 | The operator console process (`pi-dispatch-console serve`) | **Operator, the same trust as the admin extension** | It runs as the deployment's account and writes through the same read-model funnels as the panel. It renders untrusted text (issue titles, and from #641 on run text) but only escaped, after the control-byte scrub, under a strict CSP and behind the operator role; it executes none of it and feeds none of it to a model. It listens on loopback or a 0600 unix socket, never on the receiver ([The operator console](#the-operator-console)) |
@@ -230,6 +231,33 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   `KeepAlive` cannot exclude a single exit code, a wrapper that converts exit 2 into a clean exit so the unit
   stays stopped. Only infra failures are worth retrying; paying again for the same broken config is not. The
   `--system` scope **prints** a unit for you to install yourself: the command never executes a privileged one.
+- **A message into a running job is data, one way, and bounded** (issue #646, `run.steer`). A trigger must opt in,
+  and only an attempt the worker could fully arm listens: a venue that binds mounts, an image declaring `steer` (a job
+  on an image without it is refused before it spends) and `exitAuth`, and a Valkey client.
+  - **Framed as data, with no authority.** The worker, not the job, builds the words the agent reads: a heading saying
+    the message is data and not instructions, who sent it (a console token's name, the command line or the dispatch
+    panel; a forge author only by numeric id and association), and the text verbatim inside the same fence the issue
+    text gets, so a body holding backticks cannot close it. An operator's message carries no more authority than a
+    comment: standing operator instructions live in the reviewed triggers file (`run.instructions`), so a leaked
+    console token or a shell cannot rewrite a run's rules in flight. It is handed to pi as a custom message, never
+    through pi's input path, so a message starting with `/name` does not run a prompt template or a skill. Before it
+    is stored, characters a model reads and a reviewer cannot see are removed (the Unicode tag block, the zero width
+    characters, the byte order mark), backtick look-alikes become real backticks so the fence grows past them, and
+    malformed text (an unpaired surrogate) is refused.
+  - **Read-only and one way.** The messages arrive as files in a per-job directory beside the job folder, mounted
+    read-only at `/inbox`; the image check proves a write from inside is refused. The container gets no network
+    path, credential or new process channel: the worker reads Valkey and writes files.
+  - **Receipts the agent cannot forge.** The transcript is agent-writable, so a delivery counts only when its entry
+    carries an HMAC under the exit key the worker minted for that attempt and handed to the runner on stdin (issue
+    #545). A forged entry is ignored and logged once. The runner's signed exit line names the messages it delivered
+    as a second witness, so an agent that breaks its own transcript (a symlink swapped in) cannot make delivered
+    messages count as late. And it hands a message over only while pi says a run is actually in progress, so an
+    aborted run cannot record a delivery the model never saw.
+  - **Caps.** At most 16 messages, 64 KiB of text and 8 KiB per message per run, refused rather than cut, withdrawn
+    messages still counted. Every turn a message causes counts against the job's turn budget and its cost and token
+    caps, and the job reserves nothing extra.
+  - **No text in logs or the record.** The CLI prints the message id and its state, never the text; logs carry ids,
+    modes and counts; the run record gains only `steered` (three integers) and `steerSkipped` (an enum).
 
 - **Azure DevOps webhook authenticity is weaker than every other arm's, and this is not a footnote.**
   Service Hooks offer no HMAC of any kind — only HTTP Basic or a static header — so the credential proves
@@ -662,6 +690,26 @@ Stated openly rather than discovered later:
     `--force-with-lease`, look for an existing pull request, read the comments), and never re-runs anything but the
     builtin file tools on its own. It is checkpointed, not exactly once.
     Any value but `0`, `1` or empty refuses to boot.
+- **Steering is a second way to put text in front of a running agent** (issue #646). With `run.steer` on a
+  trigger, whoever can send a message can add words to a run while it works ([`docs/steering.md`](docs/steering.md)).
+  - **Who can send, in this release.** Only an operator, from the command line on a host that reaches the
+    deployment's Valkey (`pi-dispatch steer`). Anyone who holds the Valkey URL and its credential can push into an
+    open run's inbox directly, as they can already enqueue jobs, cancel them and edit the queue: Valkey is the
+    deployment's own trust, so protect it as such. Collaborators' comments and the console arrive in later changes,
+    and each will be gated by the forge author check and the console's session rules respectively.
+  - **The text is not filtered.** It is framed and fenced as data, which is placement, not a guarantee: a message is
+    exactly as able to talk the agent into something as the issue text is (the point below), and an operator's
+    message gets no extra standing to do so. Everything that bounds an issue's text bounds a message's.
+  - **A message can reach a recovered run twice.** A message delivered just before a crash is handed over again by
+    the recovery when the receipt in the restored transcript was signed by the lost attempt, whose key is gone.
+    Receipts that cannot be verified are deliberately not trusted, because the agent could plant them; a framed
+    duplicate is the cheaper error.
+  - **A withdrawal is guaranteed only before the worker writes the message.** Once it is in the run's `/inbox` the
+    agent may already have read it; the CLI says "best effort", and the transcript says whether it was delivered.
+  - **The live transcript shows the message.** A delivered message appears in the run's live stream as a note with
+    its full framed text (redacted and capped like any line), so it has the live transcript's exposure.
+  - **Not interrupting.** A message waits for the current turn's tool calls; it cannot stop a tool that is running.
+    Cancel is still the way to stop a run.
 - **Prompt injection is not prevented, only bounded.** Untrusted text is kept out of the trusted region
   of the prompt by *placement*, not by filtering — content-filtering natural language is not a security
   boundary and this project does not pretend otherwise. The bound is the container, the scoped token,

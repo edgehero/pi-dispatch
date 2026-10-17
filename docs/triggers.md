@@ -259,6 +259,14 @@ a trigger can set it behind the operator's confirm, and like `models`, adding it
 were already queued (`trigger-skew`). How a run is checkpointed and continued is in
 [`docs/durable-runs.md`](durable-runs.md).
 
+`"steer": true` opts a trigger into steering: while one of its jobs runs, operators (and, once comment routing
+lands, collaborators using the trigger phrase) can send it messages, which the agent reads between its steps. It is
+off by default. It needs a job image that declares the `steer` capability, or its jobs are refused before they cost
+anything (`job-image-steer-unsupported`), and a venue that bind-mounts. Every trigger type may set it, cron
+included; it is refused beside `"command"`. It must be `true` or `false`, the AI tools that add and edit a trigger
+can set it behind the operator's confirm, and like `models`, adding it refuses the trigger's jobs that were already
+queued (`trigger-skew`). How messages reach a running job is in [`docs/steering.md`](steering.md).
+
 ## Firing a cron trigger by hand
 
 `pi-dispatch run --trigger <id>` runs one cron trigger now, once, exactly as its schedule would. Its folder,
@@ -530,7 +538,7 @@ it that were already queued (`trigger-skew`), and the comment says so. Re-run th
 trigger by its position in the file. Inserting a trigger with the same flow, kind and type ahead of others
 moves the ones after it down. A queued job of a moved trigger can then be checked against its neighbour, and
 refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd`, `mcp`, `awaitInput`, `progress`,
-`statusComment` or `recover`. The comment says the trigger
+`statusComment`, `recover` or `steer`. The comment says the trigger
 changed after the job was queued. Re-run those jobs too. Upgrade the worker and the receiver together, and restart the
 receiver after editing the file.
 

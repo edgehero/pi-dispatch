@@ -674,6 +674,8 @@ refactor apart.
   | Another extension registers `await_human_input` on a job armed with `PI_AWAIT_INPUT=1` | after `createAgentSession`, before the prompt | `2` / `await-input-shadowed` -- the tool a parked run ends on answers only for the job; a `tool_call` hook also blocks a late registration |
   | `PI_AWAIT_INPUT=1` with no `PI_SESSION_FILE` | preflight, before the prompt | `2` / `await-input-without-session` -- a parked run would keep no transcript to resume; a worker regression or a hand-run container |
   | Another extension registers `report_progress` on a job armed with `PI_REPORT_PROGRESS=1` (issue #644, `REQ-RUN-PROGRESS`) | after `createAgentSession`, before the prompt | `2` / `report-progress-shadowed` -- another extension's tool would answer the calls the worker reads as phases; a `tool_call` hook also blocks a late registration. A member of `RUNNER_POLICY_REASONS` (`PROGRESS_RUNNER_REASONS`), with its own fixed terminal comment |
+  | `PI_STEER=1` with no exit key on stdin (issue #646, `REQ-STEER-RUNNING-JOB`) | preflight, before the prompt (`assertSteerReady`) | `2` / `steer-no-exit-key` -- the run could not sign the acks the worker counts deliveries by, so every message would be reported late while the agent may have read it; a worker regression or a hand-run container, since the worker arms steering only beside a key. A member of `RUNNER_POLICY_REASONS` (`STEER_RUNNER_REASONS`), with its own fixed terminal comment |
+  | `PI_STEER=1` with `/inbox` not a readable, searchable directory | preflight, before the prompt (`assertSteerReady`) | `2` / `steer-inbox-missing` -- every message sent to the run would wait unread while it reported success; the mount did not land. Same class and comment rule as the row above |
   | **A tool ended the run** (issue #623): every result of a tool round carried `terminate: true` (pi-agent-core 1.1.0 `agent-loop.js:167`), which pi's own tools never set, so an extension decided it | the last message is the **tool result**, which has no `stopReason` | `0` / `tool-terminated` -- the agent ran and a tool ended it on purpose. Before this row the absent `stopReason` fell to the unknown-reason default and the job was retried and billed again as `1` / `unknown-stop-reason:undefined`. Pinned by a loopback test that drives the real session at the pin |
   | **Output truncated at the token limit** | `stopReason: "length"` | `0`, **but log it** — it is a completed run, not a silent failure, and must not be mistaken for either |
 
@@ -852,6 +854,22 @@ refactor apart.
   different releases, or a hand-run container, can produce these, and a reason of their own would be a new word in
   the record's enum for that. An orphan still unanswered after recovery is a `config` refusal too, rather than a
   transcript handed to the model with pi's "No result provided".
+  **A steer-armed run's exit line carries `steer`** (issue #646, `INT-STEER-INBOX-CONTRACT`): `steer: { delivered,
+  pending, deliveredIds }`, two non-negative integers and a list (the messages the runner handed to pi and saw persisted at their
+  `message_end`, and the ones it read that never got that far: waiting, held while parked, or the one in flight,
+  counted after a last read of `/inbox` at its close; and, since review round 1 (F3), the ids of the delivered ones in
+  delivery order, at most 16, `MAX_DELIVERED_IDS`), on every exit line the runner writes once its session exists, the decided line and the signal path alike,
+  and absent on every other run, so their lines are byte-identical to before. **Exit codes are UNCHANGED**: a steered
+  run exits as any run does. The worker rebuilds the block over the three closed keys (`steerCounts`,
+  `parseExitSteer`, `worker/src/run-history.mjs`: a present count that is not a count is null on its own;
+  `deliveredIds` is kept only as 1 to 16 lowercase 32-hex ids, deduplicated, and a list that is anything else is
+  dropped WHOLE, never cut; a block with nothing valid is null), and the log sink's `close()` returns it. The counts
+  are advisory telemetry, like `recovery`: `runContainer` resolves them as `steer: { delivered, pending }` (without
+  the ids) only for an ARMED attempt, and no decision reads them. The ids ARE acted on, and only off a line the exit
+  key signed (with a key issued, every field of an unverified line is nulled): `runContainer` drains the transcript
+  acks, marks each id `delivered` in the inbox, then stops the relay (`INT-STEER-INBOX-CONTRACT`, the signed exit line
+  as a second witness). The record's `steered` is still counted off the inbox at the final outcome, never off this
+  line.
   **The exit line's `reason` is read for one purpose and cannot move a job between classes** (issue #437).
   `parseExitReason` returns it only when it is a member of the worker's CLOSED `RUNNER_POLICY_REASONS`
   (`provider-auth-refused`, and since issues #501/#502 `cost-cap`, `model-not-allowed`,
@@ -1224,6 +1242,20 @@ refactor apart.
   job's carries its key, so a completed recovery promotes it). No input names the checkpoint: the container sees a
   workspace and a transcript, never the store, a path into it or a run directory name. The job's prompt file is
   written as for any job and not read by a recovering runner, which sends the fixed recovery prompt instead.
+- **`/inbox` is a steer-armed attempt's inbox, and deliberately NOT a `/job` input either** (issue #646,
+  `INT-STEER-INBOX-CONTRACT`, `DES-STEER-VIA-READONLY-INBOX-MOUNT`). For an attempt the worker armed (the trigger's
+  `run.steer`, a venue that binds mounts, an exit key, a transcript file, a relay) it mounts `<jobDir>.inbox`
+  read-only at `/inbox` (`CONTAINER_INBOX_DIR`) and sets `PI_STEER=1`; for every other job neither exists and the argv
+  is byte-identical. The directory sits BESIDE the job directory, never inside it, mode 0700, made empty for each
+  attempt and removed when the attempt ends (a throw before the spawn included). The worker writes one file per
+  message, `<seq:06d>-<id>.json`, mode 0444, renamed into place only once complete, holding `{"v":1,"id","mode",
+  "source","content"}` with `content` the worker's framed text; the runner reads them and hands each to the agent
+  once. Not `/job`, because `/job` is the merge-gated, agent-untamperable input read from the object store and fixed
+  before the container starts, while a message is typed by a sender while the run works; not `/session`, because the
+  agent can write there, and a message channel the agent can write is one it can forge. The agent learns nothing from
+  `/inbox` about the host's layout (a constant path) and cannot write it. A message reaches the model as a pi
+  custom message (a `custom_message` transcript entry of type `pi-dispatch-inbox`, user text to the model), not as a
+  file it is told to read.
 - **A repo skill is materialised WHOLE, and bounded** (issue #60). The allowlist accepts
   `.pi/APPEND_SYSTEM.md` (an exact path) and **every declared file under `.pi/skills/<name>/`**, not just
   each `SKILL.md`. It used to accept only the latter, which meant a skill shipping `references/`,
@@ -1641,7 +1673,10 @@ refactor apart.
     configured), and `/session:rw`: a resume job's staged transcript when a trigger armed `run.resume` and the
     worker resolved a key (`INT-SESSION-STORE-CONTRACT`), and since issue #643 every other job's empty live
     transcript file (`INT-CONTAINER-JOB-INPUTS`, `INT-LIVE-TRANSCRIPT-STREAM`). `/session` is a **per-job**
-    directory under the job's own dir; the shared store is never bind-mounted into anything.
+    directory under the job's own dir; the shared store is never bind-mounted into anything. Since issue #646 a
+    steer-armed attempt also gets `/inbox:ro` (`INT-STEER-INBOX-CONTRACT`): `<jobDir>.inbox`, a per-attempt
+    directory BESIDE the job's own, relabelled like the other per-job directories (`-v <inbox>:/inbox:ro,Z` where
+    the rule below holds), and absent for every other job, whose argv is byte-identical.
   - **The SELinux relabel option (issue #355).** Where `relabelsPrivateMounts` holds (a Podman daemon that reports
     SELinux, `name=selinux` or `host.security.selinuxEnabled`, on an endpoint on this host, from a Linux worker), the
     mounts the worker makes for this one job carry Podman's PRIVATE relabel option `Z`, in the same option list as
@@ -1742,7 +1777,15 @@ refactor apart.
     `image/runner/run-job.mjs` for the sequential setting and of `image/runner/src/recover.mjs` for `recoverSession`,
     and a job armed with `run.recover` on an image without it is refused pre-spend, `job-image-recover-unsupported`,
     because an older runner would ignore both variables and a lost run would resume into pi's "No result provided"
-    for a push or a comment that may have happened) -- the third (issue #291) declares that the baked runner reads
+    for a push or a comment that may have happened) and `steer` (`REQ-STEER-RUNNING-JOB`, issue #646: the baked
+    runner reads `PI_STEER`, reads the messages the worker writes into the read-only `/inbox` mount and hands each to
+    the running agent once, as framed data, with an ack MACed under the exit key; its evidence is a grep of
+    `image/runner/src/config.mjs` for `PI_STEER` and of `image/runner/src/inbox.mjs` for `pi-dispatch-inbox`, and a
+    mount check: a fixture directory mounted at `/inbox` without `:ro` must take a control write (else the check proves
+    nothing), mounted `:ro` must be listable, and a plant and a delete through `:ro` must both leave the host
+    directory unchanged; a job armed with `run.steer` on an image without it is refused pre-spend,
+    `job-image-steer-unsupported`, because an older runner would ignore the variable and every message an operator
+    sent would be accepted and never reach the agent) -- the third (issue #291) declares that the baked runner reads
     `PI_EXCLUDE_TOOLS`, and a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a "read-only"
     trigger with every tool the file says to remove: a permission quietly not enforced. `verify-image.sh` fails on any
@@ -1763,8 +1806,8 @@ refactor apart.
     network; one that could not enforce it would exit `model-policy-unenforceable`. The pi-upgrade-check workflow
     requires this repo's image to carry this token as well. The worker's `modelPolicy` row in `CAPABILITY_GATES`
     (below) is what reads it: a job with a list on an image without it is refused pre-spend. The worker's side of the
-    ten job-feature tokens (each token above but `anyUid` and `exitAuth`: `forgeMcp` the seventh, `awaitInput` the eighth,
-    `reportProgress` the ninth and `recover` the tenth, in that order) is ONE table
+    eleven job-feature tokens (each token above but `anyUid` and `exitAuth`: `forgeMcp` the seventh, `awaitInput` the eighth,
+    `reportProgress` the ninth, `recover` the tenth and `steer` the eleventh, in that order) is ONE table
     since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which jobs need
     it, the result key, the record reason, the log event and the comment. The preflight refuses the first row a job
     needs and the image lacks, in the order the branches had, so the behaviour is unchanged and a new image-gated
@@ -1941,7 +1984,7 @@ refactor apart.
     asserts MEMBERSHIP against the factory-derived pinned set pre-spend, exit 2, because pi silently
     ignores unknown `excludeTools` names -- then passes the list to `createAgentSession` and logs
     `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
-    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_AWAIT_INPUT` (`REQ-AWAIT-INPUT`, issue #625: `1` when the trigger armed `run.awaitInput` AND a resume transcript is staged (`prepared.session`; the live file every job gets since #643 does not count), omitted otherwise, never `0` or empty. The runner offers the `await_human_input` tool through an inline extension factory, refuses a third value as a config error, and refuses `1` without `PI_SESSION_FILE` as `await-input-without-session`); `PI_REPORT_PROGRESS` (`REQ-RUN-PROGRESS`, issue #644: `1` when the trigger armed `run.progress`, omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule; not keyed on a staged transcript, since the tool keeps nothing. The runner offers the `report_progress` tool through an inline extension factory, refuses a third value as a config error, and refuses another extension's tool of that name as `report-progress-shadowed`. Reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot bind it through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`), so the live transcript's redactor leaves its value alone); `PI_RECOVER` and `PI_RECOVERING` (`REQ-RUN-RECOVERY`, issue #645: `PI_RECOVER=1` when the processor armed the job's `run.recover` (a forge job, a checkpoint store, an image with `recover`), and `PI_RECOVERING=1` beside it only on a recovery job, whose staged checkpoint transcript is `PI_SESSION_FILE`; each omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule, and taken from the processor's call bag, never from `job.recover`, so a container the processor did not clear is never armed. With `PI_RECOVER` the runner sets `toolExecution = "sequential"` right after `createAgentSession`; with `PI_RECOVERING` it answers the transcript's orphaned calls and sends the fixed recovery prompt. The three refused combinations are `INT-RUNNER-EXIT-CODE-PROTOCOL`'s. Both reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot arm checkpoints or make a fresh run believe it is a continuation through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`)); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
+    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `PI_AWAIT_INPUT` (`REQ-AWAIT-INPUT`, issue #625: `1` when the trigger armed `run.awaitInput` AND a resume transcript is staged (`prepared.session`; the live file every job gets since #643 does not count), omitted otherwise, never `0` or empty. The runner offers the `await_human_input` tool through an inline extension factory, refuses a third value as a config error, and refuses `1` without `PI_SESSION_FILE` as `await-input-without-session`); `PI_REPORT_PROGRESS` (`REQ-RUN-PROGRESS`, issue #644: `1` when the trigger armed `run.progress`, omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule; not keyed on a staged transcript, since the tool keeps nothing. The runner offers the `report_progress` tool through an inline extension factory, refuses a third value as a config error, and refuses another extension's tool of that name as `report-progress-shadowed`. Reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot bind it through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`), so the live transcript's redactor leaves its value alone); `PI_RECOVER` and `PI_RECOVERING` (`REQ-RUN-RECOVERY`, issue #645: `PI_RECOVER=1` when the processor armed the job's `run.recover` (a forge job, a checkpoint store, an image with `recover`), and `PI_RECOVERING=1` beside it only on a recovery job, whose staged checkpoint transcript is `PI_SESSION_FILE`; each omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule, and taken from the processor's call bag, never from `job.recover`, so a container the processor did not clear is never armed. With `PI_RECOVER` the runner sets `toolExecution = "sequential"` right after `createAgentSession`; with `PI_RECOVERING` it answers the transcript's orphaned calls and sends the fixed recovery prompt. The three refused combinations are `INT-RUNNER-EXIT-CODE-PROTOCOL`'s. Both reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot arm checkpoints or make a fresh run believe it is a continuation through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`)); `PI_STEER` (`REQ-STEER-RUNNING-JOB`, issue #646: `1` only for an attempt `runContainer` ARMED for steering (the job's `steer`, a venue that binds, an exit key, a transcript file, a relay and an inbox directory, `DES-STEER-VIA-READONLY-INBOX-MOUNT`), never off `job.steer` alone, since the runner refuses the flag without a readable `/inbox` and a key and a job the worker could not arm must not be refused for it; omitted otherwise, never `0` or empty, `PI_AWAIT_INPUT`'s rule. The runner reads the messages the worker writes into the read-only `/inbox` mount and hands each to the agent through an inline extension factory, refuses a third value as a config error, and refuses `1` without a readable `/inbox` or without an exit key as `steer-inbox-missing` or `steer-no-exit-key` (`INT-RUNNER-EXIT-CODE-PROTOCOL`). Reserved (`CONTAINER_ENV_NAMES`), so a trigger cannot point a runner at an inbox through `run.secrets`, and structural (`NON_SECRET_ENV_KEYS`)); `PI_MCP_SERVERS` (REQ-MCP-OPERATOR-SERVERS: the
     trigger's `run.mcp` names, comma-joined, safe by the loader's name rule, omitted when the job names none, never
     empty; the runner holds `/job/mcp.json` to exactly these names); `HOME=/home/pi` (issue #341: set ONLY beside
     `--user`, assigned after the `PI_FORWARD_ENV` and `run.secrets` loops so neither can move it, and reserved so a
@@ -4175,6 +4218,31 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
     may do). `dispatch_trigger_add` and `dispatch_trigger_edit` take `recover`, carry it only when it is a boolean,
     merge an edit's only when sent, and judge it with the loader's own validator against the entry's `on.type` and
     its `run.command` before the operator's confirm.
+- **`run.steer` (every trigger type, cron included), optional boolean (`REQ-STEER-RUNNING-JOB`, issue #646),
+  opt-IN.** Absent or `false` = today's behaviour, byte-identical normalized entry, job data, env and argv. `true`:
+  while one of the trigger's jobs runs, a message sent to it reaches the agent between its steps
+  (`DES-STEER-VIA-READONLY-INBOX-MOUNT`, `INT-STEER-INBOX-CONTRACT`). In this release the sender is an operator at the
+  command line (`pi-dispatch steer`); a collaborator's phrase comment and the console arrive in follow-up changes of
+  the same issue. Judged by `validateSteerFlag` (`worker/src/triggers.mjs`), strictly boolean, in all five
+  normalizers. Legal on cron, unlike `run.recover`: a message is delivered into the live session and needs no issue or
+  pull request to key anything by, so an operator can steer a folder job. Refused at load beside `run.command` (a
+  command job's prompt is one `/name args` line that dispatches a workflow, so a message would reach whatever the
+  command started rather than an agent listening for it). Not tied to `run.resume`, `run.recover` or `run.awaitInput`.
+  - It needs an image declaring `steer` (`job-image-steer-unsupported`, pre-spend, commented). Arming per attempt
+    needs more, each a named skip rather than a refusal: a venue that binds mounts (`steerSkipped: "venue-copies"`),
+    an image declaring `exitAuth` (`no-exit-key`), a worker with Valkey and a transcript file (`no-transcript`), and
+    an inbox directory it could make (`no-inbox`).
+  - It rides the job data at JOB level only when `true` (`job.steer`), never inside `trigger`, through every receiver
+    filter (carried only: routing a comment into a run is the comment routing change), `enqueueForgeJob`, the
+    console's `runFieldsOf`, `addLocalJob` and the cron scheduler data (`worker/src/schedules.mjs`). It is part of no
+    job id or dedup key.
+  - **Version skew**: a row of `AUTHORED_NARROWING_FIELDS`, authored when `true`: a receiver from before #646 drops
+    the key, the run starts with no inbox and an operator's message is refused as for an unarmed job while the
+    trigger promised it would be heard; the worker refuses such a job pre-spend as `trigger-skew`.
+  - **Model-callable**: yes, behind the operator's confirm. It gives the model no capability (it decides whether a
+    run listens for messages, not what a run may do). `dispatch_trigger_add` (every kind) and `dispatch_trigger_edit`
+    take `steer`, carry it only when it is a boolean, merge an edit's only when sent, and judge it with the loader's
+    own validator against the entry's `run.command` before the operator's confirm (`admin/src/write-plans.mjs`).
 - **`run.packages` (ALL FOUR trigger kinds, optional boolean) — an opt-OUT**: absent or `true` = the
   worker emits `PI_PACKAGES` with the container paths of the pi packages the operator staged into the
   global overlay (`INT-PI-PACKAGES-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`), so the flow gets
@@ -4723,7 +4791,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `:ro` mount sees an older file) would enqueue the job WITHOUT its list, and the job would run on the
   deployment's list or on none while every record reads like a correct run. The worker's own read of the
   triggers file catches it, `run.waitFor`'s skew check generalised to a table of authored NARROWING fields
-  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, `mcp`, since #625 `awaitInput` when `true`, since #644 `progress` and `statusComment` when `true`, and since #645 `recover` when `true`): when
+  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models`, since #501 `maxCostUsd`, `mcp`, since #625 `awaitInput` when `true`, since #644 `progress` and `statusComment` when `true`, since #645 `recover` when `true`, and since #646 `steer` when `true`): when
   the entry at the job's matched index (identity-checked on flow, command, kind and on-type) sets the field and
   the job ARRIVED without it (`job.data.models` or `job.data.maxCostUsd`, read before the env fill), the job is refused pre-spend as
   `trigger-skew`, naming the field. The same limits as the wait check: it reads `PI_TRIGGERS_FILE`, else
@@ -5101,7 +5169,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|job-image-progress-unsupported|job-image-recover-unsupported|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -5174,7 +5242,9 @@ validator rather than a second copy of it.
                     "orphans": <int> | null, "replayed": <int> | null,                 // charset-checked run id only
                     "interrupted": <int> | null, "notStarted": <int> | null },
     "recoverSkipped"?: "local" | "no-run-id" | "base-unprimed" | "workspace-extensions",
-    "checkpoints"?: { "written": <int>, "failed": <int>, "skipped": <int> } }
+    "checkpoints"?: { "written": <int>, "failed": <int>, "skipped": <int> },
+    "steered"?: { "delivered": <int>, "late": <int>, "withdrawn": <int> },            // issue #646: CONDITIONAL keys, present only
+    "steerSkipped"?: "venue-copies" | "no-exit-key" | "no-transcript" | "no-inbox" }  // when the job's data says steer: true
   ```
   **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
   after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
@@ -5357,6 +5427,28 @@ validator rather than a second copy of it.
   `recovery-superseded` (outcome `policy`, pre-spend, silent): the run reached its final outcome after the recovery was
   queued, decided first by a completed or policy record of the base run or an earlier recovery.
   `job-image-recover-unsupported` (outcome `policy`, pre-spend, commented): the `CAPABILITY_GATES` row.
+  **The steering fields (issue #646, `REQ-STEER-RUNNING-JOB`) are additive, TAIL position after the durable-run
+  keys, each a CONDITIONAL key**, rebuilt by the worker (`recordedSteered`, `STEER_SKIPPED_REASONS`,
+  `worker/src/run-history.mjs`) and written only for a job whose data says `steer: true`, so every other record is
+  byte-identical to before. `steered`: what became of the run's messages, counted off its inbox by the settle step at
+  the final outcome (`INT-STEER-INBOX-CONTRACT`'s close): `delivered` (a verified ack), `late` (still queued or
+  written when the run ended), `withdrawn`; three non-negative safe integers, or the key absent on any violation.
+  It is present whenever that close succeeded before the record was written, a pre-spend refusal included (all three
+  zero), and absent when the close failed (`steer_settle_failed`) or the outcome was not final (an `InfraRetry` with attempts left, a #645
+  handoff), so its absence on a steer job's record says the inbox was not counted, never that it was empty.
+  `steerSkipped`: why an armed job ran WITHOUT steering, a closed enum: `venue-copies` (the job's venue copies files
+  instead of binding them, so a message written after the start would never reach the container), `no-exit-key` (the
+  image does not declare `exitAuth`, so no delivery ack could be verified), `no-transcript` (no transcript file could
+  be staged, or this worker has no tail or relay wired, so nothing could read the acks; a worker with no Valkey client
+  is the usual cause), `no-inbox` (the inbox directory could not be made). The job still runs, as it would without
+  `run.steer`. Integers and enum members only: no message text, id, sender or author reaches the record. The runner's
+  own `steer` block off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`) is NOT recorded; its `deliveredIds`, from a
+  verified line, only move inbox states before the close counts them. Since review round 1 (F2) the failed listener's
+  terminal branch settles the inbox too, so a stall-kill the processor never saw still closes it. **Three reasons** come with
+  them, all outcome `policy`: `job-image-steer-unsupported` (pre-spend, commented, nothing minted, `budgetReserved:
+  false`): the `CAPABILITY_GATES` row; `steer-inbox-missing` and `steer-no-exit-key` (runner exit `2` before the
+  prompt, members of `RUNNER_POLICY_REASONS` through `STEER_RUNNER_REASONS`, each with its own fixed terminal comment
+  naming the fix, a worker and a job image of the same release; never retried).
   **Readers of `queuedAt` and `capacity` (issue #599)**: the capacity report (`worker/src/capacity.mjs`,
   `INT-CAPACITY-REPORT`) reads them with `host`, `project`, `startedAt`, `endedAt`, `size` and `resources.cpuUsec`,
   judges every value again as untrusted, and writes nothing to any record. A record without the `capacity` key (from
@@ -8723,11 +8815,194 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   that is down, a stalled owner, or a worker predating this contract acks nothing and the CLI exits 1
   naming the cause; the record lands up to `ABORT_GRACE_MS` after the ack, because the CLI does not wait
   for the container to die.
+- **A sibling channel** (issue #646): `INT-STEER-INBOX-CONTRACT` carries an operator's message INTO a running job the
+  way this contract carries a stop, on the same footing: a requester-side CLI verb that resolves the job across the
+  fleet's queues (`steer-cli.mjs`, modelled on `cancel-cli.mjs`), transient TTL-bounded keys only a live run's worker
+  keeps alive (its open key is refreshed by the job's relay every 2 s, the cadence of this poll), and the same
+  falsification test against `OQ-008`. It differs where a message must: its keys are per RUN (`runIdOf`) rather than
+  per job id, it has no ack key (the state hash says `written` and `delivered`), and it is opened only for a
+  steer-armed attempt. Nothing in this contract changes.
 
 **Code evidence**: worker/src/cancel-state.mjs -> requestCancel, removeHeldJob; worker/src/index.mjs ->
 the cancel poll beside the kill timer, the abortReason mapping; worker/src/processor.mjs -> the
 classification; worker/src/cancel-cli.mjs -> runCancel; admin/src/read-model.mjs -> cancelHeldJob
 (delegating); admin/src/dashboard.ts -> cancelActive/cancelHeld deps, the HELD_LIST view.
+
+## INT-STEER-INBOX-CONTRACT
+
+**sender (the CLI in this release) -> Valkey -> the worker's relay -> `/inbox` (read-only) -> the runner -> pi; and
+back: the transcript -> the worker's ack consumer -> Valkey.** The durable inbox of a running, steer-armed job (issue
+#646, `REQ-STEER-RUNNING-JOB`, `DES-STEER-VIA-READONLY-INBOX-MOUNT`), the sibling of `INT-CANCEL-CHANNEL-CONTRACT`:
+transient, TTL-bounded keys that only a live run's relay keeps alive. One module holds every Valkey side,
+`worker/src/steer-inbox.mjs`, exported as `@edgehero/pi-dispatch/steer-inbox` (and the framing as
+`@edgehero/pi-dispatch/steer-framing`), so the CLI, the relay, the settle step and, in follow-up changes, the
+receiver and the console cannot drift. In this release the only sender is the CLI (`worker/src/steer-cli.mjs`);
+`liveRunsForTarget`, `storeFallback`, `readFallbacks` and `listInboxPublic` are exported for the comment routing
+and console changes and are exercised by tests only.
+
+- **The run id.** Every key is per RUN: `runIdOf(job)` (`job.data.recoveryOf ?? job.id`, `recovery-queue.mjs`), so
+  a #645 recovery and a BullMQ retry find the same inbox; spelled into a key through `sanitizeJobId`, the run
+  mirror's sanitizer. A run id is a non-empty string or a non-negative safe integer, else the call is refused.
+- **Keys**:
+  ```
+  run:steer:target:<hex32>     ZSET  member: the raw run id, score: expiresAtMs (refresh time + 30 s); PEXPIRE 60 s.
+                                     <hex32> = the first 32 hex of sha256("<kind>\0<repo>\0<targetType>\0<number>"),
+                                     number a positive safe integer (a decimal string is accepted), targetType
+                                     "pull_request" or "issue". Only a forge job has one; null for a local or cron job.
+  run:steer:open:<runId>       STRING the host name (1..255 chars), PX 30 s. The ONE authority on whether a run
+                                     takes messages.
+  run:inbox:<runId>            LIST   entry JSON, append only (RPUSH), in acceptance order.
+  run:inbox:state:<runId>      HASH   <id> -> queued | written | delivered | withdrawn | late, plus `_count` (messages
+                                     ever accepted) and `_bytes` (their text bytes).
+  run:inbox:fallback:<runId>   HASH   <id> -> the job JSON a forge message would have started (comment routing).
+  run:inbox:closed:<runId>     STRING "1", set by the final close.
+  ```
+- **TTLs** (`STEER_OPEN_TTL_MS` 30 s, `STEER_TARGET_TTL_MS` 60 s, `STEER_INBOX_TTL_MS` 1 h). The list and the state
+  hash get an hour at every accepted push; `registerLive` and its 2 s refresh renew the hour on the list, the state
+  and the fallback hash; the close sets `closed` with an hour and gives the list and the state an hour from then. A
+  crashed worker therefore leaves nothing past an hour and a run nothing past 30 s of liveness.
+- **The entry** (`normalizeSteerEntry`; only these fields are kept, rebuilt, never the caller's object):
+  ```
+  { "v": 1, "id": "<32 lowercase hex>", "mode": "steer" | "followUp",
+    "source": "forge" | "console" | "cli" | "panel",
+    "author": { "kind": "forge", "id": <positive integer, up to 15 digits>, "association": "<[A-Z][A-Z_]{0,39}>" }
+            | { "kind": "operator", "by": "<TOKEN_NAME_RE: [a-z0-9][a-z0-9._-]{0,31}>" },
+    "text": "<scrubbed, 1..8192 bytes>", "at": <ms>,
+    "deliveryId"?: "<[A-Za-z0-9._:-]{1,128}>", "hop"?: <0..8> }
+  ```
+  The source and the author must agree: a `forge` source has a forge author, every other source an operator one. The
+  CLI writes `source: "cli"`, `author: { kind: "operator", by: "cli" }`. `at` defaults to the caller's clock.
+- **Ids.** A forge message's id is the first 32 hex of `sha256("forge\0" + deliveryId)` (`forgeMessageId`), so a
+  redelivered webhook GUID is the same message and pushes `dup`; an operator message's is 16 random bytes in hex
+  (`operatorMessageId`).
+- **Caps** (`STEER_MAX_MESSAGES` 16, `STEER_TOTAL_MAX_BYTES` 65,536, `STEER_TEXT_MAX_BYTES` 8,192 per message, the
+  console answer's own bound, `ANSWER_TEXT_MAX_BYTES`). The text is scrubbed by `scrubSteerText`: first
+  `console-answer.mjs`'s `scrubAnswerText` (CR and CRLF to LF, U+2028 and U+2029 to LF, a tab to a space, every other
+  C0 and C1 control and the bidi controls removed), then the characters a model reads and a reviewer does not see are
+  removed (the Unicode tag block U+E0000 to U+E007F, U+200B to U+200D, U+2060 to U+2064, U+180E and U+FEFF; an emoji
+  joined with U+200D arrives as its separate emoji), and three backtick look-alikes (U+FF40, U+02CB, U+1FEF) become
+  the ASCII backtick, so `fenceBlock` counts them in the run it must out-length. Nothing else is normalised: NFKC is
+  deliberately not applied, because it rewrites far more than look-alikes (a CJK writer's fullwidth punctuation,
+  ligatures, superscripts) and can lengthen a text past the cap it was measured under (U+FDFA becomes eighteen code
+  points), while the framing promises the message verbatim and the fence is defense in depth. A text holding an
+  unpaired UTF-16 surrogate is refused, never replaced with U+FFFD. The extra scrub lives on the steer path only:
+  `scrubAnswerText`'s output is quoted on the forge by a parked answer's trail comment, where U+200B is the mention
+  neutraliser. The scrubbed text is then bounded by `boundAnswerText`'s decision, refused in this feature's words,
+  NEVER cut: a truncated message is one the person did not send. A message whose inbox file would exceed 16 KiB, measured with
+  the longest possible ref (`STEER_REF_WORST`), is refused at push too, since once accepted it could never be written.
+  The count and byte caps are enforced inside the push script, so concurrent pushers cannot race past them, and
+  count every message ever accepted, withdrawn ones included, so withdraw and push again cannot flood a run.
+- **The scripts.** Every state change is one Lua script, a compare and set against the state hash run atomically by
+  Valkey:
+  - `PUSH` (KEYS open, closed, list, state; ARGV id, entry JSON, text bytes, max count, max bytes, ttl) returns, in
+    this order of checks, `dup` (the id is already in the state hash, whatever became of the run since: a redelivered
+    GUID must not enqueue its fallback twice), `closed` (the closed key exists; checked before `gone` because the
+    close deletes the open key too and "finished" is the truer answer), `gone` (no open key), `full` (one more would
+    pass a cap), else RPUSHes the entry, sets the id `queued`, adds to `_count` and `_bytes`, refreshes the hour, and
+    returns `ok`. `pushSteer` answers one of those five words, `{ error: "refused", reason }` for an entry refused
+    before Valkey is touched, or `{ error: <code> }`.
+  - `WITHDRAW` (KEYS state; ARGV id): `queued` or `written` becomes `withdrawn`, anything else is left; returns the
+    state it found, nil when the id is unknown. `withdrawSteer` answers `{ prior }`: `queued` is a GUARANTEED
+    withdrawal (the relay never wrote it), `written` best effort (the runner may have read the file before the relay
+    unlinks it), `prior: null` no such message.
+  - `CLOSE` (KEYS closed, open, list, state, and the target when the run has one; ARGV the raw run id, ttl): sets
+    `closed` (PX the ttl), DELs the open key, ZREMs the run from its target, turns every `queued` or `written` id
+    into `late`, refreshes the list's and the state's hour, and returns `[list, state]`. `closeInbox` answers
+    `{ entries, state, count, bytes }`. After it every push is refused, and everything pushed before it is in its
+    reply. Called only by the settle step, at a final outcome (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`).
+  - `MARK` (KEYS state; ARGV id, to, from...): moves the id to `to` only when it is in one of `from`; returns
+    `{1, prior}` or `{0, prior}`. `markState` answers `{ ok, prior }`. The relay's moves: `queued` to `written`
+    before the rename; `written`, `queued` or `withdrawn` to `delivered` on a verified ack (a written message withdrawn
+    best effort that the agent did receive is delivered); `delivered` to `written` at a re-baseline; the waiting
+    state to `late` for an entry the framing refuses.
+  - Liveness (`registerLive`, `refreshLive`): one `MULTI` that SETs the open key PX 30 s and, for a forge job,
+    ZREMRANGEBYSCOREs the target's members whose score has passed, ZADDs the run at `now + 30 s` and PEXPIREs the
+    target 60 s, then refreshes the list's, the state's and the fallback hash's hour. `unregisterLive` DELs the open
+    key and ZREMs the member; it is not a close, so a retry or a recovery finds the inbox open.
+  - `RESET` (the relay's `start`, `resetClosedInbox`, review round 1; KEYS list, state, fallback, closed): when the
+    closed key exists, DELs all four and returns 1, else returns 0 and touches nothing. It runs BEFORE `registerLive`,
+    so no push can be accepted into the old run's keys. It exists for a run that reuses a run id whose run already
+    ended: a console retry of a failed job keeps its job id, so its run id, and found the previous run's closed inbox
+    (every push `closed` for an hour, and the re-baseline handing that run's delivered messages to a run never sent
+    them). The previous run's outcome is already recorded, since the close precedes the record write. An OPEN inbox (a
+    #645 recovery, an `InfraRetry` with attempts left) is never reset: those attempts continue the same run. A reset
+    is logged `steer_inbox_reset`; a failed one is a relay fault (`reset`), and the relay then reads the inbox as
+    closed on every tick, so it never writes into it nor re-baselines it (`steer_inbox_closed`, said once).
+  - Reads: `readInbox` (LRANGE, HGETALL, EXISTS closed in one MULTI; text included, for the relay only),
+    `listInboxPublic` (`{ entries: [{ id, mode, source, state, at, bytes }], closed }`, NEVER the text),
+    `messageState` (one HGET, the CLI's poll), `isOpen` (EXISTS on the open key), `liveRunsForTarget`
+    (`ZRANGEBYSCORE target (now +inf LIMIT 0 n`, n 4 by default and at most 64). A list line that does not parse as an
+    entry with a valid id is dropped, never surfaced as text.
+  - **Never throws.** Every export answers a value or `{ error }`: a validation refusal is `{ error: "refused",
+    reason }` with an operator-readable reason, a Valkey fault `{ error: <code> }` naming no key or value. A caller
+    must fail loudly on either and never read it as an empty inbox.
+- **The inbox file** (the relay, `worker/src/inbox-relay.mjs`; the runner, `image/runner/src/inbox.mjs`). The host
+  directory is `<jobDir>.inbox`, beside the job directory and never inside it, mode 0700, made fresh per attempt and
+  removed when the attempt ends, mounted at `/inbox` read-only (`INT-CONTAINER-JOB-INPUTS`). A message's file is
+  written as `.<id>.tmp` with mode 0444 (`flag: "wx"`, an old temporary file removed first), and renamed to
+  `<seq>-<id>.json`, where `<seq>` is the entry's 1-based position in the list, six digits, zero padded
+  (`inboxFileName`), only after the `queued` to `written` mark succeeded. Its body is exactly
+  `{"v":1,"id":"<id>","mode":"<mode>","source":"<source>","content":"<framed text>"}` (`steerFileJson`), at most
+  16 KiB. The runner reads only names matching `^\d{6}-([0-9a-f]{32})\.json$`, in name order, refuses (once, logged by
+  id and reason, `steer_file_refused`) a file over 16 KiB, one that is not a JSON object, one with any other key, a
+  `v` other than 1, an id that is not the name's, a mode or source outside the lists, or an empty content; a file
+  gone between the listing and the read is skipped and read again if rewritten. `content` is the framing
+  (`frameSteerMessage`, `DES-STEER-VIA-READONLY-INBOX-MOUNT`), the text inside `fenceBlock`.
+- **The ack.** The runner hands a message to pi as `{ customType: "pi-dispatch-inbox", content: [{ type: "text",
+  text: <content> }], display: true, details: { id, mode, source, ack } }` with `deliverAs: <mode>`, where
+  `ack = hex(HMAC-SHA256(exitKey, "pi-dispatch-inbox-ack\0" + runId + "\0" + id))`, `exitKey` the per-attempt key the
+  worker wrote to the runner's stdin (issue #545) and `runId` the container's `PI_JOB_ID`, which the worker sets to
+  the job's CONTAINER name (the venue's name for this attempt's queue job, `pi-job-<queue id>` on the local venue), not to the run id the keys use. The worker's `inboxAck` is the
+  runner's restated byte for byte (pinned by a test), and `makeSteerAck` verifies a `custom_message` of that type
+  against the same container name (`ackRunId: name`) under the same attempt's key, in constant time; the key is minted
+  per attempt, so it is what separates one attempt's acks from another's, and the string only has to match. A line
+  that ended at or before the tail's baseline is a PRIOR line: never counted live, its id joins the prior set the relay
+  re-baselines against, and when its ack verifies under THIS attempt's key the relay marks a still waiting message
+  `delivered` at the baseline instead of writing it again (review round 1, F5).
+  **Residual, named (F5)**: a line an EARLIER attempt wrote never verifies here, because that attempt's key is gone.
+  So a message delivered just before a crash, whose state is still `written` and whose line is in the restored
+  transcript, is handed over a second time by the recovery (a duplicate, framed, never a loss). Unverified prior lines
+  are deliberately not trusted: the transcript is agent-writable, and trusting them would let the agent mark a message
+  delivered that it was never sent by planting a line in a transcript a recovery restores.
+  **The signed exit line is a second witness** (review round 1, F3). The runner's exit line carries `steer.deliveredIds`
+  (`INT-RUNNER-EXIT-CODE-PROTOCOL`): the ids it saw pi persist, at most 16. When the exit line VERIFIED under the
+  attempt's exit key, `runContainer` first drains the transcript acks in flight, then marks each of those ids
+  `delivered` through the relay, and only then stops the relay; an unverified line marks nothing. So an agent that
+  breaks the transcript (a symlink swapped in at `/session/current.jsonl` makes the tail refuse the file) can no
+  longer make delivered messages settle as `late`.
+- **Who writes what.** The open key, the target member and the inbox's hour: the relay of an armed attempt alone,
+  from the container's start until it stops. The entries: the senders, through `PUSH`. The states: `PUSH`
+  (`queued`), the relay (`written`; `delivered` off a verified transcript ack, a verified prior line or a verified exit
+  line's id; `late` for an unframable entry; `written` again at a re-baseline), `WITHDRAW` (`withdrawn`) and `CLOSE`
+  (`late`). `RESET` deletes a closed inbox's keys at a new run's start. Nothing in the container touches Valkey.
+- **The record.** At the final outcome the settle step counts the closed states into the record's `steered:
+  { delivered, late, withdrawn }`, and the attempt's arming verdict is `steerSkipped` (`venue-copies`,
+  `no-exit-key`, `no-transcript`, `no-inbox`), both only for a job whose data says `steer: true`
+  (`INT-RUN-HISTORY-FILE-CONTRACT`). The close runs before every record write of a final outcome, and also from the
+  failed listener's terminal branch (review round 1, F2), so a terminal failure the processor never saw (a stall-kill
+  of a crashed worker's job, a rethrow above its catch) closes the inbox and its waiting messages count `late`
+  instead of sitting `queued` until the key expires. The runner's own counts ride its exit line as `steer: {
+  delivered, pending, deliveredIds }` (`INT-RUNNER-EXIT-CODE-PROTOCOL`); `runContainer`'s result keeps only
+  `{ delivered, pending }`.
+- **Why this is not the Redis state `OQ-008` refuses**, `INT-CANCEL-CHANNEL-CONTRACT`'s argument: these are
+  transient, TTL-bounded keys of a live run, not durable configuration. Delete the whole `run:steer:*` and
+  `run:inbox:*` keyspace while the fleet runs and every job behaves as before; the casualties are the messages in
+  flight, and a sender is told (`gone`, or `late` at its next read). Why the target pointer is not a session index is
+  `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`.
+- **Logs** carry the job id, message ids, step names, codes and counts, never a message's text: the relay's
+  `steer_relay_fault {jobId, step, code}` (once per step and code), `steer_frame_refused {jobId, id}`,
+  `steer_inbox_reset {jobId}` and `steer_inbox_closed {jobId}` (once); the ack
+  consumer's `steer_ack_unverified {jobId, id?}` (once per attempt); the settle step's `steer_settled_late`,
+  `steer_settle_failed {jobId, code}` and `steer_late_forge_unanswered {count}`; the runner's `steer_delivered {id,
+  mode, source}`, `steer_held_parked {pending}`, `steer_file_refused {id, reason}` and `steer_inbox_unreadable
+  {code}`; `runContainer`'s `steer_skipped {container, reason}` and `steer_acks_unread {container}`.
+
+**Code evidence**: worker/src/steer-inbox.mjs (keys, scripts, caps, ids); worker/src/steer-framing.mjs
+(`frameSteerMessage`, `steerFileJson`, the file cap); worker/src/inbox-relay.mjs (`resetClosedInbox`, `makeInboxRelay`,
+`inboxFileName`, `steerTargetOf`); worker/src/steer-ack.mjs (`inboxAck`, `ackVerifies`, `makeSteerAck`);
+worker/src/inbox-settle.mjs (`settleInbox`, `isFinalOutcome`); worker/src/steer-cli.mjs (`runSteer`);
+worker/src/run-container.mjs (arming, the directory, `ackRunId: name`); image/runner/src/inbox.mjs (`createInbox`,
+`parseInboxEntry`, `inboxAck`, `assertSteerReady`).
 
 ## INT-ON-FAILURE-HOOK-CONTRACT
 
@@ -9116,6 +9391,14 @@ publisher cannot drift.
   message's note, which carries the extension's own content, redacted, escaped and capped like any `text`. **Never in the stream**: thinking, the header's `cwd`, pi's
   `usage`, `custom`, `session_info` and `label` entries, a provider's error message, and the bytes of a line that did
   not parse.
+- **A steering message in the stream** (issue #646, `INT-STEER-INBOX-CONTRACT`). A message the runner handed to pi is
+  persisted as a `custom_message` entry of type `pi-dispatch-inbox`, so it appears as one `note` whose `text` is
+  `pi-dispatch-inbox: ` followed by the framed text the worker wrote (the heading, the attribution, the no-authority
+  sentences and the fenced message), redacted, escaped and capped at `LIVE_TEXT_MAX` like any `text`. The entry's
+  `details` (the id, the mode, the source and the ack MAC) never reach the stream. No mapping was added for it: it is
+  the existing custom-message rule above. The note appears only once pi persisted the message (its `message_end`),
+  so a message still queued, written, withdrawn or late is not in the stream. With `PI_LIVE_TRANSCRIPTS=0` nothing is
+  published, although a steer-armed attempt's transcript file is still tailed for its acks (`stream: false`).
 - **`reset`**: the source file shrank, was replaced or had its first line rewritten; the entries after it start the
   transcript over (a reader may clear what it shows or mark the break). **`skipped`**: one line over 1 MiB was left
   out unread.
@@ -9627,3 +9910,5 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-17 | Issue #645, part 1: the checkpoint store. **NEW `INT-WORKSPACE-CHECKPOINT-STORE`**, written from `worker/src/workspace-checkpoint.mjs`, `worker/src/checkpoint-paths.mjs` and `STORE_GIT_FLAGS`/`storeGitEnv` in `worker/src/git-hardening.mjs` as they stand: the location (`PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`, else none, from `checkpointsDirPath`); the per-run folder `sha256("checkpoint\0" + runId)` cut to 32 hex, and why not `sanitizeJobId`, which keeps `..`; the layout (`repo.git`, `home/`, `lock`, `base-too-large`, `CURRENT`, `cp-<seq>/manifest.json` and `transcript.jsonl`); the manifest's every field and type; the commit-point order (transcript, manifest, `CURRENT`, each temp, fsync, rename) and its guarantee that `CURRENT` always names a complete checkpoint; the closed git environment and the flags of every store git; the fast-import stream; the refs `refs/pi-dispatch/base`, `/checkpoint` and `/cp/<seq>`; the caps and their defaults; every skip and refuse reason; the restore's refusals (including `run-mismatch` and `base-mismatch`, the checkout's commit parsed from files); the sweep's rules; the lock's takeover and release by rename, verify, then unlink or put back; the secret scan over paths, read bytes and link targets, and what it does not cover; the Linux `/proc/self/fd` containment check and the residual where no proc directory exists. Every manifest object is closed at every level. `check-ignore` runs with the run's `home/` as its cwd, and `storeGitEnv` drops empty and relative `PATH` entries. The transcript copy is capped by `maxTranscriptBytes` (256 MiB, judged on the offset before anything is written, `transcript-too-large`, the previous checkpoint kept), streams in 1 MiB chunks under the snapshot's deadline (`timeout`), and its bytes count in the `disk-low` and `store-full` checks; after each committed checkpoint every `cp-<seq>/` and `refs/pi-dispatch/cp/<seq>` but the current and the previous is pruned under the lock, crash-safely because `CURRENT` already names the new one (attack review: a sparse session file filled the host disk while the container was frozen, and old transcript copies were never pruned). One residual is written down for the wiring change rather than fixed here: `quiesced` is the caller's claim, which the module cannot verify. The two stores colliding is refused by `loadConfig` (`checkpointStoreCollision`, the row above). **As of this change nothing calls the checkpointer**; doctor reads the directory and warns at most, and a later change wires it into durable runs. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the store is never mounted, and no path, key or run directory name crosses the boundary. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: no input, mount or env var a container receives changed. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: nothing resumes from a checkpoint yet. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: its dot-name rule, landed earlier in #645, is what keeps the default location out of the session reaper. **Code evidence**: worker/src/workspace-checkpoint.mjs -> makeWorkspaceCheckpointer, checkpointKey, DEFAULT_CHECKPOINT_LIMITS; worker/src/checkpoint-paths.mjs; worker/src/git-hardening.mjs -> STORE_GIT_FLAGS, storeGitEnv; worker/src/config.mjs -> checkpointsDirPath; worker/test/workspace-checkpoint.test.mjs; worker/test/checkpoint-paths.test.mjs. |
 | 2026-10-17 | Issue #645, part 2: durable runs (`run.recover`). **NEW `INT-RUN-CHECKPOINT-POINTER`**: `run:checkpoint:<sanitized run id>`, JSON `{v: 1, host, hostQueue, seq, attempt, at, jobDir}` with exactly those keys, each typed (a job folder basename, never a path), `SET ... PX` 7 days, written only after a committed checkpoint, removed at the run's final outcome after the store entry, bounded and never throwing; its readers. **NEW `INT-RUN-BUDGET-LEDGER`**: `run:budget:<sanitized run id>`, fields `slot`, `seq`, `h<seq>`, `s<seq>`, `at`; states `held`, `settled`, `released`, `settled-crashed`, terminal states never moving; the scripts `claimSlot`, `nextSeq`, `recordHold`, `settle`, `release`, `settleCrashed`; 35-day TTL; `{ error }` and never a throw. **NEW `INT-RECOVERY-JOB`**: the id `<runId>.r<n>`, the queue, the data (`recoveryOf`, `recovery`, `recoverBy`), the options (`attempts: 1`, no deduplication, 31-day retention), the claim key `run:recover:claim:<run>:<n>` (`SET NX`, 7 days) and the pending set `run:recover:pending` (scored by `recoverBy`, six hours). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the conditional tail keys `recoveryOf`, `recovered` (`from` live, exit or salvage; `n`; `fromAttempt`; `checkpointSeq`; the four runner counts), `recoverSkipped` (`local`, `no-run-id`, `base-unprimed`, from `RECOVER_SKIPPED_REASONS`) and `checkpoints` (`written`, `failed`, `skipped`); the reason enum gains `job-image-recover-unsupported`, `recover-store-unset`, `recovery-enqueued`, `recovery-host-lost`, `recovery-cap`, `recovery-checkpoint-absent` and `recovery-superseded`, each with its outcome and comment. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.recover` (forge only, refused on cron and beside `run.command`, the store and the image capability it needs, job level only when `true`, a skew row, model-callable). **`INT-CONTAINER-JOB-INPUTS` AMENDED**: an armed job keeps its transcript file with both switches off; a recovery's `/workspace` is the base cloned from the store by sha with the checkpoint written over it and the trust paths reset, and its `/session` file is the checkpoint's transcript; no input names the store. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_RECOVER` and `PI_RECOVERING` (from the processor's call bag, reserved, structural), the `recover` capability token and its evidence, ten `CAPABILITY_GATES` rows. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the exit line's `recovery: {orphans, replayed, interrupted, notStarted}`, exit codes UNCHANGED, the `2` / `config` refusals of the recovery inputs and of a staged transcript that did not resume. **`INT-RUN-PROGRESS-KEY` AMENDED**: the key is the run id; the optional `replayed`, and that it was added at `v: 1` as an optional key (an older reader refuses such a key whole). **`INT-LIVE-TRANSCRIPT-STREAM` AMENDED**: the key is the run id. **`INT-WORKSPACE-CHECKPOINT-STORE` AMENDED**: Status (called by the recovery flow: who calls each method, the 20 s live snapshot bound, `sweep()` without `active` and why that is safe), the trust-path sentence, Traces to. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: `stageRecovered` writes only into the job folder and reads no key; promotion is unchanged. **`INT-SDK-SESSION-OPTIONS` UNCHANGED, checked**: the session is created with the same options; `toolExecution` is set on the agent after creation. **Code evidence**: worker/src/run-checkpoint.mjs, worker/src/run-budget-ledger.mjs, worker/src/recovery-queue.mjs, worker/src/run-history.mjs, worker/src/triggers.mjs, worker/src/env-allowlist.mjs, worker/src/image-preflight.mjs, worker/src/run-container.mjs, worker/src/prepare-github.mjs, worker/src/session-store.mjs, worker/src/run-progress.mjs, image/runner/src/config.mjs, image/runner/run-job.mjs. |
 | 2026-10-17 | Issue #645, part 2, review round 1. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the reason enum gains `recovery-unsafe-extensions` and `recovery-failed` (nine durable-run reasons, each with its outcome and comment), `recoverSkipped` gains `workspace-extensions`, `base-unprimed` also covers an unreadable extensions check, `recovery-host-lost` is described with the extended deadline, superseded with the settled-record check. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**: the counts now reach the record through the log sink's `close()` and `runContainer`'s `recovery` (present only when the block was there). **`INT-RECOVERY-JOB` CORRECTED**: the data strips `RECOVERY_STRIPPED_KEYS`; the pending member carries the host and the enqueue time; the deadline extends by `RECOVERY_EXTEND_MS` up to `RECOVERY_MAX_WAIT_MS`. **`INT-RUN-CHECKPOINT-POINTER` CORRECTED**: `recovery-failed` also removes it; the settled record is superseded's first test. **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED**: doctor's unnamed-fleet warning, and the extensions rule. **`INT-WORKSPACE-CHECKPOINT-STORE` UNCHANGED by this row, checked**: its transcript cap (`maxTranscriptBytes`, 256 MiB), chunked deadline-bound copy and pruning to two checkpoints were written by its author and agree with the code and with `DES-RUN-CHECKPOINT-PAIRED`. |
+| 2026-10-17 | Issue #646, part 1: steering, the operator path. **NEW `INT-STEER-INBOX-CONTRACT`**, written from `worker/src/steer-inbox.mjs`, `steer-framing.mjs`, `inbox-relay.mjs`, `steer-ack.mjs`, `inbox-settle.mjs`, `steer-cli.mjs` and `image/runner/src/inbox.mjs`: per RUN (`runIdOf`, through `sanitizeJobId`); the keys `run:steer:target:<hex32>` (ZSET scored `now + 30 s`, PEXPIRE 60 s), `run:steer:open:<runId>` (host, PX 30 s, the one authority), `run:inbox:<runId>` (LIST), `run:inbox:state:<runId>` (HASH with `_count` and `_bytes`), `run:inbox:fallback:<runId>`, `run:inbox:closed:<runId>`; the hour TTL and who renews it; the entry JSON and its source and author agreement; the ids (forge: sha256 of `forge\0` and the delivery GUID, 32 hex; operator: 16 random bytes); the caps (16 messages, 64 KiB, 8 KiB, refused never cut, withdrawn counted, the 16 KiB file measured at push); the scripts and their returns (PUSH `dup`, `closed`, `gone`, `full`, `ok` in that order of checks; WITHDRAW's prior; CLOSE's `[list, state]`; MARK's compare and set; the liveness MULTI); never throws; the file `<seq:06d>-<id>.json` (1-based list position), written `.<id>.tmp` 0444 and renamed after the mark, body `{"v":1,"id","mode","source","content"}`, the runner's refusals; the ack `HMAC-SHA256(exitKey, "pi-dispatch-inbox-ack\0" + runId + "\0" + id)` where the runner's runId is its `PI_JOB_ID`, the CONTAINER name, which the worker verifies against (`ackRunId: name`) under the same attempt's key; the record fields; the logs. **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**: a cross-reference to its sibling channel, and how the two differ (per run, no ack key, armed attempts only); nothing in it changes. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.steer` (every type, cron included, refused beside `run.command`, the image capability and the named arming skips, job level only when `true`, a skew row, model-callable behind the confirm), and the skew list's sentence gains it. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `/inbox`, read only, beside the job directory, per attempt, why it is neither `/job` nor `/session`, and `PI_STEER`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the mount list gains `/inbox:ro` (relabelled where the rule holds); `PI_STEER` (only for an armed attempt, reserved, structural); the `steer` capability token and its evidence (two greps and the read-only mount check), eleven `CAPABILITY_GATES` rows, reason `job-image-steer-unsupported`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the two refusal rows (`2` / `steer-no-exit-key`, `2` / `steer-inbox-missing`) and the exit line's `steer: {delivered, pending}`, exit codes UNCHANGED, advisory, never recorded. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the conditional tail keys `steered` (`delivered`, `late`, `withdrawn`, counted at the final close, absent when the close failed or the outcome was not final) and `steerSkipped` (`venue-copies`, `no-exit-key`, `no-transcript`, `no-inbox`), and the reason enum gains `job-image-steer-unsupported` beside the already listed `steer-inbox-missing` and `steer-no-exit-key`. **`INT-LIVE-TRANSCRIPT-STREAM` AMENDED**: a delivered message appears as one `note` (`pi-dispatch-inbox: ` and the framed text, redacted and capped) through the existing custom-message rule, its `details` never; nothing queued, withdrawn or late appears. **`INT-WEBHOOK-PAYLOAD-SUBSET` UNCHANGED, checked**: nothing in this release reads a payload field, and the framing names a forge author only by the numeric id and association the subset already carries (no login). **`INT-SDK-SESSION-OPTIONS` UNCHANGED, checked**: the session is created with the same options; the inbox is one more inline extension factory in the existing `extensionFactories` list beside the await and progress tools, and adds no discovery path. **Code evidence**: worker/src/steer-inbox.mjs, worker/src/steer-framing.mjs, worker/src/inbox-relay.mjs, worker/src/steer-ack.mjs, worker/src/inbox-settle.mjs, worker/src/steer-cli.mjs, worker/src/run-container.mjs, worker/src/container-spec.mjs, worker/src/env-allowlist.mjs, worker/src/reserved-env.mjs, worker/src/redact-secrets.mjs, worker/src/image-preflight.mjs, worker/src/triggers.mjs, worker/src/triggers-file.mjs, worker/src/run-history.mjs, worker/src/live-transcript.mjs, image/runner/src/inbox.mjs, image/runner/src/config.mjs, image/runner/run-job.mjs, image/Dockerfile, image/verify-image.sh. |
+| 2026-10-17 | Issue #646, part 1, review round 1. **`INT-STEER-INBOX-CONTRACT` CORRECTED** to the code after the round: F6, the text is scrubbed by `scrubSteerText` (the console answer's scrub, then the Unicode tag block U+E0000 to U+E007F, U+200B to U+200D, U+2060 to U+2064, U+180E and U+FEFF removed, and U+FF40, U+02CB and U+1FEF folded to the ASCII backtick so the fence grows), no NFKC and why, an unpaired surrogate refused, the extra scrub kept off `scrubAnswerText`; F1, the `RESET` script (`resetClosedInbox`: only while `closed` exists, DEL of list, state, fallback and closed, run before `registerLive`; an open inbox kept; a failed reset never written into nor re-baselined, `steer_inbox_closed`); F5, a verified prior line marks a waiting message delivered at the baseline, and the residual named (a message delivered just before a crash can be delivered again by the recovery; unverified earlier lines deliberately not trusted); F3, the verified exit line's `deliveredIds` marked delivered after the transcript acks drain and before the relay stops; F2, the failed listener's terminal branch closes the inbox; who writes the states and the logs updated. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**: the exit line's `steer` gains `deliveredIds` (at most 16 32-hex ids in delivery order, dropped whole when malformed), which ARE acted on off a signed line, while `runContainer`'s result keeps `{ delivered, pending }`; the earlier "no decision reads it" now covers the counts only. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the runner's block is still not recorded, its ids only move inbox states before the close; F2's settle from the failed listener. **`INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-TRANSCRIPT-STREAM` and `INT-CANCEL-CHANNEL-CONTRACT` UNCHANGED by this row, checked.** **Code evidence**: worker/src/steer-inbox.mjs (`scrubSteerText`, `boundSteerText`), worker/src/inbox-relay.mjs, worker/src/steer-ack.mjs, worker/src/run-container.mjs, worker/src/run-history.mjs (`steerCounts`, `STEER_DELIVERED_IDS_MAX`), worker/src/start.mjs, image/runner/src/inbox.mjs (`counts`). |
