@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import * as realFs from "node:fs";
+import { existsSync, mkdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { GIT_READ_FLAGS } from "../src/git-hardening.mjs";
@@ -38,41 +39,165 @@ test("a non-git folder -> null", () => {
 
 // --- injected exec unit cases: no real git needed ---
 
+/** An exec double answering rev-parse, config and status like git would, recording every call. */
+function fakeGit({ status = "", revParse = "/r/.git\n/r/.git\nsha1\n" + "a".repeat(40) + "\n", fail = null } = {}) {
+	const calls = [];
+	const exec = (bin, args, opts) => {
+		calls.push({ bin, args, opts });
+		if (fail && args.includes(fail)) throw new Error("fatal: not a git repository");
+		if (args.includes("rev-parse")) return revParse;
+		if (args.includes("config")) throw Object.assign(new Error("none"), { status: 1 });
+		return status;
+	};
+	return { exec, calls };
+}
+
 test("injected exec: nonempty porcelain output -> true", () => {
-	assert.equal(gitDirty("/any", { exec: () => " M f.txt\n" }), true);
+	assert.equal(gitDirty("/any", { exec: fakeGit({ status: " M f.txt\n" }).exec }), true);
 });
 
 test("injected exec: empty or whitespace-only output -> false", () => {
-	assert.equal(gitDirty("/any", { exec: () => "" }), false);
-	assert.equal(gitDirty("/any", { exec: () => "   \n" }), false);
+	assert.equal(gitDirty("/any", { exec: fakeGit({ status: "" }).exec }), false);
+	assert.equal(gitDirty("/any", { exec: fakeGit({ status: "   \n" }).exec }), false);
 });
 
-test("injected exec: a throwing exec (not a repo) -> null", () => {
-	assert.equal(
-		gitDirty("/any", {
-			exec: () => {
-				throw new Error("fatal: not a git repository");
-			},
-		}),
-		null,
-	);
+test("injected exec: a throwing rev-parse (not a repo) or status -> null", () => {
+	assert.equal(gitDirty("/any", { exec: fakeGit({ fail: "rev-parse" }).exec }), null);
+	assert.equal(gitDirty("/any", { exec: fakeGit({ fail: "status" }).exec }), null);
+	assert.equal(gitDirty("/any", { exec: fakeGit({ revParse: "relative\n/r/.git\nsha1\n" + "a".repeat(40) + "\n" }).exec }), null, "a path git did not make absolute");
+	assert.equal(gitDirty("/any", { exec: fakeGit({ revParse: "/r/.git\n/r/.git\nsha1\nnot-a-sha\n" }).exec }), null);
 });
 
-test("injected exec receives the porcelain status args for the folder", () => {
-	let received;
-	gitDirty("/some/folder", {
-		exec: (bin, args) => {
-			received = { bin, args };
-			return "";
-		},
+test("injected exec: the status runs hardened against a scratch GIT_DIR, never with -C on the folder", () => {
+	const { exec, calls } = fakeGit();
+	gitDirty("/some/folder", { exec });
+	assert.equal(calls[0].bin, "git");
+	assert.deepEqual(calls[0].args.slice(0, GIT_READ_FLAGS.length + 2), [...GIT_READ_FLAGS, "-C", "/some/folder"], "the reads ride the hardening");
+	const status = calls.find((c) => c.args.includes("status"));
+	assert.ok(status.args.includes("core.fsmonitor=false"));
+	assert.ok(!status.args.includes("-C"), "the status never names the folder as a repository");
+	assert.equal(status.opts.env.GIT_WORK_TREE, "/some/folder");
+	assert.notEqual(status.opts.env.GIT_DIR, "/r/.git", "the folder's own git directory is never the status's");
+	assert.ok(status.args.includes("--ignore-submodules=all"), "a submodule's own config is never read either");
+});
+
+// --- the folder's git config is agent-writable (a local job mounts the folder): nothing in it may run on the host ---
+
+/** A committed repository whose config and attributes name a filter that would touch `sentinel` if git ran it. */
+function hostileRepo(how) {
+	const dir = gitRepo({ dirty: false });
+	const sentinel = join(tempDir("gd-sentinel-"), "ran");
+	const cmd = `sh -c 'touch ${sentinel}; cat'`;
+	const g = (args) => execFileSync("git", ["-C", dir, ...args]);
+	if (how === "config") {
+		g(["config", "filter.x.clean", cmd]);
+		writeFileSync(join(dir, ".git", "info", "attributes"), "* filter=x\n");
+	} else if (how === "process") {
+		g(["config", "filter.x.process", cmd]);
+		writeFileSync(join(dir, ".gitattributes"), "* filter=x\n");
+	} else if (how === "include") {
+		const inc = join(tempDir("gd-inc-"), "inc");
+		// Quoted: in a config file an unquoted `;` starts a comment and would cut the command short.
+		writeFileSync(inc, `[filter "x"]\n\tclean = "${cmd}"\n`);
+		g(["config", "include.path", inc]);
+		writeFileSync(join(dir, ".gitattributes"), "* filter=x\n");
+	} else if (how === "fsmonitor") {
+		g(["config", "core.fsmonitor", cmd]);
+	}
+	// Stat-dirty with the same bytes, then a real change: each forces git to hash the file through the filter.
+	const later = new Date(Date.now() + 5000);
+	utimesSync(join(dir, "f.txt"), later, later);
+	return { dir, sentinel };
+}
+
+for (const how of ["config", "process", "include", "fsmonitor"]) {
+	test(`a filter or monitor in the folder's own git config never runs on the host (${how})`, () => {
+		const { dir, sentinel } = hostileRepo(how);
+		// Stat-dirty with the same bytes is clean; the two that wrote an in-tree .gitattributes are dirty by that untracked file.
+		assert.equal(gitDirty(dir), how === "process" || how === "include", "the answer is still right");
+		writeFileSync(join(dir, "f.txt"), "changed\n");
+		assert.equal(gitDirty(dir), true);
+		assert.equal(existsSync(sentinel), false, "the agent-written command never ran");
 	});
-	assert.equal(received.bin, "git");
-	// The hardening rides in FRONT of the subcommand, and this is the site where it is load-bearing rather
-	// than defensive: `status` refreshes the index, so it invokes `core.fsmonitor`, and the folder it reads
-	// is the one a local job mounts writable at /workspace. An agent that writes `.git/config` there gets
-	// its command run on the HOST by the next `pi-dispatch run`.
-	assert.deepEqual(received.args, [...GIT_READ_FLAGS, "-C", "/some/folder", "status", "--porcelain"]);
-	assert.ok(received.args.includes("core.fsmonitor=false"), "the flag that actually stops the hook must be present");
+}
+
+test("dirtiness the scratch read must still see: staged, untracked, and an untracked file info/exclude ignores", () => {
+	const staged = gitRepo({ dirty: true });
+	execFileSync("git", ["-C", staged, "add", "-A"]);
+	assert.equal(gitDirty(staged), true, "a staged change");
+	const untracked = gitRepo({ dirty: false });
+	writeFileSync(join(untracked, "new.txt"), "x\n");
+	assert.equal(gitDirty(untracked), true, "an untracked file");
+	writeFileSync(join(untracked, ".git", "info", "exclude"), "*\n");
+	assert.equal(gitDirty(untracked), true, "an exclude list inside the agent-writable .git cannot hide the operator's untracked work");
+	writeFileSync(join(untracked, ".gitignore"), "new.txt\n");
+	assert.equal(gitDirty(untracked), true, "a working-tree .gitignore is itself untracked, so still dirty");
+});
+
+test("a linked worktree is read through its own index, and an unborn HEAD is null", () => {
+	const main = gitRepo({ dirty: false });
+	const wt = join(tempDir("gd-wt-"), "wt");
+	execFileSync("git", ["-C", main, "worktree", "add", "-q", "--detach", wt]);
+	assert.equal(gitDirty(wt), false);
+	writeFileSync(join(wt, "f.txt"), "changed\n");
+	assert.equal(gitDirty(wt), true);
+	assert.equal(gitDirty(main), false, "the main tree is not the worktree");
+	const unborn = tempDir("gd-unborn-");
+	execFileSync("git", ["-C", unborn, "init", "-q"]);
+	assert.equal(gitDirty(unborn), null);
+});
+
+test("the caller's own GIT_DIR or index cannot redirect the read", () => {
+	const dir = gitRepo({ dirty: true });
+	const other = gitRepo({ dirty: false });
+	const before = { GIT_DIR: process.env.GIT_DIR, GIT_INDEX_FILE: process.env.GIT_INDEX_FILE };
+	process.env.GIT_DIR = join(other, ".git");
+	process.env.GIT_INDEX_FILE = join(other, ".git", "index");
+	try {
+		// rev-parse reads with -C, so an inherited GIT_DIR would point it elsewhere; the status env never inherits one.
+		const { exec, calls } = { calls: [], exec: null };
+		const spy = (bin, args, opts) => (calls.push(opts?.env ?? null), execFileSync(bin, args, { ...opts, env: opts?.env ?? withoutGit() }));
+		assert.equal(gitDirty(dir, { exec: spy }), true);
+		const statusEnv = calls.find((e) => e && e.GIT_WORK_TREE);
+		assert.ok(statusEnv && !statusEnv.GIT_DIR.startsWith(other));
+		void exec;
+	} finally {
+		for (const [k, v] of Object.entries(before)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+	}
+});
+
+function withoutGit() {
+	return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
+}
+
+test("an assume-unchanged or skip-worktree bit in the agent-written index cannot hide a change", () => {
+	for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
+		const dir = gitRepo({ dirty: false });
+		execFileSync("git", ["-C", dir, "update-index", flag, "f.txt"]);
+		writeFileSync(join(dir, "f.txt"), "the operator's uncommitted edit\n");
+		assert.equal(gitDirty(dir), true, flag);
+		assert.match(String(execFileSync("git", ["-C", dir, "ls-files", "-v"])), flag === "--skip-worktree" ? /^S f\.txt/m : /^h f\.txt/m, "only the copy was changed");
+	}
+});
+
+test("a symlinked index is never read through", () => {
+	const dir = gitRepo({ dirty: false });
+	// An index that is a link to another repository's index: never read, so git answers with no index, which is dirty.
+	const other = gitRepo({ dirty: false });
+	realFs.rmSync(join(dir, ".git", "index"));
+	realFs.symlinkSync(join(other, ".git", "index"), join(dir, ".git", "index"));
+	assert.equal(gitDirty(dir), true, "the linked index was not used");
+});
+
+test("the scratch directory is removed, also when git fails", () => {
+	const made = [];
+	const fs = { ...realFs, mkdtempSync: (p) => { const d = realFs.mkdtempSync(p); made.push(d); return d; } };
+	gitDirty(gitRepo({ dirty: true }), { fs });
+	gitDirty("/nonexistent-folder", { fs });
+	const { exec } = fakeGit({ fail: "status" });
+	gitDirty("/any", { fs, exec });
+	assert.ok(made.length >= 2);
+	for (const d of made) assert.equal(existsSync(d), false, d);
 });
 
 // --- localRepoProblem (issue #524): the worker's folder rule, said before anything is queued ---
