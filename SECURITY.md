@@ -66,6 +66,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A job container's `/outbox/priorities.json` | **None**, agent-authored | A portfolio job's plan. Read host-side on a `completed` exit only, `lstat`-checked, opened with `O_NOFOLLOW` and `fstat`ed, at most 16 KiB, and judged by the same parser and ladder as the operator's own plan. Its `reason` text is never logged and never enters the run record |
 | A portfolio job's `/job/portfolio.json` | **Host-written, read-only** | The facts the manager plans with. Ids, digests, integers, instants, enum tokens and operator labels (project ids and member labels as projects.json names them, a folder by its basename) only: no issue text, title, plan reason or path, because the next run reads it as facts |
 | A job container's `/session` transcript | **None**, agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges. Since #643 every job has one unless the worker sets `PI_LIVE_TRANSCRIPTS=0` (a non-resume job's is an empty live file in its own job folder, never promoted), and the worker also tails it during the run to publish a redacted copy to Valkey: parsed as data, redacted, escaped and capped before it leaves, never executed or fed to a model. Since #644 the worker also reads run progress from it (turns, steps, the tool running, and the phases a `report_progress` call names): display only, never trusted, since the agent can write any line into it ([Run progress](#what-is-not-defended-v1)) |
+| The **checkpoint store** (`PI_CHECKPOINTS_DIR`, else `<PI_SESSIONS_DIR>/.checkpoints`) | **None** for its contents (agent-authored trees and transcripts); **Operator** for the directory | Since #645 a trigger with `run.recover` has its running jobs checkpointed into it: the job's whole workspace and its transcript, written by the worker from the host side, never mounted into any container. A recovery writes those bytes back into a new job's workspace, so a restore re-checks every path with the snapshot's own rules and then resets `.pi/`, `.agents/` and the root `AGENTS.md`/`CLAUDE.md` to the run's base commit, so nothing the agent wrote there loads as the repository's own; a repository with `.pi/extensions/` gets no recovery, because an extension's imports cannot be reset ([Durable runs](#what-is-not-defended-v1)) |
 | A **resurrected sandbox**'s operator shell (`pi-dispatch sandbox`) | **Operator — the same trust as a terminal on this host** | A third channel, and the first the **operator** opens rather than the agent. Not a job container: no minted token, no provider key, no agent running, started only by a keypress. It re-mounts a finished run's workspace, which for a forge job holds attacker-influenced code — the same trust shape as checking out a stranger's pull request locally. Every isolation flag still applies; ports it publishes are `127.0.0.1`-only and last only while it does |
 | The **venue** a job's container is built in (`run.backend`, `PI_BACKENDS`) | **Operator — the same trust as the daemon they point the worker at** | A different axis from every row above. Those ask *who wrote this*; this asks *who is holding the execution*. Today there is one venue, the Docker daemon the worker's docker CLI resolves, which is the operator's own machine unless `DOCKER_HOST` or a docker context points it elsewhere; the worker reads that answer at boot and before each job, logs a redirect, and a floor asking `credentialTransit=enforced` refuses one. It judges the endpoint's form, so a unix socket or loopback port that is really a tunnel to another machine still reads as this host. A venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and the isolation flags in **this worker's argv do not reach it**. What bounds it is a declaration an operator reads (`docs/backends.md`), a floor they can require of every blessed venue, and a boot refusal when the two disagree. |
 | The operator console process (`pi-dispatch-console serve`) | **Operator, the same trust as the admin extension** | It runs as the deployment's account and writes through the same read-model funnels as the panel. It renders untrusted text (issue titles, and from #641 on run text) but only escaped, after the control-byte scrub, under a strict CSP and behind the operator role; it executes none of it and feeds none of it to a model. It listens on loopback or a 0600 unix socket, never on the receiver ([The operator console](#the-operator-console)) |
@@ -623,6 +624,43 @@ Stated openly rather than discovered later:
     The last edit, with the outcome from the run record, is still made after a 429 and tried once more a second later,
     so the comment does not say "running" after the run; a 403 or 404 stops that one too.
   - Set `PI_RUN_PROGRESS=0` on every worker to stop reading progress: no key, no record field and no status comment.
+- **Durable runs keep transcripts and whole workspaces on disk, and a crash loop costs real money.** Since #645 a
+  forge trigger with `run.recover: true` has its running jobs checkpointed, so a run the worker loses (a crash, a kill,
+  a lost host, a container that dies on an infrastructure fault) continues from its last checkpoint instead of
+  starting over ([`docs/durable-runs.md`](docs/durable-runs.md)).
+  - **The checkpoint store is the session store's PII class.** Each checkpoint holds the job's transcript (issue
+    text, tool output, the agent's own text) and its whole workspace tree, for up to 7 days after its last checkpoint
+    (removed earlier when the run ends). It lives in `PI_CHECKPOINTS_DIR`, by default `.checkpoints` inside
+    `PI_SESSIONS_DIR`, mode `0700`, owned by the worker's account, and is never mounted into a container. Put it on
+    a disk you would put transcripts on, outside the temp directory and every git repository; doctor checks the
+    owner and the mode and warns under the temp directory.
+  - **What a recovery trusts in the restored tree.** The tree was written by the agent, so a recovery resets `.pi/`,
+    `.agents/` and the root `AGENTS.override.md`, `AGENTS.md` and `CLAUDE.md` files (in every casing) to their content
+    at the commit the run started from before its container starts, and does not start when that reset fails. Without
+    it an agent could plant an extension or rewrite the instructions, crash itself, and have the recovery load them as
+    the repository's own. Every other path is restored as the agent left it, which is the point: it is the work.
+    The reset cannot see what an extension imports (a file outside `.pi/`, a package from `node_modules`), so a
+    repository whose default branch has anything under `.pi/extensions/` gets no recovery at all: its runs are not
+    armed (`recoverSkipped: "workspace-extensions"`) and run as before.
+  - **The secret scan and its limits.** A checkpoint that holds the job's minted forge token or a resolved
+    `run.secrets` value, in a file's bytes, a file or directory name or a link target, is refused whole and the run
+    keeps the checkpoint it had. The match is literal: a value the agent encoded or split is not caught. The
+    transcript copy is not scanned (it has the transcript's exposure, as with `run.resume`). A salvage checkpoint,
+    taken from a crashed attempt's job folder after that attempt died, has no secret values to match, so it is stored
+    unscanned; the store is host-private and a forge token from a minted App installation is dead within the hour.
+  - **Self-induced recoveries are capped.** The agent can end its own container (kill its runner) and that reads as
+    an infrastructure exit, which a `run.recover` run continues. Each run is continued at most twice, and each
+    container reserves its own dollar hold up to the per-job cap before it starts, so a crash loop costs at most
+    (1 + retries + recoveries) per-job caps for one run: for a forge job, two queue attempts plus two recoveries, at
+    most four. A crashed container's hold stays charged in full (it is never settled down from the transcript's usage,
+    which the agent can write). The third loss ends the run (`recovery-failed`, commented and paged).
+  - **Pause grants nothing.** A live checkpoint freezes the container with the runtime's `pause` (the cgroup freezer)
+    for at most a few seconds while the host reads the workspace. It adds no capability, mount, exec or network path;
+    the job only sees time jump. A container that cannot be unpaused is killed, and the run is recovered.
+  - **Interrupted side effects are not undone.** A push, a comment or an MCP call that was running when the run was
+    lost may or may not have happened. The recovery tells the agent so and how to check (fetch first, push with
+    `--force-with-lease`, look for an existing pull request, read the comments), and never re-runs anything but the
+    builtin file tools on its own. It is checkpointed, not exactly once.
     Any value but `0`, `1` or empty refuses to boot.
 - **Prompt injection is not prevented, only bounded.** Untrusted text is kept out of the trusted region
   of the prompt by *placement*, not by filtering — content-filtering natural language is not a security
@@ -995,3 +1033,7 @@ Stated openly rather than discovered later:
   never copied into `PI_SESSIONS_DIR`, never handed to another job, removed before a sandbox is kept, and deleted with
   the job folder when the run ends. While the run lasts it is as sensitive as a stored transcript.
   `pi-dispatch doctor` reports the store and warns whenever a trigger arms the flag.
+- **`run.recover` keeps a second PII store beside the sessions.** The checkpoint store (`PI_CHECKPOINTS_DIR`, by
+  default `<PI_SESSIONS_DIR>/.checkpoints`) holds whole workspaces as well as transcripts, for up to 7 days. Give it
+  the same disk and mode as `PI_SESSIONS_DIR`, leave room for it (its cap is 20 GiB), and on a fleet name every worker
+  (`PI_WORKER_NAME`) so a lost run's recovery goes to the machine holding its checkpoint.

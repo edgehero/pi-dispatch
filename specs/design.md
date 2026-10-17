@@ -6271,8 +6271,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   workspace's realpath (read back from `/proc/self/fd/<fd>`), or the whole snapshot is abandoned (`tree-changed`).
   Where no proc directory exists (macOS) the pause is the only guard against a directory swapped for a link, and
   that residual is stated in the module's header and in `INT-WORKSPACE-CHECKPOINT-STORE`.
-  Doctor's `pausable` fact line currently words a venue that cannot freeze as one where "a checkpoint is read while
-  the job runs"; that is not a mode this decision admits, and the wiring change reconciles the two.
+  Since the wiring change (issue #645, part 2) the caller is the run checkpointer (`DES-RUN-CHECKPOINT-PAIRED`):
+  `frozen` for a live checkpoint, taken between its pause and its unpause, and `dead` for an exit or salvage checkpoint
+  of a container that has exited. Doctor's line for a venue that cannot freeze now says its jobs get exit checkpoints
+  only, which is the mode this decision admits.
   **Two git commands touch the workspace, each bounded.** `primeBase` fetches the base from `<workspace>/.git`
   before the container starts, when that repository is still the worker's own fresh clone. And when new bytes exceed
   the cap, `check-ignore --no-index` with `GIT_WORK_TREE` set reads the ignore FILES to drop build output: no index,
@@ -6289,9 +6291,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   re-read), and it does not cover the transcript copy.
 - **Trust paths on restore.** A restore writes agent-authored bytes into the next attempt's workspace, and some paths
   there are not data to that attempt: `.pi/` (settings, extensions and prompts pi discovers) and the root context
-  files pi loads as instructions. As of this change `restore` writes them like any other path. A later change
-  (issue #645's recovery wiring) resets `.pi/` and the root context files to the base commit's on restore, so a
-  resumed attempt trusts in those places only what the base holds.
+  files pi loads as instructions. `restore` writes them like any other path, and the recovery then resets `.pi/`,
+  `.agents/` and the root context files to the base commit's (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`, issue #645 part
+  2), so a resumed attempt trusts in those places only what the base holds.
 - **Rejected**:
   - *`git add -A`, `git stash create` or `git commit` against the agent's tree.* The two-line version, and it runs
     the agent's repository: its `.git/config` (a clean filter, `core.fsmonitor`, a signing program, an `include`, a
@@ -6318,10 +6320,348 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     Writing the blob bytes exactly is the only way the round trip is byte for byte.
   - *A tarball per checkpoint.* No deduplication (a 2 GiB repository whose agent touched three files would cost 2
     GiB a checkpoint rather than three blobs), and no cheap change list for the restore to apply.
-- **Traces to**: no requirement yet; the requirement arrives with issue #645's recovery change.
+- **Traces to**: `REQ-RUN-RECOVERY`, `DES-RUN-CHECKPOINT-PAIRED`, `DES-RECOVERY-TRUST-PATHS-FROM-BASE`,
   `INT-WORKSPACE-CHECKPOINT-STORE`, `INT-SESSION-STORE-CONTRACT`, `DES-CONTAINER-BACKEND-REGISTRY`,
   `CONST-ISOLATION-CONTAINER-PER-JOB`; implemented in `worker/src/workspace-checkpoint.mjs`,
   `worker/src/checkpoint-paths.mjs` and `worker/src/git-hardening.mjs` (`STORE_GIT_FLAGS`, `storeGitEnv`).
+
+## DES-RUN-CHECKPOINT-PAIRED
+
+- **Status**: issue #645, part 2 (2026-10-17). `worker/src/run-checkpoint.mjs` (`makeRunCheckpointer`), wired by
+  `worker/src/start.mjs` into the live transcript opener and by `worker/src/run-container.mjs` around the container.
+- **Decision**: a checkpoint of a running `run.recover` job is a PAIR, the transcript prefix and the workspace tree
+  that prefix produced, taken with the container frozen so the two cannot disagree. One live checkpoint is, in order:
+  1. **pause** the container through its venue's `pause` verb (`DES-CONTAINER-BACKEND-REGISTRY`'s `pausable`: docker
+     and podman `pause`, the cgroup freezer), bounded at 15 s;
+  2. **read the transcript offset while paused**, from the file itself: the byte just past its last complete line
+     (`lastCompleteLineEnd`, the file opened `O_NOFOLLOW | O_NONBLOCK` and required to be a regular file, since
+     `/session` is the agent's to write). Not the tailer's last offset, which can lag the file by a poll: pi may have
+     appended a tool result whose effect is already in the frozen tree. A partial last line (pi frozen mid write) is
+     left out, never cut into;
+  3. **snapshot** the tree and copy the transcript's `[0, offset)` into the store (`INT-WORKSPACE-CHECKPOINT-STORE`,
+     `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`), whose manifest and `CURRENT` are the commit point. start.mjs bounds a
+     snapshot at 20 s (`snapshotTimeoutMs`, the module's default is 60 s), since that is how long a paid container
+     can stand frozen; a tree too big to walk in time is skipped (`timeout`) and the exit checkpoint is the fallback.
+     The transcript copy is capped (`maxTranscriptBytes`, 256 MiB, judged on the offset: `transcript-too-large`) and
+     made in 1 MiB chunks against the same deadline, and the store keeps only the newest checkpoint and the one before
+     it (`INT-WORKSPACE-CHECKPOINT-STORE`, pruning);
+  4. **unpause** in a `finally`, after every pause that took and after one whose answer was a timeout (the freeze may
+     still land; that thaw does not escalate). An unpause asked three times (`UNPAUSE_TRIES`) without success leaves a
+     container that will never run again while the worker waits on it for the whole job timeout, so `runContainer`
+     kills it (then removes it if the kill was refused) and the run ends as an infrastructure exit, which recovers
+     from the checkpoint just committed;
+  5. **write the pointer** (`INT-RUN-CHECKPOINT-POINTER`) only after the commit, so a reader that finds a pointer finds
+     a checkpoint behind it; a pointer write that fails leaves the previous one (stale, never ahead).
+- **Quiet points.** A live checkpoint is TRIGGERED only at a quiet point: an assistant message with no tool calls, or
+  the tool result that answers the last outstanding call of the latest assistant message (`makeQuietTracker`, over
+  the tailer's parsed lines; a call without an id holds the point closed until the next assistant message). There
+  the tree and the transcript agree and a recovery has nothing to answer. The offset is still read in step 2, so a
+  line pi appended after the quiet point is included with the tree it matches. At least `minIntervalMs` (60 s) apart,
+  the first one 60 s after the container starts (a run that ends inside a minute needs none, and an exit checkpoint
+  covers it), one in flight per job, never on a `prior` or `replay` line of the tailer (an earlier attempt's or a
+  rewrite's). A host runs at most two snapshots at once (`HOST_SNAPSHOT_CONCURRENCY`); a live checkpoint only TRIES
+  for a slot, because waiting would freeze the container at a moment that is no longer the quiet point that asked.
+- **Never throws, never holds the job.** `consume` returns at once and the checkpoint runs beside the job. A failure
+  is counted and backed off (the wait doubled per failure, up to 16 times the interval); three in a row (`maxFailures`) stop
+  live checkpoints for the attempt (`checkpoint_degraded`). A frozen spell longer than the pause bound commits and is
+  backed off like a failure. A permanent answer turns live checkpoints off at once: a venue that cannot pause
+  (`not-pausable`, rootless podman on cgroup v1), a store that was never primed or whose base is too large.
+- **The exit checkpoint.** After the container is gone, on an exit the processor may recover from (an infrastructure
+  exit of an armed run), `exit({ kind: "exit" })` takes one more checkpoint with `quiesced: "dead"` and no pause,
+  waiting first for a live one in flight. It captures what happened since the last live checkpoint.
+- **The salvage checkpoint.** A recovery job that lands on the host that crashed may find the lost attempt's job folder
+  still there (the pointer names its basename). Before the manifest is read, one checkpoint is taken from that folder
+  (`kind: "salvage"`, `quiesced: "dead"`: the boot reaper stopped every job container before this worker took a job),
+  only when its transcript is not shorter than the checkpoint's, then the folder and the container id file beside it
+  (`<jobDir>.cid`) are removed (`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`). The boot also sweeps orphaned `jobs/job-*`
+  folders older than the job timeout, keeping any a pointer of this host names, with their `.cid` files, and a stale
+  `job-*.cid` regular file whose folder is already gone.
+- **Venues without pause.** A venue whose bundle carries no `pause`/`unpause` pair gets no live checkpoints
+  (`checkpoint_live_off`, `not-pausable`), so a worker crash mid-run cannot be recovered there (its stall leaves no
+  checkpoint); its infrastructure exits still get an exit checkpoint and recover. Doctor says which venues are which.
+- **Numbering.** A checkpoint's `seq` continues the run across attempts and recoveries: past the manifest's and the
+  pointer's, read once per attempt before any pause, and past a `stale-seq` answer by a growing jump. A checkpoint's
+  `attempt` is the run's container number from the budget ledger (`DES-RUN-BUDGET-LEDGER`), unique across retries and
+  recoveries, which BullMQ's attempt count is not.
+- **Why**: a transcript without its tree, or a tree without its transcript, cannot be continued: the model would
+  describe edits that are not there, or the tree would hold edits the model never made. Freezing is what makes both
+  one instant, and what makes the walker's by-path reads sound (`DES-CHECKPOINT-WALKER-NOT-GIT-ADD`).
+- **Rejected**:
+  - *Checkpoint on every tool result.* A paid container frozen dozens of times a minute, each freeze a provider stream
+    stalled; the minute interval bounds the work a loss can cost to about a minute plus whatever ran since.
+  - *The tailer's offset as the cut.* Up to a poll behind the file, so the tree could hold a result the transcript
+    does not.
+  - *Waiting for the host's snapshot slot.* The freeze would land after the quiet point passed.
+  - *Pausing a venue that cannot (rootless podman on cgroup v1) by stopping and starting it.* That is a restart, not a
+    freeze, and the agent's processes would not survive it.
+- **Traces to**: `REQ-RUN-RECOVERY`, `INT-WORKSPACE-CHECKPOINT-STORE`, `INT-RUN-CHECKPOINT-POINTER`,
+  `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`, `DES-CONTAINER-BACKEND-REGISTRY`, `DES-LIVE-TRANSCRIPT-STREAM`.
+- **Code evidence**: worker/src/run-checkpoint.mjs (`makeRunCheckpointer`, `makeQuietTracker`, `lastCompleteLineEnd`,
+  `makeSemaphore`, `DEFAULT_RUN_CHECKPOINT_LIMITS`, `UNPAUSE_TRIES`); worker/src/run-container.mjs (`stopFrozen`, the
+  checkpoint handle); worker/src/live-transcript.mjs (the opener's `checkpoint`); worker/src/recovery-queue.mjs
+  (`makeSalvager`, `sweepOrphanJobDirs`, `pointedJobDirs`); worker/test/run-checkpoint.test.mjs.
+
+## DES-RECOVERY-REPLAY-CLASSES
+
+- **Status**: issue #645, part 2 (2026-10-17). `image/runner/src/recover.mjs`, called by `image/runner/run-job.mjs`;
+  the image declares the `recover` capability.
+- **Decision**: a recovering runner answers every ORPHAN (a tool call of the transcript's last usable assistant
+  message with no result) before the model is asked anything, by re-running it or by a fixed result, then continues
+  with a fixed recovery prompt.
+  - **The orphans** (`findOrphans`): the last assistant message whose `stopReason` is not `error` or `aborted` (pi-ai's
+    own rule: such a message is dropped at request time), and its calls with no later `toolResult`. Only a tail of
+    tool results and system messages counts as the batch still open; a user, custom or later assistant message after
+    it means pi already closed that batch, and nothing is answered.
+  - **The replay set** (`replayClass`): a call replays only when its name is one of `read`, `ls`, `grep`, `find`,
+    `edit`, `write` (`REPLAY_TOOLS`), the tool is active now, and its registry entry's source is pi's own builtin
+    (`sourceInfo.source === "builtin"` AND `sourceInfo.path === "builtin:<name>"`), or when it is the job's own
+    `report_progress`, recognised as the inline factory. Their effect is confined to the workspace the worker restored
+    to match the transcript, and `report_progress` has none. **The builtin source check** is what keeps a repository
+    or overlay extension that registers its own `read` (which replaces the builtin in the registry) from being
+    replayed as though it were pi's. Everything else is HELD: bash (a command may reach anywhere), an MCP or codemode
+    call, `await_human_input`, an extension's tool, an excluded tool, and any name this run does not know.
+  - **The ordering rule**: replay in order while the orphans replay. The first HELD orphan is `interrupted` when it is
+    the first orphan overall, else `not-started`; every orphan after it is `not-started`, replayable or not, because
+    once one call's effect is unknown a later call could act on a state the model has not seen. Texts are fixed
+    (`INTERRUPTED_TEXT`, `NOT_STARTED_TEXT`), `isError: true`, marked `details.piDispatchRecovery`; a replayed result
+    is the tool's own, marked `replayed`. After answering, an orphan still left refuses the run (a config error)
+    rather than hand the model pi's "No result provided".
+  - **Why sequential, and why no intent entry.** A `run.recover` job runs its tools one at a time
+    (`session.agent.toolExecution = "sequential"` right after `createAgentSession`). pi-agent-core's parallel executor,
+    the default, persists a batch's results only after the WHOLE batch, so a loss mid-batch leaves every call an
+    orphan whatever actually ran, and a push that happened is indistinguishable from one that never started. Under the
+    sequential executor each result is persisted as it lands, so only the FIRST orphan can have started. That one fact
+    is what the labels rest on, and it is why no "about to run X" intent entry is written: the transcript already
+    says which call was next, and an intent entry would add a write per call to learn nothing more. It is also why the
+    runner refuses `PI_RECOVERING` without `PI_RECOVER`. The cost is wall time on a batch of independent calls, which
+    is why it is opt-in.
+  - **Executing**: after `createAgentSession`, the shadow checks and the MCP start, before the prompt, each replayed
+    call goes through pi-agent-core's exported `runToolCall` with the session's own `beforeToolCall` and
+    `afterToolCall`, which are the extensions' `tool_call` and `tool_result` hooks, so a replayed call meets every
+    permission check a model-issued one would. Each answer is appended with `sessionManager.appendMessage` and the
+    same object assigned into `session.agent.state.messages`, so a loss during recovery leaves the answered prefix on
+    disk. pi-coding-agent does not re-export `runToolCall`, so the runner pins `@earendil-works/pi-agent-core` exactly
+    (`CONST-PI-VERSION-PINNED`, `pi-pin-check.mjs`, the pi-bump table) and `pinned-api.test.mjs` holds that it is the
+    copy pi-coding-agent loads.
+  - **The prompt**: always the fixed `RECOVERY_PROMPT`, never the task prompt (which the transcript holds): the job
+    was interrupted and restored, the `.pi/` and `.agents/` directories and the root `AGENTS.override.md`, `AGENTS.md`
+    and `CLAUDE.md` were reset to the commit the run started from (so re-apply a change made there), interrupted calls may or may not have
+    taken effect, and how to check before repeating anything outside the workspace (`git fetch` and compare,
+    `--force-with-lease`, `gh pr list --head`, read the comments).
+  - **The exit line** carries `recovery: { orphans, replayed, interrupted, notStarted }`; exit codes are UNCHANGED.
+- **Rejected**:
+  - *Appending the answers to the session file before `createAgentSession`.* Simpler, but the replayed calls would run
+    with no extension loaded, so an extension's `tool_call` hook (a permission check, the job's own reserved-name
+    guard) would never see them.
+  - *`ctx.executeTool`.* It is the nested call a RUNNING tool makes (pi's `_executeNestedToolCall`, at 1.2.0): it
+    needs a model-issued parent call in flight, runs against the tools-callable-by-tools set rather than the active
+    tools, and records the call on the parent's result message instead of producing the orphan's own result. A
+    recovery has no parent call; `runToolCall` (what that path itself uses underneath) runs validation, the hooks and
+    execute and emits nothing, so the runner controls exactly what is persisted.
+  - *`session.agent.continue()` after answering.* It refuses a transcript ending on an assistant message, and even
+    after the answers it would let the model carry on without being told the run was interrupted, the trust paths
+    reset, or how to check for an effect that may have happened.
+  - *Replaying bash when the command "looks" read-only.* A shell command's effect is not decidable from its text.
+  - *Marking each tool `executionMode: "sequential"`.* It reaches only the tools this runner registers, not the
+    builtins or an extension's.
+- **Traces to**: `REQ-RUN-RECOVERY`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `DES-RUN-PROGRESS` (the marks), `CONST-PI-VERSION-PINNED`.
+- **Code evidence**: image/runner/src/recover.mjs (`findOrphans`, `replayClass`, `recoverSession`, `REPLAY_TOOLS`,
+  `RECOVERY_KEY`, `RECOVERY_PROMPT`); image/runner/run-job.mjs; image/runner/src/config.mjs (`parseRecover`);
+  image/runner/test/recover.test.mjs; image/runner/test/pinned-api.test.mjs.
+
+## DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST
+
+- **Status**: issue #645, part 2 (2026-10-17). `worker/src/recovery-queue.mjs`, the processor's infra-exit path and
+  start.mjs's failed listener.
+- **Decision**: a lost `run.recover` run is continued by a NEW queue job, routed to the queue of the host that holds
+  its checkpoint, through one path whatever lost it.
+  - **One path for a stall and an infrastructure exit.** Both call `enqueueRecovery({ job, cause, pointer })`. The
+    processor calls it on an infrastructure exit of an armed run (exit 1, an unknown code, a detached container, a
+    container the checkpointer stopped) after its exit checkpoint, and RETURNS `failed` / `recovery-enqueued` instead
+    of throwing, so BullMQ spends no second attempt beside it; not enqueued (no pointer, the cap, a fault), it throws
+    today's `InfraRetry`. The failed listener calls it for a terminal stall (`maxStalledCount: 0` failed the job at
+    pickup, no processor ran) of an armed job with a pointer and no settled record; enqueued, it writes the lost
+    attempt's record (`failed` / `recovery-enqueued`), and posts no failure comment and fires no `on_failure`, because
+    the run continues; not enqueued, today's comment and page.
+  - **The id: `<runId>.r<n>`, never `:r<n>`.** BullMQ 5.80.4 refuses a custom id containing `:` unless it splits into
+    exactly three parts (`Job.validateOptions`), so `.r<n>` keeps every run id the producers mint acceptable: the
+    forge and local ids hold no colon, cron and manual ids hold two (`repeat:a:b.r1` is three parts). Any other colon
+    count is refused before the claim (`job-id-refused`). The id is never parsed back: the job data carries
+    `recoveryOf` (the run id) and `recovery` (n), and every per-RUN key (the progress key, the live stream, the status
+    comment's id, the pointer, the store, the ledger) is spelled from `recoveryOf ?? job.id` (`runIdOf`), while the
+    run RECORD stays per job id.
+  - **No deduplication.** The original forge job carried a semantic dedup key (`repo#n:flow`, ten minutes), and a
+    recovery is the same target and flow by construction, so a copied key would have the recovery swallowed by the
+    job it continues (measured against a live Valkey). The custom job id is the only dedup a recovery needs.
+  - **One attempt.** `attempts: 1`: a lost recovery is recovered again (n + 1) by the same path, never retried from
+    scratch by the queue.
+  - **The cap**: two recoveries per run (`RECOVERY_CAP`). The enqueuer refuses n past it (`job_recovery_refused`,
+    `recovery-cap`). A recovery job whose container ran and ended on an infrastructure exit, and which could not queue
+    another (the cap, no pointer, a fault), RETURNS `recovery-failed` with its own comment, because a throw would fail
+    its one attempt with only the generic comment; it is the run's final outcome (store, pointer and ledger removed),
+    and start.mjs pages it once (`pagesAsReturnedFailure`, also when the job lost its lock after returning). A recovery
+    lost to a stall with no further recovery takes today's failure path. The processor refuses a recovery job numbered
+    past the cap (`recovery-cap`, with its own comment) as a backstop.
+  - **Never-started faults of a recovery wait, they do not fail.** A recovery job has one attempt, so every
+    never-started `InfraRetry` it throws (a pointer read, a ledger write, a restore that met a lock, a failed trust
+    reset) becomes a `RecoveryWaitHold` of 60 s (`RECOVERY_RETRY_WAIT_MS`, `recovery_retry_held`): delayed without
+    spending the attempt, bounded by the host-lost deadline.
+  - **The NX claim.** `SET run:recover:claim:<run>:<n> <host> PX 7d NX` (`INT-RECOVERY-JOB`). The winner adds the job and
+    records it pending. A loser does not answer "not enqueued" (that would send its caller down today's path beside a
+    continuing run): it asks the target queue for the job and, when it is not there (the winner died between claim
+    and add), adds it itself; the custom id makes the add idempotent, so racing enqueuers make one job. A failed add
+    releases the claim.
+  - **The data**: the lost job's data less its per-attempt hold keys (`recoveryDataOf`, `RECOVERY_STRIPPED_KEYS`: the
+    rootful Podman restart hold's and the network keeper's young-hold and crash-loop marks, which index.mjs writes with
+    `updateData`, and `enqueueNonce`), plus `recoveryOf`, `recovery` and `recoverBy`. Copied, a hold mark would make
+    the recovery's first pickup believe it had already been holding; a test requires every `updateData` key to be
+    stripped or kept on purpose (`RECOVERY_KEPT_HOLD_KEYS`, empty).
+  - **Routing.** The pointer names the host that took the checkpoint and whether it drains a host queue
+    (`hostQueue`, set only when `PI_WORKER_NAME` is declared). With one, the recovery goes to `pi-jobs@<host>`; without,
+    to the shared queue, which on an unnamed deployment is one host's. A pointer is peer-written, so its routing
+    fields are re-validated before they route.
+  - **The host-lost deadline.** Each recovery carries `recoverBy` (now plus six hours, `RECOVERY_TTL_MS`) and is a
+    member of the sorted set `run:recover:pending` (member: its queue, id, the checkpoint's host and the enqueue time;
+    score: its current deadline). Every host's sweep (at boot and on the retention tick) claims due members by `ZREM`
+    (one caller wins each). **A deadline is not a verdict**: a recovery can wait past it on a host that is alive (a
+    pause window, a paused queue, a full host), so when the checkpoint's host still beats in the host registry, the
+    queue is paused, or the registry cannot be read (a Valkey blip is not a lost host), the deadline is moved an hour
+    on (`RECOVERY_EXTEND_MS`, `job_recovery_deadline_extended`), never past seven days after the enqueue
+    (`RECOVERY_MAX_WAIT_MS`, the pointer's life). Only a host absent from a readable registry, or the hard maximum,
+    makes it lost (logged `host-absent` or `max-wait`): the sweep removes a recovery still waiting, delayed or paused,
+    writes its record (`recovery-host-lost`), comments and fires `on_failure`; a recovery that started, finished or
+    vanished is only dropped from the set; a fault puts the member back. Six hours to the first verdict, not seven
+    days: a host that reboots is back in minutes, and an issue whose host is really gone deserves to be told within a
+    working day.
+  - **Superseded.** Asked FIRST, before the cap, the pointer and the store: the records of the base run and of every
+    earlier recovery (`<runId>`, `<runId>.r1`, ...) are read, this host's file then the fleet mirror (`readRunRecord`,
+    start.mjs), and a `completed` or `policy` record means the run reached its final outcome, so the recovery is
+    refused silently (`recovery-superseded`). Records first because a half-failed cleanup (a store removal that failed
+    beside a pointer delete that landed) must never put a failure comment under a run that completed. Then the old
+    test: a missing pointer AND a missing store entry (a final outcome removes the store before the pointer) is
+    superseded too. A missing pointer beside a store still there is ambiguous (a Valkey blip reads as null) and is a
+    wait, never guessed.
+  - **The wait hold.** A recovery whose base run (or an earlier recovery of it) still runs on this host may have a
+    live container spending under a hold it would settle as crashed, and would start a second agent on the same
+    branch. The recovery's own entry (`<runId>.r<n>`: the processor admits a job before it runs it) is excluded from
+    that check, or every recovery would wait on itself. It is held (`RecoveryWaitHold`, `recovery_wait_hold`): moved to the delayed set for 30 s without spending
+    its one attempt, until that container is gone or the host-lost deadline ends it.
+  - **Salvage and the orphan sweep**: `DES-RUN-CHECKPOINT-PAIRED`. The salvage snapshot runs without the lost
+    attempt's secret values (they died with it), so its secret scan has nothing to match (`CONST-TOKEN-SCOPED-PER-JOB`).
+- **Why**: the store is host-local (`INT-WORKSPACE-CHECKPOINT-STORE`), so a continuation has to run where the
+  checkpoint is, and it has to say which run it continues; a BullMQ retry can do neither (its queue and its data are
+  the original's), and a stall re-run is exactly what `CONST-RETRY-INFRA-ONLY` forbids.
+- **Rejected**:
+  - *Raising `maxStalledCount` for armed jobs.* A stall re-run is the original job run again from scratch, with no
+    checkpoint and no cap of its own, on whichever host picks it up.
+  - *A recovery id with a colon (`<runId>:r1`).* Refused by BullMQ for a forge id.
+  - *Copying the dedup key.* Swallowed by the original's window.
+  - *Routing by a lock on the host's checkpoint store.* The store is not shared; the pointer in Valkey is what any host
+    can read.
+  - *Waiting for the checkpoint's seven days before telling the run, whatever the host's state.* An issue whose host
+    is really gone would sit silent for a week; the seven days are only the cap for a host that is still alive.
+  - *Failing every recovery at its deadline.* A deadline met on a living host (a pause window, a paused queue, a full
+    host) would post a false "the worker has not come back" and a false page; hence the registry check.
+- **Traces to**: `REQ-RUN-RECOVERY`, `CONST-RETRY-INFRA-ONLY`, `INT-RECOVERY-JOB`, `INT-RUN-CHECKPOINT-POINTER`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`.
+- **Code evidence**: worker/src/recovery-queue.mjs (`makeRecoveryEnqueuer`, `recoveryJobId`, `runIdOf`,
+  `makeHostLostSweep`, `makeSalvager`, `RECOVERY_CAP`, `RECOVERY_TTL_MS`); worker/src/processor.mjs (`recoverOrThrow`,
+  `RecoveryWaitHold`, the superseded and cap gates); worker/src/index.mjs (`recovery_wait_hold`, `runIdOf` for the
+  stream); worker/src/start.mjs (`recoverStall`, the host-lost sweep); worker/test/recovery-queue.test.mjs;
+  worker/test/start-wiring.test.mjs.
+
+## DES-RUN-BUDGET-LEDGER
+
+- **Status**: issue #645, part 2 (2026-10-17). `worker/src/run-budget-ledger.mjs`, used by the processor for
+  `run.recover` jobs only.
+- **Decision**: every dollar hold of a durable run is recorded in ONE Valkey hash per run (`INT-RUN-BUDGET-LEDGER`)
+  before its container starts, and every transition of a hold is one Lua compare-and-set that moves it only FROM
+  `held`, so a hold is settled, released or written off exactly once whichever attempt or recovery asks.
+  1. **The slot**: the run's job-count slot is claimed once (`claimSlot`, `HSETNX slot held`). "new": the attempt
+     reserves the job-count ledgers as every job does. "carried": an earlier attempt or the run a recovery continues
+     already holds it, so nothing is reserved again and nothing refunded. A never-started retry of an armed run does
+     not refund the slot either: the retry carries it, and refunding it would let the retry run on a slot nothing
+     counts (the safe side: a run whose every attempt never started keeps one slot counted).
+  2. **The container number**: `nextSeq` (one `HINCRBY` with the TTL): attempt 1 is 1, its retry 2, a recovery's
+     container the next. It addresses the hold and is the checkpoints' `attempt`.
+  3. **The hold record**: after `reserveDollars`, `recordHold(seq, hold)` writes `h<seq>` (the validated hold JSON)
+     and `s<seq> = held` only when that seq has no state yet. **Contract: an armed run never runs a container without a
+     recorded hold.** Any error releases the hold just reserved and throws a never-started `InfraRetry` before tokens.
+  4. **Settle and release**: a recorded hold is settled after the exit only by the call that moved it `held` to
+     `settled`, and only that call adjusts a window key; given back on a never-started exit only by the call that moved
+     it to `released`. Anything else ("not-held", a ledger error) leaves the reservation in every window, the floor.
+  5. **Crashed holds**: a recovery, before its own reserve, moves every hold of an earlier container still `held` to
+     `settled-crashed` in one script (`settleCrashed`), bookkeeping only: no `INCRBY`, no refund, the window keys keep
+     the whole reservation. The caller has confirmed those containers dead (the wait hold keeps a recovery from
+     starting while one of its run's containers runs on this host). Two racing recoveries settle each hold once
+     between them.
+- **Why**: before #645 a hold lived only in the worker's memory. A worker that crashed between reserve and settle
+  left the hold at the floor in every window (the safe side), but nothing remembered it, so a recovery could not know
+  whether that container was still spending under it and could neither settle it nor keep it from a double release.
+  **Why the floor and not the transcript's usage**: a crashed container's real spend is unknown, and its transcript's
+  usage is agent-writable, so settling down from it would let an agent that crashed itself refund its own spend. The
+  exposure is stated in `CONST-BUDGET-BEFORE-TOKENS`: one hold per container, (1 + retries + recoveries) per run.
+- **Every method never throws**: a Valkey fault or a bad argument returns `{ error }` and logs
+  `run_budget_ledger_error` with the operation and the error code only; for every write that guards money the
+  processor turns it into a never-started `InfraRetry`.
+- **Rejected**:
+  - *Carrying a crashed hold's remainder into the recovery's budget.* It rests on the agent-writable usage.
+  - *Releasing a crashed hold so the recovery can reserve afresh.* The crashed container may still be alive on a host
+    that lost its worker, spending against a hold already given back.
+  - *A read, then a write.* That is the race the scripts exist to avoid; `read` is for doctor and tests only.
+- **Traces to**: `REQ-RUN-RECOVERY`, `CONST-BUDGET-BEFORE-TOKENS`, `INT-RUN-BUDGET-LEDGER`,
+  `DES-DOLLAR-RESERVE-AND-SETTLE`.
+- **Code evidence**: worker/src/run-budget-ledger.mjs (`makeRunBudgetLedger`, `validHold`, the five scripts);
+  worker/src/processor.mjs (`claimSlot`, `nextSeq`, `settleCrashed`, `recordHold`, `settle`, `release`);
+  worker/test/run-budget-ledger.test.mjs; worker/test/processor-durable.test.mjs.
+
+## DES-RECOVERY-TRUST-PATHS-FROM-BASE
+
+- **Status**: issue #645, part 2 (2026-10-17). `worker/src/trust-paths.mjs` (`resetTrustPaths`), called by the
+  processor after a recovery's restore.
+- **Decision**: after a recovery restores the lost run's workspace and before its container starts, every path pi
+  LOADS as trusted configuration is put back to its content at the run's base commit, and a name absent there is
+  deleted: `.pi/` whole (pi's `CONFIG_DIR_NAME`: extensions, skills, prompts, themes, `SYSTEM.md`, `APPEND_SYSTEM.md`,
+  settings), `.agents/` whole (pi loads `.agents/skills` from the working directory and its ancestors), and the root
+  context files pi's `loadContextFileFromDir` tries, `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`,
+  `CLAUDE.MD`. Names match case-insensitively at the root, because a case-insensitive host filesystem serves
+  `agents.md` as `AGENTS.md`. A nested `AGENTS.md` is ordinary work and stays: pi reads context files from the working
+  directory and its ancestors only. The names are pi's, held to the pinned pi by `worker/test/trust-paths.test.mjs`,
+  which reads pi's resource loader and package manager.
+- **Why it is mandatory**: a fresh job gets these paths from the base repository's default branch, merge-gated content
+  (CLAUDE.md, "a serviced repo's `.pi/extensions` really does load in a job"). A restored tree was written by the agent.
+  Without the reset an agent could write `.pi/extensions/evil.js` or rewrite `AGENTS.md`, crash itself (kill its own
+  runner, which is an infrastructure exit), and have the recovery's fresh pi load its code in the runner as the
+  repository's own, with the forge token in the environment. A reset that fails means the recovery would start on the
+  agent's configuration, so it does not start (a never-started `InfraRetry`). The recovery prompt names the reset so
+  the model re-applies a legitimate change it made there.
+- **What the reset cannot cover, so a base with extensions is not recovered** (review round 1). A merge-gated
+  extension under `.pi/extensions/` is code, and code can import a file outside `.pi/` (`../lib/x.js`) or a bare
+  package resolved from `/workspace/node_modules`; in a recovered run those come from the restored tree, which the
+  agent wrote, and no reset can enumerate what an extension imports. So `baseHasExtensions` (`ls-tree` of the base
+  commit from the workspace's own `.git`, `.pi` and `extensions` matched case-insensitively, never the working tree)
+  decides at ARM time: a fresh run whose base holds anything under `.pi/extensions/` is not armed
+  (`recoverSkipped: "workspace-extensions"`; no ledger, no checkpoints, no pointer; an unreadable base fails closed as
+  `base-unprimed`), and a recovery asks again on the base the store hands over and refuses one with a comment
+  (`recovery-unsafe-extensions`), an unreadable answer being a wait. Rejected: resetting `node_modules` and every path an
+  extension names (not enumerable: an import can be computed); running such a recovery with extensions off (the
+  repository's own tools and guards would silently disappear mid-run).
+- **How**: removal by `fs.rm` (a link is removed, never followed), then the base's entries listed with `ls-tree` and
+  read with `cat-file` against the workspace's `.git` with `--git-dir` explicit and the hardened read flags, so git
+  never consults the agent's working tree; regular files created exclusively (`wx`), symlinks the base holds written
+  LAST, so no write traverses a link it created. That `.git` is still the worker's own clone from the store: a
+  checkpoint never carries a `.git` segment, and it is `lstat`ed as a real directory first.
+- **Rejected**:
+  - *`git checkout <base> -- .pi AGENTS.md`.* It runs git with the agent's working tree: its `.gitattributes` choose
+    filters and encodings, and its symlinks sit in the paths git writes through.
+  - *Excluding the trust paths from the snapshot.* Then a legitimate edit of `AGENTS.md` (a task that asks for one)
+    would be silently lost from the tree as well as from what pi loads; the reset loses it only from what pi loads,
+    and the prompt says so.
+  - *Trusting the restored tree because the run was the same run.* The run's author of those bytes is the agent.
+- **Traces to**: `REQ-RUN-RECOVERY`, `CONST-NO-CONTEXT-FILES-MANDATORY`, `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`.
+- **Code evidence**: worker/src/trust-paths.mjs (`resetTrustPaths`, `TRUST_ROOT_NAMES`, `isTrustRootName`);
+  worker/src/processor.mjs; worker/test/trust-paths.test.mjs.
 
 ## DES-SANDBOX-IS-A-FRESH-CONTAINER
 
@@ -6777,6 +7117,14 @@ Considered and declined. Recorded so they are not re-proposed.
   - *Durability buys little inside a throwaway container.* A retry re-clones the repository, so a resumed
     transcript would describe edits that are gone, and continuing on retry is what `REQ-RESUMABLE-SESSION` and
     `CONST-RETRY-INFRA-ONLY` already decline. Job-to-job continuity is `run.resume`'s, at the job boundary.
+    **Answered at our layer since issue #645** (`REQ-RUN-RECOVERY`): an opted-in run is checkpointed by the worker,
+    transcript and workspace together (`DES-RUN-CHECKPOINT-PAIRED`), and a lost run continues in a new container from
+    that pair, with its interrupted calls answered (`DES-RECOVERY-REPLAY-CLASSES`), the restored tree's trust paths reset
+    (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`) and its budget held per container (`DES-RUN-BUDGET-LEDGER`). So this
+    bullet's objection no longer holds against durability itself, and pi-durable gains nothing from it: the checkpoint
+    lives outside the container, where pi-durable's storage would not. pi-durable stays declined on the other
+    grounds above (upstream keeps the coding agent off it, it breaks on almost every release, it loads none of what a
+    job is steered by, its guards are weaker than the floor needs, and the device network).
   - *The device network is the shape this project rules out*: a token that is a shell on the host and a live
     channel into a running agent, against `CONST-ISOLATION-CONTAINER-PER-JOB` and
     `DES-SANDBOX-IS-A-FRESH-CONTAINER`.
@@ -10198,6 +10546,18 @@ a tunnel.
   before the rewritten file's size at the reset. The `ts` handed to `onParsed` is the line's timestamp bounded as the
   stream's `ts` is (from 0 to a day past the read time, else the read time), since the reducer keeps it as a step's
   `since`. The baseline `lstat` runs only when a hook is given, so without one the file is read exactly as before.
+- **The checkpoint consumer** (issue #645, `DES-RUN-CHECKPOINT-PAIRED`): `onParsed`'s flags gain `end`, the file
+  position just past the line's newline (absent for the final read's unterminated tail, which ends at no newline), so
+  a consumer knows a complete-line boundary. The opener takes `checkpoint`, the run checkpointer's `open`; for an
+  attempt `runContainer` hands open arguments (a `run.recover` job the processor armed), its handle is the THIRD
+  consumer of every parsed line, beside the progress sink, each guarded on its own so a throw in one never starves the
+  other, and is reset with the file. It turns the tailing on by itself: start.mjs builds the opener whenever a run
+  checkpointer exists, and an armed job with both switches off still has its file staged and tailed with
+  `stream: false` and no progress sink, because its live checkpoints are driven by its lines. The handle is not closed
+  by the opener's finish but by `runContainer`, before the final read, so no live checkpoint pauses a dead container.
+  **Since #645 the stream's key is the RUN id** (`runIdOf`: `recoveryOf` for a recovery job `<runId>.r<n>`, else the
+  job id), so a recovery continues its run's stream: its first write replaces the lost attempt's entries, as a
+  retry's does.
 - **Why**: the console (#640 to #642) shows every run's record fleet-wide and nothing of what a run is doing. The raw
   log exists only with `PI_CAPTURE_JOB_LOGS=1` and only on the host that ran the job, runner stdout carries id-only
   events, and before this only `run.resume` jobs wrote a transcript file at all. The transcript is the artifact that
@@ -10336,6 +10696,16 @@ a tunnel.
      itself: one bounded `GET` of the key for the earlier attempt's `commentId`, then one bounded edit with the
      record's outcome and the key's last snapshot (`settleUnregisteredStatus`), skipped on a phrase collision and when
      the key holds no id.
+- **Recovered runs** (issue #645, `DES-RECOVERY-REPLAY-CLASSES`). A recovering runner answers the calls the loss cut
+  off with results marked `details.piDispatchRecovery` (`interrupted`, `not-started` or `replayed`). Those calls were
+  made by the lost attempt, so they open no step here. A marked result closes a step still open under its id without
+  counting a step; `interrupted` and `not-started` count as `interrupted` (the word this reducer already uses for a
+  call whose result never came) and are listed in `recent`; `replayed` is its own count, written to the key and the
+  record only above zero, so every other key and record keeps its field set; an unknown mark is an ordinary result;
+  on a replay pass a marked result for a call not open counts nothing. The mark is read from an agent-writable file
+  like everything here: advisory. The progress key, like the stream, is spelled from the RUN id, so a recovery reads
+  its run's `commentId` and edits the same status comment, and the lost attempt's record settles that comment as
+  retrying (`recovery-enqueued`).
 - **Advisory, never trusted.** `/session` is mounted read-write, so the agent can write any line into the file this
   reads, and a forged line costs nothing (#545 is the same class for stdout). Progress therefore decides nothing: no
   classification, budget, exit outcome, retry, alert or gate reads it, every field is bounded so a forged file cannot
@@ -10727,3 +11097,5 @@ a tunnel.
 | 2026-10-17 | The local folder's dirty-tree read. The dirty-tree guard bullet of the local-folder entry (the one beside `localRepoProblem`) gains how `gitDirty` reads: `git status` against a scratch git directory with the index's assume-unchanged and skip-worktree bits cleared, never with the folder's own git config, `info/attributes` or `info/exclude`, which a local job can write; the operator's global config still applies, filter drivers included. Everything else in the entry UNCHANGED, checked. |
 | 2026-10-17 | Issue #645 (durable runs), the backend half. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED** with a fourteenth property, `pausable`: a running job can be frozen by the cgroup freezer and thawed, so the host reads its workspace while nothing in the container runs. Both bundles carry `pause(name)` and `unpause(name)` (`makePauseVerbs` in `backend-local.mjs`), resolving `{ ok }` or `{ ok: false, reason }` with a fixed token, never throwing, bounded at 15 s through `execDockerBounded`; a name that would read as a flag is refused before any spawn (on podman before the cgroup gate too), because `docker pause --help` exits 0. `local` declares it `enforced`; `podman` declares it `enforced` and its verbs refuse before spawning on cgroup v1 (`podmanPausable`, from the kept answered `podman info` every job is admitted on, never a fresh read), where rootless Podman cannot freeze; a venue that cannot freeze gets exit checkpoints only, so no recovery from a worker crash mid-run. An `observedBy` entry was rejected because it would lower the word to `asserted` and name an asserter for a freeze nobody provides. The conformance harness checks it (the verbs against the word, and a freeze round trip through an adapter's `pauseProbe`, abstaining without one), so the bullet that said THREE of the thirteen now says FOUR of the fourteen, and `docs/backends.md` and `docs/podman.md`'s property table carry the row (the latter bolted to the table by `podman-doc.test.mjs`). **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, one bullet for the word. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: pausing grants the container nothing; no mount, flag, capability or network changes, its processes only stop being scheduled. **`DES-JOB-FILES-VIA-VOLUME-SUBPATH` UNCHANGED, checked**: the workspace a freeze holds still is the same bind mount. Nothing calls the verbs yet: the checkpointer is wired into jobs in a later change. **Code evidence**: worker/src/backends.mjs -> PROPERTIES.pausable; worker/src/backend-local.mjs -> makePauseVerbs, PAUSE_TIMEOUT_MS; worker/src/backend-podman.mjs -> podmanPausable, makePodmanBackend; worker/src/backend-conformance.mjs -> checkPausable. |
 | 2026-10-17 | Issue #645, part 1: the checkpoint store. **NEW `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`**: a host-side Node walker, `lstat` only and every open `O_NOFOLLOW`, feeds one `git fast-import` into a host-owned bare store per run while the job's container is held still, and a restore writes blob bytes exactly over a fresh base checkout after judging the whole change list with the snapshot's own path rules. Rejected, each with its reason: `git add -A` or `stash create` against the agent's tree (the agent's `.git/config` filters and hooks, `.gitattributes` changing the stored bytes, nested repositories as gitlinks, one unreadable file aborting); the same walker on an unpaused container (no `openat` in Node, so a directory swapped for a symlink between `lstat` and open copies host files, and a moving tree is torn); a `docker exec` walker inside the container (torn, image dependent); one store per repository (gc and repack races); `git checkout` for the restore overlay (re-applies smudge and eol); a tarball (no deduplication). It records the whole-snapshot refusal on a job secret, over every kept path, every byte read and every link target, and that a later change resets `.pi/` and the root context files on restore. It records the Linux `/proc/self/fd` containment check on every file opened, with the residual where no proc directory exists, and that `check-ignore` runs with the run's `home/` as its cwd and keeps nothing back when it fails. Recorded as found rather than settled: the module never pauses, it records the caller's `quiesced` claim (`frozen` or `dead`), and doctor's `pausable` line still words a venue that cannot freeze as checkpointing while the job runs, which the wiring change reconciles. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the store is never mounted into any container. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: nothing a container receives changed. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: nothing resumes from a checkpoint yet, and nothing calls the checkpointer. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: `pausable` is cited, not changed. **Code evidence**: worker/src/workspace-checkpoint.mjs -> walkTree, importTree, judgeChanges, restoreLocked; worker/src/checkpoint-paths.mjs; worker/test/workspace-checkpoint.test.mjs. |
+| 2026-10-17 | Issue #645, part 2: durable runs (`run.recover`). **NEW `DES-RUN-CHECKPOINT-PAIRED`**: a live checkpoint is pause, the transcript offset read from the file while paused (the end of its last complete line), snapshot, unpause in a `finally` (three failed unpauses stop the container, an infrastructure exit), then the pointer, written only after the commit; triggered only at quiet points (an assistant message without calls, or the result answering the last open call), 60 s apart, one in flight, at most two snapshots a host, backed off and degraded after three failures; an exit checkpoint (dead, no pause) on a recoverable exit; a salvage checkpoint from a crashed attempt's job folder; venues without pause get exit checkpoints only. Rejected: a checkpoint per result, the tailer's offset, waiting for a slot, stop and start as a freeze. **NEW `DES-RECOVERY-REPLAY-CLASSES`**: the orphans, the replay set (`read`, `ls`, `grep`, `find`, `edit`, `write` from pi's builtin source, and the inline `report_progress`), the ordering rule (replay until the first hold; that one `interrupted` if it is the first orphan, else `not-started`, and all after it `not-started`), why sequential execution and why no intent entry, `runToolCall` with the session's hooks, the fixed prompt, the exit line's counts. Rejected: appending before `createAgentSession`, `ctx.executeTool`, `continue()`, replaying bash, per-tool `executionMode`. **NEW `DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`**: one path for a stall and an infrastructure exit, the `.r<n>` id and why not `:`, no deduplication, one attempt, the cap of two, the NX claim with a loser that adds idempotently, routing by the pointer's host queue, the six-hour host-lost deadline and its fleet-wide sweep, superseded (pointer AND store gone; a lone missing pointer is retried), the 30 s wait hold. **NEW `DES-RUN-BUDGET-LEDGER`**: the slot claimed once and carried, the container number, the recorded-hold contract, settle and release by compare-and-set, crashed holds settled at the floor once (`settled-crashed`), why the floor and not the usage. **NEW `DES-RECOVERY-TRUST-PATHS-FROM-BASE`**: `.pi/`, `.agents/` and the root context files reset to the base commit, case-insensitively, and why it is mandatory (an agent could write an extension and crash itself). **`DES-CHECKPOINT-WALKER-NOT-GIT-ADD` AMENDED**: the caller of `quiesced` and doctor's line are reconciled, the trust-path reset is done, Traces to names `REQ-RUN-RECOVERY`. **Rejected alternatives (pi-durable) AMENDED**: the durability bullet is answered at our layer; pi-durable stays declined on its other grounds. **`DES-LIVE-TRANSCRIPT-STREAM` AMENDED**: `onParsed` gains `end`, the checkpoint handle is the third consumer and turns tailing on, the stream's key is the run id. **`DES-RUN-PROGRESS` AMENDED**: recovery marks and `replayed`, and the run-id key. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: `pausable` is used as declared, the verbs ride the call bag from the same bundle. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: a recovery is a fresh container from a restored workspace, no container is kept. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked**: a recovered loss is not terminal, so it comments and pages nothing; the new comments are fixed text. **Code evidence**: worker/src/run-checkpoint.mjs, worker/src/recovery-queue.mjs, worker/src/run-budget-ledger.mjs, worker/src/trust-paths.mjs, worker/src/processor.mjs, worker/src/start.mjs, worker/src/live-transcript.mjs, worker/src/run-progress.mjs, image/runner/src/recover.mjs. |
+| 2026-10-17 | Issue #645, part 2, review round 1. **`DES-RECOVERY-TRUST-PATHS-FROM-BASE` CORRECTED**: a new bullet, what the reset cannot cover: a merge-gated extension can import outside `.pi/` or from `/workspace/node_modules`, so `baseHasExtensions` (the base commit's `ls-tree`) keeps a run whose base holds `.pi/extensions/` from being armed (`workspace-extensions`) and a recovery of one is refused (`recovery-unsafe-extensions`); rejected: resetting what an extension imports, running with extensions off. **`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST` CORRECTED**: a recovery that ran and could not queue another returns `recovery-failed` (own comment, paged once, final-outcome cleanup) instead of failing with the generic comment; every never-started fault of a recovery is a 60 s `RecoveryWaitHold`; the data strips the per-attempt hold keys (`recoveryDataOf`); superseded reads the base run's and earlier recoveries' settled records first (local, then the mirror); the base-running check excludes the recovery's own entry; the host-lost deadline extends by an hour while the host is alive, its queue paused or the registry unreadable, up to seven days (`RECOVERY_MAX_WAIT_MS`), lost as `host-absent` or `max-wait`. **`DES-RECOVERY-REPLAY-CLASSES` CORRECTED**: the prompt names `.pi/`, `.agents/` and the root context files reset to the commit the run started from. Lab: `DES-RUN-CHECKPOINT-PAIRED`'s salvage and boot-sweep bullet CORRECTED, the `<jobDir>.cid` file is removed with its folder, and a stale orphan `.cid` is swept (the lab found one left per crashed attempt). |

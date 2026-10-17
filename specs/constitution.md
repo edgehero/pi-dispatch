@@ -774,6 +774,17 @@ passing, on the record — issue #80.)
   refused slot still counts": a refusal there costs one slot, here it would cost a whole per-job cap of a
   window that ran nothing. A job that cannot spend (every model it may call local and zero-rated) reserves
   nothing and runs under a per-job cap of 0, so the ordering still holds: the cap is checked before each call.
+  **A durable run multiplies holds, never the cap behind each one** (issue #645, `REQ-RUN-RECOVERY`). A run armed
+  with `run.recover` records every dollar hold in a per-run ledger before its container starts
+  (`DES-RUN-BUDGET-LEDGER`), each container reserves its own hold at the same place in the order as any job's, and a
+  recovery carries the run's job-count slot instead of reserving a second one. So the exposure is at most one dollar
+  hold per container, and (1 + retries + recoveries) holds per run, each a full per-job hold: for a forge job, its
+  two queue attempts plus at most two recoveries (one attempt each), so at most four per-job caps per run. A hold that a crashed container left behind is settled at the floor
+  (its whole reservation stays charged in every window) and is never carried into the recovery as a remainder to
+  spend, because the one record of what that container spent is the transcript's usage, which the agent can write.
+  The ordering is UNCHANGED: every refusal a recovery can give (the cap, a superseded run, an absent or foreign
+  checkpoint, the store, the image's `recover` capability) runs before its mint, its clone, the token-cap read and
+  every reserve.
 - **Evidence (upstream)**: `Davidcreador/pi-routines @ 6d2aa64 (v0.5.1)` — `maxRunsPerDay`
 - **Traces to**: `REQ-RUNNER-TURN-BUDGET`, `CONST-RETRY-INFRA-ONLY`, `REQ-SPEND-CAPS-MULTI-WINDOW`
 - **Acceptance**: Given the cap is exhausted, a new trigger consumes zero provider tokens and comments
@@ -906,6 +917,30 @@ passing, on the record — issue #80.)
   joins the list only with a row in the pinned loopback table that drives that family's own `stream()`
   into the status, and (since issue #451) only once it was measured against the real endpoint with a
   real bogus credential.
+  **A durable run is continued, not retried, and only through an explicit, capped job (issue #645).** A forge
+  trigger that sets `run.recover` (`REQ-RUN-RECOVERY`) has its jobs checkpointed: at quiet points the worker freezes
+  the container and stores the transcript and the workspace on its own host (`DES-RUN-CHECKPOINT-PAIRED`). When such
+  a run is lost to infrastructure, either because its container ended on an infrastructure exit (exit 1, an unknown
+  code, a detached container, or a container the checkpointer had to stop) or because its worker died and the stall
+  check failed the job, the worker queues ONE recovery job, `<runId>.r<n>`, to the queue of the host that holds the
+  checkpoint (`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`). The recovery restores the workspace and the transcript and
+  continues the conversation; it does not re-run it. That is still this constraint. Only an infrastructure failure
+  produces a recovery, and nothing is returned as a success: the lost attempt's record is `failed` with reason
+  `recovery-enqueued`. A policy exit, a completed run, the worker's own abort (a timeout, a cancel, a shutdown), an
+  OOM kill and a container that never started are never recovered. Three properties keep it from being the silent
+  re-run the stall paragraph above forbids. It is EXPLICIT: a new job with its own id and record, queued by the
+  worker's own decision, never a BullMQ retry or a stall re-run, so **`maxStalledCount: 0` stays** and a stalled job
+  is still failed at pickup without its processor running; the failed listener, not the processor, decides whether
+  that failure has a continuation. It is CAPPED: two recoveries per run (`RECOVERY_CAP`), each number claimed once
+  (`SET NX`) and checked again by the processor; a recovery whose container ran and could not queue another returns
+  `recovery-failed` (its own comment, one page, the run's final outcome), and a recovery lost to a stall fails as any
+  stalled job does. A never-started fault of a recovery job (its one attempt) is a 60 s delay, not a spent attempt,
+  bounded by the recovery's deadline. It is OPT-IN: a trigger without `run.recover`, an armed run with no checkpoint
+  yet, and a run whose base commit holds `.pi/extensions/` (not armed, `workspace-extensions`) keep today's path
+  unchanged. The cost
+  argument at the top of this Why is what makes it worth having: an infrastructure retry re-clones and re-prompts,
+  paying every turn again, while a recovery pays only for what comes after the checkpoint, plus the one interrupted
+  call the agent may decide to repeat (`DES-RECOVERY-REPLAY-CLASSES`).
 - **Evidence (upstream)**: `taskforcesh/bullmq @ v5.80.4 → src/commands/moveStalledJobsToWait-9.lua:76-97`
   — `local jobSchedulerId = rcall("HGET", jobKey, "rjk")` … `if rcall("EXISTS", schedulerKey) == 1 then
   isRepeatableJob = true`; then `if stalledCount > maxStalledJobCount and not isRepeatableJob then` —
@@ -942,7 +977,14 @@ passing, on the record — issue #80.)
   connection failure and an unanswered probe are retried, and at boot they exit 1 rather than 2, so a
   supervisor brings the service back. A forge whose credential could not be resolved at boot for a
   transient reason is re-resolved on the next job that needs it, not carried as absent for the lifetime
-  of the process.
+  of the process. Given a `run.recover` job whose container ends on an infrastructure exit while it has a
+  checkpoint, the attempt returns `recovery-enqueued` instead of throwing, and exactly one `<runId>.r1` job is
+  queued with one attempt and no deduplication; given the same job's worker killed mid-run, the stall still fails it
+  at pickup without the processor running, and the failed listener queues the same recovery and posts no failure
+  comment; a policy exit, a completed run and a worker abort queue none; a third loss of the same run queues none
+  (a recovery's infrastructure exit then returns `recovery-failed`); a never-started fault of a recovery job is held
+  60 s without spending its attempt (`worker/test/processor-durable.test.mjs`, `worker/test/recovery-queue.test.mjs`,
+  `worker/test/start-wiring.test.mjs`).
 
 ## CONST-PERSONA-IN-CACHED-PREFIX
 
@@ -1019,6 +1061,16 @@ passing, on the record — issue #80.)
   excluded. The provider API key is the acknowledged exception: it cannot be scoped because the agent
   cannot function without it, so it is bounded by a provider-side spend limit instead of by scope. That
   asymmetry is deliberate and documented rather than pretended away.
+  **A workspace checkpoint is a durable medium this project writes on purpose** (issue #645,
+  `INT-WORKSPACE-CHECKPOINT-STORE`), beside the two the paragraphs below admit (a session transcript, the engine's
+  log). An agent that wrote its token into a file would otherwise have it copied to host disk for up to seven days and
+  written back into the next attempt's workspace. So a snapshot is matched against the job's minted forge token and
+  every resolved secret value, in every kept path, every byte read and every symlink target, and one match refuses
+  the whole snapshot (`job-secret-in-tree`): the run keeps the checkpoint it had. Its limits are stated rather than
+  implied: the match is literal (a transformed value is not caught); the transcript copy beside the tree is not
+  scanned (it has the transcript's own exposure, below); and a salvage checkpoint, taken from a crashed attempt's job
+  folder after that attempt died, has no secret values to match against, so it is stored unscanned in the
+  host-private store (`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`).
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-CONTAINER-RUNTIME-CONTRACT`
 - **Acceptance**: (a) **Code-checkable** — no container environment holds a credential that is
   broad-scope or long-lived; the App path scopes the token to exactly one repository; the token is
@@ -1122,6 +1174,8 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-17 | Issue #645, part 2, review round 1. **`CONST-BUDGET-BEFORE-TOKENS` CORRECTED**, the Why's exposure sentence made exact: each container's hold is a full per-job hold, and for a forge job that is its two queue attempts plus at most two recoveries, so at most four per-job caps per run. **`CONST-RETRY-INFRA-ONLY` CORRECTED**, the Why and Acceptance: a recovery whose container ran and could not queue another returns `recovery-failed` (own comment, one page, final outcome) rather than failing exactly as before; a never-started fault of a recovery job is a 60 s delay, not a spent attempt; a run whose base commit holds `.pi/extensions/` is not armed (`workspace-extensions`). Statements UNCHANGED, checked. |
+| 2026-10-17 | Issue #645, part 2: durable runs (`run.recover`). No Statement changed. **`CONST-RETRY-INFRA-ONLY` AMENDED**, the Why and the Acceptance: an opt-in `run.recover` run whose worker died (a terminal stall) or whose container ended on an infrastructure exit (exit 1, an unknown code, a detached container, a container the checkpointer stopped) continues through ONE explicit recovery job, `<runId>.r<n>`, routed to the queue of the host holding its checkpoint, capped at two per run (an NX claim per number, checked again by the processor); the lost attempt's record is `failed` / `recovery-enqueued`, never a success; a policy exit, a completed run, a worker abort, an OOM kill and a never-started container are never recovered; `maxStalledCount: 0` stays, the stalled job is still failed at pickup without its processor, and the failed listener decides whether it has a continuation; a run with no checkpoint keeps today's path. The Statement is **UNCHANGED, checked**: a recovery is produced by an infrastructure failure only, and a completed run is never continued. **`CONST-BUDGET-BEFORE-TOKENS` AMENDED**, the Why only: the exposure is at most one dollar hold per container and (1 + retries + recoveries) holds per run (four for a forge job); a crash-left hold is settled at the floor and never carried, because the transcript's usage is agent-writable; a recovery carries the job-count slot. The ordering is **UNCHANGED, checked**: every recovery refusal (the cap, superseded, the checkpoint, the store, the `recover` capability) runs before the mint, the clone, the token-cap read and the reserve. **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED**, the Why only: the checkpoint is a durable medium written on purpose, so a snapshot holding the minted token or a resolved secret value is refused whole (`job-secret-in-tree`), with its limits (literal match only, the transcript copy unscanned, a salvage snapshot has no secret values to match). **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the checkpoint store is never mounted, a recovery's container gets the same mounts as any job (its workspace restored by the host before the container starts, its transcript staged as the `/session` file), and `pause` only freezes the job's cgroup, granting it nothing. **`CONST-PI-VERSION-PINNED` UNCHANGED, checked**: the runner gains an exact pin on `@earendil-works/pi-agent-core` for `runToolCall`, held by `pi-pin-check.mjs` and the pi-bump table, and a checkpoint from another pi version is refused (`recovery-checkpoint-absent`). **`CONST-ISSUE-TEXT-IS-DATA` UNCHANGED, checked**: the recovery prompt is fixed text, and a restored transcript is replayed as `REQ-RESUMABLE-SESSION`'s is. **`CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: nothing merges. **Code evidence**: worker/src/processor.mjs -> runJob, durableOf, RecoveryWaitHold; worker/src/recovery-queue.mjs; worker/src/run-budget-ledger.mjs; worker/src/run-checkpoint.mjs; worker/src/start.mjs (the failed listener's recoverStall); worker/src/workspace-checkpoint.mjs. |
 | 2026-10-16 | Issue #644, run progress. No statement changed; four articles checked against the new paths. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the worker reads progress from the transcript file it already tails for #643, in the job's own directory; the `report_progress` tool writes nothing outside the transcript and opens no network path, and the container gains no mount (the live file is the #643 one, now staged when either switch is on). **`CONST-ISSUE-TEXT-IS-DATA` UNCHANGED, checked**: the status comment the worker posts and edits holds fixed words, the job id and integers, never a phase name or note, so a later run that reads the thread as data reads no agent text through it; the worker shows phase names and notes escaped to the operator role and hands them to no model. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new refusal of a job armed with `run.progress` on an image without the `reportProgress` capability is a `CAPABILITY_GATES` row, so it runs in the image preflight before the mint, the clone and the reservation; the status comment is posted when the container starts, after every gate. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: progress and the comment never throw into the job (every failure is swallowed and logged), and `report-progress-shadowed` is an exit-2 policy stop, never retried. |
 | 2026-10-16 | Issue #643, live run transcripts. **`CONST-ISOLATION-CONTAINER-PER-JOB` AMENDED, in the Acceptance only; the constraint is unchanged.** Every job now gets a `/session` mount: a non-resume job's is an empty live transcript file in its own job directory, created 0700 and deleted with it, which pi writes and the worker tails to publish a redacted copy to Valkey. Two Acceptance sentences were made false by that and are rewritten: the fork case and the unarmed case no longer have "no `/session` mount" and a byte-identical argv; what still holds, and is what the article protects, is that no other job's transcript and nothing from the store reaches them. Checked against the Statement and Why: the mount is per job and worker-supplied (the enumeration's "none host-wide" stays true), the container gains no network path (the worker reads the file; the runner is untouched), and nothing crosses jobs. |
 | 2026-10-15 | Issue #642, writes and actions from the operator console. **`CONST-TRIGGER-AUTHOR-GATE` AMENDED**: a new clause, AN OPERATOR START. The Statement governs a job started from a webhook, and its Why calls the author gate with the HMAC "the entire" gate on who may spend and run; the console now makes forge jobs with no delivery (an answer to a parked issue run, a re-run of a forge run), so the clause is written rather than left to a reading. The say-so is an operator token's, under a session and a single-use ticket bound to the previewed change, a stronger authority than write access to one repository (its holder controls the deployment already); the job is marked as the operator's (a `console-` delivery id, and for an answer `console.by`, sender `{id: null}` and GitHub association `OWNER`, stated so it is never read as a forge user's claim; a re-run keeps the original start's `trigger`, which passed this gate); and no webhook path widens (the receiver is untouched, `console` lives outside `trigger` and is refused at enqueue unless it is a token name, the worker gates the job like a delivery's). Acceptance gains the viewer, read-only, cross-site and stale-ticket refusals and the enqueue refusal of a bad `console.by`. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the worker still reserves at pickup, after every free gate; the console only shows beforehand, through `estimateReserve`, the reserve the worker will hold, and the answer's trail comment is posted after every pre-spend gate and reserve, just before the container starts, so before any provider call. **`CONST-ISSUE-TEXT-IS-DATA` UNCHANGED, checked**: a console answer reaches the agent as `trigger.comment.body`, rendered in the fenced data region below the delimiter exactly as a forge reply's, and its `console` provenance never enters `event.json` or the prompt; the trail comment is forge text a later run reads as data like any comment. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the console starts no container (the sandbox command is shown, not run). |

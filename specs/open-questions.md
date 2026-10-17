@@ -1966,6 +1966,13 @@ adversarial passes did.
     pinned-assumption tests say what moved.
   - pi-durable drops its experimental label and a minor release passes with no Breaking Changes section.
   - The run records show real spend lost to jobs that died mid-run on infrastructure and were paid for again.
+    **Measurable since issue #645**: a `run.recover` run lost to infrastructure is continued rather than paid for
+    again (`REQ-RUN-RECOVERY`), and its recovery's record carries `recovered` (where the checkpoint came from, which
+    recovery, the runner's orphan counts) beside `recoveryOf`, while the lost attempt's record reads
+    `recovery-enqueued`. So this trigger can now be read off the records instead of argued: count the
+    `recovery-enqueued` records, and for runs without `run.recover`, the infrastructure retries. A durable harness
+    would still have to beat the worker-level checkpoint, which already answers the in-container durability this
+    entry's Position calls cheap to give up (`design.md`, the pi-durable rejection, amended).
 
 ## OQ-042: Who may set the parked label
 
@@ -2053,6 +2060,35 @@ adversarial passes did.
   `SECURITY.md` before it ships. Met: both are in the decision above and in `SECURITY.md`.
 - **Cross-links**: `REQ-CONSOLE-SECURITY`, `DES-OPERATOR-CONSOLE`, `REQ-DURABLE-RUN-HISTORY`, `REQ-RESUMABLE-SESSION`,
   `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM`, `INT-LIVE-TRANSCRIPT-STREAM`.
+
+## OQ-045: Durable runs across hosts, local folders, and the forge mirror
+
+- **Status**: `OPEN` (2026-10-17, issue #645 part 2).
+- **Position**: a lost `run.recover` run is continued only on the host that took its checkpoint
+  (`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`), and only for a forge job. Three things are not covered:
+  - **Transcript and workspace transport across hosts.** The checkpoint store is host-local, the recovery is routed
+    to the checkpoint's host, and a recovery refuses a checkpoint whose manifest names another host
+    (`recovery-checkpoint-absent`, `why: host`). A shared `PI_SESSIONS_DIR` does not change that today: the processor
+    requires the manifest's host to be its own whatever the store's location, and the store's lock, sweep and
+    collision rules were written for one host. A host that never returns therefore ends its runs with
+    `recovery-host-lost`: after six hours once it is gone from the host registry, after up to seven days while it
+    still beats there or its queue is paused. Doctor warns when `run.recover` is armed on a fleet worker with no
+    `PI_WORKER_NAME`, since such a recovery goes to the shared queue.
+  - **Local folders.** A local job is not armed (`recoverSkipped: "local"`). Its folder is durable and the operator's
+    own, so no tree snapshot is needed, but a recovery would replay a transcript over a working tree the lost run
+    changed in place, and the cron refusal's reason applies to every local job until a design says what is restored.
+  - **The forge mirror (part 3).** An opt-in mirror of the workspace (not the transcript, which is PII) to a hidden
+    ref on the forge, so a recovery on another host could fetch the tree; it would still need the transcript from the
+    checkpoint host or a shared store, and it publishes the tree to everyone who can read the repository.
+- **What would change it**: the records show `recovery-host-lost` or `recovery-checkpoint-absent` with `why: host`
+  on real runs; or an operator runs a fleet whose hosts come and go (autoscaled workers) and asks for it; or part 3
+  lands and measures pushes to a custom ref on each forge.
+- **Needs**: for cross-host, a decision on where the transcript lives (a shared store with a lock that spans hosts, or
+  a transport that is not the forge), and the host check relaxed only for it; for local folders, a statement of what a
+  recovery restores in a folder the operator owns; for the mirror, `SECURITY.md`'s statement of what a published tree
+  exposes (deleted refs stay fetchable by sha on GitHub).
+- **Cross-links**: `REQ-RUN-RECOVERY`, `DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`, `INT-WORKSPACE-CHECKPOINT-STORE`,
+  `INT-RUN-CHECKPOINT-POINTER`, `OQ-041`.
 
 ## Revision History
 
@@ -2165,3 +2201,5 @@ adversarial passes did.
 | 2026-10-14 | Issue #641, the console's screens. **`OQ-044` AMENDED, still `OPEN`, still #643's**: #641's run detail shows the record (from this host's file or the mirror, saying which) and no transcript or `.log` for any run, so nothing in it decides where transcripts are shown; the one free text the screens show is BullMQ's `failedReason`, to the operator only and in a detail view only (`REQ-CONSOLE-SECURITY` (l)). **`OQ-035` UNCHANGED, checked**: `failedReason` is still a bounded channel, not a classified one; the console shows it through the same belt, to the operator only, which narrows who reads it and changes nothing about what it may hold. |
 | 2026-10-16 | Issue #643, live run transcripts. **`OQ-044` RESOLVED: ship.** A running job's transcript (not the raw log, not the thinking) is published by the worker to one Valkey stream per job, redacted of the job's own secrets and known token shapes, capped at 2,000 entries, removed 24 h after the run ends (7 days at most while live), readable on the console by the operator role only and by the `/dispatch` panel; `PI_LIVE_TRANSCRIPTS=0` turns it off. The PII placement is stated in `SECURITY.md`: Valkey already held issue text in BullMQ job data for 31 days, and the transcript adds tool output, redacted, for 24 h. **`OQ-014` UNCHANGED, checked**: what a resumed job is handed is still one key's canonical transcript; the live file of a non-resume job is empty, per job, and never promoted. **`OQ-035` UNCHANGED, checked**: `failedReason` is untouched, and the transcript is a separate channel with its own redaction. |
 | 2026-10-16 | Issue #644, run progress. **`OQ-044` UNCHANGED, checked**: progress opens no new place where transcript text is shown; its phase names and notes, which are model text, follow the answer `OQ-044` gave the transcript (redacted, in Valkey for at most 24 h after the run, 7 days while live, to the console's operator role alone), and the forge status comment carries none of them. **`OQ-035` UNCHANGED, checked**: `failedReason` is untouched. No new question is opened. |
+| 2026-10-17 | Issue #645, part 2: durable runs. **`OQ-041` AMENDED, still `WATCH`**: its third trigger (spend lost to runs that died mid-run on infrastructure and were paid for again) is now measurable from the records: a recovery's `recovered` and `recoveryOf`, the lost attempt's `recovery-enqueued`; and the in-container durability its Position called cheap to give up is answered at the worker's layer. **NEW `OQ-045`, `OPEN`**: durable runs across hosts (the store is host-local, the recovery is routed to the checkpoint host and refuses a checkpoint from another host, so a shared `PI_SESSIONS_DIR` does not help today), local folders (not armed, `recoverSkipped: "local"`), and the forge mirror (part 3). **`OQ-014` UNCHANGED, checked**: a checkpoint is never handed to a later run, so the resume population is unchanged. **`OQ-044` UNCHANGED, checked**: no new place shows transcript text; a recovery continues its run's stream. |
+| 2026-10-17 | Issue #645, part 2, review round 1. **`OQ-045` CORRECTED**: a lost host's runs end after six hours only once it is gone from the host registry (up to seven days while it still beats or its queue is paused), and doctor now warns on `run.recover` on a fleet worker with no `PI_WORKER_NAME`. |

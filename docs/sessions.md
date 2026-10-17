@@ -252,6 +252,15 @@ Rules:
   worker then refuses the job before it spends (`trigger-skew`) rather than run it without the tool. Adding
   `awaitInput` to a trigger does the same to its jobs that were already queued: re-run them.
 
+## Durable runs are not sessions
+
+`"recover": true` ([`durable-runs.md`](durable-runs.md)) also keeps a transcript on disk, and by default in this
+store's `.checkpoints` folder, but it is a different thing. A checkpoint belongs to ONE run: it lets that run continue
+after the worker or its container is lost, and it is never handed to the next job. `resume` hands a finished run's
+transcript to the next job on the same key. The two combine: a recovered run of a `resume` trigger continues on its
+own checkpoint, and when it completes its transcript is promoted to the key exactly as the lost run's would have
+been. A recovery that does not complete promotes nothing, so the stored transcript is unchanged.
+
 ## Cost
 
 A resumed job starts with the whole prior conversation in its context, so its per-turn token cost is
