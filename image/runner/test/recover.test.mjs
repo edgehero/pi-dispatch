@@ -244,8 +244,8 @@ test("run-job: run.recover makes the tools sequential right after the session ex
 	// extension exists, so nothing has been spent.
 	const refused = src.indexOf("if (cfg.recovering && !sessionResumed) throw configError(");
 	assert.ok(refused > src.indexOf("openSessionManager({") && refused < src.indexOf("const meter = createUsageMeter({"), "an unresumable checkpoint is refused pre-spend");
-	assert.match(src, /liveExitFields = \(\) => \(\{ [^\n]*\.\.\.recoveryField\(\) \}\);/, "the SIGTERM line carries the counts");
-	assert.match(src, /session: \{ resumed: sessionResumed, reason: sessionReason \}, \.\.\.recoveryField\(\) \}\);\n\treturn outcome\.code;/, "the decided line carries the counts");
+	assert.match(src, /liveExitFields = \(\) => \(\{ [^\n]*\.\.\.recoveryField\(\)[^\n]*\}\);/, "the SIGTERM line carries the counts");
+	assert.match(src, /session: \{ resumed: sessionResumed, reason: sessionReason \}, \.\.\.recoveryField\(\)[^\n]*\}\);\n\treturn outcome\.code;/, "the decided line carries the counts");
 	assert.match(src, /const recoveryField = \(\) => \(recovery \? \{ recovery \} : \{\}\);/, "absent on every other run, so their exit lines are unchanged");
 });
 

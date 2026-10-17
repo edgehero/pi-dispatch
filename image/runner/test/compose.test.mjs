@@ -256,8 +256,10 @@ test("run-job installs the meter and the guards before any extension loads, and 
 	assert.ok(runtime > 0 && sessionManager > runtime && meter > sessionManager && install > meter && check > install && loader > check, "the runtime, the root session id, the meter, the install, the policy check, then the loader");
 	assert.equal(src.split("buildLoadedResourceLoader(").length, 2, "one loader, built once");
 	// A stop that came before the prompt had no session to abort, so the prompt is not sent.
-	// A recovering run (issue #645) answers the interrupted calls and sends the recovery prompt under the same guard.
-	assert.match(src, /\n\t\tif \(meter\.state\.stopReason === null\) \{\n\t\t\tif \(cfg\.recovering\) \{\n[^}]*?recovery = await recoverSession\(\{ session, sessionManager, runToolCall, log \}\);\n\t\t\t\tawait session\.prompt\(RECOVERY_PROMPT\);\n\t\t\t\} else \{\n\t\t\t\tawait session\.prompt\(prompt\);\n\t\t\t\}\n\t\t\}\n/, "a stop before the prompt must keep the prompt, and a recovery, from being sent");
+	// A recovering run (issue #645) answers the interrupted calls and sends the recovery prompt under the same guard. A
+	// steer-armed run (issue #646) starts reading its inbox just before either prompt, so a stopped run reads none.
+	assert.match(src, /\n\t\tif \(meter\.state\.stopReason === null\) \{\n\t\t\tif \(cfg\.recovering\) \{\n[^}]*?recovery = await recoverSession\(\{ session, sessionManager, runToolCall, log \}\);\n\t\t\t\tinbox\?\.start\(\);\n\t\t\t\tawait session\.prompt\(RECOVERY_PROMPT\);\n\t\t\t\} else \{\n\t\t\t\tinbox\?\.start\(\);\n\t\t\t\tawait session\.prompt\(prompt\);\n\t\t\t\}\n\t\t\}\n/, "a stop before the prompt must keep the prompt, and a recovery, from being sent");
+	assert.equal(src.split("inbox?.start()").length, 3, "the inbox starts only just before a prompt");
 	assert.equal(src.split("await session.prompt(").length, 3, "no prompt outside that guard");
 	// And nothing says the command dispatched when the prompt is not sent.
 	assert.match(src, /\n\t\tif \(meter\.state\.stopReason === null\) log\("command_dispatch", \{ command: name \}\);\n/, "command_dispatch only when the command will run");

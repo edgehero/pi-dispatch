@@ -1,5 +1,5 @@
 // Issue #645: a preload (`node --import`) that lets the REAL run-job.mjs run outside a container. The runner's paths
-// are absolute container mounts (/job, /workspace, /session, /outbox, /opt/pi-global, /opt/pi-dispatch) and it has no
+// are absolute container mounts (/job, /workspace, /session, /outbox, /inbox, /opt/pi-global, /opt/pi-dispatch) and it has no
 // seam for them, by design: they are the container contract. This moves each of those roots under the directory named
 // by PI_DISPATCH_TEST_ROOT, for every fs call of the process (sync, callback and promise forms, the ES named imports
 // included through syncBuiltinESMExports) and a spawned child's cwd. Everything else is the runner's own code path.
@@ -8,7 +8,7 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 
 const ROOT = process.env.PI_DISPATCH_TEST_ROOT;
-const MOUNTS = ["/job", "/workspace", "/session", "/outbox", "/opt/pi-global", "/opt/pi-dispatch"];
+const MOUNTS = ["/job", "/workspace", "/session", "/outbox", "/inbox", "/opt/pi-global", "/opt/pi-dispatch"];
 
 const remap = (path) => {
 	const text = path instanceof URL ? (path.protocol === "file:" ? path.pathname : null) : typeof path === "string" ? path : null;

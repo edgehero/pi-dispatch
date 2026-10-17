@@ -1398,13 +1398,14 @@ test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in
 		assert.ok(!loaderSrc.includes(name), `loader.mjs names ${name}`);
 	}
 	assert.ok(!/builtInExtensions|\bbuiltin:\s*true\s*[,}]/.test(runJob + loaderSrc + mcpSrc), "a factory is marked built-in");
-	// Three sources only: the job's MCP document, the tool a job armed with run.awaitInput may end on (issue #625), and
-	// the tool a job armed with run.progress reports with (issue #644).
-	assert.match(runJob, /const extensionFactories = \[\.\.\.\(jobMcp\?\.factories \?\? \[\]\), \.\.\.\(awaitInput\?\.factories \?\? \[\]\), \.\.\.\(reportProgress\?\.factories \?\? \[\]\)\];/, "run-job.mjs passes extensionFactories other than from the job's document, run.awaitInput and run.progress");
+	// Four sources only: the job's MCP document, the tool a job armed with run.awaitInput may end on (issue #625), the
+	// tool a job armed with run.progress reports with (issue #644), and the inbox of a job armed with run.steer (issue #646).
+	assert.match(runJob, /const extensionFactories = \[\.\.\.\(jobMcp\?\.factories \?\? \[\]\), \.\.\.\(awaitInput\?\.factories \?\? \[\]\), \.\.\.\(reportProgress\?\.factories \?\? \[\]\), \.\.\.\(inbox \? \[inbox\.factory\] : \[\]\)\];/, "run-job.mjs passes extensionFactories other than from the job's document, run.awaitInput, run.progress and run.steer");
 	assert.equal(runJob.split("extensionFactories").length - 1, 3, "extensionFactories is built once and passed once");
 	assert.match(runJob, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
 	assert.match(runJob, /const awaitInput = cfg\.awaitInput \? createAwaitInput\(\) : null;/);
 	assert.match(runJob, /const reportProgress = cfg\.reportProgress \? createReportProgress\(\) : null;/);
+	assert.match(runJob, /const inbox = cfg\.steer \? createInbox\(\{ [^\n]*\}\) : null;/);
 	assert.match(runJob, /const jobMcp = mcpDocument \? createJobMcp\(/);
 	assert.match(loaderSrc, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
 });

@@ -363,7 +363,13 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # the variables would ignore both: the interrupted run would resume into pi's "No result provided" for a push or a
 # comment that may have happened, and the model would repeat it. The worker sends them only to an image declaring
 # this token. verify-image.sh checks the baked runner reads the variables and carries the recovery module.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover"
+# `steer` (issue #646) tells the worker this runner reads PI_STEER: it reads the messages the worker relays into the
+# read-only /inbox mount and hands each to the running agent once, as framed data, with an ack MACed under the exit
+# key (image/runner/src/inbox.mjs). An older runner handed the variable would ignore it: every message an operator or
+# a collaborator sent would wait unread while the run reported success. The worker refuses that pairing pre-spend (its
+# `steer` capability row, reason job-image-steer-unsupported). verify-image.sh checks the baked runner reads the
+# variable and carries the inbox module, and that an /inbox mounted read-only is read-only inside the container.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer"
 
 USER pi
 WORKDIR /workspace

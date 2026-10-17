@@ -39,9 +39,10 @@ export function assistantMessage(content, { stopReason = content.some((part) => 
 
 /**
  * The runtime: one assistant message per call from `script` (the last repeats), each request's context kept in
- * `contexts` so a test can read what the model was sent.
+ * `contexts` so a test can read what the model was sent. `onCall(n)` (1-based), when given, runs before call n is
+ * answered, so a test can change the world while that request is in flight (inbox.test.mjs writes a steer file there).
  */
-export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root, api, script) {
+export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root, api, script, { onCall } = {}) {
 	const agentDir = join(root, "agent");
 	mkdirSync(agentDir, { recursive: true });
 	const modelsPath = join(agentDir, "models.json");
@@ -53,6 +54,7 @@ export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root,
 		api,
 		streamSimple(model, context) {
 			contexts.push({ model, messages: context.messages.slice() });
+			onCall?.(contexts.length);
 			const content = script[Math.min(contexts.length - 1, script.length - 1)];
 			const message = { ...assistantMessage(content, { api: model.api }), provider: model.provider, model: model.id };
 			const stream = piAi.createAssistantMessageEventStream();
@@ -65,10 +67,10 @@ export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root,
 }
 
 /** A real AgentSession over `sessionManager`, with the runner's loader and the given inline extension factories. */
-export async function scriptedSession(deps, f, { api, script, sessionManager, extensionFactories = [], excludeTools = [] }) {
+export async function scriptedSession(deps, f, { api, script, sessionManager, extensionFactories = [], excludeTools = [], onCall }) {
 	const { pi, loaderModule } = deps;
 	const loader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, outboxProtocolPath: f.outboxProtocolPath, packagePaths: [], ...(extensionFactories.length > 0 && { extensionFactories }) });
-	const runtime = await scriptedRuntime(deps, f.root, api, script);
+	const runtime = await scriptedRuntime(deps, f.root, api, script, { onCall });
 	const { session } = await pi.createAgentSession({
 		cwd: f.workspace,
 		agentDir: runtime.agentDir,
@@ -79,5 +81,5 @@ export async function scriptedSession(deps, f, { api, script, sessionManager, ex
 		resourceLoader: loader,
 		...(excludeTools.length > 0 && { excludeTools }),
 	});
-	return { session, contexts: runtime.contexts, model: runtime.model };
+	return { session, contexts: runtime.contexts, model: runtime.model, loader };
 }

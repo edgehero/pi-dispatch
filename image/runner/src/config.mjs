@@ -68,6 +68,10 @@ export function parseRunnerEnv(env) {
 		// transcript the worker staged as PI_SESSION_FILE after an infrastructure failure. Both `false` (the default)
 		// are byte-identical to every job before the feature.
 		...parseRecover(env),
+		// INT-CONTAINER-JOB-INPUTS (issue #646): the trigger's run.steer -- whether the job reads the operator's and the
+		// forge's messages from the read-only /inbox mount and hands them to the running agent (src/inbox.mjs). `false`
+		// (the default) is byte-identical to every job before the feature.
+		steer: parseSteer(env, "PI_STEER"),
 		retry: {
 			maxRetries: parsePositiveInt(env, "PI_RETRY_MAX", 2),
 			baseDelayMs: parsePositiveInt(env, "PI_RETRY_BASE_MS", 2000),
@@ -215,6 +219,16 @@ function parseReportProgress(env, name) {
 	if (raw === undefined || raw === "") return false;
 	if (raw === "1") return true;
 	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to offer report_progress, or leave it unset)`);
+}
+
+// env-internal PI_STEER: the worker's own per-job input (issue #646), "1" or absent. Strict for parseAwaitInput's
+// reason: a third value is a hand-run container or a worker regression, and guessing "off" would drop every message an
+// operator believes the run is reading.
+function parseSteer(env, name) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return false;
+	if (raw === "1") return true;
+	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to read the run's inbox, or leave it unset)`);
 }
 
 // env-internal PI_RECOVER, PI_RECOVERING: the worker's own per-job inputs (issue #645), "1" or absent. Strict for

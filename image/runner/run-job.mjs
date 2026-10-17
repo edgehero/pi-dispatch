@@ -51,6 +51,7 @@ import { assertExcludeToolsKnown, excludableToolNames } from "./src/tools.mjs";
 import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/mcp.mjs";
 import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-input.mjs";
 import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
+import { assertSteerReady, createInbox } from "./src/inbox.mjs";
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
@@ -155,6 +156,9 @@ async function main() {
 	// bind mount did not land, not that there is nothing to resume. INT-SESSION-STORE-CONTRACT.
 	assertSessionMountReady(cfg.sessionFile);
 	assertAwaitInputHasSession(cfg);
+	// Same moment, same exit code (issue #646): a steer-armed job with no readable /inbox, or no exit key to sign its
+	// acks with, would run while every message sent to it waited unread. The worker arms steer only with both.
+	assertSteerReady({ steer: cfg.steer, exitKey: exitKey.key });
 	// Same moment, same exit code, and for EVERY job, command jobs included (issue #341): a job user that cannot
 	// traverse /job loses its trigger skills without a word and would otherwise spend anyway.
 	// /workspace joins the list for READ only (issue #355). On an SELinux-enforcing host, an operator's local folder
@@ -338,7 +342,14 @@ async function main() {
 	const awaitInput = cfg.awaitInput ? createAwaitInput() : null;
 	// The tool a job armed with run.progress reports its phases with (issue #644), on the same terms.
 	const reportProgress = cfg.reportProgress ? createReportProgress() : null;
-	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(reportProgress?.factories ?? [])];
+	// The run's inbox (issue #646, src/inbox.mjs), on the same terms. The acks are signed with the exit key and name the
+	// run by PI_JOB_ID, the exact string the worker verifies them against (its container name for this job: the worker's
+	// steer-ack.mjs is handed that same value). Nothing needs it stable across attempts: the exit key is minted per
+	// attempt, and that key is what separates one attempt's acks from another's. It holds what it reads while the run is
+	// parked, so it reads the await tool's flag.
+	// env-internal PI_JOB_ID: set by the worker on the container (its container name, `pi-job-<queue id>`).
+	const inbox = cfg.steer ? createInbox({ exitKey: exitKey.key, runId: process.env.PI_JOB_ID, log, isParked: () => awaitInput?.state.called === true }) : null;
+	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(reportProgress?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
 	const resourceLoader = await buildLoadedResourceLoader({
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
@@ -562,7 +573,12 @@ async function main() {
 	// The recovery counts (issue #645), on every exit line of a recovering run once recovery has run: integers only.
 	let recovery = null;
 	const recoveryField = () => (recovery ? { recovery } : {});
-	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField() });
+	// The inbox counts (issue #646), on every exit line of a steer-armed run once its session exists: integers and the
+	// delivered ids (32 hex each, at most 16), which the worker marks delivered from this signed line. Never text.
+	const steerField = () => (inbox ? { steer: inbox.counts() } : {});
+	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField(), ...steerField() });
+	// What this transcript already delivered (a resumed or recovered run) is never handed over again.
+	inbox?.seed(sessionManager);
 
 	// FALLBACK ONLY. The process-wide meter is the single source of truth whenever it installed, so
 	// the per-session accumulator is attached only when it did NOT -- the two are never both counting
@@ -586,8 +602,10 @@ async function main() {
 				// replayed here makes a model call, so the turn budget sees nothing until the prompt. No signal: the
 				// replayed tools are the bounded file tools, and a SIGTERM ends this process outright.
 				recovery = await recoverSession({ session, sessionManager, runToolCall, log });
+				inbox?.start();
 				await session.prompt(RECOVERY_PROMPT);
 			} else {
+				inbox?.start();
 				await session.prompt(prompt);
 			}
 		}
@@ -595,6 +613,8 @@ async function main() {
 		rejected = classifyPromptRejection(error, { retryInFlight });
 		if (!rejected) throw error;
 	} finally {
+		// First: nothing may be handed to a session that is about to be disposed.
+		inbox?.close();
 		budget.unsubscribe();
 		tokenBudget?.unsubscribe();
 		// Stops the meter's re-arm interval. It is unref'd, so this is hygiene rather than a hang fix
@@ -674,7 +694,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField() });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField(), ...steerField() });
 	return outcome.code;
 }
 
