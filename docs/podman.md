@@ -1316,6 +1316,7 @@ same host.
 | secretsCustody | enforced | enforced | refused: rootless | refused: rootless | enforced | refused: rootless | enforced |
 | credentialTransit | enforced (observed) | enforced (observed) | refused: rootless | refused: rootless | asserted (no context to observe) | refused: rootless | enforced while podman info is observed saying the service is local, else asserted |
 | localFolders | enforced | enforced (as the worker's uid) | refused: rootless | refused: rootless | enforced | refused: rootless | enforced (as the worker's uid) |
+| pausable | enforced | enforced (docker pause through the Docker API, not measured) | refused: rootless | refused: rootless | enforced (not measured) | refused: rootless | enforced on cgroup v2 (on v1 the venue answers no without starting podman, from the podman info read each job is admitted on, since rootless Podman cannot freeze there) |
 <!-- /PODMAN-PROPERTY-TABLE -->
 
 How each column is known:

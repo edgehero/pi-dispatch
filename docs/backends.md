@@ -18,7 +18,7 @@ read the worker's source.
 mine: {
   describe: "the Acme container service",
   remote: true,                  // true unless the container runs on the worker's own host
-  declares: { /* all thirteen properties, see below */ },
+  declares: { /* all fourteen properties, see below */ },
   asserts: { nonRoot: "the Acme image spec's USER field" },   // required for every `asserted` word
   // observedBy: only for a word earned by observing THIS host (see `credentialTransit` below)
 },
@@ -86,7 +86,7 @@ worse.
 
 ## What a backend declares
 
-Every backend declares thirteen properties, each in one of three words. The words are not a rating. They say
+Every backend declares fourteen properties, each in one of three words. The words are not a rating. They say
 **who is asserting the property**:
 
 | Word | Meaning |
@@ -101,10 +101,10 @@ doubt. A property you omit is a property you are not admitted for, which is why 
 `asserted` must name **who** asserts it, in the entry's `asserts` map. "Not us" without "them" leaves an
 operator nothing to go and check, and `pi-dispatch doctor` prints the source beside the word.
 
-### The thirteen
+### The fourteen
 
 `isolation`, `ephemeral`, `mountSet`, `egress`, `jobToJobIsolation`, `imagePinning`, `exitCodes`,
-`abortable`, `readOnlyJobInputs`, `nonRoot`, `secretsCustody`, `credentialTransit`, `localFolders`.
+`abortable`, `readOnlyJobInputs`, `nonRoot`, `secretsCustody`, `credentialTransit`, `localFolders`, `pausable`.
 
 Each carries the question an operator is actually asking; read them in `worker/src/backends.mjs`. These are the
 ones adapters get wrong:
@@ -113,6 +113,13 @@ ones adapters get wrong:
   posture. `local` can enforce egress; a deployment with `PI_EGRESS=0` is not getting it. Those are two
   different sentences and doctor prints both.
 - **`abortable`** is the 30-minute kill. Declaring it means `stopContainer` actually ends the container.
+- **`pausable`** is the cgroup freezer (`docker pause`, `podman pause`). It exists so the host can read a job's
+  workspace while nothing in the container runs, and it grants the container nothing. Declaring it means the bundle
+  carries `pause(name)` and `unpause(name)`, each resolving `{ ok: true }` or `{ ok: false, reason }` and never
+  throwing. `absent` is an honest word for a venue that cannot freeze: nothing a job needs rests on it. Rootless
+  Podman on cgroup v1 cannot freeze, so the `podman` bundle answers no there before spawning anything, from the
+  `podman info` read every job is admitted on. A name that is not a container name is refused first, on both venues,
+  and the only process a verb starts is the CLI's own `pause` or `unpause`, bounded at 15 s.
 - **`local`'s `credentialTransit` is `enforced` only while observed.** It holds while the docker CLI sends
   containers to a daemon on this host, which the worker checks at boot and before each job. On a CLI pointed
   elsewhere it counts as `asserted`, by you, and doctor says so. The table entry says this with
@@ -391,11 +398,15 @@ const { ok, findings } = await runBackendConformance(myBackend, {
   // Start containers through YOUR runContainer path and read the eight READ_BACK_BY_A_LIVE_PROBE properties
   // off them: { isolation: { ok, warn?, detail }, ephemeral: ..., ... }. Leave it out and all eight abstain.
   readBack: async (backend) => { /* ... */ },
+  // Start a container through YOUR runContainer path and freeze and thaw it with the bundle's own verbs:
+  // { paused: await backend.pause(name), unpaused: await backend.unpause(name) }. Leave it out and pausable abstains.
+  pauseProbe: async (backend) => { /* ... */ },
 });
 ```
 
 It checks the bundle's shape, the declaration's consistency, exit-code fidelity, the abort flag, the
-reaper's tri-state and the transfer downgrade. That is **three of the thirteen properties** plus two
+reaper's tri-state, the transfer downgrade and the freezer verbs against `pausable` (a freeze round trip through a
+`pauseProbe` you write, abstaining without one). That is **four of the fourteen properties** plus two
 structural checks. **Eight more are read back off live containers** (`READ_BACK_BY_A_LIVE_PROBE`: isolation,
 ephemeral, mountSet, egress, jobToJobIsolation, imagePinning, nonRoot, localFolders), but only through the
 `readBack` probe you write, because only your runtime can start your containers. A property read back as not

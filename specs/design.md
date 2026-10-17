@@ -6254,6 +6254,75 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `REQ-RESUMABLE-SESSION`, `INT-SESSION-STORE-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`;
   implemented in `worker/src/session-key.mjs`.
 
+## DES-CHECKPOINT-WALKER-NOT-GIT-ADD
+
+- **Decision**: a workspace checkpoint is taken by a **host-side Node walker** that uses `lstat` only, opens every
+  file `O_NOFOLLOW | O_NONBLOCK`, reads names as bytes, hashes in Node, and feeds ONE `git fast-import` into a
+  **host-owned bare store per run** (`INT-WORKSPACE-CHECKPOINT-STORE`), while the job's container is held still.
+  The agent's `.git` is parsed from FILES for a branch name and a tip and nothing more; no git command reads the
+  agent's repository configuration. A restore writes the checkpoint's blob bytes, read through `cat-file --batch`,
+  over a fresh base checkout, touching only the paths that changed, after judging the whole change list with the
+  same path rules the snapshot applied (`worker/src/checkpoint-paths.mjs`, one module for both sides, because a rule
+  the snapshot applies and the restore does not is the tamper path).
+  **Who holds the container still is the caller.** The module never pauses anything: it records the caller's
+  `quiesced` claim, `frozen` (a paused container, `DES-CONTAINER-BACKEND-REGISTRY`'s `pausable` verbs) or `dead`
+  (an exited one), refuses any other value, and cannot verify either. What it adds on its own is that a file must
+  still be the inode the walk saw, of the size the walk saw, and on Linux must have been opened at a path inside the
+  workspace's realpath (read back from `/proc/self/fd/<fd>`), or the whole snapshot is abandoned (`tree-changed`).
+  Where no proc directory exists (macOS) the pause is the only guard against a directory swapped for a link, and
+  that residual is stated in the module's header and in `INT-WORKSPACE-CHECKPOINT-STORE`.
+  Doctor's `pausable` fact line currently words a venue that cannot freeze as one where "a checkpoint is read while
+  the job runs"; that is not a mode this decision admits, and the wiring change reconciles the two.
+  **Two git commands touch the workspace, each bounded.** `primeBase` fetches the base from `<workspace>/.git`
+  before the container starts, when that repository is still the worker's own fresh clone. And when new bytes exceed
+  the cap, `check-ignore --no-index` with `GIT_WORK_TREE` set reads the ignore FILES to drop build output: no index,
+  no attributes, no filter, `GIT_DIR` still the store, and its cwd the run's empty `home/` rather than the workspace.
+  A failing `check-ignore` keeps nothing back: the snapshot refuses over the cap rather than storing everything. The rejected alternative to that one is a Node reimplementation
+  of gitignore matching, a second dialect of a subtle format that would drop files git keeps, which is data loss.
+- **A snapshot holding a job secret is refused whole** (`job-secret-in-tree`). Every kept path (so every file and
+  directory name), every byte read for the snapshot and every symlink target is matched against the job's secret
+  values, because a file named after a token leaks it as surely as one containing it, and one match kills the import and removes its
+  temp pack and crash report, so the store holds no trace of the bytes it refused. Refusing beats redacting: a
+  redacted file is a file the restore writes back wrong, and a checkpoint outlives the run that minted the secret by
+  up to the sweep's TTL, then writes its bytes into a new attempt's workspace. The scan is literal, it skips files
+  served from the stat cache (base content, or bytes this run already scanned; a write changes the ctime and forces a
+  re-read), and it does not cover the transcript copy.
+- **Trust paths on restore.** A restore writes agent-authored bytes into the next attempt's workspace, and some paths
+  there are not data to that attempt: `.pi/` (settings, extensions and prompts pi discovers) and the root context
+  files pi loads as instructions. As of this change `restore` writes them like any other path. A later change
+  (issue #645's recovery wiring) resets `.pi/` and the root context files to the base commit's on restore, so a
+  resumed attempt trusts in those places only what the base holds.
+- **Rejected**:
+  - *`git add -A`, `git stash create` or `git commit` against the agent's tree.* The two-line version, and it runs
+    the agent's repository: its `.git/config` (a clean filter, `core.fsmonitor`, a signing program, an `include`, a
+    `gitdir:` redirect, `objects/info/alternates` into any repository on the host), where hardening flags close the
+    knobs we know of and not reading the config closes the ones we do not. `.gitattributes` changes the BYTES
+    stored (`eol`, `ident`, `working-tree-encoding`), so the checkpoint is not the workspace. A nested repository
+    becomes a gitlink and its files are lost. One unreadable file aborts the whole add, where a walker counts it and
+    marks the checkpoint `partial`. And it writes the agent's index and object store. The tests pin the config, attribute, nested-repository and
+    unreadable-file cases.
+  - *The same Node walker on an UNPAUSED container.* Node has no `openat`: `O_NOFOLLOW` guards only a path's final
+    component, so a directory swapped for a symlink between the `lstat` and the `open` has the walker read, and
+    store, host files through the link. And a moving tree gives a torn snapshot, files from different moments that
+    never coexisted. The freeze is what makes a by-path walk sound; the inode and size recheck turns residual motion
+    into a refusal, not a mix, and on Linux the `/proc/self/fd` read back catches the link swap itself. That check
+    narrows the hazard where it exists; it does not make an unpaused walk a supported mode.
+  - *A walker run inside the container with `docker exec`.* It needs the container running, so the snapshot is
+    torn; it depends on the image's own tools and their versions; and its output is a stream the agent can shape.
+  - *One store per repository, shared by runs.* Concurrent runs on one repository would write one object store, and
+    one run's repack or gc races another's `fast-import` over the same packs; removing one run would need a gc
+    rather than a recursive delete. Per run, the store's gc is off (`gc.auto=0`), a repack runs under that run's own
+    lock, and `remove` is one `rm`.
+  - *`git checkout` (or `restore`, `read-tree -u`) for the restore overlay.* It re-applies smudge filters and eol,
+    `ident` and encoding conversion from the base's `.gitattributes`, so the restored bytes are not the snapshot's.
+    Writing the blob bytes exactly is the only way the round trip is byte for byte.
+  - *A tarball per checkpoint.* No deduplication (a 2 GiB repository whose agent touched three files would cost 2
+    GiB a checkpoint rather than three blobs), and no cheap change list for the restore to apply.
+- **Traces to**: no requirement yet; the requirement arrives with issue #645's recovery change.
+  `INT-WORKSPACE-CHECKPOINT-STORE`, `INT-SESSION-STORE-CONTRACT`, `DES-CONTAINER-BACKEND-REGISTRY`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`; implemented in `worker/src/workspace-checkpoint.mjs`,
+  `worker/src/checkpoint-paths.mjs` and `worker/src/git-hardening.mjs` (`STORE_GIT_FLAGS`, `storeGitEnv`).
+
 ## DES-SANDBOX-IS-A-FRESH-CONTAINER
 
 - **Decision**: To let an operator inspect what a run built, **retain the run's inputs and start a new
@@ -7127,8 +7196,9 @@ a tunnel.
   the harness runs against is a backend that can be made to clamp an exit code, drop the abort flag, report
   an OOM as a stop, return `true` from a failed enumeration, or copy files while declaring the kernel
   enforced `/job`. A harness only ever run against a conformant backend proves that it can say yes.
-- **THREE of the thirteen are verified against behaviour by the harness, EIGHT are read back off live
-  containers (#278 and #344, below), and TWO are not.** A backend can still declare all of this and do most of it.
+- **FOUR of the fourteen are verified against behaviour by the harness, EIGHT are read back off live
+  containers (#278 and #344, below), and TWO are not.** (THREE of thirteen until issue #645 added `pausable`, whose
+  check is the verbs against the word plus a freeze round trip through an adapter's `pauseProbe`, abstaining without one.) A backend can still declare all of this and do most of it.
   Only a
   conformance suite that drives a backend's own `runContainer` and reads each property back off what it
   produced closes the rest. **That suite now exists** and reaches `exitCodes`, `abortable` and
@@ -7276,6 +7346,24 @@ a tunnel.
   container, which the next boot reaper sweeps; what no longer leaks is the slot. `createWorker` also
   REFUSES a wiring with no `stopContainer`, because a throw inside an AbortSignal listener surfaces as an
   uncaughtException and takes the whole worker down mid-job.
+- **`pausable` is the fourteenth property, and the first an honest venue may declare `absent` without any job being
+  refused** (issue #645, AMENDED in). What `absent` costs is recovery: a venue that cannot freeze gets exit checkpoints
+  only, taken once the container is gone, so its jobs are not recovered from a worker crash mid-run. It asks whether a running job can be frozen by the cgroup freezer (`docker pause`,
+  `podman pause`) and thawed again, and it exists for one reader: the host reading a job's bind-mounted workspace as
+  one consistent state while nothing in the container runs, which is what a workspace checkpoint needs. A bundle that
+  claims it carries `pause(name)` and `unpause(name)`, each resolving `{ ok: true }` or `{ ok: false, reason }` with a
+  fixed token and never throwing, bounded at 15 s (`PAUSE_TIMEOUT_MS`) through `execDockerBounded`, the bounded runner,
+  and not through `makeStopContainer`'s unbounded exec: the abort path does not await its stop, and a checkpointer
+  awaits its freeze. A name that is not a runtime name is refused before any spawn, on both venues and before
+  `podman`'s cgroup gate, because `docker pause --help` exits 0 and freezes nothing; the only process a verb starts is
+  the CLI's own `pause` or `unpause`. `local` declares it `enforced`; a rootless Docker on cgroup v1 cannot freeze, and
+  there the CLI's own non-zero exit comes back as `{ ok: false }` rather than the word being lowered for every rootful
+  host. `podman` declares it `enforced` and refuses BEFORE spawning on cgroup v1 (`podmanPausable`, from the KEPT
+  `podman info` read the venue admits jobs on, never a fresh one), since rootless Podman cannot freeze there. **Rejected: an `observedBy`
+  entry for the cgroup version.** That machinery lowers a word to `asserted`, which would name an asserter for a
+  freeze nobody provides; the venue instead answers no per call and doctor says which. **Pausing grants the container
+  nothing**: no mount, flag, capability or network changes, the container's processes simply stop being scheduled,
+  so the boundary `CONST-ISOLATION-CONTAINER-PER-JOB` describes is the same frozen as running.
 - **The transfer abstraction states a DOWNGRADE rather than performing a translation.**
   `DES-JOB-FILES-VIA-VOLUME-SUBPATH` already recorded the loss: `docker cp` "cannot give `/job` a
   kernel-enforced read-only mount, which `INT-CONTAINER-JOB-INPUTS` depends on", and every vendor upload API
@@ -8558,6 +8646,11 @@ a tunnel.
     provider key and the forge token ride the `podman` argv as `-e NAME=VALUE` exactly as on `docker`, and the
     observation is what keeps them on this host.
   - `localFolders` **enforced**: the operator's folder is bind-mounted and edited in place as the worker's own uid.
+  - `pausable` **enforced** on cgroup v2 (issue #645): `podman pause` on the name. On cgroup v1 the bundle's verbs
+    answer `{ ok: false, reason: "cgroup-v1-rootless" }` without spawning, from the KEPT answered `podman info` every
+    job is admitted on (never a fresh read, which would be a second spawn outside the verb's bound; with none kept the
+    verb runs and `podman pause`'s own refusal is the answer); not measured
+    on a v1 host, where rootless Podman documents the refusal itself.
 - **Rejected**:
   - **`--security-opt label=disable`** to make every mount readable under SELinux: measured working, by running the
     container unconfined (`spc_t`), which removes a layer the host gives for free to fix a labelling problem.
@@ -10632,3 +10725,5 @@ a tunnel.
 | 2026-10-16 | Issue #644, run progress. **NEW `DES-RUN-PROGRESS`**: the worker reads where each running job is from the session file it already tails, through the tailer's new `onParsed` hook: a turn per assistant message, a step per tool call closed by its result as `ok` or `error` with the result's own `durationMs` (null when pi wrote none, never a timestamp gap, since pi saves a parallel batch's results together), open calls `interrupted` at the end, anomalies ignored and counted, memory bounded (256 open, 20 recent, 8 running, 32 phases); resume-aware through a baseline (the file's size before the first read: earlier lines seed `prior` and the phases) and reset-aware (the rewritten bytes replayed without counting twice); phases from the opt-in `report_progress` job tool, read only for a job with `run.progress` and only from a result with `isError: false`, redacted, escaped and cut; the whole snapshot in `run:progress:<id>` (once a second at most, 7 days, 24 h after the final write, 16 KiB, a retry keeping the earlier attempt's `commentId`); the record's `progress` of integers and closed keys; and, for a forge trigger with `run.statusComment`, one comment edited with fixed words and integers. Progress is advisory and decides nothing. Off switch `PI_RUN_PROGRESS=0`, independent of `PI_LIVE_TRANSCRIPTS`. Rejected: runner stdout as the transport, a runner network path, phase text in the record or the comment, per-tool live status inside a parallel batch, timestamps as durations, trusting `done` and `total`. Residuals: a false phase or count, a phase name carrying text the agent read, the comment as a public record of a run's pace, #645's synthetic results counted as ordinary ones, and a lost final write past the abort grace. **`DES-LIVE-TRANSCRIPT-STREAM` AMENDED**: `PI_LIVE_TRANSCRIPTS` now governs the stream alone; the file is staged and tailed when either switch is on, and with transcripts off and progress on the tailer runs in its stream-off mode, touching no `run:live:` key; the progress hook (`onParsed`, `onReset`, the baseline and `replay`) is described. **`DES-OPERATOR-CONSOLE` AMENDED**: a "Run progress" bullet (an integer Progress column in the active table for both roles; the run page's first panel, `p-progress`, whose phase names, `<progress>` bar and note reach the operator role alone; a finished run showing the record's `progress` re-checked with `recordedProgress`); the run page becomes a LIVE page (hub panels by digest, data at most every 2 s), so an operator's run tab holds two streams; a running job with no record answers 200 with a snapshot or a transcript; Status, Traces and Code evidence follow. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the LIST's ACTIVE rows show progress (`running · turn 7 · 12 steps (1 failed) · bash 40s · phase 2/4 <name>`), the integers from the snapshot and the phase name through a `progress` dependency, clipped to 24 columns with `clipData`; the placement rule covers progress (no model text in `snapshot`, and no model-callable tool returns the tool name). UNCHANGED, checked: `DES-AWAIT-INPUT-ENDS-THE-JOB` (`await_human_input` is counted as a step like any tool; parking reads nothing of progress), `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` (the terminal comments and the hook are untouched; the status comment is a separate opt-in comment, and `report-progress-shadowed` joins the runner reasons the hook already spreads), `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (progress reads the per-job copy and indexes nothing). |
 | 2026-10-16 | Issue #644, review round 1. **`DES-RUN-PROGRESS` CORRECTED**, six clauses. (1) Automatic steps: a call or result id longer than 128 UTF-16 units (`PROGRESS_ID_MAX`) is an anomaly, since an open step's id is a map key a forged line could make nearly a megabyte; an assistant message with `stopReason` `"error"` or `"aborted"` opens no step, and an `"error"` one is no turn while an `"aborted"` one is, matching the runner's turn count; a step's time is the line's timestamp bounded as the stream's (0 to a day ahead, else the read time). (2) The key: `updatedAt` is the time of the write, the snapshot is rewritten every 30 s (`PROGRESS_HEARTBEAT_MS`) until the end, and readers call a key stale past 180 s (`PROGRESS_STALE_MS`); the sink writes the empty turn 0 snapshot at its start, replacing the previous attempt's final one; the finish waits at most 2 s for a comment post in flight so its id rides the final write. (3) The comment's final edit comes from the run record through a registry in start.mjs (`makeStatusCommentRegistry`, settled by `recordRun`), "attempt ended, retrying" for an `InfraRetry` with attempts left, and the exit's outcome only after a 30 s fallback (`STATUS_FALLBACK_MS`) for an attempt that leaves no record; it was the exit's outcome, made beside the final write. (4) The record: `endCancelled` keeps `progress`, `toolMs` is stated as a sum of step durations, `longestInterruptedMs` is new. (5) The cancel residual gains the stale marking; the logging line names the four `status_comment_skipped` reasons. (6) Code evidence gains the registry, `recordRun`'s settle and `endCancelled`. **`DES-OPERATOR-CONSOLE` AMENDED**, the run progress bullets: an ended snapshot on an active row shows `-`, a stale one says so and stops its running ages, the run page labels "Sum of step durations", "Longest interrupted step" and "Earlier runs of this session", and a retried job's record and key are paired by time (a key newer than the record shown live under its own sentence; phase names join a record only from the same, ended attempt). **`DES-LIVE-TRANSCRIPT-STREAM` AMENDED**, the progress hook: the `ts` handed to `onParsed` is bounded. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the ACTIVE row: an ended snapshot draws nothing, a stale one leads with `no update for 4m, the worker may be gone` and drops its running age. Extended in the same round (four defects found on review): (7) a container that outlives the abort grace now gets its final write: `boundAfterAbort` awaits (bounded, 10 s) a give-up hook that finishes the live publisher runContainer handed over (`onLive`) with outcome `unknown`, before the job directory goes, where the heartbeat had rewritten the key as running for as long as the worker lived; the writer also stops every write but the final one 7 days after it started (`run_progress_expired`), so no write sets a TTL under 1 s (it could set PX 1), and the residual sentence about the heartbeat is made precise (a dead worker writes nothing more, the given-up container is finished, the 7-day bound sits behind both). (8) An attempt that registers no commenter (refused before its container) and a job whose comment says "attempt ended, retrying": `recordRun` reads the key's `commentId` (one bounded `GET`) and makes one bounded edit with the record's outcome (`settleUnregisteredStatus`), skipped on a phrase collision; an operator's cancel of a delayed retry writes no record and is named as a residual. (9) `STATUS_FALLBACK_MS` is 5 minutes (was 30 s, which a slow record path could lose to), and a record that settles after the fallback, within 10 minutes (`STATUS_LATE_SETTLE_MS`, at most 256 kept), makes one corrective edit when its text differs. (10) `DES-OPERATOR-CONSOLE`: the key's phase names join a record only when the key also started no earlier than the record's `startedAt` (an unreadable one pairs with nothing), since an attempt refused before its container leaves the earlier attempt's ended key in place. |
 | 2026-10-17 | The local folder's dirty-tree read. The dirty-tree guard bullet of the local-folder entry (the one beside `localRepoProblem`) gains how `gitDirty` reads: `git status` against a scratch git directory with the index's assume-unchanged and skip-worktree bits cleared, never with the folder's own git config, `info/attributes` or `info/exclude`, which a local job can write; the operator's global config still applies, filter drivers included. Everything else in the entry UNCHANGED, checked. |
+| 2026-10-17 | Issue #645 (durable runs), the backend half. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED** with a fourteenth property, `pausable`: a running job can be frozen by the cgroup freezer and thawed, so the host reads its workspace while nothing in the container runs. Both bundles carry `pause(name)` and `unpause(name)` (`makePauseVerbs` in `backend-local.mjs`), resolving `{ ok }` or `{ ok: false, reason }` with a fixed token, never throwing, bounded at 15 s through `execDockerBounded`; a name that would read as a flag is refused before any spawn (on podman before the cgroup gate too), because `docker pause --help` exits 0. `local` declares it `enforced`; `podman` declares it `enforced` and its verbs refuse before spawning on cgroup v1 (`podmanPausable`, from the kept answered `podman info` every job is admitted on, never a fresh read), where rootless Podman cannot freeze; a venue that cannot freeze gets exit checkpoints only, so no recovery from a worker crash mid-run. An `observedBy` entry was rejected because it would lower the word to `asserted` and name an asserter for a freeze nobody provides. The conformance harness checks it (the verbs against the word, and a freeze round trip through an adapter's `pauseProbe`, abstaining without one), so the bullet that said THREE of the thirteen now says FOUR of the fourteen, and `docs/backends.md` and `docs/podman.md`'s property table carry the row (the latter bolted to the table by `podman-doc.test.mjs`). **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, one bullet for the word. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: pausing grants the container nothing; no mount, flag, capability or network changes, its processes only stop being scheduled. **`DES-JOB-FILES-VIA-VOLUME-SUBPATH` UNCHANGED, checked**: the workspace a freeze holds still is the same bind mount. Nothing calls the verbs yet: the checkpointer is wired into jobs in a later change. **Code evidence**: worker/src/backends.mjs -> PROPERTIES.pausable; worker/src/backend-local.mjs -> makePauseVerbs, PAUSE_TIMEOUT_MS; worker/src/backend-podman.mjs -> podmanPausable, makePodmanBackend; worker/src/backend-conformance.mjs -> checkPausable. |
+| 2026-10-17 | Issue #645, part 1: the checkpoint store. **NEW `DES-CHECKPOINT-WALKER-NOT-GIT-ADD`**: a host-side Node walker, `lstat` only and every open `O_NOFOLLOW`, feeds one `git fast-import` into a host-owned bare store per run while the job's container is held still, and a restore writes blob bytes exactly over a fresh base checkout after judging the whole change list with the snapshot's own path rules. Rejected, each with its reason: `git add -A` or `stash create` against the agent's tree (the agent's `.git/config` filters and hooks, `.gitattributes` changing the stored bytes, nested repositories as gitlinks, one unreadable file aborting); the same walker on an unpaused container (no `openat` in Node, so a directory swapped for a symlink between `lstat` and open copies host files, and a moving tree is torn); a `docker exec` walker inside the container (torn, image dependent); one store per repository (gc and repack races); `git checkout` for the restore overlay (re-applies smudge and eol); a tarball (no deduplication). It records the whole-snapshot refusal on a job secret, over every kept path, every byte read and every link target, and that a later change resets `.pi/` and the root context files on restore. It records the Linux `/proc/self/fd` containment check on every file opened, with the residual where no proc directory exists, and that `check-ignore` runs with the run's `home/` as its cwd and keeps nothing back when it fails. Recorded as found rather than settled: the module never pauses, it records the caller's `quiesced` claim (`frozen` or `dead`), and doctor's `pausable` line still words a venue that cannot freeze as checkpointing while the job runs, which the wiring change reconciles. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the store is never mounted into any container. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: nothing a container receives changed. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: nothing resumes from a checkpoint yet, and nothing calls the checkpointer. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: `pausable` is cited, not changed. **Code evidence**: worker/src/workspace-checkpoint.mjs -> walkTree, importTree, judgeChanges, restoreLocked; worker/src/checkpoint-paths.mjs; worker/test/workspace-checkpoint.test.mjs. |
