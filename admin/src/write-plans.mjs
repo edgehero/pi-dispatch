@@ -24,7 +24,7 @@
  */
 import * as nodeFs from "node:fs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
-import { ISSUE_ACTIONS, isMcpNearMiss, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, isMcpNearMiss, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag, validateSteerFlag } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
@@ -140,24 +140,27 @@ export function backendRefusal(backend, env) {
   return null;
 }
 
-/** The #644 flags and #645's `recover` a tool call carries, each only when it is a boolean (see buildTriggerEntry). */
+/** The #644 flags, #645's `recover` and #646's `steer` a tool call carries, each only when it is a boolean (see buildTriggerEntry). */
 function progressRun(f) {
   return {
     ...(typeof f.progress === "boolean" ? { progress: f.progress } : {}),
     ...(typeof f.statusComment === "boolean" ? { statusComment: f.statusComment } : {}),
     ...(typeof f.recover === "boolean" ? { recover: f.recover } : {}),
+    ...(typeof f.steer === "boolean" ? { steer: f.steer } : {}),
   };
 }
 
 /**
- * The loader's own refusal of the #644 flags and #645's `recover` as sent (a non-boolean, a status comment or a
- * recovery on cron, a recovery beside a command), or null. `command` is the entry's own: the add tool writes none, and
- * the edit tool passes the trigger's, so a recovery armed onto a command trigger is refused before the confirm.
+ * The loader's own refusal of the #644 flags, #645's `recover` and #646's `steer` as sent (a non-boolean, a status
+ * comment or a recovery on cron, a recovery or steering beside a command), or null. `command` is the entry's own: the
+ * add tool writes none, and the edit tool passes the trigger's, so a recovery or steering armed onto a command trigger
+ * is refused before the confirm.
  */
 function progressRefusal(params, onType, at, path, command = undefined) {
   return (
     refusalOf(() => validateProgressFlags({ progress: params.progress, statusComment: params.statusComment }, at, path, { onType })) ??
-    refusalOf(() => validateRecoverFlag({ recover: params.recover, ...(command !== undefined ? { command } : {}) }, at, path, { onType }))
+    refusalOf(() => validateRecoverFlag({ recover: params.recover, ...(command !== undefined ? { command } : {}) }, at, path, { onType })) ??
+    refusalOf(() => validateSteerFlag({ steer: params.steer, ...(command !== undefined ? { command } : {}) }, at, path))
   );
 }
 
@@ -200,6 +203,11 @@ function progressRefusal(params, onType, at, path, command = undefined) {
  * approved. A recovery replays a run's checkpoint only into that same run's own continuation, after the worker lost it:
  * the run that wrote the checkpoint is the one that reads it, and nothing reaches the next delivery. Carried only when
  * it is a boolean, the rule above; `true` on cron is passed through for the shared validator to refuse.
+ *
+ * `run.steer` (issue #646) is on both paths, cron included, and passes the resume test the same way. What it arms is a
+ * channel INTO one running job, from an operator of this deployment (and, once comment routing lands, from a person the
+ * trigger phrase already lets start that job), framed as data; nothing the agent writes travels through it, and it
+ * closes with the run. Carried only when it is a boolean; `true` beside a command is refused by the shared validator.
  */
 export function buildTriggerEntry(kind, f) {
   if (kind === "cron") {
@@ -342,7 +350,8 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
   const model = refusalOf(() => validateModelRef({ provider: optStr(params.provider), model: optStr(params.model), maxTurns: params.maxTurns }, "the new trigger", paths.triggersPath));
   if (model !== null) return { refusal: model };
   // #644, the same rule: a non-boolean flag, or a status comment on a cron trigger, is refused with the loader's message.
-  // #645's `recover` rides the same check (refused on cron); the add tool writes no `command`, so none is passed.
+  // #645's `recover` rides the same check (refused on cron), and so does #646's `steer` (legal on cron); the add tool
+  // writes no `command`, so none is passed.
   const progress = progressRefusal(params, params.kind, "the new trigger", paths.triggersPath);
   if (progress !== null) return { refusal: progress };
   const entry = buildTriggerEntry(params.kind, params);

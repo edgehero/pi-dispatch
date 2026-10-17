@@ -505,6 +505,11 @@ export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	// worker loses fails instead of continuing from its checkpoint, the opposite of what the trigger promised. Only
 	// `true` arms it, and the job data carries it only then, so `false` is nothing authored.
 	Object.freeze({ key: "recover", authored: (v) => v === true }),
+	// Issue #646: steering a running job. Dropped by a receiver from before #646 (which tolerates the key as unknown), the
+	// run starts with no inbox, so an operator's steering message is refused as for an unarmed job while the trigger
+	// promised it would be heard. Only `true` arms it, and the job data carries it only then, so `false` is nothing
+	// authored.
+	Object.freeze({ key: "steer", authored: (v) => v === true }),
 ]);
 
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {

@@ -171,6 +171,9 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		...(resolved.statusComment === true ? { statusComment: true } : {}),
 		// Issue #645: durable runs, present only when armed, the same rule.
 		...(resolved.recover === true ? { recover: true } : {}),
+		// Issue #646: steering a running job, present only when armed, the same rule. Carried only: routing a comment
+		// into a run that is already going is a later change, so nothing here reads it.
+		...(resolved.steer === true ? { steer: true } : {}),
 		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
 		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
@@ -219,6 +222,7 @@ function routeLabel(subset, triggers, targetType) {
 		progress: rule.progress,
 		statusComment: rule.statusComment,
 		recover: rule.recover,
+		steer: rule.steer,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(added, rule.predicate) },
 		target: buildTarget(subset, targetType),
@@ -288,6 +292,7 @@ function mrResult(subset, rule, matched) {
 		progress: rule.progress,
 		statusComment: rule.statusComment,
 		recover: rule.recover,
+		steer: rule.steer,
 		replicas: rule.replicas,
 		matched,
 		target: buildTarget(subset, "pull_request"),
@@ -339,6 +344,7 @@ function routeIssueClose(subset, triggers, authorized) {
 		progress: rule.progress,
 		statusComment: rule.statusComment,
 		recover: rule.recover,
+		steer: rule.steer,
 		replicas: rule.replicas,
 		// `once: true` rides `matched` ONLY when armed (spreading false is a no-op), so the enqueue path
 		// can see a disarm is owed without re-reading the rule table -- and a plain close rule's matched
@@ -378,6 +384,7 @@ function routeMergeRequestClose(subset, triggers, authorized) {
 		progress: rule.progress,
 		statusComment: rule.statusComment,
 		recover: rule.recover,
+		steer: rule.steer,
 		replicas: rule.replicas,
 		// No `number` on an MR close's matched record -- parallel to routeMergeRequest's, where the item
 		// number is the target's business; the issue route carries it because the github design does.
@@ -442,6 +449,7 @@ function routeNote(subset, triggers, knownFlows) {
 		progress: triggers.comment.progress,
 		statusComment: triggers.comment.statusComment,
 		recover: triggers.comment.recover,
+		steer: triggers.comment.steer,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		...(parkedReply && { parkedReply: true }),

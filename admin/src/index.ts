@@ -737,7 +737,9 @@ function registerTools(pi: ExtensionAPI): void {
       "`statusComment: true` (optional, webhook kinds only, refused on cron) has the worker post one status comment " +
       "on the issue or pull request and edit it as the run goes. " +
       "`recover: true` (optional, webhook kinds only, refused on cron) makes a run the worker loses continue from its " +
-      "last checkpoint instead of failing; it needs the deployment's session store and an image that supports it.",
+      "last checkpoint instead of failing; it needs the deployment's session store and an image that supports it. " +
+      "`steer: true` (optional, any kind) lets operators send messages to the job while it runs; it needs an image " +
+      "that supports it and a venue that bind-mounts.",
     executionMode: "sequential",
     parameters: Type.Object({
       kind: Type.String(),
@@ -775,6 +777,9 @@ function registerTools(pi: ExtensionAPI): void {
       // Issue #645. Not a capability the model gains either (buildTriggerEntry says why it differs from run.resume);
       // the loader's own validator refuses it on cron before the confirm.
       recover: Type.Optional(Type.Boolean()),
+      // Issue #646. Not a capability the model gains (buildTriggerEntry says why); legal on every kind, and the loader's
+      // own validator refuses a non-boolean before the confirm.
+      steer: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // Judged BEFORE the confirm (`planTriggerAdd`): the tool-proof fields and their near misses (#501 part 7), the
@@ -800,7 +805,7 @@ function registerTools(pi: ExtensionAPI): void {
       "Changes which flow a trigger runs (by array index from dispatch_triggers) and applies it live, and " +
       "optionally which `backend` (venue) its container is built in, chosen from the names PI_BACKENDS " +
       "blesses, and which `provider` and `model` its jobs run on (omitted, the trigger keeps what it has), and " +
-      "`progress` / `statusComment` / `recover` (booleans, as on dispatch_trigger_add; omitted, the trigger keeps what it has). " +
+      "`progress` / `statusComment` / `recover` / `steer` (booleans, as on dispatch_trigger_add; omitted, the trigger keeps what it has). " +
       "The operator MUST approve a confirm dialog showing the before->after; with no interactive " +
       "operator it is refused.",
     executionMode: "sequential",
@@ -817,6 +822,8 @@ function registerTools(pi: ExtensionAPI): void {
       statusComment: Type.Optional(Type.Boolean()),
       // Issue #645, the same merge, judged against the entry's type and its own run.command.
       recover: Type.Optional(Type.Boolean()),
+      // Issue #646, the same merge, judged against the entry's own run.command.
+      steer: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // Judged BEFORE the confirm (`planTriggerEdit`): the tool-proof fields, the index, a non-empty flow, the backend

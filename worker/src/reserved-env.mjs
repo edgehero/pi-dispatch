@@ -50,6 +50,9 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// run believe it is a continuation and resume a checkpoint that is not its own.
 	"PI_RECOVER",
 	"PI_RECOVERING",
+	// Issue #646: a trigger binding it through run.secrets would tell the runner to watch an inbox the operator did not
+	// arm, on a run the worker never opened one for.
+	"PI_STEER",
 	"PI_MCP_SERVERS",
 	// Issues #501, #502: the per-job dollar cap (written by the worker since #501, from the trigger's and the
 	// deployment's caps) and the allowed-model list (reserved until #502 writes it). Neither can be bound through

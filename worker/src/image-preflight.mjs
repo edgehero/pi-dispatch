@@ -46,7 +46,8 @@ export function resolveJobImage(job, defaultImage) {
  *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
  *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported,
- *                            forgeMcpUnsupported, awaitInputUnsupported, progressUnsupported, recoverUnsupported)
+ *                            forgeMcpUnsupported, awaitInputUnsupported, progressUnsupported, recoverUnsupported,
+ *                            steerUnsupported)
  *                            => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
@@ -246,6 +247,17 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-recover-unsupported",
 		event: "refused_image_recover_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for continuing a lost run from its checkpoint (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.recover\`. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #646: a runner that predates run.steer reads no PI_STEER and never looks at /inbox, so every message an
+	// operator sent would be accepted and then never reach the agent. Refused for the recover row's reason: the trigger
+	// asked for something this image cannot give, and saying so costs nothing.
+	Object.freeze({
+		token: "steer",
+		needed: (job) => job?.steer === true,
+		result: "steerUnsupported",
+		reason: "job-image-steer-unsupported",
+		event: "refused_image_steer_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for receiving messages while it runs (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.steer\`. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

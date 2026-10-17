@@ -116,11 +116,14 @@ test("each trigger plan says what its tool says: every refusal and the confirm, 
       { kind: "cron", flow: "fix", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", statusComment: true },
       { kind: "label", flow: "fix", labels: ["bug"], recover: true },
       { kind: "cron", flow: "fix", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", recover: true },
+      { kind: "label", flow: "fix", labels: ["bug"], steer: true },
+      { kind: "cron", flow: "fix", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", steer: true },
+      { kind: "label", flow: "fix", labels: ["bug"], steer: "yes" },
     ];
     for (const params of addCases) {
       assert.deepEqual(planSays(plans.planTriggerAdd({ params, paths, env })), await toolSays(t.dispatch_trigger_add, params), JSON.stringify(params));
     }
-    const editCases = [{ index: 0, flow: "review" }, { index: 0, flow: "review", backend: "local", model: "m1", provider: "openai" }, { index: 3, flow: "x" }, { index: 0, flow: "  " }, { index: 0, flow: "x", backend: "vapour" }, { index: 0, flow: "x", models: ["a/b"] }, { index: 0, flow: "x", progress: true, statusComment: false }, { index: 0, flow: "x", recover: true }, { index: 0, flow: "x", recover: "yes" }];
+    const editCases = [{ index: 0, flow: "review" }, { index: 0, flow: "review", backend: "local", model: "m1", provider: "openai" }, { index: 3, flow: "x" }, { index: 0, flow: "  " }, { index: 0, flow: "x", backend: "vapour" }, { index: 0, flow: "x", models: ["a/b"] }, { index: 0, flow: "x", progress: true, statusComment: false }, { index: 0, flow: "x", recover: true }, { index: 0, flow: "x", recover: "yes" }, { index: 0, flow: "x", steer: true }, { index: 0, flow: "x", steer: "yes" }];
     for (const params of editCases) {
       assert.deepEqual(planSays(plans.planTriggerEdit({ params, paths, env })), await toolSays(t.dispatch_trigger_edit, params), JSON.stringify(params));
     }
@@ -217,6 +220,42 @@ test("run.recover (issue #645): carried only as a boolean, refused on cron and b
     assert.match(plans.planTriggerEdit({ params: { index: 0, flow: "f", recover: true }, paths, env: {} }).refusal, /run\.recover is only available on a forge trigger/);
     assert.match(plans.planTriggerEdit({ params: { index: 1, flow: "f", recover: true }, paths, env: {} }).refusal, /run\.recover cannot be set beside run\.command/);
     assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", recover: false }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f -> f, recover: - -> false");
+  } finally {
+    restore();
+  }
+});
+
+test("run.steer (issue #646): carried only as a boolean, allowed on cron, refused beside a command by the loader before the confirm, merged only when sent", () => {
+  const { paths, restore } = deployment();
+  try {
+    for (const kind of ["label", "comment", "pull_request", "issue", "cron"]) {
+      const f = { flow: "fix", labels: ["bug"], phrase: "@pi", action: ["opened"], id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t" };
+      assert.equal(plans.buildTriggerEntry(kind, { ...f, steer: true }).run.steer, true, kind);
+      assert.equal(plans.buildTriggerEntry(kind, { ...f, steer: false }).run.steer, false, kind);
+      assert.equal("steer" in plans.buildTriggerEntry(kind, { ...f, steer: "yes" }).run, false, `${kind}: only a boolean is carried`);
+      assert.equal("steer" in plans.buildTriggerEntry(kind, f).run, false, kind);
+    }
+    assert.match(plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["bug"], steer: "yes" }, paths, env: {} }).refusal, /run\.steer must be true or false/);
+    const cron = plans.planTriggerAdd({ params: { kind: "cron", flow: "f", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", steer: true }, paths, env: {} });
+    assert.equal(cron.refusal, undefined, "allowed on cron, unlike recover");
+    assert.match(cron.plan.message, /"steer":true/);
+    const add = plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["go"], steer: true }, paths, env: {} }).plan;
+    assert.match(add.message, /"steer":true/, "the confirm shows what is armed");
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: add.mutate }).ok);
+    const edit = plans.planTriggerEdit({ params: { index: 0, flow: "fix", steer: true }, paths, env: {} }).plan;
+    assert.equal(edit.message, "trigger #1 (label) flow: fix -> fix, steer: - -> true");
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: edit.mutate }).ok);
+    assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[0].run, { kind: "github", flow: "fix", steer: true });
+    const flowOnly = plans.planTriggerEdit({ params: { index: 1, flow: "review" }, paths, env: {} }).plan;
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: flowOnly.mutate }).ok);
+    assert.equal(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].run.steer, true, "an edit that does not send it keeps it");
+    // Judged against the entry's own command, so the refusal never reaches the operator's confirm; cron is allowed.
+    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [
+      { on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv", flow: "f", task: "t" } },
+      { on: { type: "label", any: ["go"] }, run: { kind: "github", command: "wf run" } },
+    ] }));
+    assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", steer: true }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f -> f, steer: - -> true");
+    assert.match(plans.planTriggerEdit({ params: { index: 1, flow: "f", steer: true }, paths, env: {} }).refusal, /run\.steer cannot be set beside run\.command/);
   } finally {
     restore();
   }

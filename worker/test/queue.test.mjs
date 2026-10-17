@@ -1080,6 +1080,49 @@ test("recover rides local job data only when armed, and never moves the minute-w
 	}
 });
 
+test("steer rides forge job data only when armed, never in event.json's trigger, and never moves a dedup key (issue #646)", async () => {
+	const { enqueueForgeJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	const base = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-st", sender: { id: 42 }, matched: { index: 0, type: "label", label: "bug" } },
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+	};
+	for (const kind of ["github", "gitlab", "forgejo", "azure"]) {
+		await enqueueForgeJob(fakeQueue, kind, { ...base, steer: true });
+		assert.equal(captured.data.steer, true, kind);
+		assert.equal("steer" in captured.data.trigger, false, "an execution knob, never in /job/event.json");
+		const dedup = captured.opts.deduplication.id;
+		const id = captured.opts.jobId;
+		for (const value of [undefined, false, "true"]) {
+			await enqueueForgeJob(fakeQueue, kind, { ...base, steer: value });
+			assert.equal("steer" in captured.data, false, `${kind} ${value}`);
+			assert.equal(captured.opts.deduplication.id, dedup);
+			assert.equal(captured.opts.jobId, id);
+		}
+	}
+});
+
+test("steer rides local job data only when armed, and never moves the minute-windowed id (issue #646)", async () => {
+	const { enqueueLocalJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	const fields = { folder: "/proj", flow: "tidy", task: "t", provider: "anthropic", model: "m", maxTurns: 5, now: new Date("2026-07-16T12:00:00Z") };
+	const plainId = await enqueueLocalJob(fakeQueue, fields);
+	assert.deepEqual(Object.keys(captured.data), NON_CHAINED_KEYS);
+	assert.equal(await enqueueLocalJob(fakeQueue, { ...fields, steer: true }), plainId);
+	assert.equal(captured.data.steer, true);
+	for (const value of [false, "true", 1]) {
+		await enqueueLocalJob(fakeQueue, { ...fields, steer: value });
+		assert.deepEqual(Object.keys(captured.data), NON_CHAINED_KEYS, String(value));
+	}
+});
+
 test("awaitInput rides forge job data only when armed, and never moves a dedup key (issue #625)", async () => {
 	const { enqueueGitHubJob } = await import("../src/queue.mjs");
 	let captured;
