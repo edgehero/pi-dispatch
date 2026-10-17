@@ -38,16 +38,34 @@ const DIRS = ["image/runner/test", "worker/test", "receiver/test", "admin/test"]
  */
 const TIMEOUT_MS = 300_000;
 
-/** How many files run at once. The suite is ~55s wall clock; this runs it twice, so keep it parallel. */
-const CONCURRENCY = 8;
+/**
+ * How many files run at once. The suite is ~55s wall clock; this runs it twice, so keep it parallel. Sixteen since issue
+ * #657 made each file's two runs sequential: the same sixteen processes at a time as eight files with both runs at once.
+ */
+const CONCURRENCY = 16;
+
+/**
+ * A run that outlives its file cap by this much is killed (issue #657). `--test-timeout` cancels a TEST, but a process
+ * that finished its tests and stays alive on an open handle (a BullMQ worker that never closed) is never stopped by it,
+ * and this check then waited for it until the job's own cap: five hours on PR #656.
+ */
+const KILL_AFTER_MS = TIMEOUT_MS + 60_000;
 
 function run(args) {
 	return new Promise((resolve) => {
 		const child = spawn(process.execPath, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
 		let out = "";
+		let killed = false;
+		const timer = setTimeout(() => {
+			killed = true;
+			child.kill("SIGKILL");
+		}, KILL_AFTER_MS);
 		child.stdout.on("data", (c) => (out += c));
 		child.stderr.on("data", () => {});
-		child.on("close", () => resolve(out));
+		child.on("close", () => {
+			clearTimeout(timer);
+			resolve({ out, killed });
+		});
 	});
 }
 
@@ -77,15 +95,21 @@ for (let i = 0; i < files.length; i += CONCURRENCY) {
 	const batch = files.slice(i, i + CONCURRENCY);
 	const results = await Promise.all(
 		batch.map(async (file) => {
-			const [childTap, inProcTap] = await Promise.all([
-				run(["--test", "--test-reporter=tap", `--test-timeout=${TIMEOUT_MS}`, file]),
-				run(["--test-reporter=tap", `--test-timeout=${TIMEOUT_MS}`, file]),
-			]);
-			return { file, child: counts(childTap), inProc: counts(inProcTap) };
+			// ONE AFTER THE OTHER, never together (issue #657). The two runs of one file share the job's one Valkey and every
+			// fixed database number the file uses, so run together they flush and drain each other's queues: on CI,
+			// `admin/test/console-actions.test.mjs` raced its own twin on database 13, lost a job to the twin's worker and
+			// sometimes never exited. Other files still run in parallel, so the wall clock barely moves.
+			const childRun = await run(["--test", "--test-reporter=tap", `--test-timeout=${TIMEOUT_MS}`, file]);
+			const inProcRun = await run(["--test-reporter=tap", `--test-timeout=${TIMEOUT_MS}`, file]);
+			return { file, child: counts(childRun.out), inProc: counts(inProcRun.out), killed: childRun.killed || inProcRun.killed };
 		}),
 	);
-	for (const { file, child, inProc } of results) {
+	for (const { file, child, inProc, killed } of results) {
 		checked++;
+		if (killed) {
+			mismatches.push(`${file}: a run was still alive ${KILL_AFTER_MS / 1000}s after it started and was killed; a test left a handle open (a client, a worker, a timer) so the process never exited`);
+			continue;
+		}
 		// A file that reported nothing either way is a harness problem of its own, and it is louder to say
 		// so here than to let a null compare equal to a null.
 		if (child.tests === null || inProc.tests === null) {
