@@ -3444,6 +3444,127 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   posted just before the container starts, and given it is refused by any gate (`not-parked`, a missing session
   store, a cap), none (`worker/test/processor-console-answer.test.mjs`).
 
+## REQ-STEER-RUNNING-JOB
+
+- **Statement**: A trigger may set `run.steer: true`. While one of its jobs runs, a message sent to that run shall
+  reach the running agent: by default as a **steer**, after the current turn's tool calls and before its next model
+  call, or as a **follow-up** (`followUp`), once the agent would otherwise stop, which continues the run. A message
+  shall reach the agent as data, framed and fenced the way the task text is, never as operator instructions and never
+  through pi's input path (no prompt template, no `/skill:` command, no extension input handler). Each message shall
+  be handed over at most once per attempt and in the order it was accepted, and its fate shall be reported:
+  `delivered` once the run's transcript holds it under a MAC the agent cannot forge, `late` when the run ended before
+  it was handed over, `withdrawn` when its sender took it back first. Nothing shall interrupt a model stream or a tool
+  that is running. Absent or `false` is today's behaviour exactly: the normalized entry, the job data, the env, the
+  argv and the record are byte-identical.
+- **Scope (this release: issue #646, part 1, the operator path)**: messages are sent from the command line,
+  `pi-dispatch steer <jobId> [--later] <text…|->`, and taken back with `pi-dispatch steer --withdraw <jobId>
+  <msgId>`. Two surfaces arrive in follow-up changes of the same issue: a collaborator's comment carrying the
+  trigger's phrase (receiver routing on the four forges and the poller, the `later` grammar, the stored fallback job
+  and the forge branches of the late-message rule), and the operator console's and the `/dispatch` TUI's actions with
+  the state API's per-job inbox field. Until the first lands no forge text enters any inbox: the inbox module already
+  accepts a `forge` source and stores fallback jobs, and only tests exercise them. `run.steer` is legal on every
+  trigger type, cron included (an operator can steer a folder job, which no forge comment can reach), and refused at
+  load beside `run.command` (a command job's prompt is one `/name args` line, so a message would reach whatever the
+  command started rather than an agent listening for it). **Not in scope**: interrupting a running tool (pi cannot),
+  inline pull request review comments (not ingested today), a forge reaction or reply at the moment a message is
+  steered, and terminal chat (#647, which will reuse this inbox).
+- **Why**: a run that is going the wrong way can today only be cancelled and started again, paying again for
+  everything it did, and the person who notices has no way to say so to it. durable-pi's steering is the one feature
+  of that harness that fits here: a message into the live session. It is built at the job boundary instead
+  (`DES-STEER-VIA-READONLY-INBOX-MOUNT`): the worker writes framed messages into a per-attempt directory mounted
+  read-only into the job, the runner hands each to pi as a custom message, and the worker counts a delivery from the
+  transcript it already tails.
+- **Fail loudly.** The CLI refuses a job that is not active (a queued job has no run to steer, and a message waiting
+  for it would open a run the person did not start for it) and an active job whose run is not open, in one sentence
+  naming the three causes it cannot tell apart (not steer-armed, not running, or a venue that cannot deliver). An
+  accepted push answers `closed`, `gone` or `full` as exit 1 saying what happened; after `ok` the command polls up to
+  10 s and prints the message id and its state (`written`, `delivered`, or still `queued`, which is accepted and exit
+  0), never the text; a message that turns `late` in that window is exit 1, since the agent never saw it. A job
+  armed with `run.steer` on an image that does not declare the `steer` capability is refused before it spends
+  (`job-image-steer-unsupported`). A job the worker cannot arm runs WITHOUT steering, as it would without the field,
+  and its record names why (`steerSkipped`: `venue-copies`, `no-exit-key`, `no-transcript`, `no-inbox`); a message
+  for it is refused at push, because nothing ever registered it as open. A runner handed `PI_STEER` without a
+  readable `/inbox` or without an exit key exits `2` before the prompt (`steer-inbox-missing`, `steer-no-exit-key`).
+- **Budget.** No new reserve. A turn a message causes counts against `maxTurns`, and the cost cap and the token cap
+  bind as they do for any turn; a follow-up that continues a run is a metered turn like any other. The caps on the
+  inbox (16 messages, 64 KiB of text, 8 KiB per message, per run, withdrawn messages counted) bound how many such
+  turns a sender can cause.
+- **Late messages** (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`). At the run's final outcome its inbox is closed in one
+  script before the record is written: every message still queued or written becomes `late`, and every later push is
+  refused. In this release an operator's late message is **reported only** (the CLI says `late`, the record counts
+  it), and no job starts.
+- **Parked runs** (`DES-STEER-HELD-WHILE-PARKED`). Once the agent has called `await_human_input`, nothing more is
+  handed over; a message held then settles as `late` when the run ends parked.
+- **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-TRIGGER-AUTHOR-GATE`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `REQ-AWAIT-INPUT`, `REQ-RUN-RECOVERY`,
+  `REQ-LIVE-TRANSCRIPT`, `DES-STEER-VIA-READONLY-INBOX-MOUNT`, `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`,
+  `DES-STEER-HELD-WHILE-PARKED`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
+  `DES-AWAIT-INPUT-ENDS-THE-JOB`, `INT-STEER-INBOX-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`,
+  `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-LIVE-TRANSCRIPT-STREAM`, `INT-CANCEL-CHANNEL-CONTRACT`.
+- **Acceptance**:
+  - (a) **The trigger field.** Given `run.steer` on any trigger type it is carried, absent when not written; a
+    non-boolean is refused on every type naming the field; `true` is allowed on cron and refused beside
+    `run.command` on every type (`worker/test/triggers.test.mjs`: "run.steer is carried on every forge type, and
+    absent when not written", "run.steer: a non-boolean is refused on every type, naming the field", "run.steer is
+    allowed on cron, unlike run.recover: an operator can steer a folder job", "run.steer is refused beside
+    run.command on every type, cron included"). The job data carries it at JOB level only when `true`, never inside
+    `trigger` and never in an id or dedup key (`worker/test/queue.test.mjs`, both steer tests;
+    `worker/test/schedules.test.mjs`; `receiver/test/filter.test.mjs`, "a matched rule's run.steer reaches the JOB
+    only when armed, never inside trigger (issue #646)"); the admin trigger tools judge it with the loader's
+    validator before the confirm (`admin/test/write-plans.test.mjs`); a job whose authored trigger arms it and which
+    arrived without it is `trigger-skew` (`worker/test/model-policy.test.mjs`); `PI_STEER` is `1` only for an armed
+    attempt, reserved and structural (`worker/test/env-allowlist.test.mjs`).
+  - (b) **The image gate.** Given an armed job on an image without `steer`, it is refused before any spend with
+    `job-image-steer-unsupported`; an unarmed job never needs it (`worker/test/image-preflight.test.mjs`, "steer
+    (#646): a job armed with run.steer needs it; an unarmed one never does" and the `CAPABILITY_GATES` order test).
+  - (c) **Arming and the mount.** Given binds, an exit key and the wiring, the attempt gets `PI_STEER=1`, a `0700`
+    inbox beside the job directory mounted read-only at `/inbox`, and a relay for the RUN id; given a copying venue,
+    no exit key or no wiring, the job runs unarmed with the argv of a job that never asked and a named skip; an
+    unarmed argv is byte-identical; a throw before the spawn or a spawn error removes the inbox and stops the relay
+    (`worker/test/run-container-steer.test.mjs`).
+  - (d) **The inbox scripts.** Push answers `ok` once, `dup` on the same id, `gone` without the open key and `closed`
+    after the close; `full` at 16 messages and at 64 KiB, withdrawn ones still counted; a push racing a close on two
+    clients is either in close's reply or refused; close turns queued and written into late and returns everything;
+    withdraw reports the prior state; the mark is a compare and set; registration scores and TTLs follow the injected
+    clock; the text loses the tag block and the zero width characters, backtick look-alikes fold to the ASCII
+    backtick with no other normalisation, and an unpaired surrogate is refused (`worker/test/steer-inbox.test.mjs`,
+    "hidden text is removed on the steer path: the tag block and the zero width characters", "backtick look-alikes fold
+    to the ASCII backtick (and nothing else is normalised: no NFKC)", "an unpaired surrogate is refused, never kept or
+    replaced").
+  - (e) **The relay.** Nothing is written before the tail's baseline; after it every queued message is written in
+    order as `<seq>-<id>.json`, mode 0444, marked before it is renamed, so a message withdrawn while queued never
+    becomes visible; a delivered message the restored transcript does not hold is handed over again; a waiting message
+    whose verified ack is in the staged transcript is marked delivered at the baseline (F5); a CLOSED inbox under the
+    run id (a console retry) is reset before the run registers and old deliveries are never re-handed, an OPEN one (a
+    recovery, an InfraRetry) is kept, and a closed inbox the reset could not reopen is never written into nor
+    re-baselined (F1) (`worker/test/inbox-relay.test.mjs`).
+  - (f) **What the agent reads.** The frame is the heading, the attribution, the no-authority rule with rule 2 and the
+    fenced verbatim text; a body that tries to close the fence stays inside a longer one; a body starting with `/` is
+    kept verbatim (`worker/test/steer-framing.test.mjs`).
+  - (g) **The runner, on a real pi session.** A steer written mid-turn lands after that turn's tool results and before
+    the next model call, verbatim; a follow-up waits for a tool-free turn and restarts the loop; a file that lands in
+    the final turn is delivered from `agent_before_settle`; one after the close is never sent and counts as pending;
+    after `await_human_input` a message is held and the run ends parked; an aborted run and an idle session get nothing
+    from the timer (F4); the exit line's `deliveredIds` lists the delivered ids in order, at most 16; the ack verifies; `PI_STEER` without `/inbox`
+    or without a key exits `2` before any model call (`image/runner/test/inbox.test.mjs`, (a) to (h) and the two real
+    run-job tests); pi's delivery semantics are pinned at the pinned release (`image/runner/test/pinned-api.test.mjs`,
+    the two issue #646 tests).
+  - (h) **Acks.** The worker's ack is the runner's byte for byte; a bad or missing MAC is ignored, counted and said
+    once; prior lines never count as deliveries (`worker/test/steer-ack.test.mjs`).
+  - (i) **Settle and record.** Every returned result but a #645 handoff, and every throw that ends the job, closes the
+    inbox; every record write in `index.mjs` and the host-lost sweep's in `start.mjs` is immediately preceded by it
+    (BY SHAPE), and so does the failed listener's terminal branch, a stall's error being a final outcome (F2);
+    `steered` and `steerSkipped` hold integers and the enum only, and only for a steer job; `parseExitSteer` keeps
+    `deliveredIds` only as at most 16 32-hex ids (F3) (`worker/test/steer-settle.test.mjs`); an exit line that did not
+    verify marks nothing, and with the transcript swapped for a symlink the ids on the signed exit line are still marked
+    delivered (F3, `worker/test/run-container-steer.test.mjs`); end to end, a forged ack is ignored, the real one
+    counts, an InfraRetry with an attempt left keeps the inbox open for the next attempt, and a console retry under the
+    same job id finds its inbox reset (`worker/test/steer-flow.integration.test.mjs`).
+  - (j) **The CLI.** The cases under Fail loudly, the stdin bound, and withdraw's wording of the prior state
+    (`worker/test/steer-cli.test.mjs`); usage and fail-fast against an unreachable Valkey
+    (`worker/test/cli-control.test.mjs`).
+
 ## REQ-RESURRECTABLE-SANDBOX
 
 - **Statement**: A finished run's per-job directory shall be retained for a bounded window, and
@@ -4361,6 +4482,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-17 | Issue #646, part 1, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round, acceptance only (the Statement, Scope, budget and late-message rule are unchanged): (d) gains the steer scrub (the tag block and zero width characters removed, three backtick look-alikes folded, no NFKC, an unpaired surrogate refused); (e) gains F5 (a waiting message whose verified ack is in the staged transcript is marked delivered at the baseline) and F1 (a closed inbox under a reused run id is reset before the run registers, an open one is kept, a closed one the reset could not reopen is never written into nor re-baselined); (g) gains F4 (an aborted run and an idle session get nothing from the timer) and the exit line's `deliveredIds`; (i) gains F2 (the failed listener's terminal branch settles the inbox) and F3 (`deliveredIds` parsed only as at most 16 ids, marked only off a verified exit line, still marked with the transcript swapped for a symlink), and the console-retry flow test. Each names its test. |
+| 2026-10-17 | Issue #646, part 1: steering, the operator path. **NEW `REQ-STEER-RUNNING-JOB`**: a trigger may set `run.steer: true`, and a message sent to its running job reaches the agent as a steer (after the current turn's tool calls, before the next model call) or a follow-up (when it would otherwise stop), framed and fenced as data, never through pi's input path, at most once per attempt and in order, its fate reported as `delivered`, `late` or `withdrawn`. Scope: this release is the operator path, the command line (`pi-dispatch steer <jobId> [--later] <text…\|->`, `pi-dispatch steer --withdraw <jobId> <msgId>`); a collaborator's phrase comment on the four forges and the poller, and the console and `/dispatch` TUI actions, arrive in follow-up changes of the same issue, and until then no forge text enters an inbox. Legal on cron, refused beside `run.command`. Fail loudly (the CLI's refusals and states, `job-image-steer-unsupported`, the `steerSkipped` reasons, the runner's `steer-inbox-missing` and `steer-no-exit-key`), budget (no new reserve; every caused turn counts), late messages (operator ones reported only), parked runs, and lettered acceptance (a) to (j) naming the tests. **`REQ-AWAIT-INPUT` UNCHANGED, checked**: a park is unchanged; the hold is `DES-STEER-HELD-WHILE-PARKED`. **`REQ-DEDUP-BY-DELIVERY-GUID` UNCHANGED, checked**: nothing in this release touches a delivery id or a window; the inbox id from the delivery GUID and the window release for steer-armed runs arrive with comment routing. |
 | 2026-10-17 | Issue #645, closing. **`REQ-RUN-RECOVERY` AMENDED**, Scope: the forge mirror of the workspace is no longer listed as out of scope pending work; it is declined in `OQ-045` (it could carry the tree only, never the transcript a recovery needs). Everything else UNCHANGED, checked. |
 | 2026-10-17 | Issue #645, part 2, review round 1. **`REQ-RUN-RECOVERY` CORRECTED** to the code after the round: Scope gains that a run whose base commit holds anything under `.pi/extensions/` is not armed (`recoverSkipped: "workspace-extensions"`, the trust reset cannot enumerate what an extension imports from outside `.pi/` or from `/workspace/node_modules`), and Fail loudly gains its recovery-time refusal `recovery-unsafe-extensions`; a recovery whose container ran and could not queue another returns `recovery-failed` (own comment, one page) where it used to fail with the generic comment; a never-started fault of a recovery is a 60 s wait without spending its one attempt; superseded is decided first by the base run's (and earlier recoveries') settled records, read locally and then from the fleet mirror; the host-lost deadline extends by an hour while the host is alive in the registry, its queue is paused or the registry is unreadable, up to seven days; the recovery prompt names the reset paths and the commit the run started from; the runner's counts reach the record through the log sink. Acceptance (b), (d), (f) gain the round's tests. Statement UNCHANGED, checked. |
 | 2026-10-17 | Issue #645, part 2: durable runs. **NEW `REQ-RUN-RECOVERY`**: a forge trigger's `run.recover: true` makes a run lost to infrastructure (a terminal stall, or an infrastructure exit of its container) continue from its last checkpoint, at most twice, with the cut-off tool calls answered (builtin file tools and `report_progress` re-run, everything else `interrupted` or `not-started`) and a fixed recovery prompt; never a policy exit, a completed run, a worker abort, an OOM kill or a never-started container. Scope: forge triggers; cron and `run.command` refused at load; a local job not armed (`recoverSkipped: "local"`); another host, local folders and the forge mirror are `OQ-045`. The loud refusals (`recover-store-unset`, `job-image-recover-unsupported`, `recovery-checkpoint-absent`, `recovery-cap`, `recovery-host-lost`; `recovery-superseded` silent) and the fail-open `base-unprimed`. Acceptance (a) to (g) names the tests in `image/runner/test/recover.test.mjs`, `worker/test/run-checkpoint.test.mjs`, `worker/test/processor-durable.test.mjs`, `worker/test/run-budget-ledger.test.mjs`, `worker/test/recovery-queue.test.mjs`, `worker/test/trust-paths.test.mjs` and the amended suites. **`REQ-RESUMABLE-SESSION` AMENDED**: a new bullet, a checkpoint is not a session (per run, in its own store, never promoted into a key or resumed by a later run; a recovery stages it as `recovered` and a completed recovery of a resume job promotes it); "retry means re-run" holds except under `run.recover`; the non-completed-exit acceptance sentence is qualified for a recovered run; Traces to gains `REQ-RUN-RECOVERY`. The Statement is **UNCHANGED, checked**. **`REQ-RUN-PROGRESS` AMENDED**: Scope no longer excludes recovered runs; (a) gains the recovery marks (`interrupted` and `not-started` count as interrupted, `replayed` its own count, none a step). **`REQ-LIVE-TRANSCRIPT` UNCHANGED, checked**: a recovery's stream is its run's key, replaced at the recovery's first write as a retry's is. **`REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked**: a recovery edits its run's status comment; the lost attempt's settles as retrying. |
