@@ -2061,7 +2061,7 @@ adversarial passes did.
 - **Cross-links**: `REQ-CONSOLE-SECURITY`, `DES-OPERATOR-CONSOLE`, `REQ-DURABLE-RUN-HISTORY`, `REQ-RESUMABLE-SESSION`,
   `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM`, `INT-LIVE-TRANSCRIPT-STREAM`.
 
-## OQ-045: Durable runs across hosts, local folders, and the forge mirror
+## OQ-045: Durable runs across hosts and local folders (the forge mirror declined)
 
 - **Status**: `OPEN` (2026-10-17, issue #645 part 2).
 - **Position**: a lost `run.recover` run is continued only on the host that took its checkpoint
@@ -2077,16 +2077,16 @@ adversarial passes did.
   - **Local folders.** A local job is not armed (`recoverSkipped: "local"`). Its folder is durable and the operator's
     own, so no tree snapshot is needed, but a recovery would replay a transcript over a working tree the lost run
     changed in place, and the cron refusal's reason applies to every local job until a design says what is restored.
-  - **The forge mirror (part 3).** An opt-in mirror of the workspace (not the transcript, which is PII) to a hidden
-    ref on the forge, so a recovery on another host could fetch the tree; it would still need the transcript from the
-    checkpoint host or a shared store, and it publishes the tree to everyone who can read the repository.
+  - **The forge mirror: DECLINED (2026-10-17).** An opt-in mirror of the workspace to a hidden ref on the forge was
+    planned as a third part. It is not built: it could carry the tree only (the transcript is PII), and a recovery
+    needs the transcript and the tree together from the same store, so a host without the store still could not
+    recover, while the mirror would publish the tree to everyone who can read the repository (deleted refs stay
+    fetchable by sha on GitHub). Cross-host recovery, if it comes, comes from a shared checkpoint store, not the forge.
 - **What would change it**: the records show `recovery-host-lost` or `recovery-checkpoint-absent` with `why: host`
-  on real runs; or an operator runs a fleet whose hosts come and go (autoscaled workers) and asks for it; or part 3
-  lands and measures pushes to a custom ref on each forge.
+  on real runs; or an operator runs a fleet whose hosts come and go (autoscaled workers) and asks for it.
 - **Needs**: for cross-host, a decision on where the transcript lives (a shared store with a lock that spans hosts, or
   a transport that is not the forge), and the host check relaxed only for it; for local folders, a statement of what a
-  recovery restores in a folder the operator owns; for the mirror, `SECURITY.md`'s statement of what a published tree
-  exposes (deleted refs stay fetchable by sha on GitHub).
+  recovery restores in a folder the operator owns.
 - **Cross-links**: `REQ-RUN-RECOVERY`, `DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`, `INT-WORKSPACE-CHECKPOINT-STORE`,
   `INT-RUN-CHECKPOINT-POINTER`, `OQ-041`.
 
@@ -2203,3 +2203,4 @@ adversarial passes did.
 | 2026-10-16 | Issue #644, run progress. **`OQ-044` UNCHANGED, checked**: progress opens no new place where transcript text is shown; its phase names and notes, which are model text, follow the answer `OQ-044` gave the transcript (redacted, in Valkey for at most 24 h after the run, 7 days while live, to the console's operator role alone), and the forge status comment carries none of them. **`OQ-035` UNCHANGED, checked**: `failedReason` is untouched. No new question is opened. |
 | 2026-10-17 | Issue #645, part 2: durable runs. **`OQ-041` AMENDED, still `WATCH`**: its third trigger (spend lost to runs that died mid-run on infrastructure and were paid for again) is now measurable from the records: a recovery's `recovered` and `recoveryOf`, the lost attempt's `recovery-enqueued`; and the in-container durability its Position called cheap to give up is answered at the worker's layer. **NEW `OQ-045`, `OPEN`**: durable runs across hosts (the store is host-local, the recovery is routed to the checkpoint host and refuses a checkpoint from another host, so a shared `PI_SESSIONS_DIR` does not help today), local folders (not armed, `recoverSkipped: "local"`), and the forge mirror (part 3). **`OQ-014` UNCHANGED, checked**: a checkpoint is never handed to a later run, so the resume population is unchanged. **`OQ-044` UNCHANGED, checked**: no new place shows transcript text; a recovery continues its run's stream. |
 | 2026-10-17 | Issue #645, part 2, review round 1. **`OQ-045` CORRECTED**: a lost host's runs end after six hours only once it is gone from the host registry (up to seven days while it still beats or its queue is paused), and doctor now warns on `run.recover` on a fleet worker with no `PI_WORKER_NAME`. |
+| 2026-10-17 | Issue #645, closing. **`OQ-045` AMENDED**: the forge mirror of the workspace (planned as part 3) is DECLINED: it could carry the tree only, a recovery needs the transcript and the tree from the same store, and it would publish the tree to readers of the repository; cross-host recovery, if it comes, comes from a shared checkpoint store. Its trigger and need for the mirror are removed. |

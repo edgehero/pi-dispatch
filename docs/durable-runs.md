@@ -150,8 +150,8 @@ own code and instructions, and the restored tree was written by the agent.
 ## What is not covered
 
 - **Another machine.** A recovery runs only on the machine that holds the checkpoint. A shared `PI_SESSIONS_DIR`
-  does not change that today: a recovery refuses a checkpoint another machine took. A forge mirror of the workspace
-  is planned as a separate opt-in (`OQ-045` in `specs/open-questions.md`).
+  does not change that today: a recovery refuses a checkpoint another machine took. A forge mirror of the
+  workspace was considered and declined: it could not carry the transcript (`OQ-045` in `specs/open-questions.md`).
 - **Local folders.** A local job is not armed: it runs as before, and its record says `recoverSkipped: "local"`.
 - **Exactly once side effects.** A push, comment or forge call that was running when the run was lost is not undone
   or confirmed by pi-dispatch. The agent is told and checks; the forge's own rules (a branch that already exists, a
