@@ -78,6 +78,8 @@ test("parseRunFilter refuses a hostile value in every field, and never echoes it
 });
 
 test("runMatches: each field, positive and negative", () => {
+  // `anthropic/claude-x` is a BARE model id, the shape of openrouter's `anthropic/claude-haiku-4.5`: a record's `model`
+  // never carries a provider prefix (INT-RUN-HISTORY-FILE-CONTRACT), so the slash here is part of the id.
   const r = rec("repeat:nightly:1760443200000", AT, { kind: "local", target: "local:site", flow: "triage", triggerIndex: null, project: "shop", host: "mini-1", outcome: "failed", reason: "budget-exceeded", model: "anthropic/claude-x" });
   const gh = rec("gh-1", AT, { target: "acme/web#12", triggerIndex: 4 });
   const cases = [
@@ -103,6 +105,33 @@ test("runMatches: each field, positive and negative", () => {
   assert.equal(runMatches(gh, {}), true);
   assert.equal(runMatches(null, {}), false);
   assert.equal(runMatches(rec("manual:nightly:1", AT), parseRunFilter({ trigger: "nightly" }).filter), true, "a manual fire of the scheduler too");
+});
+
+test("parseRunFilter: every priced bare model id is a filter that finds its run, a leading @ or ~ included; the hostile shapes stay refused (#668)", async () => {
+  const { listPricedModels } = await import("@edgehero/pi-dispatch/pricing");
+  const ids = [...new Set(listPricedModels().map((m) => m.id))];
+  assert.ok(ids.some((id) => id.startsWith("@")), "the catalog has an @ id, so the walk proves something");
+  assert.ok(ids.some((id) => id.startsWith("~")), "and a ~ id");
+  const other = rec("gh-other", AT, { model: "not-this-model" });
+  for (const id of ids) {
+    const res = parseRunFilter({ model: id });
+    assert.deepEqual(res.filter, { model: id }, `model ${id} parses`);
+    assert.equal(runMatches(rec("gh-1", AT, { model: id }), res.filter), true, `model ${id} finds its run`);
+    assert.equal(runMatches(other, res.filter), false, `model ${id} finds no other run`);
+  }
+  // `+` is in the class (a quantization or variant suffix), so an id holding one is a filter.
+  assert.deepEqual(parseRunFilter({ model: "a+b" }).filter, { model: "a+b" }, "a + is kept");
+  // Matching is exact and case-sensitive: an operator copies the id, and two ids differing in case are two models.
+  const upper = rec("gh-upper", AT, { model: "Claude-X" });
+  assert.equal(runMatches(upper, parseRunFilter({ model: "claude-x" }).filter), false, "case differs: no match");
+  assert.equal(runMatches(upper, parseRunFilter({ model: "Claude-X" }).filter), true, "same case: a match");
+  const SAYS = "model must be a model id (an optional leading @ or ~, then letters, digits and . _ : / @ + -, at most 128 characters)";
+  for (const value of ["b~c", "@", "~", "@~a", "~@a", ".x", "/x", ":x", "a b", "a\"b", "a'b", "a\nb", "a".repeat(129), "@" + "a".repeat(128)]) {
+    const res = parseRunFilter({ model: value });
+    assert.equal(res.refusal, SAYS, `refuses ${JSON.stringify(value)}`);
+    assert.equal(res.filter, undefined);
+    if (value.length > 1) assert.ok(!res.refusal.includes(value), "the refusal does not echo the value");
+  }
 });
 
 test("runMatches: q ignores case on the record's side too; a trigger index is at most four digits; a scheduler id needs its millis", () => {
@@ -321,6 +350,18 @@ test("readRunsPage: a mirror that drops part-way through a page shows this host'
   assert.match(page.mirror, /^unreachable \(ECONNRESET\)/);
   const whole = await readRunsPage(fakeMirror(mirrored), { logsDir, filter, limit: 50, now: () => AT });
   assert.ok(ids(whole).includes("m3"), "and a mirror that answers shows it");
+});
+
+test("readRunsPage: a model filter on an @cf/... id finds its mirrored and local runs (#668)", async () => {
+  const logsDir = tempDir("pd-668-model-");
+  const CF = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+  writeLocal(logsDir, rec("l1", AT - MIN, { model: CF }));
+  writeLocal(logsDir, rec("l2", AT - 2 * MIN, { model: "claude-sonnet-5-5" }));
+  const mirrored = [rec("m1", AT - 3 * MIN, { host: "hostb", model: CF }), rec("m2", AT - 4 * MIN, { host: "hostb", model: "~anthropic/claude-opus-latest" })];
+  const { filter } = parseRunFilter({ model: CF });
+  assert.deepEqual(ids(await readRunsPage(fakeMirror(mirrored), { logsDir, filter, limit: 10, now: () => AT })), ["l1", "m1"]);
+  const tilde = parseRunFilter({ model: "~anthropic/claude-opus-latest" }).filter;
+  assert.deepEqual(ids(await readRunsPage(fakeMirror(mirrored), { logsDir, filter: tilde, limit: 10, now: () => AT })), ["m2"]);
 });
 
 // --- readRunById ------------------------------------------------------------------------------------------------------
