@@ -1082,7 +1082,15 @@ test("publicInboxEntry rebuilds each field and drops what fails; readJobInbox ke
   assert.equal(shut.open, false);
   const listFails = await readJobInbox({ redis: redis({ multi: () => { throw new Error("m"); } }), queues: q(job("active")), jobId: "gh-1" });
   assert.equal(listFails.entries, null, "an unread list is null, never []");
-  assert.deepEqual(await readJobInbox({ redis: redis(), queues: [{ name: "q", getJob: () => new Promise(() => {}) }], jobId: "gh-1", timeoutMs: 20 }), { unreachable: true }, "a read that never answers is bounded");
+  // The bound's timer is unref'd on purpose (a hung read must never hold the process open), and a promise that never
+  // settles holds nothing either, so with no other handle alive the loop empties before the 20 ms bound fires and
+  // node:test cancels the test as still pending (main's CI, four pushes). A ref'd timer keeps the loop up meanwhile.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    assert.deepEqual(await readJobInbox({ redis: redis(), queues: [{ name: "q", getJob: () => new Promise(() => {}) }], jobId: "gh-1", timeoutMs: 20 }), { unreachable: true }, "a read that never answers is bounded");
+  } finally {
+    clearInterval(keepAlive);
+  }
   assert.deepEqual(await readJobInbox({ redis: redis(), queues: q(job("active", { steer: 1 })), jobId: "gh-1" }), { found: true, steer: false });
 });
 

@@ -5252,7 +5252,13 @@ async function durableStallBoot(t) {
 		makeHost: () => host,
 		now: () => DURABLE_NOW,
 		durable: t.durable,
-		...(t.readProgressKey ? { readProgressKey: t.readProgressKey } : {}),
+		// The progress read is ALWAYS a double here, never the boot's real one. The real one reads through the boot's
+		// ioredis client, which the harness has already quit, and `quit` resolves on Valkey's OK while `status` stays
+		// "ready" until the socket's close event, a later macrotask. Where a Valkey answers on the worker's default URL
+		// (CI's service on 6379) the stall's read then went out on that closing socket and settled only when it closed,
+		// which on a loaded runner was after `settleDurable`'s turns: `drive` returned before the enqueue, and the
+		// refused case read `enqueued.length` 0 (PR #675's rerun). A test that wants a key passes its own.
+		readProgressKey: t.readProgressKey ?? (async () => null),
 	});
 	const drive = async (job, err) => {
 		const from = bootLines.length;
