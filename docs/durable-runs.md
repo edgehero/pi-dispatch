@@ -188,6 +188,7 @@ A job that never set `recover` has none of these fields.
 | `recovered.n` | which recovery, 1 or 2 |
 | `recovered.fromAttempt`, `recovered.checkpointSeq` | the lost container's number in the run and the checkpoint's number |
 | `recovered.orphans`, `replayed`, `interrupted`, `notStarted` | the cut off calls and how each was answered |
+| `recovered.countsFrom` | where those counts came from: `exit-line` (the runner's last line, used whenever it carries them) or `transcript` (the last line was missing, as when the recovery's container was killed, or carried no counts, so they were read off its transcript, which the agent can write to) |
 | `recoverSkipped` | why a job that set `recover` ran without it: `local`, `no-run-id`, `base-unprimed` (the store could not take the base, so the run went on unprotected) or `workspace-extensions` (the repository has pi extensions) |
 | `checkpoints` | how many checkpoints this attempt `written`, `failed` and `skipped` |
 
@@ -208,3 +209,11 @@ The reasons a durable run can end with:
 The run's live transcript, progress and status comment carry on through a recovery: they belong to the run, not to
 one attempt. In progress, a replayed call counts as `replayed`, and an interrupted or not started one as
 `interrupted`.
+
+The record of an attempt whose worker died (`recovery-enqueued`, written when the stall is noticed) takes its start
+time and its progress counts from the run's progress key, as it stood when the worker died, when that key was written
+after the job was queued. With progress off, the key gone, or a key an earlier attempt left (a recovery that died
+before writing its own), its `startedAt` is empty rather than the time the queue noticed the stall.
+
+On the console, the page of an attempt that was continued shows that attempt's own progress and a link to the
+recovery job ("This run continues as ..."); the recovery's page shows the run's live progress.
