@@ -3169,6 +3169,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   per-trigger security downgrade and the population that would want one should be editing the deployment
   instead. `DES-PER-TRIGGER-JOB-IMAGE` already drew this line: the image decides what is *in* the box, never
   what the box can *do*.
+- **A venue with its own egress layer (AMENDED 2026-10-18, issue #680; planned, built in #684).** The Statement's
+  network and allowlist proxy are the `local` and `podman` venues', and stay exactly as written there. A venue whose
+  table entry declares its own layer (`CONST-VENUE-EGRESS-LAYER`, the planned `credentialCustody: layer`, #683; the
+  first is `openshell`, `DES-OPENSHELL-VENUE`) has no job network and no squid proxy: the bound is instead the policy
+  document the worker generates per job and reads back, and that document carries **the same allowlist**, the same
+  `model-endpoints` entries and the same forge hosts the squid rules carry, so a host a job reaches on one venue is
+  the host it reaches on the other. The requirement's shape holds unchanged on such a venue: on by default, not per
+  trigger, and a job whose policy cannot serve it (a document that does not read back as written, a gateway-wide
+  global policy that would replace the job's own) refused before it spends. What `PI_EGRESS=0` means on such a venue
+  is deferred to #684, and no layer venue ships before #684 decides it; the Statement's `PI_EGRESS=0` behaviour is
+  the `local` and `podman` venues'. Nothing of this ships today.
 - **Why the check is pre-spend, which is the whole shape of the feature**: a job that cannot reach its
   provider **starts the container, spends its budget slot, and produces nothing**. Measured against the real
   runner: three provider attempts, `Request timed out.`, exit `1`, ~40 seconds, **zero tokens**. Exit `1` is
@@ -3667,6 +3678,22 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`DES-STEER-VIA-READONLY-INBOX-MOUNT`): the worker writes framed messages into a per-attempt directory mounted
   read-only into the job, the runner hands each to pi as a custom message, and the worker counts a delivery from the
   transcript it already tails.
+- **Copying venues: delivery through stdin frames (AMENDED 2026-10-18, issue #680; planned, built in #686; nothing
+  of it ships today).** A venue that uploads the job's files once (the first is `openshell` in its default copy
+  mode, `DES-OPENSHELL-VENUE`) cannot show the runner a file written after the start, so today such a job runs
+  without steering (`steerSkipped: "venue-copies"`). On such a venue a steer-armed attempt whose image declares the
+  planned `steerStdin` capability shall receive its messages as frames on the main exec's stdin instead: the exit key
+  first, read before any tool exists, then one frame per message MAC'd under that key, at most 4 MiB in all per
+  attempt, the pipe closed when the attempt ends (`INT-STEER-INBOX-CONTRACT`'s stdin transport,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`). Everything else in this requirement holds unchanged there: data never
+  instructions, at most once, in order within each mode, `delivered` only on the verified ack, the caps, the late
+  rule. An image without `steerStdin` on a copying venue is skipped as today, and a bind venue always takes the
+  read-only mount. **The residual is stated as a weaker guarantee, not hidden:** on stdin the agent cannot plant a
+  message, because a frame without the key's MAC is dropped, but it can consume one before the runner reads it,
+  which withdraws that message (it then never acks and is reported undelivered, `late`, exactly as a message the run
+  never took is today), or read it and write it back later, which delays it; and a sender's withdrawal of a
+  `written` message cannot stop a frame already in the pipe. Under the read-only mount none of these is possible,
+  which is why the mount stays the transport wherever a venue binds.
 - **Fail loudly.** The CLI refuses a job that is not active (a queued job has no run to steer, and a message waiting
   for it would open a run the person did not start for it) and an active job whose run is not open, in one sentence
   naming the three causes it cannot tell apart (not steer-armed, not running, or a venue that cannot deliver). An
@@ -3681,7 +3708,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and its record names why (`steerSkipped`: `venue-copies`, `no-exit-key`, `no-transcript`, `no-inbox`); a message
   for it is refused at push, because nothing ever registered it as open. A runner handed `PI_STEER` without a
   readable `/inbox` or without an exit key exits `2` before the prompt (`steer-inbox-missing`, `steer-no-exit-key`).
-  A comment the receiver cannot steer (no live run, every run `gone`, `closed` or `full`, a body over the cap or
+  **AMENDED 2026-10-18 (issue #680, planned, #686)**: `steer-inbox-missing` applies to the mount transport only; a
+  stdin-steered runner (the planned `PI_EXIT_AUTH` value `stdin-frames`, `INT-RUNNER-EXIT-CODE-PROTOCOL`) checks its
+  frame channel instead of `/inbox`, and `steer-no-exit-key` holds for both. A comment the receiver cannot steer (no live run, every run `gone`, `closed` or `full`, a body over the cap or
   empty after the scrub, a Valkey fault) is never dropped: it falls through to the enqueue it always had, and the
   receiver logs why by a fixed reason (`steer_fell_through`, `steer_comment_skipped`, `steer_lookup_failed`), never
   the text.
@@ -3726,7 +3755,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     inbox beside the job directory mounted read-only at `/inbox`, and a relay for the RUN id; given a copying venue,
     no exit key or no wiring, the job runs unarmed with the argv of a job that never asked and a named skip; an
     unarmed argv is byte-identical; a throw before the spawn or a spawn error removes the inbox and stops the relay
-    (`worker/test/run-container-steer.test.mjs`).
+    (`worker/test/run-container-steer.test.mjs`). **AMENDED 2026-10-18 (issue #680, planned, #686; no test yet)**:
+    given a copying venue whose image lacks `steerStdin`, the job runs unarmed with the named skip
+    (`steerSkipped: "venue-copies"`) as above; given one whose image declares it, with an exit key and the wiring, the
+    attempt is armed through stdin frames (`INT-STEER-INBOX-CONTRACT`'s stdin transport) and gets no `/inbox` mount.
   - (d) **The inbox scripts.** Push answers `ok` once, `dup` on the same id, `gone` without the open key and `closed`
     after the close; `full` at 16 messages and at 64 KiB, withdrawn ones still counted; a push racing a close on two
     clients is either in close's reply or refused; close turns queued and written into late and returns everything;
@@ -4994,6 +5026,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-18 | Issue #680, the decision that opens the OpenShell series (#683 backend, #684 policy layer, #686 stdio steering and bind mode); spec only, nothing ships. **`REQ-STEER-RUNNING-JOB` AMENDED**: NEW paragraph "Copying venues: delivery through stdin frames": on a copying venue (the first is `openshell` in copy mode, `DES-OPENSHELL-VENUE`) a steer-armed attempt whose image declares the planned `steerStdin` capability receives its messages as frames on the main exec's stdin (the exit key first, read before any tool exists, then one frame per message MAC'd under that key, at most 4 MiB per attempt, the pipe closed at the attempt's end), else it is skipped as today (`steerSkipped: "venue-copies"`); a bind venue always keeps the read-only mount. The residual is stated as a weaker guarantee: the agent cannot plant a message but can consume one, which withdraws it and reports it undelivered (`late`) as today, or write it back later, which delays it, and a sender's withdrawal of a `written` message cannot stop a frame already in the pipe. **Fail loudly AMENDED**: `steer-inbox-missing` applies to the mount transport only; a stdin-steered runner (the planned `PI_EXIT_AUTH` value `stdin-frames`) checks its frame channel instead of `/inbox`, `steer-no-exit-key` holding for both. **Acceptance (c) AMENDED**: a copying venue whose image lacks `steerStdin` runs unarmed with the named skip (`venue-copies`), and one whose image declares it is armed through stdin frames with no `/inbox` mount (no test yet, #686). The Statement, Scope, Budget, Late messages, Parked runs and every other Acceptance clause UNCHANGED, checked: none of them says the mount is the only transport, and every guarantee they state holds on both. **`REQ-EGRESS-ALLOWLIST` AMENDED**: its Statement names the `--internal` network and the allowlist proxy as the bound, so NEW paragraph "A venue with its own egress layer": on a venue declaring the planned `credentialCustody: layer` (`CONST-VENUE-EGRESS-LAYER`, #683) the bound is the policy document the worker generates per job and reads back, carrying the same allowlist, `model-endpoints` entries and forge hosts as the squid rules, still on by default, not per trigger, and refused before spend when it cannot serve the job (a read-back mismatch, a gateway-wide global policy); what `PI_EGRESS=0` means there is deferred to #684, no layer venue shipping before #684 decides it, and the Statement's `PI_EGRESS=0` behaviour is the `local` and `podman` venues'. The Statement, Scope and Acceptance UNCHANGED, checked, for `local` and `podman`. **Code evidence**: none; the code lands in #683, #684 and #686. |
 | 2026-10-18 | Issue #673: model settings were not shape-checked, so a run could carry a model id the console refuses. **`REQ-MODEL-POLICY` AMENDED**: the Statement says every source of a job's model and provider (`PI_MODEL`/`PI_PROVIDER` at boot, the settings overlay's `model`/`provider` at write and read, `pi-dispatch run --model`/`--provider` before enqueue) is held to the trigger's id shape (`modelIdProblem`, `providerIdProblem`), refused with a sentence naming the setting and the shape, never the value; acceptance adds the boot refusal and doctor's row, the refusal on every admin write and on a file already holding one (`settings-overlay-invalid`), and `run`'s exit 1 with nothing queued. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, acceptance (b): the "a refusal never hides a run that exists" claim now holds for `model`, held by `admin/test/run-model-bolt.test.mjs`. **`REQ-RUNTIME-SETTINGS-PICKUP` UNCHANGED, checked** (the overlay is still read at each job start; an invalid one still refuses the job). **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked** (the writer is unchanged; its sources are what is held). **Code evidence**: worker/src/model-ref.mjs -> modelIdProblem, providerIdProblem; worker/src/config.mjs -> modelFrom, providerFrom; worker/src/runtime-settings.mjs -> validateOverlay; worker/src/cli.mjs -> run; worker/src/doctor.mjs -> the PI_MODEL/PI_PROVIDER rows. Review round 1, folded in before merge: the acceptance now says doctor's PI_PROVIDER/PI_MODEL shape row is the ONLY row for a malformed value (the provider-key row, the trigger-secret clash row and the deployment default's catalog row, which print the value, are skipped for it and kept unchanged for a well-shaped one), and that the admin's planners refuse a malformed `model`/`provider` before any confirm, by the worker's own `modelIdProblem`/`providerIdProblem`, the dollar keys' rule. **Code evidence**: worker/src/doctor.mjs -> collectChecks (envShapeProblem); admin/src/write-plans.mjs -> idSettingProblem, planSettingTool, planSettingCommand. |
 | 2026-10-18 | Issue #670: a steer sent after a follow-up waited until the agent stopped. **`REQ-STEER-RUNNING-JOB` AMENDED**: the Statement's "in the order it was accepted" becomes "in the order accepted within each mode; a steer is never held behind a follow-up, which waits for the agent to stop" (the runner kept one message in flight for both modes, and a follow-up stays in pi until the agent would stop, so every later steer waited behind it: four minutes in the #647 lab); NEW acceptance (n): the #670 case, per-mode order, the boundary preferring a waiting steer, the close only with both empty, the parked hold of both (review round 1: and the follow-up held across a run a terminating tool ended goes next, with no steer delayed), and a message withdrawn while the runner held it never handed over, not pending and logged (`steer_withdrawn_held`). Scope, Fail loudly, Budget, Late messages and Parked runs UNCHANGED, checked. **Code evidence**: image/runner/src/inbox.mjs -> createInbox (scan, pump, stillWaiting, pruneWithdrawn, close). |
 | 2026-10-18 | Issue #668: the runs filter refused model ids that start with `@` or `~`. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, acceptance (b): it states the `model` charset (the record's bare model id, `RUN_MODEL_RE`: one optional leading `@` or `~`, then a letter or digit, then letters, digits and `. _ : / @ + -`, at most 128 characters; a lone `@` or `~`, an inner `~` and a leading `.`, `/` or `:` refused), so every priced catalog id, the 36 `@cf/...` and `~...` ids included, is a filter that finds its runs; its tests name the priced-id walk. Before this the rule required a letter or digit first, which broke the clause "each alone returns exactly the runs whose field matches" for a run on such a model. (e2)'s cross-reference ("outside the runs filter's model charset (a leading `@` or `~` allowed)") now holds exactly: the what-if form's model part is built from the same `RUN_MODEL_RE`, which also refuses a leading `@` or `~` followed by anything other than a letter or digit (`provider/@`, `provider/~`, `@.x`, `~/x` and the like, none of them a priced id) that it admitted. UNCHANGED, checked: (k) (`/api/run` is held by `INT-CONSOLE-STATE-API`, whose `model` field now keeps such ids), `REQ-CONSOLE-SECURITY` (the refusal still names the field and never echoes the value; `@` and `~` mean nothing in HTML), `REQ-COST-ANALYTICS`. |

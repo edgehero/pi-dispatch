@@ -582,6 +582,26 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   adding, because it is the strongest argument for the eventual mechanism and nobody had written it down: a
   header cannot be injected into a `CONNECT` tunnel without terminating it either, so the secrets-injecting
   proxy that would take the provider key **out** of the container entirely is necessarily the same one.
+- **AMENDED 2026-10-18 (issue #680): the mechanism the bullet above names is now ADMITTED, for one kind of venue,
+  and it is the custody half that moves, not the accounting half.** `CONST-VENUE-EGRESS-LAYER` lets a venue replace
+  the worker's own egress control with a layer of its own that terminates TLS and holds the job's credentials, on
+  four conditions: the venue's table entry declares it (the planned `credentialCustody: container | layer`, #683);
+  the policy is a document the worker generates per job from the same allowlist, `model-endpoints` and forge hosts,
+  hands to the venue and can read back; the layer runs on a host this deployment owns; and a job never starts
+  against a layer that cannot serve it, refused before spend. The first such venue is `openshell` (NVIDIA OpenShell
+  v0.1.4, `DES-OPENSHELL-VENUE`), whose supervisor swaps credential placeholders for the real values at the endpoints
+  a provider profile names. On such a venue the provider key **never enters the container**: the agent holds a
+  placeholder, so the premise of "What stays an accepted risk" above ("The agent holds the provider key") is false
+  there, and a direct API call made with what the agent holds reaches the provider only through the layer. That is
+  the admission, not a shipped fact: the backend is #683, the policy layer #684, and nothing of it runs today.
+  **The accounting half stays OPEN.** Holding the key is not counting what is spent with it: the layer as admitted
+  injects and does not account, so the non-pi client and the direct call are still uncounted by anything this repo
+  reads. The route is now concrete rather than hypothetical: per-sandbox accounting of provider traffic in the
+  supervisor, which already sees the plaintext, read back by the worker into the run record beside the ledger's
+  totals. It is a follow-up, not promised by #680, #683 or #684, and it would close this row on that venue only.
+  The supervisor's own compromise, which is the price of that plaintext, is `OQ-047`'s. **The status stays RESOLVED
+  for the cooperative path** and the residual still wants explicit ratification: on Docker and Podman nothing in
+  this bullet applies, the agent holds the key exactly as above, and the squid allowlist accounts for nothing.
 - **Corrected (2026-08-25, issue #202) — this row used to claim TLS termination was "the same mechanism
   `OQ-004` names", and it never was.** `OQ-004`'s close condition was a **hostname allowlist** proxy;
   `docs/sandbox.md` said in terms that such a proxy *never* terminates TLS; and `OQ-004` itself warned that
@@ -931,6 +951,18 @@ build does not.
   row's own standard and not a closure of it. **The status stays ACCEPTED RISK**, and the ratification it
   wants is now sharper: it is no longer only "an operator's image is outside our gates" but "a venue's
   runtime may be too".
+- **AMENDED 2026-10-18 (issue #680): the first vendor runtime to be admitted is exactly the case the #227
+  paragraph above describes.** On the planned `openshell` venue (`DES-OPENSHELL-VENUE`, #683) the worker builds no
+  argv: OpenShell's gateway creates the sandbox, its supervisor applies the network and filesystem policy, and the
+  agent container's isolation is what that runtime provides. It is not remote (`CONST-VENUE-EGRESS-LAYER` requires
+  the layer on a host this deployment owns, and the worker refuses a gateway endpoint that is not loopback or a Unix
+  socket on this host), so the image sits on an engine this host drives and `image/verify-image.sh` is not ruled out
+  the way it is on a remote venue; what is lost is the first mitigation, that the isolation surface is the worker's
+  argv. So that venue's words are the list `DES-CONTAINER-BACKEND-REGISTRY`'s #680 amendment gives, its isolation
+  words among them `asserted`, never `enforced` (this vocabulary's meaning: something outside the worker provides
+  them), and a floor that requires `enforced` refuses it at boot, as the
+  table already does for any venue. A non-conformant image there is a worse agent inside a box whose walls this
+  repo states rather than builds. Nothing ships today. **The status stays ACCEPTED RISK.**
 - **AMENDED (issue #278, `doctor --live`): the "what bounds it meanwhile" argument can now be READ BACK, for
   one image on one host, and nothing more.** `pi-dispatch doctor --live` starts short-lived containers of
   `PI_JOB_IMAGE` from the job builder and reads `isolation`, `ephemeral`, `mountSet`, `jobToJobIsolation` (with the
@@ -1441,6 +1473,15 @@ adversarial passes did.
   CONTAINER's argv rather than claiming what is not true of the host's.
 - **What would close it**: `OQ-011`'s secrets-injecting proxy, which would take the provider key out of the
   container entirely and could take resolved secrets with it.
+- **AMENDED 2026-10-18 (issue #680): that proxy is now admitted for a venue that declares its own layer
+  (`CONST-VENUE-EGRESS-LAYER`), so this row closes THERE once #684 ships, and nowhere else.** On the planned
+  `openshell` venue the worker builds no `docker run` argv, and the policy layer of #684 hands the job only
+  placeholders: the real provider key, the minted forge token and a resolved vault value stay in the venue's
+  supervisor and are never in the container's argv or environment, so `/proc/<pid>/cmdline` on the host reads a
+  placeholder. Until #684 ships nothing changes, and a layer venue that cannot hold a value is refused before spend
+  rather than falling back to `-e NAME=VALUE`. The exposure does not vanish, it moves: the values now live in a
+  vendor process, whose compromise is `OQ-047`'s. **Docker and Podman are unchanged**: `buildDockerRunArgs` still
+  passes every value as `-e NAME=VALUE`, and the status stays ACCEPTED RISK for them.
 - **Raised by**: issue #225.
 
 ## OQ-029 — A held job's WAKE has no authorizing actor, and the moment picks the commit
@@ -2134,6 +2175,76 @@ adversarial passes did.
 - **Cross-links**: `REQ-TERMINAL-CHAT`, `DES-TERMINAL-CHAT`, `INT-SESSION-STORE-CONTRACT`, `REQ-LIVE-TRANSCRIPT`,
   `REQ-RESUMABLE-SESSION`, `OQ-014`.
 
+## OQ-047: The residuals of a venue's own egress layer, which holds the job's credentials
+
+- **Status**: **ACCEPTED RISK** (2026-10-18, issue #680), *wants explicit ratification*. Nothing it describes ships
+  today: it is the price, stated in advance, of what `CONST-VENUE-EGRESS-LAYER` admits, and it is paid only by a
+  deployment that runs the planned `openshell` venue (`DES-OPENSHELL-VENUE`; backend #683, policy layer #684, stdio
+  steering and bind mode #686) on NVIDIA OpenShell v0.1.4 (2026-10-13, Apache-2.0,
+  https://github.com/NVIDIA/OpenShell).
+- **Position**: the constitution used to reject a TLS-terminating, secrets-injecting proxy as a different security
+  object that "needs its own constitution entry and its own story for the proxy's own compromise". #680 writes the
+  entry; this row is the story, with the residuals that remain after it. Each is a thing the worker cannot see from
+  its side of the layer:
+  - **Supervisor compromise.** OpenShell's supervisor runs beside the agent, terminates TLS with a per-sandbox CA
+    and swaps placeholders for real values. A compromised supervisor holds every credential the job would have
+    held (the provider key, the minted forge token, the job's resolved secrets) and nothing more, and it sees
+    provider and forge traffic in **plaintext**, inside a vendor process. That is a new failure class: on Docker and
+    Podman the plaintext exists only inside the agent's own container, and squid sees hostnames. The supervisor
+    is not this repo's code, so its guarantees are `asserted`, never `enforced`.
+  - **Binary-path pinning drifts silently.** OpenShell's network rules can name the binary allowed to make a
+    connection (for example node to the provider, git to the forge), by path. An image that moves node or git (a
+    new base, a version manager, a symlink resolved differently) keeps every hostname on the list and loses the
+    rule, and nothing fails loudly: the call is denied, or allowed for a path the policy did not mean. The image
+    must therefore declare its binary paths (#683), and the worker generates the rules from that declaration, never
+    from a guess (#684).
+  - **Experimental interfaces.** Parts of the CLI the venue drives are marked Experimental (for example
+    `--driver-config-json`) and may change in a patch release, on a project that releases weekly. Doctor and the
+    boot carry a version floor for the gateway, below which the venue is refused by name (#683). A patch release
+    above the floor that changes such an interface is not caught by the floor, only by a conformance run against
+    that release.
+  - **A gateway-wide global policy.** OpenShell can apply a policy to the whole gateway, which replaces every
+    sandbox's own: the per-job document the worker generated and read back would no longer be the policy in force.
+    The worker refuses to start a job on a gateway with a global policy active, before spend, with `outcome:
+    "policy"` (#684). The residual is a global policy set AFTER that read, during the run, which the job does not
+    see.
+  - **The Landlock kernel floor.** OpenShell's filesystem policy needs Landlock ABI 3, which is Linux 6.2 and
+    later. That rules out RHEL 8 and RHEL 9 hosts, whose kernels are older, so the venue is refused there rather than
+    run with the filesystem policy missing.
+  - **The exit key passes through the vendor's exec relay.** On `openshell` the main exec's stdin travels the CLI,
+    the gateway and OpenShell's supervisor container before it reaches the in-image supervisor, so the exit key of
+    EVERY attempt, steered or not, passes through vendor code. Issue #545's property (no tool of the job sees the
+    key) holds inside the agent container, but there it now also rests on that relay, a vendor trust step the
+    worker cannot inspect: a relay that kept or leaked the key could forge the job's exit line and acks.
+  - **Bind mode bypasses the filesystem policy.** Copy mode (the default) uploads the workspace into the sandbox;
+    bind mode mounts a host directory, and a bind mount is outside OpenShell's filesystem policy, so what the agent
+    may do to that directory is bounded by its uid and the mount alone. It is opt-in, never a default (#686).
+- **What bounds it**: the same things that bound the agent today, and deliberately not trust in vendor code. The
+  forge token is short-lived and narrow (`CONST-TOKEN-SCOPED-PER-JOB`), so a compromised supervisor holds a token
+  that expires with the job and reaches one repository; the provider-side spend limit `SECURITY.md` tells every
+  operator to set bounds what a stolen provider key can spend. `CONST-VENUE-EGRESS-LAYER` keeps the layer on a host
+  this deployment owns, so no credential crosses to a remote service. Its refusals (a layer that cannot serve the
+  job, a global policy among them) are free and determinate, so they run before the token mint and the reservation
+  (`CONST-BUDGET-BEFORE-TOKENS`). The split is `DES-OPENSHELL-VENUE`'s: the version floor is checked by doctor and
+  at boot; Landlock, the global policy and the gateway's locality are also refused per job, before spend (#683,
+  #684). Docker and Podman are untouched:
+  none of this exists on them.
+- **What would close it**: for the supervisor, nothing on this side of it; a vendor process holding plaintext is
+  the mechanism, not a defect, and the row stays a risk for as long as the venue is offered. The others close one
+  by one: binary paths read back from the image by the conformance run rather than declared; Experimental
+  interfaces declared stable upstream; a gateway that can refuse a global policy per sandbox, or reports one per
+  sandbox so the worker can re-read it during the run; bind mode under a filesystem policy.
+- **What would reopen or widen it**: a remote or hosted layer (refused by `CONST-VENUE-EGRESS-LAYER`); a layer
+  that holds a credential the job would not have held (a deployment-wide key in place of the job's); or OpenShell's
+  MicroVM driver, which is out of scope for v1 and would be decided separately.
+- **Related**: `OQ-011` (the custody half of its close condition is admitted on this venue, the accounting half
+  stays open), `OQ-012` (a vendor runtime builds the box itself, so its isolation words are `asserted`), `OQ-028`
+  (closes on this venue once #684 ships). `OQ-004` is not related in the sense its warning names: this is the
+  secrets proxy, and the allowlist proxy stays squid on Docker and Podman.
+- **Needs**: maintainer ratification that a vendor supervisor may hold the job's credentials and see its provider
+  and forge plaintext, bounded by token scope and the provider spend limit rather than by trusting its code, given
+  that the venue is opt-in and Docker and Podman keep the agent-held key.
+
 ## Revision History
 
 | Date | Change |
@@ -2250,3 +2361,4 @@ adversarial passes did.
 | 2026-10-17 | Issue #645, closing. **`OQ-045` AMENDED**: the forge mirror of the workspace (planned as part 3) is DECLINED: it could carry the tree only, a recovery needs the transcript and the tree from the same store, and it would publish the tree to readers of the repository; cross-host recovery, if it comes, comes from a shared checkpoint store. Its trigger and need for the mirror are removed. |
 | 2026-10-18 | Insights move to the console. **`OQ-024` CLOSED** (moot by design): the static insights export is retired and `/dispatch insights` prints the console's URL and spawns no browser, so the spawn this question watched is gone; the question as it stood is kept below the closing note, and what would reopen it is named (a command that spawns a browser for the insights page again). The shared opener and `setup github`'s use of it are outside this question. UNCHANGED, checked: `OQ-016` (the sandbox handover, its precedent), `OQ-002` (the what-if's seeded band keeps its label on the console), `OQ-044`. |
 | 2026-10-18 | Issue #647, part 1: terminal chat. **NEW `OQ-046`**: the fork of a finished run's stored session sends an unredacted transcript to the operator's own provider. Decided: the y/N prompt naming the bytes, the unredacted state and the provider, `--no-tools` unless `--tools`, and host-local only (no console route serves the stored transcript). Open: redacting the snapshot (only token shapes are available days later, and a partial redaction may read as a guarantee). **`OQ-044` UNCHANGED, checked**: the live stream's placement is unchanged; the terminal reads it through the console as the run page does. Review round 1, folded in before merge: **`OQ-046` AMENDED**, Decided: the consent names the provider and model pi will actually use (`forkModelOf`: both of pi's defaults passed as `--provider` and `--model`, else the run's own model with pi's fallback), the copy is removed on a no, on a signal at the question and once pi exits while pi's own fork stays the operator's, and no `PI_CONSOLE_*` variable reaches pi; Open is unchanged. **Code evidence**: worker/src/chat-fork.mjs -> forkModelOf, childEnv, runFork. |
+| 2026-10-18 | Issue #680: a venue's own egress layer, which may terminate TLS and hold the job's credentials, is admitted by the new `CONST-VENUE-EGRESS-LAYER` (the planned `credentialCustody: container \| layer` declaration, #683; a per-job policy document the worker generates and reads back; a layer on a host this deployment owns; a job never started against a layer that cannot serve it, a gateway-wide global policy included). The first such venue is the planned `openshell` (`DES-OPENSHELL-VENUE`, NVIDIA OpenShell v0.1.4). Nothing ships: the backend is #683, the policy layer #684, stdio steering and bind mode #686. **`OQ-047` NEW**, `ACCEPTED RISK`, wants explicit ratification: the residuals of that layer, which are the compromise story the old rejection asked for (a compromised supervisor holds every credential the job would have held and sees provider and forge plaintext in a vendor process, bounded by `CONST-TOKEN-SCOPED-PER-JOB` and the provider spend limit, not by trusting vendor code), binary-path rules drifting silently when an image moves node or git (the image declaring its binary paths is #683, the rule generation from that declaration #684), the exit key of every attempt passing through OpenShell's exec relay (CLI, gateway, supervisor container), a vendor trust step issue #545's property rests on there, Experimental OpenShell interfaces changing in a patch release, a gateway-wide global policy, the Landlock ABI 3 floor (Linux 6.2 and later, ruling out RHEL 8 and 9), and bind mode outside the filesystem policy; its refusals split as `DES-OPENSHELL-VENUE` does (the version floor at doctor and boot; Landlock, the global policy and the gateway's locality also per job, before spend). **`OQ-011` AMENDED**, still RESOLVED for the cooperative path: the mechanism its "What would close the rest" names is admitted on a layer venue, where the key never enters the container; the accounting half stays open, with a concrete route (per-sandbox accounting of provider traffic in the supervisor, a follow-up, not promised); the residual still wants ratification; Docker and Podman unchanged. **`OQ-028` AMENDED**, still `ACCEPTED RISK` for Docker and Podman: it closes on a layer venue once #684 ships (placeholders in the container, the real values never in its argv or environment). **`OQ-012` AMENDED**, still `ACCEPTED RISK`: a vendor runtime builds the box itself, which is exactly the #227 paragraph's case, so its words are `DES-CONTAINER-BACKEND-REGISTRY`'s #680 list, its isolation words `asserted`; it is on an engine this host drives because the worker refuses a gateway endpoint that is not loopback or a Unix socket on this host. **`OQ-004` UNCHANGED, checked**: its warning that the secrets-injecting proxy and the allowlist proxy "must not be conflated" is honoured; the new entry is the secrets proxy, and the allowlist proxy stays squid on Docker and Podman. |
