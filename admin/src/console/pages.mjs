@@ -51,6 +51,7 @@ import {
   parkedInbox,
   runChain,
   runCostPanel,
+  runInbox,
   runProgress,
   runResources,
   runSession,
@@ -67,8 +68,9 @@ import { runTranscriptSection } from "./transcript.mjs";
  * the run detail, which is reached from a run). Insights is not live: its assembly is the expensive read (cached 30 s
  * by the caller), and the range picker is its refresh. Configuration and the audit log change by a person's hand.
  * The run detail is live since issue #644: a running job's progress panel moves, and a run that ends gets its record's
- * panels without a reload. Its data is read at most once per `LIVE_DEFAULTS.pageMinMs.run` (live.mjs), since a run's
- * load also reads its record and searches for its children.
+ * panels without a reload; since issue #646 its inbox panel moves too, a message's state from queued to delivered. Its
+ * data is read at most once per `LIVE_DEFAULTS.pageMinMs.run` (live.mjs), since a run's load also reads its record and
+ * searches for its children.
  */
 export const PAGES = Object.freeze({
   overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview" }),
@@ -85,7 +87,7 @@ export const PAGES = Object.freeze({
 const PAGE_PANELS = Object.freeze({
   overview: [["p-state", overviewState], ["p-spend", overviewSpend], ["p-hosts", overviewHosts], ["p-parked", overviewParked], ["p-failures", overviewFailures], ["p-active", overviewActive]],
   runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
-  run: [["p-progress", runProgress], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
+  run: [["p-progress", runProgress], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
   parked: [["p-parked", parkedInbox]],
   insights: [["p-range", insightsRange], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
@@ -222,7 +224,7 @@ export function pageQueryString(name, query) {
 const PAGE_READS = Object.freeze({
   overview: ["snapshot"],
   runs: ["runsPage", "subscriptions"],
-  run: ["run", "subscriptions", "transcriptMeta", "progress"],
+  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox"],
   parked: ["snapshot"],
   insights: ["insights"],
   fleet: ["snapshot"],
@@ -346,6 +348,16 @@ export async function loadPageData(name, query, deps = {}) {
       data.progress = await deps.fleet.progress(q.id);
     } catch {
       data.progress = { unreachable: true };
+    }
+  }
+  if (reads.includes("inbox") && typeof deps.fleet?.inbox === "function") {
+    // Issue #646: a steer-armed job's inbox, WITHOUT TEXT (the reader's `readJobInbox`: ids, modes, sources, states,
+    // times and byte counts), and whether its run takes messages now. Both roles get the list; `runInbox` draws the
+    // message form and the withdraw buttons for an operator alone.
+    try {
+      data.inbox = await deps.fleet.inbox(q.id);
+    } catch {
+      data.inbox = { unreachable: true };
     }
   }
   if (reads.includes("insights")) {

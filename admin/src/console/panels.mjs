@@ -554,6 +554,72 @@ export function runProgress(view) {
   return titled(title, html`<p class="note">${PROGRESS_ABSENT}</p>`);
 }
 
+// ---- run inbox (issue #646) ------------------------------------------------------------------------------------------
+
+/** Why an active, steer-armed job's run takes no message: the open key cannot tell these apart, so all are named. */
+export const INBOX_NOT_OPEN = "The run is not accepting messages: it has not started its loop yet, it has finished, or its venue cannot deliver (bind mounts, an exit key and an image with the steer capability).";
+
+const MODE_WORD = Object.freeze({ steer: "steer", followUp: "follow-up" });
+/** A message id as the inbox mints it (INT-STEER-INBOX-CONTRACT): only such an id gets a withdraw button. */
+const MESSAGE_ID_RE = /^[0-9a-f]{32}$/;
+
+/**
+ * The run page's "Inbox" panel (issue #646, REQ-STEER-RUNNING-JOB): the messages sent into a steer-armed job, as
+ * `readJobInbox` reads them, WITHOUT TEXT for every role (id, mode, source, state, time, size): the text is the
+ * sender's words for one run, and a list is no place for them (the audit row keeps only their sha256 too). A job that
+ * is not steer-armed, or not found, draws nothing at all (its empty section is hidden by the stylesheet's
+ * `section[data-panel]:empty`), so every other run page reads as it did.
+ *
+ * The controls (`canAct`: an operator on a console that is not read-only): one form to steer and one to send a
+ * follow-up, drawn only while the job is ACTIVE and its run takes messages (`open`), and a Withdraw button on each
+ * message still `queued` (withdrawn for certain) or `written` (best effort; the preview says which). A viewer sees the
+ * list and the run's status, never a control, which is the parked answer form's and the cancel button's rule. The page
+ * is live, so a message's state moves from queued to written to delivered without a reload; a form being typed into is
+ * not swapped (the script's `inUse`).
+ */
+export function runInbox(view) {
+  const box = view.data?.inbox ?? null;
+  if (box === null || typeof box !== "object" || box.invalid || box.found === false || (box.found === true && box.steer !== true)) return html``;
+  const title = "Inbox";
+  if (box.unreachable) return titled(title, html`<p class="warn">The run's inbox could not be read (is Valkey reachable?).</p>`);
+  const jobId = view.query?.id;
+  // Review F4: a job that is not active whose run goes on as a recovery job (`continuesAs`, same run, same inbox): the
+  // forms stay, since the planner sends through the active job, and the panel names that job with a link.
+  const next = typeof box.continuesAs === "string" && RUN_ID_RE.test(box.continuesAs) ? box.continuesAs : null;
+  const running = box.state === "active" || next !== null;
+  const takes = running && box.open === true;
+  const status = takes
+    ? "The run takes messages. A steer reaches the agent after its current tool calls, before its next model call; a follow-up once the agent would otherwise stop. Either one spends from the run's existing reservation."
+    : running
+      ? box.open === null
+        ? "Whether the run takes messages could not be read."
+        : INBOX_NOT_OPEN
+      : `The job is ${cell(box.state)}, not running, so it takes no message; its inbox is kept for an hour after its run.`;
+  const act = canAct(view) && typeof jobId === "string" && RUN_ID_RE.test(jobId);
+  const withdraw = (e) => {
+    if (!act) return null;
+    if ((e.state !== "queued" && e.state !== "written") || typeof e.id !== "string" || !MESSAGE_ID_RE.test(e.id)) return html`<td>-</td>`;
+    return html`<td>${actForm("steer-withdraw", { hidden: [["jobId", jobId], ["id", e.id]], label: "Withdraw" })}</td>`;
+  };
+  const entries = Array.isArray(box.entries) ? box.entries : null;
+  const list =
+    entries === null
+      ? html`<p class="warn">The messages could not be read this time; the next refresh tries again.</p>`
+      : table(
+          "Inbox",
+          ["Message", "Mode", "Source", "State", "Sent", { num: "Bytes" }, ...(act ? ["Action"] : [])],
+          entries.map((e) => html`<tr><td class="mono">${cell(e.id)}</td><td>${cell(MODE_WORD[e.mode])}</td><td>${cell(e.source)}</td><td>${cell(e.state)}</td><td>${Number.isSafeInteger(e.at) ? utcText(e.at) : "-"}</td><td class="num">${count(e.bytes)}</td>${withdraw(e)}</tr>`),
+          "No message has been sent to this run.",
+        );
+  const text = (label) => area("text", label, { rows: 3, required: true, max: 8192 });
+  const forms =
+    act && takes
+      ? html`<h3>Send a message</h3>${actForm("steer", { hidden: [["jobId", jobId], ["mode", "steer"]], fields: text("Steer: read after the agent's current tool calls"), label: "Preview the steer" })}${actForm("steer", { hidden: [["jobId", jobId], ["mode", "followUp"]], fields: text("Follow-up: read once the agent would otherwise stop"), label: "Preview the follow-up" })}`
+      : null;
+  const cont = next !== null ? html`<p class="note">This job is ${cell(box.state)}; its run continues as ${runLink(next)}, and a message sent here goes to that job.</p>` : null;
+  return titled(title, html`${cont}<p class="note">${status}</p>${list}${forms}<p class="note">A message's text is never listed: the run reads it, and the audit log keeps its sha256.</p>`);
+}
+
 /**
  * The run detail's operator actions (issue #642): the command that reopens the run's retained workspace on the host
  * (`pi-dispatch sandbox <jobId>`, shown to copy and never run: a browser terminal was rejected, DES-OPERATOR-CONSOLE),

@@ -33,8 +33,8 @@
  *
  * WHAT A DIFF SHOWS. The file before and after, in a line diff, with every `secrets` map's values replaced by a marker
  * (a trigger's secret references are not a page's business, the configuration panel's rule) and every line escaped by
- * the `html` template. The answer to a parked run is shown to the operator who typed it, and only there: its audit row
- * carries the sha256 of the text (`afterDigest`), never the text.
+ * the `html` template. The answer to a parked run, and a message into a running job (issue #646), is shown to the
+ * operator who typed it, and only there: its audit row carries the sha256 of the text (`afterDigest`), never the text.
  *
  * Valkey-backed reads and writes go through `ctx.a` (`actionDeps`, wired by `cli.mjs`): the read model (`rm`), the
  * planners (`plans`), the deployment's `paths` and `env`, the fleet reader (`fleet`, built with `killSwitchPlanFn`) and
@@ -1081,6 +1081,78 @@ const jobActions = [
     async apply(entry, ctx) {
       const res = await ctx.a.rm.enqueueParkedAnswer(entry.payload.plan, { url: ctx.a.paths.valkeyUrl });
       return funnelResult(res, { jobIds: Array.isArray(res?.jobIds) ? res.jobIds.map(String) : [], queue: res?.queue ?? null });
+    },
+  },
+  {
+    // Issue #646 (REQ-STEER-RUNNING-JOB): a message into a running, steer-armed job. PAID, because the run spends tokens
+    // reading it and acting on it, but it takes NO NEW RESERVE: the run already holds its reservation, and its turn,
+    // dollar and token caps bind the extra turns exactly as they bind the rest (so `reserve` is null and the summary says
+    // where the money comes from). The text is shown to the operator who typed it, in the preview alone; the audit row
+    // carries its sha256 (`afterDigest`), never the text.
+    name: "steer",
+    kind: "steer",
+    paid: true,
+    bulk: false,
+    needs: JOB_NEEDS,
+    async preview(body, ctx) {
+      const jobId = jobIdOf(body);
+      const mode = body.mode === undefined || body.mode === null || body.mode === "" ? "steer" : body.mode;
+      if (mode !== "steer" && mode !== "followUp") throw new BadRequest("mode must be steer or followUp");
+      const text = typeof body.text === "string" ? body.text : "";
+      // `by` is the session's token name, never anything the body says: the run's framing names who sent it.
+      const got = planned(await ctx.a.rm.planSteer({ url: ctx.a.paths.valkeyUrl, jobId, text, mode, by: ctx.session.name, source: "console", now: ctx.now }));
+      if (!got.plan) return got;
+      const p = got.plan;
+      return {
+        // The job and the message id (review F2), never the text: the row's digest is the text's only trace.
+        target: ctx.a.rm.steerAuditTarget(p.jobId, p.id),
+        payload: { plan: p },
+        reserve: null,
+        afterDigest: p.digest,
+        summary: [
+          // `p.jobId` is the job that takes it: the page's own, or the run's active recovery job (review F4).
+          `Send a ${mode === "followUp" ? "follow-up" : "steer"} to running job ${p.jobId}, as ${ctx.session.name} (message ${p.id}, ${p.bytes} bytes)`,
+          mode === "followUp" ? "The agent reads it once it would otherwise stop, and the run goes on from it." : "The agent reads it after its current tool calls, before its next model call.",
+          "It spends from this run's existing reservation: no new reserve is taken, and the run's turn, dollar and token caps still bind.",
+          "The audit log keeps the message's sha256, never its text.",
+        ],
+        diff: textHtml(p.text),
+      };
+    },
+    async apply(entry, ctx) {
+      const res = await ctx.a.rm.enqueueSteer(entry.payload.plan, { url: ctx.a.paths.valkeyUrl, now: ctx.now });
+      return funnelResult(res, { jobId: entry.payload.plan.jobId, id: res?.id ?? null, mode: res?.mode ?? null, state: res?.state ?? null });
+    },
+  },
+  {
+    // Issue #646: take a message back. Free. The answer names the state the withdraw met: `queued` is guaranteed (the
+    // run never sees it), `written` best effort (the agent may already have read the file), as the preview warned.
+    name: "steer-withdraw",
+    kind: "steer-withdraw",
+    paid: false,
+    bulk: false,
+    needs: JOB_NEEDS,
+    async preview(body, ctx) {
+      const jobId = jobIdOf(body);
+      const id = str(body, "id", { required: true, max: 64 });
+      if (!/^[0-9a-f]{32}$/.test(id)) throw new BadRequest("id must be a message id (32 lowercase hex characters, as the inbox lists it)");
+      const got = planned(await ctx.a.rm.planSteerWithdraw({ url: ctx.a.paths.valkeyUrl, jobId, id }));
+      if (!got.plan) return got;
+      const p = got.plan;
+      return {
+        target: ctx.a.rm.steerAuditTarget(p.jobId, p.id),
+        payload: { plan: p },
+        summary: [
+          `Withdraw message ${p.id} from job ${p.jobId}`,
+          p.prior === "queued"
+            ? "It is queued: the worker has not written it into the run yet, so withdrawing it is guaranteed and the run never sees it."
+            : "It is already written into the run's inbox, so withdrawing it is best effort: the agent may have read it before the worker removes it. The run's transcript says whether it did.",
+        ],
+      };
+    },
+    async apply(entry, ctx) {
+      const res = await ctx.a.rm.withdrawSteerMessage(entry.payload.plan, { url: ctx.a.paths.valkeyUrl });
+      return funnelResult(res, { jobId: entry.payload.plan.jobId, id: entry.payload.plan.id, prior: res?.prior ?? null, guaranteed: res?.guaranteed === true, said: typeof res?.said === "string" ? res.said : null });
     },
   },
 ];

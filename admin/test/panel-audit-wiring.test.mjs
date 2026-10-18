@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -390,6 +391,26 @@ const CASES = [
       },
     };
   }),
+  // Issue #646: the ACTIVE row's `t`/`T` push. The row names the job and the message id, and carries the message's
+  // sha256, never its text.
+  {
+    site: "dashboard.ts:steer",
+    name: "the TUI deps' steer",
+    kind: "steer",
+    outcomes: ["ok"],
+    state: (fx) => (fx.ran ?? []).join(","),
+    run: async (fx) => {
+      const base = { steer: async (plan) => (fx.ran = [...(fx.ran ?? []), `steer:${plan.jobId}`], { ok: true, jobId: plan.jobId, id: plan.id, mode: plan.mode, state: "queued" }) };
+      const deps = withAuditedWrites(base, (opts, fn) => panelWrite(process.env.PI_LOGS_DIR, opts, fn));
+      const text = "steer-canary-5b1c use the fixture db";
+      await deps.steer({ kind: "steer", jobId: "j1", id: "a".repeat(32), mode: "steer", text, digest: createHash("sha256").update(text).digest("hex") });
+      // The broken-audit pass writes no row at all (and pushes nothing): the shared loop asserts that; this one the row.
+      const rows = rowsOf(fx.files.logs);
+      if (rows.length === 0) return;
+      assert.deepEqual([rows.at(-1).target, rows.at(-1).afterDigest], [`j1#${"a".repeat(32)}`, createHash("sha256").update(text).digest("hex")]);
+      assert.ok(!JSON.stringify(rows).includes("steer-canary"), "no row carries the text");
+    },
+  },
 ];
 
 for (const c of CASES) {
@@ -448,6 +469,6 @@ test("the table has exactly one row per audited call site in index.ts, secrets-c
     const named = c.site.split(":")[1];
     if (named !== "<opts>") assert.ok(named.split("|").includes(c.kind), `${c.name}: ${c.kind} is not one of ${named}`);
   }
-  // The dashboard.ts sites are the four writes withAuditedWrites wraps, and nothing else there calls `write({`.
-  assert.deepEqual(sitesIn("dashboard.ts").sort(), ["dashboard.ts:cancel-active", "dashboard.ts:cancel-held", "dashboard.ts:fleet-pause", "dashboard.ts:fleet-resume"]);
+  // The dashboard.ts sites are the five writes withAuditedWrites wraps, and nothing else there calls `write({`.
+  assert.deepEqual(sitesIn("dashboard.ts").sort(), ["dashboard.ts:cancel-active", "dashboard.ts:cancel-held", "dashboard.ts:fleet-pause", "dashboard.ts:fleet-resume", "dashboard.ts:steer"]);
 });

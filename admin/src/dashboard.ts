@@ -26,7 +26,7 @@
 import { windowState } from "@edgehero/pi-dispatch/budget";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, checkpointsText, createFleetReader, listRuns, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
+import { cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -229,6 +229,12 @@ export function createDashboardDeps(paths: any, seams: any = {}) {
     async cancelHeld({ jobId }: any) {
       return cancelHeldJob({ url: paths.valkeyUrl, jobId });
     },
+    // The ACTIVE row's `t`/`T` (issue #646): a message into the running, steer-armed job, the console's two steps. The
+    // PLAN is free and unaudited (the console's preview: every refusal said before anything is written); the push is the
+    // audited write `withAuditedWrites` wraps. Source `panel`, author `{ kind: "operator", by: "panel" }`; the row's
+    // actor is this account (`panelActor`).
+    planSteer: ({ jobId, text, mode }: any) => planSteer({ url: paths.valkeyUrl, jobId, text, mode, by: "panel", source: "panel" }),
+    steer: (plan: any) => enqueueSteer(plan, { url: paths.valkeyUrl }),
     dispose: () => reader.dispose(),
   };
 }
@@ -248,7 +254,29 @@ export function withAuditedWrites(deps: any, write: (opts: any, fn: () => any) =
     resume: () => write({ kind: "fleet-resume", target: "fleet", failure: switchFailure }, () => deps.resume()),
     cancelActive: ({ jobId }: any) => write({ kind: "cancel-active", target: jobId, failure: cancelFailure }, () => deps.cancelActive({ jobId })),
     cancelHeld: ({ jobId }: any) => write({ kind: "cancel-held", target: jobId, failure: cancelFailure }, () => deps.cancelHeld({ jobId })),
+    // Issue #646: the steer push, kind `steer`, its row naming the job and the message id (`steerAuditTarget`) and
+    // carrying the message's sha256 (`afterDigest`), never its text.
+    ...(typeof deps.steer === "function" ? { steer: (plan: any) => write({ kind: "steer", target: steerAuditTarget(plan?.jobId, plan?.id), afterDigest: plan?.digest ?? null, failure: steerFailure }, () => deps.steer(plan)) } : {}),
   };
+}
+
+/** A steer push's failure (issue #646): the refusal it names (`gone`, `closed`, `full`, ...) or Valkey out of reach. */
+function steerFailure(res: any): string | null {
+  if (typeof res?.refusal === "string" && res.refusal !== "") return res.refusal;
+  if (typeof res?.invalid === "string" && res.invalid !== "") return res.invalid;
+  if (res?.unreachable !== undefined) return "Valkey could not be reached";
+  if (res?.ok !== true) return "the message was not accepted";
+  return null;
+}
+
+/**
+ * The footer note after a `t`/`T` (issue #646): what became of the message, never its text. The id, mode and state
+ * are host-chosen; a refusal can quote what Valkey or the inbox said, so it is scrubbed.
+ */
+function steerNote(res: any): string {
+  if (res?.ok === true) return `${res.mode === "followUp" ? "follow-up" : "steer"} ${cellOf(res.id)} queued for ${cellOf(res.jobId)}: the worker writes it into the run, and the console's run page shows its state`;
+  const why = steerFailure(res);
+  return `message not sent: ${cellOf(why ?? "unknown")}`;
 }
 
 /**
@@ -433,6 +461,10 @@ export function makeDashboard({
   // cancel's outcome; unlike `copiedNote` it must SURVIVE refresh() (the active ack can take 10s of
   // polling, several ticks), so it clears on the next input instead. `heldSelected` is HELD_LIST's cursor.
   let pendingCancel: any = null; // { jobId, kind: "active" | "held", target? } | null
+  // The ACTIVE row's message input (issue #646, keys `t` steer and `T` follow-up): `{ jobId, mode, input }` while open.
+  // Like `pendingCancel`, the job is captured when the key is pressed, so a snapshot refresh while the operator types
+  // cannot send the message to a different job. The typed text lives here and in the plan alone, never in a note.
+  let steerInput: any = null;
   let actionNote: any = null;
   let heldSelected = 0;
   // The PARKED view (issue #641, key `k`): its cursor over the snapshot's `parked` rows, the note Enter leaves when the
@@ -611,6 +643,7 @@ export function makeDashboard({
         sandboxAvailable: typeof deps?.launchSandbox === "function",
         pendingDelete,
         pendingCancel,
+        steerInput,
         actionNote,
         heldSelected,
         parkedSelected,
@@ -669,6 +702,49 @@ export function makeDashboard({
           pendingCancel = null;
           tui?.requestRender?.();
         }
+        return;
+      }
+      // The open message input (issue #646) takes every key, the LIVE_TAIL search's discipline: a printable byte joins
+      // the text and never fires a LIST key. Esc stands down with nothing sent; Enter plans (free: a refusal is said
+      // and nothing is written) and then pushes through the audited write.
+      if (steerInput && view === "LIST") {
+        if (matchesKey(data, "escape")) {
+          steerInput = null;
+          tui?.requestRender?.();
+          return;
+        }
+        if (data === "\r" || data === "\n") {
+          const { jobId, mode, input } = steerInput;
+          const text = input.value();
+          steerInput = null;
+          if (text.trim() === "") {
+            actionNote = "message not sent: it is empty";
+            tui?.requestRender?.();
+            return;
+          }
+          void act(async () => {
+            try {
+              const planned = await deps.planSteer({ jobId, text, mode });
+              if (!planned?.plan) {
+                actionNote = `message not sent: ${cellOf(planned?.refusal ?? "it could not be planned")}`;
+                return;
+              }
+              actionNote = steerNote(await deps.steer(planned.plan));
+            } catch (err: any) {
+              actionNote = `message not sent: ${cellOf(err?.message ?? String(err))}`;
+            }
+          });
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "backspace")) steerInput.input.backspace();
+        else if (matchesKey(data, "left")) steerInput.input.left();
+        else if (matchesKey(data, "right")) steerInput.input.right();
+        else if (matchesKey(data, "home")) steerInput.input.home();
+        else if (matchesKey(data, "end")) steerInput.input.end();
+        else if (!data.startsWith("\x1b") && data >= " ") steerInput.input.insert(data);
+        else return;
+        tui?.requestRender?.();
         return;
       }
       if (view === "RUN_DETAIL") {
@@ -1259,6 +1335,23 @@ export function makeDashboard({
         tui?.requestRender?.();
         return;
       }
+      // `t` (steer) and `T` (follow-up) on the ACTIVE row open the message input (issue #646, REQ-STEER-RUNNING-JOB).
+      // The two cases are two keys on purpose, unlike every other letter here: the mode is the one choice the message
+      // needs, and a second prompt for it would cost a keystroke on every message. Only on the ACTIVE row, and only
+      // when the panel is wired to send; a run that is not steer-armed says so rather than opening an input whose
+      // message the inbox would refuse.
+      if (data === "t" || data === "T") {
+        const row = buildRows(snapshot, runSort, runProject)[selected];
+        if (row?.kind !== "active" || !row.jobId || typeof deps?.planSteer !== "function" || typeof deps?.steer !== "function") return;
+        if (row.steer !== true) {
+          actionNote = "t and T send a message only to a steer-armed run (its trigger sets run.steer); this one is not";
+          tui?.requestRender?.();
+          return;
+        }
+        steerInput = { jobId: row.jobId, mode: data === "T" ? "followUp" : "steer", input: makeLineInput("") };
+        tui?.requestRender?.();
+        return;
+      }
       if (matchesKey(data, "up")) {
         selected = Math.max(0, selected - 1);
         tui?.requestRender?.();
@@ -1380,7 +1473,7 @@ function degradeWidth(width: number): number | null {
 }
 
 function renderPanelLines(snapshot: any, width: number, state: any, styler: any): string[] {
-  const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, pendingCancel, actionNote, heldSelected, runSort, copiedNote, copyAvailable, terminalRows } = state;
+  const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, pendingCancel, steerInput, actionNote, heldSelected, runSort, copiedNote, copyAvailable, terminalRows } = state;
   const runProject = "runProject" in (state ?? {}) ? state.runProject : ALL_RUNS;
   const framed = framedAt(width);
   const inner = Math.trunc(width) - 4;
@@ -1549,7 +1642,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   // stays uncollapsed -- it is already the everything-else-failed rendering.
   if (framed) {
     const lines = buildListLines(snapshot, selected, inner, styler, runSort, terminalRows, runProject);
-    return frame(styler, { title, width, lines, footer: listFooter(inner, styler, pendingCancel, actionNote) });
+    return frame(styler, { title, width, lines, footer: listFooter(inner, styler, pendingCancel, actionNote, steerInput) });
   }
 
   // Degraded (too-narrow) plain path — reuse the shared, plain renderers unframed.
@@ -1600,7 +1693,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   for (const section of sections) plain.push(section.title, ...section.lines);
   // The degraded path carries the same armed question / outcome note the framed footer does -- a narrow
   // terminal must not hide that a y is about to stop a paid job. Unarmed and noteless stays byte-identical.
-  plain.push(pendingCancel ? `cancel active job ${scrubControl(String(pendingCancel.jobId ?? "-"))}? y/n` : actionNote ? `${actionNote}\n${KEY_HINTS}` : KEY_HINTS);
+  plain.push(pendingCancel ? `cancel active job ${scrubControl(String(pendingCancel.jobId ?? "-"))}? y/n` : steerInput ? `${steerPrompt(steerInput)}${scrubControl(steerInput.input.value())} (enter send, esc cancel)` : actionNote ? `${actionNote}\n${KEY_HINTS}` : KEY_HINTS);
   return plain.join("\n\n").split("\n");
 }
 
@@ -1874,11 +1967,24 @@ function heldListHints(inner: number, styler: any, pendingCancel: any, actionNot
   return fitLine(note + [k("↑↓", "select"), k("x", "cancel job"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), inner, styler);
 }
 
-/** The LIST footer: the armed cancel question, else the outcome note, else the standing key hints. */
-function listFooter(inner: number, styler: any, pendingCancel: any, actionNote: any): string {
+/** The message input's lead (issue #646): which mode, to which job. The job id is scrubbed like every cell. */
+function steerPrompt(steerInput: any): string {
+  return `${steerInput.mode === "followUp" ? "follow-up" : "steer"} ${scrubControl(String(steerInput.jobId ?? "-"))}: `;
+}
+
+/** The LIST footer: the armed cancel question, else the open message input, else the outcome note, else the hints. */
+function listFooter(inner: number, styler: any, pendingCancel: any, actionNote: any, steerInput: any = null): string {
   const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
   if (pendingCancel) {
     return fitLine(styler.fg("warning", `cancel active job ${scrubControl(String(pendingCancel.jobId ?? "-"))}?`) + "  " + [k("y", "confirm"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")), inner, styler);
+  }
+  if (steerInput) {
+    // The input gets what the lead and the two hints leave of the row, at least one cell: the lineInput scrolls its
+    // own window, so a long message stays editable at any width rather than pushing the hints off the frame.
+    const lead = styler.fg("accent", steerPrompt(steerInput));
+    const hints = "  " + [k("enter", "send"), k("esc", "cancel")].join(styler.fg("dim", "  ·  "));
+    const room = Math.max(1, inner - styler.visibleLen(lead) - styler.visibleLen(hints));
+    return fitLine(lead + styler.lineInput(steerInput.input, room) + hints, inner, styler);
   }
   if (actionNote) return fitLine(styler.fg("warning", actionNote), inner, styler);
   return keyHints(inner, styler);
@@ -3083,7 +3189,8 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   if (row.kind === "active") {
     // The cancel hint rides the SELECTED row, not the footer -- the footer's width arithmetic has no
     // headroom for another hint (its own comment), and the key only means anything on this row anyway.
-    const hint = sel ? ` ${styler.fg("dim", "· x cancel")}` : "";
+    // Issue #646: a steer-armed run's selected row adds its two message keys after the cancel key.
+    const hint = sel ? ` ${styler.fg("dim", row.steer === true ? "· x cancel · t steer · T follow-up" : "· x cancel")}` : "";
     const progress = activeProgressText(row.progress, row.phaseName, row.now);
     return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", scrubControl(String(row.jobId ?? "-")))} ${styler.fg("dim", "running")}${progress ? ` ${styler.fg("muted", `· ${progress}`)}` : ""}${hint}`, inner, styler);
   }
@@ -3594,7 +3701,8 @@ function buildRows(snapshot: any, runSort = "time", runProject: any = ALL_RUNS):
   // for this id (`activePhase`), both optional, so a snapshot without them draws the row it always did.
   const activeRow = (Array.isArray(snapshot?.active) ? snapshot.active : []).find((a: any) => a?.jobId === snapshot?.activeJobId);
   const phaseName = snapshot?.activePhase?.jobId === snapshot?.activeJobId ? snapshot?.activePhase?.name ?? null : null;
-  const active = snapshot?.activeJobId ? [{ kind: "active", jobId: snapshot.activeJobId, progress: activeRow?.progress ?? null, phaseName, now: snapshot?.fetchedAt }] : [];
+  // Issue #646: `steer` only when the snapshot says the job is steer-armed, so the `t`/`T` hint rides that row alone.
+  const active = snapshot?.activeJobId ? [{ kind: "active", jobId: snapshot.activeJobId, progress: activeRow?.progress ?? null, phaseName, now: snapshot?.fetchedAt, ...(activeRow?.steer === true ? { steer: true } : {}) }] : [];
   // The project filter (issue #499 part C) reads the id the record carries, never the projects file as it is now.
   const runs = (Array.isArray(snapshot?.runs) ? snapshot.runs : [])
     .filter((record: any) => runProject === ALL_RUNS || recordProject(record) === runProject)
@@ -3637,7 +3745,7 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
       // The plain twin of runRow's selected-row cancel hint: the monochrome panel must not hide a key
       // the colored one advertises.
       const progress = activeProgressText(row.progress, row.phaseName, row.now);
-      out.push(clipData(`${cursor} * ACTIVE ${cellOf(row.jobId)} running${progress ? ` · ${progress}` : ""}${i === selected ? " · x cancel" : ""}`, w));
+      out.push(clipData(`${cursor} * ACTIVE ${cellOf(row.jobId)} running${progress ? ` · ${progress}` : ""}${i === selected ? (row.steer === true ? " · x cancel · t steer · T follow-up" : " · x cancel") : ""}`, w));
       continue;
     }
     const run = row.record;

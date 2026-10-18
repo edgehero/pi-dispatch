@@ -45,6 +45,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { scrubControls } from "../panel.mjs";
 import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
+import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero/pi-dispatch/steer-inbox";
 import { compareTranscriptIds, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
 import { transcriptEntryHtml } from "./transcript.mjs";
 
@@ -52,8 +53,9 @@ import { transcriptEntryHtml } from "./transcript.mjs";
  * `pageMinMs`: pages whose data is read at most once per that many ms, however often the loop ticks. The runs page
  * examines up to 2000 records per distinct filter, so 32 streams with 32 filters at the 1 s tick would keep a core busy;
  * at 5 s its views still move, at a fifth of the cost. The run detail (live since issue #644, for its progress panel)
- * reads its record, its children (up to three runs pages) and two Valkey keys per load, so it is held to 2 s; the
- * worker writes progress at most once a second, so a 2 s view misses nothing an operator could read. Between loads the last data is rendered again (cheap), so a new
+ * reads its record, its children (up to three runs pages), two Valkey keys and (issue #646) the job's inbox per load, so
+ * it is held to 2 s; the worker writes progress at most once a second, so a 2 s view misses nothing an operator could
+ * read. Between loads the last data is rendered again (cheap), so a new
  * view of the same page and query is drawn at once from it.
  */
 export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ runs: 5000, run: 2000 }), transcriptPagesPerTick: 4 });
@@ -492,6 +494,25 @@ function progressOf(p) {
   };
 }
 
+/**
+ * A steer-armed active job's inbox (issue #646) as `/api/state` carries it: each entry rebuilt by name against the
+ * inbox's own vocabularies (`id`, `mode`, `source`, `state`, `at`, `bytes`), NEVER the text, which the snapshot does not
+ * hold either. Null for a job that is not steer-armed, and for one whose inbox could not be read this tick (so `[]`
+ * always means "no message").
+ */
+function inboxOf(a) {
+  if (a?.steer !== true || !Array.isArray(a.inbox)) return null;
+  const n = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  return a.inbox.map((e) => ({
+    id: typeof e?.id === "string" && STEER_ID_RE.test(e.id) ? e.id : null,
+    mode: STEER_MODES.includes(e?.mode) ? e.mode : null,
+    source: STEER_SOURCES.includes(e?.source) ? e.source : null,
+    state: STEER_STATES.includes(e?.state) ? e.state : null,
+    at: n(e?.at),
+    bytes: n(e?.bytes) ?? 0,
+  }));
+}
+
 /** The `/api/state` document's version: a script checks it before it reads a field, and a breaking change bumps it. */
 export const STATE_VERSION = 1;
 
@@ -556,7 +577,7 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
     parkedUnknown: Boolean(s.parkedUnreachable),
     failures24h: num(s.failures24h),
     failures24hFloor: Boolean(s.failures24hFloor),
-    active: (Array.isArray(s.active) ? s.active : []).map((a) => ({ jobId: str(a?.jobId), queue: str(a?.queue), startedAt: num(a?.startedAt), host: str(a?.host), progress: progressOf(a?.progress) })),
+    active: (Array.isArray(s.active) ? s.active : []).map((a) => ({ jobId: str(a?.jobId), queue: str(a?.queue), startedAt: num(a?.startedAt), host: str(a?.host), progress: progressOf(a?.progress), steer: a?.steer === true, inbox: inboxOf(a) })),
     schedulers: (Array.isArray(s.schedulers) ? s.schedulers : []).map((x) => {
       const name = x?.key ?? x?.name ?? null;
       return {

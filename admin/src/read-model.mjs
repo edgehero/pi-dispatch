@@ -41,6 +41,8 @@ import { OTHER, PLAN_VERSION, envelopeEntries, scopeRef } from "@edgehero/pi-dis
 import { ALLOC_EXPECTED_KEY, ALLOC_LOG_KEY, ALLOC_PLAN_KEY, makeAllocationAudit, makeAllocationState, parseState } from "@edgehero/pi-dispatch/allocation";
 import { DOLLAR_KEY_PREFIX } from "@edgehero/pi-dispatch/dollar-budget";
 import { removeHeldJob, requestCancel } from "@edgehero/pi-dispatch/cancel-state";
+import { RECOVERY_CAP, recoveryJobId, runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
+import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerIsOpen, listInboxPublic } from "@edgehero/pi-dispatch/steer-inbox";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
@@ -818,10 +820,11 @@ export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
 
 /**
  * The console's job actions (issue #642): retry and remove a failed job (one or in bulk), re-run a finished run, answer
- * a parked run. They live in `job-actions.mjs` for size alone and are re-exported here, so every caller still reaches
- * the queue through this one funnel. And the worker's reserve rule, for the reserve a paid action shows before confirm.
+ * a parked run, and (issue #646) send a message into a running job or take one back. They live in `job-actions.mjs` for
+ * size alone and are re-exported here, so every caller still reaches the queue through this one funnel. And the
+ * worker's reserve rule, for the reserve a paid action shows before confirm.
  */
-export { BULK_MAX, enqueueParkedAnswer, enqueueRerun, planFailedBulk, planParkedAnswer, planRerun, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs } from "./job-actions.mjs";
+export { BULK_MAX, enqueueParkedAnswer, enqueueRerun, enqueueSteer, planFailedBulk, planParkedAnswer, planRerun, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
 export { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 
 /**
@@ -3708,13 +3711,27 @@ export function createFleetReader(
       // the registry rows this tick already holds (a host publishes the ids it runs), never off the Job.
       const hostOfJob = new Map();
       for (const h of lastHosts) for (const j of parseLiveJobs(h?.jobs).jobs ?? []) if (typeof h?.name === "string") hostOfJob.set(j.id, h.name);
+      // Issue #646: of a Job's `.data`, ONE boolean (`steer`) and the run id it names (`recoveryOf`, through `runIdOf`)
+      // are read, and the run id never leaves this function: it only spells the inbox keys below.
+      const steerRows = [];
       const active = activeLists.flatMap((list, qi) =>
-        (Array.isArray(list) ? list : []).map((j) => ({
-          jobId: typeof j?.id === "string" ? j.id : j?.id === undefined || j?.id === null ? null : String(j.id),
-          queue: queues[qi]?.name ?? "-",
-          startedAt: Number.isSafeInteger(j?.processedOn) && j.processedOn > 0 ? j.processedOn : null,
-          host: hostOfJob.get(String(j?.id)) ?? null,
-        })),
+        (Array.isArray(list) ? list : []).map((j) => {
+          const row = {
+            jobId: typeof j?.id === "string" ? j.id : j?.id === undefined || j?.id === null ? null : String(j.id),
+            queue: queues[qi]?.name ?? "-",
+            startedAt: Number.isSafeInteger(j?.processedOn) && j.processedOn > 0 ? j.processedOn : null,
+            host: hostOfJob.get(String(j?.id)) ?? null,
+          };
+          if (j?.data?.steer === true && row.jobId !== null) steerRows.push({ row, runId: runIdOf(j) });
+          return row;
+        }),
+      );
+      // Issue #646: each steer-armed active job's inbox WITHOUT ITS TEXT (`listInboxPublic`: id, mode, source, state,
+      // at, bytes), for the console's state API and the TUI's ACTIVE row. Started now beside the progress MGET, at most
+      // STEER_INBOX_ROWS_MAX of them, each one bounded MULTI on the held client. A row that is not armed carries neither
+      // field, so a deployment that never steers reads the snapshot it always did.
+      const inboxRead = Promise.all(
+        steerRows.slice(0, STEER_INBOX_ROWS_MAX).map(({ runId }) => withTimeout(listInboxPublic({ redis, runId }).catch(() => ({ error: "valkey" })), FLEET_READ_TIMEOUT_MS, { error: "timeout" })),
       );
       // Issue #644: each active job's progress, INTEGERS AND A CHARSET-CHECKED TOOL NAME ONLY (`activeProgressOf`): the
       // snapshot is what lists, hub panels and `/api/state` are drawn from, so the model's phase names and note never
@@ -3790,6 +3807,12 @@ export function createFleetReader(
 
       const progressGot = await progressRead;
       for (const row of active) row.progress = activeProgressOf(progressGot.byId?.[row.jobId]);
+      const inboxGot = await inboxRead;
+      steerRows.forEach(({ row }, i) => {
+        row.steer = true;
+        // null: past the per-tick bound, or unreadable this tick. Never `[]`, which would say "no message".
+        row.inbox = Array.isArray(inboxGot[i]?.entries) ? inboxGot[i].entries.map(publicInboxEntry) : null;
+      });
 
       return {
         held,
@@ -3862,6 +3885,12 @@ export function createFleetReader(
     },
     async progressFor(jobIds) {
       return readProgressMany(redis, jobIds, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    // The run page's inbox panel (issue #646): the job found across the fleet's queues (the registry read afresh, so a
+    // run page open alone still sees a host queue), then its inbox without text. Never throws.
+    async inbox(jobId) {
+      const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
+      return readJobInbox({ redis, queues, jobId, timeoutMs: FLEET_READ_TIMEOUT_MS });
     },
     // The kill switch (issue #642): ONE funnel with the tools' `killSwitchSet`, so a resume across two disagreeing
     // Valkeys is refused here too. Returns `killSwitchSet`'s shape: `{ refused }`, or `{ results: [{ url, shown, res }],
@@ -4665,4 +4694,100 @@ export function forgeLinkOf(record, env = {}) {
     return request ? `${base}/${project}/_git/${name}/pullrequest/${n}` : `${base}/${project}/_workitems/edit/${n}`;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A running job's inbox (issue #646, INT-STEER-INBOX-CONTRACT): what the console's run page, its state API and the TUI
+// show of the messages sent into a steer-armed run. NEVER THE TEXT: `listInboxPublic` already drops it, and every field
+// is rebuilt here by name against the inbox's own vocabularies, so a value another writer put in the list cannot ride
+// along. The text is the sender's own words for one run; it reaches the run through its read-only mount and nothing
+// that lists.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The most steer-armed active jobs whose inbox one snapshot reads (one MULTI each). */
+export const STEER_INBOX_ROWS_MAX = 16;
+
+const BULL_STATE_RE = /^[a-z-]{1,24}$/;
+
+/** One public inbox entry rebuilt field by field: `{ id, mode, source, state, at, bytes }`, null for what fails. */
+export function publicInboxEntry(e) {
+  const n = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  return {
+    id: typeof e?.id === "string" && STEER_ID_RE.test(e.id) ? e.id : null,
+    mode: STEER_MODES.includes(e?.mode) ? e.mode : null,
+    source: STEER_SOURCES.includes(e?.source) ? e.source : null,
+    state: STEER_STATES.includes(e?.state) ? e.state : null,
+    at: n(e?.at),
+    bytes: n(e?.bytes) ?? 0,
+  };
+}
+
+/**
+ * The ACTIVE job of run `runId` other than `exceptId` (review F4): a #645 recovery keeps the run id, so the base run's
+ * page (its job failed) and a `.r1` page (whose `.r2` took over) name a run that is still going under another job id.
+ * The candidates are the run's own id and its recovery ids (`recoveryJobId`, 1 to `RECOVERY_CAP`), newest first,
+ * found through `getJob(id)` (which answers `{ job, queue }` or null). Null when none of them is active. Reads only.
+ */
+export async function activeJobOfRun(getJob, runId, exceptId = null) {
+  if ((typeof runId !== "string" || runId === "") && !Number.isSafeInteger(runId)) return null;
+  const base = String(runId);
+  const ids = [];
+  for (let n = RECOVERY_CAP; n >= 1; n -= 1) {
+    const id = recoveryJobId(base, n);
+    if (id !== null) ids.push(id);
+  }
+  ids.push(base);
+  for (const id of ids) {
+    if (id === exceptId) continue;
+    const found = await getJob(id);
+    if (!found?.job) continue;
+    const state = await found.job.getState().catch(() => "unknown");
+    if (state === "active") return found;
+  }
+  return null;
+}
+
+/**
+ * One job's inbox for the run page: the job found by id in `queues` (the first that knows it), then, for a steer-armed
+ * job, its queue state, whether its run takes messages now (`run:steer:open:<runId>`) and its entries without text.
+ * Answers `{ invalid: true }` (an id outside the run-id charset), `{ found: false }`, `{ found: true, steer: false }`,
+ * `{ found: true, steer: true, state, open (true, false, or null when unread), entries (null when unread), closed }` or
+ * `{ unreachable: true }`, plus `continuesAs` (review F4: the id of the run's ACTIVE recovery job, `activeJobOfRun`)
+ * when this job is not active but its run goes on under another id. Of the Job's `.data` it reads `steer` and
+ * `recoveryOf` alone. Never throws.
+ */
+export async function readJobInbox({ redis, queues, jobId, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
+  if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { invalid: true };
+  const read = (async () => {
+    const getJob = async (id) => {
+      for (const q of Array.isArray(queues) ? queues : []) {
+        if (typeof q?.getJob !== "function") continue;
+        const job = await q.getJob(id);
+        if (job) return { job, queue: q.name };
+      }
+      return null;
+    };
+    const job = (await getJob(jobId))?.job ?? null;
+    if (!job) return { found: false };
+    if (job.data?.steer !== true) return { found: true, steer: false };
+    const runId = runIdOf(job);
+    const [state, open, list] = await Promise.all([job.getState().catch(() => "unknown"), steerIsOpen({ redis, runId }), listInboxPublic({ redis, runId })]);
+    const word = typeof state === "string" && BULL_STATE_RE.test(state) ? state : "unknown";
+    const next = word === "active" ? null : await activeJobOfRun(getJob, runId, jobId);
+    const nextId = typeof next?.job?.id === "string" && RUN_ID_RE.test(next.job.id) ? next.job.id : null;
+    return {
+      found: true,
+      steer: true,
+      state: word,
+      open: open === true ? true : open === false ? false : null,
+      entries: Array.isArray(list?.entries) ? list.entries.map(publicInboxEntry) : null,
+      closed: list?.closed === true,
+      ...(nextId !== null ? { continuesAs: nextId } : {}),
+    };
+  })();
+  try {
+    return await withTimeout(read, timeoutMs, { unreachable: true });
+  } catch {
+    return { unreachable: true };
+  }
 }

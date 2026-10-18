@@ -83,6 +83,7 @@ button,input,select{font:inherit;color:var(--pd-fg);background:var(--pd-control)
 main{max-width:1100px;margin:0 auto;padding:16px}
 main>h1{font-size:18px;margin:4px 0 12px}
 section[data-panel]{max-width:none;margin:0 0 16px;padding:12px 14px;background:var(--pd-panel);border:1px solid var(--pd-border);border-radius:6px}
+section[data-panel]:empty{display:none}
 section[data-panel] section{margin:12px 0;max-width:none}
 section[data-panel] h2{font-size:14px;margin:0 0 8px}
 p{margin:4px 0}

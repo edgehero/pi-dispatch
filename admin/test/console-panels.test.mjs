@@ -322,3 +322,98 @@ test("the run page's recovery rows (issue #645): where a durable run came from, 
   const half = String(await page("operator", { ...plain, recovered: { from: "salvage", n: 3, fromAttempt: -1, checkpointSeq: 1.5, orphans: "x", replayed: 2 } }));
   assert.match(half, /<dd>recovered from a salvage checkpoint \(recovery 3\): 2 replayed<\/dd>/, "a count that is not one is dropped on its own");
 });
+
+test("the run page's Inbox panel (issue #646): the list for both roles without text; the message forms and withdraw buttons for an operator alone, only while the run takes messages", async () => {
+  const { INBOX_NOT_OPEN, runInbox } = await import("../src/console/panels.mjs");
+  const q = "0123456789abcdef0123456789abcdef";
+  const w = "fedcba9876543210fedcba9876543210";
+  const d = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const entries = [
+    { id: q, mode: "steer", source: "console", state: "queued", at: NOW - 30_000, bytes: 18 },
+    { id: w, mode: "followUp", source: "forge", state: "written", at: NOW - 20_000, bytes: 2048 },
+    { id: d, mode: "steer", source: "cli", state: "delivered", at: NOW - 10_000, bytes: 5 },
+  ];
+  // A hostile entry the reader would have rebuilt already: the panel escapes whatever it is handed anyway.
+  const box = { found: true, steer: true, state: "active", open: true, entries: [...entries, { id: "<script>x</script>", mode: "steer", source: "panel", state: "queued", at: null, bytes: 0, text: "INBOX-TEXT-CANARY" }], closed: false };
+  const view = (role, inbox, readOnly = false, id = "gh-1") => ({ page: "run", role, readOnly, query: { id }, env: {}, now: NOW, data: { now: NOW, inbox } });
+  const op = String(runInbox(view("operator", box)));
+  assert.match(op, /<h2>Inbox<\/h2>/);
+  assert.match(op, new RegExp(`<td class="mono">${q}</td><td>steer</td><td>console</td><td>queued</td><td>2026-10-08 15:38 UTC</td><td class="num">18</td>`));
+  assert.match(op, new RegExp(`<td class="mono">${w}</td><td>follow-up</td><td>forge</td><td>written</td>`));
+  assert.match(op, /<td class="num">2,048<\/td>/);
+  assert.equal((op.match(/data-action="steer-withdraw"/g) ?? []).length, 2, "a withdraw for the queued and the written message only, never the delivered one or an id outside the charset");
+  assert.match(op, new RegExp(`name="id" value="${q}"`));
+  assert.ok(!op.includes(`value="${d}"`));
+  assert.equal((op.match(/data-action="steer"/g) ?? []).length, 2, "a steer form and a follow-up form");
+  assert.match(op, /name="mode" value="steer"/);
+  assert.match(op, /name="mode" value="followUp"/);
+  assert.match(op, /name="jobId" value="gh-1"/);
+  assert.match(op, /spends from the run&#39;s existing reservation/);
+  assert.ok(!op.includes("<script>") && op.includes("&lt;script&gt;"), "escaped");
+  for (const role of ["operator", "viewer"]) for (const html of [String(runInbox(view(role, box))), String(runInbox(view(role, box, true)))]) assert.ok(!html.includes("INBOX-TEXT-CANARY"), `${role}: no text anywhere in the list`);
+  const viewer = String(runInbox(view("viewer", box)));
+  assert.match(viewer, new RegExp(`<td class="mono">${q}</td>`), "a viewer sees the list");
+  assert.ok(!viewer.includes("data-action") && !viewer.includes("<textarea"), "and no control");
+  assert.ok(!String(runInbox(view("operator", box, true))).includes("data-action"), "none on a read-only console");
+  // Active but not open: the list and the withdraw buttons, no message form, and the sentence naming every cause.
+  const shut = String(runInbox(view("operator", { ...box, open: false })));
+  assert.ok(shut.includes(INBOX_NOT_OPEN.replace(/'/g, "&#39;")) || shut.includes(INBOX_NOT_OPEN), "the not-open sentence");
+  assert.ok(!shut.includes('data-action="steer"') && shut.includes('data-action="steer-withdraw"'));
+  // Not running any more: no form; the kept list says so.
+  const gone = String(runInbox(view("operator", { ...box, state: "completed", open: false })));
+  assert.match(gone, /The job is completed, not running, so it takes no message/);
+  assert.ok(!gone.includes('data-action="steer"'));
+  // Nothing at all for a job that is not steer-armed, not found, or an id that is not one: other run pages read as before.
+  for (const none of [null, { found: false }, { found: true, steer: false }, { invalid: true }]) assert.equal(String(runInbox(view("operator", none))), "");
+  assert.match(String(runInbox(view("viewer", { unreachable: true }))), /inbox could not be read/);
+  assert.match(String(runInbox(view("viewer", { ...box, entries: null }))), /messages could not be read this time/);
+  assert.match(String(runInbox(view("viewer", { ...box, entries: [] }))), /No message has been sent to this run/);
+});
+
+test("the Inbox panel's edges (issue #646, review round 1): no form without a running job or a readable open, the query id's charset, an anchored message id, no Action column for a viewer, the textarea's bound, a missing time, and a run that continues as its recovery job", async () => {
+  const { runInbox } = await import("../src/console/panels.mjs");
+  const id = "0123456789abcdef0123456789abcdef";
+  const entries = [{ id, mode: "steer", source: "console", state: "queued", at: null, bytes: 1 }, { id: `${id}0`, mode: "steer", source: "cli", state: "queued", at: NOW, bytes: 1 }, { id: `x${id.slice(1)}z`, mode: "steer", source: "cli", state: "written", at: NOW, bytes: 1 }];
+  const base = { found: true, steer: true, state: "active", open: true, entries, closed: false };
+  const view = (role, inbox, id2 = "gh-1") => ({ page: "run", role, readOnly: false, query: { id: id2 }, env: {}, now: NOW, data: { now: NOW, inbox } });
+  const op = String(runInbox(view("operator", base)));
+  assert.match(op, new RegExp(`<td class="mono">${id}</td><td>steer</td><td>console</td><td>queued</td><td>-</td>`), "a missing time is -");
+  assert.equal((op.match(/>Withdraw<\/button>/g) ?? []).length, 1, "the Withdraw label, once: only the well-formed id; a 33-character or non-hex id gets none");
+  assert.equal((op.match(/maxlength="8192"/g) ?? []).length, 2, "each textarea is bounded at the inbox's 8 KiB");
+  assert.match(op, /<th scope="col">Action<\/th>/);
+  assert.doesNotMatch(String(runInbox(view("viewer", base))), /Action/, "no Action column for a viewer");
+  // Not active with open true (the open key outlives a job by its hold), and active with the open key unread: no form.
+  const done = String(runInbox(view("operator", { ...base, state: "completed", open: true })));
+  assert.ok(!done.includes('data-action="steer"'), "no form for a job that is not running, open or not");
+  const unread = String(runInbox(view("operator", { ...base, open: null })));
+  assert.match(unread, /Whether the run takes messages could not be read\./);
+  assert.ok(!unread.includes('data-action="steer"'));
+  // A page id outside the run-id charset gets no control at all.
+  const odd = String(runInbox(view("operator", base, "gh <1>")));
+  assert.ok(!odd.includes("data-action") && odd.includes(id), "the list, no control");
+  // A run that continues as its recovery job (review F4): named with a link, and the forms stay.
+  const cont = String(runInbox(view("operator", { ...base, state: "failed", continuesAs: "gh-1.r1" })));
+  assert.match(cont, /This job is failed; its run continues as <a class="mono" href="\/run\?id=gh-1.r1">gh-1.r1<\/a>, and a message sent here goes to that job\./);
+  assert.ok(cont.includes('data-action="steer"'), "the planner sends through the active recovery job");
+  const hostile = String(runInbox(view("operator", { ...base, state: "failed", continuesAs: "<b>" })));
+  assert.ok(!hostile.includes("continues as") && !hostile.includes('data-action="steer"'), "a continuation id outside the charset is ignored");
+});
+
+test("the run page reads the inbox end to end (issue #646): loadPageData asks the fleet for the page's id, a throw is unreachable, and the page draws the panel", async () => {
+  const { loadPageData } = await import("../src/console/pages.mjs");
+  const asked = [];
+  const box = { found: true, steer: true, state: "active", open: true, entries: [{ id: "0123456789abcdef0123456789abcdef", mode: "steer", source: "panel", state: "written", at: NOW, bytes: 4 }], closed: false };
+  const fleet = { runById: async () => ({ missing: true }), runsPage: async () => ({ runs: [], next: null }), inbox: async (id) => (asked.push(id), box) };
+  const data = await loadPageData("run", { id: "gh-7" }, { fleet, now: NOW });
+  assert.deepEqual(asked, ["gh-7"]);
+  assert.deepEqual(data.inbox, box);
+  const page = await renderPage("run", { query: { id: "gh-7" }, session: { name: "ops", role: "operator" }, data });
+  assert.match(String(page.html), /<section id="p-inbox" data-panel><h2>Inbox<\/h2>/);
+  const panels = await pagePanels("run", { query: { id: "gh-7" }, session: { name: "v", role: "viewer" }, data });
+  assert.ok(panels.some((p) => p.id === "p-inbox" && p.html.includes("written") && !p.html.includes("data-action")));
+  const broken = await loadPageData("run", { id: "gh-7" }, { fleet: { ...fleet, inbox: async () => { throw new Error("down"); } }, now: NOW });
+  assert.deepEqual(broken.inbox, { unreachable: true });
+  const other = await loadPageData("runs", {}, { fleet: { ...fleet, runsPage: async () => ({ runs: [] }), inbox: async (id) => (asked.push(`runs:${id}`), box) }, now: NOW });
+  assert.equal("inbox" in other, false, "only the run page reads it");
+  assert.deepEqual(asked, ["gh-7"]);
+});
