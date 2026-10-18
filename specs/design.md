@@ -377,24 +377,33 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     carrying both sizes (`job_size_never_fits_here_deferred`), and doctor names a project that fits no live host. No
     registry read decides it: a host's row is deleted while it restarts and expires after a crash, and a timed-out read
     drops a row, so "no live host fits" is not a verdict the registry can give.
-  - **A container whose stop did not take** keeps its hold as an ORPHAN until `docker ps -a` (or `podman ps -a`) by
-    exact name lists it no more, or lists it in a state that runs nothing (`exited`, `dead`, Podman's `stopped`), or
-    lists it not yet started (`created`, Podman's `configured`) and its `rm -f` is answered (a `docker run` client still
-    alive could start it); an unanswered listing keeps it. Every count slot outside the budget (scope, project,
+  - **A container whose stop did not take** keeps its hold as an ORPHAN until its OWN venue says it is gone: the
+    registry's `containerGone(name, venue)` asks the bundle of the venue that holds it (issue #681), and that venue's
+    runtime (`ps -a` by exact name, for `local` and `podman`) lists it no more, or lists it in a state that runs nothing
+    (for example Docker's `exited`, `dead`, Podman's `stopped`), or lists it not yet started (`created`, Podman's
+    `configured`) and its `rm -f` is answered (a `run` client still alive could start it); an unanswered listing keeps
+    it, and so does a venue no registered bundle answers for (`null`, never a throw: the caller is the sweep, and room
+    nobody can account for is room not given back). Every count slot outside the budget (scope, project,
     endpoint) still goes back at the 30-minute bound.
   - **Seeded at boot**: the ledger is process memory, so a worker that restarts starts empty while a job container
-    its boot reaper could not remove may still run. After the reaper it lists every blessed venue's remaining job
-    containers (`ps -a`, by the job namespace, with the state and both size labels) and seeds each that may still run
+    its boot reaper could not remove may still run. After the reaper it asks every BLESSED registered venue's own
+    bundle for its remaining job containers (`listJobContainers`, issue #681: for `local` and `podman` a `ps -a` by
+    the job namespace, with the state and both size labels, each through its own CLI) and seeds each that may still run
     as an orphan of its labelled size (the largest size any project row or the default could have started it at when
     unlabelled, capped at the budget in force and again at every refresh, and doctor names each unlabelled one); the
     sweep gives each back once it is gone. Each venue is listed ON ITS OWN: until a venue's listing has been read
     once the gate admits NOTHING ON THAT VENUE (`unseeded`, logged `host_budget_seed_unread` with the venue, the registry's `budgetSeed` and doctor name
     it), and every tick asks again: an empty ledger beside containers nobody counted is the overcommit the budget
     exists to refuse. A job on another venue is admitted meanwhile; one listing for the whole host let a blessed but
-    absent Podman stop every docker job forever (gate round 2). A venue whose binary is absent (`ENOENT`) or whose boot
-    job-user decision is `unmappable` for a cause that refuses a boot (every job on it is refused before a container)
-    counts as holding none; an `unmappable` decided from one unreadable answer (`runtime-unreadable`,
-    `podman-unreadable`) is decided again per job and can clear, so that venue stays unread. A
+    absent Podman stop every docker job forever (gate round 2). A venue whose binary is absent (`ENOENT`) or, for
+    `local` and `podman`, whose boot job-user decision is `unmappable` for a cause that refuses a boot (every job on it
+    is refused before a container) counts as holding none; an `unmappable` decided from one unreadable answer
+    (`runtime-unreadable`, `podman-unreadable`) is decided again per job and can clear, so that venue stays unread.
+    Any other venue has no boot job-user decision, so `ENOENT` is its only holds-none answer and every other failure
+    leaves it unread. Before issue #681 the listing was `local` and `podman` by name, so a third venue was never
+    seeded and its leftover containers were never counted, and the gone-check picked the CLI from the venue's name,
+    sending every venue but `podman` to docker: a third venue's orphan was freed while it still ran (docker lists no
+    such name) or never freed (no docker on the host). A
     seeded survivor is keyed by its container name, not a job id, so the gate also defers `running-here` a job whose
     container name an orphan carries (a retried job whose old container survived), and the sweep never asks about a
     name a live job carries: asking removes a container not yet started, which would be the live job's own.
@@ -8185,6 +8194,27 @@ a tunnel.
   falling back to the default: two gates already refuse it (the loader, and the pre-spend blessed check), so
   reaching the registry with an unknown name means one was bypassed, and running the job somewhere the
   operator did not choose would hide that rather than surface it.
+- **Two more REQUIRED members, `listJobContainers` and `containerGone`** (issue #681), because the host budget
+  (`DES-HOST-BUDGET`) asks EVERY venue both questions: which of its job containers still hold room at boot, and
+  whether an orphan's container is gone before its hold is freed. `listJobContainers()` resolves `[{ name, memMiB,
+  cpuCenti }]`, this venue's job containers in a state that may still run (`ps -a` by the job namespace with the two
+  size labels, for `local` and `podman`; a state that runs nothing is left out), and THROWS when the runtime does
+  not answer, so the venue stays unseeded rather than read as empty. `containerGone(name)` resolves `true` (no such
+  container, one in a state that runs nothing, or one not started and removed), `false` (listed in any other state)
+  or `null` (it could not ask). `local` builds docker's, `podman` builds podman's through its own exec seam, and an
+  adapter supplies its own. **Why required, not optional with a default**: the default was the defect. Before, the
+  wiring guessed the runtime from the venue's NAME (`podman` asked podman, everything else docker), so a third
+  venue's orphan was freed while it still ran or never freed on a host with no docker, and its boot leftovers were
+  never listed at all, since the seed named `local` and `podman`. No answer is safe to supply for a runtime the
+  worker does not know, so the boot check (`REQUIRED_FUNCTIONS`) refuses a bundle without either, the same
+  build-fine-throw-later lesson as `containerName`. This does change the published contract the optional
+  preflights above were careful to keep: an adapter written against the earlier set is refused at boot until it
+  adds both, which is the loud failure this project prefers to a budget that miscounts. The registry exposes
+  `containerGone(name, venue)`, resolving the venue through `resolveBackendName` like every per-job function, and a
+  venue no bundle answers for is `null`, never a throw, because the caller is the budget's sweep and `null` keeps
+  the hold; and `listers()`, name to lister, which `start.mjs` filters to the blessed venues for the boot seed. The
+  sandbox's `SANDBOX_LAUNCHERS` (below) stays a table and is UNCHANGED, checked: the CLI and the panel open a
+  sandbox without building any bundle, which is exactly why it is not read off them.
 - **`reapAll` is a free function, not a registry method**, and the reason is a defect it replaced: the boot
   sweep runs far earlier in `startWorker` than any bundle can be built (they need the log sink, the package
   resolver and the image preflight), so a first attempt calling `registry.reap()` there was a temporal dead
@@ -8338,6 +8368,10 @@ a tunnel.
   · `worker/src/job-user.mjs` -> `decideJobUser`, `resolveImageUser`; `worker/src/container-spec.mjs` ->
   `assertJobUser` (#341)
   · `worker/src/backend-registry.mjs` -> `resolveBackendName`, `BACKEND_NOT_REGISTERED` (#277)
+  · `worker/src/backend-registry.mjs` -> `REQUIRED_FUNCTIONS`, `makeBackendRegistry` (`containerGone`, `listers`);
+  `worker/src/backend-local.mjs` -> `makeLocalBackend`, `makeJobContainerLister`, `makeContainerGone`;
+  `worker/src/backend-podman.mjs` -> `makePodmanBackend`; `worker/src/start.mjs` -> the host budget's `containerGone`
+  and `survivors` (#681)
   · `worker/src/run-history.mjs` -> `buildRecord`; `worker/src/session-store.mjs` -> `readVenue`,
   `promoteSession`; `worker/src/sandbox.mjs` -> `sandboxVenueRefusal`, `resolveSandbox` (#277)
   · `worker/src/runtime-observations.mjs` -> `observeBounds`, `observeRuntimeMounts`, `observeHost`;
@@ -12054,3 +12088,4 @@ a tunnel.
 | 2026-10-18 | Issue #668: the runs filter refused model ids that start with `@` or `~`. **`DES-OPERATOR-CONSOLE` AMENDED**, the "Every query is judged before anything is read" bullet: the `model` rule is one exported pattern, `RUN_MODEL_RE` in `admin/src/run-filter.mjs` (one optional leading `@` or `~`, then a letter or digit, then letters, digits and `. _ : / @ + -`, at most 128 characters), and `/api/run`'s `safeRunOf` and the what-if form's `WHATIF_MODEL_RE` (its model part) are built from it instead of each holding a copy. Before this the filter and `/api/run` each required a letter or digit first, so a run on one of the 36 priced `@cf/...` or `~...` ids could not be filtered (breaking the bullet's own "a refusal can never hide a run that exists") and `/api/run` dropped its `model` to null. Rejected: copying the what-if's model part (`[A-Za-z0-9@~]` then the class) into the filter, since it admits a leading `@` or `~` followed by anything other than a letter or digit (a lone `@` or `~`, `@.x`, `~/x`), none of them a priced id. UNCHANGED, checked: the rest of `DES-OPERATOR-CONSOLE`, `DES-TERMINAL-CHAT` (it reads `/api/run`'s document, whose shape is unchanged). **Code evidence**: admin/src/run-filter.mjs -> RUN_MODEL_RE, parseRunFilter; admin/src/console/run-api.mjs -> safeRunOf; admin/src/console/whatif.mjs -> WHATIF_MODEL_RE. |
 | 2026-10-18 | Issue #670: a steer sent after a follow-up waited until the agent stopped. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: the runner keeps two FIFOs, steers and follow-ups, each in file order, and mid-run hands over only steers; the closing moment pushes a waiting steer first, else the oldest follow-up (drained on the `continue()` the boundary triggers, the late follow-up's existing path) and closes only with both empty; NEW bullet "Follow-ups wait in the runner, not in pi" (why: a follow-up pushed mid-run held the one in-flight slot until the agent stopped and blocked every later steer; why one in flight stays; the re-check of an entry's file before each push, logged as `steer_withdrawn_held`; rejected: two slots, pi's queue modes, follow-ups as steers); the withdraw residual narrows to a message already handed to pi. Review round 1: at the boundary a held follow-up is handed to pi as a steer (`deliverAs: "steer"`, `details.mode` still `followUp`), because after a run a terminating tool ended, `Agent.continue()` takes `runContinuation`, which polls only steering at its start, and a follow-up queued there re-asked the model with nothing new and blocked every steer; the rejected "follow-ups as steers" is now said to be about mid-run delivery; the closing case names the parked and all-withdrawn boundaries. Review round 2: the residuals of a third-party steer queued at the same boundary and of an unreadable mount read as a withdrawal are named, and the SIGTERM line's close is guarded so a throw cannot lose the exit line. **`DES-STEER-HELD-WHILE-PARKED` AMENDED**, the residual narrowed: before, a follow-up handed to pi in any earlier turn could still un-park a run; now only a steer pushed during the parking turn can (one at most), since a follow-up reaches pi only at the settle boundary, where a parked run gets nothing. **Code evidence**: image/runner/src/inbox.mjs -> createInbox (scan, pump, stillWaiting, pruneWithdrawn, close); image/runner/test/pinned-api.test.mjs -> the issue #670 pin. |
 | 2026-10-18 | Issue #673: model settings were not shape-checked, so a run could carry a model id the console refuses. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` AMENDED**: the Decision's `model`/`provider` are a model id and a provider id in the trigger's shape (non-empty strings before), and a new Why bullet, "One id shape for every source of a job's model": the shared rule (`modelIdProblem`, `providerIdProblem` in model-ref.mjs, used by `validateModelRef`, `loadConfig`, `validateOverlay` and `pi-dispatch run`), why it sits in `validateOverlay` (one place for every admin surface and a hand-edited file), why the check lowercases and the value does not (pi resolves ids exactly; 89 catalog ids are uppercase; ASCII is checked first because lowercasing is not closed over ASCII), the bolt to the console's `RUN_MODEL_RE`, and the rejected alternative of checking at the run-record writer. **`DES-OPERATOR-CONSOLE` UNCHANGED, checked** (`RUN_MODEL_RE` itself is unchanged). **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` UNCHANGED, checked**. **Code evidence**: worker/src/model-ref.mjs -> modelIdProblem; worker/src/runtime-settings.mjs -> validateOverlay; admin/test/run-model-bolt.test.mjs. Review round 1, folded in before merge: the Why bullet adds that the admin's planners ask the same rule before the confirm (the dollar keys' rule), and that the run record's `provider` is bolted like its `model` (`RUN_PROVIDER_RE`, moved beside `RUN_MODEL_RE` in admin/src/run-filter.mjs, its pattern unchanged). **Code evidence**: admin/src/write-plans.mjs -> idSettingProblem; admin/src/run-filter.mjs -> RUN_PROVIDER_RE; admin/test/run-model-bolt.test.mjs. |
+| 2026-10-18 | Issue #681: the host budget asked every venue but `podman` through docker, and seeded only `local` and `podman` at boot. **`DES-HOST-BUDGET` AMENDED**: the orphan bullet's gone-check is asked of the venue that holds the container, through the registry's `containerGone(name, venue)`, and a venue no bundle answers for is `null`, which keeps the hold; "Seeded at boot" lists every BLESSED registered venue through its own bundle's `listJobContainers` instead of `local` and `podman` by name, keeps the boot job-user tolerance for those two, and adds that any other venue's only holds-none answer is `ENOENT` (every other failure leaves it unread); the states (Docker's `exited`, `dead`, Podman's `stopped`, `created`, `configured`) are kept as examples, and the defect is recorded (a third venue's orphan freed while it ran, or never freed without docker; its leftovers never counted). **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: a new bullet makes `listJobContainers` and `containerGone` REQUIRED bundle members (`REQUIRED_FUNCTIONS`, checked at boot) with their return shapes, why they are required rather than defaulted (the default guessed the runtime from the name, which was the bug), that this changes the published adapter contract and refuses an older adapter loudly, and the registry's `containerGone` and `listers`. `SANDBOX_LAUNCHERS` stays a table, UNCHANGED, checked. Two more places stop treating an unnamed venue as docker: `reservePlan` (cpu-reserve.mjs) gives a venue other than `local` and `podman` `venue-unmanaged` (no quota kept, no runtime command) instead of docker's rules, and `runLiveProbes` requires its venue's `buildArgs` and `bin` instead of defaulting to docker's. `venuesOf` (backends.mjs) is UNCHANGED, checked: it sends nothing to docker and answers only the docker- and podman-specific setup questions of doctor, up, init, service and egress-cli, which a third venue answers with its own checks (issue #683). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked** (its size labels and boot seed wording hold). **Code evidence**: worker/src/backend-registry.mjs -> REQUIRED_FUNCTIONS, makeBackendRegistry (containerGone, listers); worker/src/backend-local.mjs -> makeLocalBackend, BACKEND_OPTIONAL_FUNCTIONS; worker/src/backend-podman.mjs -> makePodmanBackend, PODMAN_BACKEND_OPTIONS; worker/src/start.mjs -> the host budget's containerGone and survivors; worker/src/cpu-reserve.mjs -> reservePlan; worker/src/live-probes.mjs -> runLiveProbes; worker/test/start-wiring.test.mjs, worker/test/backend-registry.test.mjs, worker/test/cpu-reserve.test.mjs, worker/test/live-probes.test.mjs. |

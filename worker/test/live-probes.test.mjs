@@ -517,6 +517,8 @@ const probeArgs = (docker, over = {}) => ({
 	fs: nodeFs,
 	isAlive: () => false,
 	stepTimeoutMs: 1000,
+	buildArgs: buildDockerRunArgs,
+	bin: "docker",
 	// A clock no test waits on: a mutant that leaves a container listed runs into the deadline at once, not in 10 s.
 	...instant(),
 	...over,
@@ -1374,7 +1376,7 @@ test("each of the four probe builders builds with the buildArgs it is given, wit
 	assert.equal(given[0].network, "net-7", "a peer's own network reaches the venue's builder");
 });
 
-test("runLiveProbes builds every container with the venue's buildArgs, and docker's when none is given (#354)", async () => {
+test("runLiveProbes builds every container with the venue's buildArgs, and refuses without one (#354, #681)", async () => {
 	const docker = fakeDocker();
 	const given = [];
 	// The fake daemon routes by what an argv contains, so this builder keeps docker's argv and only marks it.
@@ -1389,7 +1391,13 @@ test("runLiveProbes builds every container with the venue's buildArgs, and docke
 	assert.ok(!calls.some((a) => a[0] === "run"), "no container is built by any other builder");
 	const plain = fakeDocker();
 	await runLiveProbes(probeArgs(plain, { egress: LIVE_EGRESS }));
-	assert.ok(plain.calls.filter((a) => a[0] === "run").length >= 6, "with no buildArgs every container is docker's `run` argv, as before");
+	assert.ok(plain.calls.filter((a) => a[0] === "run").length >= 6, "with docker's builder every container is docker's `run` argv");
+	// Issue #681: no silent docker default at the entry point. A venue that passes neither is refused before it runs anything.
+	for (const missing of [{ buildArgs: undefined }, { bin: undefined }, { bin: "" }]) {
+		const untouched = fakeDocker();
+		await assert.rejects(() => runLiveProbes(probeArgs(untouched, missing)), /buildArgs and bin are required/);
+		assert.deepEqual(untouched.calls, [], "nothing spawned");
+	}
 });
 
 test("the local gate is injectable: a venue with no .local passes its own predicate, on both reads, and only true runs (#354)", async () => {

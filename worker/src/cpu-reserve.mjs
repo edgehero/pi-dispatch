@@ -179,13 +179,16 @@ export function cgroupParentFor(runtime) {
  *   `parent`  false when jobs run without the parent (`cgroupParentFor`): their shares are then capped instead
  *   `method`  `user-systemd` | `helper` | `system-systemd` | null (the quota is not kept here; `why` says which)
  *   `why`     a fixed token: `podman-cgroupfs`, `cgroup-v1`, `remote-daemon`, `rootless-docker`, `driver-unknown`,
- *             `podman-rootful-remote` or null
+ *             `podman-rootful-remote`, `venue-unmanaged` or null
  * `facts` is the venue's parsed info: for `local` the `docker info` facts (`parseDaemonFacts`, with `cgroupDriver` and
  * `cgroupVersion`), for `podman` the `podman info` read (`parsePodmanInfo`). `endpointLocal` is the docker endpoint's
  * observed locality, and `platform` this process's: a systemd read on THIS host says nothing about a remote daemon's.
  */
 export function reservePlan({ venue, facts, endpointLocal = false, platform = process.platform }) {
 	const plan = (parent, method, why) => ({ venue, parent, method, why });
+	// Issue #681: only the two venues whose facts this reads are planned. Another venue used to fall through to docker's
+	// rules and could be handed docker's helper; it keeps no quota here, said with a token rather than guessed.
+	if (venue !== "local" && venue !== "podman") return plan(false, null, "venue-unmanaged");
 	if (venue === "podman") {
 		if (cgroupParentFor({ podman: true, cgroupManager: facts?.cgroupManager }) === null) return plan(false, null, "podman-cgroupfs");
 		if (facts?.cgroupVersion && facts.cgroupVersion !== "v2") return plan(true, null, "cgroup-v1");

@@ -30,7 +30,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { JOB_NAME_PREFIX, execDockerBounded, isRuntimeName, jobContainerName, makePauseVerbs, makeReaper, makeStopContainer } from "./backend-local.mjs";
+import { JOB_NAME_PREFIX, execDockerBounded, isRuntimeName, jobContainerName, makeContainerGone, makeJobContainerLister, makePauseVerbs, makeReaper, makeStopContainer } from "./backend-local.mjs";
 import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_NETWORK_HELPER_KEYS, PODMAN_WIDENING_KEYS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
@@ -987,6 +987,9 @@ export const PODMAN_BACKEND_OPTIONS = Object.freeze([
 	// the floor the per-job observation preflight judges, and the boot-built reaper
 	"backendFloor",
 	"reap",
+	// issue #681: the host budget's leftover listing and gone-check, as start.mjs hands them (its listing seam)
+	"listJobContainers",
+	"containerGone",
 	// the facts, the identity and the files the observations and the job user come from
 	"readInfo",
 	"platform",
@@ -1121,6 +1124,8 @@ export function makePodmanBackend(opts = {}) {
 		openInboxRelay = null,
 		backendFloor = {},
 		reap,
+		listJobContainers,
+		containerGone,
 		readInfo = makePodmanInfoReader(),
 		platform = process.platform,
 		euid = process.geteuid?.(),
@@ -1137,6 +1142,9 @@ export function makePodmanBackend(opts = {}) {
 		makeStopContainer: makeStopContainerFn = makeStopContainer,
 	} = opts ?? {};
 	if (reap !== undefined && typeof reap !== "function") throw new Error(`backend "${PODMAN_BACKEND}": reap must be a function (makePodmanReaper)`);
+	for (const [key, fn] of Object.entries({ listJobContainers, containerGone })) {
+		if (fn !== undefined && typeof fn !== "function") throw new Error(`backend "${PODMAN_BACKEND}": ${key} must be a function when it is passed`);
+	}
 	const spawnSeam = spawnFn ? { spawnFn } : {};
 	const execSeam = exec ? { exec } : spawnFn ? { exec: execViaSpawn(spawnFn) } : {};
 	const info = cachedPodmanInfo(readInfo, { log });
@@ -1242,6 +1250,10 @@ export function makePodmanBackend(opts = {}) {
 		pause: gated(verbs.pause),
 		unpause: gated(verbs.unpause),
 		reap: reap ?? makePodmanReaper({ log, ...execSeam }),
+		// Issue #681: this store's leftover job containers and whether one is gone, asked of podman through the same exec
+		// seam as the stop and the reaper. The wiring used to pick the CLI from the venue's name instead.
+		listJobContainers: listJobContainers ?? makeJobContainerLister({ bin: "podman", ...execSeam }),
+		containerGone: containerGone ?? makeContainerGone({ binOf: () => "podman", ...execSeam }),
 		jobUserPreflight,
 		observationPreflight,
 	};

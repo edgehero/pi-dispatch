@@ -862,6 +862,8 @@ test("(a2) a venue this worker never built is refused AND recorded, not retried 
 		egressPreflight: async () => ({}),
 		stopContainer: async () => {},
 		reap: async () => ({ reaped: true }),
+		listJobContainers: async () => [],
+		containerGone: async () => true,
 		neverStartedExits: [125, 126, 127],
 		containerName: (id) => `pi-job-${id}`,
 	};
@@ -897,6 +899,8 @@ test("(a3) a REGISTERED venue whose containerName throws is not swallowed: nothi
 		egressPreflight: async () => ({}),
 		stopContainer: async () => {},
 		reap: async () => ({ reaped: true }),
+		listJobContainers: async () => [],
+		containerGone: async () => true,
 		neverStartedExits: [125, 126, 127],
 		containerName: () => {
 			throw new Error("adapter: cannot name this job");

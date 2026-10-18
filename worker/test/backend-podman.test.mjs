@@ -1347,3 +1347,20 @@ test("issue #596, phase 2: cachedPodmanInfo serves a kept answer while re-reads 
 	t = STALE_FACTS_CEILING_MS;
 	assert.deepEqual(await cached(), { answered: false, reason: "timeout", transient: true }, "a day old: the failed read itself");
 });
+
+test("the bundle answers the host budget's two questions through podman, with the exec seam (#681)", async () => {
+	// The wiring used to pick the CLI from the venue's name; the bundle now asks the store its jobs ran in.
+	const calls = [];
+	const exec = async (bin, args) => {
+		calls.push([bin, ...args]);
+		return { stdout: args[0] === "ps" && args.includes("{{.Names}}\t{{.State}}") ? "pi-job-a\trunning\n" : "pi-job-b\trunning\t512\t100\npi-job-c\tstopped\t\t\n" };
+	};
+	const b = bundle({ exec });
+	assert.equal(await b.containerGone("pi-job-a"), false);
+	assert.deepEqual(await b.listJobContainers(), [{ name: "pi-job-b", memMiB: 512, cpuCenti: 100 }], "a stopped one holds nothing");
+	assert.ok(calls.length === 2 && calls.every((c) => c[0] === "podman"), JSON.stringify(calls));
+	// Passed in, each replaces the default; a non-function is refused at construction.
+	const own = async () => [];
+	assert.equal(bundle({ listJobContainers: own }).listJobContainers, own);
+	assert.throws(() => bundle({ containerGone: "yes" }), /containerGone must be a function/);
+});

@@ -137,6 +137,9 @@ export function resolveBackendName(data, defaultName) {
  * @param bundles  the blessed backend bundles (each from a `make<Name>Backend`), keyed by their own `name`
  * @param defaultName  the venue a job that names none runs in -- `PI_BACKENDS[0]`
  */
+/** The functions every registered bundle must carry, checked at boot. */
+export const REQUIRED_FUNCTIONS = Object.freeze(["runContainer", "imagePreflight", "egressPreflight", "stopContainer", "reap", "containerName", "listJobContainers", "containerGone"]);
+
 export function makeBackendRegistry({ bundles = [], defaultName, blessed = null, reaps = null } = {}) {
 	const byName = new Map();
 	for (const bundle of bundles) {
@@ -150,7 +153,10 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		// `containerName` is in this list because THIS MODULE calls it: `registry.containerName(job)` builds
 		// the name the abort then stops. Omitting it built fine and threw at the first pickup, which is the
 		// property this constructor claims to have and did not.
-		for (const fn of ["runContainer", "imagePreflight", "egressPreflight", "stopContainer", "reap", "containerName"]) {
+		// `listJobContainers` and `containerGone` (issue #681) because the host budget asks every venue both: its leftover
+		// containers at boot, and whether an orphan's container is gone before its hold is freed. Without them the wiring
+		// guessed the runtime from the venue's name, and every venue but podman was asked through docker.
+		for (const fn of REQUIRED_FUNCTIONS) {
 			if (typeof bundle[fn] !== "function") throw new Error(`backend registry: ${JSON.stringify(bundle.name)} has no ${fn}()`);
 		}
 		if (!Array.isArray(bundle.neverStartedExits) || !bundle.neverStartedExits.every(Number.isInteger)) {
@@ -266,6 +272,16 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		// module's header says is structurally impossible -- and the container NAME is the argument the
 		// abort's `stopContainer` receives, so building it locally while resolving the venue per job was the
 		// same defect in the one call the slice exists to make dispatchable.
+		// Issue #681: the host budget's gone-check, asked of the venue that holds the container. `venue` is the job's data or
+		// `{ backend }`, as the budget keeps it. A venue no bundle answers for is `null` (unknown), never a throw: the
+		// caller is the budget's sweep, and `null` keeps the hold, which is the safe answer for room nobody can account for.
+		containerGone: async (name, venue) => {
+			const bundle = byName.get(resolveBackendName(venue ?? {}, defaultName));
+			return bundle ? bundle.containerGone(name) : null;
+		},
+		// Each registered venue's leftover-container lister, keyed by name, for the budget's boot seed.
+		// Called ON the bundle, as `containerGone` is, so an adapter whose lister is a method reading `this` still works.
+		listers: () => Object.fromEntries([...byName].map(([name, bundle]) => [name, () => bundle.listJobContainers()])),
 		neverStartedExits: (job) => backendFor(job).neverStartedExits,
 		containerName: (job) => backendFor(job).containerName(job?.id),
 		// The reaper map, validated above against the registered set, so the boot sweep can be handed

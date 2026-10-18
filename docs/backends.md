@@ -47,6 +47,8 @@ anywhere, but the declaration lands here.
   egressPreflight,  // free: is the egress policy serviceable here?
   stopContainer,    // stop a running job by name (the 30-minute timeout, and shutdown)
   reap,             // boot sweep: clear strays, and say whether you ENUMERATED
+  listJobContainers,  // host budget, at boot: your job containers that may still run, with their sizes
+  containerGone,      // host budget: is this orphan's container gone, so its room can be given back?
 
   // OPTIONAL. Leave either out and your venue gets the answer every non-local venue has always had.
   observationPreflight,   // free: does this host still show what your `observedBy` words need?
@@ -55,18 +57,25 @@ anywhere, but the declaration lands here.
 ```
 
 `worker/src/backend-local.mjs` is the worked example, though note that `makeLocalBackend` is a factory for
-*that* backend: it takes the five functions and sets the rest itself. Your adapter builds the whole object.
+*that* backend: it takes the five functions and sets the rest itself (its `listJobContainers` and
+`containerGone` ask docker). Your adapter builds the whole object.
 `local`'s two optional preflights are added beside that factory in `start.mjs`, because they read this host's
 docker CLI and the job-user decision built there. `worker/src/backend-podman.mjs` is the second example, and the
 closer one for a new runtime: `makePodmanBackend` builds the whole bundle, both optional preflights included, from
 the same parts with the runtime's binary and argv builder swapped in.
 
-The two optional members are optional for a reason: an adapter written against the five functions keeps
+`listJobContainers` and `containerGone` are required (issue #681), and the worker refuses to boot with a bundle
+that lacks either. The host budget asks every venue both: which of its job containers still hold room when the
+worker starts, and whether a container whose stop did not take is gone before its room is freed. Only your bundle
+can answer for your runtime. The worker used to guess from the venue's name and asked docker about every venue but
+`podman`, so another venue's container could be counted as gone while it still ran.
+
+The two optional members are optional for a reason: an adapter written against the other required functions keeps
 working, unchanged. Absent, `observationPreflight` admits every job and `jobUserPreflight` runs the image's own
 `USER`. The one exception is a venue whose table entry names an `observedBy`: its words hold only while
 something is observed, so the worker refuses to boot with that venue registered and no `observationPreflight`
 to observe it. A venue that carries one is dispatched to it per job, through the registry, exactly like the
-five required functions.
+required functions.
 
 ### What each function must return
 
@@ -81,6 +90,8 @@ worse.
 | `stopContainer` | `(name, job)` | anything. It is not awaited for its value: the abort's effect arrives through the container's own exit. |
 | `reap` | nothing | `{ reaped: true }` only if you ENUMERATED. See below. |
 | `containerName` | the job id | the name `stopContainer` will be given |
+| `listJobContainers` | nothing | `[{ name, memMiB, cpuCenti }]`: every job container of yours that may still run (leave out the ones in a state that runs nothing), with the size it was started at. **Throw when your runtime does not answer.** An empty array says you hold none, so the budget admits jobs on your venue as if nothing ran there. |
+| `containerGone` | the container name | `true` when it is gone (no such container, one in a state that runs nothing, or one not started and removed), `false` when it is listed in any other state, `null` when you could not ask. Only `true` gives the orphan's room back. |
 | `observationPreflight` (optional) | the job | `{ ok: true }` to admit, `{ refused: true, message, observations }` when a floor needs an observation this host does not show (`message` goes to the operator's log only; `observations` names which, from the closed list), `{ unavailable: true, reason }` when it could not be read yet (retried). Anything carried beside `ok` is handed to `jobUserPreflight` as `observed`. Beside `ok`, `jobUserRefused: { refused: "job-user-unmappable", cause }` refuses the job before the image preflight, for a venue that already knows no uid can run there whatever the image (the `podman` venue uses it: its image probe asks the same runtime and would otherwise misname the fault), and so does `podmanConfRefused: { reason, key, message }`, the `podman` venue's refusal of a widening containers.conf (`podman-conf-widens-job`, issue #428), which `local` also hands back, marked `rootful: true`, for rootful Podman's own containers.conf (issue #448). |
 | `jobUserPreflight` (optional) | `(job, { capabilities, observed })` | `{ user, home }` (`user` null means the image's own `USER`), plus `relabel: true` where the job's own mounts must carry a private SELinux label (the processor hands it to `runContainer`), `{ refused: "job-user-unmappable", cause }` or `{ refused: "job-image-any-uid-unsupported" }` to refuse, `{ unavailable: true, reason }` to retry. |
 
@@ -451,7 +462,10 @@ The harness cannot detect that. A green run is not a conformant backend.
 ## Registering it
 
 Pass your bundle to `startWorker` as an extra backend. It is registered after `local` (which is built only
-while `PI_BACKENDS` blesses it), and its own `reap` joins the boot sweep automatically. Its first argument is the environment, and the backends ride the second:
+while `PI_BACKENDS` blesses it), and its own `reap` joins the boot sweep automatically. Where `PI_BACKENDS` blesses
+it, its own `listJobContainers` seeds the host budget at boot (until that listing has been read once, no job is
+admitted on your venue, and only a missing binary, `ENOENT`, counts as holding none), and its own `containerGone`
+settles every orphan on your venue. Its first argument is the environment, and the backends ride the second:
 
 ```js
 import { startWorker } from "./worker/src/start.mjs"; // from a checkout of this repository

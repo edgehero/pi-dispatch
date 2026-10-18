@@ -767,8 +767,11 @@ export async function runLiveProbes({
 	// caller's and already knows its binary. `isLocal` is the gate on both endpoint reads: docker's is the observed
 	// endpoint, a podman venue's is `serviceIsRemote === false`, which has no `.local` to read. The gate still decides
 	// on the value it is handed and must answer exactly `true`; anything else runs nothing.
-	buildArgs = buildDockerRunArgs,
-	bin = "docker",
+	// Issue #681: both REQUIRED here, never a docker default. A venue's doctor that forgot to pass them would read back
+	// docker's containers and print the verdict as its own. The four builders keep docker's builder as their default,
+	// since only this entry point reaches them with a venue.
+	buildArgs,
+	bin,
 	isLocal = (observed) => observed?.local === true,
 	// Issue #452, gate round 3: the runtime as this pass already read it (`{ podman, rootless, version } | null`), for the
 	// detach gate, so doctor asks the daemon once per run. Absent, the gate reads it itself.
@@ -782,6 +785,7 @@ export async function runLiveProbes({
 	cgroupParent = CGROUP_PARENT,
 	cpuBudgetCenti = null,
 }) {
+	if (typeof buildArgs !== "function" || typeof bin !== "string" || bin === "") throw new TypeError("runLiveProbes: the venue's buildArgs and bin are required (issue #681)");
 	const notRun = (reason) => ({ ran: false, reason, verdicts: [], notes: [], swept: [] });
 	const notLocal = notRun(`this shell's ${bin} CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run`);
 	if (isLocal(endpoint) !== true) return notLocal;

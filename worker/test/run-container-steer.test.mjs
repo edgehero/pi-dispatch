@@ -220,7 +220,7 @@ test("an inbox that cannot be made is a named skip, and the job runs unarmed", {
 test("the registry hands `binds` to a steer job's runContainer only, from the bundle's own declaration", async () => {
 	const { makeBackendRegistry } = await import("../src/backend-registry.mjs");
 	const seen = [];
-	const bundle = (name, binds) => ({ name, declares: {}, namePrefix: "pi-job-", containerName: (j) => `pi-job-${j.id}`, neverStartedExits: [125], binds, runContainer: async (args) => (seen.push([name, args]), { code: 0 }), imagePreflight: async () => ({ ok: true }), egressPreflight: async () => ({ ok: true }), stopContainer: async () => {}, reap: async () => ({}) });
+	const bundle = (name, binds) => ({ name, declares: {}, namePrefix: "pi-job-", containerName: (j) => `pi-job-${j.id}`, neverStartedExits: [125], binds, runContainer: async (args) => (seen.push([name, args]), { code: 0 }), imagePreflight: async () => ({ ok: true }), egressPreflight: async () => ({ ok: true }), stopContainer: async () => {}, reap: async () => ({}), listJobContainers: async () => [], containerGone: async () => true });
 	let registry;
 	try {
 		registry = makeBackendRegistry({ bundles: [bundle("local", true)], defaultName: "local" });
