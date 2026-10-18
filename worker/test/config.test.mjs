@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, accountTempRoot, configError, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, ensureAccountTempRoot, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, DEFAULT_MODEL, DEFAULT_PROVIDER, accountTempRoot, configError, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, ensureAccountTempRoot, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
@@ -427,6 +427,30 @@ test("PI_ALLOWED_MODELS: unset or empty is unrestricted, a list is read verbatim
 	}
 	for (const bad of ["anthropic", "a/b,,c/d", "a/b,", "a/b,A/B", Array.from({ length: 17 }, (_, i) => `a/m${i}`).join(","), "a/\u212A"]) {
 		assert.throws(() => loadConfig({ PI_ALLOWED_MODELS: bad }), (e) => e.piDispatchConfig === true && /^invalid PI_ALLOWED_MODELS: the list /.test(e.message), JSON.stringify(bad));
+	}
+});
+
+// Issue #673: PI_MODEL and PI_PROVIDER are held to the trigger's model-id and provider-id shape, so a run on the env
+// default is one the console's runs filter can find. Set and wrong (empty included) refuses the boot, naming the shape
+// and never the value; unset is the default; a good value is kept in its original case, since pi resolves ids exactly.
+test("PI_MODEL and PI_PROVIDER: a value outside the id shape refuses the boot, never echoed; every catalog id loads, case kept (#673)", async () => {
+	const { listPricedModels } = await import("../src/pricing.mjs");
+	const priced = listPricedModels();
+	const base = loadConfig({});
+	assert.equal(base.model, DEFAULT_MODEL, "unset is the default model");
+	assert.equal(base.provider, DEFAULT_PROVIDER, "unset is the default provider");
+	assert.equal(loadConfig({ PI_MODEL: DEFAULT_MODEL, PI_PROVIDER: DEFAULT_PROVIDER }).model, DEFAULT_MODEL, "the defaults pass their own rule");
+	const models = [...new Set(priced.map((m) => m.id))];
+	assert.ok(models.some((id) => id !== id.toLowerCase()), "the catalog holds an uppercase id, so case keeping is proved");
+	for (const id of models) assert.equal(loadConfig({ PI_MODEL: id }).model, id, `PI_MODEL ${id} loads as written`);
+	for (const id of new Set(priced.map((m) => m.provider))) assert.equal(loadConfig({ PI_PROVIDER: id }).provider, id, `PI_PROVIDER ${id} loads as written`);
+	const MODEL_SAYS = "invalid PI_MODEL: it must be a model id of 1 to 64 characters: letters, digits and . _ - : / @, starting with a letter or digit (or ~ or @ then one) (leave it unset for the default)";
+	const PROVIDER_SAYS = "invalid PI_PROVIDER: it must be a provider id of 1 to 64 characters: letters, digits, dot, dash and underscore, starting with a letter or digit (leave it unset for the default)";
+	for (const bad of ["", "Claude Sonnet", "a+b", "x".repeat(65), "a~b", " claude-x", "claude-x\n", "\u212Aimi"]) {
+		assert.throws(() => loadConfig({ PI_MODEL: bad }), (e) => e.piDispatchConfig === true && e.message === MODEL_SAYS, `PI_MODEL ${JSON.stringify(bad)}`);
+	}
+	for (const bad of ["", "Open AI", "a+b", "x".repeat(65), "a~b", "a/b", "a:b", "@a"]) {
+		assert.throws(() => loadConfig({ PI_PROVIDER: bad }), (e) => e.piDispatchConfig === true && e.message === PROVIDER_SAYS, `PI_PROVIDER ${JSON.stringify(bad)}`);
 	}
 });
 

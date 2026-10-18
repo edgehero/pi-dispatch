@@ -7,11 +7,12 @@
  * stripped into something that passes. A filter value comes from a URL anyone with a viewer session can type, and it
  * travels from here into a page (the "filtered by" line) and into a comparison; a charset per field is what keeps a
  * control byte, a quote or a 10 MB string out of both. Each charset is the shape the WORKER writes into that record
- * field (imported where the worker exports it), so a refusal can never hide a run that actually exists. One gap:
- * `model` is not yet held to that, since the worker writes PI_MODEL (worker/src/config.mjs) and the overlay's `model`
- * (worker/src/runtime-settings.mjs) without a shape check, so a run on an id outside RUN_MODEL_RE exists and this filter
- * cannot find it (issue #673). The refusal names the field and its rule, never the value: echoing hostile input back
- * is the mistake a refusal exists to avoid.
+ * field (imported where the worker exports it), so a refusal can never hide a run that actually exists. For `model`
+ * that holds through the worker's sources rather than an import (issue #673): the worker holds every source of a run's
+ * model (a trigger's run.model, PI_MODEL, the settings overlay's `model`, `pi-dispatch run --model`) to one model-id
+ * shape, `modelIdProblem` in worker/src/model-ref.mjs, and every id that shape accepts passes RUN_MODEL_RE, held by
+ * admin/test/run-model-bolt.test.mjs. The refusal names the field and its rule, never the value: echoing hostile input
+ * back is the mistake a refusal exists to avoid.
  *
  * Matching is EXACT per field, except `q`, a case-insensitive substring of the record's `target`: the target is the one
  * field an operator half-remembers (`web#12`), and every other field is a closed vocabulary or an id they can copy.
@@ -39,6 +40,14 @@ const TRIGGER_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
  * and a first character of `.`, `/` or `:` are refused.
  */
 export const RUN_MODEL_RE = /^(?=.{1,128}$)[~@]?[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/;
+
+/**
+ * A run record's `provider`, as `/api/run` checks it (console/run-api.mjs): a letter or digit, then letters, digits and
+ * . _ -, at most 64 characters, case allowed. Every source of a run's provider (a trigger's run.provider, PI_PROVIDER,
+ * the settings overlay's `provider`) is held by the worker to `providerIdProblem` (worker/src/model-ref.mjs), and every id
+ * that accepts, in the case the worker keeps, passes this: held by admin/test/run-model-bolt.test.mjs (issue #673).
+ */
+export const RUN_PROVIDER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** Each field's rule: a test and the words a refusal uses. */
 const RULES = Object.freeze({

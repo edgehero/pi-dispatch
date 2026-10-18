@@ -1335,10 +1335,14 @@ test("the MODEL-visible channel is gated too, which neither pane gate reaches (#
   const payload = "\u001b[2J\u001b]52;c;cm0=\u0007\u009b2J";
   // The file IS the overlay -- `readOverlay` validates the parsed object directly, so a `{ overlay: ... }`
   // wrapper reads as ten unset keys and the assertion below would have nothing to look at.
-  writeFileSync(join(dir, "settings.json"), JSON.stringify({ model: `claude-x${payload}`, provider: `anthropic${payload}` }));
+  // The payload rides the file's PATH, which the view prints as given. It rode `model` and `provider` until issue
+  // #673, which holds both to the model-id and provider-id shape, so a file carrying a control byte there is now an
+  // invalid overlay whose reason echoes no value; no known key can carry one any more, and the path still can.
+  const file = join(dir, `settings${payload}.json`);
+  writeFileSync(file, JSON.stringify({ model: "claude-x", provider: "anthropic" }));
   const had = Object.prototype.hasOwnProperty.call(process.env, "PI_SETTINGS_FILE");
   const before = process.env.PI_SETTINGS_FILE;
-  process.env.PI_SETTINGS_FILE = join(dir, "settings.json");
+  process.env.PI_SETTINGS_FILE = file;
   try {
     await def.handler("settings", fakeCtx({}).ctx);
   } finally {
@@ -1348,6 +1352,7 @@ test("the MODEL-visible channel is gated too, which neither pane gate reaches (#
   const sent = calls.sendMessage.map(([m]) => String(m?.content ?? "")).join("\n");
   assert.ok(sent.length > 0, "the channel was used");
   assert.match(sent, /claude-x/, "and it rendered the file, so this is not asserting about an empty answer");
+  assert.match(sent, /settings[^\n]*\.json/, "with the path the payload rides in");
   for (const line of sent.split("\n")) {
     assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, "no control byte reaches model context");
   }

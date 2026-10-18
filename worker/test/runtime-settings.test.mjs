@@ -219,6 +219,29 @@ test("readOverlay: an invalid known key makes the whole file invalid; the reason
 	}
 });
 
+// Issue #673: the overlay's model and provider are held to the trigger's id shape, at the write (every admin surface
+// writes through writeOverlay) and at the read (a bad value already on disk makes the overlay invalid, the loud path).
+test("model and provider outside the id shape are refused at the write and at the read, naming the shape, never the value; catalog ids pass, case kept (#673)", async () => {
+	const { listPricedModels } = await import("../src/pricing.mjs");
+	const priced = listPricedModels();
+	const MODEL_SAYS = "model must be a model id of 1 to 64 characters: letters, digits and . _ - : / @, starting with a letter or digit (or ~ or @ then one)";
+	const PROVIDER_SAYS = "provider must be a provider id of 1 to 64 characters: letters, digits, dot, dash and underscore, starting with a letter or digit";
+	const cases = [
+		...["", "Claude Sonnet", "a+b", "x".repeat(65), "a~b", 7].map((value) => ({ obj: { model: value }, says: MODEL_SAYS })),
+		...["", "Open AI", "a+b", "x".repeat(65), "a~b", "a/b"].map((value) => ({ obj: { provider: value }, says: PROVIDER_SAYS })),
+	];
+	for (const { obj, says } of cases) {
+		assert.deepEqual(readObj(obj), { invalid: says }, `read ${JSON.stringify(obj)}`);
+		const fs = makeFakeFs();
+		assert.deepEqual(writeOverlay("/s/settings.json", obj, { fs }), { invalid: says }, `write ${JSON.stringify(obj)}`);
+		assert.equal(fs.ops.length, 0, "nothing is written");
+	}
+	const models = [...new Set(priced.map((m) => m.id))];
+	assert.ok(models.some((id) => id !== id.toLowerCase()), "an uppercase catalog id is walked");
+	for (const id of models) assert.deepEqual(readObj({ model: id }), { overlay: { model: id } }, `model ${id}`);
+	for (const id of new Set(priced.map((m) => m.provider))) assert.deepEqual(readObj({ provider: id }), { overlay: { provider: id } }, `provider ${id}`);
+});
+
 // ---- readOverlay: unknown keys ----
 
 test("readOverlay: an unknown key is dropped and logged, known keys still apply, file stays valid", () => {

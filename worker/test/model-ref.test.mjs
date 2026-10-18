@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { getAllBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { readFileSync } from "node:fs";
 import { configError } from "../src/config.mjs";
-import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, modelListProblem, modelOnList, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
+import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, modelIdProblem, modelListProblem, modelOnList, providerIdProblem, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
 import { parseExitUsage } from "../src/run-history.mjs";
 import { parseTriggers, validateModelRef as reexported } from "../src/triggers.mjs";
 
@@ -92,6 +92,24 @@ test("every builtin provider id at the pin passes the trigger's provider rule (#
 	const refused = getBuiltinProviders().filter((p) => !PROVIDER_REF_PATTERN.test(p.toLowerCase()));
 	assert.ok(getBuiltinProviders().length > 10);
 	assert.deepEqual(refused, [], "a provider a trigger cannot name is a provider no trigger can choose");
+});
+
+// Issue #673: the one rule every source of a job's model is held to. validateModelRef's refusals are built from it,
+// so the trigger words stay what they were (the tests above and below pin those), and PI_MODEL, the overlay and
+// `pi-dispatch run` say the same shape.
+test("modelIdProblem and providerIdProblem: null for every catalog id in its original case, the shape sentence otherwise (#673)", () => {
+	const MODEL = "must be a model id of 1 to 64 characters: letters, digits and . _ - : / @, starting with a letter or digit (or ~ or @ then one)";
+	const PROVIDER = "must be a provider id of 1 to 64 characters: letters, digits, dot, dash and underscore, starting with a letter or digit";
+	const models = getBuiltinProviders().flatMap((p) => getAllBuiltinModels(p).map((m) => m.id));
+	assert.ok(models.length > 1000, "the walk reads the catalog");
+	assert.ok(models.some((id) => id !== id.toLowerCase()), "an uppercase id is walked");
+	for (const id of models) assert.equal(modelIdProblem(id), null, id);
+	for (const id of getBuiltinProviders()) assert.equal(providerIdProblem(id), null, id);
+	for (const bad of ["", "Claude Sonnet", "a+b", "x".repeat(65), "a~b", ".x", "\u212Aimi", null, 7]) assert.equal(modelIdProblem(bad), MODEL, JSON.stringify(bad));
+	for (const bad of ["", "Open AI", "a+b", "x".repeat(65), "a/b", "@a", "\u212A", null]) assert.equal(providerIdProblem(bad), PROVIDER, JSON.stringify(bad));
+	assert.equal(modelIdProblem("x".repeat(64)), null, "64 characters is inside the cap");
+	assert.throws(() => validateModelRef({ model: "a b" }, "triggers[0]", "/t.json"), (e) => e.message === `triggers[0]: run.model ${MODEL}: /t.json`, "the trigger sentence is built from the same words");
+	assert.throws(() => validateModelRef({ provider: "a b" }, "triggers[0]", "/t.json"), (e) => e.message === `triggers[0]: run.provider ${PROVIDER}: /t.json`);
 });
 
 test("validateModelRef's refusal has configError's shape, built without importing config.mjs", () => {

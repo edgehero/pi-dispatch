@@ -59,7 +59,7 @@ import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 }
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectsFingerprint } from "./projects.mjs";
@@ -1428,6 +1428,22 @@ export async function collectChecks(shellVars, seams) {
 	// ioredis's SELECT. It is a ✗ of its own, the worker's refusal (exit 2), and nothing below contacts a Valkey.
 	const valkeyDbProblem = unreadValkey ? null : valkeyUrlProblem(valkeyUrl);
 	const provider = env.PI_PROVIDER ?? "anthropic";
+	// Issue #673: is the service's PI_MODEL or PI_PROVIDER outside the one id shape (`modelFrom`, `providerFrom`)? Judged
+	// once, here, because the answer decides more than its own row (review round 1): the older rows that judge the same
+	// value (the provider-key row, the trigger-secret clash row and the deployment default's catalog row) are skipped for
+	// a malformed one. They print the value, so a control byte would reach the terminal, and their fix ("set PI_PROVIDER to
+	// a provider pi has") is not the one the boot refusal asks for; one root cause prints one row. A well-shaped value is
+	// judged by them unchanged. Null when the setting is unset or well-shaped, else the worker's own refusal message.
+	const envShapeProblem = {};
+	for (const [name, judge] of [["PI_MODEL", modelFrom], ["PI_PROVIDER", providerFrom]]) {
+		envShapeProblem[name] = null;
+		if (typeof env[name] !== "string") continue;
+		try {
+			judge(env);
+		} catch (err) {
+			envShapeProblem[name] = err?.message ?? "invalid";
+		}
+	}
 	// Issue #464 (gate round 1): this host's declared worker name, resolved with every other service key. Every reader
 	// below (the fleet line and its routing warning, the per-host backend wording, which cron triggers are scheduled
 	// here) uses this value: read from the shell alone, a deployment whose `.env` names its worker was told host routing
@@ -2862,7 +2878,8 @@ export async function collectChecks(shellVars, seams) {
 		: setupSupplies(["worker"])
 			? credentialAbsent({ subject: `Provider key (${provider}: ${keyAbsent.join(" or ")}) not set`, names: keyNames, readers: ["worker"], refusal: "jobs cannot authenticate to the provider", fix: keyShown.fix })
 			: { ...keyShown, fix: `${keyShown.fix}${notSupplied(keyNames, ["worker"])}` };
-	checks.push({ ...keyLine, label: `${keyLine.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
+	// Not for a malformed PI_PROVIDER: its shape row below is the one line (issue #673, review round 1).
+	if (envShapeProblem.PI_PROVIDER === null) checks.push({ ...keyLine, label: `${keyLine.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
 
 
 	// REQ-GLOBAL-PI-OVERLAY: read the extensions opt-out through the WORKER's own parser, so doctor reports
@@ -3351,6 +3368,17 @@ export async function collectChecks(shellVars, seams) {
 		});
 	}
 
+	// Issue #673: PI_MODEL and PI_PROVIDER are held to the one model-id and provider-id shape a trigger's run.model and
+	// run.provider are (`modelFrom`, `providerFrom`), and a value outside it is a worker that will not boot. Judged by the
+	// worker's own functions (`envShapeProblem`, above), the PI_ALLOWED_MODELS row's rule below, on the SERVICE's value.
+	// Only a failing row: a good value is judged further by the provider-key and model-catalog lines, which a malformed one
+	// skips. The value is never echoed, as the worker's own refusal never echoes it; the setting's name is all an
+	// operator needs to find the line.
+	for (const name of ["PI_MODEL", "PI_PROVIDER"]) {
+		if (envShapeProblem[name] === null) continue;
+		checks.push({ ok: false, label: `${name} is not a valid ${name === "PI_MODEL" ? "model" : "provider"} id`, fix: `${envShapeProblem[name]} -- the worker refuses to boot until this is fixed` });
+	}
+
 	// Issue #502, allowed-model lists. The deployment list is judged unconditionally, `PI_WAIT_PROFILES`' rule: a
 	// malformed or spaced value is a worker that will not boot. Its grammar is the worker's own (`allowedModelsFrom`).
 	// The value doctor reads is the SERVICE's (`WORKER_SERVICE_KEYS`), so a spaced value in a `.env` a shell sources is
@@ -3409,7 +3437,10 @@ export async function collectChecks(shellVars, seams) {
 				// A malformed PI_ALLOWED_MODELS is its own line above (the worker refuses to boot on it).
 			}
 			const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList });
-			checks.push(...unknownModelChecks(subjects, catalog.checkModelsKnown, readOverlayDoc));
+			// The deployment default's catalog row prints PI_PROVIDER/PI_MODEL: not for a malformed one, whose shape row is
+			// the one line (issue #673, review round 1).
+			const envShapeBad = envShapeProblem.PI_MODEL !== null || envShapeProblem.PI_PROVIDER !== null;
+			checks.push(...unknownModelChecks(envShapeBad ? subjects.filter((s) => s.deployment !== true) : subjects, catalog.checkModelsKnown, readOverlayDoc));
 			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc }), { unboundable: (ref) => outputUnboundable(outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })) }));
 			checks.push(
 				...listedProviderCredentialChecks(subjects, {
@@ -3474,7 +3505,7 @@ export async function collectChecks(shellVars, seams) {
 		// one would be permanently false and this check would silently never run. It is skipped rather than
 		// failed when pi did not load, because providerKeyCheck above has already reported that as its own ✗
 		// and one root cause should print one line.
-		if (secretNames.length > 0 && oracle?.providerKeyCandidates) {
+		if (secretNames.length > 0 && oracle?.providerKeyCandidates && envShapeProblem.PI_PROVIDER === null) {
 			const candidates = oracle.providerKeyCandidates(provider);
 			const clashing = secretNames.filter((n) => candidates.includes(n));
 			checks.push({

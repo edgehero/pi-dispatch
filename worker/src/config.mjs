@@ -19,7 +19,7 @@ import { imageRefProblem } from "./image-ref.mjs";
 import { jobSizeDefaults } from "./job-size.mjs";
 import { hostBudgetSettings } from "./host-budget.mjs";
 import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
-import { modelListProblem } from "./model-ref.mjs";
+import { modelIdProblem, modelListProblem, providerIdProblem } from "./model-ref.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 
 export { WORKER_NAME_RE };
@@ -222,6 +222,33 @@ function forwardEnvList(raw, egressArmed = false) {
 		);
 	}
 	return names;
+}
+
+/**
+ * `PI_MODEL` (issue #673): the deployment's default model, held to the one model-id rule every other source of a
+ * job's model is (`modelIdProblem`: a trigger's `run.model`, the settings overlay, `pi-dispatch run --model`). The
+ * run record writes whichever source won, and the console's runs filter accepts every id that rule does, so a run
+ * on the env default is never one the console cannot find. Refused at boot, like every other knob here; doctor
+ * fails the same row first. SET BUT EMPTY IS REFUSED, not read as unset: before #673 an empty value survived
+ * `??` and every job ran on a model named "", and an `.env` line `PI_MODEL=` is more likely a template left
+ * half-filled than a wish for the default. The value is never echoed. The original case is kept: pi resolves
+ * ids exactly, and only the check lowercases.
+ */
+export function modelFrom(env) {
+	const raw = env.PI_MODEL;
+	if (raw === undefined) return DEFAULT_MODEL;
+	const problem = modelIdProblem(raw);
+	if (problem !== null) throw configError(`invalid PI_MODEL: it ${problem} (leave it unset for the default)`);
+	return raw;
+}
+
+/** `PI_PROVIDER` (issue #673), by `modelFrom`'s rule against the provider shape. */
+export function providerFrom(env) {
+	const raw = env.PI_PROVIDER;
+	if (raw === undefined) return DEFAULT_PROVIDER;
+	const problem = providerIdProblem(raw);
+	if (problem !== null) throw configError(`invalid PI_PROVIDER: it ${problem} (leave it unset for the default)`);
+	return raw;
 }
 
 /**
@@ -434,7 +461,7 @@ export function runProgressEnabled(env) {
  * spend caps above, the per-job token scoping, or the admin-extension recursion block.
  */
 export function loadConfig(env = process.env, { fileExists = existsSync } = {}) {
-	const model = env.PI_MODEL ?? DEFAULT_MODEL; // an exact model version, not a moving alias; deterministic per CONST-PI-VERSION-PINNED
+	const model = modelFrom(env); // an exact model version, not a moving alias; deterministic per CONST-PI-VERSION-PINNED. Shape-checked (#673)
 	// #227. Hoisted above the object because `defaultBackend` INDEXES `backends`, and a property cannot read
 	// a sibling of the literal it is in. (Calling the parser twice would be harmless -- `egressEnabled` is
 	// called twice a few properties down for the same reason -- so this is about the index, not the throw.)
@@ -455,7 +482,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		weeklyCap: optionalBoundedInt(env, "PI_WEEKLY_CAP", 1), // REQ-SPEND-CAPS-MULTI-WINDOW; null = weekly window disabled
 		monthlyCap: optionalBoundedInt(env, "PI_MONTHLY_CAP", 1), // null = monthly window disabled
 		softHoldPct: optionalBoundedInt(env, "PI_SOFT_HOLD_PCT", 1, 99), // null = soft-hold band disabled
-		provider: env.PI_PROVIDER ?? DEFAULT_PROVIDER,
+		provider: providerFrom(env),
 		model,
 		maxTurns: positiveInt(env, "PI_MAX_TURNS", 30), // pi has no turn limit; we impose one
 		allowedModels: allowedModelsFrom(env), // issue #502: the deployment's allowed-model list; null = unrestricted. ENV ONLY, never the settings overlay

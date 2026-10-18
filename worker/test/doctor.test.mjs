@@ -5266,6 +5266,52 @@ test("doctor: PI_ALLOWED_MODELS is judged by the worker's own rule, a spaced val
 	assert.equal((await collectChecks(base, secretsSeams())).some((c) => /PI_ALLOWED_MODELS/.test(c.label)), false, "unset says nothing");
 });
 
+// Issue #673: a PI_MODEL or PI_PROVIDER outside the id shape is a worker that refuses to boot, so doctor fails the row
+// first, judged by the worker's own function, naming the setting and the shape and never the value.
+test("doctor: PI_MODEL and PI_PROVIDER outside the id shape fail their row, by the worker's own rule, value never echoed (#673)", async () => {
+	for (const base of [{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile() }, { ANTHROPIC_API_KEY: "sk-x" }]) {
+		for (const [name, kind, bad] of [["PI_MODEL", "model", "Claude Sonnet"], ["PI_MODEL", "model", ""], ["PI_MODEL", "model", "a+b"], ["PI_PROVIDER", "provider", "Open AI"], ["PI_PROVIDER", "provider", ""]]) {
+			const checks = await collectChecks({ ...base, [name]: bad }, secretsSeams());
+			const hit = checks.filter((c) => c.label === `${name} is not a valid ${kind} id`);
+			assert.equal(hit.length, 1, `${name}=${JSON.stringify(bad)}`);
+			assert.equal(hit[0].ok, false);
+			assert.match(hit[0].fix, new RegExp(`^invalid ${name}: it must be a ${kind} id of 1 to 64 characters: .* -- the worker refuses to boot until this is fixed$`));
+			if (bad.length > 1) assert.ok(!JSON.stringify(hit[0]).includes(bad), "the value is not echoed");
+		}
+		const good = await collectChecks({ ...base, PI_MODEL: "Claude-Sonnet-X", PI_PROVIDER: "anthropic" }, secretsSeams());
+		assert.equal(good.some((c) => / is not a valid (model|provider) id$/.test(c.label)), false, "a good value (case kept) is no row of its own");
+	}
+});
+
+// Issue #673, review round 1: a malformed PI_PROVIDER or PI_MODEL is ONE row. The older rows that judge the same value
+// (the provider-key row, the deployment default's catalog row) print it, so they are skipped for a malformed value:
+// against the same deployment with the setting unset, the failing rows differ by exactly the shape row, and no row
+// carries the value (a control byte would reach the terminal). The real catalog is asked, so the catalog row would fire.
+test("doctor: a malformed PI_PROVIDER or PI_MODEL fails its shape row alone, and no other row carries the value (#673)", async () => {
+	// A trigger binding a secret too: the trigger-secret clash row names the provider (an ok row, so it counts here).
+	for (const base of [{ ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile() }, { ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile() }]) {
+		const failing = (checks) => checks.filter((c) => !c.ok).map((c) => c.label).sort();
+		const baseline = failing(await collectChecks(base, secretsSeams()));
+		for (const [name, kind, bad] of [["PI_PROVIDER", "provider", "Open AI"], ["PI_PROVIDER", "provider", "evil\x1b[31m"], ["PI_PROVIDER", "provider", ""], ["PI_MODEL", "model", "Claude Sonnet"]]) {
+			const at = `${name}=${JSON.stringify(bad)}`;
+			const checks = await collectChecks({ ...base, [name]: bad }, secretsSeams());
+			assert.deepEqual(failing(checks), [...baseline, `${name} is not a valid ${kind} id`].sort(), at);
+			for (const c of checks) {
+				const said = `${c.label}\n${c.fix ?? ""}`;
+				assert.doesNotMatch(said, name === "PI_PROVIDER" ? /which is not a provider pi has|The deployment's default model|variable pi reads for/ : /The deployment's default model/, `${at}: ${c.label}`);
+				if (bad !== "") assert.ok(!said.includes(bad) && !said.includes(bad.slice(0, 4)) && !said.includes(JSON.stringify(bad)), `${at}: ${c.label}`);
+			}
+		}
+	}
+	// The rows the shape row stands in for are still there for a well-shaped value, unchanged.
+	const base = { ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile() };
+	const unknownProvider = await collectChecks({ ...base, PI_PROVIDER: "openaix" }, secretsSeams());
+	assert.ok(unknownProvider.some((c) => !c.ok && c.label.startsWith('PI_PROVIDER is "openaix", which is not a provider pi has')), "a well-shaped unknown provider keeps its provider-key row");
+	assert.ok(unknownProvider.some((c) => c.label === "No trigger binds a variable pi reads for openaix"), "and its trigger-secret row");
+	const unknownModel = await collectChecks({ ...base, PI_MODEL: "Claude-Sonnet" }, secretsSeams());
+	assert.ok(unknownModel.some((c) => !c.ok && c.label.startsWith("The deployment's default model") && c.label.includes("anthropic/Claude-Sonnet")), "a well-shaped unknown model keeps its catalog row");
+});
+
 test("doctor: a spaced PI_ALLOWED_MODELS in a .env a shell sources is named, since that shell leaves it unset (#502)", async () => {
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), "PI_ALLOWED_MODELS=anthropic/claude-haiku-4-5, openai/gpt-x\n");

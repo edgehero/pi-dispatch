@@ -31,6 +31,36 @@ export const MODEL_REF_PATTERN = /^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$/;
  * never be listed. Applied after lowercasing, like `MODEL_REF_PATTERN`.
  */
 export const PROVIDER_REF_PATTERN = /^(?=.{1,64}$)[a-z0-9][a-z0-9._-]*$/;
+/** What a model id may be, in words: the sentence every source's refusal ends with. */
+const MODEL_ID_SHAPE = "a model id of 1 to 64 characters: letters, digits and . _ - : / @, starting with a letter or digit (or ~ or @ then one)";
+/** What a provider id may be, in words. */
+const PROVIDER_ID_SHAPE = "a provider id of 1 to 64 characters: letters, digits, dot, dash and underscore, starting with a letter or digit";
+
+/**
+ * Is `value` a model id a record may carry (issue #673)? Null when it is, else the shape it must have, as a
+ * sentence ("must be a model id of ..."). ONE rule for every source of a job's model: a trigger's `run.model`
+ * (`validateModelRef`), `PI_MODEL` (`loadConfig`), the settings overlay's `model` (`validateOverlay`) and
+ * `pi-dispatch run --model`. Held to one rule because the run record writes whichever of them won, and the
+ * console's runs filter (`RUN_MODEL_RE`, admin) accepts exactly the ids this rule does and more, so a run on a model
+ * the worker accepted is always one the console can find.
+ *
+ * ASCII is checked on the ORIGINAL before lowercasing, because lowercasing is not closed over ASCII: the Kelvin
+ * sign (U+212A) lowercases to a plain `k`, so a lowercase-then-match check alone would pass a homoglyph that then
+ * reaches the job verbatim and names a model nobody listed. Only the CHECK lowercases: the caller keeps the
+ * original case, because pi resolves model ids exactly and case-sensitively, and the pinned catalog holds
+ * uppercase ids. The sentence never carries the value.
+ */
+export function modelIdProblem(value) {
+	if (typeof value !== "string" || !/^[\x21-\x7E]+$/.test(value) || !MODEL_REF_PATTERN.test(value.toLowerCase())) return `must be ${MODEL_ID_SHAPE}`;
+	return null;
+}
+
+/** `modelIdProblem` for a provider id (issue #673), against `PROVIDER_REF_PATTERN`, by the same rule. */
+export function providerIdProblem(value) {
+	if (typeof value !== "string" || !/^[\x21-\x7E]+$/.test(value) || !PROVIDER_REF_PATTERN.test(value.toLowerCase())) return `must be ${PROVIDER_ID_SHAPE}`;
+	return null;
+}
+
 /**
  * Validate the optional `run.provider`, `run.model`, `run.maxTurns` and `run.models` of one trigger (issue #502) and return
  * the fields that were present, so a normalizer can spread them and an absent field stays absent. Shared by
@@ -48,24 +78,24 @@ export function validateModelRef(run, at, path) {
 	// import-free: run-history.mjs imports it too, and must not drag config.mjs's fs and os in with it.
 	const configError = (message) => Object.assign(new Error(message), { piDispatchConfig: true });
 	const out = {};
-	// ASCII is checked on the ORIGINAL before lowercasing, because lowercasing is not closed over ASCII:
-	// the Kelvin sign (U+212A) lowercases to a plain `k`, so a lowercase-then-match check alone would pass
-	// a homoglyph that then reaches the job verbatim and names a model nobody listed.
-	const ascii = (value) => /^[\x21-\x7E]+$/.test(value);
+	// The shape checks (ASCII on the original, then the pattern on the lowercased value) are `providerIdProblem`
+	// and `modelIdProblem`, shared with PI_MODEL, PI_PROVIDER, the settings overlay and `pi-dispatch run` (#673).
 	// NULL IS ABSENT, for all three. Before #502 a hand-written cron entry's `"model": null` loaded and
 	// meant the deployment default (the worker fills `job.data ?? overlay ?? env`, and `??` passes over
 	// null), so refusing it now would turn a working file into one that refuses to load for no gain.
 	if (run?.provider != null) {
 		const provider = run.provider;
-		if (typeof provider !== "string" || !ascii(provider) || !PROVIDER_REF_PATTERN.test(provider.toLowerCase())) {
-			throw configError(`${at}: run.provider must be a provider id of 1 to 64 characters: letters, digits, dot, dash and underscore, starting with a letter or digit: ${path}`);
+		const problem = providerIdProblem(provider);
+		if (problem !== null) {
+			throw configError(`${at}: run.provider ${problem}: ${path}`);
 		}
 		out.provider = provider;
 	}
 	if (run?.model != null) {
 		const model = run.model;
-		if (typeof model !== "string" || !ascii(model) || !MODEL_REF_PATTERN.test(model.toLowerCase())) {
-			throw configError(`${at}: run.model must be a model id of 1 to 64 characters: letters, digits and . _ - : / @, starting with a letter or digit (or ~ or @ then one): ${path}`);
+		const problem = modelIdProblem(model);
+		if (problem !== null) {
+			throw configError(`${at}: run.model ${problem}: ${path}`);
 		}
 		out.model = model;
 	}

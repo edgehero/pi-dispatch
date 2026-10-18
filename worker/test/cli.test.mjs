@@ -258,6 +258,31 @@ test("run --image refuses, before anything is queued, an image the one image rul
 	}
 });
 
+// Issue #673: a local run's model and provider are held to the trigger's id shape before anything is queued, so the
+// run is one the console's runs filter can find. The refusal names the flag and the shape, never the value.
+test("run --model and --provider refuse, before anything is queued, an id outside the shape, never echoing it (#673)", async () => {
+	const dir = gitRepo({ dirty: false });
+	const cases = [
+		...["", "Claude Sonnet", "a+b", "x".repeat(65), "a~b"].map((v) => ["--model", v, /^error: --model must be a model id of 1 to 64 characters: .*\. Nothing was queued\.\n$/]),
+		...["", "Open AI", "a+b", "x".repeat(65), "a/b"].map((v) => ["--provider", v, /^error: --provider must be a provider id of 1 to 64 characters: .*\. Nothing was queued\.\n$/]),
+	];
+	for (const [flag, bad, said] of cases) {
+		const err = [];
+		const realErr = process.stderr.write;
+		process.stderr.write = (chunk) => (err.push(String(chunk)), true);
+		let code;
+		try {
+			// No VALKEY_URL is reachable, and reaching the refusal probe fails the test: nothing is sent.
+			code = await main(["run", dir, "--task", "t", `${flag}=${bad}`, "--force"], { VALKEY_URL: "redis://127.0.0.1:1" }, { valkeyRefusal: async () => assert.fail("reached Valkey") });
+		} finally {
+			process.stderr.write = realErr;
+		}
+		assert.equal(code, 1, `${flag} ${JSON.stringify(bad)}`);
+		assert.match(err.join(""), said);
+		if (bad.length > 1) assert.ok(!err.join("").includes(bad), "the value is not echoed");
+	}
+});
+
 test("run --image enqueues against a real Valkey (the operator-at-the-terminal path for a per-trigger image)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
 	// The CLI is the operator-trusted path -- same class as the existing free-form --provider/--model -- and
 	// it is what lets an operator see the preflight refusal once, deliberately, instead of discovering it at
