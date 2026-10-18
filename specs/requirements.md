@@ -1095,8 +1095,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `github.com`), and given no such URL, or a target that does not parse, no link is drawn; a run record carries no
     free text, so neither role sees any here (BullMQ's `failedReason` is on the fleet page, operator only). No log
     and no transcript is shown
-    (`OQ-044`). Tests: `admin/test/read-model-pages.test.mjs` (`readRunById`, `forgeLinkOf`),
-    `admin/test/console-pages.test.mjs`, `admin/test/console-server.test.mjs`.
+    (`OQ-044`). Given a job of a run armed with `run.recover` (issue #662), its Progress panel reads the progress key
+    by the RUN id (the record's `recoveryOf`, else the queue job's `data.recoveryOf`, else the page's id): a recovery's
+    own page shows its live progress; an attempt whose record says `recovery-enqueued` shows its OWN record's
+    `progress` and "This run continues as `<recovery job>`." (a link to the run's NEWEST recovery job, `.r2` even when `.r1`
+    exists since the run lives there now, or "a recovery job" once the queue no longer holds it), never the recovery's live key; a plain BullMQ retry (same job id) keeps `REQ-RUN-PROGRESS`'s pairing by time.
+    The fleet snapshot's active rows read a recovery job's progress by its run id too. Tests:
+    `admin/test/read-model-pages.test.mjs` (`readRunById`, `forgeLinkOf`),
+    `admin/test/console-pages.test.mjs` ("the run page reads progress by the run (progressOfRun), handing it the
+    record, and pairs a continued attempt with its own record (issue #662)"), `admin/test/console-panels.test.mjs`
+    ("the Progress panel of an attempt whose run continues as a recovery (issue #662): its own record's progress and a
+    link, never the recovery's live key"), `admin/test/read-model-progress.test.mjs` ("readRunProgress reads the key
+    by the RUN id and says when the attempt's run continues as a recovery (#662)"), `admin/test/console-server.test.mjs`.
   - (d) **Parked inbox** (`/parked`). Given runs that ended `completed` with `awaiting-input`, each shows its target,
     its forge link where one can be built, its age and its session chain count, newest first; given a later run on the
     same kind and target, the parked run shows as answered; given `PI_SESSIONS_DIR` not on the console's host, a key
@@ -1461,7 +1471,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     shows a key that started after the record's `endedAt` live under "An earlier attempt of this run ended
     (outcome); this is the attempt after it.", and joins the key's phase names to the record only when the key ended
     and is the same attempt (started no earlier than the record's `startedAt` and no later than its `endedAt`, an
-    unreadable time pairing with nothing). The record's figures read "Sum of step durations" and "Longest interrupted step", and the
+    unreadable time pairing with nothing). A #645 recovery is not a retry (issue #662): the key is read by the run id,
+    and an attempt whose run continues as a recovery shows its own record's `progress` with a link to the recovery,
+    never the recovery's live key as "the attempt after it" (`REQ-OPERATOR-CONSOLE-SCREENS` (c)). The `/dispatch`
+    panel follows the same rule: a running recovery's ACTIVE row reads its integers and its phase name by the run id
+    (`progressOfRun`), and RUN_DETAIL of an attempt whose record says `recovery-enqueued` adds its own record's
+    `progress` line and "continues as `<recovery job>`" ("as a recovery job" when the reader names none), every line
+    within the pane's width (`admin/test/dashboard.test.mjs`, `admin/test/dashboard-transcript.test.mjs`, the #662
+    tests). The record's figures read "Sum of step durations" and "Longest interrupted step", and the
     resume prior "Earlier runs of this session". Tests: `admin/test/read-model-progress.test.mjs` (parseProgress
     reads the worker's own snapshot, parseProgress refuses hostile snapshots whole, readProgress, readProgressMany,
     the fleet snapshot's active rows with their `updatedAt`, "progressStaleFor: a running snapshot unwritten past the heartbeat's three minutes is stale; an ended one, or one
@@ -3426,6 +3443,22 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     position, and absent for a job that never armed run.recover (#645)", "MAKE IT LIE: hostile strings in every
     durable-run field never reach the record (#645)", "the durable-run reasons start.mjs and the processor write pass
     through the record's reason (#645)").
+  - (h) **The crashed attempt's record and a killed recovery's counts** (issue #662). The record the stall path writes
+    for the attempt that crashed (`recovery-enqueued`) takes `startedAt` from the run's progress key, read before the
+    recovery is enqueued, when that key has not ended and its start is not after now and no earlier than the stalled
+    job's enqueue time (so a recovery that died before its own first write never takes the base attempt's key), else
+    null, never the job's
+    `processedOn` (BullMQ's stall re-pick overwrites it); it carries `progress` from that key's integer counts. A
+    recovery that wrote no exit line (its container was killed) takes its `recovered` counts from its own transcript's
+    recovery marks, this attempt's lines only, with `orphans` their sum and `countsFrom: "transcript"`; the exit line's
+    counts win whenever the exit line carries a `recovery` block (`countsFrom: "exit-line"`); a transcript with no mark leaves the counts null. Tests:
+    `worker/test/start-wiring.test.mjs` ("issue #662: the crashed attempt's record takes its start and progress from
+    the run's progress key, read before the enqueue"), `worker/test/processor-durable.test.mjs` ("a recovery with no
+    exit line takes its counts from the transcript, labelled transcript, never into progress (#662)", "the exit line
+    wins over the transcript's counts; a transcript with no mark leaves the counts null (#662)"),
+    `worker/test/run-progress.test.mjs` ("recovery marks of an earlier attempt (prior lines) count nothing toward this
+    attempt's split counts (#662)"), `worker/test/run-history.test.mjs` ("recovered.countsFrom is a closed enum, and
+    the transcript fallback sums orphans and refuses a zero (#662)").
 
 ## REQ-AWAIT-INPUT
 
@@ -4616,6 +4649,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-18 | Issue #662: three record and display gaps of durable runs. **`REQ-RUN-RECOVERY` AMENDED**, acceptance (h): the crashed attempt's stall record takes `startedAt` from the run's progress key (read before the enqueue; not ended, not after now, no earlier than the stalled job's enqueue time; else null, never `processedOn`, which BullMQ's stall re-pick overwrites) and `progress` from its integer counts; a recovery with no exit line takes its `recovered` counts from its transcript's recovery marks (this attempt's lines only, `orphans` the sum, `countsFrom: "transcript"`), the exit line's counts winning whenever it carries a `recovery` block (`countsFrom: "exit-line"`). **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, acceptance (c): the run page reads progress by the run id; an attempt whose record says `recovery-enqueued` shows its own record's progress and "This run continues as" the recovery job; a recovery's page shows its live progress; a plain retry keeps the pairing by time; the active rows read a recovery's progress by its run id. **`REQ-RUN-PROGRESS` AMENDED**, acceptance: a recovery is not a retry, by the same rule, on the console and in the `/dispatch` panel (the ACTIVE row's phase name by the run id; RUN_DETAIL's own progress and "continues as" line). Statements UNCHANGED, checked. |
 | 2026-10-17 | Issue #646, part 3, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round: Scope says a message is not refused while the fleet is paused (the kill switch stops new jobs, not a running one, and a message stays inside the run's caps and reservation), and that the base run page of a recovered run sends through its active recovery job; acceptance (m) gains the audit row's message id, the metadata-only listing, the recovery case and the branches the mutation round found unpinned (every refusal, the plan guards, the race to delivered, the 16-row bound, the hostile entry, the scrubbing in the TUI). **`REQ-OPERATOR-CONSOLE-ACTIONS` CORRECTED**: acceptance (n)'s audit row names `<job id>#<message id>`. **Code evidence**: admin/src/job-actions.mjs -> steerAuditTarget, planSteer; admin/src/read-model.mjs -> activeJobOfRun; worker/src/steer-inbox.mjs -> listInboxPublic. |
 | 2026-10-17 | Issue #646, part 3: the console and the panel. **`REQ-STEER-RUNNING-JOB` AMENDED**: Scope now covers parts 1 to 3; the follow-up sentence it carried is replaced by what part 3 ships: the console's run page of a steer-armed job lists its inbox without text for both roles, with a steer form, a follow-up form (only while the job is active and its run open) and a Withdraw button per queued or written message for the operator role (actions `steer` and `steer-withdraw`); the TUI's ACTIVE row of a steer-armed job takes `t` (steer) and `T` (follow-up) through the panel's audited write; `/api/state` carries each steer-armed active job's inbox without text; and steering stays an operator action, with no model-callable tool. Fail loudly gains the console's and the panel's refusals (the CLI's sentences, before anything is written; `closed`, `gone` and `full` at the confirm; a withdraw naming the state it met). NEW acceptance (m), the console and the panel, with its tests. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**: the Statement's job actions gain sending a message into a running steer-armed job and taking one back; NEW acceptance (n), kinds `steer` (paid, no new reserve, the sha256 alone audited) and `steer-withdraw` (guaranteed when queued, best effort when written). **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is registered or removed, so its enumeration and the pin `admin/test/wiring.test.mjs` keeps on it stand; the TUI key is a panel key, not a tool. **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: the run page gains a panel under `REQ-OPERATOR-CONSOLE-ACTIONS`, which holds the controls it adds to these pages. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the two actions are table entries behind every guard (the every-action test loops over them). **Code evidence**: admin/src/job-actions.mjs -> planSteer, enqueueSteer, planSteerWithdraw, withdrawSteerMessage; admin/src/console/actions.mjs -> the `steer` and `steer-withdraw` entries; admin/src/console/panels.mjs -> runInbox; admin/src/read-model.mjs -> readJobInbox, publicInboxEntry, the snapshot's `steer` and `inbox`; admin/src/console/live.mjs -> inboxOf; admin/src/dashboard.ts -> the `t` and `T` keys, withAuditedWrites's `steer`. |
 | 2026-10-17 | Issue #646, part 2, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round: Scope says steering is per target, not per trigger, that a run stays reachable for 15 minutes after its container exits until its settle closes the inbox (the relay's hold), and that a redelivered steered comment is never enqueued; Fail loudly's log list names `steer_comment_skipped` (renamed from `steer_skipped`, which is `runContainer`'s); acceptance (k) gains the redelivery marker, the skip name and the exact fanout, and (l) gains the single answer across two settles (`first`), the target-type mismatch, the hold, the 32-entry fallback cap and the end-to-end comment after exit. **`REQ-DEDUP-BY-DELIVERY-GUID` CORRECTED**: a steered delivery leaves `steer:steered:<delivery job id>` (EX 31 days, NX, after a successful push), so a redelivery after its run ended is answered `202 {status:"steered", runs:0}` and never enqueued, restoring this requirement's guarantee for steered comments; the exit-to-outcome gap is closed by the relay's hold and the named gaps become the hold's residual, the recovery's window and the webhook-and-poller delivery ids; Acceptance gains the marker cases. |

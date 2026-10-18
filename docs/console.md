@@ -270,6 +270,9 @@ live-page slots.
 - **A retried job.** A retry keeps the job's id. While the next attempt runs, the run page shows it live under "An
   earlier attempt of this run ended (failed); this is the attempt after it." A running job's row never shows the
   final numbers of the attempt before it.
+- **A recovered run** (`run.recover`). A recovery has its own job id (`<run>.r1`), so it is not a retry: its page
+  shows the run's live progress, and the page of the attempt it continues shows that attempt's own numbers with
+  "This run continues as" and a link to the recovery job.
 
 The `/dispatch` panel's running rows show the same, with the phase name clipped.
 
