@@ -1,7 +1,7 @@
 # Terminal chat
 
 A run's conversation is usually something you read on its run page in the operator console. `pi-dispatch chat`
-opens it in a terminal instead, and lets you talk to it:
+opens it in a terminal instead, and lets you talk to it (in pi, [`/dispatch chat`](#in-pi-dispatch-chat) does the same):
 
 ```bash
 pi-dispatch chat 1234                                   # a run, by its job id
@@ -216,6 +216,43 @@ The run page has a **Chat** panel, between Progress and Inbox, that offers the s
 A viewer sees the run's state only, and a read-only console draws no form. The running and parked modes show the
 `pi-dispatch chat <id>` command too. See [console.md](console.md#the-chat-panel).
 
+## In pi: `/dispatch chat`
+
+The pi extension has the same command, for the operator sitting in pi on the deployment's host:
+
+```text
+/dispatch chat <run-id | issue-or-PR-url | session-key>
+```
+
+It reads the argument by the same three shapes, and asks the same rule which chat the run has. It does not go
+through the console's HTTP API and needs no console token: the panel already reads the deployment's queue and run
+history for its other views, and it looks the run up through the very function the console's run lookup answers with,
+so the mode is the one the run page and `pi-dispatch chat` show.
+
+| The run is | `/dispatch chat` |
+|---|---|
+| running | opens the panel on that job's live transcript (its recovery job's, when the run goes on as one). `Esc` lands on the job's row in the list, where `t` sends a steer and `T` a follow-up, as in the panel ([steering.md](steering.md)). If the run ended while you watched, `Esc` leaves the cursor on no row and says the run is no longer active, so a `t` cannot reach another job; the arrows pick a row again |
+| parked | shows its question (the last thing the agent said in its transcript, else where it was posted; each line behind `  \| `, at most 40 lines), asks for your answer in a dialog, then shows what the answer starts (the queue, the trigger's run fields and what it holds of the budget) and asks you to confirm. It is queued like the console's answer form, recorded in the console's audit log as written from the panel (the answer's digest, never its text), and the worker's comment on the issue quotes it under "Answered from an operator's /dispatch panel". A refusal is shown as the planner or the queue said it, and nothing is queued |
+| finished, or a session key | checks the fork exactly as `pi-dispatch chat` does, then hands the terminal to your pi: pi's screen stops, the fork's question and pi run in the terminal, and pi's screen comes back when pi exits, also if the fork failed. A refusal, a failure or an interrupted question printed there is held on screen for a moment before the screen is redrawn |
+| anything else | says why, in the rule's sentence |
+
+The fork reads `PI_SESSIONS_DIR` from the deployment: your pi's environment, else the deployment's `.env` (the folder
+the deployment pointer names, read under the same ownership checks as the panel's other settings), a relative path
+taken from the deployment folder. The fork's question takes a line: type `y` or `yes` and press Enter to open the
+fork; any other answer, Ctrl+C, Ctrl+D or Esc is a no (an arrow key too, since it starts with Esc). Keys typed before
+the question shows are thrown away, so a key meant for pi cannot answer it, and so are keys typed right after your
+answer, so they reach neither the fork nor pi. While the terminal is handed over, Ctrl+C never ends pi, and pi's keyboard works again when its screen
+comes back. If pi's screen cannot be stopped or started again, the panel says so ("chat: failed (...)") instead of
+reporting a fork; nothing is forked after a failed stop. A SIGTERM or SIGHUP to pi in that time removes the transcript's copy first, whatever then exits. The fork
+runs with its tools off; for `--tools`, `--force` or another pi binary, use `pi-dispatch chat` in a shell.
+
+The panel's answers are signed `panel`, so the console refuses to answer as a console token of that name: give such
+a token another name.
+
+`/dispatch chat` is a command you type, never a tool the model can call: each mode queues a paid answer, sends a
+message into a running agent or hands the terminal to another program. Completion offers the run ids in this host's
+history after `/dispatch chat `.
+
 ## Known limits
 
 - **A link whose only run is still running** answers that there is no run on that target yet: a running job has no
@@ -224,7 +261,6 @@ A viewer sees the run's state only, and a read-only console draws no form. The r
   repository, and you name one by its job id.
 - **The fork needs the session store on this machine.** A remote fork was decided against, since it would need a
   route that serves an unredacted transcript.
-- `/dispatch chat` in pi is not shipped yet.
 
 ## Reference
 

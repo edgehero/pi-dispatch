@@ -401,7 +401,9 @@ posts one comment as the deployment:
 >
 > > your answer, quoted
 
-The name is your token's name. Any `@name` in your answer is changed so it does not notify anyone. That comment is
+The name is your token's name. An answer from pi's [`/dispatch chat`](chat.md#in-pi-dispatch-chat) reads "Answered
+from an operator's /dispatch panel" instead, so a token named `panel` is refused here: give it another name. Any
+`@name` in your answer is changed so it does not notify anyone. That comment is
 the record of what the agent was told, for anyone who reads the issue later.
 
 An answer is at most 8 KiB of text; control characters are removed, and an empty answer or a longer one is refused,

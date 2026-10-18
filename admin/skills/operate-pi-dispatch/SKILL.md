@@ -49,6 +49,12 @@ Control (no approval needed — reversible and money-safe):
 Start a run (paid, already gated producer-side):
 - `dispatch_run` — enqueue one agent run against an allowlisted local folder.
 
+A run's chat is a command, not a tool: to watch and steer a running job, answer a parked one, or continue a
+finished one's conversation in their own pi, tell the operator to type `/dispatch chat <run-id | issue-or-PR-url |
+session-key>` (or `pi-dispatch chat` in a shell). There is no chat tool on purpose: its modes queue a paid answer,
+send a message into a running agent, or hand the terminal to another program, and that sender must be the person at
+the keyboard.
+
 ## The human confirm gates — how to use them
 
 These tools change money-affecting configuration and **each one asks the operator to approve a confirmation

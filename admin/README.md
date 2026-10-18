@@ -140,6 +140,11 @@ One command puts a live terminal view over the whole deployment:
   failed, the tool running and for how long, and the phase it reported (or, when its worker has written nothing for
   3 minutes, that the worker may be gone). `Enter` on a run opens its full record, `x`
   on a running job cancels it after asking, and `b` on an opened run reopens its workspace.
+- **A run's chat.** `/dispatch chat <run-id | issue-or-PR-url | session-key>` opens the run the way it can be talked
+  to now: a running job opens on its live transcript, and `Esc` lands on its row, where `t` and `T` steer it; a
+  parked run shows its question and asks for your answer, then queues it after a confirm; a finished run opens in
+  your own pi as a fork, on this host, with its tools off. It is a command you type, never a model callable tool
+  ([`docs/chat.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/chat.md#in-pi-dispatch-chat)).
 - **Insights, the one analytics page.** It is `/insights` in the web console (below); press `i` (or type
   `/dispatch insights`) and the panel shows its address. It shows the budget dials, plan verdicts against API rates, daily,
   cumulative and per flow spend charts, five breakdowns (by flow, trigger, model, repo and project), the
