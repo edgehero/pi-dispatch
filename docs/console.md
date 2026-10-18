@@ -214,7 +214,7 @@ console.
 |---|---|
 | `/` | The overview: whether the fleet is paused, the queue counts, the hosts online and how long ago each last checked in, today's spend against the caps, how many runs are waiting for an answer, and the failures of the last 24 hours. |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. |
-| `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. It says whether the record came from this host or from the mirror. For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
+| `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. It says whether the record came from this host or from the mirror. For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, and how many times the session was resumed. |
 | `/insights?range=7d` | Spend and insights, the same sections as `/dispatch insights` draws into `insights.html`, for `7d`, `30d` or `mtd` (month to date). |
 | `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget and running jobs, every running job, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
@@ -345,6 +345,7 @@ is refused here with the same words, and every action lands in the [audit log](#
 | Fleet | Retry all, Remove all, Cancel all held | The bulk actions (below). |
 | Parked | Answer | Sends your answer to a run that is waiting on an issue ([below](#answering-a-parked-run)). Costs money. |
 | Run | Re-run | Runs the same thing again ([below](#re-running-a-run)). Costs money. |
+| Run | Steer, Follow-up, Withdraw | Sends a message to a running, steer-armed job, or takes one back ([below](#steering-a-running-job)). Spends from the run's own reservation. |
 | Run | Sandbox | Shows the command that opens the run's sandbox on the host ([below](#opening-a-sandbox)). |
 | Configuration | Edit | Triggers, settings, pause windows, scoped limits, projects, the envelope, priorities, reverting the budget split, and secret profile names. |
 
@@ -354,7 +355,9 @@ worker will hold for it before it runs: one job from the job count, and in dolla
 cap" when neither is set. It is the worker's own rule, so the figure is what the worker will hold, and the worker
 still checks every cap when it picks the job up: a job the budget does not admit is refused then, as any job is. A
 bulk retry shows each job's reserve and the sum, and "reserve unknown" for a job whose data cannot be read, never $0.
-Resuming the fleet or a queue shows how many jobs are waiting to start, each of which reserves up to its own cap.
+Resuming the fleet or a queue shows how many jobs are waiting to start, each of which reserves up to its own cap. A
+message to a running job is paid too, but reserves nothing new: it spends from what its run already holds, and the
+run's turn, dollar and token caps still bind, so its preview says so instead of showing a figure.
 
 **Configuration edits** change the same files the panel writes (`triggers.json`, the settings overlay, the money
 files) and nothing else. Nothing is committed to git: if you keep the deployment folder in git, commit the change
@@ -414,6 +417,19 @@ are refused by name. The same issue and flow run or queued within the last 10 mi
 duplicate, and a local or scheduled re-run within the same minute likewise; the console says so and nothing is
 queued.
 
+### Steering a running job
+
+The page of a running job whose trigger has `steer` has an **Inbox** panel: the messages sent to the run (id, steer
+or follow-up, where it came from, state, when, size), never their text, for both roles. An operator also gets a
+**Steer** and a **Follow-up** form while the job is running and its run takes messages, and a **Withdraw** button on
+each message that is still queued or written. The preview shows your message as the run will get it and says that it
+spends from the run's existing reservation; Confirm sends it, signed with your token's name. The console refuses,
+before sending, what `pi-dispatch steer` refuses (the job is not running, the run takes no messages, the text is empty
+or above 8 KiB), and a confirm after the run finished is refused with nothing sent. A withdraw is guaranteed for a
+queued message and best effort for a written one, and its preview says which. The audit log records the job, the
+message id and a hash of the message, never the text. In the `/dispatch` panel the same is `t` (steer) and `T` (follow-up) on the
+ACTIVE row. All of it is in [`steering.md`](steering.md#from-the-console-and-the-panel).
+
 ### Opening a sandbox
 
 A run's page shows the command that reopens its sandbox, `pi-dispatch sandbox <job id>`, to copy and run in a shell on
@@ -451,7 +467,9 @@ updates it has not read) is cut off and reconnects to a fresh copy of the page.
 session like every page; both roles may read it, and a viewer's copy leaves out the failed jobs' reasons. The fields
 are described in `INT-CONSOLE-STATE-API` ([`specs/interfaces.md`](../specs/interfaces.md)): within its `version`,
 fields are only ever added. Each running job in `active` carries a `progress` object of numbers and the running
-tool's name (never a phase name or note), or null when it has none. A part the console could not read is marked with a boolean (`fleetDegraded`,
+tool's name (never a phase name or note), or null when it has none, and `steer` (whether its trigger arms steering)
+with `inbox`, that job's messages as `{id, mode, source, state, at, bytes}` and never their text (null when the job is
+not steer-armed or its inbox could not be read). A part the console could not read is marked with a boolean (`fleetDegraded`,
 `parkedUnknown`, `unreachable`), never with the error, and when Valkey cannot be read at all the answer is `503` with
 a short `error` sentence.
 

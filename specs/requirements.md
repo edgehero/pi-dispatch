@@ -1148,8 +1148,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 ## REQ-OPERATOR-CONSOLE-ACTIONS
 
 - **Statement**: The operator console shall do everything the `/dispatch` TUI and the pi extension's tools can do,
-  and the job actions they lack: retry and remove a failed job, re-run a finished run, answer a parked run, and the
-  bulk actions retry every failed job, remove every failed job and cancel every held job. Every action shall be a
+  and the job actions they lack: retry and remove a failed job, re-run a finished run, answer a parked run, send a
+  message into a running steer-armed job and take one back (issue #646), and the bulk actions retry every failed job, remove every failed job and cancel every held job. Every action shall be a
   preview and then a confirm under `REQ-CONSOLE-SECURITY`'s guards and single-use ticket; shall go through the read
   model funnel the TUI and the tools use, with the same validators and the same refusal sentences; shall re-check at
   the confirm what can have changed since the preview and refuse, writing nothing, when it did; shall show, before
@@ -1242,6 +1242,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   - (m) **Live pages follow a write.** Given an action that landed, every open live page shows the change within
     about two seconds with no reload, and a live panel holding a form in use is not redrawn under it. Tests:
     `admin/test/console-actions.test.mjs` (the hub is ticked after every apply), the browser lab.
+  - (n) **Steer a running job** (kinds `steer`, paid, and `steer-withdraw`; issue #646, `REQ-STEER-RUNNING-JOB`).
+    Given an active, steer-armed job whose run is open, the preview shows the message escaped, says it spends from the
+    run's existing reservation (no new reserve, so no `reserve` on the row) and carries its sha256 as `afterDigest`;
+    the confirm pushes it into the run's inbox as an operator message by the session's token name (source
+    `console`); the audit row holds `<job id>#<message id>` and the sha256, never the text. Refused by the CLI's sentences at the
+    preview: not active, not steer-armed, not open, empty, oversize; and at the confirm, a run that closed or went
+    quiet since the preview. A withdraw's preview and answer name the state: `queued` is guaranteed, `written` best
+    effort; `delivered`, `late` and an unknown id are refused. Tests: `admin/test/job-actions.test.mjs`,
+    `admin/test/console-actions.test.mjs`, `admin/test/console-panels.test.mjs`.
 
 ## REQ-LIVE-TRANSCRIPT
 
@@ -3490,7 +3499,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   it was handed over, `withdrawn` when its sender took it back first. Nothing shall interrupt a model stream or a tool
   that is running. Absent or `false` is today's behaviour exactly: the normalized entry, the job data, the env, the
   argv and the record are byte-identical.
-- **Scope (this release: issue #646, parts 1 and 2, the operator path and forge comments)**: messages are sent
+- **Scope (this release: issue #646, parts 1 to 3, the operator path, forge comments, and the console and the panel)**: messages are sent
   from the command line, `pi-dispatch steer <jobId> [--later] <text…|->`, and taken back with `pi-dispatch steer
   --withdraw <jobId> <msgId>` (part 1). **Since part 2 a forge comment steers too**: a comment carrying the comment
   trigger's phrase, from an author that trigger's gate admits (`CONST-TRIGGER-AUTHOR-GATE`), on an issue or pull
@@ -3503,9 +3512,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   delivered by the next attempt or settles `late`. A redelivery of a steered comment is never enqueued. The word `later` immediately after the first phrase (spaces or
   tabs between, lowercase, a whole word) makes it a follow-up; the whole body is delivered, the word included. A
   phrase-free reply to a parked issue and a command rule never steer. Where no run takes the comment, it is enqueued
-  exactly as before. A forge message that turns late takes the forge branches of the late-message rule (below). Still
-  to come in a follow-up change of the same issue: the operator console's and the `/dispatch` TUI's actions with the
-  state API's per-job inbox field (`listInboxPublic` is exported for it and exercised by tests only). `run.steer` is legal on every
+  exactly as before. A forge message that turns late takes the forge branches of the late-message rule (below).
+  **Since part 3 the operator console and the `/dispatch` TUI send messages too**: the console's run page of a
+  steer-armed job lists its inbox (id, mode, source, state, time and size, never the text) for every role, and for the
+  operator role a steer form and a follow-up form, drawn only while the job is active and its run takes messages, with
+  a Withdraw button on each message still queued or written (the actions `steer` and `steer-withdraw`,
+  `REQ-OPERATOR-CONSOLE-ACTIONS` (n)); the TUI's ACTIVE row of a steer-armed job takes `t` (steer) and `T`
+  (follow-up), which open an input in the footer and push through the panel's audited write (source `panel`); and
+  `/api/state` carries each steer-armed active job's inbox without text (`INT-CONSOLE-STATE-API`). Steering stays an
+  operator action: no model-callable tool sends a message (`DES-ADMIN-VIA-PI-EXTENSION`). On the base run page of a
+  #645 recovered run the console sends through the run's active recovery job and names it. A message is NOT refused
+  while the fleet is paused: the kill switch stops new jobs, not a running one, and a message causes turns only
+  inside the run's own caps and reservation. `run.steer` is legal on every
   trigger type, cron included (an operator can steer a folder job, which no forge comment can reach), and refused at
   load beside `run.command` (a command job's prompt is one `/name args` line, so a message would reach whatever the
   command started rather than an agent listening for it). **Not in scope**: interrupting a running tool (pi cannot),
@@ -3523,7 +3541,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   naming the three causes it cannot tell apart (not steer-armed, not running, or a venue that cannot deliver). An
   accepted push answers `closed`, `gone` or `full` as exit 1 saying what happened; after `ok` the command polls up to
   10 s and prints the message id and its state (`written`, `delivered`, or still `queued`, which is accepted and exit
-  0), never the text; a message that turns `late` in that window is exit 1, since the agent never saw it. A job
+  0), never the text; a message that turns `late` in that window is exit 1, since the agent never saw it. The
+  console and the TUI refuse with the same sentences before anything is written (the console at its preview, the TUI
+  at its plan, `planSteer`), and a push the run answers `closed`, `gone` or `full` is refused at the confirm with
+  nothing sent; a withdraw names the state it met, `queued` guaranteed and `written` best effort. A job
   armed with `run.steer` on an image that does not declare the `steer` capability is refused before it spends
   (`job-image-steer-unsupported`). A job the worker cannot arm runs WITHOUT steering, as it would without the field,
   and its record names why (`steerSkipped`: `venue-copies`, `no-exit-key`, `no-transcript`, `no-inbox`); a message
@@ -3651,6 +3672,32 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     resumed job whose relay writes the second at its start, and that one, late again, is answered; and a comment
     pushed after the container exited still lands, settles late and is answered ONCE across two settles
     (`worker/test/steer-flow.integration.test.mjs`).
+  - (m) **The console and the panel (part 3).** `planSteer` refuses, writing nothing, a source other than `console`
+    or `panel`, a sender outside the token-name charset, a mode other than `steer` or `followUp`, an empty or oversize
+    text (refused, never cut), a job no fleet queue holds, a job that is not active, one not steer-armed and one whose
+    run is not open; it plans the bounded text, its byte count, its sha256 and a fresh message id. `enqueueSteer`
+    stores exactly that entry as an operator message (`console` by the session's token name, `panel` by `panel`), a
+    replayed plan is `dup` and a push after the final close is refused; a recovery job steers its base run.
+    `planSteerWithdraw` and `withdrawSteerMessage` name the prior state (`queued` guaranteed, `written` best effort)
+    and refuse `delivered`, `late` and an unknown id. The fleet reader's inbox read and its snapshot carry the entries
+    without text, and an unarmed job carries neither field (`admin/test/job-actions.test.mjs`, the three issue #646
+    tests). Over HTTP, the preview shows the text escaped, no reserve and the sha256; the confirm pushes it; the audit
+    row holds the job id and the sha256, never the text; a withdraw's preview and answer say guaranteed or best effort;
+    a message delivered after the preview and an inbox closed after it are refused 409 with a `failed` row; a bad
+    mode, an empty or oversize text and a bad message id are refused 400; and a viewer is refused 403
+    (`admin/test/console-actions.test.mjs`, the two steer tests and the leak canary). The run page's Inbox panel lists
+    the entries for both roles without text, draws the forms only while the run takes messages and the withdraw
+    buttons only for a queued or written message with a well-formed id, for an operator on a console that is not read
+    only, and draws nothing for a job that is not steer-armed (`admin/test/console-panels.test.mjs`); `/api/state`'s
+    `steer` and `inbox` (`admin/test/console-live.test.mjs`). After review round 1: the audit rows name
+    `<job id>#<message id>`; `listInboxPublic` reads the `m:<id>` metadata and never the list, falling back to it
+    for a message without its field (`worker/test/steer-inbox.test.mjs`); the base run page of a recovered run names
+    its active recovery job and a message planned there goes through it; every refusal branch, the plan guards, the
+    race to delivered, the 16-row bound with the 17th null and the hostile entry are pinned
+    (`admin/test/job-actions.test.mjs`, the review round 1 tests). The TUI's `t` and `T`, the input taking every key, the job
+    captured at the key, the note naming the id and never the text, a refusal pushing nothing, the hint only on an
+    armed row, every width, and the push audited as kind `steer` with the digest (`admin/test/dashboard.test.mjs`, the
+    issue #646 tests; `admin/test/panel-audit-wiring.test.mjs`, the `steer` row).
 
 ## REQ-RESURRECTABLE-SANDBOX
 
@@ -4569,6 +4616,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-17 | Issue #646, part 3, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round: Scope says a message is not refused while the fleet is paused (the kill switch stops new jobs, not a running one, and a message stays inside the run's caps and reservation), and that the base run page of a recovered run sends through its active recovery job; acceptance (m) gains the audit row's message id, the metadata-only listing, the recovery case and the branches the mutation round found unpinned (every refusal, the plan guards, the race to delivered, the 16-row bound, the hostile entry, the scrubbing in the TUI). **`REQ-OPERATOR-CONSOLE-ACTIONS` CORRECTED**: acceptance (n)'s audit row names `<job id>#<message id>`. **Code evidence**: admin/src/job-actions.mjs -> steerAuditTarget, planSteer; admin/src/read-model.mjs -> activeJobOfRun; worker/src/steer-inbox.mjs -> listInboxPublic. |
+| 2026-10-17 | Issue #646, part 3: the console and the panel. **`REQ-STEER-RUNNING-JOB` AMENDED**: Scope now covers parts 1 to 3; the follow-up sentence it carried is replaced by what part 3 ships: the console's run page of a steer-armed job lists its inbox without text for both roles, with a steer form, a follow-up form (only while the job is active and its run open) and a Withdraw button per queued or written message for the operator role (actions `steer` and `steer-withdraw`); the TUI's ACTIVE row of a steer-armed job takes `t` (steer) and `T` (follow-up) through the panel's audited write; `/api/state` carries each steer-armed active job's inbox without text; and steering stays an operator action, with no model-callable tool. Fail loudly gains the console's and the panel's refusals (the CLI's sentences, before anything is written; `closed`, `gone` and `full` at the confirm; a withdraw naming the state it met). NEW acceptance (m), the console and the panel, with its tests. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**: the Statement's job actions gain sending a message into a running steer-armed job and taking one back; NEW acceptance (n), kinds `steer` (paid, no new reserve, the sha256 alone audited) and `steer-withdraw` (guaranteed when queued, best effort when written). **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is registered or removed, so its enumeration and the pin `admin/test/wiring.test.mjs` keeps on it stand; the TUI key is a panel key, not a tool. **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: the run page gains a panel under `REQ-OPERATOR-CONSOLE-ACTIONS`, which holds the controls it adds to these pages. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the two actions are table entries behind every guard (the every-action test loops over them). **Code evidence**: admin/src/job-actions.mjs -> planSteer, enqueueSteer, planSteerWithdraw, withdrawSteerMessage; admin/src/console/actions.mjs -> the `steer` and `steer-withdraw` entries; admin/src/console/panels.mjs -> runInbox; admin/src/read-model.mjs -> readJobInbox, publicInboxEntry, the snapshot's `steer` and `inbox`; admin/src/console/live.mjs -> inboxOf; admin/src/dashboard.ts -> the `t` and `T` keys, withAuditedWrites's `steer`. |
 | 2026-10-17 | Issue #646, part 2, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round: Scope says steering is per target, not per trigger, that a run stays reachable for 15 minutes after its container exits until its settle closes the inbox (the relay's hold), and that a redelivered steered comment is never enqueued; Fail loudly's log list names `steer_comment_skipped` (renamed from `steer_skipped`, which is `runContainer`'s); acceptance (k) gains the redelivery marker, the skip name and the exact fanout, and (l) gains the single answer across two settles (`first`), the target-type mismatch, the hold, the 32-entry fallback cap and the end-to-end comment after exit. **`REQ-DEDUP-BY-DELIVERY-GUID` CORRECTED**: a steered delivery leaves `steer:steered:<delivery job id>` (EX 31 days, NX, after a successful push), so a redelivery after its run ended is answered `202 {status:"steered", runs:0}` and never enqueued, restoring this requirement's guarantee for steered comments; the exit-to-outcome gap is closed by the relay's hold and the named gaps become the hold's residual, the recovery's window and the webhook-and-poller delivery ids; Acceptance gains the marker cases. |
 | 2026-10-17 | Issue #646, part 2: forge comments. **`REQ-STEER-RUNNING-JOB` AMENDED**: Scope now includes forge comments (a phrase comment from an author the comment trigger's gate admits, on a target where a steer-armed run is live, goes to every live run of the target, at most 4, instead of starting a second job, on the four forges' webhooks and the GitHub poller; the comment trigger must set `run.steer` too; `later` right after the first phrase makes a follow-up; parked replies and command rules never steer); the console and the TUI are still to come; an edited comment is named out of scope. Fail loudly gains that a comment that cannot be steered falls through to its old enqueue with a logged reason. Late messages gains the forge branches (a resumed job for the first late message when the outcome is not `operator-cancel` and the stored fallback resumes and names this target, the others carried as steers; else one fixed reply; a carried message is only answered) and the window release at a steer-armed run's final outcome. Acceptance gains (k) comment routing and (l) late forge messages. Statement, Budget and Parked runs UNCHANGED, checked. **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: a steered delivery creates no job and never touches the semantic window; a forge message's inbox id derives from the delivery GUID, so the GUID layer's exactly-once extends to the inbox (`dup`); a steer-armed run releases its window at its final outcome, through the same compare-and-delete as a park, and a late message's resumed job is added with no dedup option; the window gap between a steer-armed run's container exit and its final outcome is named; Acceptance gains the release and the no-dedup resume. The GUID layer itself UNCHANGED, checked. **`REQ-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the gate runs before `steerMode` is set, in the pure filter, as before. |
 | 2026-10-17 | Issue #646, part 1, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round, acceptance only (the Statement, Scope, budget and late-message rule are unchanged): (d) gains the steer scrub (the tag block and zero width characters removed, three backtick look-alikes folded, no NFKC, an unpaired surrogate refused); (e) gains F5 (a waiting message whose verified ack is in the staged transcript is marked delivered at the baseline) and F1 (a closed inbox under a reused run id is reset before the run registers, an open one is kept, a closed one the reset could not reopen is never written into nor re-baselined); (g) gains F4 (an aborted run and an idle session get nothing from the timer) and the exit line's `deliveredIds`; (i) gains F2 (the failed listener's terminal branch settles the inbox) and F3 (`deliveredIds` parsed only as at most 16 ids, marked only off a verified exit line, still marked with the transcript swapped for a symlink), and the console-retry flow test. Each names its test. |
