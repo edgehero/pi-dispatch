@@ -440,6 +440,32 @@ test("the ACTIVE row shows turn, steps, the running tool and the phase, rich and
   await comp.dispose();
 });
 
+// Issue #662: a #645 recovery writes its RUN's key, so the phase name is read by the run (`progressOfRun`) where the
+// reader offers it; the row's integers already come off the snapshot, read by run id there.
+test("the ACTIVE row of a running recovery names its phase through progressOfRun, by the run, within every width (#662)", { timeout: 20_000 }, async () => {
+  const snap = () => ({ ...SNAP(), active: [{ ...SNAP().active[0], progress: { turn: 4, steps: 2, failed: 0, running: null, phase: { index: 0, count: 1, done: null, total: null }, ended: false } }] });
+  const reads = [];
+  const progress = async () => { throw new Error("the job-id read is not used when progressOfRun is there"); };
+  const progressOfRun = async (jobId, record) => (reads.push([jobId, record]), { progress: { v: 1, phase: { index: 0, done: null, total: null }, phases: ["RECOVERY-PHASE"] }, continues: false, continuesAs: null });
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100_000, deps: deps({ fetchSnapshot: async () => snap(), progress, progressOfRun }) });
+  await until(() => reads.length > 0 && stripAnsi(comp.render(200).join("\n")).includes("RECOVERY-PHASE"), "the progress read");
+  assert.deepEqual(reads[0], ["jA", null]);
+  assert.match(stripAnsi(comp.render(200).join("\n")), /ACTIVE jA running · turn 4 · 2 steps · phase 1\/1 RECOVERY-PHASE/);
+  for (const w of [30, 41, 60, 80, 120]) for (const line of comp.render(w)) assert.ok(visibleLen(line) <= w, `width ${w}: ${JSON.stringify(stripAnsi(line))}`);
+  await comp.dispose();
+  // The production deps carry the seam, bound to the reader.
+  const gets = [];
+  const d = createDashboardDeps({ valkeyUrl: "redis://unused:1" }, { redisFn: () => ({ status: "ready", on() {}, get: async (k) => (gets.push(k), null), quit: async () => {}, disconnect() {} }), makeQueueFn: () => ({ name: "pi-jobs", close: async () => {}, getJob: async () => null }) });
+  // The wrapper hands the record on: its recoveryOf picks the key and its reason sets continues (review D13).
+  const got = await d.progressOfRun("gh-9.r1", { jobId: "gh-9.r1", recoveryOf: "gh-9", reason: "recovery-enqueued" });
+  assert.deepEqual(gets, ["run:progress:gh-9"]);
+  assert.equal(got.continues, true);
+  gets.length = 0;
+  assert.equal((await d.progressOfRun("gh-9.r1")).continues, false);
+  assert.deepEqual(gets, ["run:progress:gh-9.r1"]);
+  await d.dispose();
+});
+
 test("the ACTIVE row without a progress seam, or with one that fails, keeps the integers and names no phase", { timeout: 20_000 }, async () => {
   const snap = () => ({ ...SNAP(), active: [{ ...SNAP().active[0], progress: { turn: 3, steps: 1, failed: 0, running: null, phase: { index: 0, count: 2, done: null, total: null }, ended: false } }] });
   for (const extra of [{}, { progress: async () => { throw new Error("down"); } }, { progress: async () => ({ unreachable: "x" }) }]) {

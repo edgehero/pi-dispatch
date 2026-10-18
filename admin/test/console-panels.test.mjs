@@ -224,6 +224,31 @@ test("the run page's Progress panel (issue #644): a finished run shows its recor
   assert.match(String(runProgress(view("viewer", { run: { missing: true }, progress: { absent: true } }))), /No live progress: not published \(PI_RUN_PROGRESS=0\)/);
 });
 
+test("the Progress panel of an attempt whose run continues as a recovery (issue #662): its own record's progress and a link, never the recovery's live key", async () => {
+  const { runProgress } = await import("../src/console/panels.mjs");
+  const ended = NOW - 120_000;
+  const record = { jobId: "gh-1", outcome: "failed", reason: "recovery-enqueued", startedAt: new Date(ended - 900_000).toISOString(), endedAt: new Date(ended).toISOString(), progress: { turns: 5, steps: 7 } };
+  const recoveryKey = { v: 1, turn: 2, steps: 3, failed: 0, interrupted: 0, running: [{ tool: "bash", since: NOW - 20_000 }], recent: [], phase: null, phases: ["RECOVERY-PHASE"], note: null, prior: { turns: 5, steps: 7 }, startedAt: ended + 30_000, updatedAt: NOW - 1_000, ended: false, outcome: null };
+  const view = (data) => ({ page: "run", role: "operator", readOnly: false, query: { id: "gh-1" }, env: {}, now: NOW, data: { now: NOW, ...data } });
+  const base = String(runProgress(view({ run: { record }, progress: recoveryKey, progressContinues: { as: "gh-1.r1" } })));
+  assert.match(base, /This run continues as <a class="mono" href="\/run\?id=gh-1\.r1"/);
+  assert.match(base, /<dt>Turns<\/dt><dd>5<\/dd>/, "the attempt's own record");
+  assert.doesNotMatch(base, /RECOVERY-PHASE|An earlier attempt|running 20s/, "the recovery's live key is not this attempt's");
+  // The queue no longer holds the recovery job: still the record, with no link.
+  const gone = String(runProgress(view({ run: { record: { ...record, progress: undefined } }, progress: { absent: true }, progressContinues: { as: null } })));
+  assert.match(gone, /This run continues as a recovery job\./);
+  assert.match(gone, /This attempt's record holds no progress\./);
+  // A hostile id is never linked.
+  for (const as of ["x\"><script>", "", 7, { id: "gh-1.r1" }]) {
+    const out = String(runProgress(view({ run: { record }, progress: recoveryKey, progressContinues: { as } })));
+    assert.doesNotMatch(out, /<script>|href=/, JSON.stringify(as));
+    assert.match(out, /This run continues as a recovery job\./, JSON.stringify(as));
+  }
+  // A recovery's own page (no record yet) shows its run's key live, as any running job.
+  const own = String(runProgress({ ...view({ run: { missing: true }, progress: recoveryKey }), query: { id: "gh-1.r1" } }));
+  assert.match(own, /<dt>Turn<\/dt><dd>2<\/dd>/);
+});
+
 // An infra retry keeps the job id: attempt 1 writes its record, then attempt 2 rewrites the progress key. The key
 // belongs to a later attempt when it started after the record ended.
 test("the Progress panel of a retried job (issue #644): a key newer than the record is the running attempt's, shown live; an older one is never mixed in", async () => {

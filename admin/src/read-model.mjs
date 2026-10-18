@@ -3712,8 +3712,11 @@ export function createFleetReader(
       const hostOfJob = new Map();
       for (const h of lastHosts) for (const j of parseLiveJobs(h?.jobs).jobs ?? []) if (typeof h?.name === "string") hostOfJob.set(j.id, h.name);
       // Issue #646: of a Job's `.data`, ONE boolean (`steer`) and the run id it names (`recoveryOf`, through `runIdOf`)
-      // are read, and the run id never leaves this function: it only spells the inbox keys below.
+      // are read, and the run id never leaves this function: it only spells the inbox keys below and, since issue #662,
+      // the progress keys (a #645 recovery writes its progress under its RUN's id, so a `.r1` row read by its own id
+      // showed none).
       const steerRows = [];
+      const runIds = [];
       const active = activeLists.flatMap((list, qi) =>
         (Array.isArray(list) ? list : []).map((j) => {
           const row = {
@@ -3723,6 +3726,8 @@ export function createFleetReader(
             host: hostOfJob.get(String(j?.id)) ?? null,
           };
           if (j?.data?.steer === true && row.jobId !== null) steerRows.push({ row, runId: runIdOf(j) });
+          const runId = row.jobId === null ? null : runIdOf(j);
+          runIds.push(typeof runId === "string" ? runId : runId === null || runId === undefined ? null : String(runId));
           return row;
         }),
       );
@@ -3737,7 +3742,7 @@ export function createFleetReader(
       // snapshot is what lists, hub panels and `/api/state` are drawn from, so the model's phase names and note never
       // enter it. ONE MGET for the first PROGRESS_BATCH_MAX ids, started now and awaited at the end, so it rides beside
       // the reads below rather than adding a round trip to the tick. Unreadable: every row's progress is null.
-      const progressRead = readProgressMany(redis, active.map((a) => a.jobId), { timeoutMs: FLEET_READ_TIMEOUT_MS });
+      const progressRead = readProgressMany(redis, runIds, { timeoutMs: FLEET_READ_TIMEOUT_MS });
       // The scoped limits + their live counters (issue #242): GET only the windows a row caps, each cell caught
       // individually so one bad read degrades one cell, never the snapshot. Keys recomputed from the shared
       // scopeKeyPrefix, so this reader and the worker's writer cannot drift.
@@ -3806,7 +3811,9 @@ export function createFleetReader(
       );
 
       const progressGot = await progressRead;
-      for (const row of active) row.progress = activeProgressOf(progressGot.byId?.[row.jobId]);
+      active.forEach((row, i) => {
+        row.progress = runIds[i] === null ? null : activeProgressOf(progressGot.byId?.[runIds[i]]);
+      });
       const inboxGot = await inboxRead;
       steerRows.forEach(({ row }, i) => {
         row.steer = true;
@@ -3885,6 +3892,12 @@ export function createFleetReader(
     },
     async progressFor(jobIds) {
       return readProgressMany(redis, jobIds, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    // The run page's progress (issue #662): the key read by the job's RUN id, and whether this attempt's run continues as
+    // a recovery job (`readRunProgress`). Never throws.
+    async progressOfRun(jobId, record = null) {
+      const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
+      return readRunProgress({ redis, queues, jobId, record, timeoutMs: FLEET_READ_TIMEOUT_MS });
     },
     // The run page's inbox panel (issue #646): the job found across the fleet's queues (the registry read afresh, so a
     // run page open alone still sees a host queue), then its inbox without text. Never throws.
@@ -4498,6 +4511,9 @@ export function recoveryCountsText(rec) {
   if (Number.isSafeInteger(rec.replayed) && rec.replayed > 0) parts.push(`${rec.replayed} replayed`);
   if (Number.isSafeInteger(rec.interrupted) && rec.interrupted > 0) parts.push(`${rec.interrupted} interrupted`);
   if (Number.isSafeInteger(rec.notStarted) && rec.notStarted > 0) parts.push(`${rec.notStarted} not started`);
+  // Issue #662: counts read off the transcript (no exit line came, as from a killed container) say so: the transcript is
+  // agent-writable, the runner's exit line is not.
+  if (parts.length > 0 && rec.countsFrom === "transcript") return `${parts.join(", ")} (from the transcript)`;
   return parts.join(", ");
 }
 
@@ -4745,6 +4761,67 @@ export async function activeJobOfRun(getJob, runId, exceptId = null) {
     if (state === "active") return found;
   }
   return null;
+}
+
+/**
+ * The recovery job that took run `runId` over after job `jobId` (issue #662): the newest of the run's recovery ids
+ * (`recoveryJobId`, `RECOVERY_CAP` down) numbered after `jobId`'s own (the base run counts as 0) that `getJob` finds,
+ * IN ANY STATE, unlike `activeJobOfRun`: a recovery that already finished still continued this run. The NEWEST, not the
+ * next one: with `.r1` and `.r2` both held, the base attempt names `.r2`, on purpose, because that is where the run
+ * lives now (`.r1`'s own page names `.r2` the same way, and `.r1` is one "Recovery of" link away from the base). Null
+ * when none is found or `jobId` is not this run's. Reads only.
+ */
+export async function laterJobOfRun(getJob, runId, jobId) {
+  if (typeof runId !== "string" || runId === "" || typeof jobId !== "string") return null;
+  let own = jobId === runId ? 0 : null;
+  for (let n = 1; own === null && n <= RECOVERY_CAP; n += 1) if (recoveryJobId(runId, n) === jobId) own = n;
+  if (own === null) return null;
+  for (let n = RECOVERY_CAP; n > own; n -= 1) {
+    const id = recoveryJobId(runId, n);
+    if (id === null) continue;
+    const found = await getJob(id);
+    if (found?.job) return found;
+  }
+  return null;
+}
+
+/**
+ * The run page's progress (issue #662): `{ progress, continues, continuesAs }`. A #645 recovery writes its progress
+ * under its RUN's id, so the key is read by that id (`runIdOf`): the record's `recoveryOf` when it has one, else the
+ * queue job's `data.recoveryOf`, else the page's own id; a plain job and a BullMQ retry (same job id) read exactly the key
+ * they always did. `continues` is true when this attempt's record says its run went on as a recovery (`reason:
+ * "recovery-enqueued"`): the key then belongs to that recovery, not to this attempt, and the panel shows the record's
+ * own progress with `continuesAs` (the recovery job's id, `laterJobOfRun`, or null once the queue no longer holds it).
+ * `progress` is `readProgress`'s answer. Of a Job's `.data` it reads `recoveryOf` alone. Never throws.
+ */
+export async function readRunProgress({ redis, queues, jobId, record = null, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
+  if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { progress: { invalid: "a run id is letters, digits and . _ : -, at most 200 characters" }, continues: false, continuesAs: null };
+  const getJob = async (id) => {
+    for (const q of Array.isArray(queues) ? queues : []) {
+      if (typeof q?.getJob !== "function") continue;
+      const job = await q.getJob(id).catch(() => null);
+      if (job) return { job, queue: q.name };
+    }
+    return null;
+  };
+  const read = (async () => {
+    const of = record && Object.hasOwn(record, "recoveryOf") ? recordedRecoveryOf(record.recoveryOf) : null;
+    let runId = of !== null && RUN_ID_RE.test(of) ? of : null;
+    if (runId === null) {
+      const job = (await getJob(jobId))?.job ?? null;
+      const id = job ? runIdOf(job) : jobId;
+      runId = typeof id === "string" && RUN_ID_RE.test(id) ? id : jobId;
+    }
+    const continues = record?.reason === "recovery-enqueued";
+    const [progress, next] = await Promise.all([readProgress(redis, runId, { timeoutMs }), continues ? laterJobOfRun(getJob, runId, jobId) : null]);
+    const nextId = typeof next?.job?.id === "string" && RUN_ID_RE.test(next.job.id) ? next.job.id : null;
+    return { progress, continues, continuesAs: nextId };
+  })();
+  try {
+    return await withTimeout(read, timeoutMs, { progress: { unreachable: "timed out reaching the progress key" }, continues: record?.reason === "recovery-enqueued", continuesAs: null });
+  } catch {
+    return { progress: { unreachable: "the progress key could not be read" }, continues: record?.reason === "recovery-enqueued", continuesAs: null };
+  }
 }
 
 /**

@@ -179,7 +179,9 @@ test("the fleet snapshot's active rows carry integers and a tool name only, a re
   const hostile = { ...workerSnapshot(), phases: ["PHASE-NAME-TEXT <b>x</b>"], phase: { index: 0, done: 2, total: 9 }, note: "NOTE-TEXT" };
   await redis.set(progressKeyFor("gh-remote"), serializeProgress(hostile));
   await redis.set(progressKeyFor("gh-bad"), JSON.stringify({ v: 1, note: "NOTE-TEXT" }));
-  const lists = { "pi-jobs": [{ id: "gh-local", processedOn: AT - 60_000 }, { id: "gh-bad", processedOn: AT - 30_000 }], "pi-jobs@hostb": [{ id: "gh-remote", processedOn: AT - 120_000 }] };
+  // Issue #662: a #645 recovery job writes its progress under its RUN's id, so its row reads that key.
+  await redis.set(progressKeyFor("gh-run"), serializeProgress({ ...workerSnapshot(), turn: 6 }));
+  const lists = { "pi-jobs": [{ id: "gh-local", processedOn: AT - 60_000 }, { id: "gh-bad", processedOn: AT - 30_000 }, { id: "gh-run.r1", processedOn: AT - 10_000, data: { recoveryOf: "gh-run", title: "PII-TITLE" } }], "pi-jobs@hostb": [{ id: "gh-remote", processedOn: AT - 120_000 }] };
   const mk = (_c, opts) => {
     const name = opts?.name ?? "pi-jobs";
     return { name, isPaused: async () => false, getJobCounts: async () => ({ waiting: 0, active: 1, paused: 0, delayed: 0, failed: 0 }), getWorkers: async () => [], getJobSchedulers: async () => [], getActive: async () => lists[name] ?? [], getFailed: async () => [], close: async () => {} };
@@ -196,6 +198,8 @@ test("the fleet snapshot's active rows carry integers and a tool name only, a re
     assert.deepEqual(byId["gh-remote"].progress, { turn: 2, steps: 1, failed: 0, running: { tool: "bash", since: AT + 3 }, phase: { index: 0, count: 1, done: 2, total: 9 }, ended: false, updatedAt: hostile.updatedAt });
     assert.equal(byId["gh-local"].progress, null, "no key");
     assert.equal(byId["gh-bad"].progress, null, "an invalid key draws nothing");
+    assert.equal(byId["gh-run.r1"].progress?.turn, 6, "a recovery's row reads its run's key (#662)");
+    assert.ok(!JSON.stringify(snap).includes("PII-TITLE") && !JSON.stringify(snap.active).includes("\"gh-run\""), "the run id and the job's data never enter the snapshot");
     const leaks = (text, where) => assert.ok(!text.includes("PHASE-NAME-TEXT") && !text.includes("NOTE-TEXT"), `${where} holds no phase name or note`);
     leaks(JSON.stringify(snap), "the snapshot");
     for (const role of ["operator", "viewer"]) {
@@ -248,4 +252,99 @@ test("recordRecovery rebuilds a record's recovery fields by the worker's rules a
   assert.deepEqual(partial.recovered, { from: "live", n: 1, fromAttempt: null, checkpointSeq: null, orphans: null, replayed: 2, interrupted: null, notStarted: 0 });
   assert.equal(recoveredText(partial.recovered), "recovered from a live checkpoint (recovery 1): 2 replayed");
   assert.deepEqual(one({ checkpoints: { written: 1, failed: 0, skipped: 0, extra: "x" } }).checkpoints, { written: 1, failed: 0, skipped: 0 });
+});
+
+// ---- the run page's progress pairing (issue #662) -------------------------------------------------------------------
+
+test("readRunProgress reads the key by the RUN id and says when the attempt's run continues as a recovery (#662)", async () => {
+  const { readRunProgress, laterJobOfRun } = await import("../src/read-model.mjs");
+  const snap = serializeProgress(workerSnapshot());
+  const gets = [];
+  const redis = { get: async (k) => (gets.push(k), k === progressKeyFor("gh-9") ? snap : null) };
+  const jobs = { "gh-9": { id: "gh-9", data: {} }, "gh-9.r1": { id: "gh-9.r1", data: { recoveryOf: "gh-9" } }, "gh-9.r2": { id: "gh-9.r2", data: { recoveryOf: "gh-9" } } };
+  const queues = [{ name: "pi-jobs", getJob: async (id) => jobs[id] ?? null }];
+
+  // A plain job, or a retried one (same job id), reads its own key: today's pairing.
+  const plain = await readRunProgress({ redis, queues, jobId: "gh-9", record: { jobId: "gh-9", outcome: "failed" } });
+  assert.equal(plain.progress.v, 1);
+  assert.deepEqual([plain.continues, plain.continuesAs], [false, null]);
+  // A running recovery (no record yet) reads its RUN's key off the queue job's data.
+  gets.length = 0;
+  const running = await readRunProgress({ redis, queues, jobId: "gh-9.r1", record: null });
+  assert.deepEqual(gets, [progressKeyFor("gh-9")]);
+  assert.equal(running.progress.v, 1);
+  // A recovery with a record names its run by the record's recoveryOf, even once the queue has dropped the job.
+  gets.length = 0;
+  await readRunProgress({ redis, queues: [], jobId: "gh-9.r1", record: { jobId: "gh-9.r1", recoveryOf: "gh-9", outcome: "completed" } });
+  assert.deepEqual(gets, [progressKeyFor("gh-9")]);
+  // The base attempt handed to a recovery: continues, and names the NEWEST recovery after it, in any state.
+  const base = await readRunProgress({ redis, queues, jobId: "gh-9", record: { jobId: "gh-9", outcome: "failed", reason: "recovery-enqueued" } });
+  assert.deepEqual([base.continues, base.continuesAs], [true, "gh-9.r2"]);
+  // A first recovery handed to a second names the second; a queue that no longer holds it gives no id but still continues.
+  assert.equal((await readRunProgress({ redis, queues, jobId: "gh-9.r1", record: { jobId: "gh-9.r1", recoveryOf: "gh-9", reason: "recovery-enqueued" } })).continuesAs, "gh-9.r2");
+  const gone = await readRunProgress({ redis, queues: [], jobId: "gh-9", record: { jobId: "gh-9", reason: "recovery-enqueued" } });
+  assert.deepEqual([gone.continues, gone.continuesAs], [true, null]);
+  // laterJobOfRun never names the job itself or an earlier one, and refuses a job that is not the run's.
+  const getJob = async (id) => (jobs[id] ? { job: jobs[id], queue: "pi-jobs" } : null);
+  assert.equal(await laterJobOfRun(getJob, "gh-9", "gh-9.r2"), null);
+  assert.equal(await laterJobOfRun(getJob, "gh-9", "gh-7"), null);
+  // A hostile page id is invalid before any read; a queue that throws is no job, never a throw.
+  assert.ok((await readRunProgress({ redis, queues, jobId: "gh 9<x>" })).progress.invalid);
+  const throwing = [{ name: "q", getJob: async () => { throw new Error("down"); } }];
+  assert.equal((await readRunProgress({ redis, queues: throwing, jobId: "gh-9", record: null })).progress.v, 1);
+});
+
+test("recoveryCountsText labels counts taken from the transcript (#662)", async () => {
+  const { recoveryCountsText, recordRecovery } = await import("../src/read-model.mjs");
+  const rec = recordRecovery({ jobId: "gh-9.r1", recoveryOf: "gh-9", recovered: { from: "live", n: 1, orphans: 2, replayed: 1, interrupted: 1, notStarted: 0, countsFrom: "transcript" } });
+  assert.equal(rec.recovered.countsFrom, "transcript", "the admin's validator keeps it");
+  assert.equal(recoveryCountsText(rec.recovered), "2 orphaned calls, 1 replayed, 1 interrupted (from the transcript)");
+  assert.equal(recoveryCountsText({ ...rec.recovered, countsFrom: "exit-line" }), "2 orphaned calls, 1 replayed, 1 interrupted");
+  assert.equal(recordRecovery({ jobId: "x", recovered: { from: "live", n: 1, countsFrom: "<b>" } }).recovered.countsFrom, undefined);
+});
+
+test("readRunProgress: a timeout or a throw keeps continues from the record, and a hostile recovery job id is dropped (#662 review)", async () => {
+  const { readRunProgress } = await import("../src/read-model.mjs");
+  const continued = { jobId: "gh-9", reason: "recovery-enqueued" };
+  // A hung Valkey: the bound's fallback still says the attempt continues, so the page shows its own record.
+  const hung = { get: () => new Promise(() => {}) };
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const t = await readRunProgress({ redis: hung, queues: [], jobId: "gh-9", record: continued, timeoutMs: 20 });
+    assert.ok(t.progress.unreachable);
+    assert.deepEqual([t.continues, t.continuesAs], [true, null]);
+    assert.equal((await readRunProgress({ redis: hung, queues: [], jobId: "gh-9", record: { jobId: "gh-9", reason: "infra" }, timeoutMs: 20 })).continues, false);
+  } finally {
+    clearInterval(keepAlive);
+  }
+  // A read that throws (here a record whose recoveryOf getter throws): the same.
+  const throwing = { reason: "recovery-enqueued", get recoveryOf() { throw new Error("boom"); } };
+  const th = await readRunProgress({ redis: { get: async () => null }, queues: [], jobId: "gh-9", record: throwing });
+  assert.ok(th.progress.unreachable);
+  assert.deepEqual([th.continues, th.continuesAs], [true, null]);
+  // A queue job whose id is not a run id is never named.
+  const queues = [{ name: "q", getJob: async (id) => (id === "gh-9.r2" ? { id: "gh-9.r2\"><script>", data: {} } : null) }];
+  assert.equal((await readRunProgress({ redis: { get: async () => null }, queues, jobId: "gh-9", record: continued })).continuesAs, null);
+});
+
+test("createFleetReader's progressOfRun hands the record on: its recoveryOf picks the key and its reason sets continues (#662 review)", async () => {
+  const gets = [];
+  const redis = { status: "ready", get: async (k) => (gets.push(k), null), on() {}, quit: async () => {}, disconnect() {} };
+  const mk = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", getJob: async () => null, close: async () => {} });
+  const logsDir = tempDir("pd-662-reader-");
+  const reader = createFleetReader(
+    { valkeyUrl: "redis://unused:1", logsDir, triggersPath: join(logsDir, "none.json") },
+    { makeQueueFn: mk, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => [], nowFn: () => AT },
+  );
+  try {
+    const got = await reader.progressOfRun("gh-9.r1", { jobId: "gh-9.r1", recoveryOf: "gh-9", reason: "recovery-enqueued" });
+    assert.deepEqual(gets, [progressKeyFor("gh-9")], "the record's recoveryOf, not the page id");
+    assert.equal(got.continues, true, "the record's reason");
+    gets.length = 0;
+    const bare = await reader.progressOfRun("gh-9.r1");
+    assert.deepEqual(gets, [progressKeyFor("gh-9.r1")]);
+    assert.equal(bare.continues, false);
+  } finally {
+    await reader.dispose();
+  }
 });
