@@ -428,6 +428,8 @@ export function parseExitOomKilled(text) {
  */
 export const PROGRESS_RECORD_TOOLS = Object.freeze(["read", "bash", "edit", "write", "grep", "find", "ls", "await_human_input", "report_progress"]);
 // `replayed` (issue #645): the orphaned tool calls a recovered run's runner answered by running them again.
+// Issue #662: the reducer's `recoveryInterrupted` and `recoveryNotStarted` summary keys are deliberately NOT here. They feed
+// the processor's `recovered` fallback; listed here they would also land in `progress`, a second copy of those counts.
 const PROGRESS_COUNT_KEYS = Object.freeze(["turns", "steps", "failed", "interrupted", "replayed", "toolMs", "longestStepMs", "longestInterruptedMs", "phasesDeclared"]);
 
 /**
@@ -537,8 +539,18 @@ export function parseExitRecovery(text) {
 }
 
 /**
+ * Where a recovered run's counts came from (issue #662), the record's `recovered.countsFrom`: `exit-line` (the runner's
+ * exit line, signed where the image signs it) or `transcript` (the progress reducer's reading of the recovery marks in the
+ * session file, the fallback when no exit line came, as from a container that was killed). The transcript is
+ * agent-writable, so the exit line's counts win whenever it carries a `recovery` block, and transcript counts stay
+ * labelled as such.
+ */
+export const RECOVERY_COUNTS_FROM = Object.freeze(["exit-line", "transcript"]);
+
+/**
  * The record's `recovered` (issue #645), REBUILT: `{ from, n, fromAttempt, checkpointSeq, orphans, replayed, interrupted,
- * notStarted }`, `from` a member of RECOVERED_FROM and every other field a non-negative safe integer or null. Null when
+ * notStarted }`, `from` a member of RECOVERED_FROM and every other field a non-negative safe integer or null, plus
+ * `countsFrom` (RECOVERY_COUNTS_FROM, issue #662) when the source names a valid one; any other value is dropped. Null when
  * `from` or `n` is not valid: a recovery whose source or number is unknown is not one this record can describe.
  */
 export function recordedRecovered(r) {
@@ -546,7 +558,26 @@ export function recordedRecovered(r) {
 	if (!RECOVERED_FROM.includes(r.from) || !(Number.isSafeInteger(r.n) && r.n >= 1)) return null;
 	const int = (v) => (isCount(v) ? v : null);
 	const counts = recoveryCounts(r) ?? {};
-	return { from: r.from, n: r.n, fromAttempt: int(r.fromAttempt), checkpointSeq: int(r.checkpointSeq), ...Object.fromEntries(RECOVERY_COUNT_KEYS.map((k) => [k, counts[k] ?? null])) };
+	const countsFrom = Object.hasOwn(r, "countsFrom") && RECOVERY_COUNTS_FROM.includes(r.countsFrom) ? { countsFrom: r.countsFrom } : {};
+	return { from: r.from, n: r.n, fromAttempt: int(r.fromAttempt), checkpointSeq: int(r.checkpointSeq), ...Object.fromEntries(RECOVERY_COUNT_KEYS.map((k) => [k, counts[k] ?? null])), ...countsFrom };
+}
+
+/**
+ * A recovery's counts off the progress reducer's summary (issue #662), the fallback for a missing exit line:
+ * `{ orphans, replayed, interrupted, notStarted }` with `orphans` the sum (each orphan takes exactly one branch,
+ * image/runner/src/recover.mjs), or null when the summary is absent or counts no mark at all. A zero is not taken from
+ * the transcript: it cannot tell "nothing was orphaned" from "killed before the runner resolved anything", and the
+ * record's null already says "not known".
+ */
+export function recoveryCountsFromProgress(p) {
+	if (p === null || typeof p !== "object" || Array.isArray(p)) return null;
+	const n = (v) => (isCount(v) ? v : 0);
+	const replayed = n(p.replayed);
+	const interrupted = n(p.recoveryInterrupted);
+	const notStarted = n(p.recoveryNotStarted);
+	const orphans = replayed + interrupted + notStarted;
+	if (orphans === 0 || !Number.isSafeInteger(orphans)) return null;
+	return { orphans, replayed, interrupted, notStarted };
 }
 
 /** The record's `checkpoints` (issue #645): `{ written, failed, skipped }`, three counts, or null on any violation. */

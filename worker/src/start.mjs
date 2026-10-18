@@ -2873,6 +2873,25 @@ export async function startWorker(
 				log("job_recovery_skipped", { jobId: job.id, reason: "no-checkpoint" });
 				return false;
 			}
+			// Issue #662: the crashed attempt's start and how far it got, off the run's progress key, read BEFORE the enqueue,
+			// because the recovery's first progress write replaces that key with its own empty snapshot. NOT `job.processedOn`:
+			// BullMQ's stall check does not fail a stalled job outright, it moves it back to wait with the deferred failure
+			// marked (`moveStalledJobsToWait` sets `defa`), and the next pickup's `prepareJobForProcessing` stamps a fresh
+			// `processedOn` before it fails the job, so `processedOn` here is the re-pick time (a three-minute attempt read
+			// as 23 ms long in the #645 lab). The key's `startedAt` is the attempt's own, written by its writer, and it is
+			// taken only when three checks pass: the key has not ended (a crash never writes the final snapshot), its start is
+			// not after now, and its start is no earlier than this job's enqueue time (`job.timestamp`). The last one ties the
+			// key to THIS job: the key is the RUN's, so a recovery that died before its own first write (or ran on a host with
+			// PI_RUN_PROGRESS=0) would otherwise find the base attempt's unended key and record a start from before the
+			// recovery existed, with the base's counts. A retry of the same job id cannot be told apart by this (its
+			// timestamp is the job's first enqueue); its writer's first write replaces the key, so only a retry that died
+			// before writing would show the earlier attempt's start. Anything else is null, an honest unknown. Bounded and
+			// never throwing (`readProgressKey`); the key is display only, so it decides nothing here either.
+			const at0 = now();
+			const key = await Promise.resolve().then(() => readProgressKeyFn({ redis, jobId: runId })).catch(() => null);
+			const snap = key?.snapshot;
+			const own = snap !== null && typeof snap === "object" && snap.ended === false && Number.isSafeInteger(snap.startedAt) && snap.startedAt > 0 && snap.startedAt <= at0 && Number.isSafeInteger(job.timestamp) && snap.startedAt >= job.timestamp;
+			const crashedProgress = own ? { turns: snap.turn, steps: snap.steps, failed: snap.failed, interrupted: snap.interrupted, replayed: snap.replayed } : null;
 			const r = await enqueueRecovery({ job, cause: "stall", pointer });
 			if (!r?.enqueued) return false;
 			// `attemptsMade` already counts this attempt here (moveToFailed added one), and `buildRecord` adds one for a record
@@ -2880,8 +2899,9 @@ export async function startWorker(
 			const at = now();
 			recordRun({
 				job: { id: job.id, name: job.name, data: job.data, opts: job.opts, attemptsMade: Math.max(0, (Number.isSafeInteger(job.attemptsMade) ? job.attemptsMade : 1) - 1), timestamp: job.timestamp },
-				result: { outcome: "failed", reason: "recovery-enqueued" },
-				startedAt: Number.isFinite(job.processedOn) ? new Date(job.processedOn).toISOString() : null,
+				// The snapshot's integer counts, rebuilt by `buildRecord` (`recordedProgress`): a bad value is dropped, never copied.
+				result: { outcome: "failed", reason: "recovery-enqueued", ...(crashedProgress !== null ? { progress: crashedProgress } : {}) },
+				startedAt: own ? new Date(snap.startedAt).toISOString() : null,
 				endedAt: new Date(at).toISOString(),
 			});
 			log("job_failed", { jobId: job.id, attempt: job.attemptsMade, reason: "recovery-enqueued" });

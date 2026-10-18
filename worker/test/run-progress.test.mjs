@@ -658,9 +658,28 @@ test("recovery marks: interrupted and not-started count as interrupted, replayed
 	assert.deepEqual([s.steps, s.failed, s.interrupted, s.replayed], [0, 0, 2, 1]);
 	assert.deepEqual(s.recent.map((r) => [r.tool, r.status]), [["bash", "interrupted"], ["edit", "interrupted"]]);
 	assert.equal(p.stats().anomalies, 0, "a marked result is not an unknown one");
-	assert.deepEqual(p.summary(), { interrupted: 2, replayed: 1 });
+	assert.deepEqual(p.summary(), { interrupted: 2, replayed: 1, recoveryInterrupted: 1, recoveryNotStarted: 1 });
 	const rec = buildRecord({ job: { id: "j", data: {} }, result: { outcome: "completed", progress: p.summary() } });
-	assert.deepEqual(rec.progress, { interrupted: 2, replayed: 1 });
+	assert.deepEqual(rec.progress, { interrupted: 2, replayed: 1 }, "the split counts never reach the record's progress (#662)");
+	for (const k of ["recoveryInterrupted", "recoveryNotStarted"]) assert.equal(Object.hasOwn(s, k), false, `${k} is never in the key's snapshot`);
+});
+
+test("recovery marks of an earlier attempt (prior lines) count nothing toward this attempt's split counts (#662)", () => {
+	const p = makeProgress({ now: clock() });
+	// A recovery of a recovery: the first recovery's marks are in the file before the baseline.
+	p.consume(asst(call("a", "bash"), call("b", "bash")), T0, { prior: true });
+	p.consume(recovered("a", "interrupted"), T0 + 1, { prior: true });
+	p.consume(recovered("b", "not-started"), T0 + 2, { prior: true });
+	p.consume(asst(call("c", "read")), T0 + 3, { prior: true });
+	p.consume(recovered("c", "not-started", "read"), T0 + 4);
+	const sum = p.summary();
+	assert.deepEqual([sum.recoveryInterrupted ?? 0, sum.recoveryNotStarted, sum.interrupted, sum.replayed ?? 0], [0, 1, 1, 0]);
+	// Nothing open at the end: finalSnapshot's own interrupted steps are not recovery marks.
+	const q = makeProgress({ now: clock() });
+	q.consume(asst(call("x", "bash")), T0);
+	q.finalSnapshot("failed");
+	assert.deepEqual(q.summary().interrupted, 1);
+	assert.equal(Object.hasOwn(q.summary(), "recoveryInterrupted"), false);
 });
 
 test("a marked result closes a step still open under its id without counting a step; an unknown mark is an ordinary result (#645)", () => {

@@ -2277,3 +2277,16 @@ test("recordedCheckpoints drops extra keys, recordedRecovered refuses n 0, and t
 	const rec = buildRecord({ job: { id: "j", data: {} }, result: { outcome: "completed", progress: { replayed: 3 } } });
 	assert.deepEqual(rec.progress, { replayed: 3 });
 });
+
+test("recovered.countsFrom is a closed enum, and the transcript fallback sums orphans and refuses a zero (#662)", async () => {
+	const { recordedRecovered, recoveryCountsFromProgress, RECOVERY_COUNTS_FROM } = await import("../src/run-history.mjs");
+	assert.deepEqual(RECOVERY_COUNTS_FROM, ["exit-line", "transcript"]);
+	for (const from of RECOVERY_COUNTS_FROM) assert.equal(recordedRecovered({ from: "live", n: 1, countsFrom: from }).countsFrom, from);
+	for (const bad of ["Transcript", "/etc/passwd", 1, null]) assert.equal(Object.hasOwn(recordedRecovered({ from: "live", n: 1, countsFrom: bad }), "countsFrom"), false, String(bad));
+	assert.equal(Object.hasOwn(recordedRecovered({ from: "live", n: 1 }), "countsFrom"), false, "absent stays absent");
+	assert.deepEqual(recoveryCountsFromProgress({ replayed: 1, recoveryInterrupted: 2, recoveryNotStarted: 3, interrupted: 9 }), { orphans: 6, replayed: 1, interrupted: 2, notStarted: 3 });
+	assert.deepEqual(recoveryCountsFromProgress({ recoveryNotStarted: 1, replayed: -4 }), { orphans: 1, replayed: 0, interrupted: 0, notStarted: 1 });
+	assert.equal(recoveryCountsFromProgress({ turns: 3, interrupted: 2 }), null, "no mark, no counts: interrupted alone is not a recovery count");
+	assert.equal(recoveryCountsFromProgress(null), null);
+	assert.equal(recoveryCountsFromProgress([1]), null);
+});

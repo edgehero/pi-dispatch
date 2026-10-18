@@ -5252,6 +5252,7 @@ async function durableStallBoot(t) {
 		makeHost: () => host,
 		now: () => DURABLE_NOW,
 		durable: t.durable,
+		...(t.readProgressKey ? { readProgressKey: t.readProgressKey } : {}),
 	});
 	const drive = async (job, err) => {
 		const from = bootLines.length;
@@ -5279,7 +5280,8 @@ test("issue #645: a terminal stall of an armed job with a pointer enqueues its r
 	assert.equal(records[0].outcome, "failed");
 	assert.equal(records[0].reason, "recovery-enqueued");
 	assert.equal(records[0].attempt, 1, "the attempt that crashed, not one past it");
-	assert.equal(records[0].startedAt, new Date(DURABLE_NOW - 30_000).toISOString());
+	assert.equal(records[0].startedAt, null, "no progress key: unknown, never the re-pick's processedOn (#662)");
+	assert.equal(Object.hasOwn(records[0], "progress"), false);
 	assert.deepEqual(lines.filter((l) => l.event === "job_failed").map((l) => [l.jobId, l.reason]), [["gh-s1", "recovery-enqueued"]], "one terminal line, saying why");
 
 	// A recovery's own stall goes through the same path, keyed by its RUN.
@@ -5288,6 +5290,64 @@ test("issue #645: a terminal stall of an armed job with a pointer enqueues its r
 	await drive(stalledArmed("gh-s1.r1", { data: { ...ARMED_DATA, recoveryOf: "gh-s1", recovery: 1 } }), await stalledError());
 	assert.deepEqual(t.pointerReads, ["gh-s1"], "the pointer is the run's");
 	assert.equal(t.enqueued.length, 1);
+});
+
+test("issue #662: the crashed attempt's record takes its start and progress from the run's progress key, read before the enqueue", { skip }, async () => {
+	const pointer = { v: 1, host: "h1", hostQueue: null, seq: 2, attempt: 1, at: DURABLE_NOW, jobDir: "job-ab12cd" };
+	const order = [];
+	let key = null;
+	const t = durableDoubles({ pointer, enqueue: async () => (order.push("enqueue"), { enqueued: true, jobId: "x.r1", n: 1, queue: "pi-jobs" }) });
+	t.readProgressKey = async ({ jobId }) => (order.push(`read:${jobId}`), key);
+	const { drive, records } = await durableStallBoot(t);
+	// The job was enqueued at DURABLE_NOW - 60 s (`stalledArmed`); its attempt started 50 s ago and ran until the stall.
+	const snapshot = (over = {}) => ({ v: 1, turn: 4, steps: 7, failed: 1, interrupted: 2, running: [], recent: [], phase: null, phases: [], note: null, prior: null, startedAt: DURABLE_NOW - 50_000, updatedAt: DURABLE_NOW - 5_000, ended: false, outcome: null, ...over });
+
+	// A live key (the attempt crashed, so it never wrote its final snapshot): its startedAt and counts.
+	key = { commentId: null, snapshot: snapshot() };
+	await drive(stalledArmed("gh-p1"), await stalledError());
+	assert.deepEqual(order, ["read:gh-p1", "enqueue"], "read BEFORE the recovery can replace the key");
+	assert.equal(records.at(-1).startedAt, new Date(DURABLE_NOW - 50_000).toISOString(), "the attempt's own start, not processedOn");
+	assert.deepEqual(records.at(-1).progress, { turns: 4, steps: 7, failed: 1, interrupted: 2 });
+	// A start exactly at the enqueue time is this job's.
+	key = { commentId: null, snapshot: snapshot({ startedAt: DURABLE_NOW - 60_000 }) };
+	await drive(stalledArmed("gh-p1"), await stalledError());
+	assert.equal(records.at(-1).startedAt, new Date(DURABLE_NOW - 60_000).toISOString());
+
+	// A recovery's own stall reads the RUN's key, and takes it when its recovery wrote it (started after r1 was enqueued).
+	order.length = 0;
+	key = { commentId: null, snapshot: snapshot({ startedAt: DURABLE_NOW - 20_000 }) };
+	await drive(stalledArmed("gh-p1.r1", { data: { ...ARMED_DATA, recoveryOf: "gh-p1", recovery: 1 }, timestamp: DURABLE_NOW - 30_000 }), await stalledError());
+	assert.deepEqual(order, ["read:gh-p1", "enqueue"]);
+	assert.equal(records.at(-1).startedAt, new Date(DURABLE_NOW - 20_000).toISOString());
+	// r1 died before its own first write (or ran with PI_RUN_PROGRESS=0): the key is still the BASE attempt's, unended,
+	// started before r1 existed. Not r1's start, not r1's counts.
+	key = { commentId: null, snapshot: snapshot({ startedAt: DURABLE_NOW - 120_000 }) };
+	await drive(stalledArmed("gh-p1.r1", { data: { ...ARMED_DATA, recoveryOf: "gh-p1", recovery: 1 }, timestamp: DURABLE_NOW - 30_000 }), await stalledError());
+	assert.equal(records.at(-1).jobId, "gh-p1.r1");
+	assert.equal(records.at(-1).startedAt, null, "the base's key is not r1's");
+	assert.equal(Object.hasOwn(records.at(-1), "progress"), false);
+
+	// An ended key (an earlier attempt's final write), no `ended` field, a start after now, before the job, zero, negative
+	// or not a number, a job with no timestamp, or no key: null and no progress.
+	const { ended: _e, ...noEnded } = snapshot();
+	for (const k of [{ commentId: null, snapshot: snapshot({ ended: true, outcome: "failed" }) }, { commentId: null, snapshot: noEnded }, { commentId: null, snapshot: snapshot({ startedAt: DURABLE_NOW + 1 }) }, { commentId: null, snapshot: snapshot({ startedAt: DURABLE_NOW - 60_001 }) }, { commentId: null, snapshot: snapshot({ startedAt: 0 }) }, { commentId: null, snapshot: snapshot({ startedAt: -5 }) }, { commentId: null, snapshot: snapshot({ startedAt: "yesterday" }) }, null]) {
+		key = k;
+		await drive(stalledArmed("gh-p2"), await stalledError());
+		assert.equal(records.at(-1).jobId, "gh-p2");
+		assert.equal(records.at(-1).startedAt, null, JSON.stringify(k));
+		assert.equal(Object.hasOwn(records.at(-1), "progress"), false, JSON.stringify(k));
+	}
+
+	key = { commentId: null, snapshot: snapshot() };
+	await drive(stalledArmed("gh-p2", { timestamp: undefined }), await stalledError());
+	assert.equal(records.at(-1).startedAt, null, "no enqueue time: the key cannot be tied to this job");
+
+	// A read that rejects is no key, never a lost recovery.
+	t.readProgressKey = async () => { throw new Error("boom"); };
+	const b = await durableStallBoot(t);
+	await b.drive(stalledArmed("gh-p3"), await stalledError());
+	assert.equal(b.records.at(-1).reason, "recovery-enqueued");
+	assert.equal(b.records.at(-1).startedAt, null);
 });
 
 test("issue #645: no pointer, an unarmed job, or a recovery that was not enqueued keeps today's failure comment and page", { skip }, async () => {
