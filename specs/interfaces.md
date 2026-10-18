@@ -9368,7 +9368,7 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
     "hosts": [ { "name": "mac", "lastBeatAgeMs": 1200, "capacity": { "memMiB": 8192, "cpuCenti": 400, "concurrency": 3 }, "running": 1 } ],
     "budget": { "day": 3, "week": 10, "month": 40, "tokensToday": 120000 },
     "dollars": { "unreachable": false, "windows": [ { "ledger": "global", "scope": null, "window": "day", "capMicros": 5000000, "counterMicros": 1200000, "full": false } ] },
-    "parked": [ { "target": "acme/web#12", "kind": "github", "ageMs": 60000, "chainCount": null } ],
+    "parked": [ { "target": "acme/web#12", "kind": "github", "jobId": "gh-...", "ageMs": 60000, "chainCount": null } ],
     "parkedUnknown": false,
     "failures24h": 0, "failures24hFloor": false,
     "active": [ { "jobId": "gh-...", "queue": "pi-jobs", "startedAt": 1760432400000, "host": "mac" } ],
@@ -9391,7 +9391,12 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   `delivered`, `withdrawn` or `late`, `at` milliseconds, `bytes` the text's UTF-8 size), a field that fails being null
   (`bytes` 0). `inbox` is null for a job that is not steer-armed, for one whose inbox could not be read that tick, and
   past the first 16 steer-armed active jobs a snapshot reads (`STEER_INBOX_ROWS_MAX`), so `[]` always means no
-  message. Both roles get the same.
+  message. Both roles get the same. **Since issue #647 each `parked` row gains `jobId`**, an added key within
+  `version: 1`: the parked run's job id in the run-id charset, else null, for both roles, so a script or the terminal
+  chat can open the run or answer it through the `parked-answer` action without a second lookup. The fleet reader's
+  snapshot also marks each parked row `answering` (the job taking its answer, false, or null when unknown; review round
+  1 of #647), which the `/parked` page and the overview draw; `/api/state`'s parked projection does NOT carry it (the
+  keys above are the whole row), and a script asks `/api/run`'s `pendingRunOnTarget` for one run instead.
 - **What it never holds**: a token, a cookie, a session id, a host path beyond what the panel shows, a secret's value
   or resolver reference (secret profiles appear by name only), a job's `.data`, log or transcript text, or a steer
   message's text or sender. A record's
@@ -9407,7 +9412,65 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
 - **Stability**: within `version: 1`, keys are only ever added. A key removed or renamed, or a value whose meaning
   changes, raises `version`; a script should check `version` and ignore keys it does not know. The keys of the
   nested projections follow the read model's snapshot and are held by the same tests.
-- **Acceptance**: `REQ-OPERATOR-CONSOLE-SCREENS` (k), `REQ-CONSOLE-SECURITY` (l).
+- **One run: `GET /api/run`** (issue #647, `REQ-TERMINAL-CHAT`, `admin/src/console/run-api.mjs`). One run and the
+  chat it can have now; the terminal chat asks it which mode to open and polls it every 5 s for its status line.
+  - **Request**: `GET /api/run?id=<job id>` or `GET /api/run?url=<issue, pull request or merge request link>`, with a
+    session; the viewer role is enough. Exactly one of the two, given once, and no other key; `id` in the run-id
+    charset; `url` at most 2048 characters. `?url=` resolves through `forgeTargetOf` (the inverse of `forgeLinkOf`,
+    on github.com and the deployment's own `GITLAB_URL`, `FORGEJO_URL` and `AZURE_ORG_URL`, also reading GitHub's
+    `/pull/<n>` and Forgejo's `/pulls/<n>`) and then the run history: one runs page whose `limit` (`TARGET_RUNS_MAX`
+    100) counts runs matching the target exactly (`readRunsPage`'s `match` predicate, `targetKeyOf`: the repository
+    path case-insensitive, the number's leading zeros dropped), over a scan of at most `RUNS_PAGE_EXAMINE_MAX` (2000)
+    records examined, never the filter's substring `q`; the newest run on that target is the run.
+  - **Response**: `200` JSON, every field rebuilt by its shape, null when it fails:
+    ```json
+    { "version": 1,
+      "run": { "id": "gh-...", "jobId": "gh-...", "kind": "github", "repo": "acme/web", "target": "acme/web#12",
+               "triggerType": "label", "triggerIndex": 0, "flow": "fix", "outcome": "completed", "reason": null,
+               "startedAt": "2026-10-18T09:00:00.000Z", "finishedAt": "2026-10-18T09:12:00.000Z",
+               "provider": "anthropic", "model": "...", "host": "mac", "backend": "docker", "project": null,
+               "attempt": 1, "exitCode": 0, "turns": 14, "parentJobId": null, "recoveryOf": null,
+               "session": { "kept": true, "resumed": false } },
+      "state": "finished", "mode": "fork", "says": null, "activeJobId": null,
+      "steer": { "armed": false, "open": false },
+      "transcript": { "exists": true, "ended": true, "outcome": "completed" },
+      "progress": { "live": false, "turns": 14, "steps": 30, "failed": 0, "interrupted": 0,
+                    "phase": null, "ended": true, "updatedAt": null },
+      "forgeLink": "https://github.com/acme/web/issues/12",
+      "newerRunOnTarget": null,
+      "pendingRunOnTarget": null }
+    ```
+    `run.id` is the id asked about; the other `run` fields come from its record and are null while the job has no
+    record (a running job's is written at its end). `state` is one of `active`, `queued`, `parked`, `answered`,
+    `finished`, `unknown` (`RUN_STATES`); `mode` is `live`, `reply`, `fork` or null, from `chatModeOf`, and `says` is
+    null or one of its fixed refusal sentences (`CHAT_REFUSALS`). `activeJobId` is the job itself when active, else
+    the #645 recovery job its run goes on as, else null; `steer` and `transcript` are that active job's (else the
+    run's own): `steer.armed` whether its data arms `run.steer`, `steer.open` true, false, or null when the open key
+    could not be read, and both null when the inbox could not be read at all (never a guessed false); `transcript.outcome` one of the live stream's outcomes or `unknown` once ended. `progress` is
+    the live key's integers while the key is the run's own, else the record's (`live: false`), else null.
+    `newerRunOnTarget` is the job id of a later run on the same kind and target, or null when there is none or the
+    history could not be searched (also when a truncated scan stopped before the record's own instant); the fork uses
+    it to warn that the session holds that run's turns too. `pendingRunOnTarget` is the job id queued or running on a
+    parked run's target that takes its answer (it has no record yet; found by the bounded queue scan
+    `readPendingOnTargets`, `DES-TERMINAL-CHAT`), else null; with it the run is `answered` and refused
+    (`CHAT_REFUSALS.answering`), and a scan that cannot tell makes it `unknown` (`CHAT_REFUSALS.parkedTooMany` when
+    the queues hold more jobs than the scan's budget, else `parkedUnknown`). A run whose #645 recovery job is
+    waiting, delayed or prioritized is `queued` (`CHAT_REFUSALS.recoveryQueued`), never `finished`.
+    `session` is two booleans, never the key.
+  - **Errors** (each `{ "error": "<sentence>" }`, the sentence never echoing the value): `400` for a query refusal or
+    a URL that names no target on a forge this deployment knows; `404` for a run that this host's history, the run mirror
+    or the queue knows, and for a target with no run (the sentence says a running job's record is written at its end,
+    so give its run id, and after a truncated scan that it searched the newest 2000 runs); `409` for an Azure work item whose runs are in several repositories of its project, with
+    `"candidates": [ { "target", "jobId" } ]` (the newest run per repository, at most 10); `503` for a queue that
+    could not be read (a fixed sentence: a mode judged on half the facts is worse than none), a history that could not
+    be searched for a URL (also one whose logs or run mirror could not be read: a partial history is not a known
+    absence), or a console with no fleet reader; `401` without a session.
+  - **What it never holds**: a record's free text (`why`, a failure reason), a Job's `.data`, transcript text, or a
+    session key (it names a directory of unredacted transcript; a host-local fork re-derives it,
+    `sessionKeyOfRecord`). That is why a viewer may read it (`REQ-CONSOLE-SECURITY` (l)).
+  - **Stability**: `version` is `RUN_API_VERSION` (1); keys are only ever added within it.
+- **Acceptance**: `REQ-OPERATOR-CONSOLE-SCREENS` (k), `REQ-CONSOLE-SECURITY` (l), and for `/api/run`
+  `REQ-TERMINAL-CHAT` (f) (`admin/test/console-run-api.test.mjs`).
 
 ## INT-CONSOLE-EVENT-STREAM
 
@@ -9464,9 +9527,12 @@ script is its only intended client; it is documented so that what a stream may c
   `Last-Event-ID` being stale by then, gets every panel again); and when the console stops. `requestTimeout` and
   `headersTimeout` do not end it.
 - **The transcript stream** (issue #643, `REQ-LIVE-TRANSCRIPT`, `DES-OPERATOR-CONSOLE`): `GET /api/transcript?id=<jobId>`,
-  a second kind of event stream, opened by the run page's live transcript section.
+  a second kind of event stream, opened by the run page's live transcript section, and since issue #647
+  (`REQ-TERMINAL-CHAT`) by the terminal chat with `&format=json`.
   - **Request**: a GET with the session cookie, operator role only: a viewer is answered 403 before any slot is
-    taken. `id` is a run id in the run-id charset, else 400. `Last-Event-ID`, when present, must match
+    taken. `id` is a run id in the run-id charset, else 400. `format` (issue #647) is optional, at most once, `html`
+    (the default) or `json`; any other value, or a second one, is 400 with a sentence that names the rule and never
+    echoes the value, and so is any other key. `Last-Event-ID`, when present, must match
     `TRANSCRIPT_ID_RE` (`^\d{1,16}-\d{1,10}$`, a Valkey stream id, a different shape from the hub's
     `<epoch>-<n>`); the stream then resumes after that entry. A malformed one, the hub's panel shape included, is ignored, and the
     stream is read from its start. `HEAD` is answered `405`.
@@ -9491,10 +9557,18 @@ script is its only intended client; it is documented so that what a stream may c
     reconnect. `end`: the session is over, exactly as for the hub. `entry` data is `{html}`: an `<article class="t-entry t-<kind>">`
     holding a `<header>` (kind, tool, an error marker, a `<time datetime>` in UTC, a truncated marker) and the text in
     an escaped `<pre>`, tool-call arguments and tool results inside `<details>`; `done` data is `{outcome}` and nothing
-    else.
+    else. **With `format=json`** (issue #647) an `entry`'s data is instead the structured entry, rebuilt by name from
+    the reader's entry (`transcriptEntryJson`) so no other field rides along:
+    `{ "id", "kind", "ts", "text", "tool", "error", "truncated", "outcome" }`, `id` the stream id (`TRANSCRIPT_ID_RE`)
+    or null, `kind` one of the stream's kinds (an unknown one `note`), `ts` milliseconds or null, `text` the worker's
+    redacted text with controls already escaped, as a JSON string, or null, `tool` the `LIVE_TOOL_RE`-checked name,
+    `?` for one that fails, or null, `error` and `truncated` booleans, `outcome` the live outcome (else `unknown`) on
+    an `end` entry and null otherwise. `done`, `end`, `: ping`, the ids and the resume are the same in both formats.
   - **What it reads**: each tick, `transcriptSince` from the stream's own cursor on the fleet reader's client, at most
-    200 entries a read, non-blocking. It never carries the `.log`, and transcript text appears in no `panel` event.
-- **Acceptance**: `REQ-CONSOLE-SECURITY` (k) and (l), `REQ-OPERATOR-CONSOLE-SCREENS` (j), `REQ-LIVE-TRANSCRIPT` (f).
+    200 entries a read, non-blocking, ONCE per job however many streams follow it and in whichever formats; each entry
+    is rendered once per format a stream asked for. It never carries the `.log`, and transcript text appears in no `panel` event.
+- **Acceptance**: `REQ-CONSOLE-SECURITY` (k) and (l), `REQ-OPERATOR-CONSOLE-SCREENS` (j), `REQ-LIVE-TRANSCRIPT` (f),
+  and for `format=json` `REQ-TERMINAL-CHAT` (f).
 
 ## INT-LIVE-TRANSCRIPT-STREAM
 
@@ -10056,3 +10130,4 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-17 | Issue #646, part 3: the console and the panel. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: the kinds written gain `steer` (the console's action and the panel's `t` and `T`) and `steer-withdraw` (the console's); a `steer` row names the job in `target` and holds the sha256 of the message as the inbox stores it in `afterDigest`, never the text, and no `reserve` (a message takes no new reserve; the `reserve` field says so); a `steer-withdraw` row names the job alone. The writer is unchanged: it enforces the kind charset, not the list. **`INT-CONSOLE-STATE-API` AMENDED**: each `active` row gains `steer` (whether the job's data arms `run.steer`) and `inbox`, that job's messages without text as `{id, mode, source, state, at, bytes}`, each field rebuilt against the inbox's vocabularies; null for an unarmed job, an unreadable inbox and past the 16 steer-armed jobs one snapshot reads (`STEER_INBOX_ROWS_MAX`), so `[]` means no message; the same for both roles; added keys within `version: 1`. **`INT-STEER-INBOX-CONTRACT` AMENDED**: the console and the panel are senders now (`planSteer` and `enqueueSteer` in `admin/src/job-actions.mjs`, on this module), the console writing `source: "console"` by the session's token name and the panel `source: "panel"` by `panel`; `listInboxPublic` is what the console's run page, its state API and the panel read, no longer exercised by tests only. The keys, the scripts, the caps and the entry are UNCHANGED, checked. **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: the run page was already live (issue #644), and its new Inbox panel is one more `p-` region re-rendered by digest. **Code evidence**: admin/src/console/actions.mjs -> the `steer` and `steer-withdraw` entries; admin/src/console/live.mjs -> stateOf, inboxOf; admin/src/read-model.mjs -> the snapshot's `steer` and `inbox`, readJobInbox, publicInboxEntry, STEER_INBOX_ROWS_MAX; admin/src/dashboard.ts -> withAuditedWrites. |
 | 2026-10-17 | Issue #646, part 3, review round 1. **`INT-STEER-INBOX-CONTRACT` CORRECTED** to the code after the round: the state hash gains one `m:<id>` field per message, "<seq> <mode> <source> <at> <bytes>", written by the push and the pre-seed scripts in the same call that writes the message (seq the accepted order), and `listInboxPublic` reads only the state hash and the closed key from them, so a surface that lists inboxes every second (the console's snapshot, up to 16 a tick) never moves a message's text; a message without its field (a worker from before part 3) makes that one read fall back to the whole list. The caps, the push and close semantics and the entry are UNCHANGED, checked (a meta field is not a state: the close, the counters and `stateOf` skip it). The run id's `sanitizeJobId` spelling is named as a residual: two run ids that differ only where the sanitizer folds a character share an inbox, as the recovery keys do (a part 1 residual, not changed here). **`INT-CONSOLE-AUDIT-LOG` CORRECTED**: a `steer` or `steer-withdraw` row's `target` is `<job id>#<message id>` (`steerAuditTarget`), so a row names the message it wrote or withdrew, never its text; a job id past 166 characters is cut before the `#` so the message id fits the 200-character cap. **Code evidence**: worker/src/steer-inbox.mjs -> PUSH_SCRIPT, PRESEED_SCRIPT, metaOf, metaFieldsOf, listInboxPublic; admin/src/job-actions.mjs -> steerAuditTarget. |
 | 2026-10-18 | Issue #662: three record and display gaps of durable runs. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: (1) the stall listener's `recovery-enqueued` record takes `startedAt` from the run's progress key, read before the enqueue, when the key has not ended and its start is not after now and no earlier than the stalled job's enqueue time, else null; never `processedOn`, which BullMQ's stall re-pick overwrites (`moveStalledJobsToWait` sets `defa`, then `prepareJobForProcessing`); it carries `progress` from that key's integer counts through `recordedProgress`. (2) `recovered` gains the optional `countsFrom` (`exit-line` or `transcript`, `RECOVERY_COUNTS_FROM`, any other value dropped): a recovery with no exit line takes its counts from its transcript's recovery marks (this attempt's lines only, `orphans` the sum), the exit line's counts winning whenever it carries a `recovery` block, and a transcript with no mark gives none. The record's `progress` key set is UNCHANGED: the reducer's two new summary keys are not in `PROGRESS_COUNT_KEYS`. **`INT-RUN-PROGRESS-KEY` UNCHANGED, checked**: the snapshot gains no field (the two new counters are summary keys only, so the admin's strict parser is unaffected), and the console now reads a recovery's key by its run id, which is the key's contract already. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**. **Code evidence**: worker/src/start.mjs, worker/src/run-progress.mjs, worker/src/run-history.mjs, worker/src/processor.mjs, admin/src/read-model.mjs, admin/src/console/pages.mjs, admin/src/console/panels.mjs, admin/src/dashboard.ts. |
+| 2026-10-18 | Issue #647, part 1: terminal chat. **`INT-CONSOLE-STATE-API` AMENDED**: a new bullet, `GET /api/run?id=` or `?url=` (viewer), its exact shape (`version`, `run` rebuilt field by field with `session` as two booleans, `state`, `mode`, `says`, `activeJobId`, `steer`, `transcript`, `progress`, `forgeLink`, `newerRunOnTarget`), its errors (400 without echo, 404 with the running-job sentence, 409 with at most 10 candidates, 503, 401) and what it never holds (free text, job data, transcript text, a session key); the `/api/state` parked rows gain `jobId` (the example too), an added key within `version: 1`. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: the transcript stream takes `format=html` or `format=json` (else 400 without echo); a JSON entry is `{id, kind, ts, text, tool, error, truncated, outcome}`, rebuilt by name; one read per job per tick serves every format. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: the fork only reads `current.jsonl`, `pi-version` and `venue`, and never writes the store. **`INT-LIVE-TRANSCRIPT-STREAM` UNCHANGED, checked**. **Code evidence**: admin/src/console/run-api.mjs -> getRun, runDocument, safeRunOf, parseRunQuery; admin/src/console/transcript.mjs -> transcriptEntryJson, TRANSCRIPT_FORMATS; admin/src/console/server.mjs -> getTranscript; admin/src/console/live.mjs -> stateOf, subscribeTranscript. Review round 1, folded in before merge: **`INT-CONSOLE-STATE-API` AMENDED**, the `/api/run` bullet: `?url=` matches the target exactly (`targetKeyOf`, repository case and a number's leading zeros ignored) over a scan of at most 2000 records (`readRunsPage`'s `match` predicate), never the substring filter; the response gains `pendingRunOnTarget` (the job queued or running on a parked run's target that takes its answer, or null; the example too); `steer.armed` and `steer.open` are null when the inbox could not be read; a run whose #645 recovery is queued is `queued`, a park being answered is `answered` and an unjudgeable one `unknown`; a 404 after a truncated scan says it searched the newest 2000 runs, a newer-run search that stopped before the record's instant is null, and a history whose logs or mirror could not be read is 503; the `/api/state` bullet says the snapshot's parked `answering` is not projected into `/api/state`. **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: the HTTP route still refuses a `format` other than `html` or `json` with 400, and the hub writes any format other than `json` as the HTML stream; a `tool` outside the charset is still `"?"`. **Code evidence**: admin/src/console/run-api.mjs -> runsOnTarget, newerRunOf, chatFactsOf, runDocument; admin/src/read-model.mjs -> targetKeyOf, readRunsPage, readPendingOnTargets, readJobStatus; admin/src/console/live.mjs -> stateOf. Review round 2, folded in before merge (console side): **`INT-CONSOLE-STATE-API` AMENDED**, the `/api/run` bullet: a scan that cannot tell names why in `says` (`CHAT_REFUSALS.parkedTooMany` for queues deeper than its budget, else `parkedUnknown`, whose sentence now names the queue beside the history); the document's fields UNCHANGED, checked. **Code evidence**: worker/src/chat-mode.mjs -> CHAT_REFUSALS, pendingFactsOf; admin/src/console/run-api.mjs -> chatFactsOf. |

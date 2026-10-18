@@ -947,7 +947,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   run's live transcript to the operator role alone, escaped, and only on the run page; and, since 2026-10-18 (insights
   move to the console), shall serve the `/insights` page with zero external requests under its CSP, answer its what-if
   as a GET read for either role (bounded and cached, never an action and never a ticket), and draw full local paths
-  there (`paths=full`) for the operator role alone.
+  there (`paths=full`) for the operator role alone; and, since #647, shall hold a non-browser client (the terminal
+  chat, `REQ-TERMINAL-CHAT`) to the same guards as a browser, with no second way in, and shall serve a transcript
+  entry as JSON to the operator role alone and a run's chat facts (`/api/run`) to either role only because they carry
+  no free text.
 - **Scope**: the console process and its CLI. The pi extension is unchanged and still binds no port
   (`REQ-ADMIN-VIA-PI-EXTENSION`). #640 built login, logout, `whoami` and one reference write, the pause windows; #641
   added the read screens, `/api/state` and the event streams (`REQ-OPERATOR-CONSOLE-SCREENS`), which meet this
@@ -963,8 +966,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   because a security property nobody runs is a sentence, not a control.
 - **Traces to**: `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
   `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`,
-  `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-LIVE-TRANSCRIPT`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`, and since 2026-10-18
-  `REQ-COST-ANALYTICS` (the what-if).
+  `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-LIVE-TRANSCRIPT`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`, since 2026-10-18
+  `REQ-COST-ANALYTICS` (the what-if), and since #647 `REQ-TERMINAL-CHAT`.
 - **Acceptance**:
   - (a) **Where it listens, and what it refuses to start on.** Given no `PI_CONSOLE_LISTEN`, the console listens on
     `127.0.0.1:4790`; given a non-loopback IP literal without `PI_CONSOLE_BIND_PUBLIC=1`, a hostname, or a unix
@@ -985,7 +988,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `cross-site` or `none`, with no `Sec-Fetch-Site` and an `Origin` other than `http://<Host>`, with no `Origin`,
     or with a body that is not `application/json` (a form post), it is answered 403 and nothing is written; given
     an `OPTIONS` request, no response carries an `Access-Control-*` header. Tests: `admin/test/console-guards.test.mjs`,
-    `admin/test/console-server.test.mjs`.
+    `admin/test/console-server.test.mjs`. **Non-browser clients** (issue #647, `REQ-TERMINAL-CHAT`): a client that
+    sends no `Sec-Fetch-Site` is judged on `Origin` alone, so the terminal chat sends `Origin: http://<Host>` (its Host
+    the address it dialled, `localhost` over a unix socket), the JSON content type and a session cookie from `POST
+    /login`, and never `Sec-Fetch-Site`; there is no bearer header and no other route in. Given such a client, end to
+    end, its sign-in, its `/api/run` read, its transcript stream and a steer's preview and confirm pass with an audit
+    row; given the same sign-in with a foreign `Origin`, it is 403. Tests: `admin/test/console-chat.test.mjs` ("end to
+    end"), `worker/test/console-client.test.mjs` (the headers sent).
   - (d) **The read-only switch and the viewer role.** Given `PI_CONSOLE_READ_ONLY=1`, every write route in the route
     table answers 403 and writes nothing, and login still works; given a viewer's session, every write route answers
     403; each such refusal appends an audit row with `action: "refused"`. Test: `admin/test/console-server.test.mjs`.
@@ -1066,6 +1075,16 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     panel, no other page and no `/api/state` body carries transcript text; given `HEAD /api/transcript`, it is 405;
     the transcript stream shares the slots and the session re-judging of (k) and its 2 MiB cut. Tests: `admin/test/console-transcript.test.mjs`,
     `admin/test/console-pages.test.mjs` and `admin/test/console-actions.test.mjs` (the script's markup writes).
+    **Extended to the JSON entries and the run lookup** (issue #647, `REQ-TERMINAL-CHAT`): given `format=json` on
+    `/api/transcript`, the stream is the same operator-only route with the same 403 for a viewer, before any slot, and
+    its entries are rebuilt by name (`transcriptEntryJson`), the text a JSON string the client scrubs again; given a
+    `format` that is neither `html` nor `json`, or given twice, it is 400 and the value is not echoed. `GET /api/run` is
+    a viewer's route because its answer holds no free text: ids in their charsets, closed words, re-serialized instants,
+    integers and booleans, and `says` one of `chatModeOf`'s fixed sentences; never a record's `why` or failure text,
+    a Job's `.data`, transcript text or a session key (the key names a directory of unredacted transcript). The run
+    page's Chat panel shows a viewer the state and a refusal's sentence only, never a form or a command. Tests:
+    `admin/test/console-transcript.test.mjs` (the two `format=json` tests), `admin/test/console-run-api.test.mjs`
+    ("no free text, job data or session key for either role", the `safeRunOf` test), `admin/test/console-chat.test.mjs`.
   - (m) **The insights page's reads** (2026-10-18, insights move to the console). Given a viewer's session, then
     `/insights?whatif=<provider>/<model>&flow=<flow>` is answered as a read (a GET, no ticket, no audit row, no
     write) and its record scan is bounded by the 92-day scan ceiling and cached 30 s, at most 64 answers; given
@@ -1110,8 +1129,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     such), the queue counts, the hosts online with the age of each one's last beat, today's spend against its caps,
     the number of parked runs waiting, and the failures of the last 24 hours; given a run window that does not reach
     back a day, the failure count is shown as a floor ("at least"), never as an exact number; given Valkey down, the
-    page renders and says the fleet is unreachable rather than showing zeros. Tests:
-    `admin/test/console-pages.test.mjs`, `admin/test/read-model-pages.test.mjs` (`failures24h`).
+    page renders and says the fleet is unreachable rather than showing zeros. Since issue #647 the parked count leaves
+    out the parks being answered (a job queued or running on the target, the parked rows' `answering`) and names how
+    many those are. Tests: `admin/test/console-pages.test.mjs`, `admin/test/read-model-pages.test.mjs`
+    (`failures24h`), `admin/test/console-chat.test.mjs` (the parks being answered).
   - (b) **Runs** (`/runs`). Given the filters `repo`, `kind`, `flow`, `trigger`, `project`, `host`, `outcome`,
     `reason`, `model` and `q` (a target substring), each alone returns exactly the runs whose field matches (the test
     is exhaustive per field); given a value outside its field's charset or longer than its bound, or a field given
@@ -1143,13 +1164,39 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     ("the Progress panel of an attempt whose run continues as a recovery (issue #662): its own record's progress and a
     link, never the recovery's live key"), `admin/test/read-model-progress.test.mjs` ("readRunProgress reads the key
     by the RUN id and says when the attempt's run continues as a recovery (#662)"), `admin/test/console-server.test.mjs`.
+    **The Chat panel** (issue #647, `REQ-TERMINAL-CHAT`): the run page gains a "Chat" panel (`p-chat`) between Progress
+    and Inbox, drawn from the job's chat facts (`chatFactsOf`: its queue state, its active recovery and, for a parked
+    record only, whether a later run took the answer, so the live loop pays the runs-page read only then) through
+    `chatModeOf`. Given an operator on a writable console: a live run shows a link to its transcript (or to the
+    recovery job it goes on as) and, while its inbox takes messages, the steer and follow-up forms, which the Inbox
+    panel then does not draw (one copy of each on the page); a parked run shows the parked inbox's own answer form
+    (`parkedAnswerForm`, the same bytes); a finished run shows `pi-dispatch chat <id>` to copy, or why the record names
+    no session the fork can find (no `run.resume`, or a pull request); live and reply show the command too. Given a
+    refused mode, its fixed sentence for both roles; given a viewer, the state only; given a read-only console, no
+    form; given an unreadable queue, a warning; given a fleet with no job-state reader, nothing. Since review round 1
+    of #647: a parked run gets the reply form only where `planParkedAnswer` would plan the answer (the planner's own
+    predicate, `parkedAnswerRefusalOf`, over the retained job's data and the triggers file: a pull request's park,
+    expired data or a comment trigger that would not route a reply shows the planner's refusal sentence in place of
+    the form and the command), and a check that could not be read keeps the form and says so (the preview checks
+    again); a park being answered (a job queued or running on its target) reads "being answered", shows the
+    `answering` refusal and links the job taking the answer; a run whose recovery job is queued links that job; a live
+    run whose inbox could not be read says so in a warning instead of "not steer-armed". Tests:
+    `admin/test/console-chat.test.mjs`, `admin/test/console-pages.test.mjs` (the run page fixtures).
   - (d) **Parked inbox** (`/parked`). Given runs that ended `completed` with `awaiting-input`, each shows its target,
     its forge link where one can be built, its age and its session chain count, newest first; given a later run on the
     same kind and target, the parked run shows as answered; given `PI_SESSIONS_DIR` not on the console's host, a key
     with no directory there, a pull request (whose key the record cannot rebuild) or an unreadable counter, the chain
     count shows as unknown, never 0. The answer box is #642's, for the operator role only
-    (`REQ-OPERATOR-CONSOLE-ACTIONS` (f)). Tests: `admin/test/read-model-pages.test.mjs`
-    (`readParkedRuns`), `admin/test/console-pages.test.mjs`.
+    (`REQ-OPERATOR-CONSOLE-ACTIONS` (f)). Since issue #647 "the same target" is `targetKeyOf`'s (a repository path in
+    any case and a number with or without leading zeros are one target), and the table has an **Answer** column:
+    `waiting`, `being answered by <run>` (a job queued or running on the target, which has no record yet, found by
+    the bounded queue scan `readPendingOnTargets`, refreshed at most every 15 s while something is parked), or
+    `unknown` when the scan was partial or unreadable; a park being answered gets no answer form. Since review round
+    2 an unknown park gets no answer form either (the Chat panel's verdict, `parkedVerdictOf`, one rule for both
+    screens), and a queue holding more than the scan's 10,000-id budget says so in the row and in
+    `CHAT_REFUSALS.parkedTooMany`'s sentence. Tests:
+    `admin/test/read-model-pages.test.mjs` (`readParkedRuns`, `targetKeyOf`, the fleet reader's `answering`),
+    `admin/test/console-pages.test.mjs`, `admin/test/console-chat.test.mjs`.
   - (e) **Insights** (`/insights?range=`). Given `range` `7d`, `30d` or `mtd`, the page shows the insights sections
     for that window, built by the one assembly (`assembleInsights`, pi-free in `admin/src/insights-assembly.mjs`),
     with no inline style and no inline script; given any other range, it is refused; given no range, the last 30 days
@@ -1210,7 +1257,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     console does not poll. Tests: `admin/test/console-live.test.mjs`, `admin/test/console-server.test.mjs`.
   - (k) **`/api/state`.** Given a session, it answers the JSON of `INT-CONSOLE-STATE-API`; given a viewer, the body
     carries no `failedReason`; given no session, it answers 401 JSON, never a redirect. Test:
-    `admin/test/console-server.test.mjs`.
+    `admin/test/console-server.test.mjs`. Since issue #647 each `parked` row carries its `jobId` (the run-id charset,
+    else null) for both roles (`admin/test/console-live.test.mjs`, "stateOf: a parked row carries its jobId"), and
+    `GET /api/run` answers one run and its chat for both roles (`INT-CONSOLE-STATE-API`,
+    `admin/test/console-run-api.test.mjs`).
   - (l) **One reader.** Given the panel's existing test suite, it passes unchanged after the snapshot code moved into
     `createFleetReader`; the console and the panel both build their snapshot from that function. Tests:
     `admin/test/dashboard.test.mjs`, `admin/test/held.test.mjs`, `admin/test/read-model-pages.test.mjs`.
@@ -1280,7 +1330,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     receiver's phrase-free reply for that issue field for field, except the delivery id, the sender, the comment
     text, the GitHub association and `console: {by: <the token's name>}`; the text is scrubbed of control and bidi
     characters and refused (never cut) when empty or above 8 KiB; refused by name when the run is not parked, already
-    answered, a pull request's park, its data expired, or no comment trigger would route a reply. The audit row holds
+    answered (a later run on the same target, `targetKeyOf`'s comparison: repository case and a number's leading zeros
+    do not matter), being answered (a job queued or running on its target, which has no record yet,
+    `readPendingAnswer`), when that queue scan is unreadable (nothing is queued; try again) or the queues hold more
+    jobs than its budget (`CHAT_REFUSALS.parkedTooMany`'s sentence: answer on the forge, or wait), a pull
+    request's park, its data expired, or no comment trigger would route a reply. The audit row holds
     the job id and the answer's sha256, never the text. The worker posts exactly one trail comment ("Answered from the
     operator console by <name>:" and the text quoted, every `@` neutralised) once every pre-spend gate and reserve has
     passed, just before the container starts, and none when the job is refused by any gate (`not-parked`, a missing
@@ -1331,7 +1385,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: An operator shall be able to watch a running job's transcript live (what the agent said, which
   tools it called with what arguments, and what they returned) from the console's run page on any host and from the
-  `/dispatch` panel's live tail, for a run on any host. What leaves the host that ran the job shall be the transcript
+  `/dispatch` panel's live tail, for a run on any host, and since #647 from a terminal (`pi-dispatch chat`, through the
+  console, `REQ-TERMINAL-CHAT`). What leaves the host that ran the job shall be the transcript
   only, never the raw log and never the model's thinking; shall be redacted of the job's own secrets and of known
   token shapes before it leaves the worker; shall be capped at 2,000 entries per job; and shall be removed 24 hours
   after the run ends, and at most 7 days after its first entry when the run never ended. Publishing shall never fail,
@@ -1385,7 +1440,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   - (f) **The console.** Given an operator, the run page's live transcript and `GET /api/transcript` stream the entries
     escaped, resume from `Last-Event-ID`, send `done` after the `end`, end with the session and share the hub's
     slots; given a viewer, 403 and no transcript text on any page, panel or `/api/state`. Tests: `admin/test/console-transcript.test.mjs` (including
-    an end-to-end stream written by the worker's own publisher), and `REQ-CONSOLE-SECURITY` (l).
+    an end-to-end stream written by the worker's own publisher), and `REQ-CONSOLE-SECURITY` (l). **The JSON format**
+    (issue #647): given `format=json`, each entry's data is `{id, kind, ts, text, tool, error, truncated, outcome}`,
+    rebuilt by name, on the same route, role, slots, resume and `done`; given an `html` and a `json` stream on one job,
+    one read per tick serves both; given any other `format`, 400. Tests: `admin/test/console-transcript.test.mjs` ("entry
+    json", "hub: a format=json stream", "over HTTP: format=json").
 
 ## REQ-RUN-PROGRESS
 
@@ -3488,7 +3547,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `not-parked` gate and the budget reserve apply unchanged. Because no comment of the operator's exists on the
   forge, the worker posts one trail comment naming the token's person and quoting the answer, with every mention
   neutralised, after the `not-parked` gate and before any spend, so the issue still shows what the agent was told.
-  A pull request's park is not answered from the console: its reply keeps the phrase on the forge.
+  A pull request's park is not answered from the console: its reply keeps the phrase on the forge. Since issue #647
+  the console also refuses an answer while one is already queued or running on the park's target (its resume run has
+  no record until it ends, so the later-run rule cannot see it yet), and when the bounded queue scan that looks for
+  one cannot tell, so two answers never resume the same transcript twice (`REQ-OPERATOR-CONSOLE-ACTIONS` (f)).
 - **Traces to**: `REQ-RESUMABLE-SESSION`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`,
   `CONST-TRIGGER-AUTHOR-GATE`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `DES-AWAIT-INPUT-ENDS-THE-JOB`,
   `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-SESSION-STORE-CONTRACT`,
@@ -3556,8 +3618,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   load beside `run.command` (a command job's prompt is one `/name args` line, so a message would reach whatever the
   command started rather than an agent listening for it). **Not in scope**: interrupting a running tool (pi cannot),
   inline pull request review comments (not ingested today), a forge reaction or reply at the moment a message is
-  steered, steering by editing a comment that already steered or started a run, and terminal chat (#647, which will
-  reuse this inbox).
+  steered, steering by editing a comment that already steered or started a run. Terminal chat (#647) reuses this inbox through
+  the console's `steer` and `steer-withdraw` actions (`REQ-TERMINAL-CHAT`).
 - **Why**: a run that is going the wrong way can today only be cancelled and started again, paying again for
   everything it did, and the person who notices has no way to say so to it. durable-pi's steering is the one feature
   of that harness that fits here: a message into the live session. It is built at the job boundary instead
@@ -3726,6 +3788,177 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     captured at the key, the note naming the id and never the text, a refusal pushing nothing, the hint only on an
     armed row, every width, and the push audited as kind `steer` with the digest (`admin/test/dashboard.test.mjs`, the
     issue #646 tests; `admin/test/panel-audit-wiring.test.mjs`, the `steer` row).
+
+## REQ-TERMINAL-CHAT
+
+- **Statement**: An operator shall be able to open a run's chat in a terminal with `pi-dispatch chat <run-id |
+  issue-or-PR-url | session-key> [--fork] [--force] [--tools] [--pi <path>] [--console <addr>] [--yes]`, and on the
+  run page of the operator console. Which chat a run has shall be decided by ONE rule (`chatModeOf`,
+  `worker/src/chat-mode.mjs`) that the CLI, `GET /api/run` and the run page's Chat panel share: a run whose job is
+  active, or whose run goes on as an active #645 recovery job, is **live**; a parked run (completed, `awaiting-input`)
+  that no later run on its target answered, and on whose target no job is queued or running now, is **reply**; any
+  other run with a record whose job is no longer queued is **fork**; a queued job, a run whose #645 recovery job is
+  waiting, delayed or prioritized (`CHAT_REFUSALS.recoveryQueued`, never a fork), an answered park, a park being
+  answered (a job queued or running on its target, which has no record yet: `CHAT_REFUSALS.answering`), a park whose
+  answer cannot be judged (the history or the queue scan could not tell) and an unknown run are refused, each with a
+  fixed sentence. "The same target" is `targetKeyOf`'s (`DES-TERMINAL-CHAT`). A
+  32-hex session key always forks, on the operator's host, with no console. **Live** follows the run's live transcript
+  and sends the console's `steer` (Enter), follow-up (`/later <text>`) and `steer-withdraw` (`/withdraw <id>`)
+  actions, each previewed and confirmed; Ctrl+C detaches and the run goes on. **Reply** shows the run's question and
+  sends the console's `parked-answer` action. **Fork** opens the run's stored transcript in the operator's own pi with
+  `pi --fork` on a private copy and its tools off, and shall never write the canonical session file. The live and
+  reply modes shall go through the console's HTTP surface exactly as a browser does (a token sign-in, the session
+  cookie, its routes and guards) and shall never read Valkey or the session store; the fork shall run only where the
+  session store is, since no route serves a stored (unredacted) transcript. No token, cookie or message text shall be
+  printed or logged, and every byte of console-supplied text shall be made inert before it reaches the terminal.
+- **Scope (this release: issue #647, part 1)**: the worker's CLI verb and its modules (`worker/src/chat-cli.mjs`,
+  `chat-mode.mjs`, `chat-fork.mjs`, `chat-view.mjs`, `console-client.mjs`), the console's `GET /api/run`
+  (`INT-CONSOLE-STATE-API`), the JSON format of `/api/transcript` (`INT-CONSOLE-EVENT-STREAM`), the run page's Chat
+  panel (`REQ-OPERATOR-CONSOLE-SCREENS` (c)) and the parked rows' `jobId` in `/api/state`. Argument classes, told
+  apart by shape alone (`classifyChatTarget`): 32 lowercase hex is a session key (tested first, so a key is never read
+  as a job id), an `http(s)` URL of at most 2048 characters that parses is an issue or pull request link (the console
+  resolves it to the newest run on its target), anything else in the run-id charset is a job id; anything else is
+  refused. The console address is `--console`, else `PI_CONSOLE_URL` from the shell, else the deployment's
+  `PI_CONSOLE_LISTEN`, else `127.0.0.1:4790`; the token is `PI_CONSOLE_TOKEN` from the shell only (never a deployment
+  file), else a hidden prompt on a TTY, else a refusal. A `PI_CONSOLE_LISTEN` read from the deployment (the shell's or
+  the folder's `.env`) shall be a loopback address (127.0.0.0/8, `::1`, `localhost`, a wildcard dialled on loopback)
+  or a unix socket, or `chat` refuses it and names `--console` and `PI_CONSOLE_URL`: a `.env` planted in a cloned
+  repository must not point the operator's token at another host. A `PI_CONSOLE_LISTEN` the shell does not set (so
+  the folder's `.env` named it) shall be taken only from a `.env` that is not a symbolic link and passes the panel's
+  rule (owned by the operator or root, no group or other write on it or a folder above it), or `chat` refuses naming
+  `--console` and `PI_CONSOLE_URL`. Before signing in to a console that is not loopback
+  (named by `--console` or `PI_CONSOLE_URL`; a hostname is judged by its spelling, never resolved), `chat` warns that
+  the token travels over plain HTTP to that host and asks y/N, default no, before the token is read or sent; `--yes`
+  answers it, and the warning still prints. **Not in scope**: `/dispatch chat` in the pi extension (part 2,
+  a follow-up change), a fork on a host without the session store, writing a fork back to the store, and redacting the
+  snapshot (`OQ-046`).
+- **Why**: a run's conversation could be read on the console's run page and nowhere else, and only while it ran. An
+  operator who wanted to steer from a terminal had `pi-dispatch steer` (one message, no transcript), one who wanted
+  to answer a parked run needed the browser, and a finished run's stored conversation could not be continued at all
+  without opening the store by hand, where `pi --session` on the canonical file would append to it and the next job on
+  that issue would resume from the operator's chat. The three surfaces asking which chat a run has would each have
+  grown a table; one pure rule keeps the terminal and the page from disagreeing.
+- **Fail loudly.** Every refusal is a sentence naming what to do: the mode's fixed sentences (`CHAT_REFUSALS`), the
+  console's own refusals passed through as sent (a lookup's 400, 404, 409 with its candidates, 503; an action's
+  preview or confirm refusal), the address and token refusals, and the fork's checks below. A live view whose stream
+  failed keeps its status line and says so; a run that keeps reading as live for 5 asks 2 s apart after its stream
+  ended is said to be still live, never guessed at.
+- **The fork's checks**, all free and in order (`planFork`), each a refusal sentence: the record has a session (a forge
+  issue or a cron trigger, `sessionKeyOfRecord`); it is not a pull or merge request; the key is 32 hex;
+  `PI_SESSIONS_DIR` is set; the key's directory exists and is a directory (not a link); `current.jsonl` is a regular
+  file, not a link, not empty, at most 64 MiB; the venue stamp is not `(pending)`; a pi binary is found (`--pi`, else
+  `PATH`, else the installed package, else the install hint); the `pi-version` stamp is not newer than the host pi and
+  is readable, and the host pi's version is readable, unless `--force` (an older stamp is noted). A newer run on the
+  same target sharing the session (from `/api/run`'s `newerRunOnTarget`, or a transcript modified more than 5 minutes
+  after the run's end; the console's run says `finishedAt`, this host's record `endedAt`) is a warning, not a refusal.
+  Then `runFork` refuses a chat folder inside `PI_SESSIONS_DIR` and a home that is not absolute; `~/.pi-dispatch` and
+  its chat folders shall be owned by the operator (one owned by another user, a link or not a directory is refused, and
+  one of the operator's with group or other permission bits is made 0700); it copies the transcript (`O_RDONLY |
+  O_NOFOLLOW`, the descriptor re-checked for a regular file of the same device and inode and the cap; the destination
+  `~/.pi-dispatch/chat/<key>/source-<ms>.jsonl` created `O_CREAT | O_EXCL | O_NOFOLLOW` at 0600 in 0700 directories),
+  names the bytes, says the transcript is unredacted, and names the provider pi will actually use (`forkModelOf`): when
+  pi's settings name a default provider AND model (`defaultProvider` and `defaultModel` from the agent dir's
+  `settings.json` only; the current folder's `.pi/settings.json` is never read for them), both are passed to pi as
+  `--provider` and `--model` and named; otherwise the prompt names the run's own model (the session's last
+  `model_change` or assistant message), used if pi knows it and has a key for its provider, and pi's fallback
+  otherwise. It asks y/N; with no TTY on stdin it refuses before copying anything. It spawns `<pi> --fork <copy> [--provider P --model M] --no-tools` (`--tools` drops `--no-tools`) in the
+  operator's current directory, stdio inherited. No `PI_CONSOLE_*` variable is passed to pi, for the fork or for
+  `pi --version` (`childEnv`); that is hygiene, not a boundary, since a forked agent with `--tools` reads whatever the
+  operator's shell and files allow. The copy under `~/.pi-dispatch/chat` is removed on a no, on SIGINT, SIGTERM or
+  SIGHUP from the start of the copy until the answer (which then exits 130, 143 or 129; the handlers are on before the
+  copy), and once pi exits (while pi runs, SIGTERM and SIGHUP are passed on to it, the command then exiting 143 or
+  129, and SIGINT is left to it), each time with its `<key>/` folder when that is left empty; pi's own fork in its sessions folder, as unredacted as the source, is the
+  operator's to keep or delete, and the command says so.
+- **Hostile text is inert.** Every console-supplied string reaching the terminal goes through `scrubForTerminal`:
+  CR and CRLF become a newline, a tab four spaces, and every other C0 control, DEL, every C1 control and the bidi
+  controls are removed, and so are the zero-width characters (U+200B to U+200D, U+2060, U+FEFF), the soft hyphen, the
+  tag characters U+E0000 to U+E007F and the Hangul fillers and leading jamo (U+1100 to U+115F, U+3164, U+FFA0), which
+  hide text or are measured at a width the terminal does not draw; an entry is clipped to 64 KiB on a character
+  boundary with the cut said; pi-tui's hyperlinks are off (`setCapabilityOverrides({hyperlinks: false})`), so a link's
+  target prints beside its text. The client keeps one Server-Sent Event to 256 KiB and drops a larger one whole. A
+  refusal sentence or status from the console is printed on one line (the client folds control characters to spaces
+  and cuts it at 1000 characters, `oneLine`; the CLI scrubs it and folds its line breaks), and refusals go to standard
+  error. An assistant entry is drawn as markdown only within the parser's limits (`markdownPlan`, `DES-TERMINAL-CHAT`),
+  else as plain text.
+- **The terminal is given back.** While a chat screen runs, an uncaught exception, an unhandled rejection, SIGINT,
+  SIGTERM and SIGHUP each leave the alternate screen, show the cursor and end raw mode before the process exits
+  (`guardTerminal`: 1 after a failure, named in one scrubbed line; 130, 143 or 129 after a signal).
+- **Exit codes**: 0 after a detach, an answer, leaving without one, and a declined fork; a fork's own exit code
+  passed through (143 or 129 once a SIGTERM or SIGHUP was passed on to it); 130, 143 or 129 for SIGINT, SIGTERM or
+  SIGHUP at the fork's question or on a chat screen; 1 for every refusal.
+- **Traces to**: `DES-TERMINAL-CHAT`, `DES-OPERATOR-CONSOLE`, `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`,
+  `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-SESSION-STORE-CONTRACT`, `INT-STEER-INBOX-CONTRACT`,
+  `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-LIVE-TRANSCRIPT`,
+  `REQ-STEER-RUNNING-JOB`, `REQ-AWAIT-INPUT`, `REQ-RESUMABLE-SESSION`, `REQ-RUN-RECOVERY`, `CONST-ISSUE-TEXT-IS-DATA`,
+  `CONST-PI-VERSION-PINNED`, `OQ-046`.
+- **Acceptance**:
+  - (a) **The mode rule.** Given an active job or an active recovery id, live, even with a record (an infra retry);
+    given a queued state (`waiting`, `delayed`, `prioritized`, `waiting-children`, `paused`), refused; given a parked
+    record, reply when unanswered, refused when answered, refused with its own sentence when the history could not be
+    searched; given any other record, fork; given no record, refused, with a different sentence for an ended job than
+    for an unknown one; a malformed active id is no active job; every answer is in the exported vocabularies
+    (`worker/test/chat-mode.test.mjs`). Given a run whose #645 recovery job is queued, refused
+    (`recoveryQueued`), active still winning; given a park with a job queued or running on its target, refused
+    (`answering`), and given a queue scan that could not tell, unknown, never a reply (`worker/test/chat-mode.test.mjs`,
+    `admin/test/console-run-api.test.mjs`).
+  - (b) **The CLI.** The four argument classes; the usage lists `chat` and an unknown flag is refused before anything
+    is asked; a key forks with no console; `--fork` with a locally recorded run id needs no console, and without one
+    the console's record is forked; the console's mode decides (a fork prefers the local record, reply asks the
+    question, a null mode prints `says` and exits 1); a live view that ends asks again and goes on in the new mode, and
+    a detach exits 0; a refused lookup prints the console's sentence, scrubbed and on one line, and an Azure item's
+    candidates; no token is a refusal; a console that is not loopback is warned about and asked y/N (default no) before
+    any token is read, and `--yes` answers it; refusals go to standard error (`worker/test/chat-cli.test.mjs`).
+  - (c) **The fork.** The store's file names equal `session-store.mjs`'s; the refusals in order; the folder and file
+    checks and the cap; the pending venue, a missing pi and the version stamps with `--force`; the newer-run warning
+    from either source; the copy is 0600 outside the store, the canonical file is byte- and mtime-identical, and pi is
+    run with `--fork <copy> --no-tools` in the operator's folder; `--tools`, a declined prompt removing the copy, a
+    chat folder inside the store refused; a transcript swapped between the check and the copy, and a planted snapshot
+    path, are refused and never followed or overwritten; the pi binary order and its version; the host defaults
+    (the agent dir's `settings.json` alone: a folder's `.pi/settings.json` cannot choose the provider), the session's model, and the consent naming what pi will use
+    (both defaults passed as `--provider` and `--model`, else the run's model with its fallback); no `PI_CONSOLE_*`
+    variable reaches pi; Ctrl+C, SIGTERM or SIGHUP at the y/N removes the copy and its emptied folder and exits, a
+    signal landing during the copy reaches a handler that removes the partial copy, a forwarded SIGTERM exits 143, no
+    TTY refuses before any file is opened, and the copy goes when pi exits; another user's private folder is refused and one of the operator's with group or other bits is made 0700
+    (`worker/test/chat-fork.test.mjs`).
+  - (d) **The screens.** `scrubForTerminal`'s removals, tab and CR handling and its 64 KiB clip; `parseChatInput`'s
+    steer, `/later`, `/withdraw <32-hex>`, `//` and a refused unknown word; the editor hidden with a sentence for a
+    viewer, a read-only console, an unarmed run, an inbox whose state is unknown and a closed inbox; hostile entries
+    draw no ESC, no OSC 8 link, no C1 or bidi control at any width, and link targets show as text; the keys (`e`, Esc,
+    Enter, Ctrl+C) and the y/n confirm reading only y, n, Esc and Ctrl+C; a viewer opens no stream and the poll ends
+    the view; an operator's live view streams entries, steers through the preview and `y`, withdraws, and ends with a
+    fresh lookup on `done`; the reply view sends `parked-answer` and keeps the editor after a refusal; `questionOf`
+    points at the forge for a viewer or a missing transcript; the invisible and mismeasured characters are dropped;
+    `markdownPlan` sends deep quote or list markers and too many delimiters to plain text and turns LaTeX off past the
+    brace depth or 256 backslashes, brace-free nested `\frac` and `\sqrt` (inline, display and `\[ \]`) render under
+    their plan without throwing, pathological markdown draws fast and never throws, and an entry whose render throws is drawn plain,
+    alone; the terminal is given back on an uncaught exception, an unhandled rejection, SIGINT, SIGTERM and SIGHUP;
+    Ctrl+C while a y/n waits answers no and detaches (`worker/test/chat-view.test.mjs`).
+  - (e) **The client.** Addresses (host:port, `http://`, IPv6, unix with Host `localhost`, wildcards dialled on
+    loopback, `https:` and paths refused); the address and token orders; backoff from 500 ms doubling to 30 s with
+    jitter, giving up after 8, a server `retry:` raising the floor, `Retry-After` clamped to 1 to 60 s; the SSE parser
+    and its 256 KiB drop, a CRLF split between two chunks read as one line end, and an id that is not printable ASCII
+    or is longer than 1024 characters ignored; over TCP the cookie is kept in memory, Host, Origin `http://<Host>` and
+    the JSON type are sent and `Sec-Fetch-Site` never, and nothing secret escapes to a log or an error; a Set-Cookie
+    whose Max-Age is zero or less, or whose Expires is past, clears the session; a 401 or an `end` signs in again after
+    a backoff at most once per 60 s over the stream's whole life, and a second inside that window gives up (an entry
+    then `end`, forever, cannot loop sign-ins); a JSON body silent for the request timeout and a stream silent for
+    45 s are cut (the stream resumed), and one that keeps sending pings never is; a 403 on a stream is not retried; a
+    multi-line refusal comes out as one line; the loopback rule (a unix socket, `localhost`, 127.0.0.0/8, `::1`) and a
+    `.env`'s non-loopback `PI_CONSOLE_LISTEN` refused; a `.env` value taken only from a file no other account can
+    change and that is not a link (`dotenvTrustRefusal`), the shell's value never judged; an unreachable console is one sentence naming the address
+    (`worker/test/console-client.test.mjs`).
+  - (f) **The console side.** `/api/run`'s shape, states and modes, its refusals and its no-free-text rule, and
+    `forgeTargetOf` as `forgeLinkOf`'s inverse (`INT-CONSOLE-STATE-API`, `admin/test/console-run-api.test.mjs`);
+    `targetKeyOf` (repository case, a number's leading zeros, a local target exactly), `?url=` as an exact-target scan
+    (`#12` found past a page of `#120`s), a truncated newer-run search unknown, `pendingRunOnTarget`, `steer.armed` null
+    for an unread inbox, and the run page loop's 30 s newer-run reuse (`admin/test/console-run-api.test.mjs`,
+    `admin/test/read-model-pages.test.mjs`); the Chat panel per mode and role, the reply form only where the planner
+    would plan the answer, a park being answered, and an unread inbox (`admin/test/console-chat.test.mjs`, and the run
+    page fixtures in `admin/test/fixtures/console/`); end to end, a non-browser client signs in with a token (a foreign Origin 403),
+    reads `/api/run`, streams `format=json` with a `Last-Event-ID` resume, and previews and confirms a steer with its
+    audit row (`admin/test/console-chat.test.mjs`, "end to end").
+  - (g) **The pin.** The worker's `@earendil-works/pi-tui` is held to the runner's pin by `pi-pin-check.mjs` and moved
+    by the pi bump table (`worker/test/pi-pin-check.test.mjs`, `worker/test/pi-bump.test.mjs`).
 
 ## REQ-RESURRECTABLE-SANDBOX
 
@@ -4645,6 +4878,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-18 | Issue #647, part 1: terminal chat. **NEW `REQ-TERMINAL-CHAT`**: `pi-dispatch chat <run-id \| issue-or-PR-url \| session-key> [--fork] [--force] [--tools] [--pi <path>] [--console <addr>] [--yes]`; the three argument classes by shape (a 32-hex key first, an http(s) URL, a run id); one mode rule shared by the CLI, `/api/run` and the run page's Chat panel (`chatModeOf`: active or an active recovery is live, an unanswered park is reply, any other record whose job is not queued is fork, queued, answered, an unjudgeable park and unknown refused with fixed sentences, a key always forks locally); live attach with steer (Enter), follow-up (`/later`), withdraw (`/withdraw`), Ctrl+C detach and the hidden message box with a sentence per reason (viewer, read-only, not armed, inbox state unknown, inbox closed); reply through `parked-answer`; the fork's checks in order, the private O_NOFOLLOW and O_EXCL copy with the dev and inode re-check, the y/N naming the bytes and the host provider, `pi --fork <copy> --no-tools` in the operator's folder, the canonical file never written; hostile text inert (`scrubForTerminal`, the 64 KiB clip, OSC 8 off, the 256 KiB event drop); no token, cookie or message text printed or logged; the exit codes; `/dispatch chat` (part 2) and snapshot redaction (`OQ-046`) out of scope; acceptance (a) to (g) naming the tests. **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement gains the #647 clause; (c) gains the non-browser client (no `Sec-Fetch-Site`, `Origin: http://<Host>`, the JSON type and the cookie, checked end to end; a foreign Origin 403); (l) gains the JSON entries (operator only, rebuilt by name, a bad `format` 400 without echo) and `/api/run` as a viewer's route because it carries no free text, job data or session key, and the Chat panel's viewer rule; Traces gain `REQ-TERMINAL-CHAT`. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: (c) gains the run page's Chat panel (`p-chat` between Progress and Inbox: the steer forms moved from the Inbox panel while it draws them, the parked answer form shared with `/parked`, the `pi-dispatch chat <id>` command, viewers status only, a read-only console no form); (k) gains the parked rows' `jobId` and `/api/run`. **`REQ-LIVE-TRANSCRIPT` AMENDED**: the Statement names the terminal as a third reader through the console; (f) gains the JSON format and the shared read per tick. **`REQ-STEER-RUNNING-JOB` AMENDED**, Scope only: terminal chat is no longer listed as future work; it reuses the inbox through the console's actions. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED** (in review round 1, below): no action is added; the terminal sends `steer`, `steer-withdraw` and `parked-answer` through the existing table and guards. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: the store is unchanged, and the fork never writes it. **Code evidence**: worker/src/chat-mode.mjs -> chatModeOf, runStateOf, CHAT_REFUSALS; worker/src/chat-cli.mjs -> classifyChatTarget, runChat; worker/src/chat-fork.mjs -> planFork, copySnapshot, runFork, forkModelOf; worker/src/chat-view.mjs -> scrubForTerminal, parseChatInput, editorAvailability, runLiveView, runReplyView, questionOf; worker/src/console-client.mjs -> makeConsoleClient, consoleAddressOf, consoleToken; admin/src/console/run-api.mjs -> getRun, runDocument, chatFactsOf; admin/src/console/transcript.mjs -> transcriptEntryJson; admin/src/console/panels.mjs -> runChat; admin/src/console/live.mjs -> stateOf. Review round 1, folded in before merge: **`REQ-TERMINAL-CHAT` AMENDED**: the usage gains `[--yes]`; a run whose #645 recovery job is queued is refused (`recoveryQueued`), never a fork, and a park with a job queued or running on its target is refused (`answering`), a queue scan that cannot tell making it unknown, never a reply; a `PI_CONSOLE_LISTEN` read from the deployment must be loopback or a unix socket, and a console that is not loopback is warned about and asked y/N (default no, `--yes` answers it) before the token is read; the fork's consent names what pi will use (`forkModelOf`: both of pi's defaults passed as `--provider` and `--model`, else the run's own model with pi's fallback), no `PI_CONSOLE_*` variable reaches pi, the copy is removed on a no, on SIGINT, SIGTERM or SIGHUP at the question and once pi exits (pi's own fork is the operator's), and the private folders must be the operator's (group or other bits made 0700); the scrub also drops zero-width, soft hyphen, tag and Hangul filler characters; console refusals print on one line, to standard error; markdown is bounded (`markdownPlan`); the terminal is given back on a crash or a signal (`guardTerminal`); exit codes 130, 143 and 129 for signals; acceptance (a) to (f) name the new tests. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: (a) the overview's parked count leaves out the parks being answered and names them; (c) the Chat panel offers the reply form only where `planParkedAnswer` would plan it (`parkedAnswerRefusalOf`) and shows the planner's sentence otherwise, says "being answered" with a link to the answering job, links a queued recovery, and warns about an unread inbox instead of "not steer-armed"; (d) `/parked` gains the Answer column (waiting, being answered by a run, or unknown) and no form for a park being answered, and "the same target" is `targetKeyOf`'s. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (f): the planner refuses while an answer is queued or running on the target, or when that queue scan is partial or unreadable, and compares targets by `targetKeyOf`. **`REQ-AWAIT-INPUT` AMENDED**, the console answer bullet: the same refusal while an answer is pending. **Code evidence**: worker/src/chat-mode.mjs -> chatModeOf, QUEUED_STATES; worker/src/chat-cli.mjs -> runChat; worker/src/chat-fork.mjs -> childEnv, hostDefaultsOf, sessionModelOf, forkModelOf, ensurePrivateDir, runFork; worker/src/chat-view.mjs -> markdownPlan, guardTerminal, scrubForTerminal; worker/src/console-client.mjs -> isLoopbackAddress, consoleAddressOf, oneLine, makeSseParser, makeConsoleClient; admin/src/read-model.mjs -> targetKeyOf, liveJobsOfRun, readJobStatus, readPendingOnTargets, readPendingAnswer, readParkedRuns, createFleetReader; admin/src/job-actions.mjs -> parkedAnswerRefusalOf, planParkedAnswer; admin/src/console/run-api.mjs -> chatFactsOf, runDocument; admin/src/console/panels.mjs -> runChat, parkedInbox, overviewParked; admin/src/console/pages.mjs -> loadPageData. Review round 2, folded in before merge (terminal side): **`REQ-TERMINAL-CHAT` AMENDED**: LaTeX is also off past 256 backslashes (`LATEX_MAX_COMMANDS`), since brace-free nested `\frac` and `\sqrt` overflowed pi-tui at 1,600 to 2,000 commands under the brace bound alone; the fork's `--provider` and `--model` come from the agent dir's `settings.json` only, never the folder's `.pi/settings.json` (`hostDefaultsOf`); no TTY refuses before the copy, the signal handlers go on before it, an emptied `<key>/` folder is removed with the copy, and a SIGTERM or SIGHUP passed on to pi exits 143 or 129 (`runFork`); a `PI_CONSOLE_LISTEN` from the folder's `.env` is taken only from a file that is not a link and passes the panel's rule (`dotenvTrustRefusal` over `readDeploymentEnv`); stripping `PI_CONSOLE_*` from pi's env is stated as hygiene, not a boundary. Acceptance (c), (d) and (e) gain the matching tests. Review round 2, folded in before merge (console side): **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (d): an unknown park gets no answer form (one verdict with the Chat panel, `parkedVerdictOf`), and a queue past the scan's 10,000-id budget says so; **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (f): the parked answer is refused with `CHAT_REFUSALS.parkedTooMany`'s sentence when the queues hold more jobs than the scan's budget, and 'partial' no longer covers a busy state (the scan pages every state under one budget). `REQ-TERMINAL-CHAT` and `REQ-AWAIT-INPUT` UNCHANGED, checked (their 'cannot tell' still holds, now with an honest sentence). **Code evidence**: admin/src/read-model.mjs -> readPendingOnTargets; worker/src/chat-mode.mjs -> parkedVerdictOf; admin/src/console/panels.mjs -> parkedInbox; admin/src/job-actions.mjs -> planParkedAnswer. |
 | 2026-10-18 | Issue #662: three record and display gaps of durable runs. **`REQ-RUN-RECOVERY` AMENDED**, acceptance (h): the crashed attempt's stall record takes `startedAt` from the run's progress key (read before the enqueue; not ended, not after now, no earlier than the stalled job's enqueue time; else null, never `processedOn`, which BullMQ's stall re-pick overwrites) and `progress` from its integer counts; a recovery with no exit line takes its `recovered` counts from its transcript's recovery marks (this attempt's lines only, `orphans` the sum, `countsFrom: "transcript"`), the exit line's counts winning whenever it carries a `recovery` block (`countsFrom: "exit-line"`). **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, acceptance (c): the run page reads progress by the run id; an attempt whose record says `recovery-enqueued` shows its own record's progress and "This run continues as" the recovery job; a recovery's page shows its live progress; a plain retry keeps the pairing by time; the active rows read a recovery's progress by its run id. **`REQ-RUN-PROGRESS` AMENDED**, acceptance: a recovery is not a retry, by the same rule, on the console and in the `/dispatch` panel (the ACTIVE row's phase name by the run id; RUN_DETAIL's own progress and "continues as" line). Statements UNCHANGED, checked. |
 | 2026-10-18 | Insights move to the console. **`REQ-INSIGHTS-HTML-EXPORT` RETIRED**: the heading stays as a permanent address and the body is a status line. The static insights export is removed (the file, its stable path write, the graph dir and its setting, the browser spawn and its headless skip, `--no-open`, `--full-paths`, the page's own reload and auto-reload); every clause not about the file lives on in the console's `/insights` page (`REQ-OPERATOR-CONSOLE-SCREENS` (e), `REQ-COST-ANALYTICS`): the content bans, zero external requests (now the console's CSP), escaping and allowlisting, determinism, the labelling rules (a) to (g), the visual clauses (a) to (h), the degrades, and the budget, budget split, job sizes and capacity sections; `paths=full` (operator only) replaced the opt in flag. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: Scope no longer keeps the file beside the console and names the page the one analytics surface; Why says the offline copy drifted; Traces to marks the retired id and adds `REQ-COST-ANALYTICS` and `REQ-TOPOLOGY-GRAPH`; Acceptance (e) defaults to 30d (it was 7d), caches per window and `paths`, refuses an unknown key, and gains (e1) the two-window header line, (e2) the what-if panel (GET, viewer readable, not an action, 92-day scan ceiling, cached 30 s per model, flow and scan window, at most 64 answers, closest three priced ids for an unknown model with no scan, `whatif` and `flow` together, both charset checked, a `<datalist>`), (e3) `paths=full` operator only, (e4) the interactive topology in `/static/console.js` with node data as a hidden escaped list, never a script element, (e5) nothing leaves the host. **`REQ-CONSOLE-SECURITY` AMENDED**: Statement gains the insights page's three rules (zero external requests under the CSP, the what-if as a bounded and cached GET read for either role, `paths=full` for the operator alone); Scope replaces the sentence that kept the static file with the property now held by the console page; Traces to adds `REQ-COST-ANALYTICS`; NEW Acceptance (m) for the page's reads. **`REQ-COST-ANALYTICS` AMENDED**: the surfaces are the console's `/insights` page, `dispatch_costs` and the page's what-if form (`/dispatch insights whatif` prints its URL); Acceptance says the what-if form and gains the unknown-model, cache and scan-ceiling clauses; Traces to adds `REQ-OPERATOR-CONSOLE-SCREENS`. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the command list says `/dispatch insights` prints the console URL (and `whatif` its what-if URL), writes nothing and spawns no browser, and the `i` key shows the URL; Acceptance gains the URL, unix socket, unparsable listen, whatif and usage clauses. The model-callable tool list and its pin paragraph UNCHANGED, checked. **`REQ-TOPOLOGY-GRAPH` AMENDED**: its surface is the console's `/insights` page; "no port" reads "no port of its own"; Scope names the console's session, role and cache; Acceptance says the console's insights page. **`REQ-SIZE-SUGGESTIONS` AMENDED**: the page it draws on is the console's `/insights` page; Traces to names `REQ-OPERATOR-CONSOLE-SCREENS` in place of the retired id. **`REQ-CAPACITY-INSIGHTS` AMENDED**: phase 4's page is the console's `/insights` page and its acceptance opens on that page, not on `/dispatch insights`. **`REQ-GRAPH-HTML-EXPORT` AMENDED** (still SUPERSEDED): one sentence saying the entry it pointed at is itself retired. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, wording only: the per-account root no longer holds a graph dir. UNCHANGED, checked: `REQ-OPERATOR-CONSOLE-ACTIONS` (the what-if is a read, not an action, so the action table is untouched), `REQ-LIVE-TRANSCRIPT`, `REQ-RUN-PROGRESS`, `REQ-DURABLE-RUN-HISTORY`, `REQ-SCOPED-LIMITS`, `REQ-HOST-BUDGET`, `REQ-DELEGATED-ALLOCATION` (each names "the insights page", which is now the console's, and no clause changes), `REQ-TOKEN-ACCOUNTING-AND-CAPS`. Review round 1, folded in before merge: (e2) admits a leading `@` or `~` in the model (priced ids the datalist offered were refused), (e4) states that a mouse click selects a chip and that a fragment's view is clamped, and the `/dispatch insights` acceptance gains the any-address, port 0 and shell-quoted socket cases. |
 | 2026-10-17 | Issue #646, part 3, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round: Scope says a message is not refused while the fleet is paused (the kill switch stops new jobs, not a running one, and a message stays inside the run's caps and reservation), and that the base run page of a recovered run sends through its active recovery job; acceptance (m) gains the audit row's message id, the metadata-only listing, the recovery case and the branches the mutation round found unpinned (every refusal, the plan guards, the race to delivered, the 16-row bound, the hostile entry, the scrubbing in the TUI). **`REQ-OPERATOR-CONSOLE-ACTIONS` CORRECTED**: acceptance (n)'s audit row names `<job id>#<message id>`. **Code evidence**: admin/src/job-actions.mjs -> steerAuditTarget, planSteer; admin/src/read-model.mjs -> activeJobOfRun; worker/src/steer-inbox.mjs -> listInboxPublic. |

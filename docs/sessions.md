@@ -252,6 +252,18 @@ Rules:
   worker then refuses the job before it spends (`trigger-skew`) rather than run it without the tool. Adding
   `awaitInput` to a trigger does the same to its jobs that were already queued: re-run them.
 
+An operator can also answer from the console's parked page or a run's **Chat** panel
+([`console.md`](console.md#answering-a-parked-run)), or from a terminal with `pi-dispatch chat <job id>`, which shows
+the question and sends the same answer ([`chat.md`](chat.md#reply-answer-a-parked-run)).
+
+## Reading a stored session in your own pi
+
+`pi-dispatch chat <job id>` (or the session's 32-hex key) on the host that keeps `PI_SESSIONS_DIR` opens a finished
+run's stored conversation in your own pi as a fork: it copies the transcript to `~/.pi-dispatch/chat/<key>/` (deleted
+again when the command ends; pi's own fork stays in pi's sessions folder), never writes the store, and starts pi with
+its tools off. The stored transcript is unredacted, so it asks before your pi
+sends it to your provider ([`chat.md`](chat.md#fork-continue-a-finished-run-in-your-own-pi)).
+
 ## Durable runs are not sessions
 
 `"recover": true` ([`durable-runs.md`](durable-runs.md)) also keeps a transcript on disk, and by default in this
