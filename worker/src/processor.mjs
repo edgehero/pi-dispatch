@@ -9,7 +9,7 @@ import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { MCP_REFUSAL_COMMENT } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
-import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS, recoveryCounts } from "./run-history.mjs";
+import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS, recoveryCounts, recoveryCountsFromProgress } from "./run-history.mjs";
 import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as resetTrustPathsDefault } from "./trust-paths.mjs";
 import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
@@ -1880,9 +1880,16 @@ async function runAttempt(job, deps, durable) {
 		const oomReported = exitOomKilled === true && exitAuthResult === "verified" && code === EXIT_SIGKILL;
 		const oomKilled = oomReported && peakReachedLimit(resources?.memPeak ?? null, memoryLimit);
 		// Issue #645: what the runner says it did with the crashed attempt's orphaned tool calls (the exit line's `recovery`).
+		// Issue #662: a recovery whose own container was killed writes no exit line, so its counts come from the transcript
+		// instead (the reducer's recovery marks, this attempt's lines only), labelled `countsFrom: "transcript"`. The marks
+		// are in an agent-writable file, so the exit line's counts win whenever the exit line CARRIES a `recovery` block
+		// (`recoveryCounts` not null); an exit line without one (a verified line whose recovery step threw, say) falls back
+		// to the transcript like a missing line. Neither feeds any decision.
 		if (durable.recovered !== null) {
 			const counts = recoveryCounts(ranRecovery);
-			if (counts !== null) durable.recovered = { ...durable.recovered, ...counts };
+			const fromTranscript = counts === null ? recoveryCountsFromProgress(progress) : null;
+			if (counts !== null) durable.recovered = { ...durable.recovered, ...counts, countsFrom: "exit-line" };
+			else if (fromTranscript !== null) durable.recovered = { ...durable.recovered, ...fromTranscript, countsFrom: "transcript" };
 		}
 		// A container the checkpointer stopped because it could not unpause it (`checkpointStopped`, code 137, not aborted)
 		// is an infrastructure exit like any other here: not the worker's abort, not an OOM (no supervisor report), so it

@@ -133,7 +133,9 @@ export function recordToolOf(name) {
  *   - `summary()` is the run record's `progress` (integers and closed keys only, zeros left out). `toolMs` is the SUM of
  *     the closed steps' durations, not wall time: a parallel batch of three 60 s tools adds 180 s. `longestStepMs` is
  *     the longest closed step, `longestInterruptedMs` the longest of the steps still open at the end (from the call's
- *     time to the end), which is where a tool hung until the job timeout shows.
+ *     time to the end), which is where a tool hung until the job timeout shows. `recoveryInterrupted` and
+ *     `recoveryNotStarted` (issue #662) count this attempt's recovery marks of those two words; they are the processor's
+ *     fallback for a recovery's counts, and `recordedProgress` keeps them out of the record's `progress`.
  *
  * THE RESET RULE. A reset means the file was rewritten and the tailer reads it again from 0. The counts this attempt
  * already has are kept, and the rewritten file's bytes up to its size at the reset are taken as already seen: a
@@ -157,6 +159,13 @@ export function makeProgress({ jobId: _jobId = null, phasesEnabled = false, reda
 	// Issue #645: orphaned tool calls a recovered run's runner answered by running them again (`piDispatchRecovery`
 	// "replayed"). Counted apart from `steps`: the call was made by the crashed attempt, and this attempt only closed it.
 	let replayed = 0;
+	// Issue #662: the same marks split by word, for the record's `recovered` counts when the runner's exit line is missing
+	// (a recovery whose own container was killed writes none). `interrupted` above merges "interrupted", "not-started" and
+	// the steps still open at the end, so it cannot give the runner's two counts back; these two count only the marks.
+	// Summary keys only: never in the snapshot (the admin's key parser refuses a field it does not name) and never in the
+	// record's `progress` (run-history.mjs `recordedProgress` keeps PROGRESS_COUNT_KEYS alone).
+	let recoveryInterrupted = 0;
+	let recoveryNotStarted = 0;
 	let toolMs = 0;
 	let longestStepMs = 0;
 	let longestInterruptedMs = 0;
@@ -351,6 +360,8 @@ export function makeProgress({ jobId: _jobId = null, phasesEnabled = false, reda
 					if (mark === "replayed") replayed += 1;
 					else {
 						interrupted += 1;
+						if (mark === "interrupted") recoveryInterrupted += 1;
+						else recoveryNotStarted += 1;
 						pushRecent({ tool: step?.tool ?? displayTool(message.toolName), status: "interrupted", durationMs: null, at });
 					}
 					touch();
@@ -403,6 +414,8 @@ export function makeProgress({ jobId: _jobId = null, phasesEnabled = false, reda
 			put("longestStepMs", longestStepMs);
 			put("longestInterruptedMs", longestInterruptedMs);
 			put("phasesDeclared", phases.length);
+			put("recoveryInterrupted", recoveryInterrupted);
+			put("recoveryNotStarted", recoveryNotStarted);
 			if (phases.length > 0 && phase !== null) out.lastPhaseIndex = phase.index;
 			const counted = {};
 			for (const tool of [...PROGRESS_RECORD_TOOLS, "other"]) if (tools[tool] > 0) counted[tool] = tools[tool];

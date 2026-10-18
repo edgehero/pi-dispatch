@@ -477,7 +477,26 @@ test("the runner's recovery counts reach the record's recovered, rebuilt", async
 	const r = await runJob(recoveryJob(2), d);
 	const rec = buildRecord({ job: { id: `${RUN}.r2`, data: recoveryJob(2) }, result: r });
 	assert.equal(rec.recoveryOf, RUN);
-	assert.deepEqual(rec.recovered, { from: "live", n: 2, fromAttempt: 1, checkpointSeq: 4, orphans: 3, replayed: 1, interrupted: 1, notStarted: 1 });
+	assert.deepEqual(rec.recovered, { from: "live", n: 2, fromAttempt: 1, checkpointSeq: 4, orphans: 3, replayed: 1, interrupted: 1, notStarted: 1, countsFrom: "exit-line" });
+});
+
+test("a recovery with no exit line takes its counts from the transcript, labelled transcript, never into progress (#662)", async () => {
+	const progress = { turns: 2, steps: 3, interrupted: 3, replayed: 2, recoveryInterrupted: 2, recoveryNotStarted: 1 };
+	const { deps: d } = deps({ runContainer: async () => ({ code: 0, aborted: false, progress }) });
+	const r = await runJob(recoveryJob(2), d);
+	const rec = buildRecord({ job: { id: `${RUN}.r2`, data: recoveryJob(2) }, result: r });
+	assert.deepEqual(rec.recovered, { from: "live", n: 2, fromAttempt: 1, checkpointSeq: 4, orphans: 5, replayed: 2, interrupted: 2, notStarted: 1, countsFrom: "transcript" });
+	assert.deepEqual(rec.progress, { turns: 2, steps: 3, interrupted: 3, replayed: 2 }, "the reducer's recovery keys never reach progress");
+});
+
+test("the exit line wins over the transcript's counts; a transcript with no mark leaves the counts null (#662)", async () => {
+	const progress = { replayed: 9, recoveryInterrupted: 9, recoveryNotStarted: 9 };
+	const a = deps({ runContainer: async () => ({ code: 0, aborted: false, progress, recovery: { orphans: 1, replayed: 1, interrupted: 0, notStarted: 0 } }) });
+	const ra = buildRecord({ job: { id: `${RUN}.r1`, data: recoveryJob(1) }, result: await runJob(recoveryJob(1), a.deps) });
+	assert.deepEqual([ra.recovered.orphans, ra.recovered.replayed, ra.recovered.countsFrom], [1, 1, "exit-line"]);
+	const b = deps({ runContainer: async () => ({ code: 0, aborted: false, progress: { turns: 4, steps: 2 } }) });
+	const rb = buildRecord({ job: { id: `${RUN}.r1`, data: recoveryJob(1) }, result: await runJob(recoveryJob(1), b.deps) });
+	assert.deepEqual(rb.recovered, { from: "live", n: 1, fromAttempt: 1, checkpointSeq: 4, orphans: null, replayed: null, interrupted: null, notStarted: null });
 });
 
 // ── local ───────────────────────────────────────────────────────────────────────────────────────────────────────
