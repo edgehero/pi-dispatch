@@ -86,7 +86,7 @@ project.
 
 ## See the spend
 
-- **Insights** (`/dispatch insights`): the breakdown has a "by project" list. Each bar is a project id, and the
+- **Insights** (the console's `/insights`, [insights](insights.md)): the breakdown has a "by project" list. Each bar is a project id, and the
   names sit under the list.
 - **`dispatch_costs`**: `fold.byProject` has one row per id, plus `(no project)`. The `project` filter
   (`project: "shop"`) scopes the whole fold to the runs recorded under that id.

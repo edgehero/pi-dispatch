@@ -1301,7 +1301,16 @@ adversarial passes did.
   test and the module is the same one `setup github` has shipped since issue #81 — but no CI runs a
   desktop session on all three platforms, so "the browser actually appears" is verified by reading
   and by field use, not by an automated end-to-end.
-- **Status**: WATCH, on the `OQ-016` precedent (the sandbox `docker run -it` spawn carries the same
+- **Status**: **CLOSED: moot by design (2026-10-18, insights move to the console)**
+- **Closed (2026-10-18)**: there is no spawn left to verify. The static insights export is retired
+  (`REQ-INSIGHTS-HTML-EXPORT`): `/dispatch insights` now prints the operator console's URL for the window, writes
+  nothing and spawns no browser, and the panel's `i` key shows the same URL as a notice
+  (`REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-OPERATOR-CONSOLE-SCREENS` (e)). The printed URL was always the contract and the
+  spawn a convenience, so dropping the convenience closes the residual rather than moving it. The shared opener
+  itself, and its own unverified-by-CI residual, stay where `setup github` uses it; this question was only ever
+  about the insights spawn. **What would reopen it**: a command that spawns a browser for the insights page again.
+  The text below is the question as it stood, kept for the history.
+- **Status, as it stood until 2026-10-18**: WATCH, on the `OQ-016` precedent (the sandbox `docker run -it` spawn carries the same
   shape of residual): the failure mode is cosmetic and self-announcing — the printed `file://` URL is
   the contract, the spawn a convenience, and a missing opener is swallowed by design with the URL
   already on screen.
@@ -2204,3 +2213,4 @@ adversarial passes did.
 | 2026-10-17 | Issue #645, part 2: durable runs. **`OQ-041` AMENDED, still `WATCH`**: its third trigger (spend lost to runs that died mid-run on infrastructure and were paid for again) is now measurable from the records: a recovery's `recovered` and `recoveryOf`, the lost attempt's `recovery-enqueued`; and the in-container durability its Position called cheap to give up is answered at the worker's layer. **NEW `OQ-045`, `OPEN`**: durable runs across hosts (the store is host-local, the recovery is routed to the checkpoint host and refuses a checkpoint from another host, so a shared `PI_SESSIONS_DIR` does not help today), local folders (not armed, `recoverSkipped: "local"`), and the forge mirror (part 3). **`OQ-014` UNCHANGED, checked**: a checkpoint is never handed to a later run, so the resume population is unchanged. **`OQ-044` UNCHANGED, checked**: no new place shows transcript text; a recovery continues its run's stream. |
 | 2026-10-17 | Issue #645, part 2, review round 1. **`OQ-045` CORRECTED**: a lost host's runs end after six hours only once it is gone from the host registry (up to seven days while it still beats or its queue is paused), and doctor now warns on `run.recover` on a fleet worker with no `PI_WORKER_NAME`. |
 | 2026-10-17 | Issue #645, closing. **`OQ-045` AMENDED**: the forge mirror of the workspace (planned as part 3) is DECLINED: it could carry the tree only, a recovery needs the transcript and the tree from the same store, and it would publish the tree to readers of the repository; cross-host recovery, if it comes, comes from a shared checkpoint store. Its trigger and need for the mirror are removed. |
+| 2026-10-18 | Insights move to the console. **`OQ-024` CLOSED** (moot by design): the static insights export is retired and `/dispatch insights` prints the console's URL and spawns no browser, so the spawn this question watched is gone; the question as it stood is kept below the closing note, and what would reopen it is named (a command that spawns a browser for the insights page again). The shared opener and `setup github`'s use of it are outside this question. UNCHANGED, checked: `OQ-016` (the sandbox handover, its precedent), `OQ-002` (the what-if's seeded band keeps its label on the console), `OQ-044`. |

@@ -206,7 +206,8 @@ set). It then checks:
 
 ## The screens
 
-A viewer sees every page except the audit log, and never the reason text of a failed job (below). The buttons and
+A viewer sees every page except the audit log, never the reason text of a failed job (below), and never a full local
+folder path on the insights page (an operator can ask for those with `?paths=full`). The buttons and
 forms that change something ([Actions](#actions)) are shown to operators only, and not at all on a read only
 console.
 
@@ -216,7 +217,7 @@ console.
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. |
 | `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. It says whether the record came from this host or from the mirror. For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, and how many times the session was resumed. |
-| `/insights?range=7d` | Spend and insights, the same sections as `/dispatch insights` draws into `insights.html`, for `7d`, `30d` or `mtd` (month to date). |
+| `/insights?range=30d` | Spend and insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
 | `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget and running jobs, every running job, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages and the secret profiles (their names only, never where a secret comes from or its value). |
 | `/audit` | The console's audit log, newest first. Operator only. A line that is not a valid row is shown as broken in its place, never skipped. |

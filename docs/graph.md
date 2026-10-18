@@ -10,16 +10,17 @@ informs; it changes nothing — no port, no database, no new dependency.
 
 ![The topology pane: triggers wired to their flows Node-RED style across the four skill tiers, a /wf command trigger with no flow edge, an amber not-at-HEAD flow, an observed chain edge with its count and recency, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=1.0.0)
 
-The topology is the lower half of the **insights page** ([`insights.md`](insights.md)):
-`/dispatch insights` writes one self-contained HTML file and opens your browser, and the topology
+The topology is the lower half of the **insights page** ([`insights.md`](insights.md)), `/insights` on the
+operator console ([`console.md`](console.md)); `/dispatch insights` prints its URL. The topology
 renders there as a Node-RED-style diagram — trigger nodes wired to their flows, observed chain edges
 with their counts and recency, potential (mentioned) edges dashed, folders as group boxes, orphans
 dimmed and dashed, dangling triggers flagged, spend badged onto the triggers that earned it. Pan by
 dragging, zoom with the wheel, hover a node for its details (a cron's tip counts down to its next
-fire, or says how overdue it is), click one to highlight what it triggers and what reaches it. The
-page is a snapshot with its own refresh loop, overwritten atomically at a stable path, so the
-workflow is: keep the tab open, re-run `/dispatch insights` after editing triggers or skills, and
-the tab picks up the new topology within the auto-reload interval.
+fire, or says how overdue it is), click one to highlight what it triggers and what reaches it, and
+press Escape to clear the selection. A label too long for its chip is shortened, with the full text in
+its tooltip. Clicking a row of the page's "spend by trigger" breakdown selects that trigger's chip and
+its wires the same way. The view (pan, zoom, selection) is kept in the URL fragment, so a reload keeps it.
+The page is drawn once per load: after editing triggers or skills, reload it to see the new topology.
 
 This document explains the semantics behind what that pane draws.
 
@@ -70,9 +71,9 @@ observed self-edge with its count.
 
 ## Which repos and folders
 
-A local folder group is headed by its `run.folder`, shown as a basename unless you pass
-`--full-paths` — the file is durable and shareable, and full host paths are the operator's explicit
-opt-in. A forge group's triggers name no repository in
+A local folder group is headed by its `run.folder`, shown as a basename. An operator can open the page
+with `?paths=full` (the page links it) to see full paths; a viewer always sees basenames, because full
+host paths are detail about the host. A forge group's triggers name no repository in
 `triggers.json` (routing belongs to the forge app installation), so the group instead lists the
 repositories its **recorded runs** actually hit in the window, labelled as record-derived: history
 answering a question configuration cannot. The title leads with `forge · unverifiable from this host`
@@ -178,8 +179,8 @@ by trigger — each line below is one flow resolution from the [tier ladder](#wh
   trigger-reachable, **never AI-reachable** (an injected `ai-trigger: allow` is a silent no-op, and the
   tip says so).
 - **`weekly-overlay` ◷ → ◎ `overlay-report` under *overlay skills (global pi dir)*.** Absent at HEAD,
-  not injected; the deployment overlay's `skills/` holds it. Renders only when the session running
-  `/dispatch insights` can see `PI_GLOBAL_PI_DIR`.
+  not injected; the deployment overlay's `skills/` holds it. Renders only when the console can see
+  `PI_GLOBAL_PI_DIR` (in the deployment's `.env`).
 - **`audit` ◷ → ▣ `house-audit` under *staged package skills*.** Resolves in `@acme/pi-house-skills` —
   and the tier is claimed only because every tier above it (repo, injected, overlay) is a **known**
   miss. An edge is an identity claim about which file the job loads, so a hit below an unknowable tier

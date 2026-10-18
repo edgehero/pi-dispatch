@@ -6,8 +6,8 @@ subscription is actually saving, and what a flow *would* cost on a different mod
 changes nothing — no auto-switching, no vendor API calls, no database (`REQ-COST-ANALYTICS`,
 `DES-COST-FOLD-BY-SCAN`).
 
-The surface is the **insights page** ([`insights.md`](insights.md)): `/dispatch insights` writes and
-opens one self-contained file with the plan verdicts, the daily and cumulative spend charts, the
+The surface is the **insights page** ([`insights.md`](insights.md)), `/insights` on the operator console
+([`console.md`](console.md)), with the plan verdicts, the daily and cumulative spend charts, the
 per-flow trend panels, and the five breakdowns (by flow, by trigger, by model, by repo, by project) beside the
 trigger/flow topology those numbers come from. This document explains the semantics behind every
 dollar that page draws.
@@ -117,13 +117,13 @@ labeled `unmeasured (OQ-002)`.
 
 ## The surfaces
 
-- `/dispatch insights [7d|30d|mtd]` — the page: the fold drawn as charts beside the trigger/flow
-  topology, in one self-contained file your browser opens from disk ([`insights.md`](insights.md)).
-  Over SSH the file still writes and its URL still prints.
-- `/dispatch insights whatif <provider>/<model> --flow <flow>` — the what-if: re-prices a flow's
-  recorded token profiles under another model. Unknown models get closest-match suggestions, and
-  tab completion offers the full priced catalog. `--flow` is **required**: the estimate scores one
-  flow's median run, not a portfolio, so the command refuses without it.
+- The console's `/insights?range=7d|30d|mtd` page: the fold drawn as charts beside the trigger/flow
+  topology ([`insights.md`](insights.md)). In pi, `/dispatch insights [7d|30d|mtd]` prints its URL.
+- The what-if, a form on that page (`/insights?whatif=<provider>/<model>&flow=<flow>`): re-prices a flow's
+  recorded token profiles under another model. An unknown model gets up to three closest priced ids, and
+  the model field suggests the priced catalog. The flow is **required**: the estimate scores one
+  flow's median run, not a portfolio, so the page refuses a what-if without it.
+  `/dispatch insights whatif <provider>/<model> --flow <flow>` prints the URL of the answer.
 - The `dispatch_costs` tool returns the fold as JSON in which **every monetary value carries its
   `class`** — a model reading it can no more launder an estimate into a fact than the page can.
   Beside the fold, `dollars` holds the dollar caps' enforcement amounts (below): integer micro-dollars from the
