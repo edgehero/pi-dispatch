@@ -544,6 +544,52 @@ test("the run page says the transcript could not be read when transcriptMeta is 
   assert.match(String((await renderPage("run", { query: { id: "gh-1" }, session, data: absent, readOnly: false })).html), /not started yet/);
 });
 
+test("the run page reads progress by the run (progressOfRun), handing it the record, and pairs a continued attempt with its own record (issue #662)", async () => {
+  const { loadPageData, renderPage } = await import("../src/console/pages.mjs");
+  const session = { name: "ops", role: "operator" };
+  const record = { jobId: "gh-1", outcome: "failed", reason: "recovery-enqueued", startedAt: "2026-10-17T10:00:00.000Z", endedAt: "2026-10-17T10:03:00.000Z", progress: { turns: 4, steps: 6 } };
+  const key = { v: 1, turn: 1, steps: 0, failed: 0, interrupted: 0, running: [], recent: [], phase: null, phases: [], note: null, prior: null, startedAt: 2, updatedAt: 3, ended: false, outcome: null };
+  const calls = [];
+  const fleet = {
+    runById: async () => ({ record }),
+    runsPage: async () => ({ runs: [], next: null, mirror: "off" }),
+    progress: async (id) => (calls.push(["progress", id]), key),
+    progressOfRun: async (id, rec) => (calls.push(["progressOfRun", id, rec?.reason ?? null]), { progress: key, continues: true, continuesAs: "gh-1.r1" }),
+  };
+  const data = await loadPageData("run", { id: "gh-1" }, { fleet, subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
+  assert.deepEqual(calls, [["progressOfRun", "gh-1", "recovery-enqueued"]], "one read, by the run, after the record");
+  assert.deepEqual(data.progressContinues, { as: "gh-1.r1" });
+  const html = String((await renderPage("run", { query: { id: "gh-1" }, session, data, readOnly: false })).html);
+  assert.match(html, /This run continues as <a class="mono" href="\/run\?id=gh-1\.r1">gh-1\.r1<\/a>/);
+  assert.match(html, /<dt>Turns<\/dt><dd>4<\/dd>/);
+  // A run that does not continue: no marker, the key as read, the pairing as before.
+  calls.length = 0;
+  const plain = await loadPageData("run", { id: "gh-1" }, { fleet: { ...fleet, progressOfRun: async () => ({ progress: key, continues: false, continuesAs: null }) }, subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
+  assert.equal(Object.hasOwn(plain, "progressContinues"), false);
+  assert.equal(plain.progress, key);
+  // A fleet without progressOfRun reads by the page's id, as before; one that throws is unreachable.
+  const { progressOfRun: _drop, ...older } = fleet;
+  assert.equal((await loadPageData("run", { id: "gh-1" }, { fleet: older, subscriptions: () => ({ subscriptions: [] }), now: () => 1 })).progress, key);
+  const down = await loadPageData("run", { id: "gh-1" }, { fleet: { ...fleet, progressOfRun: async () => { throw new Error("down"); } }, subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
+  assert.deepEqual(down.progress, { unreachable: true });
+  // Review: a continued attempt whose read threw still shows its own record and says it continues, not the failure.
+  assert.deepEqual(down.progressContinues, { as: null });
+  const downHtml = String((await renderPage("run", { query: { id: "gh-1" }, session, data: down, readOnly: false })).html);
+  assert.match(downHtml, /This run continues as a recovery job\./);
+  assert.match(downHtml, /<dt>Turns<\/dt><dd>4<\/dd>/);
+  assert.doesNotMatch(downHtml, /progress could not be read/);
+  // An answer with no progress at all reads as unreachable, never as a snapshot or an absence.
+  for (const answer of [null, {}, { continues: false }]) {
+    const odd = await loadPageData("run", { id: "gh-1" }, { fleet: { ...fleet, progressOfRun: async () => answer }, subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
+    assert.deepEqual(odd.progress, { unreachable: true }, JSON.stringify(answer));
+  }
+  // A hostile recovery job id from the reader is dropped here, before any panel sees it.
+  for (const as of ['gh-1.r1"><script>', "", 7]) {
+    const hostile = await loadPageData("run", { id: "gh-1" }, { fleet: { ...fleet, progressOfRun: async () => ({ progress: key, continues: true, continuesAs: as }) }, subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
+    assert.deepEqual(hostile.progressContinues, { as: null }, JSON.stringify(as));
+  }
+});
+
 test("the audit page's Older rows link carries readConsoleAudit's own cursor, which parsePageQuery takes back to the next page", async () => {
   const { AUDIT_PER_PAGE, loadPageData, parsePageQuery, renderPage } = await import("../src/console/pages.mjs");
   const { makeConsoleAudit, readConsoleAudit } = await import("../../worker/src/console-audit.mjs");

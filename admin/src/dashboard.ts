@@ -24,6 +24,7 @@
  * never a message.
  */
 import { windowState } from "@edgehero/pi-dispatch/budget";
+import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 import { cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
@@ -226,6 +227,10 @@ export function createDashboardDeps(paths: any, seams: any = {}) {
     // The ACTIVE row's progress (issue #644): the running job's whole snapshot, phase names included (the panel is the
     // operator's), off the same held client. The snapshot's own `active[].progress` carries the integers.
     progress: (jobId: string) => reader.progress(jobId),
+    // Issue #662: the progress key by the job's RUN id (a #645 recovery writes its run's key, not its own job id's), and
+    // whether an attempt's run continues as a recovery job (`readRunProgress`). The ACTIVE row's phase name and the
+    // RUN_DETAIL "continues" line read it.
+    progressOfRun: (jobId: string, record: any = null) => reader.progressOfRun(jobId, record),
     async cancelHeld({ jobId }: any) {
       return cancelHeldJob({ url: paths.valkeyUrl, jobId });
     },
@@ -350,6 +355,12 @@ export function makeDashboard({
   // ONCE on entry through the injected seam rather than on every tick -- the answer changes at worker boot,
   // not per second, and this module does no I/O of its own.
   let detailSandbox: any = null;
+  // Issue #662: the run opened in RUN_DETAIL, when its record says its run went on as a #645 recovery
+  // (`recovery-enqueued`): `{ jobId, as }`, `as` the recovery job's id once `progressOfRun` has answered with one, else
+  // null. Read once on entry like the sandbox state, never per tick; `continuesSeq` drops an answer for a run the pane
+  // has already left.
+  let detailContinues: { jobId: string; as: string | null } | null = null;
+  let continuesSeq = 0;
   let detailTrigger: any = null; // the trigger opened in TRIGGER_DETAIL (its display record + file index)
   // LIVE_TAIL state, held here in dedicated component fields keyed only by the id-only `activeJobId`. The
   // raw `.log` bytes in `tail` are PII-bearing and untrusted: they live here and reach the TUI overlay via
@@ -537,6 +548,26 @@ export function makeDashboard({
     capInfo = res;
     tui?.requestRender?.();
   };
+  const readContinues = (record: any) => {
+    const seq = ++continuesSeq;
+    detailContinues = null;
+    if (record?.reason !== "recovery-enqueued" || typeof record?.jobId !== "string") return;
+    // Known to continue from the record alone; the recovery job's id follows when the read answers with one.
+    const jobId = record.jobId;
+    detailContinues = { jobId, as: null };
+    if (typeof deps?.progressOfRun !== "function") return;
+    void Promise.resolve()
+      .then(() => deps.progressOfRun(jobId, record))
+      .then(
+        (got: any) => {
+          if (seq !== continuesSeq || disposed) return;
+          const as = typeof got?.continuesAs === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(got.continuesAs) ? got.continuesAs : null;
+          detailContinues = { jobId, as };
+          tui?.requestRender?.();
+        },
+        () => {},
+      );
+  };
   const refresh = async () => {
     if (fetching || disposed) return;
     fetching = true;
@@ -557,7 +588,8 @@ export function makeDashboard({
       // costs the name, never the tick.
       if (snapshot && typeof snapshot === "object" && typeof snapshot.activeJobId === "string" && typeof deps?.progress === "function") {
         const jobId = snapshot.activeJobId;
-        const got = await Promise.resolve(deps.progress(jobId)).catch(() => null);
+        // Issue #662: by the RUN id where the reader offers it, so a running recovery's row names its phase too.
+        const got = typeof deps?.progressOfRun === "function" ? await Promise.resolve(deps.progressOfRun(jobId, null)).then((r: any) => r?.progress ?? null).catch(() => null) : await Promise.resolve(deps.progress(jobId)).catch(() => null);
         snapshot.activePhase = { jobId, name: phaseNameOf(got) };
       }
       // Only while the tail view is open, and only through the injected capability, re-read the tail keyed
@@ -640,6 +672,7 @@ export function makeDashboard({
         tailQuery,
         tailMatchLine,
         detailSandbox,
+        detailContinues,
         sandboxAvailable: typeof deps?.launchSandbox === "function",
         pendingDelete,
         pendingCancel,
@@ -753,6 +786,8 @@ export function makeDashboard({
           view = detailFrom;
           detailFrom = "LIST";
           detailSandbox = null;
+          continuesSeq++;
+          detailContinues = null;
           tui?.requestRender?.();
           return;
         }
@@ -768,6 +803,7 @@ export function makeDashboard({
           detailRun = next.record;
           // Same one-read-on-entry rule as Enter: sandbox state through the injected seam, never per tick.
           detailSandbox = typeof deps?.sandboxInfo === "function" ? deps.sandboxInfo({ jobId: detailRun?.jobId }) : null;
+          readContinues(detailRun);
           selected = i + step;
           tui?.requestRender?.();
           return;
@@ -1005,6 +1041,7 @@ export function makeDashboard({
             detailFrom = "PARKED";
             // The Enter rule on the LIST: sandbox state read once on entry, through the seam.
             detailSandbox = typeof deps?.sandboxInfo === "function" ? deps.sandboxInfo({ jobId: record?.jobId }) : null;
+            readContinues(record);
             view = "RUN_DETAIL";
             tui?.requestRender?.();
           };
@@ -1205,6 +1242,7 @@ export function makeDashboard({
           detailFrom = "LIST";
           // One read on entry, through the seam whose fs access lives in index.ts.
           detailSandbox = typeof deps?.sandboxInfo === "function" ? deps.sandboxInfo({ jobId: row.record?.jobId }) : null;
+          readContinues(row.record);
           view = "RUN_DETAIL";
           tui?.requestRender?.();
         }
@@ -1473,7 +1511,7 @@ function degradeWidth(width: number): number | null {
 }
 
 function renderPanelLines(snapshot: any, width: number, state: any, styler: any): string[] {
-  const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, pendingCancel, steerInput, actionNote, heldSelected, runSort, copiedNote, copyAvailable, terminalRows } = state;
+  const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, detailContinues, sandboxAvailable, pendingDelete, pendingCancel, steerInput, actionNote, heldSelected, runSort, copiedNote, copyAvailable, terminalRows } = state;
   const runProject = "runProject" in (state ?? {}) ? state.runProject : ALL_RUNS;
   const framed = framedAt(width);
   const inner = Math.trunc(width) - 4;
@@ -1503,7 +1541,8 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     const allRuns = Array.isArray(snapshot?.runs) ? snapshot.runs : [];
     const canOpen = Boolean(sandboxAvailable && detailSandbox?.retained);
     const canCopy = Boolean(copyAvailable);
-    const lines = renderRunDetail(detailRun, framed ? dw - 4 : 24, styler, allRuns, detailSandbox);
+    const continues = detailContinues !== null && detailContinues.jobId === detailRun?.jobId ? detailContinues : null;
+    const lines = renderRunDetail(detailRun, framed ? dw - 4 : 24, styler, allRuns, detailSandbox, continues);
     if (!framed) {
       const bits = ["←→ prev/next"];
       if (canOpen) bits.push("b sandbox");
@@ -3957,7 +3996,7 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
  * already in the snapshot: no read, no `.log`, no `.data` -- exactly the PII-free run-history fields
  * (INT-RUN-HISTORY-FILE-CONTRACT). Every line is `inner` cols; a missing field renders `-` rather than throw.
  */
-function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[] = [], sandbox: any = null): string[] {
+function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[] = [], sandbox: any = null, continues: { as: string | null } | null = null): string[] {
   const r = record ?? {};
   // Every record string this pane prints goes through here, which is why the scrub lives INSIDE `show`
   // rather than around the lines it builds: `styler.fg("accent", show(r.target))` puts the value inside an
@@ -4062,6 +4101,15 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
     if (head.length > 0) out.push(kv("recovery", head.join(" · "), "warning"));
     if (counts !== "") out.push(kv("", counts, "dim"));
     if (rec.checkpoints) out.push(kv("checkpoints", checkpointsText(rec.checkpoints)));
+  }
+  // Issue #662: an attempt whose run went on as a #645 recovery. The record above is this attempt's own (its progress
+  // counts included); the line names the job that continues the run, whose own row shows the run's live progress. Only
+  // for a `recovery-enqueued` record, so every other record renders byte-identical.
+  if (continues && r.reason === "recovery-enqueued") {
+    const own = recordedProgress(r.progress);
+    const bits = own ? [Number.isSafeInteger(own.turns) ? `${own.turns} turns` : null, Number.isSafeInteger(own.steps) ? `${own.steps} steps` : null, Number.isSafeInteger(own.interrupted) ? `${own.interrupted} interrupted` : null].filter(Boolean) : [];
+    if (bits.length > 0) out.push(kv("progress", bits.join(" · ")));
+    out.push(kv("continues", continues.as !== null ? `as ${show(continues.as)}` : "as a recovery job", "warning"));
   }
 
   // Per-job token accounting (issue #25): total + cost-USD, or `-` when the container died before reporting.

@@ -526,11 +526,25 @@ export const PROGRESS_ABSENT = "No live progress: not published (PI_RUN_PROGRESS
  * outcome); the key's phase names join the record only when the key has ended and started inside the record's
  * attempt (no earlier than the record started, no later than it ended). A record whose start or end cannot be read
  * pairs with no key.
+ *
+ * Issue #662: the key is read by the job's RUN id (pages.mjs, `readRunProgress`), so a recovery's page pairs with its
+ * own live key, and an attempt whose record says its run continues as a recovery (`data.progressContinues`) pairs with
+ * nothing: it shows its own record's progress and links the recovery job.
  */
 export function runProgress(view) {
   const title = "Progress";
   const record = view.data?.run?.record ?? null;
   const g = view.data?.progress ?? null;
+  // Issue #662: an attempt whose run went on as a #645 recovery (its record says `recovery-enqueued`). The key is the
+  // RUN's, so it now holds the recovery's progress: pairing it here would show another job's live steps as this
+  // attempt's. The attempt shows its own record's progress, and names the job that continues it (its own page reads the
+  // key live). A BullMQ retry keeps the job id and keeps the pairing below.
+  const cont = view.data?.progressContinues ?? null;
+  if (record && cont) {
+    const next = typeof cont.as === "string" && RUN_ID_RE.test(cont.as) ? cont.as : null;
+    const line = html`<p class="note">This run continues as ${next !== null ? runLink(next) : "a recovery job"}.</p>`;
+    return titled(title, html`${line}${recordProgressBody(record) ?? html`<p class="note">This attempt's record holds no progress.</p>`}`);
+  }
   const live = isProgressSnapshot(g) ? g : null;
   const recordEnd = typeof record?.endedAt === "string" ? Date.parse(record.endedAt) : Number.NaN;
   if (record && live && Number.isFinite(recordEnd) && live.startedAt > recordEnd) {

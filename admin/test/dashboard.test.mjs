@@ -731,6 +731,97 @@ test("RUN_DETAIL shows a portfolio run's plan and the dollars a run settled, and
   assert.deepEqual(nulls, older, "a record with null fields renders byte-identical to one written before them");
 });
 
+test("RUN_DETAIL of an attempt whose run continues as a recovery: its own progress and the recovery job's id, within every width (#662)", async () => {
+  const reads = [];
+  const openRun = async (extra, { width = 80, progressOfRun } = {}) => {
+    const seam = progressOfRun ?? (async (jobId, record) => (reads.push([jobId, record?.reason ?? null]), { progress: { absent: true }, continues: true, continuesAs: `${jobId}.r1` }));
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], ...extra }] }), progressOfRun: seam }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    await flush();
+    const raw = comp.render(width);
+    await comp.dispose();
+    return { raw, lines: raw.map(stripAnsi) };
+  };
+  const row = (lines, label) => lines.map((l) => l.trim()).find((l) => l.startsWith(`│ ${label} `)) ?? null;
+  const kvRow = (label, value) => `│ ${`${label.padEnd(12)} ${value}`.padEnd(66)} │`;
+  const id = SNAPSHOT.runs[0].jobId;
+  const base = { outcome: "failed", reason: "recovery-enqueued", progress: { turns: 5, steps: 7, interrupted: 1, toolMs: 9 } };
+  const { lines } = await openRun(base);
+  assert.deepEqual(reads, [[id, "recovery-enqueued"]], "one read on entry, handed the record");
+  assert.equal(row(lines, "progress"), kvRow("progress", "5 turns · 7 steps · 1 interrupted"), "the attempt's own record");
+  assert.equal(row(lines, "continues"), kvRow("continues", `as ${id}.r1`));
+  // The reader no longer finds the recovery job, has no seam, or fails: still continues, with no id.
+  for (const progressOfRun of [async () => ({ progress: { absent: true }, continues: true, continuesAs: null }), async () => { throw new Error("down"); }, async () => ({ continuesAs: "x <b>\u001b[2J" })]) {
+    assert.equal(row((await openRun(base, { progressOfRun })).lines, "continues"), kvRow("continues", "as a recovery job"));
+  }
+  // Any other record draws neither line and asks nothing.
+  reads.length = 0;
+  const plain = await openRun({ outcome: "failed", reason: "infra", progress: { turns: 5 } });
+  assert.equal(row(plain.lines, "continues"), null);
+  assert.equal(row(plain.lines, "progress"), null);
+  assert.deepEqual(reads, []);
+  for (const width of [30, 40, 60, 80, 120]) {
+    const { raw } = await openRun({ ...base, jobId: `gh-${"9".repeat(180)}`, progress: { turns: 9007199254740991, steps: 9007199254740991, interrupted: 9007199254740991 } }, { width });
+    for (const l of raw) assert.ok(visibleLen(l) <= width, `width ${width}: ${JSON.stringify(stripAnsi(l))}`);
+  }
+});
+
+test("RUN_DETAIL's continues read: on ←/→ and on PARKED entry, and a late answer for a run the pane left is dropped (#662 review)", async () => {
+  const runA = { ...SNAPSHOT.runs[0], jobId: "gh-a", outcome: "failed", reason: "recovery-enqueued", endedAt: "2026-07-21T01:00:00.000Z" };
+  const runB = { ...SNAPSHOT.runs[0], jobId: "gh-b", outcome: "failed", reason: "recovery-enqueued", endedAt: "2026-07-21T00:30:00.000Z" };
+  const pending = [];
+  const progressOfRun = (jobId) => new Promise((resolve) => pending.push({ jobId, answer: (as) => resolve({ progress: { absent: true }, continues: true, continuesAs: as }) }));
+  let renders = 0;
+  const tui = { requestRender() { renders += 1; } };
+  const parked = [{ target: "o/r#5", kind: "github", jobId: "gh-b", parkedAt: AT - 60_000, ageMs: 60_000, answered: false, chainCount: 0 }];
+  const comp = makeDashboard({ paths: {}, done() {}, tui, intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [runA, runB], parked }), progressOfRun }) });
+  await flush();
+  const shown = () => stripAnsi(comp.render(80).join("\n"));
+  comp.handleInput("\r");
+  await flush();
+  assert.equal(pending.length, 1, "one read on Enter");
+  const first = pending[0];
+  const other = first.jobId === "gh-a" ? "gh-b" : "gh-a";
+  // Walk to the other run before the first answer lands: the walk reads again, and the first answer is dropped.
+  comp.handleInput(first.jobId === "gh-a" ? "\x1b[C" : "\x1b[D");
+  await flush();
+  assert.equal(pending.length, 2, "←/→ reads the run it lands on");
+  assert.equal(pending[1].jobId, other);
+  first.answer(`${first.jobId}.r1`);
+  await flush();
+  assert.match(shown(), new RegExp(`run ${other}`));
+  assert.doesNotMatch(shown(), new RegExp(`${first.jobId}\\.r1`), "the answer for the run the pane left");
+  assert.match(shown(), /continues\s+as a recovery job/);
+  pending[1].answer(`${other}.r2`);
+  await flush();
+  assert.match(shown(), new RegExp(`continues\\s+as ${other}\\.r2`));
+  // Back to the list, then the answer for the run the pane showed arrives late: nothing is drawn for it.
+  comp.handleInput("\x1b");
+  comp.handleInput("\r");
+  await flush();
+  const late = pending.at(-1);
+  comp.handleInput("\x1b");
+  await flush();
+  const before = renders;
+  late.answer(`${late.jobId}.r1`);
+  await flush();
+  assert.equal(renders, before, "a late answer after Esc asks for no render");
+  // From PARKED (k, then Enter): the detail reads too.
+  const reads = pending.length;
+  comp.handleInput("k");
+  await flush();
+  comp.handleInput("\r");
+  await flush();
+  assert.equal(pending.length, reads + 1, "PARKED's Enter reads");
+  assert.equal(pending.at(-1).jobId, "gh-b");
+  pending.at(-1).answer("gh-b.r1");
+  await flush();
+  assert.match(shown(), /continues\s+as gh-b\.r1/);
+  await comp.dispose();
+});
+
 test("RUN_DETAIL shows a durable run's recovery in short clipped lines, and drops what the contract does not allow (#645)", async () => {
   const openRun = async (extra, width = 80) => {
     const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], ...extra }] }) }) });

@@ -344,10 +344,19 @@ export async function loadPageData(name, query, deps = {}) {
     // Issue #644: the run's progress snapshot, WHOLE (its phase names and note included), read once for both roles as
     // all page data is; `runProgress` draws the model's words for an operator alone. Page data is never serialized to a
     // browser: only rendered panels leave this process.
+    // Issue #662: by the job's RUN id, and with whether this attempt's run went on as a recovery (`progressOfRun`), so a
+    // recovery's own page shows its live progress and the attempt it continues shows its own record's, not the
+    // recovery's. A fleet without it (an older reader double) reads by the page's id, as before.
     try {
-      data.progress = await deps.fleet.progress(q.id);
+      if (typeof deps.fleet.progressOfRun === "function") {
+        const got = await deps.fleet.progressOfRun(q.id, data.run?.record ?? null);
+        data.progress = got?.progress ?? { unreachable: true };
+        if (got?.continues === true) data.progressContinues = { as: typeof got.continuesAs === "string" && RUN_ID_RE.test(got.continuesAs) ? got.continuesAs : null };
+      } else data.progress = await deps.fleet.progress(q.id);
     } catch {
       data.progress = { unreachable: true };
+      // A continued attempt shows its own record whatever the read did: the record alone says its run went on.
+      if (typeof deps.fleet.progressOfRun === "function" && data.run?.record?.reason === "recovery-enqueued") data.progressContinues = { as: null };
     }
   }
   if (reads.includes("inbox") && typeof deps.fleet?.inbox === "function") {
