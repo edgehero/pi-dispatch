@@ -114,6 +114,12 @@ run page or with the id. A refusal is said in the footer, and nothing is sent. E
 in the console's audit log as the panel, with a hash of the text. Withdrawing a message is done from the console or
 the command line.
 
+**A terminal.** `pi-dispatch chat <job id>` follows a running job's transcript in your terminal and steers it from a
+message box (Enter for a steer, `/later <text>` for a follow-up, `/withdraw <id>`), through the console's own actions,
+so every rule above holds there too; Ctrl+C detaches and the run goes on ([`chat.md`](chat.md)). The run page's
+**Chat** panel holds the Steer and Follow-up forms while the run takes messages
+([`console.md`](console.md#the-chat-panel)).
+
 There is no tool for your pi session's model to send a message: steering a run is something a person does, never
 something an agent asks for.
 

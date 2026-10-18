@@ -6290,8 +6290,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     transcript it counts. That is not this entry's refusal: it is keyed state stored where the key already
     is, answering one question rather than offering a query surface, and it survives the store being
     deleted in the only way that matters, by degrading to a cold start like everything else there.
-- **Traces to**: `REQ-RESUMABLE-SESSION`, `INT-SESSION-STORE-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`;
-  implemented in `worker/src/session-key.mjs`.
+- **A record's key, derived the same way** (issue #647): `sessionKeyOfRecord` re-derives a RUN RECORD's key with
+  `sessionKeyFor`, a forge issue from kind, repository and its number, a cron run from the scheduler id in its job id,
+  and null for a pull or merge request (its key needs the head ref, which the record deliberately does not carry). It
+  moved from the admin's read model (`parkedSessionKey`, the parked chain counter) to `worker/src/session-key.mjs`,
+  beside `sessionKeyFor`, because the terminal chat's fork needs it too and two copies of a key rule are two places for
+  a cross-issue transcript mix-up to start. It is still derived and never looked up: no index is consulted, and
+  `/api/run` never carries a key (the fork re-derives it on the host that holds the store, `DES-TERMINAL-CHAT`).
+- **Traces to**: `REQ-RESUMABLE-SESSION`, `INT-SESSION-STORE-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, and since
+  #647 `REQ-TERMINAL-CHAT` and `DES-TERMINAL-CHAT`; implemented in `worker/src/session-key.mjs` (`sessionKeyFor`,
+  `keyParts`, `sessionKeyOfRecord`).
 
 ## DES-CHECKPOINT-WALKER-NOT-GIT-ADD
 
@@ -10286,7 +10294,8 @@ a tunnel.
   rejected options marked #642); issue #643, the live transcript on the run page (the bullet "The live transcript"
   below, over `DES-LIVE-TRANSCRIPT-STREAM`); issue #644, run progress (the bullet "Run progress" below, over
   `DES-RUN-PROGRESS`); issue #646 part 3, steering (the bullet "Steering a running job" below, over
-  `DES-STEER-VIA-READONLY-INBOX-MOUNT`). This entry supersedes three of the
+  `DES-STEER-VIA-READONLY-INBOX-MOUNT`); issue #647 part 1, run chat (the bullet "Run chat" below, over
+  `DES-TERMINAL-CHAT`). This entry supersedes three of the
   rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
 - **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
@@ -10679,6 +10688,40 @@ a tunnel.
     second hold would refuse a message to a run that can afford it); and a model-callable steer tool
     (`DES-ADMIN-VIA-PI-EXTENSION`: a message enters a running agent's context, so its sender is a person at an operator
     surface, never the operator's own model).
+- **Run chat** (issue #647 part 1, `REQ-TERMINAL-CHAT`, `DES-TERMINAL-CHAT`):
+  - **The run page's Chat panel** (`p-chat`, between Progress and Inbox, `runChat`): the chat the run can have now,
+    from `chatFactsOf` (the fleet reader's `jobStatus`, `readJobStatus`: any job's BullMQ state across the fleet's
+    queues and its active #645 recovery, steer-armed or not; the newer-run search, a runs-page read, only for a parked
+    record, `searchNewer: "parked"`) through `chatModeOf`. It composes what the page already has, never a second copy
+    of an action: live shows a link to the transcript section (or the recovery job) and the steer and follow-up forms,
+    which MOVE here from the Inbox panel while the panel draws them (`chatDrawsSteer`, the Inbox panel's own rule:
+    an operator on a writable console, an active or continued steer-armed job, an open inbox), so the page never holds
+    two forms for one action; reply shows `parkedAnswerForm`, the one form the parked inbox draws; fork shows
+    `pi-dispatch chat <id>` to copy (shown, never run, like the sandbox command), or why the record names no session
+    (no `run.resume`; a pull request, `sessionKeyOfRecord` null). Live and reply show the command too. A viewer gets the
+    state and a refusal's sentence, never a form or a command; a read-only console draws no form; a fleet with no
+    job-state reader draws nothing. Since review round 1: reply shows the form only where `planParkedAnswer` would plan
+    the answer (`parkedAnswerRefusalOf` through `parkedAnswerCheck`) and the planner's sentence otherwise; a park being
+    answered and a queued recovery link the job that holds the run; a live run whose inbox could not be read says so
+    rather than "not steer-armed". The parked rows of the snapshot carry `answering` (the shared pending-answer scan,
+    `DES-TERMINAL-CHAT`), which `/parked` draws as its Answer column (no form for a park being answered) and the
+    overview leaves out of its waiting count; `/api/state`'s parked projection does not carry it. Review round 2: the
+    rows also carry the scan's own answer (`pendingScan`), and `/parked` draws a form only where `parkedVerdictOf`
+    says reply, the verdict the Chat panel reaches through `chatModeOf`, so an unknown park has no form on either screen.
+  - **`GET /api/run`** (`run-api.mjs`, `INT-CONSOLE-STATE-API`): one run by `?id=` or `?url=` with its state, mode,
+    active job, steer status, transcript existence, progress integers, forge link and newer run on its target, every
+    field rebuilt by its shape (`safeRunOf`). A viewer's route, because nothing in it is free text, job data, transcript
+    text or a session key. `?url=` resolves through `forgeTargetOf`, the INVERSE of `forgeLinkOf`, held to it by a
+    round-trip test on every forge, read only on the deployment's own instance URLs and github.com; beside
+    `forgeLinkOf`'s own shapes it accepts the request URLs a person copies, GitHub's `/pull/<n>` and Forgejo's
+    `/pulls/<n>`. An Azure work item names no repository, so its runs decide, and several repositories are a 409
+    with candidates, never a guess. A queue that cannot be read is a 503: a mode judged on half the facts is worse
+    than none.
+  - **`format=json` on `/api/transcript`** (`INT-CONSOLE-EVENT-STREAM`): the terminal's structured entry, on the same
+    route, role and slots; the hub renders once per format per tick. The browser keeps the server-rendered HTML (the
+    rejection of browser-side rendering below stands).
+  - **`/api/state`'s parked rows** gain `jobId`, so a script or the terminal can open or answer one without a second
+    lookup.
 - **Wiring**: `serve` builds one `createFleetReader` on the deployment's Valkey, with `installPanelValkeyContext`
   applied as the panel applies it so TLS and auth deployments connect the same way, and with `PI_SESSIONS_DIR` when
   it is set; it builds the insights cache, the audit reader and the hub, passes them to `createConsoleServer` as named
@@ -10871,7 +10914,9 @@ a tunnel.
     `alloc:log` already are.
   - **JSON over the stream and rendering in the browser** (issue #641). The escaping would move into browser code,
     a second escaper beside the template, and the property that matters when a page shows hostile text is that
-    there is one. Server-rendered panels keep it, and the same renderer serves a reload.
+    there is one. Server-rendered panels keep it, and the same renderer serves a reload. The transcript's JSON format
+    (issue #647) does not reopen this: it serves the terminal, which is not an HTML sink and scrubs for its own
+    (`DES-TERMINAL-CHAT`), and the browser still gets only server-rendered HTML.
   - **A single-page app or a client framework for the live pages** (issue #641). The live updates did not change
     the reason a framework and a build step were rejected above; a panel swap needs a few lines of served script.
   - **Each browser polling** (Valkey through an API, or the page reloading itself). N open tabs would be N pollers
@@ -10925,7 +10970,8 @@ a tunnel.
   2026-10-18), `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-TRIGGER-AUTHOR-GATE`, `OQ-044`, since #643 `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM` and
-  `INT-LIVE-TRANSCRIPT-STREAM`, and since #644 `REQ-RUN-PROGRESS`, `DES-RUN-PROGRESS` and `INT-RUN-PROGRESS-KEY`.
+  `INT-LIVE-TRANSCRIPT-STREAM`, since #644 `REQ-RUN-PROGRESS`, `DES-RUN-PROGRESS` and `INT-RUN-PROGRESS-KEY`, and since
+  #647 `REQ-TERMINAL-CHAT` and `DES-TERMINAL-CHAT`.
 - **Code evidence**: admin/src/console/ (`cli.mjs`, `config.mjs`, `listen.mjs`, `guards.mjs`, `headers.mjs`,
   `html.mjs`, `server.mjs`, `sessions.mjs` (`peek` since #641), `login-codes.mjs`, `confirm.mjs`, `lock.mjs`, and
   since #641 `pages.mjs`, `panels.mjs`, `style.mjs`, `script.mjs`, `live.mjs`), worker/src/console-tokens.mjs,
@@ -10951,7 +10997,11 @@ a tunnel.
   move to the console): pages.mjs and panels.mjs (the what-if panel, the window line, `paths=full`), script.mjs (the
   interactive topology), admin/src/insights-html.mjs (the sections only), admin/src/index.ts (`/dispatch insights`
   prints the URL), .github/scripts/label-fit-check.mjs (now checks the console's renderers) and
-  launch/render-images.mjs (renders `docs/images/insights-view.png` from the console page).
+  launch/render-images.mjs (renders `docs/images/insights-view.png` from the console page). Since #647:
+  admin/src/console/run-api.mjs (`getRun`, `runDocument`, `chatFactsOf`, `safeRunOf`, `parseRunQuery`), panels.mjs
+  (`runChat`, `steerForms`, `chatDrawsSteer`, `parkedAnswerForm`), pages.mjs (the `chat` read), server.mjs (the
+  `/api/run` route, `format`), transcript.mjs (`transcriptEntryJson`), live.mjs (per-format entries, the parked
+  `jobId`), admin/src/read-model.mjs (`forgeTargetOf`, `readJobStatus`, the fleet reader's `jobStatus`).
 
 ## DES-LIVE-TRANSCRIPT-STREAM
 
@@ -11327,6 +11377,223 @@ a tunnel.
   (the trigger tools' parameters), admin/src/job-actions.mjs (`runFieldsOf`). admin/src/read-model.mjs,
   admin/src/console/ (panels.mjs, pages.mjs, live.mjs), admin/src/dashboard.ts.
 
+## DES-TERMINAL-CHAT
+
+- **Status**: issue #647, part 1 (2026-10-18): the terminal client `pi-dispatch chat`, the console's `GET /api/run`,
+  the JSON transcript format and the run page's Chat panel. `/dispatch chat` in the pi extension is part 2, a
+  follow-up change, and is not shipped.
+- **Decision**: a run's chat opens in a terminal through **the console, as a browser client would**, for the live and
+  reply modes, and **on the session store's own host, read directly**, for the fork. Five parts:
+  1. **One mode rule.** `chatModeOf` (`worker/src/chat-mode.mjs`) is pure and total and takes the facts the caller read
+     (the job's BullMQ state, its record, its active job, and for a parked record whether a later run took the
+     answer). The CLI never judges a mode itself: it asks `/api/run`, whose `mode` comes from that function, and the
+     run page's Chat panel calls the same function through `chatFactsOf`. Active wins over a record (an infra retry
+     keeps the job id, so attempt 1's record can exist while attempt 2 runs) and a queued state wins too (a retry
+     waiting to start is about to be the writer, and so is a #645 recovery job waiting to start: `liveJobsOfRun`
+     reports it as `queuedAs`, since its base attempt's record says `recovery-enqueued`, which alone reads as finished
+     and would offer a fork racing the recovery). A refusal is `{mode: null, says}` with a fixed sentence, never a
+     bare null.
+     - **"The same target" is ONE comparison**, `targetKeyOf` (`admin/src/read-model.mjs`): a forge target's
+       repository path compared case-insensitively and its number without leading zeros, a local or cron target
+       exactly (a folder name is case-sensitive). The parked fold's answered rule (`readParkedRuns`), the parked
+       answer's planner, `/api/run`'s URL lookup and newer-run search, and the pending-answer scan all use it, so none
+       can call a run answered that another offers a reply for.
+     - **A park being answered.** The answered rule looks for a later RECORD, and a record is written at a run's end,
+       so the answer's own resume run, queued or running, would leave the park offering a second reply that resumes
+       the same transcript twice. A pending answer is found by a bounded queue scan (`readPendingOnTargets`: the
+       active and queued jobs, each job's target compared by `targetKeyOf`, the park's own run excluded), not by the
+       answer's keys: its delivery id is new for each answer, and its semantic window names the comment trigger's flow
+       and lapses after ten minutes while the run may go on for an hour. A capped or failed list is unknown, and an
+       unknown park is refused, never a reply. The planner, `/api/run` (`pendingRunOnTarget`), the Chat panel and the
+       fleet reader's parked rows (`answering`, rescanned at most every 15 s while something is parked) share it.
+       Review round 2: the scan pages every state, in the order a job moves through them, under ONE budget of 10,000
+       listed ids (`PENDING_SCAN_BUDGET`; a cap of 200 per state had made any busy queue leave every park
+       unanswerable, and a state holding exactly the cap read as partial), reads per id only the job hash's `name`
+       (a `local` cron or CLI job is skipped at once) and `deid`, the semantic dedup id whose `repo<sep>number` prefix
+       is `targetFor`'s target, parses `.data` only for a forge job without one (a recovery, a late message's job; at
+       most `PENDING_DATA_MAX`), and stops once every target is matched; 1,200 paused jobs read in tens of
+       milliseconds. **A queue past the budget fails loudly**, with its own sentence
+       (`CHAT_REFUSALS.parkedTooMany`: answer on the forge, or wait), not the unread history's "try again".
+       Rejected: failing open on it with the ten-minute semantic window as the backstop. The scan gives up only on a
+       queue that deep, and there a queued answer can wait past those ten minutes, so the backstop has lapsed exactly
+       when it would be needed. One mapping (`pendingFactsOf`, `parkedVerdictOf`, chat-mode.mjs) turns a scan into
+       the verdict, so `/parked` draws a form for exactly the parks the Chat panel does.
+     - **The reply form is the planner's.** The Chat panel offers it only where `planParkedAnswer` would plan the
+       answer: the planner's own predicate over the retained job's data and the triggers file
+       (`parkedAnswerRefusalOf`, through the fleet reader's `parkedAnswerCheck`, which hands back a sentence or ok,
+       never the job's data), and the refusal sentence in its place otherwise.
+     - **The newer-run search is a runs-page read**, so the run page's live loop reuses a parked record's answer for
+       30 s per run id (`NEWER_CACHE_MS`; an unknown answer is not kept); `/api/run` never does. Review round 2: the
+       loop reuses the pending scan and the planner check (`parkedAnswerCheckOf`) for 15 s per run id
+       (`PARK_CHECK_CACHE_MS`, the snapshot's own rescan window; an unreadable one is not kept, a new record reads
+       afresh), and when a scan finds the answer it saw before gone, the cached newer-run answer is dropped and
+       searched again, so a finished answer's record is seen at once rather than after up to 30 s of a reply offered
+       to an answered park. The planner still reads both afresh before anything is queued.
+  2. **The console's auth model, unchanged.** The client (`worker/src/console-client.mjs`) signs in with `POST /login`
+     and holds the `pdc_session` cookie in memory for the life of the process; it is never written anywhere. Every
+     request carries `Host` (the address dialled; `localhost` over a unix socket, the one loopback name a socket has)
+     and `Origin: http://<Host>`, and a write carries `Content-Type: application/json`. `Sec-Fetch-Site` is never sent:
+     the console's origin guard accepts its absence as a non-browser client and judges `Origin` alone, and a client
+     that claimed `same-origin` would be claiming to be the console's own page. Writes are the console's existing
+     actions (`steer`, `steer-withdraw`, `parked-answer`), previewed, confirmed on screen (y/n) with the preview's
+     ticket, and audited as the token's name, exactly as from the page.
+  3. **The stream.** `GET /api/transcript?format=json` is the run page's operator-only stream with a structured entry
+     (`transcriptEntryJson`, rebuilt by name) in place of the server-rendered HTML; the hub renders each entry once per
+     format per tick, so an HTML and a JSON stream on one job cost one read. The client keeps one event to 256 KiB
+     (`SSE_EVENT_MAX_BYTES`) and drops a larger one whole, never half parsed. A dropped connection reconnects with
+     `Last-Event-ID` after a jittered backoff from 500 ms doubling to 30 s, from the upper half of each window, and
+     gives up after 8 failures in a row with nothing received; a server `retry:` raises the backoff's floor (within
+     the cap); a 429's `Retry-After` is honoured, clamped to 1 to 60 s; a 401 or an `end` event signs in again, after a
+     backoff, at most once per 60 s over the stream's whole life (`RELOGIN_WINDOW_MS`), and a second one inside the
+     window is the end, said in a sentence; 502, 503 and 504 back off; any other 4xx is final and not retried. A plain
+     request that meets a 401 signs in once and retries once. A JSON body silent for the request timeout (15 s) is cut,
+     and a stream silent for 45 s (`STREAM_IDLE_MS`, three of the console's 15 s pings) is cut and resumed. The SSE
+     parser keeps a CR that ends a chunk (a CRLF split across two chunks is one line end), and ignores an id that is
+     not printable ASCII or is longer than 1024 characters, since the id goes back as the `Last-Event-ID` header and
+     node throws on a header with a control byte. A Set-Cookie whose Max-Age is zero or less, or whose Expires is past,
+     clears the session cookie. A console refusal sentence is folded onto one line (`oneLine`: control characters to
+     spaces, at most 1000 characters).
+  4. **The fork is host-local.** `chat-fork.mjs` reads `PI_SESSIONS_DIR` on the operator's host, copies the canonical
+     `current.jsonl` to `~/.pi-dispatch/chat/<key>/source-<ms>.jsonl` (source `O_RDONLY | O_NOFOLLOW`, its descriptor
+     re-checked for the device and inode `planFork` judged; destination `O_CREAT | O_EXCL | O_NOFOLLOW`, 0600, in 0700
+     directories) and runs `pi --fork <copy> --no-tools` in the operator's current directory. pi 1.2.0's `--fork`
+     copies the file into its own sessions directory and records the source as `parentSession`; forking the COPY
+     keeps every path pi writes or records outside the store. The key is re-derived from the record
+     (`sessionKeyOfRecord`, `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`); `/api/run` never carries it. Before the copy is
+     opened in pi, a y/N names the bytes, says the transcript is unredacted and names the provider pi will actually
+     use (`forkModelOf`): when pi's settings name a default provider AND model (`hostDefaultsOf`: `defaultProvider`
+     and `defaultModel` from the agent dir's `settings.json` ONLY; the current folder's `.pi/settings.json` is never
+     read, since these flags decide where the unredacted transcript goes and that folder may be a repository someone
+     else wrote; pi 1.2.0 itself applies project settings only in a folder the operator trusted, and not reading them
+     at all is the simpler rule and copies no trust store), both are passed to pi as `--provider` and `--model`, which pi never replaces with the session's;
+     otherwise the prompt names the run's own model (`sessionModelOf`: the last `model_change` or assistant message,
+     what pi 1.2.0's `getBranchSelection` restores), used if pi knows it and has a key for its provider, and pi's
+     fallback otherwise, since this command cannot see pi's keys. No TTY (stdin) is a refusal BEFORE the copy, so the
+     unredacted file is never written for a question that cannot be asked. `~/.pi-dispatch` and its chat
+     folders must be owned by the operator (`ensurePrivateDir`: another user's, a link or a non-directory refused, and
+     one with group or other bits made 0700). No `PI_CONSOLE_*` variable reaches pi or `pi --version` (`childEnv`):
+     the token is this command's credential, and a forked agent with `--tools` can run commands. That stripping is
+     hygiene, NOT a boundary: with `--tools` the forked agent reads whatever the operator's shell and files allow (forge
+     tokens in the shell's environment, the deployment `.env`, `~/.ssh`), which is why tools are off by default.
+     **Nothing unredacted stays in `~/.pi-dispatch/chat`**: the signal handlers go on before the copy (with no listener
+     a signal takes its default action and kills the process mid-copy, leaving a partial file); the copy is removed on
+     a no, on SIGINT, SIGTERM or SIGHUP from the copy's start until the answer (exit 130, 143, 129), and once pi exits,
+     each time with `<key>/` when that leaves it empty (`rmdir`, which refuses a folder that holds anything); a SIGTERM
+     or SIGHUP passed on to pi ends the command 143 or 129, whatever pi exits with, by when `pi --fork` has written its own copy (`SessionManager.forkFrom` writes
+     it before the first prompt, pi 1.2.0); while pi runs, SIGTERM and SIGHUP are passed on to it and SIGINT is left to
+     it, so this process outlives pi and cleans up. pi's own copy, as unredacted as the source, is the operator's to
+     keep or delete, and the command says so.
+  5. **The terminal is a hostile-text sink.** `scrubForTerminal` removes every C0 control but newline (a tab becomes
+     four spaces, CR and CRLF a newline), DEL, every C1 control (a lone 0x9b is CSI on some terminals) and the bidi
+     controls, the zero-width characters (U+200B to U+200D, U+2060, U+FEFF), the soft hyphen, the tag characters
+     U+E0000 to U+E007F and the Hangul fillers and leading jamo (U+1100 to U+115F, U+3164, U+FFA0), which hide text
+     or that pi-tui measures at a width the terminal does not draw, and clips an entry to 64 KiB; pi-tui's hyperlinks
+     are turned off, so a markdown link prints its target beside its text. The worker has already redacted the text
+     and escaped its controls; the client trusts neither. **Markdown is a parser with limits, so its input is bounded
+     first** (`markdownPlan`): an assistant entry is drawn as markdown only when no line stacks more than 8 quote or
+     list markers (`MARKDOWN_MAX_DEPTH`) and it holds at most 2000 emphasis or link delimiters
+     (`MARKDOWN_MAX_DELIMITERS`), and its LaTeX is rendered only when braces nest at most 16 deep
+     (`LATEX_MAX_BRACE_DEPTH`) and the entry holds at most 256 backslashes (`LATEX_MAX_COMMANDS`: LaTeX also recurses
+     on brace-free commands, `\sqrt\sqrt...x` or `\frac a\frac a...`, which overflow at 1,600 to 2,000 commands in
+     `$...$`, `$$...$$` and `\[...\]` alike, so a brace bound alone is not one); otherwise plain text, and a render that throws falls back to plain text for that entry
+     alone (pi-tui 1.2.0's Markdown overflows the stack at a 55-deep quote and is quadratic in emphasis). **The
+     terminal is given back** (`guardTerminal`): while a screen runs, an uncaught exception, an unhandled rejection,
+     SIGINT, SIGTERM and SIGHUP leave the alternate screen, show the cursor and end raw mode before the process exits,
+     since pi-tui renders from a timer and a throw there would leave the shell with no cursor and no echo.
+- **The client's other facts**:
+  - **Which console**: `--console`, else `PI_CONSOLE_URL` from the shell, else the deployment's `PI_CONSOLE_LISTEN`
+    (`cliDeploymentEnv`: the shell's, else the folder's `.env`, a disagreement refused), else `127.0.0.1:4790`. A
+    `PI_CONSOLE_LISTEN` read that way must be loopback (127.0.0.0/8, `::1`, `localhost`, a wildcard dialled on
+    loopback) or a unix socket, or it is refused naming `--console` and `PI_CONSOLE_URL`: the folder's `.env` may be a
+    repository someone else wrote. A value the shell does not set came from that file, and is taken only when the
+    file passes the panel's rule (`dotenvTrustRefusal` over `readDeploymentEnv`: owned by this account or root, no
+    group or other write on it or a folder above it) and is not a symbolic link (`lstat`); loopback alone is not
+    enough, since another local account can listen on a loopback port and collect the token. Before signing in to any other address (only `--console` or `PI_CONSOLE_URL` can
+    name one; a hostname is judged by its spelling, never resolved, `isLoopbackAddress`), the CLI warns that the token
+    travels over plain HTTP to that host and asks y/N, default no; `--yes` answers it, and the warning still prints. An
+    `https:` address is refused (the console speaks plain http on loopback, TLS is the tunnel's, and its origin check
+    compares against `http://<Host>`, so a TLS client could read but never write); a wildcard listen (`0.0.0.0`,
+    `[::]`) is dialled on its loopback twin.
+  - **Which token**: `PI_CONSOLE_TOKEN` from the shell only, else a hidden prompt on a TTY. Never the deployment's
+    `.env`: that file is the service's, readable by whoever runs the service, and a token in it would be an operator
+    credential beside the worker's secrets.
+  - **pi-tui is imported lazily** (`loadPiTui`), only when a screen is drawn, so the fork, the pure helpers and the
+    worker's boot never load it. It is an exact pin of the worker (`@earendil-works/pi-tui`), held to the runner's pin
+    by `pi-pin-check.mjs` and moved by `pi-bump.mjs`'s table (`CONST-PI-VERSION-PINNED`).
+  - **After a live run ends** (its stream's `done`, or the poll's mode for a viewer), the CLI asks `/api/run` again up
+    to 5 times, 2 s apart, until the mode leaves `live` (the record lands a moment after `done`), then goes on in the
+    new mode: a park drops into the reply view, a finished run into the fork. A run still live after that is a
+    refusal sentence, not a guess.
+  - **Exit codes**: 0 after a detach, an answer, leaving without one and a declined fork; pi's own code for a fork
+    (143 or 129 once a SIGTERM or SIGHUP was passed on to it);
+    130, 143 or 129 for SIGINT, SIGTERM or SIGHUP at the fork's question or on a chat screen; 1 for a refusal.
+  - **The URL lookup is an exact-target scan**: `readRunsPage`'s `match` predicate (`targetKeyOf`) is applied beside the
+    kind filter, so `TARGET_RUNS_MAX` counts runs on THAT target over at most `RUNS_PAGE_EXAMINE_MAX` (2000) records
+    examined, never the filter's substring `q`, which let `#120`, `#121`... fill the page and crowd out `#12`. A 404
+    after a truncated scan says it searched the newest 2000 runs; a newer-run search that stopped before the record's
+    own instant is unknown, never "no later run"; a page whose history or run mirror could not be read is unreadable
+    (503 for a URL).
+  - **Known limit**: a URL whose only run is still active answers 404 asking for the run id, because a running job has
+    no record until it ends and the URL lookup reads the run history (`TARGET_RUNS_MAX`, one runs page).
+- **Why**: the issue asked for three things a terminal can do with a run (read and continue a finished one, attach to
+  a running one and steer it, answer a parked one) and, by decision, the same in the web console. Each of the writes
+  already existed as a console action with its guards, ticket and audit, so going through the console adds no write
+  path and no auth model; and an operator on another machine already has the SSH tunnel the browser uses. The fork is
+  the one mode the console cannot serve without a route that hands out an unredacted transcript, so it runs where the
+  transcript already is.
+- **Rejected**:
+  - **Writing the fork back to the canonical session.** The next job on that issue would resume from the operator's
+    local chat, a second writer beside the worker's promotion with no lock between them, and text the operator typed
+    would reach a job as if it were the run's own history. A fork is the operator's copy and stays theirs.
+  - **`pi --session <current.jsonl>` in place.** pi appends to the file it opens, so this IS a write-back, by the
+    back door. `--fork` on a private copy was chosen instead.
+  - **A bearer header for the client.** A second way in, judged by code the browser path never runs, and every guard
+    in `guards.mjs` (Host, Origin, the JSON type) would need a twin. The cookie from the same token login is the
+    console's one model.
+  - **A raw-transcript route on the console** (to fork from another machine). The stored transcript is unredacted
+    (whatever a tool printed, a secret included); the console only ever serves the redacted live stream, and a route
+    that served the store would make every operator token a key to every kept session. A remote fork is left to
+    `OQ-046`'s redaction question.
+  - **The CLI reading Valkey directly** (as `pi-dispatch steer` does). It would need the deployment's Valkey URL and
+    password on the operator's terminal, bypass the console's roles, tickets and audit, and judge the mode on its own
+    reads, free to disagree with the page.
+  - **Tools on by default in a fork.** The conversation is text an agent wrote while reading untrusted input, and the
+    fork runs in the operator's own folder, not the job's workspace or container: a forked agent with tools would act
+    on the operator's machine on that text's say-so. `--tools` is an explicit opt-in.
+  - **WebSockets** for the live view. The traffic is one way plus the existing two-step actions; SSE through the same
+    dispatcher and guards already serves the page, and `DES-OPERATOR-CONSOLE` rejected WebSockets for the same
+    reasons.
+  - **Resetting the re-login rule on any delivered entry** (review round 1). It let a server that delivers one entry
+    and then `end`, forever, drive sign-ins without bound; the rule is now once per 60 s over the stream's whole life.
+  - **Finding a pending answer by its keys** (review round 1). Its delivery id is fresh per answer and its semantic
+    window names the comment trigger's flow and lapses after ten minutes; only a queue scan can say a run on the
+    target is coming.
+  - **A JSON stream for the browser too.** `DES-OPERATOR-CONSOLE` rejected rendering in the browser so that one
+    escaper serves every page; that stands. The JSON format exists because a terminal is not HTML and renders itself,
+    and its own sink (`scrubForTerminal`) is the terminal's escaper.
+- **Residuals**: the fork sends an unredacted transcript to the operator's own provider (decided: the y/N naming the
+  provider and `--no-tools`; open: redacting the snapshot, `OQ-046`); a pull or merge request's run cannot be forked by
+  its id (its key needs the head branch, which no record carries) and must be named by its key; an Azure work item in
+  several repositories needs the run id (409 with candidates).
+- **Traces to**: `REQ-TERMINAL-CHAT`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-LIVE-TRANSCRIPT`,
+  `REQ-STEER-RUNNING-JOB`, `REQ-AWAIT-INPUT`, `DES-OPERATOR-CONSOLE`, `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`,
+  `DES-LIVE-TRANSCRIPT-STREAM`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-SESSION-STORE-CONTRACT`,
+  `CONST-PI-VERSION-PINNED`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-046`.
+- **Code evidence**: worker/src/chat-mode.mjs (`chatModeOf`, `runStateOf`, `CHAT_REFUSALS`), worker/src/chat-cli.mjs
+  (`classifyChatTarget`, `runChat`, `settle`), worker/src/chat-fork.mjs (`planFork`, `copySnapshot`, `runFork`,
+  `resolvePiBinary`, `piVersionOf`, `hostDefaultsOf`, `sessionModelOf`, `forkModelOf`, `childEnv`, `ensurePrivateDir`),
+  worker/src/chat-view.mjs (`scrubForTerminal`, `markdownPlan`, `guardTerminal`, `parseChatInput`,
+  `editorAvailability`, `makeChatScreen`, `runLiveView`, `runReplyView`, `questionOf`, `loadPiTui`),
+  worker/src/console-client.mjs (`parseConsoleAddress`, `consoleAddressOf`, `consoleToken`, `makeSseParser`,
+  `backoffMs`, `retryAfterMs`, `makeConsoleClient`, `isLoopbackAddress`, `oneLine`), worker/src/session-key.mjs
+  (`sessionKeyOfRecord`), worker/src/cli.mjs (the `chat` verb), admin/src/console/run-api.mjs (`chatFactsOf`,
+  `NEWER_CACHE_MS`), admin/src/console/transcript.mjs (`transcriptEntryJson`, `TRANSCRIPT_FORMATS`),
+  admin/src/console/live.mjs, admin/src/console/server.mjs, admin/src/console/pages.mjs (`loadPageData`),
+  admin/src/console/panels.mjs (`runChat`, `parkedInbox`, `overviewParked`), admin/src/job-actions.mjs
+  (`parkedAnswerRefusalOf`, `planParkedAnswer`), admin/src/read-model.mjs (`forgeTargetOf`, `readJobStatus`,
+  `targetKeyOf`, `liveJobsOfRun`, `readPendingOnTargets`, `readPendingAnswer`, `readRunsPage`),
+  .github/scripts/pi-pin-check.mjs, .github/scripts/pi-bump.mjs.
+
 ## Revision History
 
 | Date | Change |
@@ -11648,3 +11915,4 @@ a tunnel.
 | 2026-10-17 | Issue #646, part 3, review round 1. **`DES-OPERATOR-CONSOLE` CORRECTED** to the code after the round: the steer bullet says the audit row names the message by id (`<job id>#<message id>`) beside the job; that the snapshot's inbox read is metadata only (`listInboxPublic` reads the state hash's `m:<id>` fields, never the list); and that a run that goes on as a #645 recovery job is found from the base run's page: `activeJobOfRun` tries the run's recovery ids, newest first, the panel says "its run continues as" that job with a link, and the planner sends through it, so the forms work from either page. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the TUI's row is the same; only its audit row's `target` gains the message id. **Code evidence**: admin/src/read-model.mjs -> activeJobOfRun, readJobInbox; admin/src/job-actions.mjs -> planSteer, steerAuditTarget; admin/src/console/panels.mjs -> runInbox. |
 | 2026-10-18 | Issue #662: three record and display gaps of durable runs. **`DES-RUN-PROGRESS` AMENDED**: the reducer's `recoveryInterrupted` and `recoveryNotStarted` summary keys (this attempt's marks only, never in the snapshot or the record's `progress`), the processor's transcript fallback for a recovery's `recovered` counts with `countsFrom`, the two rejected alternatives, and the stall listener's read of the key for the crashed attempt's `startedAt` and counts (`processedOn` rejected: BullMQ's stall re-pick overwrites it). **`DES-OPERATOR-CONSOLE` AMENDED**: the run page reads progress by the run id; an attempt whose run continues as a recovery shows its own record's progress and links the recovery, rejecting the by-time pairing for a recovery; the active rows read a recovery's key by its run id; the `/dispatch` panel reads the ACTIVE row's phase name through `progressOfRun` and RUN_DETAIL of a `recovery-enqueued` record shows its own progress and "continues as" the recovery job, read once on entry. |
 | 2026-10-18 | Insights move to the console. **`DES-OPERATOR-CONSOLE` AMENDED**: the screens list gains `whatif=` with `flow=` and `paths=full` on `/insights`; the insights bullet drops the sentence that kept the static file and caches the assembly 30 s per (range, paths); NEW sub bullet "The one analytics surface": the 30d default, the window line, the what-if as a GET read for either role (not an action, no ticket), its 92-day scan ceiling and its 30 s cache per (model, flow, scan window) of at most 64 answers, the closest priced ids with no scan for an unknown model, the charset checks, `paths=full` for the operator alone and why, and the interactive topology in `/static/console.js` with its node data as a hidden escaped list, never an inline script or embedded JSON, because of the CSP's `script-src 'self'` and because a JSON script block would be a second escaping context; NEW Rejected bullet: keeping a second, offline insights renderer beside the console, which drifted; Traces to marks the retired requirement and adds `REQ-COST-ANALYTICS` and `REQ-TOPOLOGY-GRAPH`; Code evidence names the files this change touches. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: analytics live on the console's `/insights` page; `/dispatch insights` prints the console URL (the default listen, the unix socket tunnel hint, an unparsable setting said), `whatif` prints the what-if URL, the `i` key shows the URL as a notice, nothing is written and no browser spawned, `--no-open` and `--full-paths` answer usage; the no-port sentence says printing a URL is not a surface; the content boundary names `paths=full` as the operator-only exception; the label fitting passage notes that its script now runs in the console's served script with node data in a hidden list; the superseded Rejected bullet says the file is gone too; the `.log` Rejected bullet names the insights page. **`DES-CAPACITY-FROM-RECORDS` AMENDED**, wording only: phase 4's page is the console's. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**, wording only: its aside about a static insights file not being served now names the console. UNCHANGED, checked: `DES-SIZE-SUGGESTIONS` ("the insights page" is now the console's, and the leaf function rule stands), `DES-COST-FOLD-BY-SCAN` (the what-if still folds through it, over the same 92-day ceiling), `DES-GRAPH-EDGE-DERIVATION`, `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`, `DES-LIVE-TRANSCRIPT-STREAM`, `DES-RUN-PROGRESS`. Review round 1, folded in before merge: the what-if model rule takes a leading `@` or `~` (36 priced ids were refused 400 while the datalist offered them), and the printed address shell-quotes a unix socket path, names `<this host>` for an any-address bind and prints no URL for port 0. |
+| 2026-10-18 | Issue #647, part 1: terminal chat. **NEW `DES-TERMINAL-CHAT`**: the live and reply modes go through the console as a browser client would (the token login and the in-memory cookie, `Host`, `Origin: http://<Host>`, the JSON type, never `Sec-Fetch-Site`, `localhost` over a unix socket; the existing `steer`, `steer-withdraw` and `parked-answer` actions, previewed and confirmed), and the fork reads the session store on its own host and runs `pi --fork` on a private O_NOFOLLOW and O_EXCL copy with `--no-tools`; one mode rule (`chatModeOf`) for the CLI, `/api/run` and the Chat panel; the stream's facts (the 256 KiB event cap dropped whole, backoff from 500 ms doubling to 30 s giving up after 8, a server `retry:` raising the floor, `Retry-After` clamped to 1 to 60 s, a re-login on 401 or `end` at most once per 60 s, other 4xx final); the address order (`--console`, `PI_CONSOLE_URL`, the deployment's `PI_CONSOLE_LISTEN`, `127.0.0.1:4790`; https refused, a wildcard dialled on loopback); the token from the shell only, else a hidden prompt; pi-tui imported lazily at the exact worker pin; the 5 re-asks 2 s apart after a live run ends; the exit codes; the fork prompt's provider and model (`forkModelOf`); the known limit of a URL whose only run is still active (404, give the run id). Rejected: write-back to the canonical session, `pi --session` in place, a bearer header, a raw-transcript route, the CLI reading Valkey directly, tools on by default in a fork, WebSockets, a JSON stream for the browser. **`DES-OPERATOR-CONSOLE` AMENDED**: Status names #647; a new bullet "Run chat" (the Chat panel between Progress and Inbox with the steer forms moved from the Inbox panel while it draws them and the parked answer form shared with `/parked`; `GET /api/run` as a viewer's route, with `forgeTargetOf` as the inverse of `forgeLinkOf` held by a round-trip test and accepting GitHub `/pull/<n>` and Forgejo `/pulls/<n>`; `format=json`; the parked rows' `jobId`); the rejection of browser-side rendering gains that the JSON format does not reopen it; Traces and Code evidence gain #647. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` AMENDED**: a new bullet, `sessionKeyOfRecord` moved from the admin read model to `worker/src/session-key.mjs` for the fork and the parked counter, still derived and never carried by `/api/run`; Traces gain #647. The Decision and every Rejected option of both UNCHANGED, checked. **`DES-LIVE-TRANSCRIPT-STREAM` UNCHANGED, checked**: the worker's publisher and the stream are as they were; only the console's reader gains a format. **Code evidence**: worker/src/chat-mode.mjs, worker/src/chat-cli.mjs, worker/src/chat-fork.mjs, worker/src/chat-view.mjs, worker/src/console-client.mjs, worker/src/session-key.mjs -> sessionKeyOfRecord; admin/src/console/run-api.mjs; admin/src/console/panels.mjs -> runChat; admin/src/console/transcript.mjs -> transcriptEntryJson; admin/src/read-model.mjs -> forgeTargetOf, readJobStatus. Review round 1, folded in before merge: **`DES-TERMINAL-CHAT` AMENDED**: part 1 gains the queued #645 recovery as a refusal (`liveJobsOfRun`'s `queuedAs`), "the same target" as one comparison (`targetKeyOf`: repository case-insensitive, a number without leading zeros, a local target exactly), a park being answered found by a bounded queue scan (`readPendingOnTargets`, at most 200 jobs per state per queue, a capped or failed list unknown) rather than by the answer's keys, the reply form as the planner's own predicate (`parkedAnswerRefusalOf`), and the run page loop's 30 s newer-run reuse (`NEWER_CACHE_MS`; `/api/run` never reuses); part 3 gains `Retry-After` clamped to 1 to 60 s (was 300), a re-login after a backoff at most once per 60 s over a stream's whole life, the 15 s body and 45 s stream idle cuts, the parser keeping a chunk-ending CR and ignoring an id that is not printable ASCII or longer than 1024 characters, a Set-Cookie with Max-Age at or below zero or a past Expires clearing the cookie, and refusals folded onto one line; part 4 gains `forkModelOf` (both of pi's defaults passed as `--provider` and `--model`, else the run's own model with pi's fallback named), the operator-owned private folders, `childEnv` (no `PI_CONSOLE_*` reaches pi) and the copy removed on a no, a signal at the question and pi's exit; part 5 gains the zero-width, soft hyphen, tag and Hangul filler removals, `markdownPlan`'s bounds (8 stacked markers, 2000 delimiters, LaTeX brace depth 16, a throwing render plain for that entry) and `guardTerminal`; the client facts gain the loopback rule for a deployment's `PI_CONSOLE_LISTEN`, the plain-HTTP y/N with `--yes`, the signal exit codes and the exact-target URL scan over `RUNS_PAGE_EXAMINE_MAX` (2000) records; Rejected gains resetting the re-login rule on any entry and finding a pending answer by its keys. **`DES-OPERATOR-CONSOLE` AMENDED**, the Run chat bullet: the reply form only where the planner would plan it, the being-answered and queued-recovery links, the unread-inbox warning, and the snapshot's parked `answering` drawn by `/parked` and the overview (not projected into `/api/state`). **Code evidence**: worker/src/chat-fork.mjs -> forkModelOf, hostDefaultsOf, sessionModelOf, childEnv, ensurePrivateDir, runFork; worker/src/chat-view.mjs -> markdownPlan, guardTerminal, scrubForTerminal; worker/src/console-client.mjs -> isLoopbackAddress, consoleAddressOf, oneLine, makeSseParser, makeConsoleClient; worker/src/chat-cli.mjs -> runChat; admin/src/read-model.mjs -> targetKeyOf, liveJobsOfRun, readPendingOnTargets, readPendingAnswer, readRunsPage, createFleetReader; admin/src/job-actions.mjs -> parkedAnswerRefusalOf, planParkedAnswer; admin/src/console/run-api.mjs -> chatFactsOf, NEWER_CACHE_MS; admin/src/console/panels.mjs -> runChat, parkedInbox, overviewParked. Review round 2, folded in before merge (terminal side): **`DES-TERMINAL-CHAT` AMENDED**: the markdown bound's claim is corrected (a brace bound alone did not bound LaTeX: brace-free `\sqrt\sqrt...x` and `\frac a\frac a...` overflow at 1,600 to 2,000 commands), and LaTeX is off past 256 backslashes (`LATEX_MAX_COMMANDS`); `hostDefaultsOf` reads the agent dir's `settings.json` only, since `--provider` and `--model` decide where the unredacted transcript goes (pi 1.2.0 trusts project settings per folder; not reading them is the simpler rule); `runFork` refuses with no TTY before the copy, installs its signal handlers before it (no listener means the default action kills the process mid-copy), removes an emptied `<key>/`, and exits 143 or 129 after passing a SIGTERM or SIGHUP to pi; the console address takes a folder `.env`'s `PI_CONSOLE_LISTEN` only from a file that is not a link and passes the panel's rule (`dotenvTrustRefusal`), since another local account can listen on loopback; the `childEnv` strip is stated as hygiene, not a boundary. Every Rejected option UNCHANGED, checked. **Code evidence**: worker/src/chat-view.mjs -> markdownPlan, LATEX_MAX_COMMANDS; worker/src/chat-fork.mjs -> hostDefaultsOf, runFork; worker/src/console-client.mjs -> consoleAddressOf, dotenvTrustRefusal; worker/src/chat-cli.mjs -> runChat. Review round 2, folded in before merge (console side): **`DES-TERMINAL-CHAT` AMENDED**: the pending-answer scan pages every state under one budget of 10,000 listed ids (`PENDING_SCAN_BUDGET`, replacing 200 per state, whose first busy state made every park unanswerable and whose exact count read as partial), reads only each job hash's `name` and `deid` (cron and CLI jobs skipped by name; `.data` parsed only for a forge job without a dedup id, at most `PENDING_DATA_MAX`), and stops once every target is matched; a queue past the budget FAILS LOUDLY with `CHAT_REFUSALS.parkedTooMany` (answer on the forge, or wait), and failing open behind the ten-minute semantic window is rejected because a queue that deep is exactly where a queued answer outlasts it; one verdict (`pendingFactsOf`, `parkedVerdictOf`) serves `/parked` and the Chat panel, so neither draws a form the other refuses; the run page loop reuses the pending scan and the planner check for 15 s per run id (`PARK_CHECK_CACHE_MS`), and drops its cached newer-run answer when a scan finds the answer it saw before gone. `DES-OPERATOR-CONSOLE`'s Chat panel bullet gains the rows' `pendingScan`. Every Rejected option UNCHANGED, checked. **Code evidence**: admin/src/read-model.mjs -> readPendingOnTargets, pendingScanFor, PENDING_SCAN_BUDGET; worker/src/chat-mode.mjs -> pendingFactsOf, parkedVerdictOf, CHAT_REFUSALS.parkedTooMany; admin/src/console/run-api.mjs -> parkCheckCached, parkedAnswerCheckOf, chatFactsOf; admin/src/console/panels.mjs -> parkedInbox; admin/src/job-actions.mjs -> planParkedAnswer. |

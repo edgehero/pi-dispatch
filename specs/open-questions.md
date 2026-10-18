@@ -2099,6 +2099,41 @@ adversarial passes did.
 - **Cross-links**: `REQ-RUN-RECOVERY`, `DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`, `INT-WORKSPACE-CHECKPOINT-STORE`,
   `INT-RUN-CHECKPOINT-POINTER`, `OQ-041`.
 
+## OQ-046: The terminal chat's fork sends an unredacted transcript to the operator's provider
+
+- **Status**: `OPEN` (2026-10-18, issue #647 part 1). Partly decided: the prompt and the tools; open: redacting the
+  snapshot.
+- **Position**: `pi-dispatch chat` forks a finished run's stored session (`DES-TERMINAL-CHAT`). The session store
+  holds the transcript UNREDACTED (`INT-SESSION-STORE-CONTRACT`): whatever the job saw, a secret a tool printed
+  included, unlike the live stream, which is redacted before it leaves the worker (`REQ-LIVE-TRANSCRIPT`). The fork
+  copies it as it is and the operator's own pi sends it, with every message, to the operator's own provider.
+- **Decided**:
+  - **A consent prompt.** Before pi starts, the command names the bytes, says the transcript is unredacted and names
+    the provider pi will actually use (`forkModelOf`: when pi's settings name both `defaultProvider` and
+    `defaultModel`, from the folder's `.pi/settings.json` else the agent dir's `settings.json`, both are passed to pi
+    as `--provider` and `--model`; otherwise the run's own model, used if pi knows it and has a key for its provider,
+    and pi's fallback otherwise), and asks y/N; no TTY is a no.
+  - **No copy of ours outlives the command.** The copy under `~/.pi-dispatch/chat` is removed on a no, on SIGINT,
+    SIGTERM or SIGHUP at the question, and once pi exits. pi's own fork in its sessions folder, as unredacted as the
+    source, stays the operator's to keep or delete, and the command says so: that file is pi's, under the operator's
+    own pi, and deleting it would take the continued conversation with it.
+  - **The console token stays out of it**: no `PI_CONSOLE_*` variable is passed to pi (`childEnv`).
+  - **Tools off** (`--no-tools`) unless `--tools`: the transcript is agent-written text from a run that read untrusted
+    input, and the fork runs in the operator's own folder.
+  - **Host-local only**: no console route serves the stored transcript, so only someone on the store's host, with
+    read access to `PI_SESSIONS_DIR`, can fork it. That person can already read the file.
+- **Open**: whether to redact the snapshot before pi reads it. The job's secret values that the live publisher
+  redacts with are the job's env and minted token, which no longer exist when a run is forked days later; only the
+  known token shapes could be applied, and a partial redaction may read as a guarantee it is not. Redacting would also
+  change the conversation pi continues from.
+- **What would change it**: an operator who forks into a provider that is not theirs to trust with the job's data; a
+  report of a secret reaching a provider through a fork; or a remote fork being asked for, which would need a redacted
+  snapshot first.
+- **Needs**: a decision on what a fork's redaction covers (token shapes only, or a stored list of the job's secret
+  digests to match against), and whether it is on by default.
+- **Cross-links**: `REQ-TERMINAL-CHAT`, `DES-TERMINAL-CHAT`, `INT-SESSION-STORE-CONTRACT`, `REQ-LIVE-TRANSCRIPT`,
+  `REQ-RESUMABLE-SESSION`, `OQ-014`.
+
 ## Revision History
 
 | Date | Change |
@@ -2214,3 +2249,4 @@ adversarial passes did.
 | 2026-10-17 | Issue #645, part 2, review round 1. **`OQ-045` CORRECTED**: a lost host's runs end after six hours only once it is gone from the host registry (up to seven days while it still beats or its queue is paused), and doctor now warns on `run.recover` on a fleet worker with no `PI_WORKER_NAME`. |
 | 2026-10-17 | Issue #645, closing. **`OQ-045` AMENDED**: the forge mirror of the workspace (planned as part 3) is DECLINED: it could carry the tree only, a recovery needs the transcript and the tree from the same store, and it would publish the tree to readers of the repository; cross-host recovery, if it comes, comes from a shared checkpoint store. Its trigger and need for the mirror are removed. |
 | 2026-10-18 | Insights move to the console. **`OQ-024` CLOSED** (moot by design): the static insights export is retired and `/dispatch insights` prints the console's URL and spawns no browser, so the spawn this question watched is gone; the question as it stood is kept below the closing note, and what would reopen it is named (a command that spawns a browser for the insights page again). The shared opener and `setup github`'s use of it are outside this question. UNCHANGED, checked: `OQ-016` (the sandbox handover, its precedent), `OQ-002` (the what-if's seeded band keeps its label on the console), `OQ-044`. |
+| 2026-10-18 | Issue #647, part 1: terminal chat. **NEW `OQ-046`**: the fork of a finished run's stored session sends an unredacted transcript to the operator's own provider. Decided: the y/N prompt naming the bytes, the unredacted state and the provider, `--no-tools` unless `--tools`, and host-local only (no console route serves the stored transcript). Open: redacting the snapshot (only token shapes are available days later, and a partial redaction may read as a guarantee). **`OQ-044` UNCHANGED, checked**: the live stream's placement is unchanged; the terminal reads it through the console as the run page does. Review round 1, folded in before merge: **`OQ-046` AMENDED**, Decided: the consent names the provider and model pi will actually use (`forkModelOf`: both of pi's defaults passed as `--provider` and `--model`, else the run's own model with pi's fallback), the copy is removed on a no, on a signal at the question and once pi exits while pi's own fork stays the operator's, and no `PI_CONSOLE_*` variable reaches pi; Open is unchanged. **Code evidence**: worker/src/chat-fork.mjs -> forkModelOf, childEnv, runFork. |

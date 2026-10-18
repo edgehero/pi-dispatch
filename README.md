@@ -431,6 +431,10 @@ pi-dispatch import-pi   # stage a credential-free copy of ~/.pi/agent into ./pi-
   message, which the agent reads after its current tool calls (or, with `--later`, once it would otherwise stop). It
   reaches the agent as data, never as new rules, and costs only the turns it causes
   ([`docs/steering.md`](docs/steering.md)).
+- **Runs open in a terminal.** `pi-dispatch chat <jobId>` follows a running job and steers it, or answers a parked
+  one, through the console's own sign-in and actions. On the host that keeps the sessions it opens a finished run's
+  stored conversation in your own pi as a fork, with tools off and the store never written
+  ([`docs/chat.md`](docs/chat.md)).
 
 ## Run as a service
 
