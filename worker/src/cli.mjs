@@ -64,6 +64,14 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
                            - reads the text from stdin. Prints the message id and its state, never the text
   pi-dispatch steer --withdraw <jobId> <msgId>
                            take a message back: guaranteed while it is queued, best effort once written
+  pi-dispatch chat <run-id | issue-or-PR-url | session-key> [--fork] [--force] [--tools] [--pi <path>] [--console <addr>] [--yes]
+                           open a run's chat here, through the operator console (PI_CONSOLE_TOKEN, else a prompt):
+                           a running job is followed live and steered (Enter; /later <text>; /withdraw <id>;
+                           Ctrl+C detaches), a parked one is answered, and a finished one (or a session key, or
+                           --fork) opens in your own pi as a fork of its stored transcript, on the host that keeps
+                           the sessions, with tools off unless --tools; the stored transcript is never changed.
+                           A console that is not loopback is asked about first (the token goes over plain HTTP);
+                           --yes answers that question
 
 Config comes from the environment (see .env.example); flags override it per run.
 Prefer being walked through all of this? The operator panel's /dispatch setup does every step
@@ -73,7 +81,7 @@ with a consent per action:  pi install npm:@edgehero/pi-dispatch-admin`;
 	// injects a collector instead of reassigning `process.stdout.write`. That matters because `node --test`
 	// runs each file in a child process that serialises its own results over that same stdout, so a test
 	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
-export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date() } = {}) {
+export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), writeErr = (chunk) => process.stderr.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date() } = {}) {
 	const cmd = argv[0];
 
 	if (cmd === "init") {
@@ -272,6 +280,13 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		if (picked.urls.length > 1) return fail(`${picked.disagreement}: a job lives in one of them. Say which: pi-dispatch steer ${picked.positionals[0] ?? "<jobId>"} --valkey-url <url> ...`);
 		const { runSteer } = await import("./steer-cli.mjs");
 		return runSteer({ positionals: picked.positionals, later: picked.values.later, withdraw: picked.values.withdraw }, picked.urls[0], { write });
+	}
+
+	if (cmd === "chat") {
+		// Through the operator console (issue #647): its cookie login, its run lookup and its actions, never Valkey, so a
+		// terminal behind an SSH tunnel needs nothing else. The fork mode reads this host's session store directly.
+		const { runChat } = await import("./chat-cli.mjs");
+		return runChat(argv.slice(1), { env, out: (line) => write(`${line}\n`), err: (line) => writeErr(`${line}\n`), deploymentEnv: cliDeploymentEnv });
 	}
 
 	write(`${USAGE}\n`);

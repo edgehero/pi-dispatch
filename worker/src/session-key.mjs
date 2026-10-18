@@ -113,3 +113,35 @@ export function keyParts(job, resolved = {}) {
 	// kind that is neither a forge nor local lands here too, which is the safe direction: no session.
 	return null;
 }
+
+/**
+ * A RUN RECORD's session key, re-derived the way `sessionKeyFor` derives a job's (DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED):
+ * a forge ISSUE from kind + repo + its number, a cron run from its scheduler id. Null where the record cannot say: a
+ * pull or merge request's key needs its head ref, which the record deliberately does not carry (it is attacker-chosen
+ * text, and the record holds none, INT-RUN-HISTORY-FILE-CONTRACT).
+ *
+ * It lives HERE, beside `sessionKeyFor`, and not in the admin's read model where it started (issue #647): the admin's
+ * parked-chain counter and the terminal `pi-dispatch chat` fork both need it, and two copies of a key rule are two
+ * places for a cross-issue transcript mix-up to start. Still derived, never looked up: there is no index to consult.
+ *
+ * @param {object} record - A run record (`kind`, `target`, `jobId`, `triggerType`).
+ * @returns {string|null} The 32-hex key, or null.
+ */
+export function sessionKeyOfRecord(record) {
+	const kind = record?.kind;
+	if (kind === "local") {
+		// The scheduler id is the middle of a cron (`repeat:`) or manual-fire (`manual:`) job id; the trailing number is
+		// the fire's own, which differs every time and must not split one schedule's sessions.
+		const m = typeof record?.jobId === "string" ? /^(?:repeat|manual):(.+):\d+$/.exec(record.jobId) : null;
+		return m ? sessionKeyFor({ kind: "local", trigger: { id: m[1] } }) : null;
+	}
+	if (!isForgeKind(kind) || typeof record?.target !== "string") return null;
+	// `!` (a GitLab merge request, an Azure pull request) never matches: a request's key needs the head ref.
+	const m = /^(.+)#(\d+)$/.exec(record.target);
+	if (!m) return null;
+	// `#` is the issue separator on every forge; GitHub and Forgejo also spell a pull request with it, and only the
+	// trigger type can say which (a `pull_request` trigger). A comment on a pull request stays ambiguous, so a key that
+	// names no directory reads as unknown to its callers, never as a session.
+	if (record.triggerType === "pull_request") return null;
+	return sessionKeyFor({ kind, repo: m[1], target: { type: "issue", number: Number(m[2]) } });
+}

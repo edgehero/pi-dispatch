@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { issueBranch } from "../src/branch.mjs";
-import { keyParts, sessionKeyFor } from "../src/session-key.mjs";
+import { keyParts, SESSION_KEY_PATTERN, sessionKeyFor, sessionKeyOfRecord } from "../src/session-key.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 
 const ghIssue = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } };
@@ -147,5 +147,43 @@ test("the replica/session LOCK holds on EVERY forge, not just github (#187)", ()
 		assert.deepEqual(keyParts(r1), [kind, "o/r", "pi/issue-7"], `${kind} keys on the UNSUFFIXED branch`);
 		assert.equal(sessionKeyFor(r1), sessionKeyFor(r2), `${kind}: both replicas resolve one key`);
 		assert.equal(sessionKeyFor(r1), sessionKeyFor(base), `${kind}: and the same key an unreplicated run resolves`);
+	}
+});
+
+// --- a run RECORD's key (issue #647): the admin's chain counter and `pi-dispatch chat` share this one rule ---
+
+test("a record's key is the key its job resolved: a forge issue from its target, a cron run from its scheduler id", () => {
+	for (const kind of FORGE_KINDS) {
+		const key = sessionKeyOfRecord({ kind, target: "o/r#7", triggerType: "issues" });
+		assert.match(key, SESSION_KEY_PATTERN, `${kind}: a 32-hex key`);
+		assert.equal(key, sessionKeyFor({ kind, repo: "o/r", target: { type: "issue", number: 7 } }), `${kind}: the job's own key, so a record names the directory its job wrote`);
+	}
+	const cron = sessionKeyFor({ kind: "local", trigger: { id: "nightly.docs" } });
+	assert.equal(sessionKeyOfRecord({ kind: "local", jobId: "repeat:nightly.docs:1760000000000" }), cron);
+	assert.equal(sessionKeyOfRecord({ kind: "local", jobId: "manual:nightly.docs:3" }), cron, "a manual fire of a schedule shares the schedule's session");
+});
+
+test("a record that cannot name its key resolves none: a pull or merge request, a CLI run, a malformed target", () => {
+	// A request's key needs its head ref, which the record deliberately does not carry; a `#` pull request on GitHub or
+	// Forgejo is told apart only by its trigger type.
+	assert.equal(sessionKeyOfRecord({ kind: "github", target: "o/r#8", triggerType: "pull_request" }), null);
+	assert.equal(sessionKeyOfRecord({ kind: "forgejo", target: "o/r#8", triggerType: "pull_request" }), null);
+	assert.equal(sessionKeyOfRecord({ kind: "gitlab", target: "g/p!8", triggerType: "merge_request" }), null);
+	assert.equal(sessionKeyOfRecord({ kind: "azure", target: "p/r!8" }), null);
+	for (const record of [
+		null,
+		undefined,
+		{},
+		{ kind: "local", jobId: "cli-1" },
+		{ kind: "local", jobId: "repeat:x" },
+		{ kind: "local" },
+		{ kind: "chained", target: "o/r#7" },
+		{ kind: "github" },
+		{ kind: "github", target: 7 },
+		{ kind: "github", target: "o/r#" },
+		{ kind: "github", target: "o/r#x" },
+		{ kind: "github", target: "o/r#0" },
+	]) {
+		assert.equal(sessionKeyOfRecord(record), null, `${JSON.stringify(record)} names no key`);
 	}
 });
