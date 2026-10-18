@@ -205,7 +205,7 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     // Pinned so the sandbox default does not drag the OS temp dir into this equality
     // (REQ-RESURRECTABLE-SANDBOX); the defaulting itself is asserted in its own test below.
     PI_SANDBOX_DIR: "/sbx",
-    // Pinned for the same temp-dir reason; the default is asserted in its own test below.
+    // A retired key (the insights move to the console): set, and read by nothing, so it is in no field below.
     PI_GRAPH_DIR: "/g",
   });
   assert.deepEqual(p, {
@@ -224,8 +224,6 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     schedulerStallMax: 2,
     chainDepthMax: 1,
     chainMaxPerJob: 2,
-    graphDir: "/g",
-    graphRoot: null,
     pauseWindowsPath: "./pause-windows.json",
     scopedLimitsPath: "./scoped-limits.json",
     projectsPath: "./projects.json",
@@ -256,14 +254,10 @@ test("the admin and the worker resolve the SAME durable defaults from an empty e
   assert.ok(!underOsTempDir(p.settingsFile));
 });
 
-test("resolvePaths resolves the graph dir from PI_GRAPH_DIR with the worker's temp default", () => {
-  assert.equal(resolvePaths({ PI_GRAPH_DIR: "/x/graphs" }).graphDir, "/x/graphs");
-  // Issue #464: per account, `<tmp>/pi-dispatch-<uid>/graph`, beside that account's jobs dir.
-  const perAccount = `/pi-dispatch-${process.geteuid()}/graph`;
-  assert.ok(resolvePaths({}).graphDir.endsWith(perAccount), "the default is the worker-owned temp path, never cwd");
-  assert.ok(resolvePaths({ PI_GRAPH_DIR: "" }).graphDir.endsWith(perAccount), "empty falls back like every other path here");
-  assert.equal(resolvePaths({ TMPDIR: "/t" }).graphRoot, `/t/pi-dispatch-${process.geteuid()}`, "the root the default is secured under");
-  assert.equal(resolvePaths({ PI_GRAPH_DIR: "/x/graphs" }).graphRoot, null, "an operator's own graph dir is not the account root's");
+test("resolvePaths names no graph dir any more, and the panel reads the console's address from the deployment (the insights move to the console)", () => {
+  assert.ok(!("graphDir" in resolvePaths({ PI_GRAPH_DIR: "/x/graphs" })), "nothing writes an insights file, so no path is resolved for one");
+  assert.ok(!PANEL_SERVICE_KEYS.includes("PI_GRAPH_DIR"), "and the panel takes no such key from the deployment's .env");
+  for (const k of ["PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC"]) assert.ok(PANEL_SERVICE_KEYS.includes(k), `${k}: /dispatch insights prints the console's address from it`);
 });
 
 test("resolvePaths falls back to defaults on empty env (no worker config required)", () => {

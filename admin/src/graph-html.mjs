@@ -1,12 +1,11 @@
 /**
- * The Node-RED-style HTML page for the trigger/flow graph (issue #54): one fully self-contained
- * document (inline CSS, inline SVG, ONE inline script, zero external references) that works over
- * file:// with nothing listening anywhere. Pure in the render.mjs/costs.mjs sense and then some:
- * this module pulls in nothing at all, not even node: builtins, and the source-regex guard that
- * keeps render.mjs honest also keeps this one byte-deterministic -- no clock reads, no randomness, no
- * environment. The clock the page needs at view time is read by the PAGE script in the browser
- * (via new Date().getTime(); the static clock accessor is banned from this source by the purity
- * test), and the generation instant is injected by the caller as `now`.
+ * The Node-RED-style trigger/flow topology (issue #54): inline SVG with zero external references, drawn on the
+ * operator console's spend screen (`/insights`). It began as a self-contained page of its own and then as half of the
+ * static insights export; both were retired, and what stays is the scene (`buildGraphScene`), the escaping and the
+ * label fitter (`FIT_JS`, which the console's script carries). Pure in the render.mjs/costs.mjs sense and then some:
+ * this module pulls in nothing at all, not even node: builtins, and the source-regex guard that keeps render.mjs honest
+ * also keeps this one byte-deterministic -- no clock reads, no randomness, no environment. The generation instant is
+ * injected by the caller as `now`.
  *
  * Layout is a hand-rolled Sugiyama-lite rather than a graph library: the dependency posture of the
  * repo is hand-roll-or-argue, and the graphs here are folder-local and tiny (a handful of triggers
@@ -188,19 +187,6 @@ export function escapeHtml(s) {
   // WELL-FORMED FIRST (issue #418): half a surrogate pair that arrived in the data would otherwise reach
   // the page as it came, and a cut is not the only way to get one. Then the unseen characters (issue #641).
   return String(s).toWellFormed().replace(UNSEEN_RE, " ").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-
-// JSON destined for the inline script: `<` becomes < so no value can spell `</script>` and
-// break out of the script element, and U+2028/2029 become escapes because they are line
-// terminators to a JS parser while being invisible to JSON.
-export function embedJson(value) {
-  // And the same for every string VALUE in the embedded JSON, which would otherwise carry the escaped
-  // text of a half pair (issue #418). Keys are not rewritten: every key this page embeds is minted here
-  // (`n0`, a tip index), never data.
-  return JSON.stringify(value, (_k, v) => (typeof v === "string" ? v.toWellFormed() : v))
-    .replace(/</g, "\\u003c")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
 }
 
 // Every number that reaches markup goes through this: a non-finite value becomes 0 rather than
@@ -1891,200 +1877,12 @@ if (typeof document === "object" && document !== null && document.getElementsByT
 }
 `;
 
-// The page's whole behaviour, ES5-flavoured on purpose (no template strings, so this literal can
-// sit inside one), and with three hard rules the tests pin: no fetching of any kind, no markup
-// assembly on the client (textContent only; FIT_JS above adds its one title through the DOM, never
-// markup), and the clock read spelled without the static accessor this module's purity regex bans.
-export const PAGE_JS = `
-(function () {
-  "use strict";
-  var svg = document.getElementById("graph");
-  var root = document.getElementById("root");
-  var tip = document.getElementById("tip");
-  var wrap = document.getElementById("wrap");
-  var stamp = document.getElementById("stamp");
-  var auto = document.getElementById("auto");
-  var reloadBtn = document.getElementById("reload");
-  var selected = null;
-  var autoTimer = null;
-  var hashTimer = null;
-
-  function nowClock() { return new Date().getTime(); }
-
-  function fmtAge(ms) {
-    var s = Math.max(0, Math.floor(ms / 1000));
-    if (s < 60) return s + "s";
-    var m = Math.floor(s / 60);
-    if (m < 60) return m + "m";
-    return Math.floor(m / 60) + "h";
-  }
-  function tickStamp() {
-    var age = nowClock() - GENERATED_AT;
-    stamp.textContent = "generated " + fmtAge(age) + " ago";
-    stamp.className = age > 600000 ? "stale" : "";
-  }
-  tickStamp();
-  setInterval(tickStamp, 1000);
-
-  if (reloadBtn) reloadBtn.addEventListener("click", function () { location.reload(); });
-  function applyAuto() {
-    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
-    var s = auto ? parseInt(auto.value, 10) : 0;
-    if (s > 0) autoTimer = setInterval(function () { location.reload(); }, s * 1000);
-  }
-  if (auto) auto.addEventListener("change", function () { applyAuto(); writeHash(); });
-
-  if (!svg || !root) return;
-  var vb = svg.viewBox.baseVal;
-  var baseW = vb.width;
-
-  function writeHash() {
-    hashTimer = null;
-    var parts = ["vb=" + [vb.x, vb.y, vb.width, vb.height].map(function (v) { return Math.round(v * 10) / 10; }).join("_")];
-    if (selected) parts.push("sel=" + selected);
-    if (auto && auto.value !== "0") parts.push("ar=" + auto.value);
-    history.replaceState(null, "", "#" + parts.join("&"));
-  }
-  function scheduleHash() {
-    if (hashTimer) return;
-    hashTimer = setTimeout(writeHash, 300);
-  }
-  function readHash() {
-    var h = location.hash.replace(/^#/, "");
-    if (!h) return;
-    var kvs = h.split("&");
-    for (var i = 0; i < kvs.length; i++) {
-      var at = kvs[i].indexOf("=");
-      if (at < 0) continue;
-      var k = kvs[i].slice(0, at);
-      var v = kvs[i].slice(at + 1);
-      if (k === "vb") {
-        var n = v.split("_").map(parseFloat);
-        if (n.length === 4 && n.every(isFinite) && n[2] > 0 && n[3] > 0) {
-          vb.x = n[0]; vb.y = n[1]; vb.width = n[2]; vb.height = n[3];
-        }
-      } else if (k === "sel" && ownNode(v)) {
-        select(v);
-      } else if (k === "ar" && auto) {
-        auto.value = v === "5" || v === "30" ? v : "0";
-        applyAuto();
-      }
-    }
-  }
-
-  // With preserveAspectRatio meet, the browser scales UNIFORMLY (the smaller of the two ratios)
-  // and centres the letterboxed remainder; mapping each axis by its own ratio pans at the wrong
-  // speed and zooms beside the cursor whenever the element and viewBox aspects differ.
-  function view() {
-    var r = svg.getBoundingClientRect();
-    var s = Math.min(r.width / vb.width, r.height / vb.height);
-    return { r: r, s: s, ox: (r.width - vb.width * s) / 2, oy: (r.height - vb.height * s) / 2 };
-  }
-
-  var panning = null;
-  var suppressClick = false;
-  svg.addEventListener("pointerdown", function (e) {
-    if (e.button !== 0) return;
-    panning = { x: e.clientX, y: e.clientY, moved: 0 };
-    svg.setPointerCapture(e.pointerId);
-  });
-  svg.addEventListener("pointermove", function (e) {
-    if (panning) {
-      var v = view();
-      var dx = e.clientX - panning.x;
-      var dy = e.clientY - panning.y;
-      panning.moved += Math.abs(dx) + Math.abs(dy);
-      vb.x -= dx / v.s;
-      vb.y -= dy / v.s;
-      panning.x = e.clientX;
-      panning.y = e.clientY;
-      scheduleHash();
-    }
-    moveTip(e);
-  });
-  svg.addEventListener("pointerup", function (e) {
-    if (panning && svg.hasPointerCapture && svg.hasPointerCapture(e.pointerId)) svg.releasePointerCapture(e.pointerId);
-    // Pointer capture makes the click after a pan land on the svg, which would read as a
-    // background click and wipe the selection; a real drag therefore swallows that click.
-    suppressClick = panning !== null && panning.moved > 3;
-    panning = null;
-  });
-  svg.addEventListener("wheel", function (e) {
-    e.preventDefault();
-    var k = Math.exp(-e.deltaY * 0.0015);
-    var scale = baseW / (vb.width / k);
-    if (scale < 0.15 || scale > 4) return;
-    var v = view();
-    var px = vb.x + (e.clientX - v.r.left - v.ox) / v.s;
-    var py = vb.y + (e.clientY - v.r.top - v.oy) / v.s;
-    vb.x = px - (px - vb.x) / k;
-    vb.y = py - (py - vb.y) / k;
-    vb.width = vb.width / k;
-    vb.height = vb.height / k;
-    scheduleHash();
-  }, { passive: false });
-
-  // The ONLY indexed read of GRAPH.nodes: an id arriving from the hash (or a DOM id) could be a
-  // prototype-chain key like "constructor", which a bare truthy lookup would happily return and a
-  // later .nb dereference would throw on. A test pins this as the single raw read.
-  function ownNode(id) {
-    return Object.prototype.hasOwnProperty.call(GRAPH.nodes, id) ? GRAPH.nodes[id] : null;
-  }
-  function nodeAt(e) {
-    var el = e.target && e.target.closest ? e.target.closest(".gnode") : null;
-    return el && ownNode(el.id) ? el : null;
-  }
-  function moveTip(e) {
-    var el = nodeAt(e);
-    if (!el) { tip.style.display = "none"; return; }
-    tip.textContent = ownNode(el.id).tip;
-    tip.style.display = "block";
-    var wr = wrap.getBoundingClientRect();
-    tip.style.left = e.clientX - wr.left + 14 + "px";
-    tip.style.top = e.clientY - wr.top + 14 + "px";
-  }
-
-  function mark(id) {
-    var el = document.getElementById(id);
-    if (el) el.classList.add("hi");
-  }
-  function clearSel() {
-    selected = null;
-    root.classList.remove("dim");
-    var hi = root.querySelectorAll(".hi");
-    for (var i = 0; i < hi.length; i++) hi[i].classList.remove("hi");
-    scheduleHash();
-  }
-  function select(id) {
-    clearSel();
-    var g = ownNode(id);
-    if (!g) return;
-    selected = id;
-    root.classList.add("dim");
-    mark(id);
-    for (var i = 0; i < g.nb.length; i++) mark(g.nb[i]);
-    for (var j = 0; j < g.w.length; j++) mark(g.w[j]);
-    scheduleHash();
-  }
-  svg.addEventListener("click", function (e) {
-    if (suppressClick) { suppressClick = false; return; }
-    var el = nodeAt(e);
-    if (el) { if (selected === el.id) clearSel(); else select(el.id); }
-    else clearSel();
-  });
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") clearSel(); });
-
-  readHash();
-})();
-`;
-
 /**
  * The scene: normalize, lay out, and emit the SVG body plus the per-node data the page script
  * needs. Extracted (issue #175) so insights-html.mjs could place the same topology inside a larger
- * document without a second layout engine or a second escaping discipline -- and since issue #279
- * that page is the ONLY consumer: the standalone topology page this was split from lost its
- * command in #181 and sat caller-less until it was deleted, total-function guarantees and all
- * (they live on in `buildInsightsHtml`, which the same suites pin). The
+ * document without a second layout engine or a second escaping discipline. Since the insights move
+ * to the console its one consumer is the console's spend screen (`console/panels.mjs` `insightsBody`),
+ * which lists `graphData` in a hidden, escaped list for its script. The
  * layout's placed nodes still hold their normalised node objects (original ids and all) -- that is
  * server-side composition state for the caller; only `svgBody`/`graphData` strings belong in a
  * page, and they carry minted ordinals alone.

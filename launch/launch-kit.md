@@ -26,7 +26,7 @@ a container starts (per-job turn budget + a daily cap), and the same job runs wh
 CLI, a cron schedule, or a label, `@pi` comment or PR event on GitHub, GitLab, Forgejo or Azure DevOps. You
 bake your own toolchain into the image (it ships Playwright + Chromium, so a flow can build a frontend,
 screenshot it, and iterate on the render), a live `/dispatch` admin panel shows the queue, spend meters,
-run history, and triggers, and one `/dispatch insights` page prices it all: spend charts, subscription
+run history, and triggers, and one insights page in the web console prices it all: spend charts, subscription
 verdicts against API rates, and the whole trigger/flow topology.
 
 **The install line** (use this everywhere; the scoped form only, per the naming rule above):
@@ -71,7 +71,7 @@ pi-dispatch is the operational layer that closes them, and nothing else:
   Chromium so a flow can build a frontend, screenshot it, and iterate on the rendered result.
 - A live admin panel (a pi extension): queue state, day/week/month spend meters, run history
   with per-job token+cost accounting, editable triggers, per-repo "quiet hours" that defer runs
-  between certain times — and one /dispatch insights page: spend charts, subscription
+  between certain times, and one insights page in the web console: spend charts, subscription
   SAVING/LOSING verdicts against API rates, what-if re-pricing, and the whole trigger/flow
   topology drawn Node-RED style with the spend badged onto the triggers that earned it.
 
@@ -120,7 +120,7 @@ The admin side is itself a pi extension: a /dispatch command + overlay (queue, s
 run history, editable triggers) and confirm-gated tools so an agent can operate the deployment
 with a human approving each *config* change. Two tools skip that dialog on purpose: pause and
 resume (reversible, spend nothing), and the paid dispatch_run (bounded by six limits instead,
-spelled out in SECURITY.md). Newest bits: /dispatch insights — one self-contained page with
+spelled out in SECURITY.md). Newest bits: insights in the web console, one page with
 the spend charts, subscription SAVING/LOSING verdicts, what-if re-pricing, and the whole
 trigger/flow topology — and run.command triggers that dispatch a staged workflow extension's
 slash command headlessly, no glue code.
@@ -232,7 +232,7 @@ that makes that safe-ish and boring:
 - Durable queue (Valkey + BullMQ) so a burst or a reboot doesn't drop jobs.
 - Bring your own Docker image (Playwright/Chromium included for frontend work).
 - A TUI admin panel for queue/spend/runs/triggers, per-repo scheduled pause windows, and a
-  self-contained insights page (spend charts, subscription verdicts, the trigger/flow topology).
+  web console with an insights page (spend charts, subscription verdicts, the trigger/flow topology).
 
 Self-hosted, MIT, needs Docker + Node 22.19 + a provider key. Threat model is written down
 honestly in SECURITY.md (it's the GitHub-Actions trust model: whoever can merge can instruct it).
@@ -263,8 +263,8 @@ Working title: **"Giving a coding agent an off-switch: containers, spend caps, a
    human. Why "operator-approved" beats "no tool at all" here, and then the honest half: where that gate
    deliberately stops. Pause and resume carry no confirm (reversible, spend nothing), and the paid
    `dispatch_run` carries none either, bounded by six independent limits instead of a dialog.
-6. **One page that explains the bill.** The insights page: why the analytics are a self-contained file
-   (no server, no port, works over scp), how every dollar keeps its class (metered vs estimated vs
+6. **One page that explains the bill.** The insights page: why the analytics moved from a self-contained file
+   into the operator console (one surface, behind a token, still loading nothing from another origin), how every dollar keeps its class (metered vs estimated vs
    plan-covered — never a lying $0.00), and the trigger/flow topology as the map the spend hangs off.
    (Screenshot: the insights page.)
 7. **What I got wrong / what's not defended.** Link SECURITY.md's honest list. Invite scrutiny.

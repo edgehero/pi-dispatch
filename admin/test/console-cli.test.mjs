@@ -9,6 +9,7 @@ import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
 import * as server from "../src/console/server.mjs";
+import * as realWhatif from "../src/console/whatif.mjs";
 
 // `pi-dispatch-console` (issue #640) on injected modules: the token, session, code, ticket and audit modules are fakes
 // here, so these tests pin the command's own rules (exit codes, what it prints and where, the startup refusals, the
@@ -102,7 +103,9 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
       resolvePaths: (env) => ({ valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379", logsDir: env.PI_LOGS_DIR ?? "./logs", triggersPath: env.PI_TRIGGERS_FILE ?? "./triggers.json", subscriptionsPath: "./subscriptions.json" }),
       createFleetReader: (paths, seams) => (fleet.built.push({ paths, seams }), fleet),
       readSubscriptions: (args) => (calls.push(["subscriptions", args.subscriptionsPath]), { version: 1, subscriptions: [] }),
+      scanRunRecords: (args) => (calls.push(["scan", args.logsDir, args.sinceMs]), []),
     },
+    whatif: realWhatif,
   };
 }
 
@@ -357,7 +360,8 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   const auditReads = [];
   modules.audit.readConsoleAudit = (args) => (auditReads.push(args), { rows: [], next: null });
   const err = [];
-  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
+  let clock = T0;
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => clock, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
   const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
   const port = srv.address().port;
 
@@ -395,6 +399,25 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   assert.deepEqual(modules.insightCalls.map((c) => c.window), ["7d", "30d"], "one assembly per window inside the cache");
   assert.deepEqual(Object.keys(modules.insightCalls[0].opts.pricing).sort(), ["getPricedModel", "isZeroRated", "listPricedModels", "piAiVersion", "reprice"]);
   assert.equal(modules.insightCalls[0].paths, paths);
+  assert.equal(modules.insightCalls[0].opts.fullPaths, undefined, "a names-only assembly asks for no host path");
+  // An operator's paths=full is its own entry: a full-path assembly is never handed to a names-only request.
+  await deps.insights("7d", { fullPaths: true });
+  await deps.insights("7d", { fullPaths: true });
+  await deps.insights("7d");
+  assert.deepEqual(modules.insightCalls.map((c) => [c.window, c.opts.fullPaths === true]), [["7d", false], ["30d", false], ["7d", true]]);
+  // The what-if (REQ-COST-ANALYTICS): the reader over this deployment's logs at the scan's own 92-day ceiling (no
+  // display window), and the priced catalog for the form, both wired.
+  assert.equal(typeof deps.whatIf, "function");
+  assert.deepEqual(deps.pricedModels(), [], "the fake façade lists nothing");
+  const answer = await deps.whatIf({ model: "acme/m-1", flow: "tidy" });
+  assert.equal(answer.result.class, "seeded", "no ledgered run in an empty scan: the seeded band");
+  assert.deepEqual(modules.calls.filter((c) => c[0] === "scan"), [["scan", paths.logsDir, undefined]], "one scan, at the scan's own ceiling");
+  // The reader keeps its scan on serve's clock, not the wall clock: past the TTL on the injected clock it scans again.
+  await deps.whatIf({ model: "acme/m-1", flow: "tidy" });
+  assert.equal(modules.calls.filter((c) => c[0] === "scan").length, 1, "within the TTL, the held scan and answer");
+  clock += realWhatif.WHATIF_LIMITS.ttlMs;
+  await deps.whatIf({ model: "acme/m-1", flow: "tidy" });
+  assert.equal(modules.calls.filter((c) => c[0] === "scan").length, 2, "past it on the injected clock, a new scan");
   await deps.audit({ limit: 5, before: null });
   assert.deepEqual(auditReads.map((a) => [a.logsDir, a.limit]), [[join(dep.dir, "logs"), 5]]);
   assert.deepEqual(deps.subscriptions(), { version: 1, subscriptions: [] });
@@ -440,6 +463,15 @@ test("cachedPerWindow: one call per window within the TTL on the injected clock,
   await assert.rejects(cached("bad"));
   fail = false;
   assert.equal(await cached("bad"), "v-bad-4", "a failed assembly is tried again, not served for 30 s");
+  // Only fullPaths: true is the full-path entry; false or any other value is the names entry, asked with no option.
+  const optsSeen = [];
+  const names = cachedPerWindow(async (w, o) => (optsSeen.push(o), w), { now: () => t });
+  await names("7d");
+  await names("7d", { fullPaths: false });
+  await names("7d", { fullPaths: "yes" });
+  assert.deepEqual(optsSeen, [undefined], "one names-only assembly, asked for no host path");
+  await names("7d", { fullPaths: true });
+  assert.deepEqual(optsSeen, [undefined, { fullPaths: true }]);
 });
 
 test("readSideOf: the deployment .env fills the read side's keys, relative paths are the deployment folder's, PI_SESSIONS_DIR turns on sessionsDir", async () => {

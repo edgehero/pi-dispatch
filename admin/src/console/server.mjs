@@ -204,7 +204,7 @@ function pageHandler(name) {
     const parsed = pageQueryOr400(ctx, name, ctx.searchParams);
     if (!parsed) return;
     const { pages, pageDeps, config } = ctx.deps;
-    const data = await pages.loadPageData(name, parsed.query, pageDeps);
+    const data = await pages.loadPageData(name, parsed.query, pageDeps, { role: ctx.session.role });
     const out = await pages.renderPage(name, { query: parsed.query, session: { name: ctx.session.name, role: ctx.session.role }, data, readOnly: Boolean(config.readOnly) });
     return sendHtml(ctx.res, out?.status ?? 200, out?.html ?? "");
   };

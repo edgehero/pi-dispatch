@@ -13,9 +13,10 @@ recipe; it needs a real terminal and pi itself, so it's yours to run (the still 
    `pi -e admin/src/index.ts`; the published extension's entry point is its built `./dist/index.mjs`.)
 2. `↵` on a trigger → the MATCHES / RUNS / TRUST MODEL drill-in.
 3. `↵` on a run → the colored post-mortem.
-4. `i` → the insights page opens in the browser: the budget lever, the plan verdicts, how busy each host was, the spend
-   charts and the topology, one page. (In a pure-terminal recording, skip this beat or show the
-   printed `file://` URL instead.)
+4. `i` → a notice with the console's insights URL (`http://127.0.0.1:4790/insights?range=30d` by default). Open it in
+   the browser, with the console started (`pi-dispatch-console serve`), for the budget lever, the plan verdicts, how
+   busy each host was, the spend charts and the topology, one page. (In a pure-terminal recording, the notice is the
+   beat.)
 5. (optional) `w` on the dashboard → the pause-window dialogs: a three-way select (add / edit / delete a
    pause window), then seven prompts for an add. Watch a PAUSE WINDOWS row flip to
    `● paused · resumes in …`.
@@ -55,7 +56,7 @@ Type "/dispatch"  Enter
 Sleep 3s
 Enter  Sleep 3s   Escape Sleep 1s                      # a trigger drill-in (selection starts on trigger 1)
 Tab  Sleep 500ms  Enter  Sleep 3s  Escape Sleep 1s     # a run post-mortem (Tab jumps triggers <-> runs)
-Type "i"  Sleep 4s                                        # the insights page opens (browser beat)
+Type "i"  Sleep 4s                                        # the notice with the console's insights URL
 Type "q"
 Sleep 1s
 ```
@@ -164,8 +165,8 @@ run detail. The commands image is what `/dispatch status`, `budget`, `runs 5`, `
 assembled from the same reads and renderers the extension uses, with the deployment's folder shown as `~/pi-work`.
 Each SVG is checked against the renderer's lines before it is written, and two runs write the same bytes
 (`admin/test/render-images.test.mjs`). The
-insights page is `insightsCommand`'s, shot at 1240 px and device scale 2, full page, with the browser's clock one
-minute after the page was generated.
+insights page is the console's `/insights?range=30d` page over the same fixture, shot at 1240 px and device scale 2,
+full page.
 
 After a render, bump the `?v=` on each changed image in both READMEs (the admin README links the PNGs by their
 absolute raw.githubusercontent.com URLs, because the npm page cannot show an SVG from there).

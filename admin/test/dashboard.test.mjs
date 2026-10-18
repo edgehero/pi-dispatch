@@ -81,7 +81,8 @@ test("renders every section from the last snapshot, reusing the command renderer
 test("the footer advertises i insights unclipped at 80; c/g are inert; i resolves with the openInsights action", async () => {
   // The consolidation pins (issue #181): the analytics views left the terminal for the page, so the
   // footer names the one door, the old entry keys do nothing, and `i` resolves the overlay with the
-  // done-action index.ts turns into a write-and-open between overlays (the addTrigger route).
+  // done-action index.ts turns into a notice of the console's spend screen address between overlays (the addTrigger
+  // route).
   let resolved = "unset";
   const comp = makeDashboard({ paths: {}, done: (r) => { resolved = r; }, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
   await flush();

@@ -8,7 +8,8 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { stripAnsi } from "../src/style.mjs";
 import { hostBudgetsOf, readSizeSuggestions } from "../src/read-model.mjs";
 import { PAGE_THEME } from "../src/graph-html.mjs";
-import { INSIGHTS_CAP_MISSING, INSIGHTS_CPU_REASONS, INSIGHTS_MEMORY_HELD, SIZING_NO_CAP_WORDS, INSIGHTS_MEMORY_REASONS, INSIGHTS_SIZE_FACTS, buildInsightsHtml, layoutSizingChart, sizeCoresText, sizeCpuText, sizeMemText } from "../src/insights-html.mjs";
+import { insightsBody } from "../src/console/panels.mjs";
+import { INSIGHTS_CAP_MISSING, INSIGHTS_CPU_REASONS, INSIGHTS_MEMORY_HELD, SIZING_NO_CAP_WORDS, INSIGHTS_MEMORY_REASONS, INSIGHTS_SIZE_FACTS, layoutSizingChart, sizeCoresText, sizeCpuText, sizeMemText } from "../src/insights-html.mjs";
 import { CPU_REASONS, MEMORY_CAP_MISSING, MEMORY_HELD, MEMORY_REASONS, SIZE_FACTS, coresText, hostCap, suggestSize } from "@edgehero/pi-dispatch/size-suggest";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
@@ -362,7 +363,7 @@ function sizingPayload(overrides = {}) {
 }
 
 test("the insights page draws a job sizes section: the hosts' budgets in use, each project's chart, suggestion and call", () => {
-  const html = buildInsightsHtml({ sizing: sizingPayload() }, { now: NOW });
+  const html = String(insightsBody({ sizing: sizingPayload() }, NOW));
   assert.match(html, /<h2>job sizes<\/h2>/);
   assert.match(html, /<span class="pid">mini1<\/span> promised memory 4g of 29492m, CPU \? of 7</, "each dimension in the HOSTS view's words");
   assert.match(html, /<span class="pid">shop<\/span> <span class="dim">size 4g, 2 CPUs · p95 4g, 1 core<\/span>/);
@@ -373,19 +374,19 @@ test("the insights page draws a job sizes section: the hosts' budgets in use, ea
   assert.ok(html.includes(`r="2.5" fill="${PAGE_THEME.danger}"`), "an oom-killed run's dot is drawn in the danger colour");
   const ok = sizingPayload();
   ok.projects.shop.series = [{ at: NOW - MIN, peakMiB: 1000, sizeMiB: 4096 }];
-  assert.ok(buildInsightsHtml({ sizing: ok }, { now: NOW }).includes(`r="2.5" fill="${PAGE_THEME.accent}"`));
+  assert.ok(String(insightsBody({ sizing: ok }, NOW)).includes(`r="2.5" fill="${PAGE_THEME.accent}"`));
   const over = sizingPayload();
   over.projects.shop.call = null;
   over.projects.shop.refusal = { memMiB: null, cpuCenti: "share" };
-  assert.match(buildInsightsHtml({ sizing: over }, { now: NOW }), /<div class="small">no call: no live host admits it \(its 2 CPUs are above its hostShare of every live host&#39;s budget\)<\/div>/);
+  assert.match(String(insightsBody({ sizing: over }, NOW)), /<div class="small">no call: no live host admits it \(its 2 CPUs are above its hostShare of every live host&#39;s budget\)<\/div>/);
   over.projects.shop.refusal = { memMiB: "host", cpuCenti: "made-up" };
-  assert.match(buildInsightsHtml({ sizing: over }, { now: NOW }), /no live host admits it \(memory 6g is above every live host&#39;s budget\)/, "an unknown kind names no dimension");
-  assert.doesNotMatch(buildInsightsHtml({ sizing: sizingPayload() }, { now: NOW }), /no live host admits/);
+  assert.match(String(insightsBody({ sizing: over }, NOW)), /no live host admits it \(memory 6g is above every live host&#39;s budget\)/, "an unknown kind names no dimension");
+  assert.doesNotMatch(String(insightsBody({ sizing: sizingPayload() }, NOW)), /no live host admits/);
   // a held raise says what the hosts offer, never "raise the budget"; a fact is information below the call
   const held = (h, more = {}) => {
     const p = sizingPayload();
     p.projects.shop.memory = { ...p.projects.shop.memory, held: h, wanted: 6144, ...more };
-    return buildInsightsHtml({ sizing: p }, { now: NOW });
+    return String(insightsBody({ sizing: p }, NOW));
   };
   assert.match(held("cap", { suggested: 5120 }), /memory: suggest 5g \(oom-killed, the most a live host offers\)/);
   assert.match(held("largest", { suggested: null }), /memory: stays \(oom-killed, already the largest size a live host offers\)/);
@@ -402,15 +403,15 @@ test("the insights page draws a job sizes section: the hosts' budgets in use, ea
   const facts = sizingPayload();
   facts.projects.shop.memory = { ...facts.projects.shop.memory, fact: "pressure", evidence: { samples: 10, p95MiB: 4096, pressured: 3 } };
   facts.projects.shop.cpu = { ...facts.projects.shop.cpu, reason: "fits", fact: "ceiling", evidence: { samples: 10, p95CoresCenti: 100, throttledPct: 60 } };
-  const fhtml = buildInsightsHtml({ sizing: facts }, { now: NOW });
+  const fhtml = String(insightsBody({ sizing: facts }, NOW));
   assert.match(fhtml, /<div class="dim small">3 of 10 runs reached the memory limit while stalled for memory<\/div><div class="dim small">the median run was held back 60% of its time by its host&#39;s CPU ceiling, which a job&#39;s cpus do not change<\/div><svg/);
   facts.projects.shop.memory.fact = "at-limit";
-  assert.doesNotMatch(buildInsightsHtml({ sizing: facts }, { now: NOW }), /reached the memory limit/, "an unknown fact is dropped");
+  assert.doesNotMatch(String(insightsBody({ sizing: facts }, NOW)), /reached the memory limit/, "an unknown fact is dropped");
   assert.doesNotMatch(fhtml + held("cap", { suggested: 5120 }), /raise (?:the|this|a) host|budget first/i);
-  assert.doesNotMatch(buildInsightsHtml({}, { now: NOW }), /job sizes/, "no slice, no section");
-  assert.match(buildInsightsHtml({ sizing: { unreachable: "logs dir unreadable (EACCES)" } }, { now: NOW }), /job sizes not read: logs dir unreadable \(EACCES\)/);
-  assert.match(buildInsightsHtml({ sizing: sizingPayload({ hosts: { unreachable: "timed out" } }) }, { now: NOW }), /host budgets not read: timed out/);
-  assert.match(buildInsightsHtml({ sizing: sizingPayload({ hosts: { rows: [] } }) }, { now: NOW }), /no live host publishes a budget/);
+  assert.doesNotMatch(String(insightsBody({}, NOW)), /job sizes/, "no slice, no section");
+  assert.match(String(insightsBody({ sizing: { unreachable: "logs dir unreadable (EACCES)" } }, NOW)), /job sizes not read: logs dir unreadable \(EACCES\)/);
+  assert.match(String(insightsBody({ sizing: sizingPayload({ hosts: { unreachable: "timed out" } }) }, NOW)), /host budgets not read: timed out/);
+  assert.match(String(insightsBody({ sizing: sizingPayload({ hosts: { rows: [] } }) }, NOW)), /no live host publishes a budget/);
 });
 
 test("the insights sizing slice is allowlisted: junk ids, reasons, calls and points are dropped, never drawn", () => {
@@ -419,13 +420,13 @@ test("the insights sizing slice is allowlisted: junk ids, reasons, calls and poi
   p.projects.ok = { ...p.projects.shop, call: 'dispatch_limit_edit {"index":0,"memory":"<script>"}', memory: { ...p.projects.shop.memory, reason: "made-up" } };
   p.projects.pts = { ...p.projects.shop, call: "rm -rf /", series: [{ at: "x", peakMiB: 1, sizeMiB: 1 }, { at: NOW - MIN, peakMiB: -1, sizeMiB: 4096 }, { at: NOW - MIN, peakMiB: 9999, sizeMiB: 4096 }] };
   p.hosts.rows.push({ name: "<img>", budgetMemMiB: "1" });
-  const html = buildInsightsHtml({ sizing: p }, { now: NOW });
+  const html = String(insightsBody({ sizing: p }, NOW));
   assert.doesNotMatch(html, /Bad Id|&lt;script&gt;|made-up|rm -rf|&lt;img&gt;/);
   assert.match(html, /<span class="pid">pts<\/span>/);
   assert.doesNotMatch(html, /peak 9999m/, "a peak above its size is drawn at the size");
   // a hostile getter takes only this section down
   const hostile = { get projects() { throw new Error("boom"); }, hosts: { rows: [] } };
-  assert.doesNotMatch(buildInsightsHtml({ sizing: hostile }, { now: NOW }), /job sizes/);
+  assert.doesNotMatch(String(insightsBody({ sizing: hostile }, NOW)), /job sizes/);
 });
 
 test("assembleSizingView reads the registry through its seam and caps a raise per host", async () => {
@@ -511,7 +512,7 @@ test("insights job sizes chart: every date under the axis fits inside the chart,
 });
 
 test("the job sizes section says a host with no budget has none, in the HOSTS view's words", () => {
-  const html = buildInsightsHtml({ sizing: sizingPayload({ hosts: { rows: [{ name: "mini2", budgetMemMiB: "off", budgetCpuCenti: "off", usedMemMiB: "", usedCpuCenti: "" }, { name: "mini1", budgetMemMiB: "16384", budgetCpuCenti: "800", usedMemMiB: "6144", usedCpuCenti: "300" }] } }) }, { now: NOW });
+  const html = String(insightsBody({ sizing: sizingPayload({ hosts: { rows: [{ name: "mini2", budgetMemMiB: "off", budgetCpuCenti: "off", usedMemMiB: "", usedCpuCenti: "" }, { name: "mini1", budgetMemMiB: "16384", budgetCpuCenti: "800", usedMemMiB: "6144", usedCpuCenti: "300" }] } }) }, NOW));
   assert.match(html, /<span class="pid">mini2<\/span> no memory budget, no CPU budget</);
   assert.match(html, /<span class="pid">mini1<\/span> promised memory 6g of 16g, CPU 3 of 8</);
   assert.doesNotMatch(html, /off CPUs|in use unknown/);
@@ -524,7 +525,7 @@ test("the job sizes section keeps the panel's budget states apart: not known yet
     { name: "a3" },
     { name: "a4", budgetMemMiB: "8192", budgetCpuCenti: "", usedMemMiB: "4096", usedCpuCenti: "" },
   ];
-  const html = buildInsightsHtml({ sizing: sizingPayload({ hosts: { rows } }) }, { now: NOW });
+  const html = String(insightsBody({ sizing: sizingPayload({ hosts: { rows } }) }, NOW));
   assert.match(html, /<span class="pid">a1<\/span> budget not known yet</);
   assert.match(html, /<span class="pid">a2<\/span> budget unreadable</);
   assert.match(html, /<span class="pid">a3<\/span> no host budget published</);

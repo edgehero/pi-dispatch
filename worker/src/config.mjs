@@ -747,11 +747,10 @@ export function loadGitHubAuth(env, fileExists) {
 	return { source, patVar, appId, installationId, privateKeyPath, privateKey };
 }
 
-// env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job, sandbox and graph paths
+// env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job and sandbox paths
 // below -- and, only on a host with no home directory to name, as the last-resort fallback for the
 // durable state root. Not a variable of this project's and not a deployment knob: PI_JOBS_DIR,
-// PI_LOGS_DIR, PI_GRAPH_DIR and PI_SETTINGS_FILE are how an operator moves any of them, and
-// .env.example says so.
+// PI_LOGS_DIR and PI_SETTINGS_FILE are how an operator moves any of them, and .env.example says so.
 
 /** This process's effective uid, the one its files are created as, or null where the platform has none (Windows). */
 function currentUid() {
@@ -759,7 +758,7 @@ function currentUid() {
 }
 
 /**
- * The per-account root under the OS temp dir that the default jobs, sandbox and graph paths live in (issue #464):
+ * The per-account root under the OS temp dir that the default jobs and sandbox paths live in (issue #464):
  * `<tmp>/pi-dispatch-<uid>`, or `<tmp>/pi-dispatch` where the platform has no uid (Windows, whose TEMP is per user).
  *
  * Per ACCOUNT because the OS temp dir is shared by every account on a host. The old `<tmp>/pi-dispatch` was created by
@@ -842,7 +841,7 @@ export function sandboxDirOwnerFix(dir) {
 
 /**
  * Secure the per-account root (`ensureAccountTempRoot`) when `path` lies in it, else do nothing (issue #464). The one
- * rule for every default that can live there: the jobs, sandbox and graph dirs, and, on an account with no home, the
+ * rule for every default that can live there: the jobs and sandbox dirs, and, on an account with no home, the
  * run history and the settings overlay (`defaultStateDir`). Returns whether it did.
  */
 export function ensureUnderAccountRoot(path, { env = process.env, uid = currentUid(), fs = { mkdirSync, lstatSync, statSync, chmodSync } } = {}) {
@@ -862,8 +861,8 @@ export function jobsDirOwnerFix(dir, inRoot) {
 
 /**
  * Create `root` mode 0700 when it is absent, and refuse it unless it is a real directory (never a symlink, lstat) owned
- * by `uid`; one this account owns with group or other bits is tightened to 0700. Exported for the admin's graph dir,
- * which lives under the same root. Throws a `configError` naming the path and the remedy.
+ * by `uid`; one this account owns with group or other bits is tightened to 0700. Exported for its tests and for
+ * doctor's reading of its refusals. Throws a `configError` naming the path and the remedy.
  *
  * lstat FIRST, never a recursive mkdir first (gate round 1, measured on Fedora 44): with fs.protected_symlinks on (the
  * default on Fedora and Ubuntu), following another account's symlink under the sticky /tmp fails EACCES, and the
@@ -1309,19 +1308,6 @@ function workerName(env) {
 	}
 	return declared;
 }
-
-export function defaultGraphDir(env = process.env, uid = currentUid()) {
-	// Under the OS temp dir by default, beside logs/ and jobs/ -- the admin's graph HTML artifact
-	// (issue #54) is host-side display output on the defaultLogsDir doctrine, and deliberately NOT
-	// inside logsDir: INT-RUN-HISTORY-FILE-CONTRACT names that directory's filename shape, and a
-	// stray .html beside the sidecars would widen a contract for a file that is not a record.
-	// Overridable with PI_GRAPH_DIR; exported so the admin resolves the same default without
-	// loadConfig, like defaultSandboxDir above.
-	// Issue #464: under the per-account root, for the jobs dir's reason: another account's `<tmp>/pi-dispatch` made
-	// this one uncreatable.
-	return `${accountTempRoot(env, uid)}/graph`;
-}
-
 
 /**
  * The worker's Azure DevOps auth config, or `null` when none is configured -- same presence rule as the

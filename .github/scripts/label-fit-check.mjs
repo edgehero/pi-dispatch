@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-// Measures the insights page's drawn labels in a real browser (issue #422): builds the page from a corpus of
-// scripts the static column estimate cannot size, serves it from memory, lets headless Chrome run the page's own
-// view-time fit, and reads back where every left-anchored label ends against the box it sits in. Not run in CI:
-// it needs a Chrome, and the unit suite pins the fit's logic with an injected measure.
+// Measures the console spend screen's drawn labels in a real browser (issue #422): builds the screen's insights body
+// (the console's own renderer, `insightsBody`, under the console's stylesheet) from a corpus of scripts the static
+// column estimate cannot size, serves it from memory with the console script's view-time fit (`FIT_JS`, which
+// console.js carries verbatim), lets headless Chrome run it, and reads back where every left-anchored label ends
+// against the box it sits in. Not run in CI: it needs a Chrome, and the unit suite pins the fit's logic with an
+// injected measure.
 //
 //   node .github/scripts/label-fit-check.mjs [path-to-chrome]
 //
@@ -18,7 +20,9 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const { buildInsightsHtml } = await import(path.join(root, "admin/src/insights-html.mjs"));
+const { insightsBody } = await import(path.join(root, "admin/src/console/panels.mjs"));
+const { CONSOLE_CSS } = await import(path.join(root, "admin/src/console/style.mjs"));
+const { CONSOLE_SCRIPT } = await import(path.join(root, "admin/src/console/script.mjs"));
 const { buildGraphModel } = await import(path.join(root, "admin/src/graph-model.mjs"));
 const { FIT_JS } = await import(path.join(root, "admin/src/graph-html.mjs"));
 
@@ -321,13 +325,13 @@ const HITS = `<script>
 })();
 </script>`;
 
+// The page: the console's insights body in its stylesheet, inline here because this harness serves one document and
+// no CSP; the fit is the exact string the console's script carries, run before the probes.
 function page(graph, fitFold, withFit, costByTrigger = {}) {
-  let html = buildInsightsHtml({ graph, fold: fitFold, costsUnreachable: null, window: "30d", costByTrigger, budget: null }, { now: NOW });
-  if (!withFit) {
-    if (!html.includes(FIT_JS)) throw new Error("the page does not carry FIT_JS verbatim");
-    html = html.replace(FIT_JS, "");
-  }
-  return html.replace("</body>", `<pre id="fitout"></pre>${PROBE}<pre id="hitout"></pre>${HITS}</body>`);
+  if (!CONSOLE_SCRIPT.includes(FIT_JS)) throw new Error("the console script does not carry FIT_JS verbatim");
+  const body = String(insightsBody({ graph, fold: fitFold, costsUnreachable: null, window: "30d", costByTrigger, budget: null }, NOW));
+  const fit = withFit ? `<script>${FIT_JS}</script>` : "";
+  return `<!doctype html>\n<meta charset="utf-8">\n<title>label fit</title>\n<style>${CONSOLE_CSS}</style>\n<body data-page="insights"><main><section data-panel>${body}</section></main>${fit}<pre id="fitout"></pre>${PROBE}<pre id="hitout"></pre>${HITS}</body>`;
 }
 
 function measure(html) {

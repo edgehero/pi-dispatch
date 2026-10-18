@@ -4025,8 +4025,8 @@ export async function collectChecks(shellVars, seams) {
 	// ~/.pi-dispatch, so this block is normally one green line; it warns only when a path RESOLVES under a
 	// temp dir, which after the move means an operator put it there.
 	//
-	// Deliberately NOT checked HERE: PI_JOBS_DIR, PI_SANDBOX_DIR and PI_GRAPH_DIR. Those are per-run,
-	// retention-bounded and regenerable respectively, and they stay under temp on purpose. Warning about a
+	// Deliberately NOT checked HERE: PI_JOBS_DIR and PI_SANDBOX_DIR. Those are per-run and
+	// retention-bounded respectively, and they stay under temp on purpose. Warning about a
 	// directory that is SUPPOSED to be swept is how an operator learns to skim this section, which costs
 	// more than it buys. Whose the jobs dir is, is checked above (`jobsDirChecks`, issue #464): that is a
 	// different question, and the one that failed every job of a second account on a shared host.

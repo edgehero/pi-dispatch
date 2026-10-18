@@ -50,7 +50,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -70,28 +70,41 @@ export async function loadModules() {
     import("@edgehero/pi-dispatch/config"),
     import("@edgehero/pi-dispatch/model-endpoints"),
     import("@edgehero/pi-dispatch/model-catalog"),
+    import("./whatif.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
 export const INSIGHTS_CACHE_MS = 30_000;
 
-/** `fn(window)` memoised per window for `ttlMs` on `now`; a rejection is not kept, so the next call tries again. */
+/**
+ * `fn(window, opts)` memoised per key for `ttlMs` on `now`; a rejection is not kept, so the next call tries again. The
+ * key is the window and, for the spend screen, whether full paths were asked (`opts.fullPaths`): an operator's
+ * full-path assembly must never be handed to a viewer's request, so the two are different entries. At most six keys
+ * exist (three windows, two path choices), so the map needs no bound.
+ */
 export function cachedPerWindow(fn, { now = () => Date.now(), ttlMs = INSIGHTS_CACHE_MS } = {}) {
   const held = new Map();
-  return (window) => {
-    const key = String(window);
+  return (window, opts) => {
+    const fullPaths = opts?.fullPaths === true;
+    const key = `${String(window)}\n${fullPaths ? "full" : "names"}`;
     const t = now();
     const hit = held.get(key);
     if (hit && t >= hit.at && t - hit.at < ttlMs) return hit.promise;
-    const promise = Promise.resolve().then(() => fn(window));
+    const promise = Promise.resolve().then(() => (fullPaths ? fn(window, { fullPaths }) : fn(window)));
     held.set(key, { at: t, promise });
     promise.catch(() => {
       if (held.get(key)?.promise === promise) held.delete(key);
     });
     return promise;
   };
+}
+
+/** `fn()` computed once, on first use (the priced catalog is the pinned pi-ai's and cannot change while serving). */
+function memoOnce(fn) {
+  let held = null;
+  return () => (held ??= fn());
 }
 
 /** The most active jobs one console snapshot reads (issue #641); the TUI's reader keeps its own default. */
@@ -378,7 +391,10 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const pricing = pricingOf(m.pricing);
     const pageDeps = {
       fleet,
-      insights: cachedPerWindow((window) => m.insights.assembleInsights(side.paths, window, { pricing, nowMs: now(), envFn: () => side.env }), { now }),
+      insights: cachedPerWindow((window, opts) => m.insights.assembleInsights(side.paths, window, { pricing, nowMs: now(), envFn: () => side.env, ...(opts?.fullPaths ? { fullPaths: true } : {}) }), { now }),
+      // The what-if (REQ-COST-ANALYTICS): one shared record scan at the scan's 92-day ceiling per 30 s, the answers
+      // bounded and cached per (model, flow, scan window) (`whatif.mjs`).
+      ...(m.whatif ? { whatIf: m.whatif.makeWhatIfReader({ pricing, scan: () => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, nowMs: now(), fs }), now }), pricedModels: memoOnce(() => m.whatif.pricedModelIds(pricing)) } : {}),
       audit: ({ limit, before } = {}) => m.audit.readConsoleAudit({ logsDir: config.logsDir, limit, before, fs }),
       // The subscriptions file, for a run's cost class (a plan-covered run is not a dollar run).
       subscriptions: () => m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs }),

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, accountTempRoot, configError, defaultGraphDir, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, ensureAccountTempRoot, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, accountTempRoot, configError, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, ensureAccountTempRoot, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
@@ -36,19 +36,6 @@ test("AI-trigger / chaining knobs default conservatively", () => {
 	assert.equal(c.chainMaxPerJob, 2);
 	assert.equal(c.dispatchRunPerHour, 3);
 	assert.deepEqual(c.dispatchRunRoots, []);
-});
-
-test("defaultGraphDir is the worker-owned temp path, beside jobs/, never inside logsDir", () => {
-	// Still under temp, and no longer beside logs/: issue #290 moved the two DURABLE stores to
-	// ~/.pi-dispatch and left the regenerable artifact here, because the next `insights` rebuilds it.
-	// NOT logsDir on purpose: INT-RUN-HISTORY-FILE-CONTRACT names that directory's filename shape,
-	// and a stray .html beside the sidecars would widen a contract for a file that is not a record.
-	// Issue #464: under the per-account root, `<tmp>/pi-dispatch-<uid>`, beside that account's jobs/.
-	assert.equal(defaultGraphDir({ TMPDIR: "/t" }, 1234), "/t/pi-dispatch-1234/graph");
-	assert.equal(defaultGraphDir({ TEMP: "C:\\Temp" }, null), "C:/Temp/pi-dispatch/graph", "backslashes normalise like the sibling defaults; no uid (Windows) keeps the plain name");
-	assert.equal(defaultGraphDir({}, 1234), "/tmp/pi-dispatch-1234/graph");
-	assert.equal(defaultGraphDir({}), `/tmp/pi-dispatch-${process.geteuid()}/graph`, "the default uid is this process's effective one");
-	assert.ok(!defaultGraphDir({}).includes("/logs"), "never inside the run-history directory");
 });
 
 test("the exported chain-cap defaults are the literals loadConfig uses (issue #54)", () => {
@@ -866,7 +853,7 @@ test("a garbled PI_WAIT_PROFILES refuses to BOOT, on its sibling's reasoning (#2
 // ── issue #290: the two DURABLE defaults, and the predicate that says when they are not ──────────────
 
 test("the durable defaults compose one state root under the home dir, in the slash alphabet", () => {
-	// The SHAPE pin, on defaultGraphDir's precedent above. `.pi-dispatch` is the whole point: these two
+	// The SHAPE pin. `.pi-dispatch` is the whole point: these two
 	// are the run history and the operator's caps, and the OS is entitled to sweep what they used to
 	// default into. See docs/backup.md.
 	assert.equal(defaultLogsDir({}, "/home/u"), "/home/u/.pi-dispatch/logs");

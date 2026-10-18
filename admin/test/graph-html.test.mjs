@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildGraphScene, clip, escapeHtml, clipColumns, drawnColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS, SPEND_BADGE_DY } from "../src/graph-html.mjs";
+import { buildGraphScene, clip, escapeHtml, clipColumns, drawnColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, SPEND_BADGE_DY } from "../src/graph-html.mjs";
 import { columnsOf } from "../src/panel.mjs";
-import { buildInsightsHtml } from "../src/insights-html.mjs";
+import { insightsBody } from "../src/console/panels.mjs";
+import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { buildGraphModel, findLoopHints, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS, parseSkillMeta } from "../src/graph-model.mjs";
 
 const NOW = 1770000000000;
@@ -12,7 +13,8 @@ const NOW = 1770000000000;
 // Since issue #279 this suite pins graph-html.mjs's SHIPPING surface: the scene builder, the shared
 // escaping/theme/script pieces, and the layout invariants. `buildGraphHtml` (the standalone topology
 // page, command-less since #181) is deleted, so every page-level pin here drives the page that can
-// still emit these bytes -- `buildInsightsHtml`, whose lower half IS this scene. A fold-less payload
+// still emit these bytes -- the operator console's spend screen (`insightsBody`), whose lower half IS this scene (the
+// static insights export that held it until the insights move to the console is retired too). A fold-less payload
 // renders the topology whole (the degrade contract insights-html.test.mjs pins), which keeps these
 // tests about the topology and nothing else. Pins that duplicate an insights-html.test.mjs twin
 // byte-for-byte (permutation determinism, well-formedness, the redaction canary, the file:// needle
@@ -63,9 +65,16 @@ const CANNED = () => ({
 // tests ever called) is deleted; the scene result's `layout` is the same layoutNormalized output.
 const layoutOf = (model) => buildGraphScene(model, { now: NOW }).layout;
 
-// The LIVE page around a topology model: a fold-less insights payload renders the whole scene, the
-// legend and the banners -- the exact composition the panel writes to disk minus the cost half.
-const pageOf = (model, opts = {}) => buildInsightsHtml({ graph: model, fold: null, costsUnreachable: null, window: "30d", costByTrigger: null }, { now: NOW, ...opts });
+// The LIVE page around a topology model: a fold-less insights payload renders the whole scene, the legend, the banners
+// and the chips' data list -- the console's spend screen minus the cost half.
+const pageOf = (model, opts = {}) => String(insightsBody({ graph: model, fold: null, costsUnreachable: null, window: "30d", costByTrigger: null }, NOW, { fullPaths: opts.fullPaths === true }));
+
+/** The chips' tooltips from the page's hidden `#graph-nodes` list, entity-decoded, by minted id. */
+function nodeTips(page) {
+  const list = /<ol id="graph-nodes" class="hidden-tips" hidden>([^]*?)<\/ol>/.exec(page)[1];
+  const dec = (t) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  return Object.fromEntries([...list.matchAll(/<li data-id="([^"]*)"[^>]*>([^<]*)<\/li>/g)].map((m) => [m[1], dec(m[2])]));
+}
 const cannedPage = () => pageOf(buildGraphModel(CANNED()));
 
 // ---- 1. purity ----
@@ -98,7 +107,7 @@ test("GRAPH_HTML_KINDS is the assembler's GRAPH_EDGE_KINDS, byte for byte, froze
 
 // ---- 3. escaping / breakout (the trigger-side vectors; the cost-side twins live in the insights suite) ----
 
-test("hostile trigger and flow strings cannot break out of markup or the embedded json", () => {
+test("hostile trigger and flow strings cannot break out of markup or the chips' data list", () => {
   const inputs = CANNED();
   // The comment phrase lands verbatim in the trigger's display label; the flow name fails
   // SKILL_NAME_RE so it travels the charset-invalid path into a node name and a flag detail.
@@ -106,11 +115,11 @@ test("hostile trigger and flow strings cannot break out of markup or the embedde
   inputs.triggers.triggers.push({ type: "cron", index: 4, id: "evil", pattern: "0 5 * * *", folder: "/srv/site", flow: "</script><script>evil()", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false });
   const out = pageOf(buildGraphModel(inputs));
 
-  assert.equal(out.split("<script").length - 1, 1, "exactly ONE script open tag: the page's own");
-  assert.equal(out.split("</script").length - 1, 1, "and exactly one close: nothing embedded can spell it");
+  assert.equal(out.split("<script").length - 1, 0, "no script element: the console's one script is served by URL");
+  assert.equal(out.split("</script").length - 1, 0, "and nothing a value carries can spell its close");
   assert.ok(!out.includes("<script>alert"), "the attack string never appears unescaped");
   assert.ok(out.includes("&lt;script&gt;") || out.includes("&lt;/script&gt;"), "it appears as entities instead");
-  assert.ok(out.includes("\\u003c"), "the embedded json carries < as an escape, never a literal");
+  assert.ok(Object.values(nodeTips(out)).some((t) => t.includes("</script><script>evil()")), "the chips' list carries the hostile text, as text");
 });
 
 // ---- 4. layout invariants ----
@@ -374,27 +383,26 @@ test("an unknown field on a graph NODE never reaches the live page", () => {
   assert.ok(!pageOf(model, { fullPaths: true }).includes("CANARY-9f3"), "the fullPaths opt-in widens labels, not the allowlist");
 });
 
-// ---- 6. page-script hardening, on the exported string itself (the insights suite pins the same
-// script IN SITU -- the parse check, the single guarded GRAPH read; these are the expressions whose
-// loss would not break a parse, asserted at the source the shipping page embeds verbatim) ----
+// ---- 6. page-script hardening, on the console's served script (the topology's pan, zoom, tooltip and selection moved
+// there with the insights move to the console; these are the expressions whose loss would not break a parse) ----
 
-test("PAGE_JS letterbox-maps the cursor, survives a pan without wiping selection, and guards GRAPH.nodes", () => {
+test("the console script letterbox-maps the cursor, survives a pan without wiping selection, and guards the chips' data", () => {
   // meet letterboxing: a uniform scale (min of the two ratios) plus centring offsets; the
   // per-axis ratios this replaced panned at the wrong speed whenever the aspects differed.
-  assert.ok(PAGE_JS.includes("Math.min(r.width / vb.width, r.height / vb.height)"), "uniform meet scale");
-  assert.ok(PAGE_JS.includes("(r.width - vb.width * s) / 2"), "letterbox x offset");
-  assert.ok(PAGE_JS.includes("(r.height - vb.height * s) / 2"), "letterbox y offset");
+  assert.ok(CONSOLE_SCRIPT.includes("Math.min(r.width / vb.width, r.height / vb.height)"), "uniform meet scale");
+  assert.ok(CONSOLE_SCRIPT.includes("(r.width - vb.width * sc) / 2"), "letterbox x offset");
+  assert.ok(CONSOLE_SCRIPT.includes("(r.height - vb.height * sc) / 2"), "letterbox y offset");
 
   // pan-then-click: pointer capture retargets the post-pan click at the svg, which reads as a
   // background click; a drag beyond the threshold must swallow it or every pan clears the selection.
-  assert.ok(PAGE_JS.includes("panning.moved > 3"), "drag threshold present");
-  assert.ok(PAGE_JS.includes("suppressClick"), "the following click is suppressed");
+  assert.ok(CONSOLE_SCRIPT.includes("panning.moved > 3"), "drag threshold present");
+  assert.ok(CONSOLE_SCRIPT.includes("suppressClick"), "the following click is suppressed");
 
   // prototype-chain ids: #sel=constructor must die at the guard, not at a .nb dereference.
-  assert.ok(PAGE_JS.includes("Object.prototype.hasOwnProperty.call(GRAPH.nodes, id)"), "own-property guard present");
-  assert.equal((PAGE_JS.match(/GRAPH\.nodes\[/g) ?? []).length, 1, "exactly one raw indexed read of GRAPH.nodes: the one inside the guard");
+  assert.ok(CONSOLE_SCRIPT.includes("Object.prototype.hasOwnProperty.call(NODES, id)"), "own-property guard present");
+  assert.equal((CONSOLE_SCRIPT.match(/NODES\[(?!nid\])/g) ?? []).length, 1, "exactly one indexed read of the chips' data: the one inside the guard");
 
-  new Function(PAGE_JS); // parse check on the exported string the shipping page embeds verbatim
+  new Function(CONSOLE_SCRIPT); // parse check on the served string
 });
 
 // ---- 7. tier rendering (issue #188) ----
@@ -983,14 +991,13 @@ test("a very long label is cut in a handful of measures, not one per character (
   assert.ok(calls <= 20, `halving the cut: ${calls} measures for 20,000 characters`);
 });
 
-test("FIT_JS runs before the page script and holds none of the words the page pins ban (#422)", () => {
+test("FIT_JS runs before the topology's handlers and holds none of the words the page pins ban (#422)", () => {
   for (const word of ["import", "NaN", "undefined", "Infinity", "innerHTML", "fetch", "src=", "url(", "<script", "<svg", "<g", "`", "${"]) {
     assert.ok(!FIT_JS.includes(word), `FIT_JS does not contain ${JSON.stringify(word)}`);
   }
-  const page = pageOf(buildGraphModel(CANNED()));
-  const at = page.indexOf(FIT_JS);
-  assert.ok(at > 0, "the page carries the fit verbatim");
-  assert.ok(at < page.indexOf(PAGE_JS), "ahead of the page script, in the one script element");
+  assert.ok(CONSOLE_SCRIPT.includes(FIT_JS), "the console script carries the fit verbatim");
+  const call = CONSOLE_SCRIPT.indexOf("try { fitInsightsLabels(); }");
+  assert.ok(call > 0 && call < CONSOLE_SCRIPT.indexOf("insightsPage();"), "the spend screen fits its labels before it wires the topology");
 });
 
 test("a cron pattern is drawn whole by the builder and fitted to its loop by the page (#422)", () => {
@@ -1647,8 +1654,7 @@ test("a portfolio trigger's tip says what it writes, the chip is unchanged, and 
   const plain = pageOf(model);
   model.nodes.find((n) => n.id === "trigger:0").portfolio = true;
   const page = pageOf(model);
-  const graph = JSON.parse(/var GRAPH = (.*);/.exec(page)[1]);
-  const tips = Object.values(graph.nodes).map((n) => n.tip).filter((t) => typeof t === "string" && t.includes("portfolio"));
+  const tips = Object.values(nodeTips(page)).filter((t) => t.includes("portfolio"));
   assert.equal(tips.length, 1, "one tip, the flagged trigger's");
   assert.ok(tips[0].split("\n").includes("portfolio: its jobs write the budget split"), tips[0]);
   const svgOf = (p) => /<g id="root">([\s\S]*?)<\/g><g id="spend">/.exec(p)[1];
