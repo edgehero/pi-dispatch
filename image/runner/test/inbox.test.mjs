@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -138,7 +138,8 @@ function standIn({ parked = false, logs = [] } = {}) {
 test("the inbox pushes nothing before agent_start, one at a time in file order, the next on the last one's message_end", () => {
 	const { dir, inbox, api, logs, deliver } = standIn();
 	assert.equal(inbox.factory.name, "job-inbox");
-	writeEntry(dir, 2, { messageId: id(2), mode: "followUp", source: "console", content: "second" });
+	// Both steers: order across modes is no longer one FIFO (issue #670, the tests below), so this keeps to one mode.
+	writeEntry(dir, 2, { messageId: id(2), source: "console", content: "second" });
 	writeEntry(dir, 1, { messageId: id(1), content: "first" });
 	writeFileSync(join(dir, ".tmp-not-yet"), "x");
 	writeFileSync(join(dir, `1-${id(3)}.json`), entryText({ messageId: id(3) }));
@@ -159,12 +160,13 @@ test("the inbox pushes nothing before agent_start, one at a time in file order, 
 	assert.equal(api.sent.length, 1, "only our own message_end clears it");
 	deliver(0);
 	assert.equal(api.sent.length, 2);
-	assert.deepEqual(api.sent[1].options, { deliverAs: "followUp" });
+	assert.deepEqual(api.sent[1].options, { deliverAs: "steer" });
+	assert.equal(api.sent[1].message.details.id, id(2));
 	deliver(1);
 	assert.deepEqual(inbox.counts(), { delivered: 2, pending: 0, deliveredIds: [id(1), id(2)] });
 	assert.deepEqual(logs.filter((line) => line.event === "steer_delivered"), [
 		{ event: "steer_delivered", id: id(1), mode: "steer", source: "cli" },
-		{ event: "steer_delivered", id: id(2), mode: "followUp", source: "console" },
+		{ event: "steer_delivered", id: id(2), mode: "steer", source: "console" },
 	]);
 	assert.equal(JSON.stringify(logs).includes("first"), false, "never the text");
 	// The same id under a later sequence number is the same message.
@@ -301,6 +303,7 @@ test("a message_end of our type with another id does not clear the one in flight
 	assert.equal(api.sent[0].message.details.id, id(1));
 });
 
+// All steers: file order is the rule within a mode; across modes a steer goes first (issue #670, the tests above).
 test("files are pushed in file-name order whatever order readdir lists them in (N16)", async () => {
 	const dir = tempDir("pi-dispatch-inbox-order-");
 	const realFs = (await import("node:fs")).default;
@@ -317,6 +320,170 @@ test("files are pushed in file-name order whatever order readdir lists them in (
 		api.handlers.message_end({ message: { role: "custom", customType: INBOX_CUSTOM_TYPE, details: { id: order[i] } } });
 	}
 	assert.deepEqual(order, [id(1), id(2), id(3)]);
+});
+
+// Issue #670: a follow-up means "when the agent would stop", and pi drains its follow-up queue only then. Handed to pi
+// early it held the runner's one in-flight slot and every later steer waited behind it, so follow-ups now wait in the
+// runner and only the settle boundary hands one over. Order holds within each mode, not across them.
+// Each push as [id, the mode its details carry, how pi was asked to queue it]: always a pi steer, a follow-up only at the
+// settle boundary (review round 1: after a run a terminating tool ended, pi's continuation polls only steering first).
+const pushed = (api) => api.sent.map((sent) => [sent.message.details.id, sent.message.details.mode, sent.options.deliverAs]);
+
+test("a steer sent after a follow-up goes at the next turn_end; the follow-up waits for agent_before_settle (issue #670)", () => {
+	const { dir, inbox, api, deliver } = standIn();
+	api.handlers.agent_start();
+	writeEntry(dir, 1, { messageId: id(1), mode: "followUp", content: "later" });
+	api.handlers.turn_end();
+	assert.equal(api.sent.length, 0, "a follow-up is not handed to pi mid-run");
+	assert.deepEqual(inbox.counts(), { delivered: 0, pending: 1, deliveredIds: [] }, "but it is pending");
+	writeEntry(dir, 2, { messageId: id(2), content: "now" });
+	api.handlers.turn_end();
+	assert.deepEqual(pushed(api), [[id(2), "steer", "steer"]], "the steer is not held behind the follow-up");
+	assert.deepEqual(inbox.counts(), { delivered: 0, pending: 2, deliveredIds: [] }, "the follow-up waiting and the steer in flight");
+	deliver(0);
+	api.handlers.turn_end();
+	inbox.poll();
+	assert.equal(api.sent.length, 1, "still waiting: the agent has not stopped");
+	api.handlers.agent_end();
+	api.handlers.agent_before_settle();
+	assert.deepEqual(pushed(api), [[id(2), "steer", "steer"], [id(1), "followUp", "steer"]], "handed over at the boundary as a pi steer, its details still a follow-up");
+	api.handlers.agent_start();
+	deliver(1);
+	assert.deepEqual(inbox.counts(), { delivered: 2, pending: 0, deliveredIds: [id(2), id(1)] });
+});
+
+test("interleaved follow-ups and steers keep file order within each mode; at the boundary a waiting steer goes first; it closes only with both empty (issue #670)", () => {
+	const { dir, inbox, api, deliver } = standIn();
+	writeEntry(dir, 1, { messageId: id(1), mode: "followUp" });
+	writeEntry(dir, 2, { messageId: id(2) });
+	writeEntry(dir, 3, { messageId: id(3), mode: "followUp" });
+	writeEntry(dir, 4, { messageId: id(4) });
+	inbox.poll();
+	assert.deepEqual(inbox.counts(), { delivered: 0, pending: 4, deliveredIds: [] }, "both FIFOs count");
+	api.handlers.agent_start();
+	deliver(0);
+	api.handlers.turn_end();
+	assert.deepEqual(pushed(api), [[id(2), "steer", "steer"], [id(4), "steer", "steer"]], "the steers, in file order, past the first follow-up");
+	deliver(1);
+	api.handlers.agent_end();
+	api.handlers.agent_before_settle();
+	assert.deepEqual(pushed(api).at(-1), [id(1), "followUp", "steer"], "the oldest follow-up");
+	api.handlers.agent_start();
+	deliver(2);
+	assert.equal(api.sent.length, 3, "the next follow-up waits for the next boundary");
+	// A steer that lands now goes before the follow-up still waiting, at the next boundary too.
+	writeEntry(dir, 5, { messageId: id(5) });
+	api.handlers.agent_end();
+	api.handlers.agent_before_settle();
+	assert.deepEqual(pushed(api).at(-1), [id(5), "steer", "steer"], "a waiting steer first");
+	api.handlers.agent_start();
+	deliver(3);
+	api.handlers.agent_end();
+	api.handlers.agent_before_settle();
+	assert.deepEqual(pushed(api).at(-1), [id(3), "followUp", "steer"], "follow-ups waiting keep the inbox open");
+	api.handlers.agent_start();
+	deliver(4);
+	api.handlers.agent_end();
+	api.handlers.agent_before_settle();
+	writeEntry(dir, 6, { messageId: id(6) });
+	api.handlers.agent_start();
+	api.handlers.turn_end();
+	assert.equal(api.sent.length, 5, "both FIFOs empty at the boundary: closed for good");
+	inbox.close();
+	assert.deepEqual(inbox.counts(), { delivered: 5, pending: 1, deliveredIds: [id(2), id(4), id(1), id(5), id(3)] });
+});
+
+test("a follow-up whose file is unlinked while held is never pushed, not pending, and logged; at close too (issue #670)", () => {
+	const logs = [];
+	const { dir, inbox, api } = standIn({ logs });
+	api.handlers.agent_start();
+	writeEntry(dir, 1, { messageId: id(1), mode: "followUp", source: "console", content: "withdrawn text" });
+	api.handlers.turn_end();
+	assert.equal(inbox.counts().pending, 1);
+	// The worker withdrew it: its relay unlinks the file.
+	unlinkSync(join(dir, fileName(1, id(1))));
+	api.handlers.agent_end();
+	api.handlers.agent_before_settle();
+	assert.equal(api.sent.length, 0, "a withdrawn message never becomes a delivery");
+	assert.deepEqual(inbox.counts(), { delivered: 0, pending: 0, deliveredIds: [] });
+	assert.deepEqual(logs, [{ event: "steer_withdrawn_held", id: id(1), mode: "followUp", source: "console" }]);
+	assert.equal(JSON.stringify(logs).includes("withdrawn text"), false, "never the text");
+	// Nothing was pushed, so the boundary closed: a later file is never handed over, even if pi starts a run again.
+	writeEntry(dir, 2, { messageId: id(2) });
+	api.handlers.agent_start();
+	api.handlers.turn_end();
+	inbox.poll();
+	assert.equal(api.sent.length, 0, "every held entry withdrawn at the boundary closes the inbox");
+	// A run that ends without the boundary (an abort): close's last check still drops it from the count.
+	const aborted = standIn();
+	aborted.api.handlers.agent_start();
+	writeEntry(aborted.dir, 1, { messageId: id(1), mode: "followUp" });
+	writeEntry(aborted.dir, 2, { messageId: id(2), mode: "followUp" });
+	aborted.api.handlers.turn_end();
+	unlinkSync(join(aborted.dir, fileName(1, id(1))));
+	aborted.api.handlers.agent_end();
+	aborted.api.handlers.agent_settled();
+	aborted.inbox.close();
+	assert.deepEqual(aborted.inbox.counts(), { delivered: 0, pending: 1, deliveredIds: [] }, "only the one still on disk");
+	assert.deepEqual(aborted.logs, [{ event: "steer_withdrawn_held", id: id(1), mode: "followUp", source: "cli" }]);
+	// The same for a steer held behind the one in flight: withdrawn, then aborted, it is not counted at the close.
+	const steers = standIn();
+	steers.api.handlers.agent_start();
+	for (const n of [1, 2, 3]) writeEntry(steers.dir, n, { messageId: id(n) });
+	steers.api.handlers.turn_end();
+	assert.deepEqual(pushed(steers.api), [[id(1), "steer", "steer"]]);
+	unlinkSync(join(steers.dir, fileName(2, id(2))));
+	steers.api.handlers.agent_end();
+	steers.api.handlers.agent_settled();
+	steers.inbox.close();
+	assert.deepEqual(steers.inbox.counts(), { delivered: 0, pending: 2, deliveredIds: [] }, "the one in flight and the one still on disk");
+	assert.deepEqual(steers.logs, [{ event: "steer_withdrawn_held", id: id(2), mode: "steer", source: "cli" }]);
+});
+
+test("a steer whose file is unlinked while held behind another is never pushed, not pending, and logged (issue #670)", () => {
+	const { dir, inbox, api, logs, deliver } = standIn();
+	api.handlers.agent_start();
+	writeEntry(dir, 1, { messageId: id(1) });
+	writeEntry(dir, 2, { messageId: id(2) });
+	writeEntry(dir, 3, { messageId: id(3) });
+	api.handlers.turn_end();
+	assert.deepEqual(pushed(api), [[id(1), "steer", "steer"]]);
+	unlinkSync(join(dir, fileName(2, id(2))));
+	deliver(0);
+	assert.deepEqual(pushed(api), [[id(1), "steer", "steer"], [id(3), "steer", "steer"]], "the withdrawn one is skipped, the next goes");
+	deliver(1);
+	assert.deepEqual(inbox.counts(), { delivered: 2, pending: 0, deliveredIds: [id(1), id(3)] });
+	assert.deepEqual(logs.filter((line) => line.event === "steer_withdrawn_held"), [{ event: "steer_withdrawn_held", id: id(2), mode: "steer", source: "cli" }]);
+});
+
+test("parked: neither a steer nor a follow-up is pushed, and the held count says both (issue #670)", () => {
+	const { dir, inbox, api, logs } = standIn({ parked: true });
+	api.handlers.agent_start();
+	writeEntry(dir, 1, { messageId: id(1), mode: "followUp" });
+	writeEntry(dir, 2, { messageId: id(2) });
+	api.handlers.turn_end();
+	api.handlers.agent_before_settle();
+	assert.equal(api.sent.length, 0);
+	assert.deepEqual(logs, [{ event: "steer_held_parked", pending: 2 }]);
+	assert.deepEqual(inbox.counts(), { delivered: 0, pending: 2, deliveredIds: [] });
+});
+
+test("parked with only follow-ups held: nothing is logged mid-run, and the boundary logs the count without a withdrawn one (issue #670)", () => {
+	const { dir, inbox, api, logs } = standIn({ parked: true });
+	api.handlers.agent_start();
+	writeEntry(dir, 1, { messageId: id(1), mode: "followUp" });
+	writeEntry(dir, 2, { messageId: id(2), mode: "followUp" });
+	api.handlers.turn_end();
+	assert.deepEqual(logs, [], "a follow-up is not a mid-run push, so there is nothing held from one yet");
+	unlinkSync(join(dir, fileName(2, id(2))));
+	api.handlers.agent_end();
+	api.handlers.agent_before_settle();
+	assert.equal(api.sent.length, 0);
+	assert.deepEqual(logs, [
+		{ event: "steer_withdrawn_held", id: id(2), mode: "followUp", source: "cli" },
+		{ event: "steer_held_parked", pending: 1 },
+	], "pruned before it is counted");
+	assert.deepEqual(inbox.counts(), { delivered: 0, pending: 1, deliveredIds: [] });
 });
 
 test("parked at before_settle: the held message is logged there (N29)", () => {
@@ -436,6 +603,84 @@ test("(b) a follow-up waits for a tool-free turn, then restarts the loop", { ski
 		assert.equal(userText(s.terminal()), "second done");
 		assert.deepEqual(s.inbox.counts(), { delivered: 1, pending: 0, deliveredIds: [id(1)] });
 		assert.deepEqual(s.logs, [{ event: "steer_delivered", id: id(1), mode: "followUp", source: "cli" }]);
+	} finally {
+		s.session.dispose();
+	}
+});
+
+test("(b2) a follow-up sent first and a steer next, while tools keep running: the steer lands within a turn, the follow-up after the last tool-free turn (issue #670)", { skip }, async () => {
+	const s = await steerSession("follow-up-then-steer", {
+		script: [lsCall("call-1"), lsCall("call-2"), lsCall("call-3"), text("tools done"), text("follow-up answered")],
+		onCall: (n, inboxDir) => {
+			if (n === 1) writeEntry(inboxDir, 1, { messageId: id(1), mode: "followUp", content: "FOLLOW-UP: afterwards" });
+			if (n === 2) writeEntry(inboxDir, 2, { messageId: id(2), content: "STEER: now" });
+		},
+	});
+	try {
+		await s.session.prompt("start");
+		assert.equal(s.contexts.length, 5, "one more model call, for the follow-up; the steer rides call 3");
+		const third = s.contexts[2].messages;
+		assert.equal(third.at(-2).role, "toolResult", "the steer after call 2's tool results");
+		assert.equal(third.at(-2).toolCallId, "call-2");
+		assert.equal(userText(third.at(-1)), "STEER: now", "not held behind the follow-up");
+		assert.equal(JSON.stringify(s.contexts[3].messages).includes("FOLLOW-UP"), false, "the follow-up waits while tools run");
+		const fifth = s.contexts[4].messages;
+		assert.equal(fifth.at(-2).role, "assistant");
+		assert.equal(userText(fifth.at(-2)), "tools done", "after the turn that would have ended the run");
+		assert.equal(userText(fifth.at(-1)), "FOLLOW-UP: afterwards");
+		assert.equal(userText(s.terminal()), "follow-up answered");
+		assert.deepEqual(s.customEnds.map((message) => message.details.id), [id(2), id(1)]);
+		assert.deepEqual(s.inbox.counts(), { delivered: 2, pending: 0, deliveredIds: [id(2), id(1)] });
+		assert.deepEqual(s.logs, [
+			{ event: "steer_delivered", id: id(2), mode: "steer", source: "cli" },
+			{ event: "steer_delivered", id: id(1), mode: "followUp", source: "cli" },
+		]);
+	} finally {
+		s.session.dispose();
+	}
+});
+
+test("(b3) a follow-up held across a run a terminating tool ended is the very next message, and a steer after it is not delayed (issue #670, review round 1)", { skip }, async () => {
+	// A tool that ends the run on purpose (`terminate: true`), not the await tool: the run is not parked. The transcript
+	// then ends on a tool result, so pi's continue() takes runContinuation, which polls only steering at its start.
+	const stopper = {
+		name: "test-stopper",
+		factory: (api) =>
+			api.registerTool({
+				name: "stop_now",
+				label: "stop now",
+				description: "ends the run",
+				parameters: { type: "object", properties: {} },
+				async execute() {
+					return { content: [{ type: "text", text: "stopped" }], details: {}, terminate: true };
+				},
+			}),
+	};
+	const s = await steerSession("follow-up-terminate", {
+		extra: [stopper],
+		script: [lsCall("call-1"), [{ type: "toolCall", id: "call-stop", name: "stop_now", arguments: {} }], lsCall("call-3"), lsCall("call-4"), text("done")],
+		onCall: (n, inboxDir) => {
+			if (n === 1) writeEntry(inboxDir, 1, { messageId: id(1), mode: "followUp", content: "FOLLOW-UP: afterwards" });
+			if (n === 3) writeEntry(inboxDir, 2, { messageId: id(2), content: "STEER: now" });
+		},
+	});
+	try {
+		await s.session.prompt("start");
+		assert.equal(s.contexts.length, 5, "no model call asked again with nothing new");
+		const third = s.contexts[2].messages;
+		assert.equal(third.at(-2).role, "toolResult");
+		assert.equal(third.at(-2).toolCallId, "call-stop", "right after the run the tool ended");
+		assert.equal(userText(third.at(-1)), "FOLLOW-UP: afterwards", "the follow-up is the very next message");
+		const fourth = s.contexts[3].messages;
+		assert.equal(fourth.at(-2).toolCallId, "call-3");
+		assert.equal(userText(fourth.at(-1)), "STEER: now", "the steer goes at the next turn, not held behind the follow-up");
+		assert.equal(userText(s.terminal()), "done");
+		assert.deepEqual(s.customEnds.map((message) => [message.details.id, message.details.mode]), [[id(1), "followUp"], [id(2), "steer"]], "the record still says follow-up");
+		assert.deepEqual(s.inbox.counts(), { delivered: 2, pending: 0, deliveredIds: [id(1), id(2)] });
+		assert.deepEqual(s.logs, [
+			{ event: "steer_delivered", id: id(1), mode: "followUp", source: "cli" },
+			{ event: "steer_delivered", id: id(2), mode: "steer", source: "cli" },
+		]);
 	} finally {
 		s.session.dispose();
 	}
@@ -690,7 +935,8 @@ test("run-job: the steer refusals run pre-spend, the inbox is seeded before and 
 	const seed = src.indexOf("inbox?.seed(sessionManager);");
 	assert.ok(seed > src.indexOf("await createAgentSession({") && seed < src.indexOf("inbox?.start();"), "seeded from the transcript before it starts reading");
 	assert.match(src, /\} finally \{\n\t\t\/\/ [^\n]*\n\t\tinbox\?\.close\(\);\n\t\tbudget\.unsubscribe\(\);/, "closed first in the prompt's finally");
-	assert.match(src, /const steerField = \(\) => \(inbox \? \{ steer: inbox\.counts\(\) \} : \{\}\);/, "absent on every unarmed run, so their exit lines are unchanged");
-	assert.match(src, /liveExitFields = \(\) => \(\{ [^\n]*\.\.\.steerField\(\) \}\);/, "the SIGTERM line carries the counts");
+	assert.match(src, /const steerField = \(\{ closing = false \} = \{\}\) => \{\n\t\tif \(!inbox\) return \{\};\n\t\tif \(closing\) \{\n\t\t\ttry \{\n\t\t\t\tinbox\.close\(\);\n\t\t\t\} catch \{\n[^\n]*\n\t\t\t\}\n\t\t\}\n\t\treturn \{ steer: inbox\.counts\(\) \};\n\t\};/, "absent on every unarmed run, so their exit lines are unchanged");
+	// Issue #670: the SIGTERM line closes the inbox before it counts, so a message withdrawn while held is not pending.
+	assert.match(src, /liveExitFields = \(\) => \(\{ [^\n]*\.\.\.steerField\(\{ closing: true \}\) \}\);/, "the SIGTERM line closes the inbox, then carries the counts");
 	assert.match(src, /\.\.\.recoveryField\(\), \.\.\.steerField\(\) \}\);\n\treturn outcome\.code;/, "the decided line carries the counts");
 });
