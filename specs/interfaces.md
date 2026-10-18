@@ -933,6 +933,32 @@ refactor apart.
   The forge is closed only when BOTH the worker and the image are from #545 or later: an older worker sends no
   key to any image, and a newer worker sends none to an image without `exitAuth`, so every other pairing runs
   unsigned, exactly as before.
+  **AMENDED 2026-10-18 (issue #680), planned, built in #686: stdin stays open after the key on a stdin-steered attempt,
+  and only there.** A stdin-steered attempt is one on a COPYING venue (the first is `openshell`,
+  `DES-OPENSHELL-VENUE`; neither argv-built venue copies) that the worker armed for steering
+  (`REQ-STEER-RUNNING-JOB`) on an image declaring the planned `steerStdin` capability. On it the key travels as frame
+  1 of `INT-STEER-INBOX-CONTRACT`'s stdin frames: a 4-byte big-endian unsigned length, then that many bytes of UTF-8
+  JSON, `{"t":"key","key":"<64 hex>"}`, the key in exactly the shape above (`EXIT_KEY_PATTERN`, 64 lowercase hex), and
+  the worker does NOT close the pipe after it. The channel is named by a planned second value of `PI_EXIT_AUTH`
+  (`stdin-frames`, the name final in #686), written only beside `PI_STEER=1` to an image declaring `steerStdin`; a
+  runner that predates it reads the value as `unknown-channel` and runs unsigned, and an unsigned `PI_STEER=1` run is
+  `2` / `steer-no-exit-key` (the row above), so a worker pointing the new channel at an old image fails closed; it is
+  not free, since that exit comes after the container started and costs one reserved slot, and it needs a mislabelled
+  image, since arming requires `steerStdin`. The in-image supervisor (`image/runner/supervise.mjs`, logic in
+  `image/runner/src/supervise.mjs`; not OpenShell's supervisor container) and then the runner read EXACTLY frame 1's
+  bytes, no more, before the runner loads pi, so the #545 property is kept word for word: no tool exists while the
+  key is in the pipe, and the key never reaches the environment, the argv, a file or a log. What changes is what the
+  pipe holds AFTER the key: the in-image supervisor forwards every later byte to the runner's stdin unchanged, and
+  the runner reads it as steer frames (`INT-STEER-INBOX-CONTRACT`), each MAC'd under this key; the key itself is
+  never written to the pipe again, so an agent that opens the pipe later reads only frames whose MACs it cannot make,
+  and a key-shaped frame after frame 1 breaks the stream rather than re-keying it. The stdin-steered runner skips
+  the readable-`/inbox` check of `assertSteerReady` (today it checks the key first, then `/inbox`,
+  `image/runner/src/inbox.mjs`) and checks its frame channel instead; `steer-inbox-missing` stays the mount
+  transport's. The exit line's signature, the in-image supervisor's line, `decisiveExitLine`,
+  the codes and the classes are UNCHANGED, checked. **On every other attempt, on every venue, the key is written as
+  64 hex characters and a newline and the pipe is closed at once, exactly as above**, `PI_EXIT_AUTH` stays `stdin`,
+  and the argv and env are byte-identical; a bind venue that is steer-armed keeps the read-only `/inbox` mount and
+  never gets the framed channel, because the channel lets the agent withdraw a message and the mount does not.
   **Every exit line carries `resources`, and a supervisor reports a runner killed for memory (issue #596).** The
   runner reads its own cgroup (v2; `/proc/self/cgroup` names it, `0::/` on all five venues measured: Docker Desktop,
   rootful Docker 29, rootless Podman 4.9, rootful and rootless Podman 5.8) just before the exit line is written, in
@@ -1493,7 +1519,11 @@ refactor apart.
 
 ## INT-CONTAINER-RUNTIME-CONTRACT
 
-**worker → docker daemon.**
+**worker → container runtime** (the docker daemon for `local`, this account's rootless Podman for `podman`, an
+OpenShell gateway for `openshell`, `DES-OPENSHELL-VENUE`). The body below still governs the two argv-built venues
+only, `local` and `podman`, and is UNCHANGED for them; the `openshell` venue builds no `docker run` or `podman run`
+argv, and its contract (the CLI calls, the upload and download, the providers and the policy document) arrives with
+#683, planned, so nothing below is claimed for it.
 
 - **Contract**:
   - **Which daemon (issue #278).** Every `docker` spawn inherits the worker's environment, so the daemon is
@@ -2650,9 +2680,22 @@ contract governs the argv of one container, this governs the estate that argv jo
     does not transfer: a floating tag on a queue breaks loudly and spends nothing, while this container **is
     the allowlist**, so a floating tag would let an upstream rebuild change what every job may reach with no
     commit anywhere.
-  - **TLS is never terminated.** The proxy sees the name in a `CONNECT` and no byte inside the tunnel, so it
-    cannot read a credential and cannot count a token. A proxy that decrypts provider traffic is `OQ-011`'s
-    mechanism and is explicitly not this (`OQ-004` warns against conflating them).
+  - **TLS is never terminated by the squid proxy** (on the `local` and `podman` venues, the two this contract's
+    objects exist on; scoped so by issue #680, the text otherwise as written). The proxy sees the name in a `CONNECT`
+    and no byte inside the tunnel, so it cannot read a credential and cannot count a token. A proxy that decrypts
+    provider traffic is `OQ-011`'s mechanism and is explicitly not this (`OQ-004` warns against conflating them).
+  - **A venue's own egress layer (`CONST-VENUE-EGRESS-LAYER`, issue #680, planned, detail in #684).** A venue whose
+    table entry declares the planned `credentialCustody: layer` (#683) replaces this contract's objects with its own
+    layer, and on that venue the object the worker names is not a network or a proxy but the **policy document** it
+    generates per job from the same allowlist, the same `model-endpoints` entries and the same forge hosts this
+    contract renders for squid, hands to the venue, and reads back before the job starts. That layer MAY terminate TLS
+    and MAY hold the job's credentials, the agent's environment carrying placeholders; it is the secrets-injecting
+    proxy `OQ-011` named, admitted under the constitution entry and kept distinct from the allowlist proxy (`OQ-004`'s
+    warning honoured: on `local` and `podman` the allowlist proxy is still squid and still decrypts nothing), and its
+    residuals are `OQ-047`'s. A policy that does not read back as the one generated, and a gateway-wide global policy
+    that would replace the job's own, are each a POLICY refusal before any spend (`CONST-BUDGET-BEFORE-TOKENS`),
+    never a job run under a policy the worker did not write. The document's shape, the read-back comparison and the
+    refusal reasons are #684's; nothing of this ships today.
   - **What each disagreement fails toward**:
 
     | State | Result |
@@ -9093,6 +9136,75 @@ panel read (part 3): never the text.
   `delivered` through the relay, and only then stops the relay; an unverified line marks nothing. So an agent that
   breaks the transcript (a symlink swapped in at `/session/current.jsonl` makes the tail refuse the file) can no
   longer make delivered messages settle as `late`.
+- **A second transport: stdin frames (copying venues). AMENDED 2026-10-18 (issue #680), planned, built in #686;
+  nothing of it ships today.** The `/inbox` mount above needs a venue that binds: a venue that uploads `/job` once
+  cannot show the runner a file written later, which is why such a venue is skipped today (`steerSkipped:
+  "venue-copies"`). On a COPYING venue (the first is `openshell` in its default copy mode, `DES-OPENSHELL-VENUE`; its
+  opt-in bind mode, #686, binds and takes the mount) the relay instead writes each message as a frame on the main
+  exec's stdin, the pipe issue #545 already uses for the exit key (`INT-RUNNER-EXIT-CODE-PROTOCOL`, AMENDED the same
+  day). Everything above the inbox file (the keys, the scripts, the caps, the ids, the framing of the text, the ack,
+  the exit line's `deliveredIds`, the record) is the same on both transports; this bullet defines only what replaces
+  the file.
+  - **Arming.** An attempt is stdin-steered when the job asks (`job.steer === true`), the venue copies, the image
+    declares `exitAuth` and the planned capability **`steerStdin`** (the runner reads frames, and `verify-image.sh`
+    proves the two process properties below; the name final in #686), and a transcript tail and a relay exist. An
+    image without `steerStdin` on a copying venue is skipped exactly as today, `steerSkipped: "venue-copies"`, and the
+    job runs unsteered: `steerStdin` is a capability token, not a pre-spend gate, because a job on a copying venue
+    already runs without steering when it cannot be armed, and the record says why. A bind venue never uses this
+    transport, whatever the image declares.
+  - **The frame.** A 4-byte big-endian unsigned length, then exactly that many bytes of UTF-8 JSON, one object.
+    **Frame 1 is the exit key**, `{"t":"key","key":"<64 lowercase hex>"}`, written at the spawn and read by the
+    in-image supervisor and the runner before pi loads, so no tool exists while it is in the pipe (#545's property). **Every
+    later frame is one message**:
+    `{"t":"steer","seq":<n>,"v":1,"id":"<id>","mode":"<mode>","source":"<source>","content":"<framed text>","mac":"<64 hex>"}`,
+    `v`, `id`, `mode` (`steer` or `followUp`), `source` and `content` exactly the inbox file's fields and values
+    (`steerFileJson`'s), `seq` the frame's position in this attempt's stream (the key frame is 1, so the first message
+    is 2), and
+    `mac = hex(HMAC-SHA256(exitKey, "pi-dispatch-inbox-frame\0" + runId + "\0" + seq + "\0" + body))`, where `exitKey`
+    and `runId` are the ack's (the per-attempt key, and `PI_JOB_ID`, the name the venue gives this attempt), `seq` is
+    written in decimal, and `body` is the exact bytes `steerFileJson` writes for those five fields, so the MAC covers
+    the id, the mode, the source and the content, and a frame cannot be re-labelled from a steer to a follow-up. The
+    domain string differs from the ack's `pi-dispatch-inbox-ack\0`, and the input from the exit line's, so an ack the
+    agent reads in its transcript, or the exit line, is never a valid frame MAC. The runner applies every refusal the
+    file has (any other key, a `v` other than 1, a mode or source outside the lists, an empty content, a body over
+    16 KiB) and accepts a verified frame only when its id is unseen this attempt and its `seq` is above the last
+    accepted; it then holds and hands it over exactly as a file's message (two FIFOs by mode, the ack, the exit
+    line's counts).
+  - **The budget.** At most 4 MiB (4,194,304 bytes) in total over the attempt, every frame counted with its 4-byte
+    prefix, the key frame included: the stdin buffer OpenShell's exec path holds, as #686 reads it at the pin; if
+    that measurement is smaller, the cap moves down, never up. The relay counts what it wrote and refuses a frame
+    larger than the remaining budget: the message is not written, its state moves to `late` as for an entry the
+    framing refuses (`MARK`, `steer_frame_refused {jobId, id}`), and a message is never cut. The inbox's own caps
+    (16 messages, 64 KiB of text) keep a run far below it; the cap exists so a pipe the venue buffers is never asked
+    to hold more than it can.
+  - **What breaks the stream.** A declared length the relay could never have written (zero, over the remaining
+    budget, or over the 16 KiB body plus the frame's extra keys), bytes that are not UTF-8 JSON, an object that is
+    neither shape, or a key-shaped frame (`"t":"key"`) after frame 1, which is a `shape` break and never a re-key (the
+    runner accepts exactly one key per attempt, frame 1's): the runner stops reading steer frames for the attempt, logs `steer_stream_broken {reason}` (a fixed
+    token: `length`, `json`, `shape`), and every message not yet accepted settles undelivered. A well-formed frame
+    whose MAC does not verify is dropped and reading goes on; drops are counted and logged once per attempt,
+    `steer_frame_unverified {count}`, by that fixed token and a number, never the frame's text or id. Names planned,
+    final in #686.
+  - **Close.** The relay closes the pipe when it withdraws the attempt's arming (its stop) or when the attempt ends;
+    the runner reads EOF as no more messages and keeps what it already holds. A `WITHDRAW` of a `written` message is
+    weaker here than on the mount: there is no file to unlink, so a frame already in the pipe is still handed over,
+    and its verified ack moves it from `withdrawn` to `delivered` as `MARK` already does; a `queued` withdrawal stays
+    guaranteed, since the relay never wrote it.
+  - **The residual, stated plainly: this transport is weaker than the read-only `/inbox` mount, which is why bind
+    venues keep the mount.** The agent runs as the runner's uid, and on Linux the design assumes it can open the pipe
+    for READ and WRITE through a holder's `/proc/<pid>/fd/0` (the runner's own is refused by the exec-only node;
+    another holder's need not be, and how OpenShell's exec hands the pipe in is its code, not ours). It **cannot
+    plant** a message: the key left the pipe before any tool existed, and a frame without a valid MAC is dropped. It
+    **can consume** one, which WITHDRAWS it: the runner never sees it, no ack arrives, and the worker reports it
+    undelivered exactly as today, `late` at the close (`settleInbox`). A frame it reads and writes back is the
+    genuine frame again, accepted once by its id and `seq`, so the agent can delay or drop a message and can break
+    the stream (which drops every later one), never forge, duplicate, re-label or reorder one. Under the mount it can
+    do none of these: the kernel refuses its write and the relay owns the directory. A delivery is still confirmed
+    only by the ack under the exit key, so a withdrawal is never reported as a delivery; what is lost is the
+    guarantee that a sent message reaches the agent at all.
+  - **No TTY and no other channel.** The exec is started without a terminal, and the runner gives every tool child
+    `/dev/null` as stdin, so a `bash` call cannot read a frame by inheriting fd 0; `verify-image.sh` proves both on an
+    image declaring `steerStdin` (#686). The container gains no network path, credential or listening socket.
 - **Who writes what.** The open key, the target member and the inbox's hour: the relay of an armed attempt alone,
   from the container's start until it stops, when it holds the open key and the member for 15 minutes (`HOLD`). The entries: the senders, through `PUSH`, and the settle step, through
   `PRESEED`, into a resumed job's inbox. The fallback hash: the receiver (`storeFallback`). The states: `PUSH` and
@@ -10171,3 +10283,4 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-18 | Issue #668: the runs filter refused model ids that start with `@` or `~`. **`INT-CONSOLE-STATE-API` AMENDED**, the `/api/run` bullet: `run.model` is checked by the runs filter's own `RUN_MODEL_RE` (one optional leading `@` or `~`), so a run on a priced `@cf/...` or `~...` id answers its model instead of null, as it did while `safeRunOf` held a copy that required a letter or digit first; the document's keys and `version` UNCHANGED, checked (a value that was null is now the id, within `version: 1`). **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record's `model` is still the bare host-effective id, never a provider prefix. **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**. **Code evidence**: admin/src/run-filter.mjs -> RUN_MODEL_RE; admin/src/console/run-api.mjs -> safeRunOf. |
 | 2026-10-18 | Issue #670: a steer sent after a follow-up waited until the agent stopped. **`INT-STEER-INBOX-CONTRACT` AMENDED**: the inbox file bullet says the runner holds what it read in two FIFOs by mode, each in name order, hands over only steers mid-run and at `agent_before_settle` a waiting steer first, else the oldest follow-up, one in flight either way, and checks each entry's file again before the push, dropping one the relay unlinked (withdrawn while held) and logging `steer_withdrawn_held {id, mode, source}`; the exit line's `pending` is the steers and follow-ups held plus the one in flight, never a message withdrawn while held; the log list gains `steer_withdrawn_held`. Review round 1: the ack bullet's `deliverAs: <mode>` becomes `deliverAs: "steer"` (a held follow-up is handed over at the settle boundary as a pi steer, `details.mode` still `followUp`, since after a run a terminating tool ended pi's `runContinuation` polls only steering at its start); the SIGTERM exit line closes the inbox before it counts, so its `pending` excludes a withdrawn message as the decided line's does. The file shape, the name rule, the refusals, the ack and the Valkey keys and scripts UNCHANGED, checked. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: `steer: { delivered, pending, deliveredIds }` keeps its shape and types. **Code evidence**: image/runner/src/inbox.mjs -> createInbox (scan, pending, stillWaiting, pruneWithdrawn, pump, close). |
 | 2026-10-18 | Issue #673: model settings were not shape-checked, so a run could carry a model id the console refuses. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: `model` and `provider` are a model id and a provider id in the trigger's `run.model`/`run.provider` shape (`modelIdProblem`, `providerIdProblem`: printable ASCII, then `MODEL_REF_PATTERN` or `PROVIDER_REF_PATTERN` on the lowercased value, the value kept as written), refused at every admin write and at the read with "model must be a model id of ..." or "provider must be a provider id of ...", never the value; `PI_MODEL`/`PI_PROVIDER` held to the same rule at boot. Every other key and the write and read protocols UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's `model` is always an id the console's `RUN_MODEL_RE` accepts, since every source of it is held to the worker rule and `admin/test/run-model-bolt.test.mjs` holds that rule inside `RUN_MODEL_RE`; the field, its type and the writer UNCHANGED, checked; a job queued before the upgrade is the named exception. **`INT-CONSOLE-STATE-API` UNCHANGED, checked** (`/api/run`'s `run.model` rule is still `RUN_MODEL_RE`; it can now always answer the model). **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked** (the trigger sentences are byte-identical). **Code evidence**: worker/src/model-ref.mjs -> modelIdProblem, providerIdProblem; worker/src/runtime-settings.mjs -> validateOverlay; worker/src/config.mjs -> modelFrom, providerFrom. Review round 1, folded in before merge: `INT-CONFIG-OVERLAY-CONTRACT` adds that the admin's planners refuse a malformed `model`/`provider` before any confirm, by the same worker functions, and that doctor's PI_MODEL/PI_PROVIDER shape row stands alone for a malformed value (the provider-key, trigger-secret and deployment-default catalog rows, which print the value, are skipped); `INT-RUN-HISTORY-FILE-CONTRACT`'s `provider` comment names `RUN_PROVIDER_RE`, `/api/run`'s provider rule, now exported beside `RUN_MODEL_RE` (pattern unchanged) and bolted to `providerIdProblem`. **Code evidence**: admin/src/write-plans.mjs -> idSettingProblem; worker/src/doctor.mjs -> collectChecks (envShapeProblem); admin/src/run-filter.mjs -> RUN_PROVIDER_RE. |
+| 2026-10-18 | Issue #680, the decision that opens the OpenShell series (#683 backend, #684 policy layer, #686 stdio steering and bind mode); spec only, nothing ships. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: on a stdin-steered attempt (a COPYING venue, the job steer-armed, the image declaring `exitAuth` and the planned `steerStdin`) the key travels as frame 1, a 4-byte big-endian length then `{"t":"key","key":"<64 hex>"}`, under a planned `PI_EXIT_AUTH` value `stdin-frames`, and the pipe stays open for steer frames; the in-image supervisor (`image/runner/supervise.mjs`, named by its file to tell it from OpenShell's supervisor container) and the runner read exactly frame 1 before pi loads, so #545's property is kept word for word; an old runner reads the new value as `unknown-channel`, runs unsigned and is refused `steer-no-exit-key`, so the mismatch fails closed, at the cost of one reserved slot (the exit comes after the container started), and needs a mislabelled image, since arming requires `steerStdin`; the stdin-steered runner skips `assertSteerReady`'s readable-`/inbox` check (`image/runner/src/inbox.mjs`) and checks its frame channel instead. Every other attempt writes the 64 hex characters and a newline and closes the pipe exactly as before; the signature, the codes and the classes UNCHANGED, checked. **`INT-STEER-INBOX-CONTRACT` AMENDED**: a second transport, stdin frames on copying venues: arming (the image's `steerStdin`, else `steerSkipped: "venue-copies"` as today; a bind venue never uses it); the frame (length-prefixed UTF-8 JSON, key first, then `{"t":"steer","seq","v","id","mode","source","content","mac"}`, `mac` the HMAC-SHA256 under the attempt's exit key of `"pi-dispatch-inbox-frame\0" + runId + "\0" + seq + "\0" + body`, `body` the exact `steerFileJson` bytes, domain-separated from the ack); the file's refusals, id dedup and rising `seq`; the 4 MiB budget over the attempt with the relay refusing a frame past it (`late`, never cut); a broken stream ends steering for the attempt (`steer_stream_broken`), a key-shaped frame after frame 1 among the breaks (`shape`, never a re-key), an unverified frame is dropped and counted (`steer_frame_unverified`), never its text; the close; a `written` withdrawal is not enforceable on the pipe; and the residual stated as weaker than the read-only mount: the agent cannot plant a frame but can consume one, which withdraws it and is reported undelivered as today, which is why bind venues keep `/inbox`; no TTY, tool children on `/dev/null`, proved by `verify-image.sh` in #686. The keys, scripts, caps, ids, ack, file transport and record UNCHANGED, checked. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED, header only**: "worker → docker daemon" becomes "worker → container runtime" naming the docker daemon for `local`, this account's rootless Podman for `podman` and an OpenShell gateway for `openshell` (`DES-OPENSHELL-VENUE`), with one sentence that the body governs the two argv-built venues and the OpenShell venue's contract arrives with #683; the body UNCHANGED, checked (its `PI_EXIT_AUTH` value `stdin`, its `-i` and No TTY lines stay true for both argv venues, neither of which copies). **`INT-EGRESS-POLICY-CONTRACT` AMENDED**: "TLS is never terminated" is scoped to the squid proxy on `local` and `podman`, its text otherwise as written; NEW paragraph "A venue's own egress layer" (`CONST-VENUE-EGRESS-LAYER`): on a venue declaring the planned `credentialCustody: layer` (#683) the worker's object is the policy document it generates per job from the same allowlist, `model-endpoints` and forge hosts and reads back; that layer may terminate TLS and hold the job's credentials, residuals in `OQ-047`; a read-back mismatch and a gateway-wide global policy are each a POLICY refusal before spend; detail in #684. The objects, the proxy's argv, the failure table and the Acceptance UNCHANGED, checked, for both squid venues. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: `resolveSandbox` already refuses by name (`venue-unreachable`) a run whose venue has no `SANDBOX_LAUNCHERS` row, so an `openshell` run is refused there with no change. **Code evidence**: none; the code lands in #683, #684 and #686. |

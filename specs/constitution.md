@@ -73,6 +73,10 @@ passing, on the record — issue #80.)
   issue authors: one author's residue becomes the next author's starting condition. Rejected
   alternative — Gondolin's micro-VM routes only pi's *built-in* tools into the VM while custom extension
   tools still execute on the host; partial isolation is not isolation when the threat is arbitrary code.
+  **Not to be read as covering OpenShell's MicroVM driver (issue #680, 2026-10-18).** That driver runs the
+  **whole** agent inside the VM, so it is not Gondolin's partial routing and this rejection does not reach it; nor
+  does anything admit it. The `openshell` venue (`DES-OPENSHELL-VENUE`) is admitted on its Docker and Podman drivers
+  only, and a MicroVM venue, if one is wanted, is decided separately and argued on its own boundary.
 
   **One kind of residue now crosses jobs on purpose, and this paragraph exists because the sentence above
   forbids it.** With `run.resume` armed on a trigger (`INT-TRIGGERS-FILE-CONTRACT`,
@@ -160,6 +164,29 @@ passing, on the record — issue #80.)
   snapshots* — gigabytes per run to preserve what belonged in the image. `DES-SANDBOX-IS-A-FRESH-CONTAINER`
   records them in full. What survives a run is a **directory**, not a container, and it is swept on a
   bounded window that has no keep-forever value.
+  **The stdin alternative is ADMITTED IN ONE FRAMED, AUTHENTICATED FORM on a copying venue (issue #680, decided
+  2026-10-18; it ships with #686), and stays rejected as an interactive or unauthenticated channel.** A copying venue
+  (one that copies the job in and out rather than binding mounts, as `openshell` does by default) cannot carry the
+  read-only `/inbox` mount, so steering there would otherwise be skipped. On such a venue only, a steer-armed attempt
+  keeps the main exec's stdin **open after the exit key**, and nothing else changes for any other attempt. The
+  stream is **length-prefixed JSON frames, at most 4 MiB in total**. **Frame 1 is the exit key**, read by the runner
+  before any tool exists, so issue #545's property is kept: the agent never sees the key. **Every later frame is a
+  steer message MAC'd under that attempt's exit key**, and a key-shaped frame after frame 1 is not a re-key but a
+  break of the stream, which ends steering for the attempt: the runner never accepts a second key. The threat is real
+  and is the reason for the MAC: the agent shares the runner's uid. The runner's own `/proc/<runner>/fd/0` is refused
+  to it (the runner and its in-image supervisor run under the exec-only node, measured EACCES,
+  `image/runner/src/exit-line.mjs`), but another holder of the same pipe need not be (the container's init,
+  `/proc/1/fd/0`, today; on a vendor venue, whatever its exec path hands the pipe to), so this article assumes the
+  agent can reach the pipe for **reading and writing** and relies on nothing that says otherwise. A frame it plants
+  that way carries no valid MAC and the runner drops it. What it **can** do is consume a frame before the runner reads
+  it, which **withdraws** that message, or read it and write it back later, which **delays** it: a withdrawn one shows
+  as an ack that never arrives, and the worker reports it undelivered exactly as it reports an unacked `/inbox`
+  message today. **That is weaker than the read-only mount, and is said so in so many words**: the mount lets the
+  agent neither plant, withdraw nor delay, this channel lets it withdraw or delay and not plant. There is **no TTY** and no other process channel, and tool
+  children get `/dev/null` as stdin, which `verify-image.sh` proves in #686 for an image declaring `steerStdin`. The
+  operator-as-input concern the bullet above names is the one `DES-SANDBOX-IS-A-FRESH-CONTAINER`'s amended stdin
+  bullet already answers for `/inbox`: what enters is text, framed by the worker as data, never an interactive
+  session.
 
   **A THIRD CONTAINER SHAPE, the live probe (issues #278 and #344), and it meets all four of the carve-out's
   tests.** `pi-dispatch doctor --live` starts short-lived containers to read the backend declarations back
@@ -193,7 +220,7 @@ passing, on the record — issue #80.)
   containerize or sandbox Pi."*
 - **Traces to**: `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SESSION-STORE-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`, `INT-LIVE-PROBE-CONTRACT`, `DES-STEER-VIA-READONLY-INBOX-MOUNT`,
-  `INT-STEER-INBOX-CONTRACT`
+  `INT-STEER-INBOX-CONTRACT`, `CONST-VENUE-EGRESS-LAYER`, `DES-OPENSHELL-VENUE`
   **A JOB'S BOUNDS ARE NOW ITS PROJECT'S SIZE, AND ITS CPU BOUND IS A SHARE (issue #596).** Until this, every job
   container ran at one fixed `--memory=4g --cpus=2`, with swap equal to its memory by the runtime's default. That is
   replaced by a per-project size (`INT-CONTAINER-RUNTIME-CONTRACT`, the job's size), and the change has to be argued
@@ -243,6 +270,15 @@ passing, on the record — issue #80.)
   docker's **default bridge can already reach each other by IP today**, so per-job networks **remove** an
   adjacency this entry never actually had, rather than adding one. That is why this clause reads as a
   strengthening and not as an exception.
+  **On a venue that declares its own egress layer (`CONST-VENUE-EGRESS-LAYER`, issue #680), the network is the
+  vendor's and is argued here rather than through the paragraph above.** The agent container has **networking off**
+  and reaches exactly one thing, its supervisor, over that supervisor's authenticated Unix socket. That is argued as
+  **no wider than the `--internal` network with two members**: one peer, which is the egress control, and no route to
+  any other job's container or to the host's network. What it does **not** inherit is that paragraph's evidence. The
+  per-job network is built by the worker's own argv and read back by `doctor`; this topology is built by a vendor
+  runtime, so the claim is `asserted`, never `enforced` (`DES-CONTAINER-BACKEND-REGISTRY`), and a compromised
+  supervisor is that venue's peer with every credential the job holds, which is the new failure class
+  `CONST-VENUE-EGRESS-LAYER` records and `OQ-047` keeps open.
   **A STEER-ARMED JOB GAINS ONE READ-ONLY MOUNT, `/inbox` (issue #646, `DES-STEER-VIA-READONLY-INBOX-MOUNT`), and it
   is argued on the mount's own terms rather than through any earlier one.** It exists only for an attempt the worker
   armed (`run.steer`, a venue that binds mounts, an exit key, a transcript to read the acks from), so every other
@@ -258,7 +294,8 @@ passing, on the record — issue #80.)
   through it is text, framed by the worker as data and fenced like the issue text the run already holds; the trust
   argument for that is `DES-SANDBOX-IS-A-FRESH-CONTAINER`'s amended stdin bullet.
 - **Acceptance**: Given any job, the agent has no filesystem path to the host outside the declared mounts
-  in `INT-CONTAINER-RUNTIME-CONTRACT` — `/job:ro`, `/workspace:rw`, `/outbox:rw` (local only),
+  in `INT-CONTAINER-RUNTIME-CONTRACT` (which govern `local` and `podman`; the planned `openshell` venue's declared
+  paths arrive with #683, issue #680) — `/job:ro`, `/workspace:rw`, `/outbox:rw` (local only),
   `/opt/pi-global:ro` (the operator global overlay, only when configured; `REQ-GLOBAL-PI-OVERLAY`), and
   `/session:rw` (a resume job's staged transcript when a trigger armed `run.resume` **and** the worker resolved a
   key, `INT-SESSION-STORE-CONTRACT`; since issue #643 every other job's empty live transcript file,
@@ -298,6 +335,12 @@ passing, on the record — issue #80.)
   a network a `pi-job-` container is still on, since that severs a live job's only route out; and
   given `PI_EGRESS=0` the argv carries no `--network` and is byte-identical to one built before that entry
   existed.
+  **Given a venue under `CONST-VENUE-EGRESS-LAYER`** (issue #680, none yet): the agent container has networking off
+  and its one peer is its own supervisor, and the registry declares that `asserted`, never `enforced`. **Given an
+  attempt on a copying venue that is steer-armed through stdin** (#686): stdin carries the exit key as frame 1 and
+  thereafter only length-prefixed frames, at most 4 MiB in total, a frame without a valid MAC under the attempt's exit
+  key is dropped and never delivered, a consumed frame is reported undelivered, there is no TTY, and tool children
+  read `/dev/null`; **given any other attempt**, the exit key is written and stdin closed, as before issue #680.
   **Given any job's size** (issue #596): its argv carries `--memory` and an EQUAL `--memory-swap` at the size the
   worker resolved at pickup (its project row's, else `PI_JOB_MEMORY` and `PI_JOB_CPUS`, else `4g` and `2`),
   `--cpu-shares` for its CPUs, `--shm-size` at most half its memory, `--pids-limit=512`, and `--cpus` at the host
@@ -308,11 +351,15 @@ passing, on the record — issue #80.)
 
 ## CONST-EGRESS-POLICY-IN-THE-ARGV
 
-- **Statement**: An egress policy this project claims shall be expressed in the worker's **own `docker run`
-  argv**, and a job shall **never start against a policy that cannot serve it**. Both halves are
-  unconditional. **Neither says egress is denied**, and that omission is the entry rather than a gap in it:
-  an operator may set `PI_EGRESS=0` and a deployment that has done so runs exactly as it did before this
-  constraint existed, with no `--network`, no proxy variable and no probe. What is forbidden is a **third
+- **Statement**: An egress policy this project claims shall be expressed in the worker's **own argv**, or, on a
+  venue under `CONST-VENUE-EGRESS-LAYER`, in **the policy document the worker generates and hands to that venue**
+  (issue #680; the Statement moved from "the worker's own `docker run` argv", and the worker's `docker run` /
+  `podman run` argv is still exactly what it means on the `local` and `podman` venues), and a job shall **never start
+  against a policy that cannot serve it**. Both halves are unconditional. **Neither says egress is denied**, and
+  that omission is the entry rather than a gap in it: on the argv-built venues (`local`, `podman`) an operator may
+  set `PI_EGRESS=0` and a deployment that has done so runs exactly as it did before this constraint existed, with no
+  `--network`, no proxy variable and no probe. What `PI_EGRESS=0` means on a layer venue is deferred to #684, and no
+  layer venue ships before #684 decides it. What is forbidden is a **third
   state**: a deployment believing it has an egress policy that the worker cannot name, cannot check and
   does not apply. An operator's own host firewall is **out of scope** rather than forbidden, on the same
   terms this file already puts an operator's interactive pi session out of scope: it is their control, this
@@ -347,6 +394,10 @@ passing, on the record — issue #80.)
   a materially different security object: the provider key leaves the container and provider plaintext
   enters a host process, so the proxy's own compromise becomes a new class. Named here so the two are never
   conflated, and so the reason it is bigger is on the record as *different* rather than merely *harder*.
+  **SUPERSEDED for a venue that declares its own egress layer (issue #680, 2026-10-18)**: the entry and the
+  compromise story this paragraph asked for now exist as `CONST-VENUE-EGRESS-LAYER`, which admits such a layer on a
+  venue that declares it and meets its four conditions. For the Docker and Podman venues, whose boxes the worker
+  builds itself, this rejection stands as written, and their egress control stays squid, hostname-only.
 - **Evidence (upstream)**: pi README, verbatim: *"Pi does not include a built-in permission system for
   restricting filesystem, process, **network**, or credential access."* The same sentence
   `CONST-ISOLATION-CONTAINER-PER-JOB` cites for the filesystem and process halves names the network half,
@@ -368,7 +419,7 @@ passing, on the record — issue #80.)
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
   `CONST-TOKEN-SCOPED-PER-JOB`, `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`,
   `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SANDBOX-CONTRACT`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`,
-  `OQ-011`, `OQ-026`
+  `OQ-011`, `OQ-026`, `CONST-VENUE-EGRESS-LAYER`
 - **Acceptance**: Given `PI_EGRESS=0`, a job's docker argv and container env are **byte-identical** to ones
   built before this entry existed and the preflight spawns nothing. Given any other accepted value, **every**
   job's argv carries `--network=pi-job-<jobId>-net`, and no trigger field, runtime-settings key or
@@ -379,6 +430,122 @@ passing, on the record — issue #80.)
   determinate/indeterminate split `makeImagePreflight` draws with `docker info`. Given any deployment, no
   clause of this entry is satisfiable by a host firewall rule, and `doctor` reports the policy it reads back
   from docker and from the argv it would build, never from the host's `iptables`.
+  **Given a venue under `CONST-VENUE-EGRESS-LAYER`** (issue #680; no venue declares one yet, the first is `openshell`
+  in #683 and #684): the `--network=pi-job-<jobId>-net` clause above is replaced by its equivalent, the policy
+  document the worker generated for that job, which the venue reads back identical before the sandbox starts; no
+  trigger field, runtime-settings key or model-callable tool can produce a job on that venue whose policy is another
+  document; and an absent, unreadable or overridden policy returns `outcome: "policy"` before spend exactly as an
+  absent proxy does. That is all this entry decides for a layer venue. Every other clause of this Acceptance (the
+  `PI_EGRESS=0` byte-identity, the proxy probe and its indeterminate throw, `doctor`'s read-back from docker) is the
+  argv-built venues', `local` and `podman`, as written; what `PI_EGRESS=0` means on a layer venue is deferred to
+  #684, and no layer venue ships before #684 decides it.
+
+## CONST-VENUE-EGRESS-LAYER
+
+- **Statement**: A venue may replace the worker's own egress control with **a layer of its own**, which may
+  **terminate TLS and hold the job's credentials**, only when **all four** of these hold. (1) **The venue declares
+  it** in its backend table entry, through the property `credentialCustody` (`container` or `layer`; the table change
+  lands in #683), and nothing infers it from a venue's name, an image or a payload. (2) **The policy is the worker's**:
+  a document the worker generates per job from the same sources the squid allowlist is built from (the allowlist,
+  `model-endpoints` and the forge hosts), hands to the venue, and can read back; a policy an operator or the venue
+  writes some other way is not this one. (3) **The layer runs on a host this deployment owns**: its supervisor runs
+  beside the agent, on the gateway's own engine, never as a remote or hosted service, and the worker checks it: a
+  gateway endpoint that is not loopback or a Unix socket on this host is refused, by `doctor` and per job before
+  spend. (4) **A job never starts against
+  a layer that cannot serve it**: every free, determinate refusal comes before spend (`CONST-BUDGET-BEFORE-TOKENS`),
+  and that includes a **gateway-wide global policy** that would replace the job's own. A venue that meets these is
+  still bound by every other article of this file; this entry admits a different place for the egress control and
+  the credentials, and relaxes nothing else. **Nothing ships under it today**: no venue declares `layer`, and the
+  first that will, `openshell` (`DES-OPENSHELL-VENUE`), is built in #683 and gains its layer in #684.
+- **Why**: **This entry reverses a rejection, on the record rather than by quiet omission.** Since 2026-08-25,
+  `CONST-EGRESS-POLICY-IN-THE-ARGV` has named "a TLS-terminating, secrets-injecting proxy" as `OQ-011`'s mechanism
+  and refused it as a materially different security object: the provider key leaves the container and provider
+  plaintext enters a host process, so the proxy's own compromise becomes a new class. That reasoning was right, and
+  it was a request rather than a verdict: such a layer was named as "needing its own constitution entry and its own
+  story for the proxy's own compromise" (`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`). This is that entry, and the story is below. The
+  old paragraph keeps its text, gains a dated marker and keeps governing the two venues the worker builds itself.
+  **What the layer gains, which is why it is worth the new class.** On a layer venue the provider key and the forge
+  token **never enter the agent's container**: the environment holds placeholders, and the supervisor swaps them for
+  the real values only on connections to the endpoints the job's policy names. That removes, on that venue, the
+  exposure `OQ-028` records and `CONST-TOKEN-SCOPED-PER-JOB` calls the acknowledged exception: an injected agent that
+  exfiltrates its environment exfiltrates placeholders, and the provider key, which cannot be scoped, is no longer
+  readable by the thing most likely to leak it. Egress rules become **per binary** rather than per hostname, which the
+  squid allowlist cannot express because it sees a CONNECT and a host name and nothing of the process behind it. And
+  the layer **could** account provider traffic per sandbox, which is the condition `OQ-011` names for closing its
+  accounting half; that is a follow-up, recorded there, and not promised here.
+  **The compromise story the old rejection asked for.** Provider and forge plaintext exist inside the supervisor, so
+  its compromise is a **new failure class** and is called one: whoever controls the supervisor holds every credential
+  the job would have held, sees every request the agent makes in the clear, and can rewrite either. Two things bound
+  it, and they are the same two that bound the agent today. **What it holds is no more than the job held**: the forge
+  token is the one `CONST-TOKEN-SCOPED-PER-JOB` mints, short and narrow, so a stolen one dies on the same expiry and
+  reaches the same one repository; the provider key is bounded by the provider-side spend limit that article already
+  names as its bound. **Where it runs is this deployment's own host** (condition 3), so its compromise needs a foothold
+  the operator's own engine already guards, not a vendor's service. What does **not** bound it is trusting the
+  vendor's code. The supervisor is a vendor component the worker neither builds nor can inspect at run time, so every
+  guarantee it gives is **`asserted`, never `enforced`**, in `DES-CONTAINER-BACKEND-REGISTRY`'s words: every property
+  word a layer venue declares `asserted` is listed in that entry's #680 amendment, `egress` and `secretsCustody`
+  among them, and the registry's floors treat them so. The residuals
+  that stay after all of that (the supervisor's compromise itself, TLS plaintext in a vendor process, binary-path
+  pinning that can drift silently, interfaces the vendor marks Experimental changing in a patch release, a
+  gateway-wide global policy, and the kernel floor the vendor's Landlock confinement needs, Linux 6.2 or later) are
+  `OQ-047`, an accepted risk that wants ratification rather than a closed question.
+  **Why each condition, by what its absence would permit.** Without (1), a venue could be treated as holding the
+  credentials because of what it is called, and an older worker or a misread table would hand a real key to a
+  container on the strength of a guess. The declaration is a **closed choice** (`container` or `layer`, omitted read
+  as `container`), not a word on the `enforced`/`asserted`/`absent` scale, so `PI_BACKEND_FLOOR` does not compare it;
+  an operator who refuses layer venues does not bless one, and the floors still see the `asserted` words such a venue
+  declares. Without (2), the layer would be the `DOCKER-USER` recipe again in a vendor's clothes: a control
+  the worker cannot name, check or report, which is the third state `CONST-EGRESS-POLICY-IN-THE-ARGV` forbids; the
+  same allowlist feeds both venues, so an operator's reviewed list means one thing everywhere. Without (3), the job's
+  credentials would cross to a service this deployment does not own, which is what `credentialTransit` already
+  refuses for a daemon. Without (4), a global policy an operator set for some other purpose would silently replace
+  the job's, and a job would spend its slots against rules nobody generated for it, which is the measured cost that
+  made the argv entry a constraint. What `PI_EGRESS=0` means on a layer venue is deferred to #684, and no layer venue
+  ships before #684 decides it; this entry requires only that whatever a layer enforces is the worker's generated
+  document.
+- **Rejected alternatives.** *Running a layer for the Docker and Podman venues too*: the worker builds those boxes
+  itself and their egress control is squid, hostname-only and never terminating TLS (`INT-EGRESS-POLICY-CONTRACT`);
+  putting a secrets proxy there would bring the new failure class to the two venues whose whole argument is that the
+  worker's own argv is the boundary, so they keep the old rejection. *A remote or hosted layer*: it breaks condition
+  3, since the job's credentials and its plaintext would rest on someone else's host. *Treating the layer's
+  credential handling as a reason to relax `CONST-TOKEN-SCOPED-PER-JOB`*: the supervisor is a vendor process and can
+  be compromised, so the token's scope and expiry are still what bound the damage, and a long-lived token behind a
+  layer is as non-conformant as one in an environment. *An operator-written policy file handed to the venue*: it
+  breaks condition 2 and splits the allowlist into two documents that drift. *Inferring the custody from the backend
+  name*: a hand-written relation nothing pins, which this repository has found drifted every time it looked. *The
+  vendor's MicroVM driver in this round*: it runs the whole agent in a VM, a different boundary that is argued on its
+  own if it is wanted (`CONST-ISOLATION-CONTAINER-PER-JOB`'s Gondolin note).
+- **Evidence (upstream)**: NVIDIA OpenShell v0.1.4, Apache-2.0, `https://github.com/NVIDIA/OpenShell`, documentation
+  at `https://docs.nvidia.com/openshell/latest/`. Its documented architecture is the shape this entry admits: each
+  sandbox is an agent container with **networking off** beside a trusted **supervisor**, reached over an
+  **authenticated Unix socket**; every connection is checked against a deny-by-default **OPA policy**; TLS is
+  terminated with a **per-sandbox CA**; and **providers** carry credentials as placeholders that the supervisor
+  replaces only at the endpoints a provider profile names. Documentation is a hint, not evidence: each of these is
+  re-verified against the v0.1.4 release itself in #683 and #684 before any code relies on it, on
+  `CONST-PI-VERSION-PINNED`'s terms for a pinned artifact.
+- **Code evidence**: none yet, and said so rather than left blank. The `credentialCustody` property and the
+  `openshell` backend land in #683; the policy document, the providers and the pre-spend refusals land in #684.
+- **Traces to**: `CONST-EGRESS-POLICY-IN-THE-ARGV`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-TOKEN-SCOPED-PER-JOB`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `OQ-011`, `OQ-028`, `OQ-047`, `DES-OPENSHELL-VENUE`,
+  `DES-CONTAINER-BACKEND-REGISTRY`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`, `INT-EGRESS-POLICY-CONTRACT`
+- **Acceptance**: **Condition 1.** Given a venue whose table entry declares `credentialCustody: "container"`, or
+  declares none, then its jobs are built exactly as before this entry, with real credentials in the container
+  environment and the egress control in the worker's own argv; given a declaration of `layer`, then it is read from
+  the table alone, and no trigger field, runtime-settings key, payload or model-callable tool can set or change it.
+  **Condition 2.** Given a layer venue, then the policy the venue reads back before the sandbox starts is the document
+  the worker generated for that job from the allowlist, `model-endpoints` and the forge hosts, and a host in none of
+  those appears in no rule; given a read-back that differs, then the job returns `outcome: "policy"` with
+  `budgetReserved: false` and is not retried. **Condition 3.** Given a layer venue whose gateway endpoint is not
+  loopback or a local socket on this host, then `doctor` reports it and the job is refused as policy before the token
+  mint. **Condition 4.** Given a layer
+  venue with a gateway-wide global policy active, then the job returns `outcome: "policy"` with nothing reserved, no
+  sandbox is created and the queue does not retry it; given a gateway that does not answer, then the job **throws**
+  and is retried (`CONST-RETRY-INFRA-ONLY`'s determinate/indeterminate split). **Custody.** Given a layer venue, then
+  the agent's environment holds no real provider key and no real forge token, only placeholders, and the registry
+  declares every word `DES-CONTAINER-BACKEND-REGISTRY`'s #680 amendment lists for that venue `asserted`, never
+  `enforced`. **Bound.** Given any layer
+  venue, then the forge token the supervisor holds is the one `CONST-TOKEN-SCOPED-PER-JOB` minted for that job, with
+  that article's scope and expiry.
 
 ## CONST-NO-CONTEXT-FILES-MANDATORY
 
@@ -1108,7 +1275,8 @@ passing, on the record — issue #80.)
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-CONTAINER-RUNTIME-CONTRACT`
 - **Acceptance**: (a) **Code-checkable** — no container environment holds a credential that is
   broad-scope or long-lived; the App path scopes the token to exactly one repository; the token is
-  env-injected and never written to `/workspace`, `.git/config`, the CONTAINER's argv, or logs; no acceptance clause
+  env-injected, or held by a venue's own layer with a placeholder in the environment (`CONST-VENUE-EGRESS-LAYER`,
+  issue #680, none yet), and never written to `/workspace`, `.git/config`, the CONTAINER's argv, or logs; no acceptance clause
   mandates a specific expiry duration. (b) **Operator obligation** — a single-owner deployment must
   supply a repo-scoped, minimally-permissioned, short-expiry fine-grained PAT (or use the App); a broad
   or long-lived classic PAT is non-conformant. Multi-tenant deployments must use the App. A GitLab
@@ -1208,6 +1376,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-18 | Issue #680: a venue's own egress layer that holds the key, admitted in the spec only; nothing ships with this row (the `openshell` backend is #683, its policy layer for egress, credentials and MCP is #684, stdin steering and bind mode are #686). **`CONST-VENUE-EGRESS-LAYER` NEW**, after `CONST-EGRESS-POLICY-IN-THE-ARGV`: a venue may replace the worker's own egress control with its own layer, which may terminate TLS and hold the job's credentials, only when (1) its backend table entry declares it (the planned property `credentialCustody`, `container` or `layer`, #683), (2) the policy is a document the worker generates per job from the allowlist, `model-endpoints` and the forge hosts, hands to the venue and reads back, (3) the layer runs on a host this deployment owns, beside the agent on the gateway's own engine, never remote, checked by refusing (in `doctor`, and per job before spend) a gateway endpoint that is not loopback or a Unix socket on this host, and (4) a job never starts against a layer that cannot serve it, a gateway-wide global policy included, with every determinate refusal before spend. The Why carries the compromise story the old rejection asked for: plaintext in the supervisor is a new failure class, bounded by the token's expiry and scope and the provider-side spend limit, not by trusting the vendor, whose guarantees are `asserted`, never `enforced`; residuals go to the new `OQ-047`. `credentialCustody` is a closed choice (`container` \| `layer`, omitted read as `container`), not a word on the `enforced`/`asserted`/`absent` scale and not compared by `PI_BACKEND_FLOOR`: an operator who refuses layer venues does not bless one. The Why points to `DES-CONTAINER-BACKEND-REGISTRY`'s #680 list for every word a layer venue declares `asserted`, rather than restating part of it; `PI_EGRESS=0` on a layer venue is deferred to #684, and no layer venue ships before #684 decides it. Acceptance condition 3: given a layer venue whose gateway endpoint is not loopback or a local socket on this host, `doctor` reports it and the job is refused as policy before the token mint. Rejected: a layer for the Docker and Podman venues, a remote or hosted layer, relaxing `CONST-TOKEN-SCOPED-PER-JOB` because of the layer, an operator-written policy file, inferring custody from a backend name, the MicroVM driver this round. Evidence names NVIDIA OpenShell v0.1.4 (Apache-2.0) and its documented architecture, to be re-verified against the release in #683 and #684; Code evidence is none yet, said so. **`CONST-EGRESS-POLICY-IN-THE-ARGV` AMENDED**, the Statement moves: "the worker's own `docker run` argv" becomes "the worker's own argv, or, on a venue under `CONST-VENUE-EGRESS-LAYER`, the policy document the worker generates and hands to that venue"; the rejected-alternative paragraph on a TLS-terminating, secrets-injecting proxy keeps its text and gains **SUPERSEDED for a venue that declares its own egress layer (issue #680, 2026-10-18)**, standing as written for Docker and Podman; the Statement's `PI_EGRESS=0` sentence is scoped to the argv-built venues (`local`, `podman`), the moved Statement names "the worker's `docker run` / `podman run` argv" for them, and what `PI_EGRESS=0` means on a layer venue is deferred to #684, no layer venue shipping before #684 decides it; the Acceptance gains one clause naming the layer venue's equivalent of the `--network` clause, which decides only the generated document and its refusals before spend, every other clause (the `PI_EGRESS=0` byte-identity, the proxy probe, doctor's docker read-back) staying the argv-built venues'; Traces gain the new entry. Its other clauses UNCHANGED, checked. **`CONST-ISOLATION-CONTAINER-PER-JOB` AMENDED**: the Gondolin rejection gains a note that OpenShell's MicroVM driver runs the whole agent in the VM, is not Gondolin's partial routing, and is neither covered nor admitted by v1; the sandbox paragraph's stdin rejection keeps its text and gains a paragraph admitting stdin in one framed, authenticated form on a copying venue only (length-prefixed JSON frames, at most 4 MiB in total; frame 1 the exit key, read before any tool exists, issue #545's property kept; every later frame a steer message MAC'd under the attempt's exit key, and a key-shaped frame after frame 1 a break of the stream for the attempt, never a re-key; the runner's own `/proc/<runner>/fd/0` is refused to the agent's uid by the exec-only node (measured EACCES, `image/runner/src/exit-line.mjs`), but another holder of the pipe (init's `/proc/1/fd/0`, or whatever the vendor's exec path hands it to) need not be, so the article assumes read and write access to the pipe and relies on nothing that says otherwise; a frame the agent plants is dropped; it can consume a frame and so withdraw it, reported undelivered, or write it back later and so delay it, stated as weaker than the read-only `/inbox` mount; no TTY, tool children on `/dev/null`, proved by `verify-image.sh` in #686 for an image declaring `steerStdin`), still rejected as an interactive or unauthenticated channel; the network paragraph gains the layer venue's topology (networking off, one peer, the supervisor over its authenticated socket), argued as no wider than the two-member `--internal` network and declared `asserted`; the Acceptance gains the layer-venue and stdin-steered clauses, and its reference to the declared mounts in `INT-CONTAINER-RUNTIME-CONTRACT` says those govern `local` and `podman` while the `openshell` venue's arrive with #683; Traces gain `CONST-VENUE-EGRESS-LAYER` and `DES-OPENSHELL-VENUE`. Every other paragraph and the mount enumeration itself UNCHANGED, checked. **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED, the Acceptance only**: "env-injected" becomes "env-injected, or held by a venue's own layer with a placeholder in the environment". The Statement UNCHANGED, checked: the token is still host-held, never written to an agent-reachable file, and short and narrow. UNCHANGED, checked: CONST-BUDGET-BEFORE-TOKENS (the layer's refusals are free and determinate and run before the mint, an instance rather than an exception), CONST-TRIGGER-AUTHOR-GATE (who may start a job or steer one is untouched; a stdin frame carries the same gated message an `/inbox` file does), CONST-ISSUE-TEXT-IS-DATA (a steer frame is framed by the worker as data, as `/inbox` text is), CONST-RETRY-INFRA-ONLY (a determinate layer refusal returns policy, an unanswering gateway throws). |
 | 2026-10-18 | Issue #647, part 1: terminal chat. **`CONST-PI-VERSION-PINNED` AMENDED**, the Acceptance only: the hand-written pins it enumerates gain the worker's `@earendil-works/pi-tui`, an exact dependency the terminal chat draws with (imported lazily, never on the worker's boot path), held to the runner's pin by `pi-pin-check.mjs` and moved by its own row of the pi bump table. The Statement UNCHANGED, checked. **`CONST-ISSUE-TEXT-IS-DATA` UNCHANGED, checked**: a steer or an answer sent from the terminal is the console's existing action, framed as data as before; transcript text reaching the terminal is scrubbed of controls and never interpreted. **`CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: nothing merges. **Code evidence**: .github/scripts/pi-pin-check.mjs -> piPinProblems; .github/scripts/pi-bump.mjs -> PI_PIN_SITES; worker/package.json; worker/src/chat-view.mjs -> loadPiTui. |
 | 2026-10-17 | Issue #646, part 2: forge comments. **`CONST-TRIGGER-AUTHOR-GATE` AMENDED**: a new paragraph says the gate now also governs which comments enter a running run, not only which deliveries start one: the receiver asks whether a run is live only for a job the pure filter returned after the unchanged gate, `steerMode` is set only on the gated phrase route (never a parked reply, never a command rule), the agent is told the author the gate judged, and a late comment's resumed job is the job the same admitted comment would have started; Traces gain `REQ-STEER-RUNNING-JOB`; Acceptance gains the stranger-never-reaches-an-inbox case per forge. The Statement and every per-forge mechanism UNCHANGED, checked. **`CONST-ISSUE-TEXT-IS-DATA` UNCHANGED, checked**: a comment reaches the agent through part 1's framing, as data. |
 | 2026-10-17 | Issue #646, part 1: steering, the operator path. **`CONST-ISOLATION-CONTAINER-PER-JOB` AMENDED**: a new paragraph argues the one mount a steer-armed attempt gains, `/inbox`, on its own terms rather than by borrowing an earlier mount's argument: present only for an attempt the worker armed (every other argv byte-identical), per job (a `0700` directory `<jobDir>.inbox` made empty for this attempt, relabelled, removed in the attempt's `finally`, new for a retry), read only (the agent can neither plant nor withdraw a message; `verify-image.sh` proves a write from inside is refused), outside `/job` (which stays merge-gated, agent-untamperable input), and no network path (the worker reads Valkey and writes files; the ack comes back in the transcript under a MAC keyed by the attempt's exit key). The Acceptance enumeration gains `/inbox:ro` and the unarmed and armed cases; Traces to gains `DES-STEER-VIA-READONLY-INBOX-MOUNT` and `INT-STEER-INBOX-CONTRACT`. **`CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: in this release no forge text enters an inbox; a message comes only from an operator at the command line on the host, who already holds the deployment (the operator clause's footing), and the inbox module's `forge` source is exercised by tests alone. The comment-routing change of the same issue will add a clause here: the gate then also governs entry into a RUNNING run, a comment reaching a run's inbox only when it carries the trigger's phrase and its author passes this entry's check for that forge (the same pre-route resolution, before any lookup of live runs), a parked reply and a command never steering, and a refused author's comment taking today's path. **`CONST-ISSUE-TEXT-IS-DATA` UNCHANGED, checked**: a message is framed by the worker as data with the same fence the task text gets, and an operator message carries no more authority than a comment. |

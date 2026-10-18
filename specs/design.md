@@ -6760,7 +6760,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Status**: issue #646, part 1 (2026-10-17), the operator path (`REQ-STEER-RUNNING-JOB`). Implemented in
   `worker/src/steer-inbox.mjs`, `worker/src/inbox-relay.mjs`, `worker/src/steer-framing.mjs`,
   `worker/src/prompt-fence.mjs`, `worker/src/steer-ack.mjs`, `worker/src/inbox-settle.mjs`, the steer parts of
-  `worker/src/run-container.mjs` and `worker/src/container-spec.mjs`, and `image/runner/src/inbox.mjs`.
+  `worker/src/run-container.mjs` and `worker/src/container-spec.mjs`, and `image/runner/src/inbox.mjs`. AMENDED
+  2026-10-18 (issue #680): the stdin transport for a copying venue is DECIDED here and built in #686; nothing of it
+  ships today.
 - **Decision**: a message reaches a running job through **files in a per-attempt host directory mounted read-only at
   `/inbox`**, and its delivery comes back through **the transcript the worker already tails**, under an HMAC the
   agent cannot compute. One way in, one way back, and neither is a new reach for the container.
@@ -6855,7 +6857,52 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     exit key (an image declaring `exitAuth`), a transcript tail and a relay (a worker with Valkey), a transcript file,
     and an inbox directory it could make. Each missing part is a named skip (`steerSkipped`), and the job runs as it
     would without the field. Only an armed attempt gets `PI_STEER=1` and the mount, so an unarmed argv is
-    byte-identical to one built before this entry.
+    byte-identical to one built before this entry. **AMENDED 2026-10-18 (issue #680), planned, built in #686**: on a
+    COPYING venue (the first is `openshell`, `DES-OPENSHELL-VENUE`) the inbox part is the stdin frame channel below
+    instead of the mount, and its parts are an exit key, an image declaring the planned `steerStdin` capability, the
+    transcript stream over the exec's stdout (the copying venue's tail, #686) and a relay. A bind venue is armed exactly
+    as above and never through stdin. Nothing of this ships today.
+  - **On a copying venue: framed, MAC'd stdin, and weaker than the mount, in so many words** (decided 2026-10-18,
+    issue #680; built in #686). A venue that uploads `/job` once cannot show the runner a file written later, so the
+    worker has no read-only path into the box but the main `exec`'s stdin, which issue #545 already uses for the exit
+    key. A steer-armed attempt whose image declares `steerStdin` keeps that stdin OPEN after the key; every other
+    attempt, on every venue, writes the key and closes the pipe as today (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
+    - **Frames.** The pipe carries length-prefixed JSON frames, at most 4 MiB in total over the attempt (OpenShell's
+      exec stdin buffer; a message that would pass the cap is refused by the worker and reported undelivered, never
+      truncated). The exact bytes are `INT-STEER-INBOX-CONTRACT`'s.
+    - **Frame 1 is the exit key, drained before any tool exists.** The runner reads exactly one frame, the key, before
+      pi loads, so #545's property is kept word for word: no tool has run while the key is in the pipe, and the
+      agent never sees it. Only then does the runner start reading later frames.
+    - **Every later frame is a steer message MAC'd under the attempt's exit key**, domain-separated from the ack and
+      the exit line, over the job's `PI_JOB_ID` (the container name, as the ack's MAC uses), the frame's sequence
+      number and the exact bytes of the message's file form (its id, mode, source and framed content), so a captured
+      frame cannot be replayed relabelled from a steer to a follow-up; the byte-level formula is
+      `INT-STEER-INBOX-CONTRACT`'s. The content is the same `frameSteerMessage` text the mount's file carries, so the
+      trust and framing are unchanged. A frame whose MAC does not verify is dropped, counted and logged once per attempt by code; a
+      verified frame whose id the runner has already seen, or whose sequence number is not above the last accepted,
+      is dropped too. **A key-shaped frame (`"t":"key"`) after frame 1 is a `shape` break** that ends the stream for
+      the attempt, never a re-key: the runner accepts exactly one key, frame 1's.
+    - **The threat, stated as the design assumes it.** The agent runs as the runner's uid. The runner's own
+      `/proc/<runner>/fd/0` is refused to it by the exec-only node the runner and the in-image supervisor run under
+      (`image/runner/src/exit-line.mjs`), but every other
+      holder of the same pipe is not (the container's init today: `exit-line.mjs` records `/proc/1/fd/0` reaching the
+      same pipe and `/proc/1/fd/1` opening on every venue), and how OpenShell's exec hands the pipe in is its code,
+      not ours. So the design assumes the agent can open the pipe
+      for READ and WRITE on Linux, and rests on nothing that says otherwise. **A frame it plants carries no valid MAC
+      and is dropped**: it never holds the key, which left the pipe before it existed. **A frame it reads is
+      consumed**, which WITHDRAWS that message: the runner never sees it, so no ack arrives, and the worker reports it
+      undelivered exactly as it reports a message no ack confirmed today (`settleInbox`). A frame it reads and writes
+      back is the genuine frame again, accepted once by its id and sequence number, so the agent can delay or drop a
+      message, never forge, duplicate or reorder one. **A write that breaks the framing** (a bogus length prefix)
+      desynchronises the stream; the runner then stops reading steer frames for the attempt, logs it, and every later
+      message settles undelivered, which is the same withdraw at a larger scale and never a plant.
+    - **Weaker than the read-only mount, and that is why bind venues keep the mount.** Under the mount the agent can
+      neither plant, withdraw nor delay (the relay owns the directory, the kernel refuses the write); under stdin it
+      can withdraw or delay. Delivery comes back as before, in the transcript under the ack's MAC, so a withdrawal can never be
+      dressed as a delivery; what is lost is only the guarantee that a sent message reaches the agent at all.
+    - **No TTY, and no other process channel.** The exec is started without a terminal, and tool children get
+      `/dev/null` as stdin, so a `bash` call cannot read a frame by inheriting fd 0; `verify-image.sh` proves both in
+      #686. The container still gains no network path, credential or listening socket.
 - **Recovery and retries.** The inbox is keyed by the RUN id (`runIdOf`), so a #645 recovery and a BullMQ retry write
   the same inbox, each into a fresh directory of its own. Writing waits for the live tail's first pass over the
   staged transcript (`onBaseline`, which fails open on a refused or unreadable file). At that moment the relay
@@ -6878,7 +6925,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     to EOF before any tool exists, so the key is out of the pipe before the agent can run anything. A message channel
     there would keep the key's pipe open for the whole run, or need a framing protocol multiplexed with the key. And
     `DES-SANDBOX-IS-A-FRESH-CONTAINER` rejected a stdin channel to the agent for reasons this design answers only in
-    the framed, read-only form recorded there.
+    the framed, read-only form recorded there. **Still rejected as an open pipe beside the key, and admitted since
+    issue #680 in one framed, MAC'd form, on copying venues only** (above, built in #686): the "framing protocol
+    multiplexed with the key" this bullet named is exactly what is admitted, with the key as frame 1 drained before
+    any tool exists, so the key's pipe is open for the run but the key is not in it; every later frame verifies under
+    that key or is dropped. It is admitted where the mount cannot exist and nowhere else, because it lets the agent
+    withdraw a message, which the mount does not.
   - *A writable mount for messages or acks.* A writable `/inbox` lets the agent plant a message in its own inbox,
     withdraw one by deleting it, or write an ack file; a second writable directory for acks is the same thing in two
     halves. The transcript already holds what pi persisted, so the ack rides there, MACed. `verify-image.sh` proves
@@ -6902,7 +6954,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `DES-SANDBOX-IS-A-FRESH-CONTAINER` refuses. So the runner closes at `agent_before_settle` and a later message is
     `late` (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`).
   - *A copying venue.* A runtime that uploads mounts once at the start would never see a message written later. Such
-    a venue is not armed (`steerSkipped: "venue-copies"`); every in-tree backend binds.
+    a venue is not armed (`steerSkipped: "venue-copies"`); every in-tree backend binds. **AMENDED 2026-10-18 (issue
+    #680)**: still rejected as a mount, and such a venue is now armed through stdin frames (above) when the image
+    declares the planned `steerStdin` capability, else it is skipped with
+    `steerSkipped: "venue-copies"` as today. The planned `openshell` venue copies by default (`DES-OPENSHELL-VENUE`);
+    its opt-in bind mode (#686) is a binding venue and takes the mount.
   - *A shadow guard on the custom type,* as the await and progress tools have. Nothing here can be answered by
     another extension: the message is pushed straight onto the agent's queue. `registerMessageRenderer` is read only
     by the interactive TUI, and an extension that sends a message of our type itself cannot forge the ack.
@@ -6919,7 +6975,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `REQ-STEER-RUNNING-JOB`, `INT-STEER-INBOX-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`,
   `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-TRANSCRIPT-STREAM`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `DES-SANDBOX-IS-A-FRESH-CONTAINER`, `DES-LIVE-TRANSCRIPT-STREAM`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
-  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-EGRESS-POLICY-IN-THE-ARGV`.
+  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-EGRESS-POLICY-IN-THE-ARGV`, `DES-OPENSHELL-VENUE`, `CONST-VENUE-EGRESS-LAYER`.
 
 ## DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX
 
@@ -7203,7 +7259,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     process channel. **No extra container lifetime**: nothing keeps a container alive to wait for a message; the
     runner closes its inbox when the run settles, a message after that is `late`, and the container ends when its
     run does. What this does not change is the rest of this bullet's neighbours: no `docker exec` into a job, no
-    TTY, no published port, `--rm` kept.
+    TTY, no published port, `--rm` kept. **Admitted since issue #680 in a second form, framed and MAC'd stdin, on
+    copying venues only** (`DES-STEER-VIA-READONLY-INBOX-MOUNT`, decided there, built in #686; nothing ships today):
+    where a venue uploads `/job` once and no mount can carry a later message, a steer-armed attempt whose image
+    declares `steerStdin` keeps the main exec's stdin open after the exit key, which is frame 1 and drained before
+    any tool exists, and every later frame is a steer message MAC'd under that key. The same four counts, answered
+    the same way except the third. **The same trust and framing**: a frame carries the worker's `frameSteerMessage`
+    text, unchanged. **No operator authority**: unchanged, the framing is the same. **One way, and NOT read only**:
+    the agent can open the pipe through `/proc` for reading and writing, so a frame it plants has no valid MAC and is
+    dropped, but a frame it reads is consumed, which withdraws that message; the withdrawal shows as an ack that never
+    arrives, reported undelivered as today, never as a delivery. That is weaker than the mount, stated as such, and it
+    is why a venue that binds keeps the mount and never takes this form. The container still gains no network path,
+    credential or listening socket, and tool children get `/dev/null` as stdin. **No extra container lifetime**:
+    unchanged, the runner closes the channel when the run settles. And still no TTY: the exec is started without
+    one.
   - *`docker commit` the container at exit.* This preserves strictly more — installed packages, process
     residue — and costs gigabytes per run to do it. It serves a 5% case that image+workspace already
     serves, and the extra it preserves is mostly the part that should have been in the image. The honest
@@ -7229,7 +7298,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     INJECTED into the sandbox reaper so `sandbox-store.mjs` stays docker-free in its own tests.
 - **Traces to**: `REQ-RESURRECTABLE-SANDBOX`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
   `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SANDBOX-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`,
-  `DES-STEER-VIA-READONLY-INBOX-MOUNT`
+  `DES-STEER-VIA-READONLY-INBOX-MOUNT`, `DES-OPENSHELL-VENUE`
 
 ## DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK
 
@@ -7455,8 +7524,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     **different security object**, in which the provider key stops living in the container and starts living
     in a host process that reads provider plaintext, needing its own constitution entry and its own story
     for the proxy's own compromise. Named here so this design is never mistaken for a down payment on it,
-    and so the conflation `OQ-004:89-92` warned about does not happen at the one moment it was warning
-    about.
+    and so the conflation `OQ-004` warned about (its corroboration bullet, "the two must not be conflated",
+    `open-questions.md:168-171` at issue #680; the `:89-92` this bullet cited had gone stale) does not happen at the
+    one moment it was warning about. **SUPERSEDED for a venue that declares its own egress layer (issue #680)**:
+    `CONST-VENUE-EGRESS-LAYER` is the constitution entry this bullet asked for, with the compromise story, and
+    `DES-OPENSHELL-VENUE` is its first venue, where the layer is the venue's own supervisor and not a proxy this
+    worker runs. It is NOT superseded for `local` and `podman`: the Decision above is UNCHANGED for them, squid stays
+    hostname-only and never terminates TLS, and the conflation is still refused, because the layer is the
+    secrets-holding object and the allowlist proxy stays the allowlist.
   - *The worker starting the proxy at boot.* Today the worker starts only ephemeral `--rm` containers it
     reaps by a name filter. A long-lived, network-attached, restart-policied component is a different
     lifecycle object, and making the worker responsible for a security control's **uptime** creates the one
@@ -7523,7 +7598,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-RETRY-INFRA-ONLY`, `DES-WORKER-ON-HOST`, `DES-CONCURRENCY-3`, `DES-PER-TRIGGER-JOB-IMAGE`,
-  `OQ-004`, `OQ-011`
+  `OQ-004`, `OQ-011`, `CONST-VENUE-EGRESS-LAYER`, `DES-OPENSHELL-VENUE`
 
 ## DES-REPLICA-INDEX-REACHES-THE-BRANCH
 
@@ -7938,7 +8013,24 @@ a tunnel.
   adversarial pass: without them a backend could declare every other word `enforced`, be fully conformant,
   and still reuse one container across mutually untrusting issue authors, bind-mount the docker socket, put
   every job on one segment, have no way to stop a runaway job, or ship the per-job token to a daemon this
-  deployment does not own.
+  deployment does not own. **AMENDED 2026-10-18 (issue #680), planned, the table change lands in #683**: the list
+  gains `credentialCustody`, and unlike the fourteen it is not a property word on the three-word scale but a closed
+  choice of WHO holds the job's credentials, `container | layer`. `container` is every venue today: the worker
+  hands the provider key and the per-job forge token into the job container's environment. `layer` is a venue whose
+  own layer terminates TLS and holds them, with placeholders in the container, admitted only under
+  `CONST-VENUE-EGRESS-LAYER`; the first is `openshell` (`DES-OPENSHELL-VENUE`). A venue that omits it is read as
+  `container`, since that is what every in-tree builder does, and a venue declaring `layer` without the
+  constitution's conditions met is refused rather than trusted. Being a choice and not a word on the scale,
+  `PI_BACKEND_FLOOR` does not compare it; an operator who refuses layer venues does not bless one. **The words a
+  `layer` venue declares, the one list the constitution, `DES-OPENSHELL-VENUE` and `OQ-012` point to**: `isolation`,
+  `jobToJobIsolation`, `mountSet`, `readOnlyJobInputs`, `egress` and `secretsCustody` are **`asserted`, never
+  `enforced`**; `credentialTransit` is decided by observation in #683; `pausable` is `absent`, and `localFolders` is `absent` in copy mode. The rest
+  (`ephemeral`, `imagePinning`, `exitCodes`, `abortable`, `nonRoot`) are #683's to declare by measurement. They are
+  `asserted` because the box, the allowlist and the secret values are built and held by the vendor's gateway and
+  supervisor, not by code in this repository a test here reads back, so the words say "something outside the worker
+  provides it", which is this vocabulary's meaning and `OQ-012`'s line. The worker's own half of `secretsCustody`
+  (no value in a log, a record or a comment) is unchanged; the word drops because the values now also live in a
+  process it does not build. The fourteen and the conformance counts below are UNCHANGED until #683 lands the word.
 - **One `local` declaration is `asserted`: `nonRoot`**, because `USER pi` is the image's and `SECURITY.md`
   said "Non-root is not in that argv". Since issue #341 the argv can supply it: on a daemon that enforces bind-mount
   ownership the job runs `--user=<worker uid>:<gid>`, which the builder refuses unless both parts are non-zero.
@@ -10308,6 +10400,126 @@ a tunnel.
 - **Traces to**: `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-FIRST-RUN-SETUP-WIZARD`,
   `DES-SERVICE-ENV-SETUP-SEAM`, `DES-CONCURRENCY-3`, `REQ-EGRESS-ALLOWLIST`, `REQ-QUEUE-BURST-NO-DROP`
 
+## DES-OPENSHELL-VENUE
+
+- **Status**: decided 2026-10-18, issue #680; built in #683 (the backend), #684 (the policy layer: egress,
+  credentials and MCP) and #686 (stdio steering and transcripts, and bind mode). **Nothing of it ships today**: there is
+  no table entry, no adapter and no doctor line, and every word below is a plan this entry fixes so the three issues
+  build one venue rather than three. The venue code they build on is generic since issue #681 (`listJobContainers` and
+  `containerGone` are required bundle members, and no venue other than `local` and `podman` is treated as docker).
+- **Decision**: a third backend, `openshell`, runs a job in an NVIDIA OpenShell sandbox (v0.1.4, Apache-2.0,
+  https://github.com/NVIDIA/OpenShell) on a gateway this deployment owns.
+  - **What OpenShell is, as far as this design rests on it.** A gateway control plane, and a compute driver that
+    creates, per sandbox, an agent container with networking OFF and a supervisor container beside it, the two
+    joined by an authenticated Unix socket. The agent's processes run under Landlock and seccomp; every connection
+    is decided by an OPA policy, per binary; the supervisor terminates TLS under a per-sandbox CA; and a provider's
+    credentials enter the agent only as placeholders the supervisor swaps for the real values at the endpoints the
+    provider's profile names. The CLI covers the lifecycle: `sandbox create`, `upload`, `exec`, `download`, `delete`
+    and `list -o json`, with `--cpu`, `--memory` and `--label` on create. `exec` returns the command's own exit code,
+    and a signal as 128+n.
+  - **Driven by the CLI with `-o json`, from the host**, on `DES-WORKER-ON-HOST`'s reasoning: the worker shells out
+    to the real client, which owns its config and its endpoint resolution, instead of reimplementing either. Every
+    read the adapter makes is a JSON document, never prose, so a failure is classified on values
+    (`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE`).
+  - **The Docker and Podman compute drivers only, in v1**: the engines this deployment already runs and reads, on a
+    host it owns (`CONST-VENUE-EGRESS-LAYER`'s third condition). Any other driver is refused by name.
+  - **One sandbox per job, made and removed by the worker**: create (labelled with the job's container name, sized
+    from the job's size through `--cpu` and `--memory`), upload, exec, download, delete. `ephemeral` therefore rests on
+    the worker's create and delete and on the runtime honouring them, and the required `listJobContainers` and
+    `containerGone` read `list -o json` by label.
+  - **Copy mode by default.** The job's inputs are uploaded before the exec and its outputs downloaded after it, at
+    paths under the image's WORKDIR, where OpenShell's filesystem policy places the sandbox's writable tree. This is
+    the transfer downgrade `DES-CONTAINER-BACKEND-REGISTRY` already models (`transfersFromSpec` with `binds: false`,
+    `copyDowngrades`): `/job` read-only is no longer a bind with `:ro` but a read-only path in OpenShell's Landlock
+    policy, a kernel control the worker does not build, so `readOnlyJobInputs` is `asserted`; and the nesting trap that
+    entry names (a forge job's `jobDir` containing `workspace/` and `session/`) is the adapter's to upload as one
+    tree. **Bind mode is opt-in per host (#686)**, below under Rejected for why it is not the default.
+  - **Credentials through per-job providers**, under `CONST-VENUE-EGRESS-LAYER`: the worker creates a provider per
+    job for its provider key and its minted forge token, the agent's environment holds placeholders, and the provider
+    is deleted with the sandbox. The table entry declares `credentialCustody: layer` (the planned word, #683), and
+    its property words are the list `DES-CONTAINER-BACKEND-REGISTRY`'s #680 amendment gives for a `layer` venue.
+    `CONST-TOKEN-SCOPED-PER-JOB` is not relaxed by any of it: the token is as short and as narrow as on every venue.
+  - **The policy is a document the worker generates per job** (#684), from the same allowlist, `model-endpoints` and
+    forge hosts the squid venues read, handed to the sandbox and READ BACK before the exec. The job's MCP servers add
+    no source: with the egress policy on, `makeMcpCheck` (`worker/src/mcp-preflight.mjs`) already refuses before spend
+    a server whose host the allowlist and `model-endpoints` would not let the job reach (`mcp-egress-unreachable`,
+    `mcp-package-runner`), so an MCP host is a subset of those sources and `CONST-VENUE-EGRESS-LAYER`'s second
+    condition holds as written; #684 keeps that refusal on this venue. A read-back that differs, or a gateway-wide global policy that would replace it, refuses the job before spend
+    (`CONST-BUDGET-BEFORE-TOKENS`), returned as a policy result and never retried (`CONST-RETRY-INFRA-ONLY`).
+  - **No freeze, so `pausable` is `absent`.** OpenShell has no pause verb, so the venue checkpoints as every venue
+    that cannot freeze does (`DES-RUN-CHECKPOINT-PAIRED`): live checkpoints off, an exit checkpoint only on an exit
+    the processor may recover from (an infrastructure exit of an armed run), read from the tree the download brought
+    back, and no recovery from a worker crash mid-run there.
+  - **No sandbox launcher.** `SANDBOX_LAUNCHERS` gets no `openshell` row, so `pi-dispatch sandbox` on such a job is
+    refused by name (`INT-SANDBOX-CONTRACT`, `sandboxVenueRefusal`), never reopened on docker.
+  - **No local-folder or cron-folder jobs in copy mode.** `localFolders` means a folder edited in place; a copy is
+    edited elsewhere and written back afterwards, which races every edit the operator makes meanwhile and turns a
+    failed download into a lost run. So the copy venue declares `localFolders` `absent`, and a job aimed at a local
+    folder (a cron folder's included) routed there is refused before spend. What bind mode admits is #686's to decide.
+  - **Steering and the live transcript over stdio** (#686). With no bind there is no `/inbox` mount and no
+    `/session` file on the host to tail, so the steer channel is the framed, MAC'd stdin that
+    `DES-STEER-VIA-READONLY-INBOX-MOUNT` decides (amended by issue #680, weaker than the mount and said so), and the
+    transcript the tail and the ack consumer read comes back on the exec's stdout. The transcript was always the
+    agent's to write (`/session` is agent-writable), so carrying it on stdout hands the agent nothing new; the acks
+    and the exit line keep their MACs under the attempt's exit key.
+  - **The exit key passes through the vendor's exec relay.** On this venue the main exec's stdin, and so the exit key
+    of EVERY attempt, steered or not, travels the CLI, then the gateway, then OpenShell's supervisor container before
+    it reaches the in-image supervisor (`image/runner/supervise.mjs`). #545's property (no tool of the job sees the
+    key) still holds inside the agent container, but on `openshell` it now also rests on that relay, a vendor trust
+    step the worker cannot inspect; it is the same supervisor that already holds the job's credentials, and it is
+    named in `OQ-047`.
+  - **The exit code.** `exec` returning the runner's own code, and 128+n for a signal (the runner's own SIGTERM code
+    is 143 already), is what `exitCodes` asks. The never-started set is the adapter's to declare, by the registry's
+    rule: OpenShell's CLI failures are not docker's 125, 126 and 127, and #683 measures which exits mean the sandbox
+    never ran. `abortable` is a `sandbox delete` on the timeout or a shutdown, told apart from a crash by the
+    worker's own abort flag, as on every venue.
+  - **Doctor and the refusals (#683, #684)**. Doctor checks the CLI's and the gateway's versions against a tested
+    floor; the compute driver (Docker or Podman); that the gateway endpoint is loopback or a Unix socket on this host
+    (OpenShell's local gateway listens on `https://127.0.0.1:17670` by default), which is how
+    `CONST-VENUE-EGRESS-LAYER`'s third condition is checked rather than assumed; Landlock ABI 3 or later on the
+    gateway's host (Linux 6.2); and that no gateway-wide global policy is active. The split: the **version floor** is
+    checked by doctor and at boot; **Landlock, the global policy and the gateway's locality** are also free per-job
+    refusals before spend (`outcome: "policy"`, before the token mint), because a doctor line read once is not a gate
+    (`CONST-VENUE-EGRESS-LAYER`'s third and fourth conditions). Bind mode additionally needs the gateway's engine on
+    the worker's own host (#686).
+- **Why**: the custody. On `local` and `podman` the provider key and the forge token sit in the job's environment,
+  where the agent reads them, and in the host's argv (`OQ-028`); on this venue they never enter the agent's
+  container, the provider is to be created with no value on any command line (#684, so `OQ-028` is not reproduced on
+  the CLI's argv), egress is decided per binary rather than per hostname, and the box itself is confined by Landlock
+  and seccomp on top of the container. The price is paid in this vocabulary's own words: the walls and the policy are the vendor's, so the words
+  `DES-CONTAINER-BACKEND-REGISTRY`'s #680 amendment lists are `asserted` where `local` says `enforced`, and `PI_BACKEND_FLOOR` lets an operator
+  refuse that trade at boot (`egress=enforced` refuses `openshell`). That is why it is a third venue beside the
+  enforced two, never their replacement: `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` is UNCHANGED for them.
+- **Rejected**:
+  - *The TypeScript SDK.* It is published to GitHub Packages, which needs a login token to install, so every
+    `npm install` of the worker would need a credential, and the vendor would enter the worker's import graph. The
+    CLI is one binary the operator installs and doctor reads.
+  - *The MicroVM driver, in v1.* Not on Gondolin's objection (`CONST-ISOLATION-CONTAINER-PER-JOB`): that driver runs
+    the whole agent in the VM, not only pi's built-in tools. It is deferred because a VM in place of a container is
+    an isolation decision of its own, which `CONST-ISOLATION-CONTAINER-PER-JOB` would have to make before any word
+    in the table could be declared for it.
+  - *Wrapping OpenShell as a policy layer around our own `docker run`.* The compute driver creates the agent
+    container itself and joins it to the supervisor; there is no mode in which it adopts a container built from this
+    worker's argv, so the "wrapped" form would be a supervisor beside a container it did not make, a configuration
+    nobody states guarantees for. OpenShell owns the container, so it is a venue.
+  - *Bind mode as the default.* A bind bypasses OpenShell's filesystem policy for every bound path, so the Landlock
+    read-only `/job` the copy gets is gone, and it needs the gateway on the worker's own host to resolve the paths at
+    all. It is admitted opt-in per host for what a copy cannot do (in-place folders, the mount steer channel), #686.
+- **Residuals, named** (`OQ-047`): a compromised supervisor holds every credential the job would have held, and
+  provider and forge plaintext exist in a vendor process; OPA's per-binary rules pin binaries by path, which can
+  drift silently with the image; OpenShell is v0.1.x and marks interfaces experimental, so a patch release can change
+  what the CLI's JSON says, which the version floor and the JSON reads catch only as far as a shape check can;
+  Landlock needs Linux 6.2; the exit key of every attempt passes through OpenShell's exec relay (CLI, gateway,
+  supervisor container), a vendor trust step #545's property rests on here; and the stdin steer channel caps at
+  4 MiB per attempt and lets the agent withdraw or delay a message.
+- **Traces to**: `CONST-VENUE-EGRESS-LAYER`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-EGRESS-POLICY-IN-THE-ARGV`,
+  `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
+  `DES-CONTAINER-BACKEND-REGISTRY`, `DES-WORKER-ON-HOST`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`,
+  `DES-STEER-VIA-READONLY-INBOX-MOUNT`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`, `DES-RUN-CHECKPOINT-PAIRED`,
+  `INT-SANDBOX-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-EGRESS-POLICY-CONTRACT`, `OQ-011`, `OQ-012`,
+  `OQ-028`, `OQ-047`
+- **Code evidence**: none yet; the code lands in #683, #684 and #686.
+
 ## DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR
 
 - **Decision** (issue #596, phase 0): each run records what its container used, and a job killed for memory is
@@ -12089,3 +12301,4 @@ a tunnel.
 | 2026-10-18 | Issue #670: a steer sent after a follow-up waited until the agent stopped. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: the runner keeps two FIFOs, steers and follow-ups, each in file order, and mid-run hands over only steers; the closing moment pushes a waiting steer first, else the oldest follow-up (drained on the `continue()` the boundary triggers, the late follow-up's existing path) and closes only with both empty; NEW bullet "Follow-ups wait in the runner, not in pi" (why: a follow-up pushed mid-run held the one in-flight slot until the agent stopped and blocked every later steer; why one in flight stays; the re-check of an entry's file before each push, logged as `steer_withdrawn_held`; rejected: two slots, pi's queue modes, follow-ups as steers); the withdraw residual narrows to a message already handed to pi. Review round 1: at the boundary a held follow-up is handed to pi as a steer (`deliverAs: "steer"`, `details.mode` still `followUp`), because after a run a terminating tool ended, `Agent.continue()` takes `runContinuation`, which polls only steering at its start, and a follow-up queued there re-asked the model with nothing new and blocked every steer; the rejected "follow-ups as steers" is now said to be about mid-run delivery; the closing case names the parked and all-withdrawn boundaries. Review round 2: the residuals of a third-party steer queued at the same boundary and of an unreadable mount read as a withdrawal are named, and the SIGTERM line's close is guarded so a throw cannot lose the exit line. **`DES-STEER-HELD-WHILE-PARKED` AMENDED**, the residual narrowed: before, a follow-up handed to pi in any earlier turn could still un-park a run; now only a steer pushed during the parking turn can (one at most), since a follow-up reaches pi only at the settle boundary, where a parked run gets nothing. **Code evidence**: image/runner/src/inbox.mjs -> createInbox (scan, pump, stillWaiting, pruneWithdrawn, close); image/runner/test/pinned-api.test.mjs -> the issue #670 pin. |
 | 2026-10-18 | Issue #673: model settings were not shape-checked, so a run could carry a model id the console refuses. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` AMENDED**: the Decision's `model`/`provider` are a model id and a provider id in the trigger's shape (non-empty strings before), and a new Why bullet, "One id shape for every source of a job's model": the shared rule (`modelIdProblem`, `providerIdProblem` in model-ref.mjs, used by `validateModelRef`, `loadConfig`, `validateOverlay` and `pi-dispatch run`), why it sits in `validateOverlay` (one place for every admin surface and a hand-edited file), why the check lowercases and the value does not (pi resolves ids exactly; 89 catalog ids are uppercase; ASCII is checked first because lowercasing is not closed over ASCII), the bolt to the console's `RUN_MODEL_RE`, and the rejected alternative of checking at the run-record writer. **`DES-OPERATOR-CONSOLE` UNCHANGED, checked** (`RUN_MODEL_RE` itself is unchanged). **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` UNCHANGED, checked**. **Code evidence**: worker/src/model-ref.mjs -> modelIdProblem; worker/src/runtime-settings.mjs -> validateOverlay; admin/test/run-model-bolt.test.mjs. Review round 1, folded in before merge: the Why bullet adds that the admin's planners ask the same rule before the confirm (the dollar keys' rule), and that the run record's `provider` is bolted like its `model` (`RUN_PROVIDER_RE`, moved beside `RUN_MODEL_RE` in admin/src/run-filter.mjs, its pattern unchanged). **Code evidence**: admin/src/write-plans.mjs -> idSettingProblem; admin/src/run-filter.mjs -> RUN_PROVIDER_RE; admin/test/run-model-bolt.test.mjs. |
 | 2026-10-18 | Issue #681: the host budget asked every venue but `podman` through docker, and seeded only `local` and `podman` at boot. **`DES-HOST-BUDGET` AMENDED**: the orphan bullet's gone-check is asked of the venue that holds the container, through the registry's `containerGone(name, venue)`, and a venue no bundle answers for is `null`, which keeps the hold; "Seeded at boot" lists every BLESSED registered venue through its own bundle's `listJobContainers` instead of `local` and `podman` by name, keeps the boot job-user tolerance for those two, and adds that any other venue's only holds-none answer is `ENOENT` (every other failure leaves it unread); the states (Docker's `exited`, `dead`, Podman's `stopped`, `created`, `configured`) are kept as examples, and the defect is recorded (a third venue's orphan freed while it ran, or never freed without docker; its leftovers never counted). **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: a new bullet makes `listJobContainers` and `containerGone` REQUIRED bundle members (`REQUIRED_FUNCTIONS`, checked at boot) with their return shapes, why they are required rather than defaulted (the default guessed the runtime from the name, which was the bug), that this changes the published adapter contract and refuses an older adapter loudly, and the registry's `containerGone` and `listers`. `SANDBOX_LAUNCHERS` stays a table, UNCHANGED, checked. Two more places stop treating an unnamed venue as docker: `reservePlan` (cpu-reserve.mjs) gives a venue other than `local` and `podman` `venue-unmanaged` (no quota kept, no runtime command) instead of docker's rules, and `runLiveProbes` requires its venue's `buildArgs` and `bin` instead of defaulting to docker's. `venuesOf` (backends.mjs) is UNCHANGED, checked: it sends nothing to docker and answers only the docker- and podman-specific setup questions of doctor, up, init, service and egress-cli, which a third venue answers with its own checks (issue #683). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked** (its size labels and boot seed wording hold). **Code evidence**: worker/src/backend-registry.mjs -> REQUIRED_FUNCTIONS, makeBackendRegistry (containerGone, listers); worker/src/backend-local.mjs -> makeLocalBackend, BACKEND_OPTIONAL_FUNCTIONS; worker/src/backend-podman.mjs -> makePodmanBackend, PODMAN_BACKEND_OPTIONS; worker/src/start.mjs -> the host budget's containerGone and survivors; worker/src/cpu-reserve.mjs -> reservePlan; worker/src/live-probes.mjs -> runLiveProbes; worker/test/start-wiring.test.mjs, worker/test/backend-registry.test.mjs, worker/test/cpu-reserve.test.mjs, worker/test/live-probes.test.mjs. |
+| 2026-10-18 | Issue #680: admit a venue's own egress layer that terminates TLS and holds the job's credentials, and decide the stdin steer channel for copying venues; spec only, nothing ships. **NEW `DES-OPENSHELL-VENUE`**: NVIDIA OpenShell (v0.1.4, Apache-2.0) as the third backend `openshell`, driven by its CLI with `-o json` from the host (`DES-WORKER-ON-HOST`); the Docker and Podman compute drivers only in v1; one sandbox per job (create, upload, exec, download, delete, read back by `list -o json` and a label); copy mode by default with paths under the image's WORKDIR (`readOnlyJobInputs` `asserted`, a Landlock path rather than a bind), bind mode opt-in per host (#686); per-job providers holding the provider key and the forge token with placeholders in the agent (`credentialCustody: layer`, under `CONST-VENUE-EGRESS-LAYER`); the policy a document generated per job and read back (#684), a differing read-back or a gateway-wide global policy refused before spend, and the job's MCP servers no extra source (with the egress policy on `makeMcpCheck` already refuses before spend an MCP host the allowlist and `model-endpoints` do not reach, so MCP hosts are a subset and `CONST-VENUE-EGRESS-LAYER`'s second condition holds); `pausable` `absent` (live checkpoints off, an exit checkpoint only on a recoverable infrastructure exit of an armed run, as `DES-RUN-CHECKPOINT-PAIRED` says); no sandbox launcher (`INT-SANDBOX-CONTRACT` refuses it by name); no local-folder or cron-folder jobs in copy mode (`localFolders` `absent`); steering and the live transcript over stdio (#686); the exit key of every attempt, steered or not, passing through OpenShell's exec relay (CLI, gateway, supervisor container), a vendor trust step #545's property rests on there; the exit code from `exec` (a signal as 128+n) and the adapter's own never-started set; doctor's version floor, driver, gateway-locality (the endpoint loopback or a Unix socket on this host; OpenShell's local gateway listens on `https://127.0.0.1:17670` by default), Landlock ABI 3 and no-global-policy checks, split as: the version floor at doctor and boot, Landlock, the global policy and the gateway's locality also per job before spend (#683, #684); its property words pointed at `DES-CONTAINER-BACKEND-REGISTRY`'s #680 list rather than restated. Rejected: the TypeScript SDK (GitHub Packages needs a login token), the MicroVM driver in v1 (not Gondolin's objection, it runs the whole agent in the VM, but its own `CONST-ISOLATION-CONTAINER-PER-JOB` decision), wrapping OpenShell around our own `docker run` (it owns the container), bind mode as the default (it bypasses OpenShell's filesystem policy and needs the gateway on the worker's host); residuals pointed at `OQ-047`. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: Status names the decision; Arming gains the copying venue's parts (an exit key, an image declaring the planned `steerStdin`, the stdout transcript, a relay); NEW sub-bullet "On a copying venue: framed, MAC'd stdin": length-prefixed JSON frames on the main exec's stdin, at most 4 MiB per attempt (OpenShell's exec stdin buffer), frame 1 the exit key drained before any tool exists (issue #545's property kept), every later frame a steer message MAC'd under the attempt's exit key over the job's `PI_JOB_ID` (the container name, as the ack's MAC uses), the sequence number and the exact bytes of the message's file form (id, mode, source, content), a repeated id or a non-increasing sequence dropped, and a key-shaped frame after frame 1 a `shape` break that ends the stream for the attempt, never a re-key; the threat as assumed (the agent shares the runner's uid and can open the pipe through `/proc` for read and write on Linux, the exec-only node's refusal of `/proc/<runner>/fd/0` to the runner and the in-image supervisor not relied on, since another holder of the pipe need not be refused), so a planted frame has no valid MAC and is dropped, a consumed frame is a withdrawal reported undelivered as today (`settleInbox`), a frame written back later a delay, a broken framing ends the channel for the attempt; stated as weaker than the read-only mount, which is why bind venues keep the mount; no TTY, tool children on `/dev/null` (`verify-image.sh`, #686). The Rejected stdin bullet keeps its text and gains "admitted since issue #680 in one framed, MAC'd form, on copying venues only"; the copying-venue bullet keeps its text and is armed through stdin frames when the image declares `steerStdin`, else `steerSkipped: "venue-copies"` as today. Traces to gains `DES-OPENSHELL-VENUE`, `CONST-VENUE-EGRESS-LAYER`. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` AMENDED**: the stdin bullet keeps its text and gains the second admitted form, framed and MAC'd stdin on copying venues, answered on the same four counts, with the third ("one way, read only") NOT met in full: the agent can withdraw a frame, never plant one; Traces to gains `DES-OPENSHELL-VENUE`. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**: the TLS-terminating, secrets-injecting proxy bullet keeps its text and gains "SUPERSEDED for a venue that declares its own egress layer (issue #680)", pointing at `CONST-VENUE-EGRESS-LAYER` and `DES-OPENSHELL-VENUE`; its stale `OQ-004:89-92` reference is corrected to `OQ-004`'s corroboration bullet (`open-questions.md:168-171` at this revision); the Decision is UNCHANGED, checked, for `local` and `podman` (squid stays hostname-only and never terminates TLS); Traces to gains both IDs. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the closed property list gains the planned `credentialCustody` (`container` \| `layer`, the table change in #683; a closed choice of who holds the credentials, not a word on the three-word scale; omitted reads as `container`; not compared by `PI_BACKEND_FLOOR`, so an operator who refuses layer venues does not bless one; `layer` refused unless `CONST-VENUE-EGRESS-LAYER`'s conditions are met), and the one list of a `layer` venue's words that the constitution, `DES-OPENSHELL-VENUE` and `OQ-012` point to: `isolation`, `jobToJobIsolation`, `mountSet`, `readOnlyJobInputs`, `egress` and `secretsCustody` `asserted`, `credentialTransit` decided by observation in #683, `pausable` `absent` and `localFolders` `absent` in copy mode, the rest #683's to measure; the fourteen properties and the conformance counts are UNCHANGED until #683. **UNCHANGED, checked**: `DES-WORKER-ON-HOST` (the CLI-on-the-host reasoning is reused, not changed), `DES-RUN-CHECKPOINT-PAIRED` (a venue without pause already gets no live checkpoints and an exit checkpoint only on a recoverable infrastructure exit), `DES-STEER-HELD-WHILE-PARKED`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`, `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`, `DES-HOST-BUDGET`. The lines that say the agent holds the provider key describe shipped behaviour and change in #684 when a layer venue ships. **Code evidence**: none; the code lands in #683, #684 and #686. |
