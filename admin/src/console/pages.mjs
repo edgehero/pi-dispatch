@@ -53,6 +53,7 @@ import {
   overviewState,
   parkedInbox,
   runChain,
+  runChat,
   runCostPanel,
   runInbox,
   runProgress,
@@ -63,6 +64,7 @@ import {
   runsTable,
   RUN_ID_RE,
 } from "./panels.mjs";
+import { chatFactsOf, parkedAnswerCheckOf } from "./run-api.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
 
@@ -92,7 +94,7 @@ export const PAGES = Object.freeze({
 const PAGE_PANELS = Object.freeze({
   overview: [["p-state", overviewState], ["p-spend", overviewSpend], ["p-hosts", overviewHosts], ["p-parked", overviewParked], ["p-failures", overviewFailures], ["p-active", overviewActive]],
   runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
-  run: [["p-progress", runProgress], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
+  run: [["p-progress", runProgress], ["p-chat", runChat], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
   parked: [["p-parked", parkedInbox]],
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
@@ -242,7 +244,7 @@ export function pageQueryString(name, query) {
 const PAGE_READS = Object.freeze({
   overview: ["snapshot"],
   runs: ["runsPage", "subscriptions"],
-  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox"],
+  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat"],
   parked: ["snapshot"],
   insights: ["insights"],
   fleet: ["snapshot"],
@@ -391,6 +393,22 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.inbox = await deps.fleet.inbox(q.id);
     } catch {
       data.inbox = { unreachable: true };
+    }
+  }
+  if (reads.includes("chat")) {
+    // Issue #647: the chat this run can have (`chatFactsOf`: the job's queue state, its active recovery, and for a parked
+    // record whether a later run took the answer), for the Chat panel. Null without a job-state reader. The newer-run
+    // search is a runs-page read, so the live loop pays it only for a parked record, whose mode depends on it.
+    try {
+      data.chat = await chatFactsOf(deps.fleet, q.id, data.run?.record ?? null, { searchNewer: "parked", now: () => now });
+    } catch {
+      data.chat = { unreachable: true };
+    }
+    // A reply the Chat panel offers is one the planner would plan (issue #647): the planner's own predicate over the
+    // parked run's retained job and the triggers file (`parkedAnswerCheck`, a sentence or ok, never the job's data),
+    // reused for PARK_CHECK_CACHE_MS per run id (`parkedAnswerCheckOf`), so the 2 s loop does not read it every tick.
+    if (data.chat?.mode === "reply" && typeof deps.fleet?.parkedAnswerCheck === "function") {
+      data.chatAnswer = await parkedAnswerCheckOf(deps.fleet, q.id, data.run?.record ?? null, { now: () => now });
     }
   }
   if (reads.includes("insights")) {

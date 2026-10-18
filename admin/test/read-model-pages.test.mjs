@@ -638,6 +638,41 @@ test("createFleetReader: an unreachable run mirror makes the parked list unknown
   assert.equal(up.parkedUnreachable, null);
 });
 
+test("createFleetReader: a park whose answer is queued or running is marked answering (the shared scan), listed at most once per 15 s; an unlistable queue is unknown (issue #647)", async () => {
+  const logsDir = tempDir("pd-647-answering-");
+  writeLocal(logsDir, rec("gh-p", AT - MIN, { target: "acme/web#2", reason: "awaiting-input" }));
+  writeLocal(logsDir, rec("gh-r", AT - 2 * MIN, { target: "acme/web#3", reason: "awaiting-input" }));
+  const listed = [];
+  const listing = (_c, opts) => ({
+    ...quietQueue()(_c, opts),
+    async getJobs([state]) {
+      listed.push(state);
+      return state === "waiting" ? [{ id: "gh-ans", data: { kind: "github", repo: "Acme/Web", target: { type: "issue", number: 2 }, title: "SECRET TITLE" } }] : [];
+    },
+  });
+  let t = AT;
+  const reader = fleetOf(logsDir, emptyRedis(), { seams: { makeQueueFn: listing, nowFn: () => t } });
+  const snap = await reader.snapshot();
+  assert.deepEqual(snap.parked.map((p) => [p.jobId, p.answering]), [["gh-p", "gh-ans"], ["gh-r", false]]);
+  // Review round 2: each row carries the scan's own answer, the input of the verdict the inbox shares with the Chat panel.
+  assert.deepEqual(snap.parked.map((p) => p.pendingScan), [{ jobId: "gh-ans" }, { jobId: null }]);
+  assert.ok(!JSON.stringify(snap).includes("SECRET"), "no Job .data in the snapshot");
+  const once = listed.length;
+  await reader.snapshot();
+  assert.equal(listed.length, once, "the same parks within 15 s: no second listing");
+  t += 15_000;
+  await reader.snapshot();
+  assert.equal(listed.length, 2 * once, "listed again once the window passed");
+  const blind = await fleetOf(logsDir, emptyRedis()).snapshot();
+  assert.deepEqual(blind.parked.map((p) => p.answering), [null, null], "a queue that cannot list: unknown, never false");
+  assert.deepEqual(blind.parked.map((p) => p.pendingScan), [{ unknown: true, tooMany: false }, { unknown: true, tooMany: false }]);
+  const none = tempDir("pd-647-answering-none-");
+  writeLocal(none, rec("gh-x", AT - MIN, { target: "acme/web#9" }));
+  const quiet = [];
+  await fleetOf(none, emptyRedis(), { seams: { makeQueueFn: (_c, o) => ({ ...listing(_c, o), async getJobs() { quiet.push(1); return []; } }) } }).snapshot();
+  assert.equal(quiet.length, 0, "nothing parked: the queues are not listed");
+});
+
 test("createFleetReader: the day's failures skip a run dated in the future, and are a floor when the wide window ends inside the day", async () => {
   // 999 runs a minute apart (ten of them failed) and one failed run ten minutes AHEAD of the clock: a full window of
   // 1000 whose oldest run is under 17 hours old, so more failures may lie beyond it.

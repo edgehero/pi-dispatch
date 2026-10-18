@@ -57,6 +57,8 @@ import { renderWhatIf } from "../render.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { checkpointsText, forgeLinkOf, isProgressSnapshot, progressStaleFor, recordRecovery, recoveredText, secretProfileNames } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
+import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
+import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { html, trustedRenderer } from "./html.mjs";
 
 const SEC = 1000;
@@ -323,8 +325,11 @@ export const overviewSpend = fromSnapshot("Spend against caps", (s) => spendBody
 
 export const overviewParked = fromSnapshot("Parked, waiting for a person", (s) => {
   if (s.parkedUnreachable) return html`<p class="warn">The parked runs could not be read (${s.parkedUnreachable}), so how many wait is unknown.</p>`;
-  const n = Array.isArray(s.parked) ? s.parked.length : 0;
-  return html`<p><span class="big">${count(n)}</span> ${n === 1 ? "run is" : "runs are"} waiting for an answer. <a href="/parked">Open the parked inbox</a></p>`;
+  // Issue #647: a park whose answer is queued or running (`answering`, a job id) no longer waits for a person.
+  const rows = Array.isArray(s.parked) ? s.parked : [];
+  const answering = rows.filter((p) => typeof p?.answering === "string").length;
+  const n = rows.length - answering;
+  return html`<p><span class="big">${count(n)}</span> ${n === 1 ? "run is" : "runs are"} waiting for an answer${answering > 0 ? `, and ${count(answering)} ${answering === 1 ? "is" : "are"} being answered now` : ""}. <a href="/parked">Open the parked inbox</a></p>`;
 });
 
 export const overviewFailures = fromSnapshot("Failures in the last 24 hours", (s) => {
@@ -627,13 +632,113 @@ export function runInbox(view) {
           entries.map((e) => html`<tr><td class="mono">${cell(e.id)}</td><td>${cell(MODE_WORD[e.mode])}</td><td>${cell(e.source)}</td><td>${cell(e.state)}</td><td>${Number.isSafeInteger(e.at) ? utcText(e.at) : "-"}</td><td class="num">${count(e.bytes)}</td>${withdraw(e)}</tr>`),
           "No message has been sent to this run.",
         );
-  const text = (label) => area("text", label, { rows: 3, required: true, max: 8192 });
-  const forms =
-    act && takes
-      ? html`<h3>Send a message</h3>${actForm("steer", { hidden: [["jobId", jobId], ["mode", "steer"]], fields: text("Steer: read after the agent's current tool calls"), label: "Preview the steer" })}${actForm("steer", { hidden: [["jobId", jobId], ["mode", "followUp"]], fields: text("Follow-up: read once the agent would otherwise stop"), label: "Preview the follow-up" })}`
-      : null;
+  // Issue #647: when the Chat panel draws the message forms (a live run an operator can steer), they are drawn THERE and
+  // not here, so the page holds one steer form per mode, never two copies of the same action.
+  const forms = act && takes && !chatDrawsSteer(view) ? steerForms(jobId) : null;
   const cont = next !== null ? html`<p class="note">This job is ${cell(box.state)}; its run continues as ${runLink(next)}, and a message sent here goes to that job.</p>` : null;
   return titled(title, html`${cont}<p class="note">${status}</p>${list}${forms}<p class="note">A message's text is never listed: the run reads it, and the audit log keeps its sha256.</p>`);
+}
+
+// ---- run chat (issue #647) -------------------------------------------------------------------------------------------
+
+/** What each run state is called in the Chat panel's status line (`RUN_STATES`, chat-mode.mjs). */
+const CHAT_STATE_WORD = Object.freeze({ active: "running", queued: "queued", parked: "parked, waiting for an answer", answered: "answered by a later run", finished: "finished", unknown: "unknown" });
+
+/** The Chat panel's line for a run that cannot chat because another job holds it: a link to that job, or null. */
+function chatHeldBy(chat) {
+  if (typeof chat.answeringJobId === "string" && RUN_ID_RE.test(chat.answeringJobId)) return html`<p class="note">The run taking the answer is ${runLink(chat.answeringJobId)}.</p>`;
+  if (typeof chat.queuedJobId === "string" && RUN_ID_RE.test(chat.queuedJobId)) return html`<p class="note">The queued recovery job is ${runLink(chat.queuedJobId)}.</p>`;
+  return null;
+}
+
+/**
+ * The run page's "Chat" panel (issue #647, REQ-TERMINAL-CHAT): the chat this run can have now (`data.chat`, from
+ * `chatModeOf` through `run-api.mjs`'s `chatFactsOf`, the rule `/api/run` and `pi-dispatch chat` share), composed of what
+ * the console already has, never a second copy of an action:
+ *
+ *   - live: the live transcript section below (issue #643, an operator's) and the steer and follow-up forms, which move
+ *     here from the Inbox panel while this panel shows them (`chatDrawsSteer`);
+ *   - reply: the parked answer form, the very one the parked inbox draws (`parkedAnswerForm`);
+ *   - fork: the exact `pi-dispatch chat <id>` command to fork the run's session on a host that holds the session store
+ *     (shown to copy, never run, like the sandbox command), or why its session cannot be found from the record.
+ *
+ * A VIEWER SEES STATUS ONLY (REQ-CONSOLE-SECURITY clause l): the state, the mode and a refusal's sentence, never a form
+ * or a command; a read-only console draws no form for anyone. Nothing here is free text: the state words are this
+ * module's, `says` is one of `chatModeOf`'s fixed sentences, and the id is charset-checked. A page whose fleet has no
+ * job-state reader draws nothing (the empty section is hidden), so an older reader's page reads as it did.
+ */
+export function runChat(view) {
+  const chat = view.data?.chat ?? null;
+  if (chat === null || typeof chat !== "object") return html``;
+  const title = "Chat";
+  if (chat.unreachable) return titled(title, html`<p class="warn">The queue could not be read (is Valkey reachable?), so whether this run can chat is unknown. The next refresh tries again.</p>`);
+  const jobId = typeof view.query?.id === "string" && RUN_ID_RE.test(view.query.id) ? view.query.id : null;
+  const answering = chat.state === "answered" && typeof chat.answeringJobId === "string";
+  const status = html`<p>This run is ${answering ? "being answered" : Object.hasOwn(CHAT_STATE_WORD, chat.state) ? CHAT_STATE_WORD[chat.state] : "unknown"}.</p>`;
+  if (chat.mode !== "live" && chat.mode !== "reply" && chat.mode !== "fork") return titled(title, html`${status}<p class="note">${typeof chat.says === "string" ? chat.says : "This run has no chat."}</p>${chatHeldBy(chat)}`);
+  if (view.role !== "operator" || jobId === null) return titled(title, html`${status}<p class="note">Chat is for operators; a viewer sees the run's status only.</p>`);
+  const terminal = (id) => html`<p>From a terminal: <code class="mono">${`pi-dispatch chat ${id}`}</code></p>`;
+  const readOnly = view.readOnly ? html`<p class="note">This console is read-only, so it sends nothing.</p>` : null;
+  if (chat.mode === "live") {
+    const active = typeof chat.activeJobId === "string" && RUN_ID_RE.test(chat.activeJobId) ? chat.activeJobId : jobId;
+    const via = active !== jobId ? html`<p class="note">The run goes on as ${runLink(active)}; its transcript is on that job's page, and a message sent here reaches it.</p>` : html`<p class="note">Its live transcript is <a href="#transcript">below</a>.</p>`;
+    const box = view.data?.inbox ?? null;
+    // An inbox that could not be read says so: "not steer-armed" about a run whose inbox was never read would be a guess.
+    const boxRead = box !== null && typeof box === "object" && !box.unreachable && !box.invalid;
+    const armed = boxRead && box.found === true && box.steer === true;
+    const send = chatDrawsSteer(view)
+      ? steerForms(jobId)
+      : canAct(view)
+        ? !boxRead
+          ? html`<p class="warn">The run's inbox could not be read (is Valkey reachable?), so whether it takes a message is unknown. The next refresh tries again.</p>`
+          : html`<p class="note">${!armed ? "This run is not steer-armed (its trigger sets no run.steer), so it takes no message; watch it instead." : "The run takes no message right now; the Inbox panel says why."}</p>`
+        : null;
+    return titled(title, html`${status}${via}${send}${readOnly}${terminal(jobId)}`);
+  }
+  if (chat.mode === "reply") {
+    const link = view.data?.run?.record ? targetLink(view.data.run.record, view.env) : "-";
+    // Issue #647: the form only where the planner would plan the answer (`parkedAnswerCheck`, its own predicate): a pull
+    // request's park, a forge without a reply route or expired job data shows the planner's sentence instead. A check that
+    // could not be read keeps the form and says so (the planner checks again before anything is queued).
+    const check = view.data?.chatAnswer ?? null;
+    const refusal = typeof check?.refusal === "string" ? check.refusal : null;
+    const form = refusal === null && canAct(view) ? parkedAnswerForm(jobId) : null;
+    const why = refusal !== null ? html`<p class="note">It cannot be answered from here: ${refusal}.</p>` : check?.unreachable ? html`<p class="warn">Whether it can be answered from here could not be read; the preview checks again.</p>` : null;
+    return titled(title, html`${status}<p class="note">Its question is the last assistant entry of its transcript <a href="#transcript">below</a> (kept 24 hours), and on ${link}. An answer resumes it, as a reply there would.</p>${why}${form}${readOnly}${refusal === null ? terminal(jobId) : null}`);
+  }
+  // fork: whether the record names a session the host-local fork can find, said before the command is offered.
+  const record = view.data?.run?.record ?? null;
+  const kept = record?.session !== null && typeof record?.session === "object";
+  const why = !kept ? "This run's trigger keeps no session (no run.resume), so there is no transcript to fork." : sessionKeyOfRecord(record) === null ? "This run's session cannot be found from its record (a pull or merge request's session is keyed by its head branch, which the record does not carry), so a fork would refuse." : null;
+  if (why !== null) return titled(title, html`${status}<p class="note">${why}</p>`);
+  return titled(title, html`${status}<p class="note">Continue it in your own pi, as a fork of its session: run this on a host that holds the session store (PI_SESSIONS_DIR). The session's transcript is not redacted and goes to your pi's provider; the run's own transcript is never written.</p>${terminal(jobId)}`);
+}
+
+/**
+ * The two message forms of a steer-armed run that takes messages (issue #646): a steer and a follow-up, both the `steer`
+ * action with a `mode`. Drawn by the Inbox panel, or by the Chat panel when it shows a live run (issue #647), never by
+ * both (`chatDrawsSteer`).
+ */
+function steerForms(jobId) {
+  const text = (label) => area("text", label, { rows: 3, required: true, max: 8192 });
+  return html`<h3>Send a message</h3>${actForm("steer", { hidden: [["jobId", jobId], ["mode", "steer"]], fields: text("Steer: read after the agent's current tool calls"), label: "Preview the steer" })}${actForm("steer", { hidden: [["jobId", jobId], ["mode", "followUp"]], fields: text("Follow-up: read once the agent would otherwise stop"), label: "Preview the follow-up" })}`;
+}
+
+/**
+ * Whether the run's inbox takes a message now and this view may send one: the Inbox panel's own rule (an operator on a
+ * writable console, a steer-armed job that is active or continues as an active recovery, and an open inbox).
+ */
+function inboxTakes(view) {
+  const box = view.data?.inbox ?? null;
+  if (box === null || typeof box !== "object" || box.found !== true || box.steer !== true || box.unreachable) return false;
+  const next = typeof box.continuesAs === "string" && RUN_ID_RE.test(box.continuesAs) ? box.continuesAs : null;
+  return (box.state === "active" || next !== null) && box.open === true;
+}
+
+/** Whether the Chat panel draws the message forms (so the Inbox panel does not): a live run an operator can steer now. */
+function chatDrawsSteer(view) {
+  const jobId = view.query?.id;
+  return view.data?.chat?.mode === "live" && canAct(view) && typeof jobId === "string" && RUN_ID_RE.test(jobId) && inboxTakes(view);
 }
 
 /**
@@ -748,19 +853,41 @@ export const runChain = withRun("Chain", (r, view) => {
 
 // ---- parked ----------------------------------------------------------------------------------------------------------
 
+/**
+ * One parked run's answer form (issue #642): the `parked-answer` action, whose preview shows the answer and the reserve
+ * and whose server refuses a pull request's park, expired job data and a trigger without `resume`. The parked inbox and
+ * the run page's Chat panel (issue #647) draw this one form.
+ */
+function parkedAnswerForm(jobId) {
+  return actForm("parked-answer", { hidden: [["jobId", jobId]], fields: area("text", "Your answer, as the reply on the issue", { rows: 4, required: true, max: 8192 }), label: "Preview the answer" });
+}
+
 export const parkedInbox = fromSnapshot("Parked runs", (s, view) => {
   if (s.parkedUnreachable) return html`<p class="warn">The parked runs could not be read (${s.parkedUnreachable}); this is not an empty inbox.</p>`;
   const rows = Array.isArray(s.parked) ? s.parked : [];
   // Issue #642: one answer form per parked run, below the list. The answer is the operator's own words, posted as the
   // reply a forge comment would have been; the preview shows it and the reserve, and the audit keeps only its digest.
-  const answerable = canAct(view) ? rows.filter((p) => typeof p.jobId === "string" && RUN_ID_RE.test(p.jobId)) : [];
-  const answers = answerable.length === 0 ? null : html`<h3>Answer a parked run</h3>${answerable.map((p) => editor(html`Answer ${cell(p.target)} (${p.jobId})`, actForm("parked-answer", { hidden: [["jobId", p.jobId]], fields: area("text", "Your answer, as the reply on the issue", { rows: 4, required: true, max: 8192 }), label: "Preview the answer" })))}`;
+  // Issue #647: a form only where the Chat panel would draw one: the shared verdict over the row's pending-answer scan
+  // (`parkedVerdictOf`, chat-mode's table, review round 2). A park whose answer is queued or running gets no form and
+  // its row links that job; a scan that could not tell (unreadable, or a queue too deep to check) gets no form either,
+  // and its sentence is said once under the table.
+  const verdictOf = (p) => parkedVerdictOf(p.pendingScan);
+  const answerable = canAct(view) ? rows.filter((p) => typeof p.jobId === "string" && RUN_ID_RE.test(p.jobId) && verdictOf(p).mode === "reply") : [];
+  const answers = answerable.length === 0 ? null : html`<h3>Answer a parked run</h3>${answerable.map((p) => editor(html`Answer ${cell(p.target)} (${p.jobId})`, parkedAnswerForm(p.jobId)))}`;
+  const unknownSays = [...new Set(rows.map(verdictOf).filter((v) => v.mode === null && v.answeringJobId === null).map((v) => v.says))];
+  const unknownNote = unknownSays.length === 0 ? null : unknownSays.map((says) => html`<p class="warn">${says}</p>`);
+  const answerCell = (p) => {
+    const v = verdictOf(p);
+    if (v.answeringJobId !== null) return html`being answered by ${runLink(v.answeringJobId)}`;
+    if (v.mode === "reply") return "waiting";
+    return p.pendingScan?.tooMany === true ? "unknown (too many queued jobs to check)" : "unknown (the queue could not be fully read)";
+  };
   return html`<p class="note">A parked run asked a question and ended; a reply on its issue or merge request resumes it, and an operator can answer it from here.</p>${table(
     "Parked runs",
-    ["Target", "Forge", "Job", "Parked", "Waiting", { num: "Chain" }],
-    rows.map((p) => html`<tr><td>${targetLink(p, view.env)}</td><td>${cell(p.kind)}</td><td>${runLink(p.jobId)}</td><td>${utcText(p.parkedAt)}</td><td>${ageText(p.ageMs)}</td><td class="num">${Number.isInteger(p.chainCount) ? p.chainCount : "unknown"}</td></tr>`),
+    ["Target", "Forge", "Job", "Parked", "Waiting", { num: "Chain" }, "Answer"],
+    rows.map((p) => html`<tr><td>${targetLink(p, view.env)}</td><td>${cell(p.kind)}</td><td>${runLink(p.jobId)}</td><td>${utcText(p.parkedAt)}</td><td>${ageText(p.ageMs)}</td><td class="num">${Number.isInteger(p.chainCount) ? p.chainCount : "unknown"}</td><td>${answerCell(p)}</td></tr>`),
     "Nothing is parked.",
-  )}${answers}`;
+  )}${unknownNote}${answers}`;
 });
 
 // ---- insights --------------------------------------------------------------------------------------------------------

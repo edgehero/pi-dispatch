@@ -714,7 +714,7 @@ test("/api/state: role-aware JSON of the fleet snapshot; a viewer never gets fai
   assertSecurityHeaders(b, "/api/state");
   assert.equal(a.json().paused.state, true);
   assert.equal(a.json().counts.waiting, 5);
-  assert.deepEqual(a.json().parked, [{ target: "o/r#1", kind: "github", ageMs: 10, chainCount: null }]);
+  assert.deepEqual(a.json().parked, [{ target: "o/r#1", kind: "github", jobId: "j2", ageMs: 10, chainCount: null }]);
   assert.equal(a.json().failed.rows[0].failedReason, "free text from a job");
   assert.equal(b.json().role, "viewer");
   assert.equal(a.json().version, 1);

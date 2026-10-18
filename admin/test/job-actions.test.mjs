@@ -14,6 +14,8 @@ import {
   planFailedBulk,
   planParkedAnswer,
   planRerun,
+  PENDING_SCAN_BUDGET,
+  readPendingAnswer,
   planSteer,
   planSteerWithdraw,
   removeFailedJob,
@@ -29,7 +31,8 @@ import {
 import { createHash } from "node:crypto";
 import { closeInbox, listInboxPublic, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
-import { makeQueue, enqueueForgeJob, forgeDeliveryJobId, manualTriggerJobId } from "@edgehero/pi-dispatch/queue";
+import { makeQueue, enqueueForgeJob, enqueueLateForgeJob, forgeDeliveryJobId, manualTriggerJobId } from "@edgehero/pi-dispatch/queue";
+import { CHAT_REFUSALS } from "@edgehero/pi-dispatch/chat-mode";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { filter } from "../../receiver/src/filter.mjs";
 import { filterGitLab } from "../../receiver/src/filter-gitlab.mjs";
@@ -648,8 +651,12 @@ for (const kind of ["github", "gitlab", "forgejo"]) {
       const ok = await enqueueParkedAnswer(planned.plan, { url: URL12 });
       assert.deepEqual(ok, { ok: true, jobIds: [forgeDeliveryJobId(kind, "console-0101010101010101")], queue: "pi-jobs" });
       assert.deepEqual((await shared.getJob(ok.jobIds[0])).data.console, { by: "alice" });
+      // Issue #647: once an answer is queued, the planner refuses a second one by name (no record yet, so the later-run
+      // check cannot see it); the semantic window stays the enqueue's own backstop for a plan made before.
       const second = await planParkedAnswer({ url: URL12, logsDir, jobId, text: "again", by: "bob", triggersPath, runsFn: async () => [], now });
-      const dup = await enqueueParkedAnswer(second.plan, { url: URL12 });
+      assert.equal(second.refusal, `${jobId} is being answered: ${ok.jobIds[0]} is queued or running on ${planned.plan.job.repo}#${planned.plan.job.target.number}`);
+      const racing = { ...planned.plan, job: { ...planned.plan.job, trigger: { ...planned.plan.job.trigger, deliveryId: "console-0202020202020202" } } };
+      const dup = await enqueueParkedAnswer(racing, { url: URL12 });
       assert.equal(dup.deduplicated, true);
       assert.match(dup.refusal, /an answer to this issue is already queued or running/);
     } finally {
@@ -702,6 +709,52 @@ test("planParkedAnswer refuses by name: not parked, already answered, a pull req
     writeFileSync(triggersPath, JSON.stringify({ triggers: [] }));
     assert.match((await plan()).refusal, /has no github comment trigger/);
     assert.match((await plan({ triggersPath: null })).refusal, /triggers file is not known here/);
+  } finally {
+    await v.done();
+  }
+});
+
+test("a park behind a paused queue of 1,200 forge jobs stays answerable: the pending scan reads names and dedup ids inside the fleet read's time, finds an answer however deep, and a queue past its budget is refused with the honest sentence (review round 2)", live, async () => {
+  const v = await freshValkey();
+  const dir = tempDir("pd-647-deep-");
+  const logsDir = join(dir, "logs");
+  const triggersPath = join(dir, "triggers.json");
+  const now = () => Date.parse("2026-10-15T11:00:00Z");
+  try {
+    parkedTriggers(triggersPath, "github");
+    const shared = await v.q("pi-jobs");
+    await shared.pause();
+    const comment = "x".repeat(8000); // each job carries a large comment, which the scan never reads
+    const base = { repo: "org/repo", target: { type: "issue", ...ISSUE }, flow: "fix", resume: true, awaitInput: true, trigger: { event: "issues", action: "labeled", deliveryId: "deep-park", sender: { id: 5 }, matched: { index: 0, type: "label", label: "pi" } } };
+    const { jobId } = await enqueueForgeJob(shared, "github", base);
+    await shared.removeDeduplicationKey("org/repo#7:fix");
+    writeRecord(logsDir, { jobId, kind: "github", target: "org/repo#7", outcome: "completed", reason: "awaiting-input", endedAt: "2026-10-15T10:00:00.000Z" });
+    // 1,200 receiver jobs on other issues, the OLDEST on issue 8 (listed last, newest first), plus cron jobs.
+    const other = (i) => ({ ...base, target: { type: "issue", number: 8 + i, title: "t", body: comment }, trigger: { event: "issue_comment", action: "created", deliveryId: `deep-${i}`, sender: { id: 6 }, matched: { index: 1, type: "comment", phrase: "@pi" }, comment: { body: comment } } });
+    for (let i = 0; i < 1200; i += 100) await Promise.all(Array.from({ length: 100 }, (_, k) => enqueueForgeJob(shared, "github", other(i + k))));
+    await shared.addBulk(Array.from({ length: 100 }, (_, i) => ({ name: "local", data: { kind: "local", folder: `/srv/x${i}`, flow: "nightly" }, opts: { jobId: `local-deep-${i}` } })));
+    const counts = await shared.getJobCounts();
+    assert.equal(counts.paused + counts.waiting, 1301, JSON.stringify(counts));
+    assert.ok(1301 < PENDING_SCAN_BUDGET, "a queue this deep is inside the one budget");
+    const read = (over = {}) => readPendingAnswer({ queues: [shared], kind: "github", target: "org/repo#7", runId: jobId, ...over });
+    const t0 = performance.now();
+    const got = await read();
+    const took = performance.now() - t0;
+    assert.deepEqual(got, { jobId: null }, "every job seen, none on the park's target: a complete look");
+    assert.ok(took < 2000, `inside FLEET_READ_TIMEOUT_MS (${Math.round(took)} ms)`);
+    assert.deepEqual(await read({ dataMax: 0 }), { jobId: null }, "no job's data is parsed: forge jobs by their dedup id, cron jobs skipped by name");
+    assert.deepEqual(await readPendingAnswer({ queues: [shared], kind: "github", target: "org/repo#8", runId: null }), { jobId: forgeDeliveryJobId("github", "deep-0") }, "the oldest job, listed last, is found");
+    assert.ok((await planParkedAnswer({ url: URL12, logsDir, jobId, text: "ok", by: "alice", triggersPath, runsFn: async () => [], now })).plan, "the park is answerable");
+    // A budget below the queue's depth: the scan cannot tell, the planner refuses with chat-mode's honest sentence.
+    assert.deepEqual(await read({ budget: 1000 }), { unknown: true, tooMany: true });
+    const deep = await planParkedAnswer({ url: URL12, logsDir, jobId, text: "ok", by: "alice", triggersPath, runsFn: async () => [], now, pendingBudget: 1000 });
+    assert.equal(deep.refusal, `${CHAT_REFUSALS.parkedTooMany} Nothing was queued.`);
+    // A job with no dedup id (a late message's, a recovery's) is read through its data: the park's own recovery is not
+    // its answer, a late message's job on its target is.
+    await shared.add("github", { ...base, kind: "github", recoveryOf: jobId }, { jobId: `${jobId}.r1` });
+    assert.deepEqual(await read(), { jobId: null }, "the park's own recovery");
+    await enqueueLateForgeJob(shared, "github", { ...base, trigger: { ...base.trigger, deliveryId: "deep-late" } });
+    assert.deepEqual(await read(), { jobId: forgeDeliveryJobId("github", "deep-late") });
   } finally {
     await v.done();
   }

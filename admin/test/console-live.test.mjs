@@ -453,7 +453,7 @@ test("stateOf: the named fields only, numbers as numbers, no error text, no host
   assert.equal(op.fleetDegraded, true);
   assert.deepEqual(op.hosts, [{ name: "h1", lastBeatAgeMs: 1200, capacity: { memMiB: 4096, cpuCenti: null, concurrency: 2 }, running: 2 }]);
   assert.deepEqual(op.dollars.windows.map((w) => w.scope), [null, "openai/gpt"], "a folder scope's host path is dropped");
-  assert.deepEqual(op.parked, [{ target: "o/r#12", kind: "github", ageMs: 3600000, chainCount: 2 }]);
+  assert.deepEqual(op.parked, [{ target: "o/r#12", kind: "github", jobId: "j1", ageMs: 3600000, chainCount: 2 }]);
   assert.deepEqual(op.active, [{ jobId: "j9", queue: "pi", startedAt: T0 - 1000, host: "h1", progress: null, steer: false, inbox: null }]);
   assert.deepEqual(op.schedulers, [{ name: "nightly", next: T0 - 5000, overdue: true, overdueMs: 5000, stalls: 1 }]);
   assert.equal(op.failed.rows[0].failedReason, "repo o/r: token for alice@example.test refused");
@@ -895,4 +895,11 @@ test("integration: every real page renders through the server, and a real live s
   assert.ok(!viewStream.text.includes("token for alice"), "the viewer's stream never carries BullMQ's free text");
   hub.close();
   await Promise.all([opStream.done, viewStream.done]);
+});
+
+test("stateOf: a parked row carries its jobId (issue #647) for both roles, and an id outside the run-id charset is null", () => {
+  for (const role of ["operator", "viewer"]) assert.equal(stateOf(SNAPSHOT, role, { now: T0 }).parked[0].jobId, "j1", role);
+  for (const jobId of ["j 1", "j\u001b1", "x".repeat(201), 7, null, undefined, ""]) {
+    assert.equal(stateOf({ parked: [{ target: "o/r#1", kind: "github", jobId }] }, "viewer").parked[0].jobId, null, JSON.stringify(jobId));
+  }
 });

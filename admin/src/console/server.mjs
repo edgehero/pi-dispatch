@@ -39,9 +39,11 @@ import { applySecurityHeaders } from "./headers.mjs";
 import { loginCodePage, loginPage } from "./html.mjs";
 import { STATE_VERSION, stateOf as defaultStateOf } from "./live.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
+import { getRun } from "./run-api.mjs";
 import * as realPages from "./pages.mjs";
 import { CONSOLE_SCRIPT } from "./script.mjs";
 import { CONSOLE_CSS } from "./style.mjs";
+import { TRANSCRIPT_FORMATS } from "./transcript.mjs";
 
 /** The largest request body a write may send. A pause-windows file is a few hundred bytes; 64 KiB is generous. */
 export const BODY_LIMIT = 64 * 1024;
@@ -294,20 +296,27 @@ function openStream(ctx, subscribe) {
 
 /**
  * One run's live transcript (issue #643, `/api/transcript?id=<jobId>`), operator only (the route table refuses a viewer
- * 403 before this runs): `id`, exactly once, in the run-id charset, and no other parameter (400). `Last-Event-ID` is
- * honoured only in the stream's own shape (`TRANSCRIPT_ID_RE`, `<ms>-<seq>`); anything else, a panel stream's id
- * included, is no id at all, and the stream starts from the beginning. The slots are `/api/events`'s, shared.
+ * 403 before this runs): `id`, exactly once, in the run-id charset, and (issue #647) `format`, at most once, `html` (the
+ * default, the run page's) or `json` (the structured entry, for the terminal chat); no other parameter (400).
+ * `Last-Event-ID` is honoured only in the stream's own shape (`TRANSCRIPT_ID_RE`, `<ms>-<seq>`); anything else, a panel
+ * stream's id included, is no id at all, and the stream starts from the beginning. The slots are `/api/events`'s,
+ * shared, whichever format a stream asked for.
  */
 async function getTranscript(ctx) {
   const { deps, req, res, session } = ctx;
-  for (const key of new Set(ctx.searchParams.keys())) if (key !== "id") return sendError(res, 400, "the transcript stream takes only id");
+  for (const key of new Set(ctx.searchParams.keys())) if (key !== "id" && key !== "format") return sendError(res, 400, "the transcript stream takes only id and format");
   const ids = ctx.searchParams.getAll("id");
   if (ids.length !== 1) return sendError(res, 400, ids.length === 0 ? "the transcript stream needs ?id= with a run's job id" : "id is given more than once");
   const jobId = ids[0];
   if (!RUN_ID_RE.test(jobId)) return sendError(res, 400, "id must be a run id (letters, digits and . _ : -, at most 200 characters)");
+  const formats = ctx.searchParams.getAll("format");
+  if (formats.length > 1) return sendError(res, 400, "format is given more than once");
+  // The refusal names the rule, never the value, as every query refusal here does.
+  if (formats.length === 1 && !TRANSCRIPT_FORMATS.includes(formats[0])) return sendError(res, 400, `format must be ${TRANSCRIPT_FORMATS.join(" or ")}`);
+  const format = formats[0] ?? "html";
   const presented = req.headers["last-event-id"];
   const lastEventId = typeof presented === "string" && TRANSCRIPT_ID_RE.test(presented) ? presented : null;
-  return openStream(ctx, () => deps.hub.subscribeTranscript({ res, sessionId: session.id, session: { name: session.name, role: session.role }, jobId, lastEventId }));
+  return openStream(ctx, () => deps.hub.subscribeTranscript({ res, sessionId: session.id, session: { name: session.name, role: session.role }, jobId, lastEventId, format }));
 }
 
 /** One GET route per screen, from the pages' own table, so a screen cannot exist without its auth. */
@@ -352,6 +361,8 @@ export const ROUTES = Object.freeze([
     ctx.res.end(CONSOLE_CSS);
   } },
   { method: "GET", path: "/api/state", auth: "viewer", write: false, handler: getState },
+  // Issue #647: one run and the chat it can have (`run-api.mjs`); a viewer's, since the answer carries no text at all.
+  { method: "GET", path: "/api/run", auth: "viewer", write: false, handler: getRun },
   // `noHead`: a HEAD would take a stream slot and hold it with no body ever sent, so it is 405 before anything runs.
   { method: "GET", path: "/api/events", auth: "viewer", write: false, noHead: true, handler: getEvents },
   // Issue #643: one run's live transcript, an operator's only (agent-written text); a stream, so no HEAD either.

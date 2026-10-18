@@ -36,7 +36,8 @@ import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 import { boundAnswerText, consoleAnswerBy } from "@edgehero/pi-dispatch/console-answer";
 import { runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import * as steerInbox from "@edgehero/pi-dispatch/steer-inbox";
-import { activeJobOfRun, makeLocalRunIndex, readFleetQueues, readRunById } from "./read-model.mjs";
+import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
+import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, readFleetQueues, readPendingAnswer, readRunById, targetKeyOf } from "./read-model.mjs";
 
 /** The most jobs one bulk action names, and so the most one preview lists (issue #642). */
 export const BULK_MAX = 100;
@@ -664,6 +665,30 @@ function commentTriggerFor(triggersPath, kind, fs) {
 }
 
 /**
+ * Whether a parked run's RETAINED JOB can take an answer typed into the console (issues #642, #647): `{ kind, delivery,
+ * rule }` or `{ refusal }`. The planner's refusals that the job's data and the triggers file decide, in its order: the
+ * data expired (`data` null), not a forge issue's run, a pull request's park, and a comment trigger the receiver would
+ * not route a reply through (absent, a command, without `run.resume`, without a flow). ONE predicate, so the run page's
+ * Chat panel offers the reply form exactly where `planParkedAnswer` would plan it, and shows this sentence where it
+ * would not; whether the run is parked and still unanswered is the caller's (the record and `chatModeOf`).
+ */
+export function parkedAnswerRefusalOf({ jobId, data, triggersPath, fs = nodeFs }) {
+  if (data === null || data === undefined) return { refusal: `the queue no longer holds ${jobId}'s data (a forge job's data is kept 31 days), so the reply cannot be built; answer on the forge instead` };
+  const kind = data.kind;
+  const delivery = COMMENT_DELIVERY[kind];
+  if (!isForgeKind(kind) || !delivery) return { refusal: `${jobId} is a ${String(kind)} run; only a forge issue's parked run is answered this way` };
+  if (data.target?.type !== "issue") return { refusal: `${jobId} parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge` };
+  if (typeof triggersPath !== "string" || triggersPath === "") return { refusal: "the triggers file is not known here (PI_TRIGGERS_FILE), so the reply cannot be built as the receiver builds it" };
+  const rule = commentTriggerFor(triggersPath, kind, fs);
+  if (rule?.refusal) return { refusal: rule.refusal };
+  if (!rule) return { refusal: `the triggers file has no ${kind} comment trigger, so the receiver would not route a reply either` };
+  if (rule.run.command !== undefined) return { refusal: `the ${kind} comment trigger runs a command, and a parked reply resumes only a flow (the receiver's rule)` };
+  if (rule.run.resume !== true) return { refusal: `the ${kind} comment trigger does not set run.resume, so a reply cannot resume the parked transcript (the receiver's rule)` };
+  if (typeof rule.run.flow !== "string" || rule.run.flow === "") return { refusal: `the ${kind} comment trigger names no flow` };
+  return { kind, delivery, rule };
+}
+
+/**
  * Plan an ANSWER to a parked run, typed into the console (issue #642, REQ-AWAIT-INPUT). Free; `{ plan }` or `{ refusal }`.
  *
  * The job is the one the RECEIVER builds for a phrase-free reply on that forge (`routeComment`'s parked-reply path),
@@ -676,9 +701,11 @@ function commentTriggerFor(triggersPath, kind, fs) {
  *
  * Refused by name: a `by` that is not a token name; an empty or oversized answer (`boundAnswerText`: control characters
  * scrubbed, newlines kept, at most 8 KiB, never cut); no record; a run that is not parked (not `completed` with
- * `awaiting-input`); already answered (a later run on the same target); a pull request's park (its reply needs the
- * head branch, so it keeps the phrase, the receiver's rule); expired job data; and a comment trigger the receiver would
- * not route a reply through (absent, a command, or without `run.resume`).
+ * `awaiting-input`); already answered (a later run on the same target, `targetKeyOf`'s comparison); being answered (a
+ * job on its target queued or running, which has no record yet: `readPendingAnswer`, issue #647), or that queue scan
+ * unreadable or unable to tell (a queue deeper than its budget: `parkedVerdictOf`'s sentence, the Chat panel's); and `parkedAnswerRefusalOf`'s: expired job data, a pull request's park (its reply needs the
+ * head branch, so it keeps the phrase, the receiver's rule), and a comment trigger the receiver would not route a reply
+ * through (absent, a command, or without `run.resume`).
  *
  * `plan`: `{ kind: "parked-answer", jobId (the parked run), forge, deliveryId, queue, job, runFields, reserve }`, the
  * reserve over the same inputs as `planRerun`'s (`overlay`, `env`, `modelEndpoints`, `builtinModel`).
@@ -702,6 +729,7 @@ export async function planParkedAnswer({
   fs = nodeFs,
   now = () => Date.now(),
   timeoutMs = 2500,
+  pendingBudget = PENDING_SCAN_BUDGET,
 } = {}) {
   const who = consoleAnswerBy({ by });
   if (who === null) return { refusal: "the answer needs the console token's name (lowercase letters, digits, . _ -)" };
@@ -722,22 +750,25 @@ export async function planParkedAnswer({
     // mirror, the fleet reader's wide window, which holds any run newer than this one.
     const runs = runsFn ? await runsFn() : await answeredWindow(redis, { logsDir, fs, now, timeoutMs });
     const at = runAt(record);
-    const later = (Array.isArray(runs) ? runs : []).find((r) => r?.kind === record.kind && r?.target === record.target && runAt(r) > at);
+    const key = targetKeyOf(record.kind, record.target);
+    const later = (Array.isArray(runs) ? runs : []).find((r) => key !== null && targetKeyOf(r?.kind, r?.target) === key && runAt(r) > at);
     if (later) return { refusal: `${jobId} was already answered: ${String(later.jobId ?? "a later run")} ran on ${String(record.target)} after it` };
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     const found = await fleet.find(jobId);
     const data = found?.job?.data ?? null;
-    if (data === null) return { refusal: `the queue no longer holds ${jobId}'s data (a forge job's data is kept 31 days), so the reply cannot be built; answer on the forge instead` };
-    const kind = data.kind;
-    const delivery = COMMENT_DELIVERY[kind];
-    if (!isForgeKind(kind) || !delivery) return { refusal: `${jobId} is a ${String(kind)} run; only a forge issue's parked run is answered this way` };
-    if (data.target?.type !== "issue") return { refusal: `${jobId} parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge` };
-    const rule = commentTriggerFor(triggersPath, kind, fs);
-    if (rule?.refusal) return { refusal: rule.refusal };
-    if (!rule) return { refusal: `the triggers file has no ${kind} comment trigger, so the receiver would not route a reply either` };
-    if (rule.run.command !== undefined) return { refusal: `the ${kind} comment trigger runs a command, and a parked reply resumes only a flow (the receiver's rule)` };
-    if (rule.run.resume !== true) return { refusal: `the ${kind} comment trigger does not set run.resume, so a reply cannot resume the parked transcript (the receiver's rule)` };
-    if (typeof rule.run.flow !== "string" || rule.run.flow === "") return { refusal: `the ${kind} comment trigger names no flow` };
+    const judged = parkedAnswerRefusalOf({ jobId, data, triggersPath, fs });
+    if (judged.refusal) return { refusal: judged.refusal };
+    const { kind, delivery, rule } = judged;
+    // Issue #647: an answer already queued or running has no record yet, so the later-run check above cannot see it.
+    const pending = await readPendingAnswer({ queues: fleet.names.map((n) => fleet.queueOf(n)), kind: record.kind, target: record.target, runId: jobId, budget: pendingBudget, timeoutMs });
+    if (pending.jobId) return { refusal: `${jobId} is being answered: ${pending.jobId} is queued or running on ${String(record.target)}` };
+    // A scan that could not tell refuses (chat-mode's FAIL LOUDLY rule for `pendingTooMany`: on a queue too deep to
+    // check, a queued answer can outlast the ten-minute semantic window that would swallow a second one), with the
+    // sentence the Chat panel and the parked inbox show for the same scan.
+    if (pending.jobId !== null) {
+      const verdict = parkedVerdictOf(pending);
+      return { refusal: verdict.mode === null && pending.tooMany === true ? `${verdict.says} Nothing was queued.` : `whether an answer to ${jobId} is already queued or running could not be told (the queue could not be read); nothing was queued, try again` };
+    }
     const deliveryId = consoleDeliveryId(random);
     // The receiver's routeComment, field for field and in its spreads (`runFieldsOf`): absent stays absent, so the job's
     // data is the one a forge reply would have made. NO FAN-OUT: the loader refuses `run.replicas` beside `run.resume`

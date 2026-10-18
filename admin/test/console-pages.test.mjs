@@ -227,6 +227,11 @@ async function renderInChild() {
         getWorkers: async () => WORKERS.map((w) => ({ name: w })),
         getJobSchedulers: (...a) => (real ? real.getJobSchedulers(...a) : Promise.resolve([])),
         getActive: async () => active,
+        // Issue #647: the run page's Chat panel asks the queue for the job's state; an active job reads as active, with
+        // no `.data` (so it is not steer-armed and its run id is its own), and any other id is not this queue's.
+        getJob: async (id) => (active.some((e) => e.id === id) ? { id, data: {}, getState: async () => "active" } : null),
+        // The pending-answer scan (issue #647) lists the running and waiting jobs: the running ones, with no `.data`.
+        getJobs: async ([state]) => (state === "active" ? active.map((e) => ({ id: e.id, data: {} })) : []),
         getFailed: async () => (name === W.queue.QUEUE ? [hostile ? { ...FAILED, id: HOSTILE.jobId, failedReason: HOSTILE.reason } : { ...FAILED }] : []),
         pause: async () => {},
         resume: async () => {},
