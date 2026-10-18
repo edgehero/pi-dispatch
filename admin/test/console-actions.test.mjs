@@ -781,7 +781,7 @@ test("the controls: drawn for an operator, never for a viewer or on a read-only 
     active: [{ jobId: "gh-1", queue: "pi-jobs", startedAt: 1 }],
     held: { rows: [{ jobId: "gh-2", target: "o/r#1", label: "jira", waitedMs: 5 }] },
     failed: { rows: [{ jobId: "gh-3", queue: "pi-jobs", attemptsMade: 1, endedAt: 1 }] },
-    parked: [{ jobId: "gh-4", kind: "github", target: "o/r#2", parkedAt: 1, ageMs: 1 }],
+    parked: [{ jobId: "gh-4", kind: "github", target: "o/r#2", parkedAt: 1, ageMs: 1, pendingScan: { jobId: null } }],
     triggers: { triggers: [] },
   };
   const panels = [fleetQueues, fleetActive, fleetHeld, fleetFailed, parkedInbox, configTriggers];
@@ -973,6 +973,8 @@ test("parked-answer on Valkey: the queued job is the plan's, by the session's to
     assert.equal(pj.reserve.dollarsMicros, 1_250_000, "a paid action shows its reserve");
     assert.ok(pj.diffHtml.includes("&lt;b&gt;bold&lt;/b&gt;"), "the answer is shown escaped");
     assert.equal(pj.afterDigest, sha256(`${ANSWER}\n<b>bold</b>`));
+    // A plan built the same way BEFORE the answer is queued (once it is, the planner refuses: issue #647, being answered).
+    const again = await RM.planParkedAnswer({ url: URL13, logsDir: paths.logsDir, jobId, text: `${ANSWER}\n<b>bold</b>`, by: "alice", triggersPath: paths.triggersPath, runsFn: async () => [] });
     const res = await c.confirm("parked-answer", pj.ticket);
     assert.equal(res.status, 200, res.text);
     const [queuedId] = res.json().jobIds;
@@ -980,11 +982,13 @@ test("parked-answer on Valkey: the queued job is the plan's, by the session's to
     const job = (await shared.getJob(queuedId)).data;
     assert.deepEqual(job.console, { by: "alice" }, "by is the session's token name, whatever the body said");
     assert.equal(job.trigger.comment.body, `${ANSWER}\n<b>bold</b>`);
-    // The queued job is the plan's: a plan built the same way now differs only in its fresh delivery id.
-    const again = await RM.planParkedAnswer({ url: URL13, logsDir: paths.logsDir, jobId, text: `${ANSWER}\n<b>bold</b>`, by: "alice", triggersPath: paths.triggersPath, runsFn: async () => [] });
+    // The queued job is the plan's: a plan built the same way differs only in its fresh delivery id.
     // `kind` is the producer's (enqueueForgeJob stamps it on the queued data), not the plan's.
     const strip = ({ kind: _k, ...d }) => ({ ...d, trigger: { ...d.trigger, deliveryId: null } });
     assert.deepEqual(strip(job), strip(again.plan.job));
+    // And now that the answer is queued, a second one is refused by name, before any job is built (issue #647).
+    const third = await RM.planParkedAnswer({ url: URL13, logsDir: paths.logsDir, jobId, text: "again", by: "alice", triggersPath: paths.triggersPath, runsFn: async () => [] });
+    assert.equal(third.refusal, `${jobId} is being answered: ${queuedId} is queued or running on org/repo#7`);
     const row = lastWrite(c);
     assert.deepEqual([row.kind, row.target, row.afterDigest, row.reserve], ["parked-answer", jobId, sha256(`${ANSWER}\n<b>bold</b>`), 1_250_000]);
   } finally {

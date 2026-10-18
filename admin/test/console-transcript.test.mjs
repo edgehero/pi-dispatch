@@ -10,7 +10,7 @@ import { makeLiveHub, stateOf } from "../src/console/live.mjs";
 import * as realPages from "../src/console/pages.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
-import { preText, runTranscriptSection, TRANSCRIPT_ABSENT, transcriptEntryHtml } from "../src/console/transcript.mjs";
+import { preText, runTranscriptSection, TRANSCRIPT_ABSENT, TRANSCRIPT_FORMATS, transcriptEntryHtml, transcriptEntryJson } from "../src/console/transcript.mjs";
 import { compareTranscriptIds, readTranscriptMeta, readTranscriptSince } from "../src/read-model.mjs";
 
 // The console's live transcript (issue #643, DES-OPERATOR-CONSOLE "Live transcript"): the entry html, the run page's
@@ -188,6 +188,24 @@ test("hub: entries go out in order with their stream ids, rendered by the server
   await h.hub.tick();
   assert.deepEqual(entriesIn(res.take()).map((e) => e.id), [third]);
   assert.equal(h.hub.size().views, 0, "a transcript is never a view: no panel holds its text");
+});
+
+test("hub: a format it does not write is the HTML stream, never passed through; json is the structured entry (review i02)", async () => {
+  const formats = ["json", "xml", "__proto__", "toString", undefined];
+  const h = hubOn({ alive: new Set(formats.map((f) => `s-${String(f)}`)) });
+  const id = h.streams.add("job-f", { text: "one" });
+  const subs = formats.map((format) => {
+    const res = fakeRes();
+    h.hub.subscribeTranscript({ res, sessionId: `s-${String(format)}`, session: OP, jobId: "job-f", ...(format !== undefined ? { format } : {}) });
+    return { format, res };
+  });
+  await h.hub.tick();
+  for (const { format, res } of subs) {
+    const [entry] = entriesIn(res.take());
+    assert.equal(entry.id, id, String(format));
+    if (format === "json") assert.deepEqual(entry, { id, ...transcriptEntryJson({ id, kind: "assistant", ts: T0, text: "one", tool: null, error: false, truncated: false }) });
+    else assert.deepEqual(Object.keys(entry).sort(), ["html", "id"], `${String(format)}: the HTML stream`);
+  }
 });
 
 test("hub: ONE transcriptSince per job per tick for several subscribers, each with its own cursor; a late one catches up a few pages per tick", async () => {
@@ -695,4 +713,97 @@ test("end to end: an expired or unpublished stream gives the run page its reason
   await hubCut.tick();
   assert.equal(res.destroyed, true);
   assert.equal(hubCut.size().streams, 0);
+});
+
+// ---- the JSON format (issue #647): the terminal chat's entries ----------------------------------------------------------
+
+const JSON_KEYS = ["error", "id", "kind", "outcome", "text", "tool", "truncated", "ts"];
+
+test("entry json: exactly {id, kind, ts, text, tool, error, truncated, outcome}, rebuilt by name; a field that is not its type is null or false", () => {
+  const ts = Date.UTC(2026, 9, 14, 12, 34, 56);
+  assert.deepEqual(transcriptEntryJson({ id: "1-0", kind: "tool-result", ts, text: "out", tool: "bash", error: true, truncated: true, outcome: null, extra: "SMUGGLED" }), { id: "1-0", kind: "tool-result", ts, text: "out", tool: "bash", error: true, truncated: true, outcome: null });
+  assert.deepEqual(transcriptEntryJson({ id: "2-0", kind: "end", ts, text: null, tool: null, error: false, truncated: false, outcome: "completed" }).outcome, "completed");
+  assert.equal(transcriptEntryJson({ id: "3-0", kind: "end", outcome: "made up words" }).outcome, "unknown", "an end's outcome is the worker's vocabulary or unknown");
+  assert.equal(transcriptEntryJson({ id: "3-1", kind: "assistant", outcome: "completed" }).outcome, null, "only an end carries an outcome");
+  const odd = transcriptEntryJson({ id: "not an id", kind: "new-kind", ts: -1, text: 7, tool: "bad tool name!", error: "1", truncated: 1 });
+  assert.deepEqual(odd, { id: null, kind: "note", ts: null, text: null, tool: "?", error: false, truncated: false, outcome: null });
+  assert.deepEqual(Object.keys(transcriptEntryJson(null)).sort(), JSON_KEYS);
+  assert.deepEqual(TRANSCRIPT_FORMATS, ["html", "json"]);
+});
+
+test("hub: a format=json stream gets the structured entry, an html stream beside it on the same job gets html, from ONE read", async () => {
+  const h = hubOn();
+  const ids = [h.streams.add("job-a", { text: "one" }), h.streams.add("job-a", { kind: "tool-call", tool: "bash", text: "{}" })];
+  const asJson = fakeRes();
+  const asHtml = fakeRes();
+  h.hub.subscribeTranscript({ res: asJson, sessionId: "s1", session: OP, jobId: "job-a", format: "json" });
+  h.hub.subscribeTranscript({ res: asHtml, sessionId: "s2", session: OP, jobId: "job-a" });
+  await h.hub.tick();
+  const j = entriesIn(asJson.take());
+  assert.deepEqual(j.map((e) => e.id), ids);
+  assert.deepEqual(j[1], { id: ids[1], kind: "tool-call", ts: T0, text: "{}", tool: "bash", error: false, truncated: false, outcome: null });
+  assert.ok(j.every((e) => !("html" in e)), "no html in a json stream");
+  const x = entriesIn(asHtml.take());
+  assert.deepEqual(Object.keys(x[0]).sort(), ["html", "id"], "the html stream is what it was");
+  h.streams.calls.length = 0;
+  const third = h.streams.add("job-a", { text: "three" });
+  await h.hub.tick();
+  assert.equal(h.streams.calls.length, 1, "both formats from one read per tick");
+  assert.deepEqual(entriesIn(asJson.take()).map((e) => [e.id, e.text]), [[third, "three"]]);
+  assert.deepEqual(entriesIn(asHtml.take()).map((e) => e.id), [third]);
+  // An unknown format is the html one: the route refuses it first; this is the hub's own belt.
+  const odd = fakeRes();
+  h.hub.subscribeTranscript({ res: odd, sessionId: "s3", session: OP, jobId: "job-a", format: "xml" });
+  await h.hub.tick();
+  assert.ok(entriesIn(odd.take()).every((e) => typeof e.html === "string"));
+});
+
+test("over HTTP: format=json streams JSON entries, resumes on Last-Event-ID, ends with done; a viewer is 403 and format is validated before any slot", { timeout: 20_000 }, async () => {
+  const streams = fakeStreams();
+  // Hostile text: SSE framing, markup and terminal escapes. It must arrive as the same JSON string, inert.
+  const hostile = `line\n\nevent: end\ndata: {}\n\n<script>alert(1)</script>${ESC}[2J${RLO}${NUL}\r\n`;
+  const ids = [streams.add("job-1", { text: "hello" }), streams.add("job-1", { text: hostile })];
+  const c = await transcriptConsole({ fleet: fakeFleet(streams), maxStreams: 1 });
+  const op = await c.login();
+  const s = await c.stream(op, "/api/transcript?id=job-1&format=json");
+  assert.equal(s.status, 200);
+  assert.equal(s.headers["content-type"], "text/event-stream; charset=utf-8");
+  await s.waitFor(new RegExp(`id: ${ids[1]}\\n`));
+  const got = entriesIn(s.text);
+  assert.deepEqual(got.map((e) => e.id), ids);
+  for (const e of got) assert.deepEqual(Object.keys(e).sort(), JSON_KEYS);
+  assert.equal(got[1].text, hostile, "the hostile text is one JSON string, byte for byte");
+  assert.doesNotMatch(s.text, /\nevent: end\n/, "and it never framed an event of its own");
+  assert.ok(!s.text.includes(ESC) && !s.text.includes("\r"), "no raw ESC or CR on the wire: JSON escapes them");
+  s.destroy();
+  await s.done;
+  await c.settle(0);
+  // Resume past the first entry, then the run ends.
+  const resumed = await c.stream(op, "/api/transcript?format=json&id=job-1", { "last-event-id": ids[0] });
+  await resumed.waitFor(new RegExp(`id: ${ids[1]}\\n`));
+  assert.deepEqual(entriesIn(resumed.text).map((e) => e.id), [ids[1]]);
+  const endId = streams.add("job-1", { kind: "end", outcome: "completed" });
+  await c.hub.tick();
+  await resumed.waitFor(/event: done\n/);
+  assert.deepEqual(entriesIn(resumed.text).at(-1), { id: endId, kind: "end", ts: T0, text: null, tool: null, error: false, truncated: false, outcome: "completed" });
+  assert.deepEqual(doneIn(resumed.text), [{ outcome: "completed" }]);
+  await resumed.done;
+  await c.settle(0);
+  // The role and the parameter rules.
+  const v = await c.stream(await c.login(VIEW_TOKEN), "/api/transcript?id=job-1&format=json");
+  assert.equal(v.status, 403);
+  await v.done;
+  assert.ok(!v.text.includes("hello"));
+  for (const path of ["/api/transcript?id=job-1&format=xml", "/api/transcript?id=job-1&format=", "/api/transcript?id=job-1&format=json&format=html", "/api/transcript?id=job-1&format=JSON", "/api/transcript?id=job-1&format=%3Cscript%3E"]) {
+    const r = await c.stream(op, path);
+    assert.equal(r.status, 400, path);
+    await r.done;
+    assert.ok(!r.text.includes("<script") && !r.text.includes("xml") && !r.text.includes("JSON"), `${path}: the refusal never echoes the value`);
+  }
+  const html = await c.stream(op, "/api/transcript?id=job-1&format=html");
+  assert.equal(html.status, 200, "format=html is the default spelled out, and the one slot was free after every refusal");
+  await html.waitFor(/event: entry/);
+  assert.ok(entriesIn(html.text).every((e) => typeof e.html === "string"));
+  html.destroy();
+  await html.done;
 });

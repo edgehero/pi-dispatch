@@ -31,7 +31,8 @@
  *
  *   5. `transcriptSince` runs ONCE per distinct job per tick, from the OLDEST cursor among that job's streams, and the
  *      page is fanned out to each stream from its own cursor (`id: <stream id>`, `event: entry`, `data: {"html"}`, the
- *      html server-rendered by `transcript.mjs`). Streams at the tip, however many, cost one read; a stream that came
+ *      html server-rendered by `transcript.mjs`, or, for a `format=json` stream (issue #647), the structured entry
+ *      `transcriptEntryJson` rebuilds). Streams at the tip, however many, cost one read; a stream that came
  *      in behind (a reconnect with an old `Last-Event-ID`, or none) is caught up a few pages per tick
  *      (`transcriptPagesPerTick`), the others waiting at most those ticks. A stream whose cursor reaches the `end`
  *      entry gets `event: done` with `{"outcome"}` and is closed (the browser closes its EventSource on it, so it is
@@ -47,7 +48,8 @@ import { scrubControls } from "../panel.mjs";
 import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero/pi-dispatch/steer-inbox";
 import { compareTranscriptIds, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
-import { transcriptEntryHtml } from "./transcript.mjs";
+import { RUN_ID_RE } from "./panels.mjs";
+import { transcriptEntryHtml, transcriptEntryJson } from "./transcript.mjs";
 
 /**
  * `pageMinMs`: pages whose data is read at most once per that many ms, however often the loop ticks. The runs page
@@ -301,7 +303,10 @@ export function makeLiveHub({
     }
   }
 
-  const entryEvent = (id, htmlText) => `id: ${id}\nevent: entry\ndata: ${JSON.stringify({ html: htmlText })}\n\n`;
+  // The `data` per format (issue #647): `{"html"}` for the run page, the structured entry for the terminal chat. Both
+  // are JSON.stringify'd, so no newline in the text can end an event early.
+  const entryEvent = (id, data) => `id: ${id}\nevent: entry\ndata: ${JSON.stringify(data)}\n\n`;
+  const ENTRY_DATA = Object.freeze({ html: (entry) => ({ html: String(transcriptEntryHtml(entry)) }), json: (entry) => transcriptEntryJson(entry) });
 
   /** The run is over for this stream: `event: done` with the outcome, then close; the browser closes its EventSource. */
   function done(sub, outcome) {
@@ -343,11 +348,15 @@ export function makeLiveHub({
           break;
         }
         recovered(`transcript\n${jobId}`, "console: a live transcript is read again");
-        // Rendered once per entry, whichever streams it goes to.
-        const rendered = read.entries.map((entry) => ({ id: entry.id, event: entryEvent(entry.id, String(transcriptEntryHtml(entry))) }));
+        // Rendered once per entry and format, whichever streams it goes to, and only in the formats a stream asked for.
+        const rendered = new Map();
+        const eventsIn = (format) => {
+          if (!rendered.has(format)) rendered.set(format, read.entries.map((entry) => ({ id: entry.id, event: entryEvent(entry.id, ENTRY_DATA[format](entry)) })));
+          return rendered.get(format);
+        };
         for (const sub of live) {
           if (!subs.has(sub)) continue;
-          for (const r of rendered) {
+          for (const r of eventsIn(sub.format)) {
             if (compareTranscriptIds(r.id, sub.cursor) <= 0) continue;
             if (!send(sub, r.event)) break;
             sub.cursor = r.id;
@@ -408,9 +417,10 @@ export function makeLiveHub({
 
     /**
      * One run's live transcript (issue #643): entries after `lastEventId` (a stream id the caller validated, else null
-     * for the beginning). The first entries are read now rather than a tick later.
+     * for the beginning), as `format` (`html`, the default, or `json`, issue #647; anything else is `html`). The first
+     * entries are read now rather than a tick later.
      */
-    subscribeTranscript({ res, sessionId, session, jobId, lastEventId = null }) {
+    subscribeTranscript({ res, sessionId, session, jobId, lastEventId = null, format = "html" }) {
       if (closed) {
         try {
           res.end();
@@ -419,7 +429,7 @@ export function makeLiveHub({
         }
         return () => {};
       }
-      const sub = { kind: "transcript", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, jobId: String(jobId), cursor: typeof lastEventId === "string" ? lastEventId : null };
+      const sub = { kind: "transcript", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, jobId: String(jobId), cursor: typeof lastEventId === "string" ? lastEventId : null, format: Object.hasOwn(ENTRY_DATA, format) ? format : "html" };
       subs.add(sub);
       startTimer();
       void tick();
@@ -572,7 +582,9 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
         full: Boolean(r?.full),
       })),
     },
-    parked: (Array.isArray(s.parked) ? s.parked : []).map((p) => ({ target: str(p?.target), kind: str(p?.kind), ageMs: num(p?.ageMs), chainCount: num(p?.chainCount) })),
+    // Issue #647: with the parked run's `jobId` (a worker-minted run id, the run-id charset or null), so a script or the
+    // terminal chat can open the run, or answer it through the `parked-answer` action, without a second lookup.
+    parked: (Array.isArray(s.parked) ? s.parked : []).map((p) => ({ target: str(p?.target), kind: str(p?.kind), jobId: typeof p?.jobId === "string" && RUN_ID_RE.test(p.jobId) ? p.jobId : null, ageMs: num(p?.ageMs), chainCount: num(p?.chainCount) })),
     // True when the parked list could not be read: `parked: []` then means "unknown", never "nobody is waiting".
     parkedUnknown: Boolean(s.parkedUnreachable),
     failures24h: num(s.failures24h),

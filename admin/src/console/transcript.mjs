@@ -7,10 +7,15 @@
  * the `html` template (control scrub, then escape), line by line, so the `<pre>` keeps the text's real newlines and tabs
  * while a newline or tab can never carry anything else. No markdown is interpreted and no inline style is written.
  *
+ * Issue #647 adds the same entry as structured JSON (`transcriptEntryJson`), for the terminal chat, which renders it
+ * itself; the route, the role and the caps are the same, only the `data` differs.
+ *
  * THE OPERATOR ALONE SEES IT. Only `/api/transcript` (operator only) renders an entry; the run page's section holds no
  * entry, only the empty `[data-transcript]` element the browser script fills, and a viewer gets a sentence instead.
  * Nothing here reaches `/api/state`, a hub panel or a list.
  */
+import { LIVE_OUTCOMES, LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
+import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { html } from "./html.mjs";
 
 /** The kinds that carry text worth folding: a tool call's arguments and a tool's result go in a `<details>`. */
@@ -64,6 +69,36 @@ export function transcriptEntryHtml(entry) {
   else if (Object.hasOwn(FOLDED, kind)) body = html`<details><summary>${FOLDED[kind]}</summary><pre>${preText(e.text)}</pre></details>`;
   else body = html`<pre>${preText(e.text)}</pre>`;
   return html`<article class="t-entry t-${kind}">${header}${body}</article>`;
+}
+
+/** The formats `/api/transcript` writes an entry in: the run page's HTML, or the structured entry (issue #647). */
+export const TRANSCRIPT_FORMATS = Object.freeze(["html", "json"]);
+
+/**
+ * One transcript entry as the JSON stream's `data` (issue #647, `/api/transcript?format=json`): `{ id, kind, ts, text,
+ * tool, error, truncated, outcome }`, REBUILT BY NAME from `readTranscriptSince`'s entry, so a field another reader or a
+ * later change put on the entry cannot ride along to a terminal. The text is the worker's, already redacted and with
+ * every control and bidi character written as `\u{XXXX}`; it stays a JSON STRING (JSON.stringify escapes every newline,
+ * so an entry can never break the SSE framing), and the terminal client scrubs it again before it reaches a screen.
+ * The vocabularies are the worker's own (`LIVE_TOOL_RE`, `LIVE_OUTCOMES`) and the read model's id shape, imported, never
+ * restated. An unknown kind is a `note`, as the HTML renderer reads it; a field that is not its type is null or false.
+ * A `tool` that IS a string but falls outside `LIVE_TOOL_RE` is written as `"?"`, not null: the HTML renderer still draws
+ * a tool header for any string, and the terminal client (worker/src/chat-view.mjs) draws `tool` as a header string, so
+ * null would hide that a tool ran, while the name itself is not charset-checked and stays out.
+ */
+export function transcriptEntryJson(entry) {
+  const e = entry ?? {};
+  const kind = Object.hasOwn(KIND_LABEL, e.kind) ? e.kind : "note";
+  return {
+    id: typeof e.id === "string" && TRANSCRIPT_ID_RE.test(e.id) ? e.id : null,
+    kind,
+    ts: timeOf(e.ts) ? e.ts : null,
+    text: typeof e.text === "string" ? e.text : null,
+    tool: typeof e.tool === "string" ? (LIVE_TOOL_RE.test(e.tool) ? e.tool : "?") : null,
+    error: e.error === true,
+    truncated: e.truncated === true,
+    outcome: kind === "end" ? (LIVE_OUTCOMES.includes(e.outcome) ? e.outcome : "unknown") : null,
+  };
 }
 
 /** Why a run has no stream: the stream cannot tell these apart, so the page names all three. */

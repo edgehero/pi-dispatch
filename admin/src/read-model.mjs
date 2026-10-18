@@ -23,7 +23,8 @@ import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { RECOVER_SKIPPED_REASONS, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { RECOVER_SKIPPED_REASONS, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
@@ -61,7 +62,7 @@ import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleet
 import { RUNS_INDEX, RUNS_INDEX_MAX, hostsIn, mergeRuns, readMirroredPage, readMirroredRecord, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
-import { sessionKeyFor } from "@edgehero/pi-dispatch/session-key";
+import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 // The live transcript's key, kinds, outcomes and tool charset (issue #643), the worker's own, so the reader and the
 // publisher cannot drift on the stream's contract.
 import { LIVE_KINDS, LIVE_OUTCOMES, LIVE_TOOL_RE, liveKeyFor } from "@edgehero/pi-dispatch/live-transcript";
@@ -807,7 +808,8 @@ export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
  * size alone and are re-exported here, so every caller still reaches the queue through this one funnel. And the
  * worker's reserve rule, for the reserve a paid action shows before confirm.
  */
-export { BULK_MAX, enqueueParkedAnswer, enqueueRerun, enqueueSteer, planFailedBulk, planParkedAnswer, planRerun, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
+import { parkedAnswerRefusalOf } from "./job-actions.mjs";
+export { BULK_MAX, enqueueParkedAnswer, enqueueRerun, enqueueSteer, parkedAnswerRefusalOf, planFailedBulk, planParkedAnswer, planRerun, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
 export { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 
 /**
@@ -3632,6 +3634,8 @@ export function createFleetReader(
   // false`) on every reader: the TUI's per-tick `mergedRunsOn` already prunes, and a second pruning read would only
   // race it.
   let wide = null;
+  // The last pending-answer scan for the parked rows (issue #647), `{ at, key, got }`, reused for DOLLAR_RECORDS_TTL_MS.
+  let parkedPending = null;
   const wideRuns = async () => {
     const at = nowFn();
     if (wide && at >= wide.at && at - wide.at < DOLLAR_RECORDS_TTL_MS) return wide;
@@ -3793,6 +3797,26 @@ export function createFleetReader(
         (err) => ({ parked: [], failures24h: null, failures24hFloor: false, parkedUnreachable: scrubReason(err?.message ?? String(err)) || "the runs could not be read" }),
       );
 
+      // Issue #647: whether each waiting park is being answered now (a job queued or running on its target, which has no
+      // record yet: `readPendingOnTargets`, the rule the Chat panel and the planner use). Read only while something is
+      // parked, and at most once per DOLLAR_RECORDS_TTL_MS for the same parks, so a park left for days does not list the
+      // queues on every tick. `pendingScan` per row is the scan's answer for its target (`pendingScanFor`, the shape the
+      // shared verdict `parkedVerdictOf` reads, so the inbox and the Chat panel decide alike), and `answering` the same
+      // read as the job's id, false (the scan saw everything and found none), or null (unknown: partial or unreadable).
+      if (fold.parked.length > 0) {
+        const parkKey = fold.parked.map((p) => `${p.kind}\u0000${p.target}\u0000${p.jobId}`).join("\n");
+        if (!parkedPending || parkedPending.key !== parkKey || nowMs < parkedPending.at || nowMs - parkedPending.at >= DOLLAR_RECORDS_TTL_MS) {
+          const got = await readPendingOnTargets({ queues, targets: fold.parked.map((p) => ({ kind: p.kind, target: p.target, runId: typeof p.jobId === "string" ? p.jobId : null })), timeoutMs: FLEET_READ_TIMEOUT_MS });
+          parkedPending = { at: nowMs, key: parkKey, got };
+        }
+        const got = parkedPending.got;
+        for (const p of fold.parked) {
+          p.pendingScan = pendingScanFor(got, targetKeyOf(p.kind, p.target));
+          const facts = pendingFactsOf(p.pendingScan);
+          p.answering = facts.pending === true ? facts.pendingJobId : facts.pending === false ? false : null;
+        }
+      }
+
       const progressGot = await progressRead;
       active.forEach((row, i) => {
         row.progress = runIds[i] === null ? null : activeProgressOf(progressGot.byId?.[runIds[i]]);
@@ -3887,6 +3911,42 @@ export function createFleetReader(
     async inbox(jobId) {
       const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
       return readJobInbox({ redis, queues, jobId, timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    // The terminal chat's mode (issue #647): the job's queue state across the fleet's queues and its active recovery,
+    // for every job (`readJobStatus`). Never throws.
+    async jobStatus(jobId) {
+      const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
+      return readJobStatus({ queues, jobId, timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    // Whether a park is being answered now (issue #647): a job queued or running on its target, which has no record yet
+    // (`readPendingAnswer`). Never throws.
+    async pendingAnswer({ kind, target, runId = null } = {}) {
+      const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
+      return readPendingAnswer({ queues, kind, target, runId, timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    // Whether a parked run's retained job can take a console answer (issue #647): the planner's own predicate
+    // (`parkedAnswerRefusalOf`) over the job's data and the triggers file, so the Chat panel offers the reply form
+    // exactly where `planParkedAnswer` would plan it. `{ refusal }` (a sentence), `{ ok: true }` or `{ unreachable: true }`.
+    // The job's `.data` never leaves this method. Never throws.
+    async parkedAnswerCheck(jobId) {
+      if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { refusal: "a run id is letters, digits and . _ : -, at most 200 characters" };
+      try {
+        const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
+        const read = (async () => {
+          for (const q of queues) {
+            if (typeof q?.getJob !== "function") continue;
+            const job = await q.getJob(jobId);
+            if (job) return job;
+          }
+          return null;
+        })();
+        const job = await withTimeout(read, FLEET_READ_TIMEOUT_MS, undefined);
+        if (job === undefined) return { unreachable: true };
+        const judged = parkedAnswerRefusalOf({ jobId, data: job?.data ?? null, triggersPath: paths.triggersPath ?? null, fs });
+        return judged.refusal ? { refusal: judged.refusal } : { ok: true };
+      } catch {
+        return { unreachable: true };
+      }
     },
     // The kill switch (issue #642): ONE funnel with the tools' `killSwitchSet`, so a resume across two disagreeing
     // Valkeys is refused here too. Returns `killSwitchSet`'s shape: `{ refused }`, or `{ results: [{ url, shown, res }],
@@ -4000,6 +4060,10 @@ const RUNS_PAGE_BATCH = 200;
  * offset would shift every later page by one and show one run twice. A page never ends inside a group of runs that share
  * one instant (it takes the whole group), because `(before` would otherwise skip the rest of it.
  *
+ * `match` (issue #647) is a caller's predicate applied beside `filter`, never parsed from a URL: `/api/run` passes the
+ * exact-target comparison (`targetKeyOf`), so `limit` counts runs on THAT target, where the filter's substring `q` let
+ * `#120`, `#121`... fill the page and crowd out `#12`.
+ *
  * FILTERED AFTER FETCHING, so it fetches in batches (`RUNS_PAGE_BATCH` from each source) until `limit` runs match or
  * both sources are exhausted, and stops at `examineMax` records examined. Stopping there reports `truncated: true` with
  * a `next` that resumes exactly where the examination stopped (`floor + 1`: every run above the floor was examined, the
@@ -4011,7 +4075,7 @@ const RUNS_PAGE_BATCH = 200;
  * by the worker's `mergeRuns`, so a retry on another host shows the later attempt exactly as the TUI does. Named
  * residual: a job whose two attempts straddle a page boundary can show its earlier attempt on the later page.
  */
-export async function readRunsPage(redis, { logsDir, before = null, limit = 50, filter = null, fs = nodeFs, now = () => Date.now(), timeoutMs = 2500, localIndex = null, examineMax = RUNS_PAGE_EXAMINE_MAX } = {}) {
+export async function readRunsPage(redis, { logsDir, before = null, limit = 50, filter = null, match = null, fs = nodeFs, now = () => Date.now(), timeoutMs = 2500, localIndex = null, examineMax = RUNS_PAGE_EXAMINE_MAX } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) return { refusal: "limit must be a whole number from 1 to 100" };
   if (before !== null && before !== undefined && !(Number.isSafeInteger(before) && before >= 0)) return { refusal: "before must be a non-negative whole number of milliseconds" };
   const bound = before === null || before === undefined ? null : before;
@@ -4054,7 +4118,7 @@ export async function readRunsPage(redis, { logsDir, before = null, limit = 50, 
     const floor = frontiers.length === 0 ? null : Math.max(...frontiers);
     const merged = mergeRuns(local.slice(0, localTaken), mirrored, { limit: Infinity }).sort(byRunAtDesc);
     const final = floor === null ? merged : merged.filter((r) => runAt(r) > floor);
-    const matched = filter ? final.filter((r) => runMatches(r, filter)) : final;
+    const matched = final.filter((r) => (!filter || runMatches(r, filter)) && (typeof match !== "function" || match(r) === true));
     if (matched.length > limit || floor === null || examined >= examineMax) {
       let runs = matched.slice(0, limit);
       if (matched.length > limit) {
@@ -4533,27 +4597,6 @@ export function checkpointsText(c) {
 const RESUME_CHAIN_FILE = "resume-chain";
 const SIDECAR_MAX_BYTES = 4096;
 
-/**
- * A parked run's session key, re-derived the way the worker derives it (`sessionKeyFor`, DES-SESSION-KEY-IS-DERIVED-
- * NOT-INDEXED): a forge ISSUE from kind + repo + its number, a cron run from its scheduler id. Null where the record
- * cannot say: a pull or merge request's key needs its head ref, which the record deliberately does not carry.
- */
-function parkedSessionKey(record) {
-  const kind = record?.kind;
-  if (kind === "local") {
-    const m = typeof record?.jobId === "string" ? /^(?:repeat|manual):(.+):\d+$/.exec(record.jobId) : null;
-    return m ? sessionKeyFor({ kind: "local", trigger: { id: m[1] } }) : null;
-  }
-  if (!isForgeKind(kind) || typeof record?.target !== "string") return null;
-  const m = /^(.+)#(\d+)$/.exec(record.target);
-  if (!m) return null;
-  // `#` is the issue separator on every forge; GitHub and Forgejo also spell a pull request with it, and only the
-  // trigger type can say which (a `pull_request` trigger); a comment on a pull request stays ambiguous, so a key that
-  // names no directory reads as unknown below, never as a chain of zero.
-  if (record.triggerType === "pull_request") return null;
-  return sessionKeyFor({ kind, repo: m[1], target: { type: "issue", number: Number(m[2]) } });
-}
-
 /** The chain counter for `key` under `sessionsDir`: an integer (0 for a key with no counter), or null when unknown. */
 function readChainCount(sessionsDir, key, fs) {
   if (typeof sessionsDir !== "string" || sessionsDir === "" || typeof key !== "string") return null;
@@ -4588,7 +4631,7 @@ function readChainCount(sessionsDir, key, fs) {
  * first. PURE over the runs it is handed, apart from the optional session-store read.
  *
  * `answered` is the rule the processor implies and nothing records: a LATER run on the same kind + target (an answer is
- * a new delivery on the same issue, which resumes the parked transcript). `chainCount` is the session store's
+ * a new delivery on the same issue, which resumes the parked transcript), the target compared as `targetKeyOf` says. `chainCount` is the session store's
  * `resume-chain` counter for the run's re-derived key when `sessionsDir` is on this host and the key has a directory,
  * else null ("unknown"), never 0 for a store this host cannot see. `unansweredOnly` drops the answered runs BEFORE that
  * read, so a caller that shows only the waiting ones (the fleet reader) pays no fs call for a run nobody waits on.
@@ -4596,10 +4639,10 @@ function readChainCount(sessionsDir, key, fs) {
 export function readParkedRuns({ runs, now = Date.now(), sessionsDir = null, fs = nodeFs, unansweredOnly = false } = {}) {
   const list = Array.isArray(runs) ? runs.filter((r) => r && typeof r === "object") : [];
   const nowMs = typeof now === "function" ? now() : now;
-  const latest = new Map(); // kind + target -> the newest run's instant
+  const latest = new Map(); // kind + target (`targetKeyOf`) -> the newest run's instant
   for (const r of list) {
     if (typeof r.target !== "string" || typeof r.kind !== "string") continue;
-    const k = `${r.kind}\u0000${r.target}`;
+    const k = targetKeyOf(r.kind, r.target);
     const at = runAt(r);
     if (!latest.has(k) || at > latest.get(k)) latest.set(k, at);
   }
@@ -4608,7 +4651,7 @@ export function readParkedRuns({ runs, now = Date.now(), sessionsDir = null, fs 
     if (r.outcome !== "completed" || r.reason !== "awaiting-input") continue;
     const at = runAt(r);
     const known = typeof r.target === "string" && typeof r.kind === "string";
-    const answered = known && Number.isFinite(at) && latest.get(`${r.kind}\u0000${r.target}`) > at;
+    const answered = known && Number.isFinite(at) && latest.get(targetKeyOf(r.kind, r.target)) > at;
     if (answered && unansweredOnly) continue;
     out.push({
       target: typeof r.target === "string" ? r.target : null,
@@ -4617,7 +4660,7 @@ export function readParkedRuns({ runs, now = Date.now(), sessionsDir = null, fs 
       parkedAt: Number.isFinite(at) ? at : null,
       ageMs: Number.isFinite(at) && Number.isFinite(nowMs) ? Math.max(0, nowMs - at) : null,
       answered,
-      chainCount: readChainCount(sessionsDir, parkedSessionKey(r), fs),
+      chainCount: readChainCount(sessionsDir, sessionKeyOfRecord(r), fs),
     });
   }
   out.sort((a, b) => (b.parkedAt ?? -Infinity) - (a.parkedAt ?? -Infinity));
@@ -4695,6 +4738,109 @@ export function forgeLinkOf(record, env = {}) {
   return null;
 }
 
+/** The longest URL `forgeTargetOf` reads; a forge link is well under it. */
+export const FORGE_URL_MAX = 2048;
+
+const FORGE_NUMBER_RE = /^\d{1,12}$/;
+
+/**
+ * A run target's comparison key (issue #647): `<kind>\0<target>`, with a forge target's repository path lowercased and
+ * its number's leading zeros dropped, or null for a kind or target that is not a string. ONE rule for "the same target",
+ * shared by the parked fold's answered rule (`readParkedRuns`), the parked answer's planner, `/api/run`'s URL lookup and
+ * newer-run search, and the pending-answer scan (`readPendingOnTargets`), so none of them can call a run answered that
+ * another offers a reply for. Case-insensitive because every forge this project speaks looks a repository up that way
+ * (GitHub, Forgejo and GitLab paths, an Azure project and repository): `Acme/Web#12` and `acme/web#12` are one issue,
+ * and an exact comparison would let a renamed-case repository's later run leave its park offering a second reply. A
+ * local or cron target (`local:<basename>`, a scheduler's) is compared exactly: a folder name is case-sensitive.
+ */
+export function targetKeyOf(kind, target) {
+  if (typeof kind !== "string" || typeof target !== "string") return null;
+  if (isForgeKind(kind)) {
+    const m = /^(.+)([#!])(\d{1,30})$/.exec(target);
+    if (m) return `${kind}\u0000${m[1].toLowerCase()}${m[2]}${m[3].replace(/^0+(?=\d)/, "")}`;
+  }
+  return `${kind}\u0000${target}`;
+}
+
+/** A repository path for `kind` from URL path segments, or null: the forge's own charset, and no `.` or `..` segment. */
+function forgeRepoOf(kind, segments) {
+  const repo = segments.join("/");
+  if (!FORGE_REPO_RE[kind]?.test(repo) || segments.some((seg) => seg === "." || seg === "..")) return null;
+  return repo;
+}
+
+/**
+ * The run target a forge URL names (issue #647): the INVERSE of `forgeLinkOf`, held to it by a round-trip test, so a
+ * link the console draws is a link `pi-dispatch chat <url>` and `/api/run?url=` read back to the same target. Answers
+ * `{ kind, target }`; for an Azure WORK ITEM `{ kind: "azure", project, number, ambiguous: true }`, because its URL names
+ * the project and never the repository, so the target (`<project>/<repo>#<n>`) is whichever run records say (the caller
+ * looks, and answers 409 with the candidates when there are several); or null.
+ *
+ * Read on the DEPLOYMENT's own instance URLs (`forgeBase`, the variables `forgeLinkOf` reads) and github.com, never a
+ * guessed host: a URL on any other host is null, not a best guess. Beside `forgeLinkOf`'s own shapes it also reads the
+ * request URLs a person copies from the forge, which `forgeLinkOf` never writes because GitHub and Forgejo redirect an
+ * issue link to the pull request: GitHub's `/pull/<n>` and Forgejo's `/pulls/<n>` (both `#`, the separator those forges
+ * share between issues and pull requests). A query or fragment (`#issuecomment-1`) is ignored; credentials, a control
+ * byte, whitespace, a non-http(s) scheme, a path segment that does not decode, a segment that decodes to a `/` or a
+ * control byte (`%2F` in a GitLab path is not a subgroup), and a repository outside its forge's charset are refused.
+ * Where two configured instances share a prefix, the longer base wins. A number's leading zeros are dropped.
+ */
+export function forgeTargetOf(url, env = {}) {
+  if (typeof url !== "string" || url === "" || url.length > FORGE_URL_MAX || hasControls(url) || /\s/.test(url)) return null;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if ((u.protocol !== "https:" && u.protocol !== "http:") || u.username !== "" || u.password !== "") return null;
+  const href = `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+  let best = null;
+  for (const kind of Object.keys(FORGES)) {
+    const base = kind === "github" ? "https://github.com" : forgeBase(kind, env);
+    if (base === null || !href.startsWith(`${base}/`)) continue;
+    if (best === null || base.length > best.base.length) best = { kind, base };
+  }
+  if (best === null) return null;
+  let segments;
+  try {
+    segments = href.slice(best.base.length + 1).split("/").map((seg) => decodeURIComponent(seg));
+  } catch {
+    return null; // a malformed percent escape
+  }
+  if (segments.some((seg) => seg === "" || seg.includes("/") || hasControls(seg))) return null;
+  const { kind } = best;
+  const digits = segments.at(-1);
+  if (!FORGE_NUMBER_RE.test(digits ?? "")) return null;
+  // `/issues/007` is issue 7 on every forge, and the worker writes the target with the forge's own number (no zeros).
+  const n = digits.replace(/^0+(?=\d)/, "");
+  const word = segments.at(-2);
+  if (kind === "github" || kind === "forgejo") {
+    if (segments.length !== 4) return null;
+    const request = kind === "github" ? "pull" : "pulls";
+    if (word !== "issues" && word !== request) return null;
+    const repo = forgeRepoOf(kind, segments.slice(0, 2));
+    return repo === null ? null : { kind, target: `${repo}#${n}` };
+  }
+  if (kind === "gitlab") {
+    if (segments.length < 5 || segments.at(-3) !== "-" || (word !== "issues" && word !== "merge_requests")) return null;
+    const repo = forgeRepoOf(kind, segments.slice(0, -3));
+    return repo === null ? null : { kind, target: `${repo}${word === "merge_requests" ? "!" : "#"}${n}` };
+  }
+  if (kind === "azure") {
+    if (segments.length === 4 && segments[1] === "_workitems" && segments[2] === "edit") {
+      const project = segments[0];
+      return forgeRepoOf(kind, [project, "x"]) === null ? null : { kind, project, number: n, ambiguous: true };
+    }
+    if (segments.length === 5 && segments[1] === "_git" && segments[3] === "pullrequest") {
+      const repo = forgeRepoOf(kind, [segments[0], segments[2]]);
+      return repo === null ? null : { kind, target: `${repo}!${n}` };
+    }
+    return null;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // A running job's inbox (issue #646, INT-STEER-INBOX-CONTRACT): what the console's run page, its state API and the TUI
 // show of the messages sent into a steer-armed run. NEVER THE TEXT: `listInboxPublic` already drops it, and every field
@@ -4744,6 +4890,34 @@ export async function activeJobOfRun(getJob, runId, exceptId = null) {
     if (state === "active") return found;
   }
   return null;
+}
+
+/**
+ * The ACTIVE and the QUEUED job of run `runId` other than `exceptId` (issue #647): `{ active, queued }`, each `{ job,
+ * queue }` or null, over the same candidates and order as `activeJobOfRun` (the recovery ids newest first, then the base).
+ * `queued` is the newest candidate in one of chat-mode's `QUEUED_STATES` (a #645 recovery enqueued and not started yet):
+ * the base attempt's record then says `recovery-enqueued`, which alone reads as a finished run, and a fork of it would
+ * race the recovery that is about to write the same session. Stops at the first active one. Reads only.
+ */
+export async function liveJobsOfRun(getJob, runId, exceptId = null) {
+  if ((typeof runId !== "string" || runId === "") && !Number.isSafeInteger(runId)) return { active: null, queued: null };
+  const base = String(runId);
+  const ids = [];
+  for (let n = RECOVERY_CAP; n >= 1; n -= 1) {
+    const id = recoveryJobId(base, n);
+    if (id !== null) ids.push(id);
+  }
+  ids.push(base);
+  let queued = null;
+  for (const id of ids) {
+    if (id === exceptId) continue;
+    const found = await getJob(id);
+    if (!found?.job) continue;
+    const state = await found.job.getState().catch(() => "unknown");
+    if (state === "active") return { active: found, queued: null };
+    if (queued === null && QUEUED_STATES.includes(state)) queued = found;
+  }
+  return { active: null, queued };
 }
 
 /**
@@ -4805,6 +4979,244 @@ export async function readRunProgress({ redis, queues, jobId, record = null, tim
   } catch {
     return { progress: { unreachable: "the progress key could not be read" }, continues: record?.reason === "recovery-enqueued", continuesAs: null };
   }
+}
+
+/**
+ * One job's queue state for the terminal chat's mode (issue #647, `chatModeOf`): `{ found, state, continuesAs,
+ * queuedAs }`, the job found by id in `queues` (the first that knows it), its BullMQ state word (null when no queue holds
+ * it), the id of its run's ACTIVE #645 recovery job when the job itself is not active, and, when none is active, the id
+ * of its run's QUEUED recovery job (`liveJobsOfRun`; each null otherwise). For
+ * every job, steer-armed or not, unlike `readJobInbox`. `{ invalid: true }` for an id outside the run-id charset and
+ * `{ unreachable: true }` for a read that failed or ran out of time. Of the Job's `.data` it reads `recoveryOf` alone
+ * (`runIdOf`). Never throws.
+ */
+export async function readJobStatus({ queues, jobId, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
+  if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { invalid: true };
+  const read = (async () => {
+    const getJob = async (id) => {
+      for (const q of Array.isArray(queues) ? queues : []) {
+        if (typeof q?.getJob !== "function") continue;
+        const job = await q.getJob(id);
+        if (job) return { job, queue: q.name };
+      }
+      return null;
+    };
+    const job = (await getJob(jobId))?.job ?? null;
+    const raw = job ? await job.getState().catch(() => "unknown") : null;
+    const state = raw === null ? null : typeof raw === "string" && BULL_STATE_RE.test(raw) ? raw : "unknown";
+    // A job the queue no longer holds may still be a run's base whose recovery runs (`.r1` keeps the run id), so the
+    // recovery ids are looked for by this id as the run id then.
+    const runId = job ? runIdOf(job) : jobId;
+    const live = state === "active" ? { active: null, queued: null } : await liveJobsOfRun(getJob, typeof runId === "string" ? runId : jobId, jobId);
+    const idOf = (found) => (typeof found?.job?.id === "string" && RUN_ID_RE.test(found.job.id) ? found.job.id : null);
+    return { found: job !== null, state, continuesAs: idOf(live.active), queuedAs: idOf(live.queued) };
+  })();
+  try {
+    return await withTimeout(read, timeoutMs, { unreachable: true });
+  } catch {
+    return { unreachable: true };
+  }
+}
+
+/**
+ * How many job ids the pending-answer scan lists in all, across every queue and state (issue #647, review round 2).
+ * Past it the scan says so (`tooMany`) instead of guessing. One budget for the whole look, not a cap per state: a cap
+ * per state made the first state with that many jobs declare everything partial, so a busy queue made every park
+ * unanswerable. Listing an id and reading its two short hash fields costs about the same for any job, so the budget
+ * bounds the read's time and memory whatever the jobs carry; 10,000 is far above a healthy queue and well inside
+ * FLEET_READ_TIMEOUT_MS against a local Valkey (the 1,200-job live test reads in tens of milliseconds).
+ */
+export const PENDING_SCAN_BUDGET = 10_000;
+
+/** Ids per list read: a page, so one huge state is read in bounded steps under the one budget. */
+export const PENDING_SCAN_PAGE = 500;
+
+/**
+ * The most jobs whose whole `.data` the scan parses (a forge job with no semantic dedup id: a #645 recovery or a late
+ * message's job). Past it the scan says `tooMany`: a job's data carries its issue's body and comment, so this is the
+ * one read whose size the job's author chooses.
+ */
+export const PENDING_DATA_MAX = 500;
+
+/**
+ * The states a job on a park's target counts as taking its answer in: running, or about to (chat-mode's own list), in
+ * the order a job moves through them, so a job that moves while the scan pages (delayed to waiting, waiting to active)
+ * is met again in a state read later rather than slipping between two reads.
+ */
+export const PENDING_STATES = Object.freeze(["waiting-children", "delayed", "prioritized", "paused", "waiting", "active"]);
+
+/** The forge job's semantic dedup id (`enqueueForgeJob`'s `repo<sep>number:flow...`): its target, the part before the flow. */
+const DEID_TARGET_RE = /^([^:]+[#!]\d{1,30}):/;
+
+/**
+ * One queue's ids in `state`, `start` to `end` inclusive, and their `name` and `deid` hash fields, read the cheap way:
+ * BullMQ's own range script for the ids, then one pipelined HMGET of two short fields per job, never the job's data.
+ * A queue double (or a reader without the raw client) falls back to `getJobs`, whose jobs carry their data whole.
+ */
+async function pendingPage(q, state, start, end) {
+  if (typeof q?.getRanges === "function" && typeof q?.toKey === "function" && q?.client) {
+    const ids = (await q.getRanges([state], start, end)).filter((id) => typeof id === "string");
+    if (ids.length === 0) return [];
+    const client = await q.client;
+    const pipe = client.pipeline();
+    for (const id of ids) pipe.hmget(q.toKey(id), "name", "deid");
+    const got = await pipe.exec();
+    return ids.map((id, i) => {
+      const [err, v] = got[i] ?? [];
+      return { id, name: !err && Array.isArray(v) ? v[0] : null, deid: !err && Array.isArray(v) ? v[1] : null, data: undefined };
+    });
+  }
+  if (typeof q?.getJobs !== "function") return null;
+  const jobs = await q.getJobs([state], start, end);
+  return (Array.isArray(jobs) ? jobs : []).map((job) => ({ id: job?.id, name: typeof job?.name === "string" ? job.name : null, deid: null, data: job?.data ?? null }));
+}
+
+/** The parsed `.data` of each id (null where it is missing or not JSON), one pipelined HGET. */
+async function pendingData(q, ids) {
+  const client = await q.client;
+  const pipe = client.pipeline();
+  for (const id of ids) pipe.hget(q.toKey(id), "data");
+  const got = await pipe.exec();
+  return ids.map((_, i) => {
+    const [err, v] = got[i] ?? [];
+    if (err || typeof v !== "string") return null;
+    try {
+      return JSON.parse(v);
+    } catch {
+      return null;
+    }
+  });
+}
+
+/**
+ * The jobs queued or running on parked runs' targets (issue #647): `{ byKey, complete, tooMany }`, `byKey` a Map from
+ * each matched target's `targetKeyOf` to the first such job's id, `complete` false when the scan did not see every job
+ * (so a target with no match is NOT known to have none), `tooMany` true when that was because the queues hold more than
+ * the budget (`PENDING_SCAN_BUDGET` ids, `PENDING_DATA_MAX` data reads), or `{ unreachable: true }`. `targets` is
+ * `[{ kind, target, runId }]`, `runId` the park's own run, whose jobs are never its answer.
+ *
+ * WHY A QUEUE SCAN AND NOT THE ANSWER'S KEYS. A run's record is written at its end, so the answer's resume run leaves no
+ * record while it is queued or running, and the park would go on offering a reply that resumes the same transcript a
+ * second time. The keys an answer leaves are no better: its delivery id is fresh per answer, and its semantic window
+ * (`repo#n:flow`) names the COMMENT trigger's flow, not the park's, and lapses after ten minutes while the run may go on
+ * for an hour. Listing the running and waiting jobs is what can say "a run on this target is coming", the parked fold's
+ * own answered rule one step early.
+ *
+ * WHAT IT READS (review round 2: reading every job whole made a busy queue cost every park its answer). Ids page by
+ * page under one budget, and per id only the hash's `name` (the job's kind: `local` for cron, CLI and chained jobs,
+ * skipped at once unless a local park is wanted) and `deid`, the semantic dedup id every receiver and console forge job
+ * carries, whose `repo<sep>number` prefix IS `targetFor`'s target. Only a forge job of a wanted kind without one (a
+ * recovery or a late message's job) has its `.data` parsed, for what `targetFor` reads and `recoveryOf` (`runIdOf`).
+ * Compared in memory; ids alone come back. It stops early once every target is matched. Never throws.
+ */
+export async function readPendingOnTargets({ queues, targets, budget = PENDING_SCAN_BUDGET, page = PENDING_SCAN_PAGE, dataMax = PENDING_DATA_MAX, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
+  const want = new Map();
+  for (const t of Array.isArray(targets) ? targets : []) {
+    const key = targetKeyOf(t?.kind, t?.target);
+    if (key !== null) want.set(key, typeof t.runId === "string" ? t.runId : null);
+  }
+  if (want.size === 0) return { byKey: new Map(), complete: true, tooMany: false };
+  const kinds = new Set([...want.keys()].map((k) => k.slice(0, k.indexOf("\u0000"))));
+  const read = (async () => {
+    const byKey = new Map();
+    let complete = true;
+    let tooMany = false;
+    let listed = 0;
+    let parsed = 0;
+    const match = (id, key, recoveryOf) => {
+      if (key === null || !want.has(key) || byKey.has(key)) return;
+      if (typeof id !== "string" || !RUN_ID_RE.test(id)) return;
+      const own = want.get(key);
+      if (own !== null && (id === own || recoveryOf === own)) return;
+      byKey.set(key, id);
+    };
+    const fromData = (id, data) => {
+      if (data === null || typeof data !== "object") return;
+      let target = null;
+      try {
+        target = targetFor(data.kind, data);
+      } catch {
+        target = null; // a hand-built entry with no folder or repo has no target
+      }
+      match(id, targetKeyOf(data.kind, target), runIdOf({ id, data }));
+    };
+    scan: for (const q of Array.isArray(queues) ? queues : []) {
+      for (const state of PENDING_STATES) {
+        for (let start = 0; ; ) {
+          if (byKey.size === want.size) break scan;
+          const room = budget - listed;
+          const take = Math.min(page, room);
+          // One id past the page says whether more follow, so a state that holds exactly the budget is complete.
+          const rows = take > 0 ? await pendingPage(q, state, start, start + take) : await pendingPage(q, state, start, start);
+          if (rows === null) {
+            complete = false; // a queue this reader cannot list
+            continue scan;
+          }
+          if (take <= 0) {
+            if (rows.length > 0) {
+              complete = false;
+              tooMany = true;
+              break scan;
+            }
+            break;
+          }
+          const mine = rows.slice(0, take);
+          listed += mine.length;
+          const needData = [];
+          for (const row of mine) {
+            if (row.data !== undefined) {
+              fromData(row.id, row.data); // a queue double's whole job
+              continue;
+            }
+            if (!kinds.has(row.name)) continue; // another kind (a cron or CLI job when no local park is wanted)
+            const deid = isForgeKind(row.name) && typeof row.deid === "string" ? DEID_TARGET_RE.exec(row.deid) : null;
+            if (deid) match(row.id, targetKeyOf(row.name, deid[1]), null);
+            else needData.push(row.id);
+          }
+          if (needData.length > 0) {
+            if (parsed + needData.length > dataMax) {
+              complete = false;
+              tooMany = true;
+              break scan;
+            }
+            parsed += needData.length;
+            const datas = await pendingData(q, needData);
+            needData.forEach((id, i) => fromData(id, datas[i]));
+          }
+          if (rows.length <= take) break;
+          start += take;
+        }
+      }
+    }
+    return { byKey, complete, tooMany };
+  })();
+  try {
+    return await withTimeout(read, timeoutMs, { unreachable: true });
+  } catch {
+    return { unreachable: true };
+  }
+}
+
+/**
+ * One target's answer off a `readPendingOnTargets` result: `{ jobId }` (the job on its target, or null when the scan saw
+ * everything and found none), `{ unknown: true, tooMany }` (a partial scan with no match; `tooMany` when the queues were
+ * deeper than its budget) or `{ unreachable: true }`. The shape chat-mode's `pendingFactsOf` reads, for the parked
+ * inbox's rows and the single-park reader alike.
+ */
+export function pendingScanFor(got, key) {
+  if (!got || got.unreachable) return { unreachable: true };
+  const id = key === null ? null : (got.byKey?.get(key) ?? null);
+  if (id !== null) return { jobId: id };
+  if (key !== null && got.complete) return { jobId: null };
+  return { unknown: true, tooMany: got.tooMany === true };
+}
+
+/** Whether one park is being answered now (issue #647, `readPendingOnTargets` for a single target): `pendingScanFor`'s shape. */
+export async function readPendingAnswer({ queues, kind, target, runId = null, budget, page, dataMax, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
+  const key = targetKeyOf(kind, target);
+  if (key === null) return { unknown: true, tooMany: false };
+  const got = await readPendingOnTargets({ queues, targets: [{ kind, target, runId }], budget, page, dataMax, timeoutMs });
+  return pendingScanFor(got, key);
 }
 
 /**
