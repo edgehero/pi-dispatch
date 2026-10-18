@@ -9,8 +9,8 @@
  * the runner's pin, and this checks both halves:
  *   - the overrides name every pi package the lockfile holds, each at the pin;
  *   - every pi package entry in package-lock.json (at any depth) is at the pin;
- *   - the places the pin is written by hand agree with it: the runner's pi-mcp and pi-agent-core, the worker's pi-ai,
- *     the admin devDependency, admin/src/index.ts's SUPPORTED_PI_VERSION and image/Dockerfile's PI_VERSION.
+ *   - the places the pin is written by hand agree with it: the runner's pi-mcp and pi-agent-core, the worker's pi-ai
+ *     and pi-tui, the admin devDependency, admin/src/index.ts's SUPPORTED_PI_VERSION and image/Dockerfile's PI_VERSION.
  *
  * `piPinProblems` is pure (the files are handed in) so its test pins the rule on constructed input as well as on this
  * repository's own files. Run as a script it reads the repository and exits 1 on any problem.
@@ -35,6 +35,9 @@ export function piPinProblems({ root, lock, runner, worker, admin, adminIndex, d
 	// not re-export it; the runner's copy must be the one pi-coding-agent loads, whose hooks and tools it is handed.
 	want("image/runner/package.json's @earendil-works/pi-agent-core", runner?.dependencies?.[`${SCOPE}pi-agent-core`]);
 	want("worker/package.json's @earendil-works/pi-ai", worker?.dependencies?.[`${SCOPE}pi-ai`]);
+	// The terminal chat draws with pi-tui (issue #647, chat-view.mjs), the renderer pi itself uses: one copy at the pin,
+	// so the screen it draws and the escapes it can emit are the ones the pinned pi was checked against.
+	want("worker/package.json's @earendil-works/pi-tui", worker?.dependencies?.[`${SCOPE}pi-tui`]);
 	want("admin/package.json's devDependency @earendil-works/pi-coding-agent", admin?.devDependencies?.[`${SCOPE}pi-coding-agent`]);
 	want("admin/src/index.ts's SUPPORTED_PI_VERSION", /^export const SUPPORTED_PI_VERSION = "([^"]*)";$/m.exec(adminIndex ?? "")?.[1]);
 	want("image/Dockerfile's PI_VERSION", /^ARG PI_VERSION=(\S*)$/m.exec(dockerfile ?? "")?.[1]);
