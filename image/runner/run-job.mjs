@@ -575,8 +575,20 @@ async function main() {
 	const recoveryField = () => (recovery ? { recovery } : {});
 	// The inbox counts (issue #646), on every exit line of a steer-armed run once its session exists: integers and the
 	// delivered ids (32 hex each, at most 16), which the worker marks delivered from this signed line. Never text.
-	const steerField = () => (inbox ? { steer: inbox.counts() } : {});
-	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField(), ...steerField() });
+	// The SIGTERM line is the run's last word, so it closes the inbox first, as the prompt's finally does before the
+	// decided line: `pending` then counts what is on disk and never a message withdrawn while held (issue #670).
+	const steerField = ({ closing = false } = {}) => {
+		if (!inbox) return {};
+		if (closing) {
+			try {
+				inbox.close();
+			} catch {
+				// the exit line matters more than an exact count: a throw here would lose it and exit 1, which retries
+			}
+		}
+		return { steer: inbox.counts() };
+	};
+	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField(), ...steerField({ closing: true }) });
 	// What this transcript already delivered (a resumed or recovered run) is never handed over again.
 	inbox?.seed(sessionManager);
 

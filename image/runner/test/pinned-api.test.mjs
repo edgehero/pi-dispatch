@@ -2306,6 +2306,32 @@ test("a steer queued from agent_before_settle continues the run, and the agent l
 	assert.equal(sha256(run), "a98c51c7f74da166ac6f187c2f6eff136f27141219ddd93436445aeac5284a28", "pi's agent loop changed at this pin: re-read when a steer and a follow-up are delivered, and src/inbox.mjs");
 });
 
+test("pi keeps steering and follow-ups in two queues, each drained one message at a time by default, and a continuation polls steering first (issue #670)", { skip }, () => {
+	// src/inbox.mjs keeps one of ours in flight and holds follow-ups until the settle boundary: its header rests on
+	// pi's two separate queues, each handing over one message per drain in the default mode.
+	const agent = agentCoreDistFile("agent.js");
+	const start = agent.indexOf("class PendingMessageQueue {");
+	assert.ok(start >= 0, "pi no longer defines PendingMessageQueue");
+	const queue = agent.slice(start, agent.indexOf("\n}\n", start) + 2);
+	assert.match(queue, /peek\(\) \{\n\s*if \(this\.mode === "all"\)\n\s*return this\.messages\.slice\(\);\n\s*const first = this\.messages\[0\];\n\s*return first \? \[first\] : \[\];/, "a non-\"all\" queue no longer hands over one message at a time");
+	assert.match(queue, /drain\(\) \{\n\s*const drained = this\.peek\(\);/, "drain no longer takes what peek shows");
+	assert.match(agent, /this\.steeringQueue = new PendingMessageQueue\(runtimeOptions\.steeringMode \?\? "one-at-a-time"\);\n\s*this\.followUpQueue = new PendingMessageQueue\(runtimeOptions\.followUpMode \?\? "one-at-a-time"\);/, "the two queues or their fallback mode changed");
+	const defaults = agentDistFile("core", "settings-defaults.js");
+	assert.match(defaults, /\n {4}steeringMode: "one-at-a-time",\n {4}followUpMode: "one-at-a-time",\n/, "the settings' default steeringMode/followUpMode changed");
+	assert.match(agentDistFile("core", "sdk.js"), /steeringMode: settingsManager\.getSteeringMode\(\),\n\s*followUpMode: settingsManager\.getFollowUpMode\(\),/, "the session no longer hands the settings' modes to the agent");
+	assert.equal(sha256(queue), "b88ddfd94c1f60cbc5f58ee486e76a05cd9966dd0073f13b41bce65ea22104e9", "PendingMessageQueue changed at this pin: re-read src/inbox.mjs's header");
+	// Review round 1: the boundary hands a held follow-up over as a STEER, because steering is read first on both of
+	// continue()'s paths. A trailing assistant drains it before the follow-ups (the issue #646 pin above); a transcript a
+	// terminating tool ended (a tool result last) takes runContinuation, whose loop polls steering at its start, with no
+	// skip, and follow-ups only once it would stop again.
+	assert.match(piMethod(agent, "async continue"), /throw new Error\("Cannot continue from message role: assistant"\);\n\s*\}\n\s*await this\.runContinuation\(\);\n\s*\}/, "continue() no longer falls through to runContinuation for a non-assistant last message");
+	assert.match(piMethod(agent, "async runContinuation"), /await runAgentLoopContinue\(this\.createContextSnapshot\(\), this\.createLoopConfig\(\), /, "runContinuation now passes loop options: the first steering poll may be skipped");
+	assert.match(piMethod(agent, "createLoopConfig"), /let skipInitialSteeringPoll = options\.skipInitialSteeringPoll === true;[\s\S]*getSteeringMessages: async \(\) => \{\n\s*if \(skipInitialSteeringPoll\) \{\n\s*skipInitialSteeringPoll = false;\n\s*return \[\];\n\s*\}\n\s*return this\.steeringQueue\.drain\(\);/, "the first steering poll is skipped by something other than the option");
+	const loop = agentCoreDistFile("agent-loop.js");
+	assert.match(piFunction(loop, "runAgentLoopContinue"), /await emit\(\{ type: "turn_start" \}\);\n\s*await runLoop\(currentContext, newMessages, config, signal, emit, /, "runAgentLoopContinue no longer goes straight into runLoop");
+	assert.match(piFunction(loop, "runLoop"), /^function runLoop\([^)]*\) \{\n(?:\s*(?:let|\/\/)[^\n]*\n)*\s*let pendingMessages = \(await config\.getSteeringMessages\?\.\(\)\) \|\| \[\];\n\s*\/\/ Outer loop/, "the loop no longer polls steering before its first model call");
+});
+
 test("a message renderer is read only by the interactive TUI, so the inbox needs no shadow guard (issue #646)", { skip }, () => {
 	const dist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 	const readers = [];
