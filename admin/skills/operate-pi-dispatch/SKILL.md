@@ -21,9 +21,11 @@ Observe (no approval needed):
   When a dollar cap applies, a `dollars` block sits beside the fold: the dollar windows (each window's counter,
   spent and held, against its cap, and what settled) and each run's `dollars`. Those amounts are integer
   micro-dollars (1 USD = 1000000) with no class: they are the caps' own accounting.
-  The operator sees the same fold drawn as charts on the insights page (`/dispatch insights
-  [7d|30d|mtd]` writes and opens it), and `/dispatch insights whatif <provider/model> --flow <flow>`
-  estimates what a flow would cost per run on another model's rates.
+  The operator sees the same fold drawn as charts on the operator console's insights page
+  (`/insights?range=7d|30d|mtd`; `/dispatch insights [7d|30d|mtd]` prints its URL, and the console runs only
+  when started with `pi-dispatch-console serve`). Its what-if form (`/dispatch insights whatif
+  <provider/model> --flow <flow>` prints that URL) estimates what a flow would cost per run on another
+  model's rates.
 - `dispatch_triggers` — the configured triggers with their array `index` (needed to edit/delete one).
 - `dispatch_projects` - the projects (projects.json): each id, display name, members, and the scoped-limits
   rows that cap it. `dispatch_costs` folds spend `byProject` by the id each run recorded, and its `project`

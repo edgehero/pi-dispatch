@@ -2,12 +2,23 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, layoutCapacityChart, microsUsd, capMilliText, capPercentText, capShare, capShareText, INSIGHTS_CAPACITY_HOST_NAME, INSIGHTS_CAPACITY_JOBS_ONLY, INSIGHTS_SPLIT_REFUSALS, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
+import { layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, layoutSplitBars, layoutCapacityChart, microsUsd, capMilliText, capPercentText, capShare, capShareText, INSIGHTS_CAPACITY_HOST_NAME, INSIGHTS_CAPACITY_JOBS_ONLY, INSIGHTS_SPLIT_REFUSALS, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { buildGraphModel } from "../src/graph-model.mjs";
 import { buildGraphScene, drawnColumns, PAGE_THEME } from "../src/graph-html.mjs";
 import { COST_CLASSES, foldTriggerCosts } from "../src/costs.mjs";
+import { insightsBody } from "../src/console/panels.mjs";
+import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
+import { CONSOLE_CSS } from "../src/console/style.mjs";
+
+/**
+ * The insights sections as the operator console's spend screen draws them (`insightsBody`, the `p-insights` panel's
+ * body), as a string. The static insights export these tests were written against is retired (the insights move to
+ * the console); every pin that guarded a property of the drawn sections is held here on the renderer that ships, and
+ * the pins on the page's behaviour are held on the console's one script (`CONSOLE_SCRIPT`).
+ */
+const insightsHtml = (payload, { now, fullPaths } = {}) => String(insightsBody(payload, now, { fullPaths: fullPaths === true }));
 
 const NOW = 1770000000000;
 
@@ -169,7 +180,7 @@ const CANNED_PAYLOAD = () => ({
   budget: CANNED_BUDGET(),
 });
 
-const cannedHtml = () => buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW });
+const cannedHtml = () => insightsHtml(CANNED_PAYLOAD(), { now: NOW });
 
 // ---- 1. purity / import allowlist ----
 
@@ -208,13 +219,12 @@ test("hostile flow, plan, repo, trigger and day strings cannot break out of mark
   // A hostile day string is not escaped but DROPPED: a day is an axis coordinate, and a non-date
   // coordinate has nowhere truthful to draw. The $77 canary proves the whole entry went with it.
   payload.fold.daily.push({ day: '"><script>', cost: usd(77, "metered"), runs: 1 });
-  const out = buildInsightsHtml(payload, { now: NOW });
+  const out = insightsHtml(payload, { now: NOW });
 
-  assert.equal(out.split("<script").length - 1, 1, "exactly ONE script open tag: the page's own");
-  assert.equal(out.split("</script").length - 1, 1, "and exactly one close: nothing embedded can spell it");
+  assert.equal(out.split("<script").length - 1, 0, "no script element at all: the console's one script is served by URL");
+  assert.equal(out.split("</script").length - 1, 0, "and nothing a value carries can spell its close");
   assert.ok(!out.includes("<script>alert"), "the attack string never appears unescaped");
   assert.ok(out.includes("&lt;script&gt;") || out.includes("&lt;/script&gt;"), "it appears as entities instead");
-  assert.ok(out.includes("\\u003c"), "the embedded json carries < as an escape, never a literal");
   assert.ok(!out.includes("$77.00"), "the malformed-day entry is dropped whole, cost and all");
 });
 
@@ -223,7 +233,7 @@ test("hostile flow, plan, repo, trigger and day strings cannot break out of mark
 test("same payload + same now is byte-identical, and every input array order is irrelevant", () => {
   assert.equal(cannedHtml(), cannedHtml());
 
-  const base = buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW });
+  const base = insightsHtml(CANNED_PAYLOAD(), { now: NOW });
   const p = CANNED_PAYLOAD();
   p.fold.daily.reverse();
   p.fold.byFlow.reverse();
@@ -240,7 +250,7 @@ test("same payload + same now is byte-identical, and every input array order is 
   p.fold.dailyByFlow.reverse();
   for (const r of p.fold.dailyByFlow) r.days.reverse();
   p.budget = Object.fromEntries(Object.entries(p.budget).reverse());
-  assert.equal(buildInsightsHtml(p, { now: NOW }), base, "normalisation re-sorts everything; a permuted payload may not move a byte");
+  assert.equal(insightsHtml(p, { now: NOW }), base, "normalisation re-sorts everything; a permuted payload may not move a byte");
 });
 
 // ---- 5. well-formedness smoke ----
@@ -273,9 +283,11 @@ test("balanced markup, finite numbers everywhere, path grammar, and labelled cha
   }
 });
 
-// ---- 6. file:// posture ----
+// ---- 6. zero external requests ----
 
-test("nothing on the page can reach outside the file", () => {
+test("nothing in the drawn sections can reach outside the console", () => {
+  // The console's CSP (`default-src 'none'`, `self` for script, style, image and connect) is the browser's half of
+  // this; the drawn sections hold no reference to load at all, which is the server's half.
   const out = cannedHtml();
   for (const needle of ["src=", "<link", "url(", "@import", "fetch", "XMLHttpRequest", "innerHTML"]) {
     assert.ok(!out.includes(needle), `forbidden over file://: ${needle}`);
@@ -309,7 +321,7 @@ test("a null window limit renders undisclosed with no burn-down, and NO_BASELINE
   const p = CANNED_PAYLOAD();
   p.fold.plans[0].apiEquiv = null;
   p.fold.plans[0].verdict = { kind: "NO_BASELINE", usd: usd(9.99, "estimated") }; // a smuggled number
-  const page = buildInsightsHtml(p, { now: NOW });
+  const page = insightsHtml(p, { now: NOW });
   assert.ok(page.includes("no API-rate baseline declared, set counterfactualModel to compare"));
   assert.ok(!page.includes("$9.99"), "NO_BASELINE renders the sentence and never a number, even a smuggled one");
 });
@@ -386,13 +398,13 @@ test("unexpected fields and host paths never reach the page; fullPaths widens gr
   payload.fold.byFlow[0].secret = "CANARY-9f3";
   payload.fold.byTrigger[0].secret = "CANARY-9f3";
   payload.costByTrigger["trigger:0"].secret = "CANARY-9f3";
-  const out = buildInsightsHtml(payload, { now: NOW });
+  const out = insightsHtml(payload, { now: NOW });
   assert.ok(!out.includes("CANARY-9f3"), "unknown fields must be structurally unreachable, not merely unused");
   assert.ok(!out.includes("/Users/someone/private"), "groups render their basename label by DEFAULT, never the path");
   assert.ok(out.includes("private"), "the basename label itself still renders");
   assert.ok(!out.includes('"trigger:0"'), "original trigger ids are server-side join vocabulary only");
 
-  const full = buildInsightsHtml(payload, { now: NOW, fullPaths: true });
+  const full = insightsHtml(payload, { now: NOW, fullPaths: true });
   assert.ok(full.includes("/Users/someone/private"), "fullPaths: true labels local groups with their path");
   assert.ok(!full.includes("CANARY-9f3"), "the opt-in widens labels, not the allowlist");
 });
@@ -417,13 +429,13 @@ test("provenance counters, the pi-ai pin, the dual window statement and the date
   const p = CANNED_PAYLOAD();
   p.fold.provenance.ratesDrifted = 0;
   p.fold.provenance.runsLedgerTruncated = 0;
-  const quiet = buildInsightsHtml(p, { now: NOW });
+  const quiet = insightsHtml(p, { now: NOW });
   assert.ok(!quiet.includes("rates drifted"));
   assert.ok(!quiet.includes("ledgers truncated"));
 
   const mtd = CANNED_PAYLOAD();
   mtd.window = "mtd";
-  assert.ok(buildInsightsHtml(mtd, { now: NOW }).includes("spend window: month to date"));
+  assert.ok(insightsHtml(mtd, { now: NOW }).includes("spend window: month to date"));
 });
 
 test("the spend layer badges triggers under their chips, amber only for estimated dollars", () => {
@@ -446,7 +458,7 @@ test("breakdown lists cap at 8 rows and state the tail as one estimated aggregat
     tokens: 10,
     cost: usd(11 - i, "metered"),
   }));
-  const out = buildInsightsHtml(p, { now: NOW });
+  const out = insightsHtml(p, { now: NOW });
   // Rows 9..11 carry $3 + $2 + $1: the tail is their sum, demoted to an estimate because a fold of
   // heterogeneous rows is no longer one measured number.
   assert.ok(out.includes("(+3 more · ~$6.00 est.)"), "totals never silently truncate");
@@ -456,21 +468,28 @@ test("breakdown lists cap at 8 rows and state the tail as one estimated aggregat
 
 // ---- 11. script hardening ----
 
-test("one script that parses, minted-only data-node ids, bounded tips, one guarded GRAPH read", () => {
-  const out = cannedHtml();
-  const script = /<script>([\s\S]*?)<\/script>/.exec(out)[1];
-  new Function(script); // parse check: a syntax break in the emitted script goes red here, not in a browser
+/** The texts of a hidden list the body carries (`#insights-tips`, `#graph-nodes`), entity-decoded. */
+function listTexts(out, id) {
+  const m = new RegExp(`<ol id="${id}" class="hidden-tips" hidden>([^]*?)</ol>`).exec(out);
+  assert.ok(m, `the body carries #${id}`);
+  const dec = (t) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  return [...m[1].matchAll(/<li([^>]*)>([^<]*)<\/li>/g)].map((x) => ({ attrs: x[1], text: dec(x[2]) }));
+}
 
-  assert.equal((script.match(/GRAPH\.nodes\[/g) ?? []).length, 1, "exactly one raw indexed read of GRAPH.nodes: PAGE_JS's own guarded one");
-  assert.ok(script.includes("/^n\\d+$/"), "the click replay guards its id before any DOM lookup");
-  assert.ok(script.includes('MouseEvent("click"'), "row clicks replay through the DOM so PAGE_JS owns selection");
-  assert.ok(script.includes("textContent"), "tips reach the DOM as text only");
+test("one script that parses, minted-only data-node ids, bounded tips, one guarded node read", () => {
+  const out = cannedHtml();
+  new Function(CONSOLE_SCRIPT); // parse check: a syntax break in the served script goes red here, not in a browser
+  assert.equal((CONSOLE_SCRIPT.match(/NODES\[(?!nid\])/g) ?? []).length, 1, "exactly one indexed read of the chips' data: the own-property guard's");
+  assert.ok(CONSOLE_SCRIPT.includes("Object.prototype.hasOwnProperty.call(NODES, id)"), "and it is guarded");
+  assert.ok(CONSOLE_SCRIPT.includes("/^n\\d+$/"), "the click replay guards its id before any DOM lookup");
+  assert.ok(CONSOLE_SCRIPT.includes('MouseEvent("click"'), "row clicks replay through the DOM so the topology owns selection");
+  assert.ok(CONSOLE_SCRIPT.includes("tip.textContent = TIPS[i]"), "tips reach the DOM as text only");
 
   const nodeIds = [...out.matchAll(/data-node="([^"]*)"/g)].map((m) => m[1]);
   assert.ok(nodeIds.length >= 2, "the canned trigger rows link to their chips");
   for (const id of nodeIds) assert.match(id, /^n\d+$/, "only minted ordinals ride the DOM");
 
-  const tips = JSON.parse(/var INSIGHTS = (.*);/.exec(out)[1]).tips;
+  const tips = listTexts(out, "insights-tips").map((t) => t.text);
   const refs = [...out.matchAll(/data-tip="([^"]*)"/g)].map((m) => Number(m[1]));
   assert.ok(refs.length > 0 && tips.length > 0);
   for (const i of refs) assert.ok(Number.isInteger(i) && i >= 0 && i < tips.length, "every data-tip ordinal is in bounds");
@@ -478,31 +497,37 @@ test("one script that parses, minted-only data-node ids, bounded tips, one guard
   assert.ok(tips.some((t) => t.includes("1 failed (") && t.includes("$0.40")), "a trigger with failures states their cost in its tip");
 });
 
-test("the header keeps graph.html's reload contract so PAGE_JS binds unmodified", () => {
+test("the topology's chip data rides a hidden escaped list the script reads, and the view survives a reload via the hash", () => {
   const out = cannedHtml();
-  assert.ok(out.includes("<h1>pi-dispatch insights</h1>"));
-  assert.ok(out.includes('<span id="stamp"></span>'));
-  assert.ok(out.includes(">Reload</button>"));
-  for (const opt of [">off<", ">5s<", ">30s<"]) assert.ok(out.includes(opt), `auto-reload option ${opt}`);
-  assert.ok(out.includes(`GENERATED_AT = ${NOW}`));
-  assert.ok(out.includes('<div id="wrap">') && out.includes('<div id="tip">'), "the ids PAGE_JS expects");
-  assert.ok(out.includes("location.reload") && !out.includes("fetch"), "refresh means reloading regenerated bytes");
-  // Since #279 this is the only page carrying the contract, so its last two clauses move here from
-  // the deleted graph-page test: view state survives a reload via the hash, and the auto-reload
-  // timer actually exists rather than being three dead options.
-  assert.ok(out.includes("location.hash"), "view state survives a reload via the hash");
-  assert.ok(out.includes("setInterval"), "the auto-reload options drive a real timer");
+  assert.ok(out.includes('<div id="wrap">') && out.includes('<div id="tip">'), "the ids the script expects");
+  const nodes = listTexts(out, "graph-nodes");
+  const scene = buildGraphScene(CANNED_PAYLOAD().graph, { now: NOW });
+  assert.deepEqual(nodes.map((n) => /data-id="([^"]*)"/.exec(n.attrs)[1]).sort(), Object.keys(scene.graphData.nodes).sort(), "one item per chip, by minted id");
+  for (const n of nodes) {
+    const id = /data-id="([^"]*)"/.exec(n.attrs)[1];
+    assert.equal(n.text, scene.graphData.nodes[id].tip, `${id}: the chip's tooltip, as text`);
+    for (const attr of ["data-nb", "data-w"]) {
+      const words = new RegExp(`${attr}="([^"]*)"`).exec(n.attrs)[1].split(" ").filter(Boolean);
+      for (const w of words) assert.match(w, /^[nw]\d+$/, `${id} ${attr}: minted ids only`);
+    }
+  }
+  assert.ok(!out.includes('"trigger:'), "no original id reaches the list");
+  // The behaviour the offline page's script had, in the console's: the hash keeps the view, the page never reloads
+  // itself (the console's range picker is its refresh), and nothing is fetched for the topology.
+  assert.ok(CONSOLE_SCRIPT.includes("location.hash") && CONSOLE_SCRIPT.includes("history.replaceState"), "view state survives a reload via the hash");
+  const spend = CONSOLE_SCRIPT.slice(CONSOLE_SCRIPT.indexOf("// ---- the spend screen"), CONSOLE_SCRIPT.indexOf("// ---- the action forms"));
+  assert.ok(spend.includes("function insightsPage()"), "the spend screen's part of the script is where this test looks");
+  for (const word of ["location.reload", "setInterval", "fetch(", "XMLHttpRequest", "EventSource", "innerHTML", "insertAdjacentHTML"]) assert.ok(!spend.includes(word), `the spend screen's script holds no ${word}`);
 });
 
 // ---- 12. degrades ----
 
 test("null payload, unreachable costs, missing joins and junk all degrade to a stated page", () => {
-  const nothing = buildInsightsHtml(null);
-  assert.ok(nothing.startsWith("<!doctype html>"));
-  assert.ok(nothing.includes("<title>pi-dispatch insights</title>"));
+  const nothing = insightsHtml(null);
   assert.ok(nothing.includes("no graph model supplied; the page has nothing to draw"));
+  assert.ok(nothing.includes("No cost data could be read for this window."), "a null fold is a stated absence");
 
-  const unreachable = buildInsightsHtml(
+  const unreachable = insightsHtml(
     { graph: buildGraphModel(CANNED()), fold: null, costsUnreachable: "records dir unreadable", window: "7d", costByTrigger: null },
     { now: NOW },
   );
@@ -512,33 +537,33 @@ test("null payload, unreachable costs, missing joins and junk all degrade to a s
 
   const noJoin = CANNED_PAYLOAD();
   noJoin.fold.byTrigger = null;
-  assert.ok(buildInsightsHtml(noJoin, { now: NOW }).includes("not computed (no trigger join wired)"), "absence, not an empty table");
+  assert.ok(insightsHtml(noJoin, { now: NOW }).includes("not computed (no trigger join wired)"), "absence, not an empty table");
 
   const empty = CANNED_PAYLOAD();
   empty.fold.daily = [];
-  assert.ok(buildInsightsHtml(empty, { now: NOW }).includes("no runs in the spend window"));
+  assert.ok(insightsHtml(empty, { now: NOW }).includes("no runs in the spend window"));
 
   const zeroRuns = CANNED_PAYLOAD();
   zeroRuns.fold.provenance.runsTotal = 0;
-  assert.ok(buildInsightsHtml(zeroRuns, { now: NOW }).includes("no runs in the spend window"), "the zero-run banner");
+  assert.ok(insightsHtml(zeroRuns, { now: NOW }).includes("no runs in the spend window"), "the zero-run banner");
 
   const allZero = CANNED_PAYLOAD();
   allZero.fold.daily = [
     { day: "2026-07-29", cost: usd(0, "metered"), runs: 0 },
     { day: "2026-07-30", cost: usd(0, "metered"), runs: 0 },
   ];
-  assert.ok(buildInsightsHtml(allZero, { now: NOW }).includes("no spend recorded"), "an all-zero window keeps its axis frame and says so");
+  assert.ok(insightsHtml(allZero, { now: NOW }).includes("no spend recorded"), "an all-zero window keeps its axis frame and says so");
 
   const noSubs = CANNED_PAYLOAD();
   noSubs.fold.plans = [];
   noSubs.subscriptionsInvalid = true;
-  assert.ok(buildInsightsHtml(noSubs, { now: NOW }).includes("subscriptions file missing or invalid: plans not scored"));
+  assert.ok(insightsHtml(noSubs, { now: NOW }).includes("subscriptions file missing or invalid: plans not scored"));
   const noFlag = CANNED_PAYLOAD();
   noFlag.fold.plans = [];
-  assert.ok(!buildInsightsHtml(noFlag, { now: NOW }).includes("subscriptions file missing"), "no flag, no accusation");
+  assert.ok(!insightsHtml(noFlag, { now: NOW }).includes("subscriptions file missing"), "no flag, no accusation");
 
   for (const junk of [null, 42, "x", { graph: "no", fold: 7, window: 9, costByTrigger: [] }]) {
-    const page = buildInsightsHtml(junk, { now: NOW });
+    const page = insightsHtml(junk, { now: NOW });
     assert.ok(page.includes("<svg"), "malformed input still yields a page, never a throw");
   }
 });
@@ -566,25 +591,25 @@ test("budget rows render used-vs-cap FACTS: known caps get a bar, unknown caps g
 test("budget degrades: off windows, an unreachable queue, junk states, and a missing slice", () => {
   const offPayload = CANNED_PAYLOAD();
   offPayload.budget.week = { reserved: 0, cap: null, state: "ok" };
-  const off = buildInsightsHtml(offPayload, { now: NOW });
+  const off = insightsHtml(offPayload, { now: NOW });
   assert.ok(off.includes("off · no cap set"), "week/month with no cap and nothing reserved is OFF, not zero");
 
   const downPayload = CANNED_PAYLOAD();
   downPayload.budget.unreachable = "timed out reaching the queue";
   downPayload.budget.day = { reserved: null, cap: 25, state: "ok" };
   downPayload.budget.tokens = { spent: null, cap: 8000000, state: "ok", maxTokens: null };
-  const down = buildInsightsHtml(downPayload, { now: NOW });
+  const down = insightsHtml(downPayload, { now: NOW });
   assert.ok(down.includes("budget unreachable: timed out reaching the queue"), "the banner states the absence");
   assert.ok(down.includes("cap 25 (overlay) · reserved unavailable (queue unreachable)"), "caps stay facts; reserved does not invent a zero");
 
   const junkPayload = CANNED_PAYLOAD();
   junkPayload.budget.day.state = "critical!!";
-  const junk = buildInsightsHtml(junkPayload, { now: NOW });
+  const junk = insightsHtml(junkPayload, { now: NOW });
   assert.ok(!junk.includes("critical"), "a junk state degrades toward SILENCE -- it can hide an alarm, never invent one");
 
   const bare = CANNED_PAYLOAD();
   delete bare.budget;
-  assert.ok(buildInsightsHtml(bare, { now: NOW }).includes("no budget data in this payload"), "a missing slice is a stated absence");
+  assert.ok(insightsHtml(bare, { now: NOW }).includes("no budget data in this payload"), "a missing slice is a stated absence");
 });
 
 // ---- 14. the line charts (issue #181): shared scales, dashed estimates, honest gaps ----
@@ -644,7 +669,7 @@ test("the flow panels render with text-borne identity; an absent series is an ab
 
   const bare = CANNED_PAYLOAD();
   delete bare.fold.dailyByFlow;
-  const page = buildInsightsHtml(bare, { now: NOW });
+  const page = insightsHtml(bare, { now: NOW });
   assert.ok(!page.includes("daily spend by flow"), "a fold that predates the series gets NO section -- absence, never an empty grid");
 });
 
@@ -652,8 +677,8 @@ test("a hostile flow name in the series stays entity-escaped in panel titles and
   const p = CANNED_PAYLOAD();
   p.fold.dailyByFlow[0].flow = '"><script>alert(1)</script>';
   p.fold.dailyByFlow[0].flowKey = "x";
-  const out = buildInsightsHtml(p, { now: NOW });
-  assert.equal((out.match(/<script/g) ?? []).length, 1, "still exactly one script element");
+  const out = insightsHtml(p, { now: NOW });
+  assert.equal((out.match(/<script/g) ?? []).length, 0, "still no script element");
   assert.ok(out.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), "the hostile name renders as entities");
 });
 
@@ -669,7 +694,7 @@ test("scoped rows render facts with the assembler's state words; config-only con
     ],
     scopedInvalid: null,
   };
-  const page = buildInsightsHtml(p, { now: NOW });
+  const page = insightsHtml(p, { now: NOW });
   assert.ok(page.includes("scoped limits (scoped-limits.json)"), "the scoped block is labeled");
   assert.ok(page.includes("day used 3 / cap 10"), "used/cap as words");
   assert.ok(page.includes("week used 12 / cap 40"), "every capped window rides");
@@ -690,7 +715,7 @@ test("a scoped row's dollar windows render as exact micro-dollars; junk and an o
     ],
     scopedInvalid: null,
   };
-  const page = buildInsightsHtml(p, { now: NOW });
+  const page = insightsHtml(p, { now: NOW });
   const row = (scope) => page.match(new RegExp(`<div class="row"><span class="wl">${scope.replace(/[/:]/g, "\\$&")}</span><span>([^<]*)</span>`))?.[1] ?? null;
   assert.equal(row("project:shop"), "week spent+held $6.340917 / cap $45.00");
   assert.equal(row("model:anthropic/claude-sonnet-4-5"), "day spent+held ? / cap $5.00", "an unread counter is ?, a zero cap and junk draw nothing");
@@ -707,7 +732,7 @@ test("a project row's size rides beside its scope, so a size-only row is never a
     ],
     scopedInvalid: null,
   };
-  const page = buildInsightsHtml(p, { now: NOW });
+  const page = insightsHtml(p, { now: NOW });
   const row = (scope) => page.match(new RegExp(`<div class="row"><span class="wl">${scope.replace(/[/:]/g, "\\$&")}</span><span>([^<]*)</span>`))?.[1] ?? null;
   assert.equal(row("project:billing"), "memory 8g · 4 CPUs", "the size in sizeBits' words; junk entries dropped");
   assert.equal(row("project:web"), "week spent+held $1.00 / cap $45.00");
@@ -718,13 +743,13 @@ test("a pre-#242 payload (no scoped key) and an invalid limits file both state t
   assert.ok(!base.includes("scoped limits (scoped-limits.json)"), "no scoped block invented for an old payload");
   const p = CANNED_PAYLOAD();
   p.budget = { ...CANNED_BUDGET(), scoped: [], scopedInvalid: "scoped-limits file is not valid JSON: x" };
-  const page = buildInsightsHtml(p, { now: NOW });
+  const page = insightsHtml(p, { now: NOW });
   assert.ok(page.includes("scoped limits: file invalid"), "an invalid file is a stated absence, not a silent gap");
 });
 
 // ---- issue #418: no half character reaches the page, and labels are cut in columns ----
 
-test("no field of the page carries half a character, raw or escaped into the embedded JSON (#418)", () => {
+test("no field of the page carries half a character, raw or escaped (#418)", () => {
   // THE INJECTION: an odd prefix and a run of emoji appended to every free-text field of the topology
   // input and of the fold, so that every even code-unit cap on the page lands between the halves of a
   // pair. Before issue #418 the page carried dozens of raw lone surrogates and the embedded JSON the
@@ -741,12 +766,12 @@ test("no field of the page carries half a character, raw or escaped into the emb
     return o;
   };
   const payload = { ...CANNED_PAYLOAD(), graph: buildGraphModel(inject(CANNED())), fold: inject(CANNED_FOLD()) };
-  const page = buildInsightsHtml(payload, { now: NOW });
+  const page = insightsHtml(payload, { now: NOW });
   assert.ok(page.includes("\u{1f600}"), "the injection reached the page, or this test checks nothing");
   const raw = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
   assert.doesNotMatch(page, raw, "no raw half character");
   const escaped = /\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f][0-9a-f]{2})|(?<!\\ud[89ab][0-9a-f]{2})\\ud[c-f][0-9a-f]{2}/i;
-  assert.doesNotMatch(page, escaped, "and no escaped one in the embedded JSON");
+  assert.doesNotMatch(page, escaped, "and no escaped one anywhere");
 });
 
 test("a list label and a plan chip are sized in columns (#418)", () => {
@@ -755,15 +780,15 @@ test("a list label and a plan chip are sized in columns (#418)", () => {
   assert.equal(row.labelText, "\u4f1a\u793e\u306e\u30ea\u30dd\u30b8\u30c8\u30ea\u540d\u2026", "cut to twenty columns, the ellipsis costing two");
   assert.equal(row.chipText, "plan:\u4f1a\u793e\u30d7\u30e9\u30f3");
   // The chip's width is drawn from its text: 5 + 5 * 2 columns at 6px, plus 12 (it was 72, by code units).
-  const page = buildInsightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: "\u4f1a\u793e\u30d7\u30e9\u30f3" }), runs: 1 }] } }, { now: NOW });
+  const page = insightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: "\u4f1a\u793e\u30d7\u30e9\u30f3" }), runs: 1 }] } }, { now: NOW });
   assert.match(page, /<rect x="150" y="3" width="102" height="15" rx="7"/, "the plan chip is 102px wide");
   // A plan id too long for the chip's capped rect is cut to what the rect holds: the text ran past the
   // rect and past the SVG. Five and twelve emoji at three columns and the two-column ellipsis, at 6px.
-  const long = buildInsightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: "\u{1f600}".repeat(20) }), runs: 1 }] } }, { now: NOW });
+  const long = insightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: "\u{1f600}".repeat(20) }), runs: 1 }] } }, { now: NOW });
   assert.match(long, new RegExp(`<rect x="150" y="3" width="270" height="15" rx="7"[^>]*/><text x="157" y="[0-9.]+" font-size="10" fill="[^"]+">plan:${"\u{1f600}".repeat(12)}\u2026</text>`, "u"));
   // AT THE CAP: a plan chip that fits its capped rect is left exactly as it was (forty-three columns is
   // 270px of a 272px rect), and one column more is cut.
-  const plan = (id) => buildInsightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: id }), runs: 1 }] } }, { now: NOW });
+  const plan = (id) => insightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: id }), runs: 1 }] } }, { now: NOW });
   assert.match(plan("p".repeat(38)), new RegExp(`width="270" height="15" rx="7"[^>]*/><text[^>]*>plan:${"p".repeat(38)}</text>`));
   assert.match(plan("p".repeat(39)), new RegExp(`width="270" height="15" rx="7"[^>]*/><text[^>]*>plan:${"p".repeat(37)}\u2026</text>`, "u"));
   const ascii = layoutBarList([{ label: "a-label-that-is-longer-than-twenty", cost: null, runs: 0 }], { width: 430 })[0];
@@ -815,7 +840,7 @@ test("a trigger's spend badge sits above its re-arm loop on the page (issue #483
   // loop. The badge now takes the scene's own line, and the scene routes the loop below it.
   const p = CANNED_PAYLOAD();
   p.costByTrigger["trigger:0"] = { cost: usd(1.55, "metered"), runs: 4 };
-  const out = buildInsightsHtml(p, { now: NOW });
+  const out = insightsHtml(p, { now: NOW });
   const spend = /<g id="spend">(.*?)<\/g>/.exec(out)[1];
   const badges = [...spend.matchAll(/<text x="([\d.-]+)" y="([\d.-]+)"[^>]*>([^<]*)<\/text>/g)].map((m) => ({ x: Number(m[1]), y: Number(m[2]), text: m[3] }));
   const loops = [...out.matchAll(/<g class="gwire gcron" id="[^"]+"><path d="([^"]+)"/g)].map((m) => m[1].match(/-?\d+(?:\.\d+)?/g).map(Number));
@@ -844,7 +869,7 @@ test("a small topology is not blown up past a real deployment's scale (issue #48
   one.triggers.triggers[0].flow = "notify";
   one.chainEdges.edges = [];
   for (const graph of [buildGraphModel(one), buildGraphModel(CANNED())]) {
-    const out = buildInsightsHtml({ graph, fold: null, costsUnreachable: null, window: "30d", costByTrigger: null }, { now: NOW });
+    const out = insightsHtml({ graph, fold: null, costsUnreachable: null, window: "30d", costByTrigger: null }, { now: NOW });
     const m = /<svg id="graph" class="canvas" width="([\d.]+)" viewBox="[\d. -]+ ([\d.]+) [\d.]+"/.exec(out);
     assert.ok(m, "the pane carries its scale cap");
     assert.ok(Number(m[1]) <= Number(m[2]) * 1.35 + 0.1, `width ${m[1]} for a ${m[2]}-unit scene`);
@@ -866,7 +891,7 @@ test("a plan-covered trigger's badge reads plan:<id>, never a dollar, from the r
   const costByTrigger = foldTriggerCosts({ records: [run("r-1"), run("r-2")], subscriptions: subs, pricing, triggerJoin });
   const p = CANNED_PAYLOAD();
   p.costByTrigger = costByTrigger;
-  const out = buildInsightsHtml(p, { now: NOW });
+  const out = insightsHtml(p, { now: NOW });
   const spend = /<g id="spend">(.*?)<\/g>/.exec(out)[1];
   assert.ok(spend.includes(">plan:kimi</text>"), `trigger:0's plan-covered spend reads plan:kimi: ${spend}`);
   assert.ok(!/>~?\$0(\.00)? ?(est\.)?<\/text>/.test(spend), "and no badge reads $0");
@@ -877,7 +902,7 @@ test("a trigger's spend badge fits its chip, the whole text in a tooltip (issue 
   const long = "customer-facing-enterprise-plan-2026"; // under the page's 40-character id clip
   const p = CANNED_PAYLOAD();
   p.costByTrigger["trigger:0"] = { cost: usd(0, "plan", { planId: long }), runs: 9 };
-  const out = buildInsightsHtml(p, { now: NOW });
+  const out = insightsHtml(p, { now: NOW });
   const layout = buildGraphScene(p.graph, { now: NOW }).layout;
   const chip = layout.nodes.find((n) => n.node.id === "trigger:0");
   const m = new RegExp(`<text x="${chip.x + 16}" y="${chip.y + 53}" font-size="10" fill="[^"]+">([^<]*)<title>([^<]*)</title></text>`).exec(out);
@@ -885,7 +910,7 @@ test("a trigger's spend badge fits its chip, the whole text in a tooltip (issue 
   assert.equal(m[2], `plan:${long}`, "the tooltip holds the whole badge");
   assert.ok(m[1].endsWith("…") && 16 + drawnColumns(m[1]) * 6 <= chip.w - 4, `the cut badge ${JSON.stringify(m[1])} fits a ${chip.w}px chip`);
   // A badge that fits is drawn whole and carries no tooltip, byte for byte as before.
-  assert.ok(buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW }).includes(">plan:kimi</text>"), "a short badge is untouched");
+  assert.ok(insightsHtml(CANNED_PAYLOAD(), { now: NOW }).includes(">plan:kimi</text>"), "a short badge is untouched");
 });
 
 // ---- issue #499 part C: by project ----
@@ -903,7 +928,7 @@ test("the breakdown gains a by-project list keyed by id, with names escaped and 
     { id: "constructor", name: null },
     { id: "Bad Id", name: "ignored" },
   ];
-  const out = buildInsightsHtml(p, { now: NOW });
+  const out = insightsHtml(p, { now: NOW });
   assert.ok(out.includes("<h3>by project</h3>"), "the section renders");
   assert.ok(out.includes('aria-label="spend by project"'));
   assert.ok(out.includes(">shop</text>") && out.includes(">constructor</text>") && out.includes(">(no project)</text>"), "bars carry the id, and the no-project bucket");
@@ -911,11 +936,11 @@ test("the breakdown gains a by-project list keyed by id, with names escaped and 
   assert.ok(!out.includes("‮"), "the override never reaches the page");
   assert.ok(out.includes('<span class="pid">shop</span> <bdi>Web\\u{202E}shop &lt;b&gt;</bdi>'), "escaped, HTML-escaped and isolated in a bdi");
   assert.ok(!out.includes("ignored"), "a name for an id that is not an id is dropped");
-  assert.equal(buildInsightsHtml(p, { now: NOW }), out, "byte-deterministic");
+  assert.equal(insightsHtml(p, { now: NOW }), out, "byte-deterministic");
 });
 
 test("a fold without byProject draws no by-project section, never an empty list that reads as no spend", () => {
-  const out = buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW });
+  const out = insightsHtml(CANNED_PAYLOAD(), { now: NOW });
   assert.ok(!out.includes("by project"));
 });
 
@@ -931,7 +956,7 @@ test("a key that is not an id JOINS the one (no project) bar, never a second one
     { key: "Bad Key", label: "Bad Key", runs: 2, tokens: 5, cost: usd(2, "metered") },
     { key: "shop", label: "shop", runs: 1, tokens: 1, cost: usd(0.5, "metered") },
   ];
-  const out = buildInsightsHtml(p, { now: NOW });
+  const out = insightsHtml(p, { now: NOW });
   assert.equal(out.split(">(no project)</text>").length - 1, 1, "one bar");
   assert.ok(out.includes("$3.00"), "it carries both rows' spend");
 });
@@ -955,7 +980,7 @@ const SPLIT = () => ({
   ],
   counts: { refusals: { "allocation-cap": 3, "envelope-mismatch": 0, "portfolio-no-envelope": 0, "portfolio-snapshot-oversize": 1 }, plans: { applied: 2, "plan-stale": 1 } },
 });
-const splitPage = (allocation, over = {}) => buildInsightsHtml({ ...CANNED_PAYLOAD(), allocation, ...over }, { now: NOW });
+const splitPage = (allocation, over = {}) => insightsHtml({ ...CANNED_PAYLOAD(), allocation, ...over }, { now: NOW });
 
 test("the budget split's live shape: the envelope, the plan, the headroom, the counts and the history, composed exactly (#507)", () => {
   const out = splitPage(SPLIT());
@@ -970,7 +995,7 @@ test("the budget split's live shape: the envelope, the plan, the headroom, the c
   assert.ok(out.includes('<tr><td>2026-10-05 06:01 UTC</td><td>portfolio-job</td><td>applied</td><td></td><td class="pid">3f9a0c1d2e4b5a67</td></tr>'));
   assert.ok(out.includes('$77.00 spent of $70.00 · floor $10.00 <tspan fill="'), "the overspent row says over in words");
   assert.ok(out.includes(">$4.25 spent of $30.00 · floor $10.00</text>"), "a row within its allocation carries no word");
-  const tips = JSON.parse(/var INSIGHTS = (.*);/.exec(out)[1]).tips;
+  const tips = listTexts(out, "insights-tips").map((t) => t.text);
   assert.ok(tips.includes("shop · allocated $70.00 · spent $77.00 · floor $10.00 · over its allocation"));
   assert.ok(tips.includes("platform · allocated $30.00 · spent $4.25 · floor $10.00"));
   assert.ok(!out.includes("CANARY-HOST"), "no host reaches a page meant to be shared");
@@ -1016,10 +1041,10 @@ test("junk in a split row degrades to ? or absence, and hostile text is escaped 
   assert.ok(out.includes(">constructor</text>"), "an id-shaped key is a row like any other");
   const long = splitPage({ ...SPLIT(), floors: { "customer-data-platform-migration": 0 } });
   assert.ok(long.includes(">customer-data-pl…</text>"), "a long id is cut to the label column");
-  assert.ok(JSON.parse(/var INSIGHTS = (.*);/.exec(long)[1]).tips.includes("customer-data-platform-migration · allocated - · spent - · floor $0.00"), "and its tip carries it whole");
-  assert.equal(out.split("<script").length - 1, 1, "still exactly the page's own script");
+  assert.ok(listTexts(long, "insights-tips").map((t) => t.text).includes("customer-data-platform-migration · allocated - · spent - · floor $0.00"), "and its tip carries it whole");
+  assert.equal(out.split("<script").length - 1, 0, "still no script element");
   const down = splitPage({ unreachable: "</script><script>x" });
-  assert.equal(down.split("<script").length - 1, 1);
+  assert.equal(down.split("<script").length - 1, 0);
   assert.ok(down.includes("budget split unreachable: &lt;/script&gt;&lt;script&gt;x"));
 });
 
@@ -1045,23 +1070,33 @@ test("layoutSplitBars: one scale for every row, the envelope total or a larger a
   assert.deepEqual(layoutSplitBars([{ id: "a", floor: 0, allocation: 0, spent: 0 }], 0), [{ y: 0, allocW: 0, spentW: 0, floorX: null, over: false }], "an all-zero envelope is safe");
 });
 
-test("the page script runs under a DOM stub, and a split bar's tooltip is the composed text (#507)", () => {
+test("the console script runs under a DOM stub on the spend screen, and a split bar's tooltip is the composed text (#507)", () => {
   const out = splitPage(SPLIT());
-  const script = /<script>([\s\S]*?)<\/script>/.exec(out)[1];
+  const tips = listTexts(out, "insights-tips").map((t) => t.text);
   const handlers = {};
-  const el = () => ({ textContent: "", className: "", style: {}, getBoundingClientRect: () => ({ left: 0, top: 0 }), addEventListener() {} });
-  const nodes = { tip: el(), wrap: el(), stamp: el() };
-  // No graph svg: PAGE_JS stamps the age and returns before pan/zoom, and FIT_JS has no getElementsByTagName to walk.
-  const document = { getElementById: (id) => nodes[id] ?? null, addEventListener: (type, fn) => (handlers[type] = fn) };
-  new Function("document", "setInterval", "location", "history", "MouseEvent", script)(document, () => 0, {}, {}, function () {});
-  const tips = JSON.parse(/var INSIGHTS = (.*);/.exec(out)[1]).tips;
+  const el = (extra = {}) => ({ textContent: "", className: "", style: {}, getBoundingClientRect: () => ({ left: 0, top: 0 }), addEventListener() {}, getElementsByTagName: () => [], ...extra });
+  const tipsList = el({ getElementsByTagName: (tag) => (tag === "li" ? tips.map((t) => ({ textContent: t })) : []) });
+  const nodes = { tip: el(), wrap: el(), "insights-tips": tipsList };
+  // No graph svg and no node list: the script wires the chart tooltips and the row replay, and returns before pan/zoom.
+  const document = {
+    body: { getAttribute: (n) => (n === "data-page" ? "insights" : null) },
+    getElementById: (id) => nodes[id] ?? null,
+    getElementsByTagName: () => [],
+    querySelector: () => null,
+    addEventListener: (type, fn) => (handlers[type] = fn),
+  };
+  new Function("document", "setTimeout", "location", "history", "MouseEvent", "EventSource", "fetch", CONSOLE_SCRIPT)(document, () => 0, {}, {}, function () {}, undefined, () => { throw new Error("no fetch on the spend screen"); });
   const idx = tips.indexOf("shop · allocated $70.00 · spent $77.00 · floor $10.00 · over its allocation");
   assert.ok(idx >= 0 && out.includes(`<g data-tip="${idx}">`), "the shop bar carries that tip's ordinal");
   const bar = { getAttribute: (n) => (n === "data-tip" ? String(idx) : null) };
   handlers.pointermove({ target: { closest: (sel) => (sel === "[data-tip]" ? bar : null) }, clientX: 5, clientY: 5 });
   assert.equal(nodes.tip.textContent, "shop · allocated $70.00 · spent $77.00 · floor $10.00 · over its allocation");
   assert.equal(nodes.tip.style.display, "block");
-  assert.match(nodes.stamp.textContent, /^generated /);
+  assert.equal(nodes.tip.style.left, "19px", "placed beside the pointer, inside the topology pane's frame");
+  // An index the list does not hold shows nothing, and moving off a bar hides only what a bar showed.
+  handlers.pointermove({ target: { closest: () => ({ getAttribute: () => "999" }) }, clientX: 1, clientY: 1 });
+  assert.equal(nodes.tip.style.display, "none");
+  assert.equal(typeof handlers.click, "function", "the breakdown row replay is wired");
 });
 
 test("the split's refusal list is the worker's four reasons, the one list the assembler counts by (#507)", async () => {
@@ -1103,10 +1138,10 @@ test("the split says what this host sees: its mismatch, an outside edit, a plan 
 });
 
 test("the split box scrolls sideways on a narrow window, and its labels never wrap (#507)", () => {
-  const out = splitPage(SPLIT());
-  assert.match(out, /#split\{[^}]*overflow-x:auto\}/);
-  assert.match(out, /#split \.wl\{[^}]*flex-shrink:0\}/);
-  assert.match(out, /#split \.state\.over\{[^}]*flex-shrink:0\}/);
+  // The console's stylesheet: the insights CSS on theme tokens.
+  assert.match(CONSOLE_CSS, /#split\{[^}]*overflow-x:auto\}/);
+  assert.match(CONSOLE_CSS, /#split \.wl\{[^}]*flex-shrink:0\}/);
+  assert.match(CONSOLE_CSS, /#split \.state\.over\{[^}]*flex-shrink:0\}/);
 });
 
 // ---- the capacity section (issue #599, phase 4, REQ-CAPACITY-INSIGHTS) ----
@@ -1131,7 +1166,7 @@ const CAP_SLICE = () => ({
     { name: "laptop", fromMs: NOW, truncated: false, slots: 1, buckets: capBuckets(() => 0), notShared: "no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)" },
   ],
 });
-const capPage = (capacity, extra = {}) => buildInsightsHtml({ window: "7d", capacity, ...extra }, { now: NOW });
+const capPage = (capacity, extra = {}) => insightsHtml({ window: "7d", capacity, ...extra }, { now: NOW });
 const capSection = (html) => {
   const at = html.indexOf("<h2>capacity</h2>");
   return at < 0 ? null : html.slice(at, html.indexOf("</section>", at));
@@ -1217,7 +1252,7 @@ test("the capacity section: each host's numbers and caveats, no data hatched wit
   assert.equal((laptopSvg.match(/class="nodata"/g) ?? []).length, 1);
   assert.ok(!laptopSvg.includes(`fill="${PAGE_THEME.accent}"`), "a host whose history is not here draws no bar, of any height");
   // its no-data tooltip carries the shared sentence
-  const tips = JSON.parse(html.match(/var INSIGHTS = (.*);\n/)[1]).tips;
+  const tips = listTexts(html, "insights-tips").map((t) => t.text);
   assert.ok(tips.some((t) => t.endsWith("no data: no source here holds its runs (a worker without PI_WORKER_NAME writes no run mirror)")));
   assert.ok(tips.some((t) => /busy 50%, avg 1\.5 of 2, peak 2, full 0% \(part of it has no data\)$/.test(t)), "the half-covered bucket says so");
   // a payload without the slice draws no section
@@ -1250,7 +1285,7 @@ test("hostile host, project, caveat and reason text in the capacity slice is esc
   p.hosts[2].notShared = `the run mirror was not read (${evil})`;
   p.coverage = [evil];
   const html = capPage(p);
-  assert.equal(html.split("<script").length - 1, 1);
+  assert.equal(html.split("<script").length - 1, 0);
   assert.ok(!html.includes("<script>alert"));
   assert.ok(capSection(html).includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
   assert.ok(!html.includes("\u001b") && !html.includes("\u0007"), "control characters are made visible text");
@@ -1343,12 +1378,12 @@ test("junk buckets, a window of no time yet, and every gap's own reason", () => 
   const none = capSection(capPage({ noTime: true, fromMs: NOW }, { window: "mtd" }));
   assert.ok(none.includes("no time in this window yet: month to date starts at"));
   assert.ok(!none.includes("not read"));
-  const tips = JSON.parse(capPage(CAP_SLICE()).match(/var INSIGHTS = (.*);\n/)[1]).tips;
+  const tips = listTexts(capPage(CAP_SLICE()), "insights-tips").map((t) => t.text);
   assert.ok(tips.some((t) => t.endsWith("no data: before this host's history starts (the run mirror holds nothing older: it started then, or its cap or a peer's shorter retention cut it)")));
   const junk = CAP_SLICE();
   junk.hosts[0].buckets[3] = { ...junk.hosts[0].buckets[3], busyMs: CH * 2 };
-  const jt = JSON.parse(capPage(junk).match(/var INSIGHTS = (.*);\n/)[1]).tips;
+  const jt = listTexts(capPage(junk), "insights-tips").map((t) => t.text);
   assert.ok(jt.some((t) => t.endsWith("no data: this bucket's numbers were not readable, so they are not drawn")));
-  const late = JSON.parse(buildInsightsHtml({ window: "7d", capacity: CAP_SLICE() }, { now: NOW + CH }).match(/var INSIGHTS = (.*);\n/)[1]).tips;
+  const late = listTexts(insightsHtml({ window: "7d", capacity: CAP_SLICE() }, { now: NOW + CH }), "insights-tips").map((t) => t.text);
   assert.ok(late.some((t) => t.endsWith("no data: after the report was read")));
 });

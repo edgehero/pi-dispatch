@@ -38,9 +38,12 @@ import {
   fleetHosts,
   fleetQueues,
   fleetSchedulers,
+  INSIGHTS_DEFAULT_RANGE,
   INSIGHTS_RANGES,
   insightsPanel,
   insightsRange,
+  insightsWhatIf,
+  WHATIF_FLOW_RE,
   navHtml,
   overviewActive,
   overviewFailures,
@@ -61,12 +64,14 @@ import {
   RUN_ID_RE,
 } from "./panels.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
+import { WHATIF_MODEL_RE } from "./whatif.mjs";
 
 /**
  * The screens. `path` is the route, `auth` the least role that may open it, `live` whether the page opens the event
  * stream (a screen whose data changes while it is open), `title` the heading, `nav` the navigation label (none for
  * the run detail, which is reached from a run). Insights is not live: its assembly is the expensive read (cached 30 s
- * by the caller), and the range picker is its refresh. Configuration and the audit log change by a person's hand.
+ * by the caller), and the range picker is its refresh; its what-if form is a GET of the same page. Configuration and
+ * the audit log change by a person's hand.
  * The run detail is live since issue #644: a running job's progress panel moves, and a run that ends gets its record's
  * panels without a reload; since issue #646 its inbox panel moves too, a message's state from queued to delivered. Its
  * data is read at most once per `LIVE_DEFAULTS.pageMinMs.run` (live.mjs), since a run's load also reads its record and
@@ -89,7 +94,7 @@ const PAGE_PANELS = Object.freeze({
   runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
   run: [["p-progress", runProgress], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
   parked: [["p-parked", parkedInbox]],
-  insights: [["p-range", insightsRange], ["p-insights", insightsPanel]],
+  insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
   config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles]],
   audit: [["p-audit", auditLog]],
@@ -108,7 +113,7 @@ const PAGE_PARAMS = Object.freeze({
   runs: [...RUN_FILTER_FIELDS, "before"],
   run: ["id"],
   parked: [],
-  insights: ["range"],
+  insights: ["range", "whatif", "flow", "paths"],
   fleet: [],
   config: [],
   audit: ["before"],
@@ -141,7 +146,9 @@ function asParams(searchParams) {
  *
  *   - runs: the filter (`parseRunFilter`) and `before` (a cursor in millis); `{ filter, before }`.
  *   - run: `id`, required, in the read model's run-id charset; `{ id }`.
- *   - insights: `range`, one of 7d, 30d, mtd, default 7d; `{ range }`.
+ *   - insights: `range`, one of 7d, 30d, mtd, default 30d; `whatif` (`<provider>/<model>`, `WHATIF_MODEL_RE`) and `flow`
+ *     (the skill-name charset), together or not at all; `paths`, only `full`; `{ range, whatif, flow, paths }`, each
+ *     absent one null. `paths=full` is ACCEPTED from anyone, and honoured for an operator alone (`insightsFullPaths`).
  *   - audit: `before` (an audit position, `YYYY-MM:<line>`, `readConsoleAudit`'s cursor); `{ before }`.
  *   - every other screen: no parameter at all; `{}`.
  *
@@ -185,9 +192,18 @@ export function parsePageQuery(name, searchParams) {
       return { query: Object.freeze({ id }) };
     }
     case "insights": {
-      const range = one("range") ?? "7d";
+      const range = one("range") ?? INSIGHTS_DEFAULT_RANGE;
       if (!INSIGHTS_RANGES.includes(range)) return { refusal: `range must be one of ${INSIGHTS_RANGES.join(", ")}` };
-      return { query: Object.freeze({ range }) };
+      const whatif = one("whatif");
+      const flow = one("flow");
+      // Together or not at all: the estimate scores one flow's median run, so a model without a flow has no question in
+      // it, and a flow without a model has no rates to ask at.
+      if ((whatif === null) !== (flow === null)) return { refusal: "whatif and flow go together: give both (whatif=<provider>/<model>&flow=<flow>) or neither" };
+      if (whatif !== null && !WHATIF_MODEL_RE.test(whatif)) return { refusal: "whatif must be <provider>/<model> (letters, digits and . _ - for the provider; letters, digits and . _ : / @ + - for the model, which may also start with @ or ~, at most 128 characters)" };
+      if (flow !== null && !WHATIF_FLOW_RE.test(flow)) return { refusal: "flow must be a flow name (lowercase letters, digits, '_' and '-', at most 64 characters)" };
+      const paths = one("paths");
+      if (paths !== null && paths !== "full") return { refusal: "paths must be full (or left out for folder names)" };
+      return { query: Object.freeze({ range, whatif, flow, paths }) };
     }
     case "audit": {
       const raw = one("before");
@@ -213,7 +229,9 @@ export function pageQueryString(name, query) {
     for (const k of RUN_FILTER_FIELDS) if (q.filter?.[k] !== undefined) p.set(k, q.filter[k]);
     if (q.before !== null && q.before !== undefined) p.set("before", String(q.before));
   } else if (name === "run" && q.id) p.set("id", q.id);
-  else if (name === "insights" && q.range) p.set("range", q.range);
+  else if (name === "insights") {
+    for (const k of ["range", "whatif", "flow", "paths"]) if (typeof q[k] === "string" && q[k] !== "") p.set(k, q[k]);
+  }
   else if (name === "audit" && q.before !== null && q.before !== undefined) p.set("before", String(q.before));
   return p.toString();
 }
@@ -293,15 +311,21 @@ async function childrenOf(fleet, record) {
  * Read what screen `name` shows for `query` (a `parsePageQuery` result's `query`). `deps`:
  *
  *   - `fleet`: a `createFleetReader` instance (`snapshot`, `runsPage`, `runById`). `snapshot()` is called at most once.
- *   - `insights(window)`: the assembled insights payload for a window (the caller caches it: it is the expensive read).
+ *   - `insights(window, { fullPaths })`: the assembled insights payload for a window (the caller caches it: it is the
+ *     expensive read). `fullPaths` is true only for an operator's `paths=full`.
+ *   - `whatIf({ model, flow })` (optional): the what-if answer (`whatif.mjs`'s reader, cached and bounded by the caller).
+ *   - `pricedModels()` (optional): the priced catalog's `provider/id` strings, for the what-if form's suggestions.
  *   - `audit({ limit, before })`: `readConsoleAudit` bound to the deployment's logs directory.
  *   - `subscriptions()` (optional): the subscriptions file's entries, for the cost class of a plan-covered run.
  *   - `env`: the deployment's env, of which only the forge instance variables are kept (`forgeEnvOf`).
  *   - `now`: the clock (a function or a number), read ONCE; every panel draws from this instant.
  *
+ * `who` is the session asking (`{ role }`): only the spend screen's `paths=full` reads by role, and only an operator's
+ * request reads full paths, so a viewer's page data never holds them. The live hub passes none (insights is not live).
+ *
  * Never throws for a read that fails: the field is null (or carries a sentence), and the panel says so.
  */
-export async function loadPageData(name, query, deps = {}) {
+export async function loadPageData(name, query, deps = {}, who = {}) {
   if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const now = typeof deps.now === "function" ? deps.now() : Number.isFinite(deps.now) ? deps.now : Date.now();
   const q = query ?? {};
@@ -370,11 +394,28 @@ export async function loadPageData(name, query, deps = {}) {
     }
   }
   if (reads.includes("insights")) {
+    const fullPaths = q.paths === "full" && who?.role === "operator";
     try {
-      data.insights = await deps.insights(q.range ?? "7d");
+      data.insights = await deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths });
     } catch {
       data.insights = null;
       data.insightsError = "The spend history could not be assembled. The console's log has the reason.";
+    }
+    try {
+      const models = typeof deps.pricedModels === "function" ? deps.pricedModels() : [];
+      data.pricedModels = Array.isArray(models) ? models : [];
+    } catch {
+      data.pricedModels = [];
+    }
+    if (typeof q.whatif === "string" && typeof q.flow === "string") {
+      if (typeof deps.whatIf !== "function") data.whatIf = { model: q.whatif, flow: q.flow, unreachable: "the what-if reader is not wired" };
+      else {
+        try {
+          data.whatIf = await deps.whatIf({ model: q.whatif, flow: q.flow });
+        } catch {
+          data.whatIf = { model: q.whatif, flow: q.flow, unreachable: "the what-if estimate failed" };
+        }
+      }
     }
   }
   if (reads.includes("audit")) {

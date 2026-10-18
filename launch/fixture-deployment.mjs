@@ -89,7 +89,6 @@ export function writeDeployment(dir, { git = false } = {}) {
 		projects: join(dir, "projects.json"),
 		envelope: join(dir, "envelope.json"),
 		subs: join(dir, "subscriptions.json"),
-		graph: join(dir, "graph"),
 		overlay: join(dir, "pi-global"),
 	};
 	const files = (root, entries) => {

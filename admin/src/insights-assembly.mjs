@@ -1,6 +1,6 @@
 /**
  * The insights payload's assembly (issues #53/#54/#175/#181, moved out of `index.ts` for the operator console, #641):
- * the reads and folds behind `buildInsightsHtml`, shared by the `/dispatch insights` command and the console, a
+ * the reads and folds behind the console's spend screen (`console/panels.mjs` `insightsBody`), in the console, a
  * separate process that never loads pi.
  *
  * Pi-free by contract: nothing this module reaches imports `@earendil-works/pi-coding-agent` or `typebox`
@@ -278,7 +278,7 @@ export function splitCounts(records) {
  * read WITHOUT reasons (a plan's reasons are agent text, and the panel's view is the one place they are drawn). Valkey
  * is read only when an envelope is set. Each row is cut to its enum fields here, so no host name and no reason text
  * reaches a file meant to be shared. A problem text has the envelope path cut to its basename for the same reason,
- * unless the operator passed `--full-paths`, the page's one opt-in for host paths. The cut is made on the parser's RAW
+ * unless an operator asked for `?paths=full`, the page's one opt-in for host paths. The cut is made on the parser's RAW
  * text, before `envelopeProblem` escapes it: a path holding a character the escape rewrites would no longer match.
  * `outsideEdit` is the panel's notice, by its rule, over the same 20 rows. Exported for its tests, as `splitCounts` is: the
  * rest of the insights assembly dials the real queue. `envFn` is the deployment's environment (`processEnv`).
@@ -396,7 +396,7 @@ export async function assembleCapacityView(paths, window, nowMs, { readCapacityF
  * derived from the SPEND window's records (the operator's question), not the graph's fixed record
  * window -- the artifact states both windows, and a badge whose window differed from the table
  * beside it would be the quiet inconsistency this surface exists to kill.
- * The whole payload `buildInsightsHtml` draws, for `window` (a `COSTS_WINDOWS` word) at the instant `nowMs`.
+ * The whole payload the console's spend screen draws, for `window` (a `COSTS_WINDOWS` word) at the instant `nowMs`.
  * `pricing` is the façade (`needPricing`), `fullPaths` the page's opt-in for host paths (the split's problem text),
  * `envFn` the deployment's environment (`processEnv`).
  */

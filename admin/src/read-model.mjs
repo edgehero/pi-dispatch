@@ -20,7 +20,7 @@ import { randomBytes } from "node:crypto";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
-import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensureAccountTempRoot, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { logsDirPath, defaultSandboxDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { RECOVER_SKIPPED_REASONS, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
@@ -163,15 +163,6 @@ export function resolvePaths(env = process.env) {
     // GRAPH view exists to remove.
     chainDepthMax: parseNonNegInt(env.PI_CHAIN_DEPTH_MAX, CHAIN_DEPTH_MAX_DEFAULT),
     chainMaxPerJob: parseNonNegInt(env.PI_CHAIN_MAX_PER_JOB, CHAIN_MAX_PER_JOB_DEFAULT),
-    // Where the graph HTML artifact lands (issue #54): the worker's own temp-dir default, imported
-    // like logsDirPath/defaultSandboxDir above, so the admin and any future worker consumer agree
-    // on the path without loadConfig. Deliberately NOT logsDir -- that directory's filename shape is
-    // contract (INT-RUN-HISTORY-FILE-CONTRACT).
-    graphDir: env.PI_GRAPH_DIR || defaultGraphDir(env),
-    // Issue #464: the per-account temp root the DEFAULT graph dir lives in (`<tmp>/pi-dispatch-<uid>`), which
-    // `secureGraphRoot` makes this account's before the artifact is written there; null for an operator's own
-    // PI_GRAPH_DIR, which is theirs to place.
-    graphRoot: env.PI_GRAPH_DIR ? null : accountTempRoot(env),
   };
 }
 
@@ -190,11 +181,13 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+// The console's address (the insights move to the console): `/dispatch insights` and the `i` key print the spend
+// screen's URL from the PI_CONSOLE_LISTEN the console itself reads from this `.env` (`console/link.mjs`).
 // The dollar settings (issue #501) are among them: `dispatch_set`'s confirm states a dollar key's effective value, and
 // in a pointer deployment the cap the worker runs under lives in the deployment's `.env`, not in pi's environment.
 // Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
-const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
+const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "TMPDIR", "TEMP"]);
 
 /**
  * Issue #471: the environment `resolvePaths` should see, by the rule `doctor` judges the service by
@@ -232,16 +225,6 @@ export function panelEnv({ env = process.env, pointerDir = null, owned = [], fs 
   if (res.unread.length > 0) said.push(`${res.path} assigns ${res.unread.map((u) => `${u.key} (line ${u.line})`).join(", ")} in a form the service's loader may read differently, so the panel used none of those values`);
   if (res.disagreements.length > 0) said.push(`pi's environment and ${res.path} set ${res.disagreements.map((d) => d.key).join(", ")} differently: the panel uses pi's, the service runs the file's; make them agree`);
   return { env: out, dir, notice: said.length > 0 ? said.join("; ") : undefined };
-}
-
-/**
- * Issue #464: make the default graph dir's account root this account's before writing into it, as the worker does
- * for its jobs dir (`ensureAccountTempRoot`): created 0700, a symlink or another account's directory refused with
- * the fix. Any account can create a name under the temp dir first, and a page the operator's browser opens from a
- * directory another account controls is a page that account can replace. No-op for an explicit PI_GRAPH_DIR.
- */
-export function secureGraphRoot(paths, fs) {
-  if (paths?.graphRoot) ensureAccountTempRoot(paths.graphRoot, { fs });
 }
 
 /** Parse a non-negative integer from a raw env string; absent/empty/invalid falls back to `fallback`. */

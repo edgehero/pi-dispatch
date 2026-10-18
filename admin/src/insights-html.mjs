@@ -1,35 +1,34 @@
 /**
- * The insights page (issue #175): ONE self-contained file:// document that unifies the trigger/flow
- * topology (the graph.html scene, embedded whole) with a cost-analytics half rendered as hand-rolled
- * inline SVG charts. Same doctrines as the sibling artifact: one document, inline CSS + SVG + one
- * script element, zero external references, byte-deterministic (total sorts, injected `now`, no clock
- * reads and no randomness), allowlist normalization (never a spread), and every string escaped on its
- * way into markup or the embedded JSON.
+ * The insights sections (issue #175): the trigger/flow topology's spend layer beside a cost-analytics half rendered as
+ * hand-rolled inline SVG charts, drawn by the operator console's spend screen (`/insights`, issue #641). Until the
+ * insights move to the console this module also built a self-contained offline page around these sections; the console
+ * is now the one analytics surface, and the doctrines that page held are this module's: byte-deterministic (total
+ * sorts, an injected `now`, no clock reads and no randomness), allowlist normalization (never a spread), and every
+ * string escaped on its way into markup.
  *
- * Dependency posture: exactly two imports, both pure. graph-html.mjs is the scene/escaping/theme
- * source of truth (buildGraphScene lays out the topology; PAGE_JS owns pan/zoom/tooltip/selection;
- * FIT_JS shortens, at view time, a drawn label the static estimate let run past its box, issue #422;
- * PAGE_THEME is the palette; `clip`, `clipColumns` and `drawnColumns` are the one answer to how a
- * string is cut and sized on these pages, issue #418), and panel.mjs is THE money renderer -- fmtCost/fmtUsd are the only
- * functions allowed to turn a dollar into text, because the typed-cost class system is what keeps an
- * estimate structurally distinguishable behind every figure on this page. costs.mjs is deliberately
- * NOT loaded: it reaches into the worker for its day bucketing, and one worker coupling would drag
- * the queue stack into an artifact builder. Its class list is duplicated below and pinned
- * byte-for-byte by a parity test in insights-html.test.mjs.
+ * Dependency posture: exactly two imports, both pure. graph-html.mjs is the scene/escaping/theme source of truth
+ * (buildGraphScene lays out the topology; PAGE_THEME is the palette; `clip`, `clipColumns` and `drawnColumns` are the
+ * one answer to how a string is cut and sized on these pages, issue #418; FIT_JS, which the console's script carries,
+ * shortens at view time a drawn label the static estimate let run past its box, issue #422), and panel.mjs is THE money
+ * renderer -- fmtCost/fmtUsd are the only functions allowed to turn a dollar into text, because the typed-cost class
+ * system is what keeps an estimate structurally distinguishable behind every figure on this page. costs.mjs is
+ * deliberately NOT loaded: it reaches into the worker for its day bucketing, and one worker coupling would drag the
+ * queue stack into a renderer. Its class list is duplicated below and pinned byte-for-byte by a parity test in
+ * insights-html.test.mjs.
  *
- * The operator console (issue #641) draws the same sections one by one, so the slice normalizers (`norm*`), the section
- * renderers (`*SectionHtml`, `kpisHtml`, `planCardsHtml`, the daily charts, `breakdownHtml`, `topologySectionHtml`) and
- * the stylesheet and script are exported. A renderer takes its slice NORMALIZED, and pushes each tooltip's text onto the
+ * The slice normalizers (`norm*`), the section renderers (`*SectionHtml`, `kpisHtml`, `planCardsHtml`, the daily
+ * charts, `breakdownHtml`, `topologySectionHtml`) and the stylesheet are exported for the console (`console/panels.mjs`
+ * composes them in `insightsBody`). A renderer takes its slice NORMALIZED, and pushes each tooltip's text onto the
  * `tips` array it is handed, the element carrying the index as `data-tip`. None of them emits a `style` attribute, a
- * `<style>` or `<script>` element, or an `on*` handler (the console's CSP refuses inline style and script); only
- * `buildInsightsHtml` wraps the page in its inline stylesheet and script.
+ * `<style>` or `<script>` element, or an `on*` handler: the console's CSP refuses inline style and script, and its
+ * `trustedRenderer` refuses them at the server.
  *
- * Chart encoding rule the file:// posture forces: "estimated" is drawn with fill-opacity plus a
- * dashed outline, never an SVG hatch pattern -- a pattern fill would need a paint-server reference,
- * and the posture test bans that whole reference syntax as a substring.
+ * Chart encoding rule: "estimated" is drawn with fill-opacity plus a dashed outline, never an SVG hatch pattern -- a
+ * pattern fill would need a paint-server reference, and the posture test bans that whole reference syntax as a
+ * substring.
  */
 
-import { buildGraphScene, clip, clipColumns, drawnColumns, escapeHtml, embedJson, fmt, FIT_JS, PAGE_JS, legendHtml, bannersHtml, PAGE_THEME, SPEND_BADGE_DY } from "./graph-html.mjs";
+import { clip, clipColumns, drawnColumns, escapeHtml, fmt, legendHtml, PAGE_THEME, SPEND_BADGE_DY } from "./graph-html.mjs";
 import { escapeInterpreted, fmtCost, fmtUsd } from "./panel.mjs";
 
 // Must equal costs.mjs's COST_CLASSES; the parity test compares the two literals. Duplicated rather
@@ -2030,7 +2029,8 @@ export function topologySpend(scene, spend) {
 
 /**
  * The topology section: the scene's pane with the spend badges (`topologySpend`'s html) over it, the dollars legend and
- * the scene's legend. Pan, zoom, the tooltip and label fitting are PAGE_JS and FIT_JS, which read the page's `GRAPH`.
+ * the scene's legend. Pan, zoom, the tooltip and label fitting are the console's script (`console/script.mjs`), which
+ * reads the chips' data from the page's hidden `#graph-nodes` list.
  */
 export function topologySectionHtml(scene, spendHtml) {
   const windowDays = scene.norm.caps.windowDays ?? "?";
@@ -2061,17 +2061,16 @@ export function topologySectionHtml(scene, spendHtml) {
   return parts.join("\n");
 }
 
-// ---- page chrome ----
+// ---- the stylesheet ----
 
+/**
+ * The sections' stylesheet: the class names and ids the renderers above emit. The console serves it, each colour
+ * rewritten to a theme token (`console/style.mjs`); nothing else does since the static page was retired.
+ */
 export const INSIGHTS_CSS = `
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:${PAGE_THEME.canvas};color:${PAGE_THEME.fg};font:14px/1.4 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:60px 16px 40px}
-#hdr{position:fixed;top:0;left:0;right:0;height:46px;display:flex;align-items:center;gap:12px;padding:0 14px;background:${PAGE_THEME.panel};border-bottom:1px solid ${PAGE_THEME.border};z-index:3}
-#hdr h1{font-size:14px;font-weight:600}
-#stamp{color:${PAGE_THEME.dim};font-size:12px}
-#stamp.stale{color:${PAGE_THEME.amber}}
-#hdr button,#hdr select{background:#21262d;color:${PAGE_THEME.fg};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:3px 10px;font-size:12px}
-#windows{color:${PAGE_THEME.dim};font-size:11px;margin-left:auto}
+body{background:${PAGE_THEME.canvas};color:${PAGE_THEME.fg};font:14px/1.4 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+#windows{color:${PAGE_THEME.dim};font-size:11px;margin:0 0 8px}
 section{margin:18px auto;max-width:960px}
 h2{font-size:13px;color:${PAGE_THEME.fg};margin:0 0 8px}
 h3{font-size:12px;color:${PAGE_THEME.dim};margin:0 0 4px}
@@ -2129,185 +2128,3 @@ svg.canvas{display:block;max-width:100%;height:auto;min-height:220px;max-height:
 .dim .gnode,.dim .gwire{opacity:.15}
 .dim .hi{opacity:1}
 `;
-
-// The insights half of the page behaviour, ES5-flavoured like PAGE_JS (it sits inside a template
-// string) and under the same three rules the tests pin: nothing is retrieved over any transport,
-// nothing assembles markup on the client (textContent only), and selection is NOT reimplemented --
-// a breakdown row replays a plain DOM click at its chip so PAGE_JS's own handler stays the single
-// owner of the dim/highlight state.
-export const INSIGHTS_JS = `
-(function () {
-  "use strict";
-  var tip = document.getElementById("tip");
-  var wrap = document.getElementById("wrap");
-  if (!tip || !wrap) return;
-  var mine = false;
-
-  function showTip(el, e) {
-    var raw = el.getAttribute("data-tip");
-    if (raw === null) return;
-    var i = parseInt(raw, 10);
-    var tipsArr = INSIGHTS.tips;
-    // The index rides a DOM attribute, so it is untrusted by the time it comes back even though
-    // this page wrote it; a failed parse compares false here and falls through to nothing.
-    if (!(i >= 0 && i < tipsArr.length)) return;
-    var text = tipsArr[i];
-    if (typeof text !== "string") return;
-    tip.textContent = text;
-    tip.style.display = "block";
-    var wr = wrap.getBoundingClientRect();
-    tip.style.left = e.clientX - wr.left + 14 + "px";
-    tip.style.top = e.clientY - wr.top + 14 + "px";
-    mine = true;
-  }
-  function hideTip() {
-    // Only hide what this half showed: PAGE_JS drives the same #tip for graph chips, and a chart
-    // handler that blanks it on every stray move would fight that code mid-hover.
-    if (!mine) return;
-    mine = false;
-    tip.textContent = "";
-    tip.style.display = "none";
-  }
-  document.addEventListener("pointermove", function (e) {
-    var el = e.target && e.target.closest ? e.target.closest("[data-tip]") : null;
-    if (el) showTip(el, e);
-    else hideTip();
-  });
-  // pointerleave does not bubble, so delegation needs the capture phase to see a bar's exit.
-  document.addEventListener("pointerleave", function (e) {
-    var el = e.target && e.target.closest ? e.target.closest("[data-tip]") : null;
-    if (el) hideTip();
-  }, true);
-
-  document.addEventListener("click", function (e) {
-    var row = e.target && e.target.closest ? e.target.closest("[data-node]") : null;
-    if (!row) return;
-    var id = row.getAttribute("data-node");
-    // Minted ordinals only: anything else (a prototype-chain key, a stray attribute) dies here
-    // rather than at a DOM lookup.
-    if (id === null || !/^n\\d+$/.test(id)) return;
-    var chip = document.getElementById(id);
-    if (!chip) return;
-    chip.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  });
-})();
-`;
-
-/**
- * Build the complete insights page. Total function like the sibling: no arguments, a junk payload,
- * a null fold -- all yield a valid page with banners saying what is wrong, never a throw. `now` is
- * the injected generation instant; `fullPaths` is the operator's opt-in for absolute folder labels
- * and rides through to buildGraphScene untouched -- nothing on the cost side ever renders a path.
- */
-export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
-  const p = payload !== null && payload !== undefined && typeof payload === "object" ? payload : {};
-  const scene = buildGraphScene(p.graph, { now, fullPaths });
-  let nf;
-  let spend;
-  try {
-    nf = normFold(p.fold);
-    spend = normSpendMap(p.costByTrigger);
-  } catch {
-    // A hostile getter in a junk payload lands the same place as a null fold: a stated absence.
-    nf = null;
-    spend = null;
-  }
-  let nb;
-  try {
-    // Its own try: the budget slice is independent of the spend scan (the lever does not depend on
-    // the fold), so a hostile fold must not take the budget panel down with it, or vice versa.
-    nb = normBudget(p.budget);
-  } catch {
-    nb = null;
-  }
-  let na;
-  try {
-    // Its own try too (issue #507): the split is read apart from the spend scan and the budget, and a hostile slice
-    // must take neither down, nor be taken down by them.
-    na = normAllocation(p.allocation);
-  } catch {
-    na = null;
-  }
-
-  const windowLabel = insightsWindowLabel(p.window);
-  const windowDays = scene.norm.caps.windowDays ?? "?";
-  const dualWindow = `spend window: ${windowLabel} · topology: fixed ${windowDays}d record window · series bounded by retention (PI_LOG_RETENTION_DAYS) and the 92-day scan cap`;
-
-  // Server-side join table: original trigger id -> minted ordinal (`topologySpend`).
-  const { minted, html: spendHtml } = topologySpend(scene, spend);
-
-  const tips = [];
-  const bodyParts = [];
-  bodyParts.push('<div id="hdr">');
-  bodyParts.push("<h1>pi-dispatch insights</h1>");
-  bodyParts.push('<span id="stamp"></span>');
-  bodyParts.push('<button id="reload" type="button">Reload</button>');
-  bodyParts.push('<select id="auto" aria-label="auto reload"><option value="0">off</option><option value="5">5s</option><option value="30">30s</option></select>');
-  bodyParts.push(`<span id="windows">${escapeHtml(dualWindow)}</span>`);
-  bodyParts.push("</div>");
-  bodyParts.push(bannersHtml(scene.norm));
-  bodyParts.push(costBannersHtml(p, nf, nb, na));
-
-  if (nf !== null) bodyParts.push(`<section>${kpisHtml(nf)}</section>`);
-  // Budget sits SECOND, beside the headline spend and above everything it can act on: the caps are
-  // the operator's one real lever on cost, and it renders whether or not the spend scan was readable.
-  bodyParts.push(`<section><h2>budget</h2>${budgetSectionHtml(nb)}</section>`);
-  // The split right under the caps (issue #507): both are the operator's levers on cost, and the split renders whether
-  // or not the spend scan was readable (its counts then say "not counted"). No section for a payload without the slice.
-  let names;
-  try {
-    names = normProjectNames(p.projects);
-  } catch {
-    names = new Map(); // a hostile getter in a junk payload: the bars still render, without names
-  }
-  if (na !== null) bodyParts.push(`<section><h2>budget split</h2>${splitSectionHtml(na, tips, names, windowLabel)}</section>`);
-  // Issue #596, phase 3: each project's peak memory against its size, and the hosts' budgets. Its own try, like the
-  // slices above: a hostile sizing slice takes nothing else down. No section for a payload without it.
-  let ns;
-  try {
-    ns = normSizing(p.sizing);
-  } catch {
-    ns = null;
-  }
-  if (ns !== null) bodyParts.push(`<section><h2>job sizes</h2>${sizingSectionHtml(ns, tips, scene.nowMs)}</section>`);
-  // Issue #599, phase 4: how busy each host was over the page's window. Its own try: a hostile capacity slice takes
-  // nothing else down, and is taken down by nothing else. No section for a payload without it.
-  let nc;
-  try {
-    nc = normCapacity(p.capacity);
-  } catch {
-    nc = { unreachable: "the capacity slice is not readable" };
-  }
-  if (nc !== null) {
-    let html;
-    try {
-      html = capacitySectionHtml(nc, tips, scene.nowMs, windowLabel);
-    } catch {
-      html = `<div class="dim">capacity not drawn: the slice is not readable</div><div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`;
-    }
-    bodyParts.push(`<section><h2>capacity</h2>${html}</section>`);
-  }
-  if (nf !== null) {
-    if (nf.plans.length > 0) bodyParts.push(`<section><h2>plans</h2>${planCardsHtml(nf.plans)}</section>`);
-    bodyParts.push(`<section><h2>daily spend</h2>${dailyChartHtml(nf.daily, tips)}${cumulativeHtml(nf.daily, tips)}</section>`);
-    const flows = flowLinesHtml(nf, tips);
-    if (flows !== null) bodyParts.push(`<section><h2>daily spend by flow</h2>${flows}</section>`);
-    bodyParts.push(`<section><h2>breakdown</h2>${breakdownHtml(nf, minted, tips, names)}</section>`);
-  } else {
-    bodyParts.push('<section><div class="dim">no cost data in this payload</div></section>');
-  }
-
-  bodyParts.push(topologySectionHtml(scene, spendHtml));
-  if (nf !== null) bodyParts.push(footerHtml(nf, windowLabel));
-
-  return [
-    "<!doctype html>",
-    '<meta charset="utf-8">',
-    "<title>pi-dispatch insights</title>",
-    `<style>${INSIGHTS_CSS}</style>`,
-    "<body>",
-    ...bodyParts,
-    `<script>\n"use strict";\nvar GENERATED_AT = ${fmt(scene.nowMs)};\nvar GRAPH = ${embedJson(scene.graphData)};\nvar INSIGHTS = ${embedJson({ tips })};\n${FIT_JS}${PAGE_JS}${INSIGHTS_JS}</script>`,
-    "</body>",
-  ].join("\n");
-}

@@ -53,7 +53,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // pinned-extension-api.test.mjs and must keep its exact shape. VERSION is the HOST's pi version --
 // build.mjs keeps pi external, so this resolves against whatever pi actually loaded the extension.
 import { VERSION } from "@earendil-works/pi-coding-agent";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import {
   resolvePaths,
@@ -88,9 +88,7 @@ import {
   readProjects,
   writeProjects,
   enqueueDispatchRun,
-  scanRunRecords,
   KNOWN_KEYS,
-  secureGraphRoot,
   DEPLOYMENT_SCAFFOLD_FILES,
   readEnvelope,
   readAllocations,
@@ -102,11 +100,12 @@ import {
 // The operator session's write guard (issue #504 part C): pi's own `write`, `edit` and `powershell` blocked on the
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
 import { envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
-import { buildInsightsHtml } from "./insights-html.mjs";
+import { consolePageLines } from "./console/link.mjs";
+import { WHATIF_MODEL_RE } from "./console/whatif.mjs";
+import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 // The insights payload's assembly, pi-free so the operator console shares it (issue #641). The allocation seams live
 // there too, because its split reads through them; the tests keep reaching them, and the slices, through this module.
 import {
-  assembleInsights,
   assembleCosts as assembleCostsOf,
   assembleAllocationView as assembleAllocationViewOf,
   assembleSizingView as assembleSizingViewOf,
@@ -130,7 +129,6 @@ import { formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
-import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 import { tokensFilePath } from "@edgehero/pi-dispatch/console-tokens";
 import { defaultWorkerName } from "@edgehero/pi-dispatch/config";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
@@ -148,7 +146,7 @@ import * as nodeFs from "node:fs";
 // The audit rows' host name for a plan this session applies (issue #504 part C): PI_WORKER_NAME, else this machine's.
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { COSTS_WINDOWS, PROJECT_KEY_RE, whatIfFlow } from "./costs.mjs";
+import { COSTS_WINDOWS, PROJECT_KEY_RE } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
@@ -157,7 +155,7 @@ import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGl
 import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
-import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, renderAllocations } from "./render.mjs";
+import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderAllocations } from "./render.mjs";
 import { makeDashboard, createDashboardDeps, switchFailure, withAuditedWrites } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -1742,15 +1740,9 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       return;
     }
     case "insights": {
-      // The ONE analytics surface (issue #181). `whatif` keeps the CLI estimator (the interactive
-      // layer died with the COSTS view); anything else writes AND opens the artifact -- the artifact
-      // IS the feature, so the bare command does the whole job with no `html` verb to remember.
-      // Still deliberately not an LLM-callable tool: the topology assembly spawns git per folder.
-      if (tokens[1] === "whatif") {
-        insightsWhatIf(pi, paths, tokens, notify);
-        return;
-      }
-      await insightsCommand(paths, tokens, notify);
+      // The ONE analytics surface is the operator console's spend screen (the insights move to the console): this
+      // prints its address, for a window or a what-if question. Still deliberately not an LLM-callable tool.
+      insightsLink(tokens, notify);
       return;
     }
     case "run": {
@@ -1887,123 +1879,41 @@ export function assembleCapacityView(paths: any, window: string, nowMs: number, 
   return assembleCapacityViewOf(paths, window, nowMs, { envFn: deploymentEnv, ...opts });
 }
 
-/** The real side-effect deps for insightsCommand; tests inject fakes for every one of them. */
-function realArtifactDeps(): any {
-  return { fs: nodeFs, openBrowser, env: process.env, now: () => Date.now(), platform: process.platform };
-}
+const INSIGHTS_USAGE = "usage: /dispatch insights [7d|30d|mtd] | /dispatch insights whatif <provider/model> --flow <flow>";
 
 /**
- * Why the spawn is skipped, or null when opening locally can work. Exported for its tests: the SSH
- * check is deliberately first (a Mac over SSH has no DISPLAY either, but the reason the operator
- * should see is the session, not the variable), and only linux gates on DISPLAY/WAYLAND_DISPLAY --
- * darwin and win32 have openers that need no display variable.
+ * `/dispatch insights [7d|30d|mtd]` and `/dispatch insights whatif <provider/model> --flow <flow>`: the address of the
+ * operator console's spend screen (the insights move to the console, REQ-ADMIN-VIA-PI-EXTENSION), for that window or
+ * that what-if question, plus how to start the console. The console draws everything the static export drew and more
+ * (the what-if form, the live data a file could not hold), so this command writes nothing and opens nothing: the URL is
+ * the whole answer. Default window 30d, the page's own. The retired flags (`--no-open`, `--full-paths`) and any junk
+ * answer the usage line, which is what teaches the new grammar. Exported for its tests: `env` is the deployment's
+ * environment (`deploymentEnv()` by default), read for `PI_CONSOLE_LISTEN` and `PI_CONSOLE_BIND_PUBLIC` alone
+ * (`link.mjs`, which parses them as the console does).
  */
-// env-internal SSH_CONNECTION, SSH_TTY, DISPLAY, WAYLAND_DISPLAY: how the session the panel is running
-// in describes itself. They decide whether opening a browser here could work at all, and a deployment
-// declaring them would be describing someone else's terminal.
-export function isHeadlessEnv(env: any, platform: string): string | null {
-  if (env?.SSH_CONNECTION || env?.SSH_TTY) return "SSH session";
-  if (platform === "linux" && !env?.DISPLAY && !env?.WAYLAND_DISPLAY) return "no display";
-  return null;
-}
-
-const INSIGHTS_USAGE =
-  "usage: /dispatch insights [7d|30d|mtd] [--no-open] [--full-paths] | /dispatch insights whatif <provider/model> --flow <flow>";
-
-/**
- * `/dispatch insights [7d|30d|mtd] [--no-open] [--full-paths]` (REQ-INSIGHTS-HTML-EXPORT): the bare
- * command does the whole job -- assemble, render the self-contained artifact, write it ATOMICALLY to
- * the STABLE path `<graphDir>/insights.html` (tmp+rename, the writeTriggers idiom -- stable so
- * re-running updates an already-open tab through its Reload/auto-reload controls, atomic so that
- * tab's reload never reads half a file), print the file:// URL FIRST (the URL is the contract, the
- * spawn a convenience; over SSH or without a display the spawn is skipped AND SAID), then best-effort
- * open unless headless/--no-open. A cost-side degrade (scan unreachable) still writes the page with
- * its banner: the artifact is total, never a stack trace. A write failure notifies and never opens --
- * opening a stale artifact after a failed write would show yesterday's deployment as today's.
- * Default window 30d, NOT the old costs mtd: the topology half is pinned at a 30d record window, and
- * the one page's two halves should describe the same period unless the operator asks otherwise.
- * Exported for its tests.
- */
-export async function insightsCommand(paths: any, tokens: string[], notify: Notify, deps: any = realArtifactDeps()): Promise<void> {
+export function insightsLink(tokens: string[], notify: Notify, env: any = deploymentEnv()): void {
   const rest = tokens.slice(1);
-  const noOpen = rest.includes("--no-open");
-  // Full local folder paths are an explicit OPT-IN: the artifact defaults to basename-only because
-  // it is a durable, shareable file, but "which folder is this" is a fair question on a multi-folder
-  // deployment, and the paths are the operator's own reviewed config.
-  const fullPaths = rest.includes("--full-paths");
-  const positional = rest.filter((t) => t !== "--no-open" && t !== "--full-paths");
-  const window = positional.length > 0 ? positional[0] : "30d";
-  // The removed `html` verb lands here as a junk positional and answers usage on purpose: a dead
-  // verb that half-works is drift, and the usage string is what teaches the new grammar.
-  if (positional.length > 1 || !COSTS_WINDOWS.includes(window)) {
-    notify?.(INSIGHTS_USAGE, "warning");
-    return;
+  let query: URLSearchParams;
+  if (rest[0] === "whatif") {
+    const target = rest[1] ?? "";
+    const flowAt = rest.indexOf("--flow");
+    const flow = flowAt >= 2 ? rest[flowAt + 1] : undefined;
+    // The console page's own rules (its `parsePageQuery` checks the same two), so a URL printed here is one the page
+    // accepts rather than one it refuses 400.
+    if (!flow || rest.length !== 4 || !WHATIF_MODEL_RE.test(target) || !SKILL_NAME_RE.test(flow)) {
+      notify?.(INSIGHTS_USAGE, "warning");
+      return;
+    }
+    query = new URLSearchParams({ range: "30d", whatif: target, flow: flow as string });
+  } else {
+    const window = rest.length > 0 ? rest[0] : "30d";
+    if (rest.length > 1 || !COSTS_WINDOWS.includes(window)) {
+      notify?.(INSIGHTS_USAGE, "warning");
+      return;
+    }
+    query = new URLSearchParams({ range: window });
   }
-  // One instant for the whole page: the capacity chart's time axis ends where its report was read.
-  const now = deps.now();
-  const payload = await assembleInsights(paths, window, { pricing: PRICING, fullPaths, nowMs: now, envFn: deploymentEnv });
-  const html = buildInsightsHtml(payload, { now, fullPaths });
-  const file = `${paths.graphDir}/insights.html`;
-  try {
-    // Issue #464: the default graph dir's per-account root is this account's (created 0700), or the write refuses.
-    secureGraphRoot(paths, deps.fs);
-    deps.fs.mkdirSync(paths.graphDir, { recursive: true });
-    const tmp = `${file}.tmp`;
-    deps.fs.writeFileSync(tmp, html, { mode: 0o644 });
-    deps.fs.renameSync(tmp, file);
-  } catch (err: any) {
-    notify?.(`insights: could not write ${file} (${err?.message ?? err})`, "error");
-    return;
-  }
-  // pathToFileURL, not concatenation (review finding): an operator-set PI_GRAPH_DIR with a space
-  // would otherwise print a URL that truncates in terminals and breaks the opener spawn.
-  const url = pathToFileURL(file).href;
-  notify?.(`insights written: ${url}`, "info");
-  if (noOpen) return;
-  const headless = isHeadlessEnv(deps.env, deps.platform);
-  if (headless) {
-    notify?.(`not opening a browser (${headless}): open the URL on this machine's desktop, or scp the file there`, "info");
-    return;
-  }
-  deps.openBrowser(url);
-}
-
-/**
- * `insights whatif <provider/model> --flow <flow>`. The target splits on the FIRST "/" -- model ids
- * carry dots and colons, never the provider separator -- and `--flow` is required because whatIfFlow
- * scores one flow's median run, not a portfolio. An unknown model answers with the closest priced ids
- * by a cheap contains-filter over the façade's catalog: that reply IS the long-tail model picker now
- * that no interactive filter exists.
- */
-function insightsWhatIf(pi: ExtensionAPI, paths: any, tokens: string[], notify: Notify): void {
-  const target = tokens[2] ?? "";
-  const slash = target.indexOf("/");
-  const flowAt = tokens.indexOf("--flow");
-  const flow = flowAt >= 0 ? tokens[flowAt + 1] : undefined;
-  if (slash <= 0 || slash === target.length - 1 || !flow) {
-    notify?.(INSIGHTS_USAGE, "warning");
-    return;
-  }
-  const provider = target.slice(0, slash);
-  const id = target.slice(slash + 1);
-  if (getPricedModel(provider, id) === null) {
-    const needle = id.toLowerCase();
-    const near = listPricedModels()
-      .filter((m: any) => m.id.toLowerCase().includes(needle) || needle.includes(m.id.toLowerCase()))
-      .slice(0, 3)
-      .map((m: any) => `  ${m.provider}/${m.id}`);
-    send(pi, [`unknown model: ${provider}/${id}`, ...(near.length > 0 ? ["closest priced ids:", ...near] : [])].join("\n"));
-    return;
-  }
-  // No window argument here: the estimate wants every ledgered run of the flow it can see, so the scan
-  // runs at its own 92-day ceiling rather than a display window.
-  const records = scanRunRecords({ logsDir: paths.logsDir, nowMs: Date.now() });
-  if (!Array.isArray(records)) {
-    notify?.(`insights: ${(records as any).unreachable}`, "error");
-    return;
-  }
-  const result = whatIfFlow({ records, flow, target: { provider, id }, pricing: PRICING });
-  send(pi, renderWhatIf(result, { flow, target: `${provider}/${id}` }));
+  notify?.(["insights are on the operator console's spend screen:", ...consolePageLines(env, `insights?${query}`)].join("\n"), "info");
 }
 
 /**
@@ -2365,11 +2275,11 @@ export async function handleDashboardAction(result: any, paths: any, rawCtx: any
   const ctx = gateDialogs(rawCtx);
   const ui = ctx?.ui;
   const notify: Notify = ui?.notify?.bind(ui);
-  // The `i` key (issue #181): write and open the insights page between overlays, then the caller's
-  // loop reopens the panel. BEFORE the dialog guard on purpose -- this action needs no dialogs, and
-  // an older pi without them must still reach the one analytics surface.
+  // The `i` key (issue #181): the console's spend screen address, between overlays, then the caller's loop reopens
+  // the panel. BEFORE the dialog guard on purpose -- this action needs no dialogs, and an older pi without them must
+  // still reach the one analytics surface.
   if (result.action === "openInsights") {
-    return insightsCommand(paths, ["insights"], notify);
+    return insightsLink(["insights"], notify);
   }
   if (typeof ui?.input !== "function" || typeof ui?.select !== "function" || typeof ui?.confirm !== "function") {
     notify?.("editing needs a newer pi (no input/select/confirm dialogs)", "warning");

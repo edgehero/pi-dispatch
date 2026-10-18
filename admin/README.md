@@ -140,11 +140,12 @@ One command puts a live terminal view over the whole deployment:
   failed, the tool running and for how long, and the phase it reported (or, when its worker has written nothing for
   3 minutes, that the worker may be gone). `Enter` on a run opens its full record, `x`
   on a running job cancels it after asking, and `b` on an opened run reopens its workspace.
-- **Insights, the one analytics page.** Press `i` (or type `/dispatch insights`) and one self contained
-  page opens in your browser. It shows the budget dials, plan verdicts against API rates, daily,
+- **Insights, the one analytics page.** It is `/insights` in the web console (below); press `i` (or type
+  `/dispatch insights`) and the panel shows its address. It shows the budget dials, plan verdicts against API rates, daily,
   cumulative and per flow spend charts, five breakdowns (by flow, trigger, model, repo and project), the
   budget split with each project's share, spend and floor and the split's history, how busy each host was
-  (jobs only), and the trigger and flow topology with spend on each trigger. A plan covered run never shows as $0.00, and an estimate is
+  (jobs only), and the trigger and flow topology with spend on each trigger, plus a what if form that re-prices a
+  flow on another model. A plan covered run never shows as $0.00, and an estimate is
   always marked as one ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">

@@ -516,57 +516,98 @@ test("runs renders into the pi-dispatch-admin channel with triggerTurn unset", a
   assert.ok(!options || !options.triggerTurn, "must never trigger a paid turn to observe state");
 });
 
-test("insights whatif routes its reply into the pi-dispatch-admin channel with triggerTurn unset", async () => {
-  // The unknown-model path is offline-deterministic: the REAL pricing façade answers null for a
-  // model no catalog carries, and the reply (the long-tail picker) goes through send() like every
-  // other read. Only the first line is pinned -- the closest-ids shortlist depends on the live
-  // catalog and pinning it would couple this suite to pi-ai's model list.
-  const { calls, def } = await loadRegistered();
-  await def.handler("insights whatif nosuch/model-x --flow tidy", fakeCtx().ctx);
-  assert.equal(calls.sendMessage.length, 1);
-  const [message, options] = calls.sendMessage[0];
-  assert.equal(message.customType, "pi-dispatch-admin");
-  assert.equal(message.display, true);
-  assert.match(message.content, /^unknown model: nosuch\/model-x/, "the estimator's reply is the message");
-  assert.ok(!options || !options.triggerTurn, "must never trigger a paid turn to observe state");
-});
-
-test("bare insights writes the artifact through the real deps, and the headless skip is said", async () => {
-  // The end-to-end coverage the removed graph-channel test carried, retargeted at the umbrella:
-  // real fs into a temp PI_GRAPH_DIR, an UNPARSEABLE VALKEY_URL (degrades the scheduler read
-  // synchronously; a dead PORT would leak a stray async error event into the runner, which is why
-  // this suite never opens real connections), a triggers file whose folder does not exist (the
-  // enumeration degrades, the page still renders), and SSH_CONNECTION set so the browser spawn is
-  // skipped AND SAID on any box this suite runs on.
-  const dir = tempDir("admin-insights-wiring-");
-  const triggersPath = join(dir, "triggers.json");
-  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: join(dir, "absent"), flow: "tidy", task: "t" } }] }));
-  const graphDir = join(dir, "artifacts");
-  const prev = { triggers: process.env.PI_TRIGGERS_FILE, valkey: process.env.VALKEY_URL, graph: process.env.PI_GRAPH_DIR, ssh: process.env.SSH_CONNECTION };
-  process.env.PI_TRIGGERS_FILE = triggersPath;
-  process.env.VALKEY_URL = "not-a-url";
-  process.env.PI_GRAPH_DIR = graphDir;
-  process.env.SSH_CONNECTION = "10.0.0.1 22";
+/** Run `fn` with `vars` set in process.env (undefined deletes), restoring every one after. */
+async function withEnv(vars, fn) {
+  const prev = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test("bare insights prints the console's spend screen address for the window, says how to start it, and writes and sends nothing", async () => {
+  // The insights move to the console: the command is a pointer now. Nothing reaches model context, nothing is written
+  // (no graph dir exists to write to), and no browser is spawned.
+  await withEnv({ PI_CONSOLE_LISTEN: undefined, PI_CONSOLE_BIND_PUBLIC: undefined, PI_GRAPH_DIR: "/must/not/be/used" }, async () => {
     const { calls, def } = await loadRegistered();
     const view = fakeCtx({ withCustom: true });
     await def.handler("insights", view.ctx);
-    assert.equal(calls.sendMessage.length, 0, "the artifact path sends nothing into model context");
-    assert.ok(existsSync(join(graphDir, "insights.html")), "the artifact landed at the stable path");
-    const writtenAt = view.notes.findIndex((n) => /insights written: file:\/\//.test(n[0]));
-    const skippedAt = view.notes.findIndex((n) => /SSH session/.test(n[0]));
-    assert.ok(writtenAt >= 0, "the file:// URL is notified");
-    assert.ok(skippedAt > writtenAt, "the spawn skip is said, after the URL -- never silently");
-  } finally {
-    if (prev.triggers === undefined) delete process.env.PI_TRIGGERS_FILE;
-    else process.env.PI_TRIGGERS_FILE = prev.triggers;
-    if (prev.valkey === undefined) delete process.env.VALKEY_URL;
-    else process.env.VALKEY_URL = prev.valkey;
-    if (prev.graph === undefined) delete process.env.PI_GRAPH_DIR;
-    else process.env.PI_GRAPH_DIR = prev.graph;
-    if (prev.ssh === undefined) delete process.env.SSH_CONNECTION;
-    else process.env.SSH_CONNECTION = prev.ssh;
+    assert.equal(calls.sendMessage.length, 0, "nothing goes into model context");
+    assert.equal(view.notes.length, 1);
+    const [text, level] = view.notes[0];
+    assert.equal(level, "info");
+    assert.deepEqual(text.split("\n"), [
+      "insights are on the operator console's spend screen:",
+      "http://127.0.0.1:4790/insights?range=30d",
+      "PI_CONSOLE_LISTEN is not set, so that is the console's default address; if the console is not running, start it with pi-dispatch-console serve (docs/console.md)",
+    ], "the default window is 30d, the page's own");
+    const seven = fakeCtx({ withCustom: true });
+    await def.handler("insights 7d", seven.ctx);
+    assert.match(seven.notes[0][0], /\nhttp:\/\/127\.0\.0\.1:4790\/insights\?range=7d\n/);
+  });
+  await withEnv({ PI_CONSOLE_LISTEN: "[::1]:4811" }, async () => {
+    const { def } = await loadRegistered();
+    const view = fakeCtx({ withCustom: true });
+    await def.handler("insights mtd", view.ctx);
+    assert.deepEqual(view.notes[0][0].split("\n").slice(1), ["http://[::1]:4811/insights?range=mtd", "if the console is not running, start it with pi-dispatch-console serve (docs/console.md)"], "the deployment's own address, bracketed");
+  });
+});
+
+test("insights whatif prints the console's what-if address; a unix socket gets the tunnel, a refused address the fix", async () => {
+  const { mod } = await loadRegistered();
+  const notesOf = (tokens, env) => {
+    const notes = [];
+    mod.insightsLink(tokens, (m, l) => notes.push([m, l]), env);
+    return notes;
+  };
+  const [what] = notesOf(["insights", "whatif", "anthropic/claude-sonnet-4-5", "--flow", "tidy"], { PI_CONSOLE_LISTEN: "127.0.0.1:4790" });
+  assert.equal(what[0].split("\n")[1], "http://127.0.0.1:4790/insights?range=30d&whatif=anthropic%2Fclaude-sonnet-4-5&flow=tidy");
+  // A model id may hold a slash after the provider's (an OpenRouter id): the target splits on the first one.
+  assert.match(notesOf(["insights", "whatif", "openrouter/anthropic/claude-x", "--flow", "fix"], {})[0][0], /whatif=openrouter%2Fanthropic%2Fclaude-x&flow=fix/);
+  const [unix] = notesOf(["insights"], { PI_CONSOLE_LISTEN: "unix:/run/pd/console.sock" });
+  assert.equal(unix[0].split("\n")[1], "the console listens on the unix socket /run/pd/console.sock: ssh -L 4790:/run/pd/console.sock <this host>, then open http://localhost:4790/insights?range=30d");
+  const [bad] = notesOf(["insights"], { PI_CONSOLE_LISTEN: "0.0.0.0:4790" });
+  assert.match(bad[0], /the console's address is not usable: /);
+  assert.match(bad[0], /fix PI_CONSOLE_LISTEN in the deployment's \.env, start the console with pi-dispatch-console serve, and open \/insights\?range=30d/);
+  // A socket path is one shell word in the pasted ssh line, whatever it holds; a control byte is refused, not quoted.
+  const tunnel = (path) => notesOf(["insights"], { PI_CONSOLE_LISTEN: `unix:${path}` })[0][0].split("\n")[1];
+  assert.match(tunnel("/run/my pd/c;$(id)'x.sock"), / ssh -L 4790:'\/run\/my pd\/c;\$\(id\)'\\''x\.sock' <this host>, then open /);
+  assert.match(tunnel("/run/pd/a\u001b[2Jb.sock"), /^the console's address is not usable: PI_CONSOLE_LISTEN unix socket path holds a control character/);
+  // Port 0 is a port only the running console knows, and an any-address bind is no address to open: neither is printed.
+  const [zero] = notesOf(["insights"], { PI_CONSOLE_LISTEN: "127.0.0.1:0" });
+  assert.equal(zero[0].split("\n")[1], "the console listens on a port the OS picks (PI_CONSOLE_LISTEN port 0), so its address is not known here: pi-dispatch-console serve prints it; open /insights?range=30d there");
+  assert.ok(!zero[0].includes(":0/"), "no :0 URL");
+  for (const listen of ["0.0.0.0:4790", "[::]:4790", "[0:0:0:0:0:0:0:0]:4790"]) {
+    const lines = notesOf(["insights"], { PI_CONSOLE_LISTEN: listen, PI_CONSOLE_BIND_PUBLIC: "1" })[0][0].split("\n");
+    assert.deepEqual(lines.slice(1), ["http://<this host>:4790/insights?range=30d", "the console binds every address of this host, so open it by this host's name or address; if the console is not running, start it with pi-dispatch-console serve (docs/console.md)"], listen);
   }
+  assert.match(notesOf(["insights"], { PI_CONSOLE_LISTEN: "192.168.1.5:4790", PI_CONSOLE_BIND_PUBLIC: "1" })[0][0], /\nhttp:\/\/192\.168\.1\.5:4790\/insights\?range=30d\n/, "a named public address is printed as it is");
+  // A target or flow the console page would refuse 400 is never printed as a URL: the usage line instead.
+  for (const tokens of [["insights", "whatif", "noslash", "--flow", "tidy"], ["insights", "whatif", "a/b", "--flow", "Bad Flow"], ["insights", "whatif", "a/b", "--flow"], ["insights", "whatif", "a/b", "tidy"], ["insights", "whatif", "a/<b>", "--flow", "tidy"], ["insights", "whatif", "a/b", "--flow", "tidy", "extra"]]) {
+    const n = notesOf(tokens, {});
+    assert.equal(n.length, 1, tokens.join(" "));
+    assert.equal(n[0][1], "warning", tokens.join(" "));
+    assert.match(n[0][0], /^usage: \/dispatch insights/, tokens.join(" "));
+  }
+});
+
+test("the dashboard's i key shows the console's insights address between overlays", async () => {
+  const { mod } = await loadRegistered();
+  await withEnv({ PI_CONSOLE_LISTEN: "127.0.0.1:4799" }, async () => {
+    const notes = [];
+    await mod.handleDashboardAction({ action: "openInsights" }, {}, { ui: { notify: (m, l) => notes.push([m, l]) } });
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0][1], "info");
+    assert.equal(notes[0][0].split("\n")[1], "http://127.0.0.1:4799/insights?range=30d");
+  });
 });
 
 test("USAGE and KNOWN_SUBCOMMANDS agree, member for member, in order", () => {
@@ -744,11 +785,11 @@ test("argument completion offers the insights windows, whatif, then the priced c
 });
 
 test("junk insights arguments answer usage with zero side effects; the removed verbs stay removed", async () => {
-  // The new-grammar teaching path: a bad window, a bare whatif, a whatif with no --flow, and the
-  // removed `html` verb all answer INSIGHTS_USAGE and neither write nor send. And the removed
+  // The new-grammar teaching path: a bad window, a bare whatif, a whatif with no --flow, the removed `html` verb and
+  // the retired flags of the static export all answer INSIGHTS_USAGE and neither write nor send. And the removed
   // subcommands are unknown at the router, not silent aliases.
   const { calls, def } = await loadRegistered();
-  for (const line of ["insights 12d", "insights whatif", "insights whatif foo/bar", "insights html"]) {
+  for (const line of ["insights 12d", "insights whatif", "insights whatif foo/bar", "insights html", "insights --no-open", "insights 30d --full-paths"]) {
     const view = fakeCtx({ withCustom: true });
     await def.handler(line, view.ctx);
     assert.match(view.notes[0][0], /usage: \/dispatch insights/, `${line} answers the insights usage`);

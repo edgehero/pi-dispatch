@@ -18,8 +18,8 @@
  * parked run and Enter, its RUN_DETAIL), and drawn as framed SVGs by `launch/transcript-svg.mjs`. The commands
  * transcript is what `/dispatch status`, `budget`, `runs 5`, `triggers` and `priorities` send, assembled from the same
  * reads and `render.mjs` functions index.ts uses, at `COMMANDS_WIDTH` columns, with the deployment's temporary folder
- * shown as `~/pi-work`. With `--png`, the insights page is written by the real `insightsCommand` (no browser
- * opened) and shot in headless Chrome at 1240 px and device scale 2, full page, and the two SVGs are rasterised for the
+ * shown as `~/pi-work`. With `--png`, the operator console's insights page is rendered by the console's own page code
+ * (`insightsPage`) and shot in headless Chrome at 1240 px and device scale 2, full page, and the two SVGs are rasterised for the
  * npm page, which cannot show an SVG from raw.githubusercontent.com. Chrome is never needed without `--png`.
  *
  * Only live state is canned: the queue's (its counts, its workers, the active job and the failed one), which a running
@@ -580,22 +580,30 @@ async function openChrome() {
 	};
 }
 
-/** The insights page, as `/dispatch insights 30d --no-open` writes it, captured rather than written to the graph dir. */
+/**
+ * The operator console's spend screen (`/insights?range=30d`), as `pi-dispatch-console serve` renders it for an
+ * operator: the console's own page code (`loadPageData`, `renderPage`) over the real `assembleInsights` and pricing.
+ * The page links its stylesheet and script by URL (the console serves them; its CSP refuses inline ones); for a file
+ * Chrome opens they are written in, the stylesheet in the head and the script at the end of the body, unchanged.
+ */
 async function insightsPage({ env, RM }) {
-	const piRequire = (await import("node:module")).createRequire(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-	const jiti = piRequire("jiti").createJiti(import.meta.url);
-	const mod = await jiti.import(join(REPO, "admin", "src", "index.ts"));
-	let html = null;
-	const notes = [];
-	await mod.insightsCommand(RM.resolvePaths(env), ["insights", "30d", "--no-open"], (m, level) => notes.push([level, m]), {
-		fs: { mkdirSync() {}, writeFileSync: (_p, data) => (html = data), renameSync() {} },
-		openBrowser() {},
-		env: {},
-		platform: "linux",
-		now: () => NOW,
-	});
-	if (html === null) throw new Error(`insights wrote no page: ${JSON.stringify(notes)}`);
-	return html;
+	const pages = await import("../admin/src/console/pages.mjs");
+	const { assembleInsights } = await import("../admin/src/insights-assembly.mjs");
+	const { CONSOLE_CSS } = await import("../admin/src/console/style.mjs");
+	const { CONSOLE_SCRIPT } = await import("../admin/src/console/script.mjs");
+	const { pricedModelIds } = await import("../admin/src/console/whatif.mjs");
+	const pricing = await import("../worker/src/pricing.mjs");
+	const paths = RM.resolvePaths(env);
+	const parsed = pages.parsePageQuery("insights", "range=30d");
+	const deps = { insights: (window, o) => assembleInsights(paths, window, { pricing, nowMs: NOW, envFn: () => env, ...(o?.fullPaths ? { fullPaths: true } : {}) }), pricedModels: () => pricedModelIds(pricing), env, now: () => NOW };
+	const session = { name: "ops", role: "operator" };
+	const data = await pages.loadPageData("insights", parsed.query, deps, session);
+	const { html } = await pages.renderPage("insights", { query: parsed.query, session, data, readOnly: false });
+	const link = '<link rel="stylesheet" href="/static/console.css">';
+	const script = '<script src="/static/console.js" defer></script>';
+	const page = String(html);
+	if (!page.includes(link) || !page.includes(script) || !page.includes("</body>")) throw new Error("the console page no longer links its stylesheet and script as expected");
+	return page.replace(link, `<style>${CONSOLE_CSS}</style>`).replace(script, "").replace("</body>", `<script>${CONSOLE_SCRIPT}</script>\n</body>`);
 }
 
 // ---- main ---------------------------------------------------------------------------------------------------------
@@ -654,7 +662,6 @@ async function main() {
 			PI_PROJECTS_FILE: paths.projects,
 			PI_ENVELOPE_FILE: paths.envelope,
 			PI_SUBSCRIPTIONS_FILE: paths.subs,
-			PI_GRAPH_DIR: paths.graph,
 			PI_GLOBAL_PI_DIR: paths.overlay,
 		};
 		Object.assign(process.env, env);
@@ -675,7 +682,7 @@ async function main() {
 
 		if (opts.png) {
 			const html = await insightsPage({ env, RM });
-			const page = join(work, "insights.html");
+			const page = join(work, "insights-page.html");
 			writeFileSync(page, html);
 			const browser = await openChrome();
 			try {

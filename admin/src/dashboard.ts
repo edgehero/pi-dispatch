@@ -14,7 +14,8 @@
  * FAILED (`f`) and HELD_LIST (`h`) -- the failed and held jobs; ALLOCATION (`b`) -- the budget split;
  * PROJECTS (`j`) -- the projects with their spend and sizes; and HOSTS (`u`) -- each live host's slots,
  * budget and running jobs, with its last 7 days; PARKED (`k`) -- the runs waiting for an answer on their issue
- * (issue #641). Analytics live on the insights page (issue #181): the `i` key writes and opens it.
+ * (issue #641). Analytics live on the operator console's spend screen (the insights move to the console): the `i`
+ * key shows its address.
  *
  * PII discipline (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT): LIST and RUN_DETAIL surface only
  * PII-free run records, counts, budget, schedulers and the settings overlay. LIVE_TAIL renders tail bytes
@@ -1256,9 +1257,9 @@ export function makeDashboard({
         void refresh();
         return;
       }
-      // `i` -- the insights page (issue #181): analytics live in the browser artifact now, so the key
-      // resolves the overlay with a done-action, index.ts writes and opens the page between overlays
-      // (the addTrigger route -- no dep seam here, no TUI suspend bracket), and the panel reopens.
+      // `i` -- the insights page (issue #181): analytics live on the operator console's spend screen, so the key
+      // resolves the overlay with a done-action, index.ts shows the console's address between overlays (the
+      // addTrigger route -- no dep seam here, no TUI suspend bracket), and the panel reopens.
       if (data === "i" || data === "I") {
         void dispose().finally(() => done({ action: "openInsights" }));
         return;

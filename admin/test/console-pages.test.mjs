@@ -54,6 +54,9 @@ const SHOTS = Object.freeze([
   ["run-live", "run", "id=gh-b3d7"],
   ["parked", "parked", ""],
   ["insights", "insights", "range=7d"],
+  // The what-if (the insights move to the console): a priced model over the fixture's ledgered fix runs, at the scan's
+  // own ceiling, with the canned pricing below so a pi bump moves no byte of it.
+  ["insights-whatif", "insights", "whatif=acme%2Fmodel-1&flow=fix"],
   ["fleet", "fleet", ""],
   ["config", "config", ""],
   ["audit", "audit", ""],
@@ -148,6 +151,7 @@ async function renderInChild() {
   const RM = await import("../src/read-model.mjs");
   const DW = await import("../src/dollar-windows.mjs");
   const { assembleInsights } = await import("../src/insights-assembly.mjs");
+  const { makeWhatIfReader } = await import("../src/console/whatif.mjs");
   const pricing = await import("../../worker/src/pricing.mjs");
   const { makeConsoleAudit, readConsoleAudit } = await import("../../worker/src/console-audit.mjs");
   const { sessionKeyFor } = await import("../../worker/src/session-key.mjs");
@@ -177,7 +181,6 @@ async function renderInChild() {
       PI_PROJECTS_FILE: paths.projects,
       PI_ENVELOPE_FILE: paths.envelope,
       PI_SUBSCRIPTIONS_FILE: paths.subs,
-      PI_GRAPH_DIR: paths.graph,
       PI_GLOBAL_PI_DIR: paths.overlay,
     };
     Object.assign(process.env, env);
@@ -235,6 +238,18 @@ async function renderInChild() {
     const deps = {
       fleet: reader,
       insights: (window) => assembleInsights(fleetPaths, window, { pricing: { ...pricing, piAiVersion: () => "0.99.1" }, nowMs: NOW, envFn: () => env }),
+      // A canned catalog of two ids and a rate of $1 in and $5 out per million tokens: the what-if's own arithmetic over
+      // the fixture's real records, with nothing a pi bump can move.
+      whatIf: makeWhatIfReader({
+        pricing: {
+          getPricedModel: (p, id) => (p === "acme" && (id === "model-1" || id === "model-2") ? { provider: p, id } : null),
+          listPricedModels: () => [{ provider: "acme", id: "model-1" }, { provider: "acme", id: "model-2" }],
+          reprice: (q) => ({ usd: (q.input + 5 * q.output) / 1_000_000, ratesVersion: "0.99.1" }),
+        },
+        scan: () => RM.scanRunRecords({ logsDir: paths.logs, nowMs: NOW }),
+        now: () => NOW,
+      }),
+      pricedModels: () => ["acme/model-1", "acme/model-2"],
       audit: ({ limit, before }) => readConsoleAudit({ logsDir: paths.logs, limit, before }),
       subscriptions: () => RM.readSubscriptions({ subscriptionsPath: paths.subs }),
       env: { ...env, GITLAB_URL: "https://gitlab.example.com" },
@@ -382,6 +397,14 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   assert.match(first["runs-filtered.viewer"].html, /value="web"/, "the filter form shows the query's values");
   assert.match(first["runs-filtered.viewer"].html, /href="\/runs\?project=web&amp;outcome=completed&amp;before=\d+">Older runs<\/a>/, "and paging keeps the filter");
   assert.match(first["insights.viewer"].html, /<ol id="insights-tips" class="hidden-tips" hidden><li>/, "the chart tooltips are listed");
+  // The insights move to the console: the two-window line, the chips' data list, the what-if form, and its answer.
+  assert.match(first["insights.viewer"].html, /<p id="windows" class="note">spend window: last 7d · topology: fixed 30d record window · series bounded by retention \(PI_LOG_RETENTION_DAYS\) and the 92-day scan cap<\/p>/);
+  assert.match(first["insights.viewer"].html, /<ol id="graph-nodes" class="hidden-tips" hidden><li data-id="n0"/);
+  assert.match(first["insights.viewer"].html, /<section id="p-whatif" data-panel><h2>What if<\/h2>/);
+  assert.match(first["insights-whatif.viewer"].html, /<pre class="answer">What-if fix @ acme\/model-1:\n  estimate ~\$[\d.]+ est\. total · ~\$[\d.]+ est\. per run\n  coverage \d+% of observed runs ledgered/, "the estimate over the fixture's ledgered runs");
+  assert.match(first["insights-whatif.operator"].html, /<h2>Spend and insights, last 30d<\/h2>/, "a what-if keeps the page's default window");
+  assert.doesNotMatch(first["insights.viewer"].html, /Show full local paths/, "a viewer is offered no paths toggle");
+  assert.match(first["insights.operator"].html, /Show full local paths/, "an operator is");
   assert.match(first["config.viewer"].html, /\.\.\.\/site/, "a local folder is shown by its basename");
   assert.match(first["config.viewer"].html, /<li class="mono">kimi-coding|linear/, "the configuration lists what the overlay holds");
   assert.match(first["audit.operator"].html, /Not an audit row: line 5 of 2026-10\.jsonl/, "a damaged audit line is a warning row");
@@ -471,10 +494,34 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
   assert.match(q("run", "id=a%20b").refusal, /id must be a run id/);
   assert.match(q("run", `id=${"a".repeat(201)}`).refusal, /id must be a run id/);
   assert.match(q("run", "id=gh-1&x=2").refusal, /takes only id/);
-  // insights: a closed range vocabulary, 7d by default.
-  assert.deepEqual(q("insights", "").query, { range: "7d" });
-  for (const r of ["7d", "30d", "mtd"]) assert.deepEqual(q("insights", `range=${r}`).query, { range: r });
+  // insights: a closed range vocabulary, 30d by default (the static export's default, kept when the insights moved to
+  // the console); the what-if pair, together or not at all; and paths=full.
+  const none = { whatif: null, flow: null, paths: null };
+  assert.deepEqual(q("insights", "").query, { range: "30d", ...none });
+  for (const r of ["7d", "30d", "mtd"]) assert.deepEqual(q("insights", `range=${r}`).query, { range: r, ...none });
   for (const r of ["90d", "7D", "mtd ", "<x>"]) assert.match(q("insights", `range=${encodeURIComponent(r)}`).refusal, /range must be one of 7d, 30d, mtd/);
+  const asked = q("insights", "range=7d&whatif=openrouter%2Fanthropic%2Fclaude-x&flow=fix-it&paths=full");
+  assert.deepEqual(asked.query, { range: "7d", whatif: "openrouter/anthropic/claude-x", flow: "fix-it", paths: "full" });
+  assert.equal(pageQueryString("insights", asked.query), "range=7d&whatif=openrouter%2Fanthropic%2Fclaude-x&flow=fix-it&paths=full");
+  assert.deepEqual(q("insights", pageQueryString("insights", asked.query)).query, asked.query, "the string round-trips");
+  for (const [qs, re] of [
+    ["whatif=anthropic%2Fx", /whatif and flow go together/],
+    ["flow=tidy", /whatif and flow go together/],
+    ["whatif=noslash&flow=tidy", /whatif must be <provider>\/<model>/],
+    ["whatif=%2Fx&flow=tidy", /whatif must be <provider>\/<model>/],
+    ["whatif=a%2F&flow=tidy", /whatif must be <provider>\/<model>/],
+    [`whatif=a%2F${encodeURIComponent(hostile)}&flow=tidy`, /whatif must be <provider>\/<model>/],
+    [`whatif=a%2F${"m".repeat(129)}&flow=tidy`, /whatif must be <provider>\/<model>/],
+    ["whatif=a%2Fb&flow=Tidy", /flow must be a flow name/],
+    [`whatif=a%2Fb&flow=${encodeURIComponent(hostile)}`, /flow must be a flow name/],
+    ["paths=absolute", /paths must be full/],
+    ["paths=full&paths=full", /paths is given more than once/],
+    ["fullPaths=1", /takes only range, whatif, flow, paths/],
+  ]) {
+    const r = q("insights", qs);
+    assert.match(r.refusal ?? "", re, qs);
+    assert.ok(!r.refusal.includes("<script") && !r.refusal.includes(ESC), "a refusal never echoes the value");
+  }
   // audit: readConsoleAudit's cursor exactly, `YYYY-MM:<line>`, kept as the string the reader takes.
   assert.deepEqual(q("audit", "before=2026-10:12").query, { before: "2026-10:12" });
   assert.deepEqual(q("audit", "before=2026-10%3A1").query, { before: "2026-10:1" }, "the link's encoded colon");

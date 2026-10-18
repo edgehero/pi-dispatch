@@ -672,6 +672,18 @@ test("a viewer is refused an operator page 403, and gets every viewer page", asy
   }
 });
 
+test("the session's role reaches the page read: a viewer's /insights?paths=full asks the assembly for folder names only", async () => {
+  const asked = [];
+  const pageDeps = { insights: async (window, opts) => (asked.push(opts), {}), now: T0 };
+  const c = await start({ pageDeps, pages: { ...fakePages(), loadPageData: realPages.loadPageData } });
+  for (const [token, want] of [[VIEW_TOKEN, false], [OP_TOKEN, true]]) {
+    const { cookie } = await c.login(token);
+    const res = await c.send({ path: "/insights?paths=full", headers: { cookie } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(asked.splice(0), [{ fullPaths: want }], token === VIEW_TOKEN ? "viewer" : "operator");
+  }
+});
+
 test("a page query the page refuses is 400 with the security headers, before any data is read", async () => {
   const c = await start();
   const { cookie } = await c.login();
