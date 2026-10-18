@@ -1016,7 +1016,16 @@ test("an abort whose stop does NOT take still frees the slot, and says so (#227)
 	const never = new Promise(() => {});
 	const bounded = mod.__boundAfterAbortForTests(never, controller.signal, { id: "j1" }, (event, fields) => logs.push([event, fields]));
 	controller.abort();
-	const out = await bounded;
+	// The grace timer is unref'd on purpose (the worker must be able to exit with only this wait left), and `never`
+	// holds nothing, so run alone this test's loop empties before the 0 ms grace fires and node:test cancels it as
+	// still pending; in the full file it passed only on whatever handle another test happened to leave alive.
+	const keepAlive = setInterval(() => {}, 1000);
+	let out;
+	try {
+		out = await bounded;
+	} finally {
+		clearInterval(keepAlive);
+	}
 	assert.equal(out.aborted, true, "classified as an abort, so the processor treats it as POLICY and does not retry");
 	assert.equal(out.code, 137, "the same shape a killed container returns, so nothing downstream needs to know the difference");
 	assert.equal(logs[0][0], "stop_did_not_take", "a host whose daemon ignores a stop is a fact an operator must learn somewhere");

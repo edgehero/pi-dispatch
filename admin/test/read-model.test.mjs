@@ -507,7 +507,16 @@ test("readSchedulers is bounded: a scheduler list or a close that never settles,
   const never = () => new Promise(() => {});
   const redisFn = () => ({ smembers: async () => [], disconnect() {} });
   const t0 = Date.now();
-  const hung = await readSchedulers({ url: "redis://x", makeQueueFn: () => ({ getJobSchedulers: never, close: () => (closed.push(1), never()) }), parseConnectionFn: () => ({}), redisFn, timeoutMs: 300 });
+  // Both bounds' timers are unref'd on purpose (a hung read must never hold the process open), and a promise that
+  // never settles holds nothing either, so with no other handle alive the loop would empty before either bound fires
+  // and node:test would cancel the test as still pending. A ref'd timer keeps the loop up until they have.
+  const keepAlive = setInterval(() => {}, 1000);
+  let hung;
+  try {
+    hung = await readSchedulers({ url: "redis://x", makeQueueFn: () => ({ getJobSchedulers: never, close: () => (closed.push(1), never()) }), parseConnectionFn: () => ({}), redisFn, timeoutMs: 300 });
+  } finally {
+    clearInterval(keepAlive);
+  }
   assert.deepEqual(hung, { unreachable: "timed out reading the job schedulers" });
   assert.equal(closed.length, 1, "the queue is still closed");
   assert.ok(Date.now() - t0 < 3000, "two bounds, not a hang");
