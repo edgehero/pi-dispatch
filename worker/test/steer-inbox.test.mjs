@@ -417,6 +417,41 @@ test("listInboxPublic never carries text; readInbox does, for the relay", { skip
 	assert.deepEqual(await listInboxPublic({ redis, runId: runIdFor("empty") }), { entries: [], closed: false });
 });
 
+test("listInboxPublic reads metadata only (part 3, F3): the push's and the pre-seed's m:<id> fields, in seq order, never the list; a message without its field falls back to the list", { skip: live }, async () => {
+	const redis = await client();
+	const runId = runIdFor("meta");
+	await registerLive({ redis, runId, host: "h", now: clock });
+	const a = opEntry({ text: "zwei üñï", source: "console", author: { kind: "operator", by: "alice" } });
+	const b = opEntry({ mode: "followUp", source: "panel", author: { kind: "operator", by: "panel" }, at: T0 + 5 });
+	await pushSteer({ redis, runId, entry: a, now: clock });
+	await pushSteer({ redis, runId, entry: b, now: clock });
+	const k = inboxKeys(runId);
+	assert.equal(await redis.hget(k.state, `m:${a.id}`), `1 steer console ${T0} ${Buffer.byteLength(a.text)}`, "seq, mode, source, at and UTF-8 bytes; no text");
+	assert.equal(await redis.hget(k.state, `m:${b.id}`), `2 followUp panel ${T0 + 5} 9`);
+	const want = { entries: [{ id: a.id, mode: "steer", source: "console", state: "queued", at: T0, bytes: Buffer.byteLength(a.text) }, { id: b.id, mode: "followUp", source: "panel", state: "queued", at: T0 + 5, bytes: 9 }], closed: false };
+	assert.deepEqual(await listInboxPublic({ redis, runId }), want);
+	// Proof the list is not read: with the list gone the listing is unchanged.
+	const saved = await redis.lrange(k.list, 0, -1);
+	await redis.del(k.list);
+	assert.deepEqual(await listInboxPublic({ redis, runId }), want);
+	// The meta fields are not states: the close, the counters and readInbox's state ignore them.
+	await redis.rpush(k.list, ...saved);
+	const closed = await closeInbox({ redis, runId });
+	assert.deepEqual(closed.state, { [a.id]: "late", [b.id]: "late" });
+	assert.deepEqual([closed.count, closed.bytes], [2, Buffer.byteLength(a.text) + 9]);
+	assert.deepEqual((await listInboxPublic({ redis, runId })).entries.map((e) => e.state), ["late", "late"]);
+	// A message held without its field (a worker from before part 3): the whole list is read, as before.
+	await redis.hdel(k.state, `m:${b.id}`);
+	assert.deepEqual((await listInboxPublic({ redis, runId })).entries.map((e) => [e.id, e.bytes]), [[a.id, Buffer.byteLength(a.text)], [b.id, 9]]);
+	// The pre-seed writes the fields too, in its own order after what the hash already counts.
+	const pre = runIdFor("meta-pre");
+	const c = carried();
+	const d = carried({ mode: "followUp" });
+	await preseedInbox({ redis, runId: pre, entries: [c, d], now: clock });
+	assert.deepEqual([await redis.hget(inboxKeys(pre).state, `m:${c.id}`), await redis.hget(inboxKeys(pre).state, `m:${d.id}`)], [`1 steer forge ${T0} 12`, `2 followUp forge ${T0} 12`]);
+	assert.deepEqual((await listInboxPublic({ redis, runId: pre })).entries.map((e) => e.id), [c.id, d.id]);
+});
+
 test("the fallback store keeps one job per message id with the inbox's hour", { skip: live }, async () => {
 	const redis = await client();
 	const runId = runIdFor("fallback");
