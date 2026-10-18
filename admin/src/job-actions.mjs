@@ -4,7 +4,8 @@
  *
  * Reached through `read-model.mjs`, which re-exports every name here, so "the read model is the admin's one data-access
  * surface" stays true for every caller; this file exists only because that one had grown past the point where a new
- * family of functions could be reviewed inside it.
+ * family of functions could be reviewed inside it. Issue #646 adds one more: a message into a running,
+ * steer-armed job (`planSteer`/`enqueueSteer`) and taking one back (`planSteerWithdraw`/`withdrawSteerMessage`).
  *
  * THE SHAPE OF EVERY ACTION. A PLAN, then an APPLY, so the console can show an operator exactly what will happen before
  * they confirm, and bind its ticket to it:
@@ -21,7 +22,7 @@
  */
 
 import * as nodeFs from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { QUEUE, makeQueue, enqueueForgeJob, enqueueLocalJobReporting, enqueueTriggerRunReporting, forgeDeliveryJobId, hostQueueName, swallowedRunSentence } from "@edgehero/pi-dispatch/queue";
 import { jobNeeds, routeForgeJob } from "@edgehero/pi-dispatch/capabilities";
@@ -33,7 +34,9 @@ import { mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { gitDirty, localRepoProblem } from "@edgehero/pi-dispatch/git-dirty";
 import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 import { boundAnswerText, consoleAnswerBy } from "@edgehero/pi-dispatch/console-answer";
-import { makeLocalRunIndex, readFleetQueues, readRunById } from "./read-model.mjs";
+import { runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
+import * as steerInbox from "@edgehero/pi-dispatch/steer-inbox";
+import { activeJobOfRun, makeLocalRunIndex, readFleetQueues, readRunById } from "./read-model.mjs";
 
 /** The most jobs one bulk action names, and so the most one preview lists (issue #642). */
 export const BULK_MAX = 100;
@@ -797,5 +800,232 @@ export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, pars
     return { unreachable: err?.message ?? String(err) };
   } finally {
     if (queue) await queue.close().catch(() => {});
+  }
+}
+
+// ---- steering a running job (issue #646, REQ-STEER-RUNNING-JOB, INT-STEER-INBOX-CONTRACT) -----------------------------
+
+/** The surfaces an operator's message may come from here: the console (`by` its token name) and the panel. */
+const STEER_SOURCES_HERE = Object.freeze(["console", "panel"]);
+
+const sha256Hex = (text) => createHash("sha256").update(text).digest("hex");
+
+/**
+ * Find `jobId` across the fleet's queues and judge whether it can take a message now (free reads only, nothing written):
+ * `{ job, queue, runId, redis, fleet }` or `{ refusal }`. Shared by the send plan; the withdraw plan needs the job but
+ * not its being open (a run that just ended still holds its inbox, and the withdraw script answers for it).
+ */
+async function findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, timeoutMs, fleetHolder }) {
+  const fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+  fleetHolder.fleet = fleet;
+  const found = await fleet.find(jobId);
+  if (!found) return { refusal: `${notInFleet(jobId, fleet)}; nothing was sent` };
+  return { job: found.job, queue: found.queue, runId: runIdOf(found.job), fleet };
+}
+
+/**
+ * Plan a MESSAGE into a running job (issue #646, REQ-STEER-RUNNING-JOB), typed into the console or the panel. Free;
+ * `{ plan }` or `{ refusal }`. The CLI's `pi-dispatch steer` (worker/src/steer-cli.mjs) on the same footing, with the
+ * same order of refusals, each one sentence an operator can act on:
+ *
+ *   - a `source` other than `console` or `panel`, then a `by` that is not a token-name word (the console's session
+ *     name; the panel's `panel`), then a mode other than `steer` or `followUp`;
+ *   - the text, bounded by the inbox's own rule (`boundSteerText`: control and invisible characters removed, at most
+ *     8 KiB, refused and NEVER cut, since a truncated message is one the person did not send);
+ *   - a job id outside the run-id charset; then the whole entry through `normalizeSteerEntry`, so a message whose
+ *     framed inbox file would pass its own cap is refused HERE, at the preview, not after the operator confirmed;
+ *   - no such job in any fleet queue; a job that is not ACTIVE (a queued job has no run to steer, and a message waiting
+ *     for it would arrive as the opening of a run nobody started it for: refused, never parked); a job whose data does
+ *     not arm `run.steer`; and a run whose `run:steer:open:<runId>` key is absent (only the worker's relay sets it, for
+ *     an armed run on a venue that can deliver, so its absence names all three causes in one sentence, as the CLI does).
+ *
+ * `runId` is `job.data.recoveryOf ?? job.id` (`runIdOf`), so a recovery job steers the run it continues; and a job
+ * that is not active whose run goes on under another id (a #645 recovery, review F4) is steered through that ACTIVE job
+ * (`activeJobOfRun`), so the base run's page works: the plan then names the active job. The message id
+ * is minted HERE, so the ticket binds the one message the preview showed and a replayed confirm could only ever be
+ * `dup`. `plan`: `{ kind: "steer", jobId, queue, runId, id, mode, source, by, text (the bounded text, exactly what the
+ * push stores), bytes, digest (its sha256, the only form of it an audit row carries) }`.
+ */
+export async function planSteer({
+  url,
+  jobId,
+  text,
+  mode = "steer",
+  by,
+  source = "console",
+  redisFn = makeRedisClient,
+  queueFn = makeQueue,
+  parseConnectionFn = parseConnection,
+  random = randomBytes,
+  now = () => Date.now(),
+  timeoutMs = 2500,
+} = {}) {
+  if (!STEER_SOURCES_HERE.includes(source)) return { refusal: `the source is not one of ${STEER_SOURCES_HERE.join(", ")}` };
+  const who = consoleAnswerBy({ by });
+  if (who === null) return { refusal: "the message needs the sender's name (a console token's name: lowercase letters, digits, . _ -)" };
+  if (!steerInbox.STEER_MODES.includes(mode)) return { refusal: `the mode is not one of ${steerInbox.STEER_MODES.join(", ")}` };
+  const bounded = steerInbox.boundSteerText(text);
+  if (bounded.refusal) return { refusal: bounded.refusal };
+  if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { refusal: "a job id is letters, digits and . _ : -, at most 200 characters" };
+  const id = steerInbox.operatorMessageId(random);
+  const entry = { v: 1, id, mode, source, author: { kind: "operator", by: who }, text: bounded.text, at: now() };
+  const norm = steerInbox.normalizeSteerEntry(entry, now);
+  if (norm.refusal) return { refusal: norm.refusal };
+  let redis = null;
+  const holder = { fleet: null };
+  try {
+    let found = await findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, timeoutMs, fleetHolder: holder });
+    if (found.refusal) return found;
+    const state = await found.job.getState().catch(() => "unknown");
+    if (state !== "active") {
+      const next = await activeJobOfRun((id) => found.fleet.find(id), found.runId, jobId);
+      if (!next) return { refusal: `job ${jobId} is ${state}: only a running job takes messages. Nothing was sent` };
+      found = { job: next.job, queue: next.queue, runId: runIdOf(next.job), fleet: found.fleet };
+    }
+    const target = String(found.job.id);
+    if (found.job.data?.steer !== true) return { refusal: `job ${target} is not steer-armed (its trigger does not set run.steer), so it takes no messages. Nothing was sent` };
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    const open = await steerInbox.isOpen({ redis, runId: found.runId });
+    if (open !== true) {
+      if (open === false) return { refusal: "the run is not accepting messages: it is not steer-armed, not running, or its venue cannot deliver. Nothing was sent" };
+      return { refusal: `the run's inbox could not be read (Valkey said ${String(open?.error ?? "nothing")}); nothing was sent` };
+    }
+    const kept = norm.entry.text;
+    return { plan: { kind: "steer", jobId: target, queue: found.queue, runId: String(found.runId), id, mode, source, by: who, text: kept, bytes: Buffer.byteLength(kept, "utf8"), digest: sha256Hex(kept) } };
+  } catch (err) {
+    return { refusal: `could not read the job or its inbox (${err?.message ?? String(err)}); nothing was sent` };
+  } finally {
+    await holder.fleet?.close();
+    try {
+      redis?.disconnect?.();
+    } catch {
+      // already closed
+    }
+  }
+}
+
+/**
+ * Push a message `planSteer` planned (issue #646): the inbox's own script (`pushSteer`), so a run that closed or went
+ * quiet since the preview refuses it (`closed`/`gone`) instead of swallowing it. Returns `{ ok: true, jobId, id, mode,
+ * state: "queued" }`, `{ refusal }` with the CLI's sentence for `gone`, `closed`, `full` and `dup`, or `{ unreachable }`.
+ * It does not wait for the relay's write: the run page's inbox panel and `/api/state` show the message's state move.
+ */
+export async function enqueueSteer(plan, { url, redisFn = makeRedisClient, now = () => Date.now() } = {}) {
+  if (plan?.kind !== "steer" || typeof plan.runId !== "string" || typeof plan.id !== "string" || !STEER_SOURCES_HERE.includes(plan.source)) return { refusal: "not a steer plan" };
+  let redis = null;
+  try {
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    const entry = { v: 1, id: plan.id, mode: plan.mode, source: plan.source, author: { kind: "operator", by: plan.by }, text: plan.text, at: now() };
+    const pushed = await steerInbox.pushSteer({ redis, runId: plan.runId, entry, now });
+    if (pushed?.error === "refused") return { refusal: `${pushed.reason}` };
+    if (pushed?.error) return { unreachable: `Valkey said ${pushed.error}` };
+    if (pushed === "ok") return { ok: true, jobId: plan.jobId, id: plan.id, mode: plan.mode, state: "queued" };
+    if (pushed === "gone") return { refusal: "the run stopped accepting messages before this one arrived (it ended, or its worker stopped refreshing it). Nothing was sent" };
+    if (pushed === "closed") return { refusal: "the run has finished and its inbox is closed. Nothing was sent" };
+    if (pushed === "full") return { refusal: `the run's inbox is full (at most ${steerInbox.STEER_MAX_MESSAGES} messages and ${steerInbox.STEER_TOTAL_MAX_BYTES} bytes per run, withdrawn ones included). Nothing was sent` };
+    if (pushed === "dup") return { refusal: `message ${plan.id} is already in the run's inbox; nothing new was sent` };
+    return { refusal: `the inbox answered ${String(pushed)}; nothing was sent` };
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    try {
+      redis?.disconnect?.();
+    } catch {
+      // already closed
+    }
+  }
+}
+
+/**
+ * The audit row's `target` for a message (review F2): `<job id>#<message id>`, so a row names the one message it wrote
+ * or withdrew (32 hex, never the text) beside the job, and a reader groups by job with the part before the `#`. `#` is
+ * outside the job-id charset, so the split on the last `#` is exact. A row's strings are capped at 200 characters
+ * (INT-CONSOLE-AUDIT-LOG), so a job id past 166 characters is cut there, keeping the message id whole.
+ */
+export function steerAuditTarget(jobId, id) {
+  const job = String(jobId ?? "");
+  return `${[...job].length > 166 ? [...job].slice(0, 166).join("") : job}#${String(id ?? "")}`;
+}
+
+/** What withdrawing a message in `prior` state means, in one sentence (the CLI's words): guaranteed or best effort. */
+export function steerWithdrawSentence(prior, id) {
+  if (prior === "queued") return `message ${id} was queued, so the run never sees it (guaranteed)`;
+  if (prior === "written") return `message ${id} was already written into the run's inbox, so the withdrawal is best effort: the agent may have read it before the worker removed it. Its transcript says whether it did`;
+  if (prior === "withdrawn") return `message ${id} was already withdrawn; nothing was changed`;
+  return null;
+}
+
+/** The refusal for a message that cannot be withdrawn from `prior`, or null when it can. */
+function unwithdrawable(prior, id, jobId) {
+  if (prior === "delivered") return `message ${id} was already delivered: the agent has received it, so it cannot be withdrawn. Nothing was changed`;
+  if (prior === "late") return `message ${id} arrived after the run had ended (late): the agent never saw it, and there is nothing to withdraw`;
+  if (prior === null) return `no message ${id} in the inbox of ${jobId}`;
+  return null;
+}
+
+/**
+ * Plan taking a message BACK (issue #646). Free; `{ plan }`, `{ unchanged }` (already withdrawn) or `{ refusal }`. The
+ * job is found across the fleet (any state: a run that just ended still holds its inbox for an hour), and the message's
+ * state is read now: `queued` is withdrawn for certain, `written` only best effort (the relay may already have handed
+ * the file to the agent), `delivered` and `late` cannot be, and an unknown id is refused. `plan`: `{ kind:
+ * "steer-withdraw", jobId, runId, id, prior }`, where `prior` is the state the preview saw; the confirm's answer names
+ * the state the withdraw script actually met, which can have moved on.
+ */
+export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 } = {}) {
+  if (typeof id !== "string" || !steerInbox.STEER_ID_RE.test(id)) return { refusal: "the message id is 32 lowercase hex characters, as the inbox lists it" };
+  if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { refusal: "a job id is letters, digits and . _ : -, at most 200 characters" };
+  let redis = null;
+  const holder = { fleet: null };
+  try {
+    const found = await findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, timeoutMs, fleetHolder: holder });
+    if (found.refusal) return { refusal: found.refusal.replace(/; nothing was sent$/, "; nothing was changed") };
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    const prior = await steerInbox.messageState({ redis, runId: found.runId, id });
+    if (prior !== null && typeof prior === "object") return { refusal: prior.error === "refused" ? String(prior.reason) : `the run's inbox could not be read (Valkey said ${String(prior.error)}); nothing was changed` };
+    const no = unwithdrawable(prior, id, jobId);
+    if (no) return { refusal: no };
+    if (prior === "withdrawn") return { unchanged: steerWithdrawSentence(prior, id) };
+    return { plan: { kind: "steer-withdraw", jobId, runId: String(found.runId), id, prior } };
+  } catch (err) {
+    return { refusal: `could not read the job or its inbox (${err?.message ?? String(err)}); nothing was changed` };
+  } finally {
+    await holder.fleet?.close();
+    try {
+      redis?.disconnect?.();
+    } catch {
+      // already closed
+    }
+  }
+}
+
+/**
+ * Withdraw the message `planSteerWithdraw` planned: the inbox's `STEER_WITHDRAW` script, one compare and set. Returns
+ * `{ ok: true, jobId, id, prior, guaranteed, said }` (`prior` the state the script met: `queued` is guaranteed,
+ * `written` best effort, `withdrawn` a no-op someone else already made), `{ refusal }` for `delivered`, `late` or an id
+ * the inbox does not hold, or `{ unreachable }`.
+ */
+export async function withdrawSteerMessage(plan, { url, redisFn = makeRedisClient } = {}) {
+  if (plan?.kind !== "steer-withdraw" || typeof plan.runId !== "string" || typeof plan.id !== "string") return { refusal: "not a steer-withdraw plan" };
+  let redis = null;
+  try {
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    const res = await steerInbox.withdrawSteer({ redis, runId: plan.runId, id: plan.id });
+    if (res?.error === "refused") return { refusal: String(res.reason) };
+    if (res?.error) return { unreachable: `Valkey said ${res.error}` };
+    const no = unwithdrawable(res.prior, plan.id, plan.jobId);
+    if (no) return { refusal: no };
+    return { ok: true, jobId: plan.jobId, id: plan.id, prior: res.prior, guaranteed: res.prior === "queued", said: steerWithdrawSentence(res.prior, plan.id) };
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    try {
+      redis?.disconnect?.();
+    } catch {
+      // already closed
+    }
   }
 }

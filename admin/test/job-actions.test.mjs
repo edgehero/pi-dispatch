@@ -9,15 +9,25 @@ import {
   createFleetReader,
   enqueueParkedAnswer,
   enqueueRerun,
+  enqueueSteer,
   estimateReserve,
   planFailedBulk,
   planParkedAnswer,
   planRerun,
+  planSteer,
+  planSteerWithdraw,
   removeFailedJob,
   retryFailedJob,
   retryFailedJobs,
   setQueuePausedOne,
+  withdrawSteerMessage,
+  readJobInbox,
+  publicInboxEntry,
+  STEER_INBOX_ROWS_MAX,
+  steerAuditTarget,
 } from "../src/read-model.mjs";
+import { createHash } from "node:crypto";
+import { closeInbox, listInboxPublic, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { makeQueue, enqueueForgeJob, forgeDeliveryJobId, manualTriggerJobId } from "@edgehero/pi-dispatch/queue";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
@@ -699,4 +709,330 @@ test("planParkedAnswer refuses by name: not parked, already answered, a pull req
 
 test("the read model re-exports the worker's reserve rule for the console", () => {
   assert.deepEqual(estimateReserve({ kind: "github", maxCostUsd: "0.5" }, { env: { PI_MAX_COST_USD: "2" } }), { slots: 1, dollarsMicros: 500_000, capMicros: 500_000, zeroRated: false });
+});
+
+// ---- steering a running job (issue #646) ----
+
+/** A job held ACTIVE by a bare BullMQ Worker until `release()`: what a running steer-armed run looks like to a queue. */
+async function activeJob(v, name, id, data) {
+  const { Worker } = await import("bullmq");
+  const queue = await v.q(name);
+  let release;
+  const held = new Promise((r) => (release = r));
+  await queue.add(data.kind ?? "x", data, { jobId: id, attempts: 1 });
+  const worker = new Worker(name, () => held, { connection: parseConnection(URL12), concurrency: 1 });
+  await until(async () => (await (await queue.getJob(id))?.getState()) === "active");
+  return {
+    queue,
+    async stop() {
+      release();
+      await worker.close();
+    },
+  };
+}
+
+test("planSteer refuses by name before anything is written: source, sender, mode, empty and oversize text, no job, not active, not armed, not open", live, async () => {
+  const v = await freshValkey();
+  const held = [];
+  try {
+    const armed = await activeJob(v, "pi-jobs", "gh-s1", { kind: "github", repo: "o/r", steer: true, target: { type: "issue", number: 1 } });
+    held.push(armed);
+    // While the shared queue's one worker is busy, a second armed job stays waiting there.
+    await armed.queue.add("github", { kind: "github", repo: "o/r", steer: true }, { jobId: "gh-s3" });
+    held.push(await activeJob(v, "pi-jobs@h2", "gh-s2", { kind: "github", repo: "o/r", target: { type: "issue", number: 2 } }));
+    const plan = (over = {}) => planSteer({ url: URL12, jobId: "gh-s1", text: "use the staging db", mode: "steer", by: "alice", ...over });
+    assert.match((await plan({ source: "forge" })).refusal, /the source is not one of console, panel/);
+    assert.match((await plan({ by: "Alice!" })).refusal, /sender's name/);
+    assert.match((await plan({ mode: "later" })).refusal, /the mode is not one of steer, followUp/);
+    assert.match((await plan({ text: " \u0007\u200b " })).refusal, /the message is empty/);
+    assert.match((await plan({ text: "x".repeat(8193) })).refusal, /8193 bytes, above the 8192-byte limit; shorten it\. Nothing was sent/);
+    assert.match((await plan({ jobId: "gh-none" })).refusal, /no job gh-none in 2 queue\(s\); nothing was sent/);
+    assert.match((await plan({ jobId: "gh-s3" })).refusal, /job gh-s3 is waiting: only a running job takes messages\. Nothing was sent/);
+    assert.match((await plan({ jobId: "gh-s2" })).refusal, /job gh-s2 is not steer-armed \(its trigger does not set run\.steer\)/);
+    // Armed and active, but the relay has not opened the run (no `run:steer:open:` key): one sentence for all three causes.
+    assert.match((await plan()).refusal, /the run is not accepting messages: it is not steer-armed, not running, or its venue cannot deliver/);
+    await registerLive({ redis: v.redis, runId: "gh-s1", host: "h1" });
+    const ok = await plan({ text: "use the\u200b staging db\r\n" });
+    assert.equal(ok.plan.kind, "steer");
+    assert.equal(ok.plan.runId, "gh-s1");
+    assert.equal(ok.plan.text, "use the staging db\n", "the bounded text: invisible characters removed, line endings folded, never cut");
+    assert.equal(ok.plan.bytes, Buffer.byteLength(ok.plan.text));
+    assert.match(ok.plan.id, /^[0-9a-f]{32}$/);
+    assert.equal(ok.plan.digest.length, 64);
+    assert.deepEqual(await listInboxPublic({ redis: v.redis, runId: "gh-s1" }), { entries: [], closed: false }, "a plan writes nothing");
+  } finally {
+    for (const h of held) await h.stop();
+    await v.done();
+  }
+});
+
+test("enqueueSteer pushes exactly the plan as an operator message; withdraw names the prior state; a closed inbox refuses", live, async () => {
+  const v = await freshValkey();
+  const held = [];
+  try {
+    held.push(await activeJob(v, "pi-jobs", "gh-r1", { kind: "github", repo: "o/r", steer: true, recoveryOf: "gh-base", target: { type: "issue", number: 1 } }));
+    // A recovery job steers the run it continues: the open key and the inbox are the base run's.
+    await registerLive({ redis: v.redis, runId: "gh-base", host: "h1" });
+    const plan = async (text, mode = "steer", source = "console", by = "alice") => (await planSteer({ url: URL12, jobId: "gh-r1", text, mode, by, source })).plan;
+    const p1 = await plan("first", "followUp");
+    assert.equal(p1.runId, "gh-base");
+    assert.deepEqual(await enqueueSteer(p1, { url: URL12, now: () => 1_791_000_000_000 }), { ok: true, jobId: "gh-r1", id: p1.id, mode: "followUp", state: "queued" });
+    const stored = (await readInbox({ redis: v.redis, runId: "gh-base" })).entries[0];
+    assert.deepEqual(stored, { v: 1, id: p1.id, mode: "followUp", source: "console", author: { kind: "operator", by: "alice" }, text: "first", at: 1_791_000_000_000 });
+    assert.match((await enqueueSteer(p1, { url: URL12 })).refusal, /already in the run's inbox; nothing new was sent/, "a replayed plan is dup");
+    const p2 = await plan("second", "steer", "panel", "panel");
+    assert.equal((await enqueueSteer(p2, { url: URL12 })).ok, true);
+    assert.equal((await readInbox({ redis: v.redis, runId: "gh-base" })).entries[1].source, "panel");
+    // Withdraw a queued message: guaranteed.
+    const w1 = await planSteerWithdraw({ url: URL12, jobId: "gh-r1", id: p1.id });
+    assert.deepEqual(w1.plan, { kind: "steer-withdraw", jobId: "gh-r1", runId: "gh-base", id: p1.id, prior: "queued" });
+    const done1 = await withdrawSteerMessage(w1.plan, { url: URL12 });
+    assert.deepEqual([done1.ok, done1.prior, done1.guaranteed], [true, "queued", true]);
+    assert.match(done1.said, /was queued, so the run never sees it \(guaranteed\)/);
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-r1", id: p1.id })).unchanged, /already withdrawn; nothing was changed/);
+    // Withdraw a written message: best effort, said so.
+    await markState({ redis: v.redis, runId: "gh-base", id: p2.id, from: ["queued"], to: "written" });
+    const w2 = await planSteerWithdraw({ url: URL12, jobId: "gh-r1", id: p2.id });
+    assert.equal(w2.plan.prior, "written");
+    const done2 = await withdrawSteerMessage(w2.plan, { url: URL12 });
+    assert.deepEqual([done2.ok, done2.prior, done2.guaranteed], [true, "written", false]);
+    assert.match(done2.said, /best effort: the agent may have read it/);
+    // Delivered and unknown messages cannot be withdrawn.
+    const p3 = await plan("third");
+    await enqueueSteer(p3, { url: URL12 });
+    await markState({ redis: v.redis, runId: "gh-base", id: p3.id, from: ["queued"], to: "delivered" });
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-r1", id: p3.id })).refusal, /already delivered: the agent has received it/);
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-r1", id: "f".repeat(32) })).refusal, /no message f{32} in the inbox of gh-r1/);
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-r1", id: "nope" })).refusal, /32 lowercase hex/);
+    // A plan made while open, pushed after the final close, is refused: it is never accepted and silently unseen.
+    const p4 = await plan("fourth");
+    await closeInbox({ redis: v.redis, runId: "gh-base" });
+    assert.match((await enqueueSteer(p4, { url: URL12 })).refusal, /the run has finished and its inbox is closed\. Nothing was sent/);
+    assert.match((await enqueueSteer({ kind: "rerun" }, { url: URL12 })).refusal, /not a steer plan/);
+    // The public list never carries the text.
+    const pub = await listInboxPublic({ redis: v.redis, runId: "gh-base" });
+    assert.ok(!JSON.stringify(pub).includes("first") && !JSON.stringify(pub).includes("third"));
+  } finally {
+    for (const h of held) await h.stop();
+    await v.done();
+  }
+});
+
+test("the fleet reader's inbox read and snapshot: a steer-armed active job's entries without text; an unarmed job carries neither field", live, async () => {
+  const v = await freshValkey();
+  const held = [];
+  const dir = tempDir("pd-646-reader-");
+  const reader = createFleetReader({ valkeyUrl: URL12, logsDir: join(dir, "logs"), triggersPath: join(dir, "triggers.json") }, { readOnly: true, activeLimit: 50 });
+  try {
+    held.push(await activeJob(v, "pi-jobs", "gh-a1", { kind: "github", repo: "o/r", steer: true, target: { type: "issue", number: 1 } }));
+    held.push(await activeJob(v, "pi-jobs@h2", "gh-a2", { kind: "github", repo: "o/r", target: { type: "issue", number: 2 } }));
+    await beat(v.redis, "h2", "");
+    await registerLive({ redis: v.redis, runId: "gh-a1", host: "h1" });
+    const p = (await planSteer({ url: URL12, jobId: "gh-a1", text: "READER-TEXT-CANARY", by: "alice" })).plan;
+    await enqueueSteer(p, { url: URL12, now: () => 1_791_000_000_000 });
+    const one = await reader.inbox("gh-a1");
+    assert.deepEqual(one, { found: true, steer: true, state: "active", open: true, entries: [{ id: p.id, mode: "steer", source: "console", state: "queued", at: 1_791_000_000_000, bytes: 18 }], closed: false });
+    assert.deepEqual(await reader.inbox("gh-a2"), { found: true, steer: false }, "found on a registered host's queue, not armed");
+    assert.deepEqual(await reader.inbox("gh-none"), { found: false });
+    assert.deepEqual(await reader.inbox("<b>"), { invalid: true });
+    const snap = await reader.snapshot();
+    const byId = Object.fromEntries(snap.active.map((a) => [a.jobId, a]));
+    assert.deepEqual([byId["gh-a1"].steer, byId["gh-a1"].inbox], [true, one.entries]);
+    assert.equal("steer" in byId["gh-a2"] || "inbox" in byId["gh-a2"], false);
+    assert.ok(!JSON.stringify(snap).includes("READER-TEXT-CANARY"), "the snapshot never holds the text");
+  } finally {
+    await reader.dispose();
+    for (const h of held) await h.stop();
+    await v.done();
+  }
+});
+
+// ---- review round 1 (issue #646 part 3): the refusals and branches the first tests left unpinned ----
+
+const sha = (t) => createHash("sha256").update(t).digest("hex");
+
+/** A job that COMPLETED for real: added, then taken by a bare Worker whose processor returns. */
+async function completedJob(v, name, id, data) {
+  const { Worker } = await import("bullmq");
+  const queue = await v.q(name);
+  await queue.add(data.kind ?? "x", data, { jobId: id, attempts: 1 });
+  const worker = new Worker(name, async () => "done", { connection: parseConnection(URL12) });
+  await until(async () => (await (await queue.getJob(id))?.getState()) === "completed");
+  await worker.close();
+  return queue;
+}
+
+test("planSteer, every branch: completed and unknown states, an open read that fails, a bad job id, the framed-file cap, the cli source, multibyte bytes, the digest and the queue", live, async () => {
+  const v = await freshValkey();
+  const held = [];
+  try {
+    held.push(await activeJob(v, "pi-jobs", "gh-b1", { kind: "github", repo: "o/r", steer: true, target: { type: "issue", number: 1 } }));
+    await completedJob(v, "pi-jobs@h3", "gh-done", { kind: "github", repo: "o/r", steer: true });
+    await registerLive({ redis: v.redis, runId: "gh-b1", host: "h1" });
+    const plan = (over = {}) => planSteer({ url: URL12, jobId: "gh-b1", text: "go", mode: "steer", by: "alice", ...over });
+    assert.match((await plan({ jobId: "gh-done" })).refusal, /^job gh-done is completed: only a running job takes messages\. Nothing was sent$/);
+    assert.match((await plan({ source: "cli" })).refusal, /the source is not one of console, panel/, "the CLI's own source is not the console's to write");
+    assert.match((await plan({ jobId: "gh b1" })).refusal, /a job id is letters, digits and \. _ : -, at most 200 characters/);
+    // The framed inbox file's cap (normalizeSteerEntry's own refusal): backslashes double in JSON.
+    assert.match((await plan({ text: "\\".repeat(8190) })).refusal, /above the 16384-byte inbox file limit/);
+    const ok = (await plan({ text: "üñï" })).plan;
+    assert.deepEqual([ok.bytes, ok.text.length, ok.queue, ok.digest, ok.jobId], [6, 3, "pi-jobs", sha("üñï"), "gh-b1"]);
+    // A state the queue cannot read is "unknown", and an open read that fails is said, not taken for "not open".
+    const realQueue = (conn, o) => makeQueue(conn, o);
+    const queueFn = (conn, o) => {
+      const q = realQueue(conn, o);
+      return new Proxy(q, { get: (t, k) => (k === "getJob" ? async (id) => { const j = await t.getJob(id); return j && id === "gh-b1" ? Object.assign(Object.create(Object.getPrototypeOf(j)), j, { getState: async () => { throw new Error("gone"); } }) : j; } : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+    };
+    assert.match((await plan({ queueFn })).refusal, /job gh-b1 is unknown: only a running job takes messages/);
+    const redisFn = (url) => {
+      const c = makeRedisClient(url);
+      return new Proxy(c, { get: (t, k) => (k === "exists" ? async (key) => { if (String(key).startsWith("run:steer:open:")) throw Object.assign(new Error("x"), { code: "ECONNRESET" }); return t.exists(key); } : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+    };
+    assert.match((await plan({ redisFn })).refusal, /the run's inbox could not be read \(Valkey said ECONNRESET\); nothing was sent/);
+  } finally {
+    for (const h of held) await h.stop();
+    await v.done();
+  }
+});
+
+test("enqueueSteer and the withdraw funnels, every branch: gone, full, an entry refused, Valkey down, the plan guards, late, not in the fleet, a state read that fails, the race to delivered", live, async () => {
+  const v = await freshValkey();
+  const held = [];
+  try {
+    held.push(await activeJob(v, "pi-jobs", "gh-e1", { kind: "github", repo: "o/r", steer: true, target: { type: "issue", number: 1 } }));
+    await registerLive({ redis: v.redis, runId: "gh-e1", host: "h1" });
+    const mk = async (text = "m") => (await planSteer({ url: URL12, jobId: "gh-e1", text, by: "alice" })).plan;
+    const p = await mk();
+    const down = () => ({ on() {}, disconnect() {}, eval: async () => { throw Object.assign(new Error("x"), { code: "ECONNREFUSED" }); }, hget: async () => { throw Object.assign(new Error("y"), { code: "ECONNREFUSED" }); } });
+    assert.deepEqual(await enqueueSteer(p, { url: URL12, redisFn: down }), { unreachable: "Valkey said ECONNREFUSED" });
+    assert.match((await enqueueSteer({ ...p, by: "Bad!" }, { url: URL12 })).refusal, /an operator message needs an operator author/);
+    assert.equal((await enqueueSteer({ ...p, kind: "rerun" }, { url: URL12 })).refusal, "not a steer plan");
+    assert.equal((await enqueueSteer({ ...p, source: "cli" }, { url: URL12 })).refusal, "not a steer plan");
+    // Full: 16 messages per run, then the 17th.
+    for (let i = 0; i < 16; i += 1) assert.equal((await enqueueSteer(await mk(`m${i}`), { url: URL12 })).ok, true);
+    assert.match((await enqueueSteer(await mk("one more"), { url: URL12 })).refusal, /the run's inbox is full \(at most 16 messages and 65536 bytes per run, withdrawn ones included\)\. Nothing was sent/);
+    // Gone: the relay stopped refreshing (the open key lapsed) after the plan.
+    const fresh = v.redis;
+    await fresh.del("run:inbox:gh-e1", "run:inbox:state:gh-e1");
+    const p2 = await mk("late plan");
+    await fresh.del("run:steer:open:gh-e1");
+    assert.match((await enqueueSteer(p2, { url: URL12 })).refusal, /the run stopped accepting messages before this one arrived/);
+    await registerLive({ redis: fresh, runId: "gh-e1", host: "h1" });
+    // Withdraw: late is refused at the plan; a race to delivered between plan and withdraw is refused at the withdraw.
+    const p3 = await mk("three");
+    await enqueueSteer(p3, { url: URL12 });
+    await markState({ redis: fresh, runId: "gh-e1", id: p3.id, from: ["queued"], to: "late" });
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-e1", id: p3.id })).refusal, /arrived after the run had ended \(late\)/);
+    const p4 = await mk("four");
+    await enqueueSteer(p4, { url: URL12 });
+    const w4 = (await planSteerWithdraw({ url: URL12, jobId: "gh-e1", id: p4.id })).plan;
+    await markState({ redis: fresh, runId: "gh-e1", id: p4.id, from: ["queued"], to: "delivered" });
+    assert.match((await withdrawSteerMessage(w4, { url: URL12 })).refusal, /already delivered/, "the script's answer, not the preview's");
+    assert.equal(await (await import("@edgehero/pi-dispatch/steer-inbox")).messageState({ redis: fresh, runId: "gh-e1", id: p4.id }), "delivered", "nothing changed");
+    assert.match((await withdrawSteerMessage({ ...w4, id: "nope" }, { url: URL12 })).refusal, /32 lowercase hex/);
+    assert.deepEqual(await withdrawSteerMessage(w4, { url: URL12, redisFn: down }), { unreachable: "Valkey said ECONNREFUSED" });
+    assert.equal((await withdrawSteerMessage({ ...w4, kind: "steer" }, { url: URL12 })).refusal, "not a steer-withdraw plan");
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-none", id: p4.id })).refusal, /^no job gh-none in \d+ queue\(s\); nothing was changed$/);
+    const badHget = (url) => {
+      const c = makeRedisClient(url);
+      return new Proxy(c, { get: (t, k) => (k === "hget" ? async () => { throw Object.assign(new Error("z"), { code: "ETIMEDOUT" }); } : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+    };
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-e1", id: p4.id, redisFn: badHget })).refusal, /the run's inbox could not be read \(Valkey said ETIMEDOUT\); nothing was changed/);
+  } finally {
+    for (const h of held) await h.stop();
+    await v.done();
+  }
+});
+
+test("a recovered run (review F4): the base job failed and its .r1 runs; the base page's inbox names the recovery job and a message planned there goes through it", live, async () => {
+  const v = await freshValkey();
+  const held = [];
+  try {
+    await makeFailed(v, "pi-jobs@h4", [{ id: "gh-base", data: { kind: "github", repo: "o/r", steer: true, target: { type: "issue", number: 1 } } }]);
+    held.push(await activeJob(v, "pi-jobs", "gh-base.r1", { kind: "github", repo: "o/r", steer: true, recoveryOf: "gh-base", recovery: 1, target: { type: "issue", number: 1 } }));
+    await registerLive({ redis: v.redis, runId: "gh-base", host: "h1" });
+    const p = (await planSteer({ url: URL12, jobId: "gh-base", text: "from the base page", by: "alice" })).plan;
+    assert.deepEqual([p.jobId, p.runId, p.queue], ["gh-base.r1", "gh-base", "pi-jobs"]);
+    assert.equal((await enqueueSteer(p, { url: URL12 })).jobId, "gh-base.r1");
+    const queues = [makeQueue(parseConnection(URL12, { failFast: true }), { name: "pi-jobs" }), makeQueue(parseConnection(URL12, { failFast: true }), { name: "pi-jobs@h4" })];
+    try {
+      const base = await readJobInbox({ redis: v.redis, queues, jobId: "gh-base" });
+      assert.deepEqual([base.state, base.open, base.continuesAs, base.entries.length], ["failed", true, "gh-base.r1", 1]);
+      const r1 = await readJobInbox({ redis: v.redis, queues, jobId: "gh-base.r1" });
+      assert.deepEqual([r1.state, "continuesAs" in r1, r1.entries[0].id], ["active", false, p.id], "the recovery job reads the base run's inbox (runIdOf)");
+    } finally {
+      for (const q of queues) await q.close();
+    }
+  } finally {
+    for (const h of held) await h.stop();
+    await v.done();
+  }
+});
+
+test("the snapshot's inbox read: 16 armed rows per tick (the 17th null, never []), the recovery's run id, steer must be true, and the rows rebuilt", live, async () => {
+  const v = await freshValkey();
+  const dir = tempDir("pd-646-bound-");
+  try {
+    const { pushSteer } = await import("@edgehero/pi-dispatch/steer-inbox");
+    const jobs = Array.from({ length: STEER_INBOX_ROWS_MAX + 1 }, (_, i) => ({ id: `gh-k${String(i).padStart(2, "0")}`, data: { steer: true }, processedOn: 1000 + i }));
+    jobs.push({ id: "gh-rec.r1", data: { steer: true, recoveryOf: "gh-rec" }, processedOn: 5 }, { id: "gh-truthy", data: { steer: "yes" }, processedOn: 6 });
+    // The recovery's message lives under its base run's id; the 16 bounded rows have none.
+    await registerLive({ redis: v.redis, runId: "gh-rec", host: "h1" });
+    await pushSteer({ redis: v.redis, runId: "gh-rec", entry: { v: 1, id: "c".repeat(32), mode: "steer", source: "cli", author: { kind: "operator", by: "cli" }, text: "x", at: 7 } });
+    // The recovery row first, so it is inside the per-tick bound.
+    const ordered = [jobs.at(-2), ...jobs.slice(0, -2), jobs.at(-1)];
+    const canned = (_c, { name = "pi-jobs" } = {}) => ({ name, isPaused: async () => false, getJobCounts: async () => ({}), getWorkers: async () => [], getJobSchedulers: async () => [], getActive: async () => (name === "pi-jobs" ? ordered : []), getFailed: async () => [], close: async () => {} });
+    const reader = createFleetReader({ valkeyUrl: URL12, logsDir: join(dir, "logs"), triggersPath: join(dir, "t.json") }, { makeQueueFn: canned, readOnly: true, activeLimit: 50, readLiveHostsFn: async () => ({ hosts: [] }) });
+    try {
+      const snap = await reader.snapshot();
+      const rows = snap.active;
+      const armed = rows.filter((r) => r.steer === true);
+      assert.equal(armed.length, STEER_INBOX_ROWS_MAX + 2, "every armed row is marked");
+      assert.equal(armed.filter((r) => Array.isArray(r.inbox)).length, STEER_INBOX_ROWS_MAX, "16 read per tick");
+      assert.equal(armed.at(-1).inbox, null, "the 17th armed row is null (not read), never []");
+      assert.deepEqual(rows.find((r) => r.jobId === "gh-rec.r1").inbox.map((e) => e.id), ["c".repeat(32)], "read under recoveryOf");
+      assert.deepEqual(rows.find((r) => r.jobId === "gh-k00").inbox, [], "a read inbox with no message is []");
+      const truthy = rows.find((r) => r.jobId === "gh-truthy");
+      assert.equal("steer" in truthy || "inbox" in truthy, false, "a truthy steer that is not true is unarmed");
+    } finally {
+      await reader.dispose();
+    }
+  } finally {
+    await v.done();
+  }
+});
+
+test("publicInboxEntry rebuilds each field and drops what fails; readJobInbox keeps the state charset, open null apart from false, closed, and bounds its wait", async () => {
+  assert.deepEqual(publicInboxEntry({ id: "<b>", mode: "shout", source: "evil", state: "gone", at: -1, bytes: "9", text: "T" }), { id: null, mode: null, source: null, state: null, at: null, bytes: 0 });
+  const id = "0123456789abcdef0123456789abcdef";
+  assert.deepEqual(publicInboxEntry({ id, mode: "followUp", source: "panel", state: "late", at: 5, bytes: 3 }), { id, mode: "followUp", source: "panel", state: "late", at: 5, bytes: 3 });
+  const job = (state, data = { steer: true }) => ({ id: "gh-1", data, getState: async () => state });
+  const q = (j) => [{ name: "pi-jobs", getJob: async (x) => (x === j.id ? j : null) }];
+  const redis = (over = {}) => ({
+    exists: async () => 1,
+    multi: () => {
+      const c = { hgetall: () => c, exists: () => c, exec: async () => [[null, { [id]: "queued", [`m:${id}`]: "1 steer cli 5 2" }], [null, over.closed ?? 0]] };
+      return c;
+    },
+    ...over,
+  });
+  const got = await readJobInbox({ redis: redis({ closed: 1 }), queues: q(job("Weird State!")), jobId: "gh-1" });
+  assert.deepEqual(got, { found: true, steer: true, state: "unknown", open: true, entries: [{ id, mode: "steer", source: "cli", state: "queued", at: 5, bytes: 2 }], closed: true });
+  const openFails = await readJobInbox({ redis: redis({ exists: async () => { throw new Error("x"); } }), queues: q(job("active")), jobId: "gh-1" });
+  assert.equal(openFails.open, null, "an unread open key is null, never false");
+  const shut = await readJobInbox({ redis: redis({ exists: async () => 0 }), queues: q(job("active")), jobId: "gh-1" });
+  assert.equal(shut.open, false);
+  const listFails = await readJobInbox({ redis: redis({ multi: () => { throw new Error("m"); } }), queues: q(job("active")), jobId: "gh-1" });
+  assert.equal(listFails.entries, null, "an unread list is null, never []");
+  assert.deepEqual(await readJobInbox({ redis: redis(), queues: [{ name: "q", getJob: () => new Promise(() => {}) }], jobId: "gh-1", timeoutMs: 20 }), { unreachable: true }, "a read that never answers is bounded");
+  assert.deepEqual(await readJobInbox({ redis: redis(), queues: q(job("active", { steer: 1 })), jobId: "gh-1" }), { found: true, steer: false });
+});
+
+test("steerAuditTarget: the job and the 32-hex message id, split on the last #; a long job id is cut, the message id kept", () => {
+  const id = "a".repeat(32);
+  assert.equal(steerAuditTarget("gh-1", id), `gh-1#${id}`);
+  const long = "j".repeat(200);
+  const t = steerAuditTarget(long, id);
+  assert.equal(t, `${"j".repeat(166)}#${id}`);
+  assert.equal(t.length, 199, "inside the audit row's 200-character cap");
 });

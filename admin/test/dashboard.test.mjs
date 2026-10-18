@@ -3725,3 +3725,209 @@ test("a parked run's row names its reason, where a finished one says done (REQ-A
   assert.doesNotMatch(row("j2"), /done/, "a parked run is not done");
   assert.match(row("j1"), /fix · ✔ done · 4t/, "a completed run without a reason still reads done");
 });
+
+// --- sending a message into the running job (issue #646) -------------------------------------------------------------
+
+const STEER_ID = "0123456789abcdef0123456789abcdef";
+
+/** A canned plan/push pair that records what it was asked, the way createDashboardDeps' two steps answer. */
+function steerDeps(snap, { refusal = null, push = null } = {}) {
+  const calls = { plan: [], push: [] };
+  const deps = cannedDeps({
+    fetchSnapshot: async () => snap,
+    planSteer: async (args) => {
+      calls.plan.push(args);
+      return refusal ? { refusal } : { plan: { kind: "steer", jobId: args.jobId, id: STEER_ID, mode: args.mode, text: args.text, digest: "d".repeat(64) } };
+    },
+    steer: async (plan) => {
+      calls.push.push(plan);
+      return push ?? { ok: true, jobId: plan.jobId, id: plan.id, mode: plan.mode, state: "queued" };
+    },
+  });
+  return { deps, calls };
+}
+
+test("t on a steer-armed ACTIVE row opens the message input: keys type, Enter plans then pushes for the job captured at t, and the note names the message, never its text", async () => {
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true, inbox: [] }] };
+  const { deps, calls } = steerDeps(snap);
+  const doneCalls = [];
+  const comp = makeDashboard({ paths: {}, done: (v) => doneCalls.push(v), tui: fakeTui(), intervalMs: 100000, deps });
+  await flush();
+  assert.match(stripAnsi(comp.render(120).join("\n")), /● ACTIVE gh-A running · x cancel · t steer · T follow-up/, "the armed row's hint names both keys");
+  comp.handleInput("t");
+  for (const ch of "quit and run lint") comp.handleInput(ch);
+  await flush();
+  assert.deepEqual(doneCalls, [], "q typed into the message never quits the overlay");
+  assert.match(stripAnsi(comp.render(120).join("\n")), /steer gh-A: quit and run lint.*enter send/, "the footer is the input");
+  comp.handleInput("\x7f");
+  comp.handleInput("T");
+  snap.activeJobId = "gh-B"; // a refresh retargets the row while the operator types
+  comp.handleInput("\r");
+  await flush();
+  await flush();
+  assert.deepEqual(calls.plan, [{ jobId: "gh-A", text: "quit and run linT", mode: "steer" }], "the plan is for the job the key was pressed on; T typed is text");
+  assert.equal(calls.push.length, 1);
+  const out = stripAnsi(comp.render(120).join("\n"));
+  assert.match(out, new RegExp(`steer ${STEER_ID} queued for gh-A`));
+  assert.ok(!out.includes("quit and run"), "the text is not echoed after it is sent");
+  await comp.dispose();
+});
+
+test("T sends a follow-up; Esc closes the input with nothing sent; an empty message and a planner refusal are said and push nothing", async () => {
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true }] };
+  const { deps, calls } = steerDeps(snap);
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
+  await flush();
+  comp.handleInput("T");
+  assert.match(stripAnsi(comp.render(100).join("\n")), /follow-up gh-A:/);
+  comp.handleInput("x");
+  comp.handleInput("\x1b");
+  await flush();
+  assert.deepEqual(calls.plan, [], "Esc sends nothing");
+  assert.match(stripAnsi(comp.render(100).join("\n")), /q quit/, "the ordinary footer is back");
+  comp.handleInput("T");
+  comp.handleInput("\r");
+  await flush();
+  assert.match(stripAnsi(comp.render(100).join("\n")), /message not sent: it is empty/);
+  comp.handleInput("T");
+  for (const ch of "go on") comp.handleInput(ch);
+  comp.handleInput("\r");
+  await flush();
+  await flush();
+  assert.deepEqual(calls.plan.at(-1), { jobId: "gh-A", text: "go on", mode: "followUp" });
+  assert.match(stripAnsi(comp.render(100).join("\n")), new RegExp(`follow-up ${STEER_ID} queued for gh-A`));
+  await comp.dispose();
+  const refused = steerDeps(snap, { refusal: "job gh-A is waiting: only a running job takes messages. Nothing was sent" });
+  const c2 = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: refused.deps });
+  await flush();
+  c2.handleInput("t");
+  c2.handleInput("a");
+  c2.handleInput("\r");
+  await flush();
+  await flush();
+  assert.equal(refused.calls.push.length, 0, "a refused plan pushes nothing");
+  assert.match(stripAnsi(c2.render(140).join("\n")), /message not sent: job gh-A is waiting: only a running job takes messages/);
+  await c2.dispose();
+});
+
+test("t is inert off the ACTIVE row and on a panel not wired to send; an unarmed run says why instead of opening an input", async () => {
+  const unarmed = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A" }] };
+  const { deps, calls } = steerDeps(unarmed);
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
+  await flush();
+  assert.match(stripAnsi(comp.render(120).join("\n")), /● ACTIVE gh-A running · x cancel(?! · t)/, "no message keys on an unarmed row");
+  comp.handleInput("t");
+  await flush();
+  assert.match(stripAnsi(comp.render(140).join("\n")), /t and T send a message only to a steer-armed run/);
+  comp.handleInput("j"); // clears the note
+  comp.handleInput("\x1b[B"); // down: onto the run row
+  comp.handleInput("t");
+  await flush();
+  assert.doesNotMatch(stripAnsi(comp.render(120).join("\n")), /steer gh-A:|steer-armed/, "inert on a run row");
+  assert.deepEqual(calls.plan, []);
+  await comp.dispose();
+  const armed = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true }] };
+  const bare = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => armed }) });
+  await flush();
+  bare.handleInput("t");
+  assert.doesNotMatch(stripAnsi(bare.render(120).join("\n")), /steer gh-A:/, "no send seam, no input");
+  await bare.dispose();
+});
+
+test("the message input and the armed row's hint fit every width, framed and plain: no line wider than the frame", async () => {
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true }] };
+  const { deps } = steerDeps(snap);
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
+  await flush();
+  for (const w of [24, 40, 60, 80, 100, 160]) for (const line of comp.render(w)) assert.ok(visibleLen(line) <= w, `hint row at ${w}: ${visibleLen(line)}`);
+  comp.handleInput("t");
+  for (const ch of "a long message that is much wider than any frame this panel will ever be drawn in, typed on and on ".repeat(3)) comp.handleInput(ch);
+  for (const w of [24, 40, 60, 80, 100, 160]) {
+    const lines = comp.render(w);
+    for (const line of lines) assert.ok(visibleLen(line) <= w, `input at ${w}: ${visibleLen(line)} > ${w}`);
+    if (w >= 60) assert.match(stripAnsi(lines.join("\n")), /steer gh-A: .*esc cancel/, `the hints survive at ${w}`);
+  }
+  await comp.dispose();
+});
+
+test("withAuditedWrites wraps the steer push alone: one write with kind steer, the job and the digest; the plan is never audited", async () => {
+  const { withAuditedWrites } = await jiti.import(dashboardPath);
+  const writes = [];
+  const base = { planSteer: async () => ({ refusal: "no" }), steer: async (plan) => ({ ok: true, jobId: plan.jobId, id: plan.id, mode: plan.mode }) };
+  const deps = withAuditedWrites(base, (opts, fn) => (writes.push(opts), fn()));
+  assert.deepEqual(await deps.planSteer({ jobId: "j1" }), { refusal: "no" });
+  assert.equal(writes.length, 0, "a plan writes no row");
+  await deps.steer({ jobId: "j1", id: STEER_ID, mode: "steer", text: "SECRET-WORDS", digest: "e".repeat(64) });
+  assert.deepEqual(writes.map((o) => [o.kind, o.target, o.afterDigest]), [["steer", `j1#${STEER_ID}`, "e".repeat(64)]], "the job and the message id, never the text");
+  assert.ok(!JSON.stringify(writes).includes("SECRET-WORDS"));
+  assert.equal(writes[0].failure({ refusal: "the run has finished and its inbox is closed. Nothing was sent" }), "the run has finished and its inbox is closed. Nothing was sent");
+  assert.equal(writes[0].failure({ ok: true }), null);
+  assert.equal(writes[0].failure({ invalid: "the run is gone" }), "the run is gone");
+  assert.equal(writes[0].failure({ unreachable: "ECONNREFUSED" }), "Valkey could not be reached");
+  assert.equal(writes[0].failure({ ok: false }), "the message was not accepted");
+  assert.equal(writes[0].failure({}), "the message was not accepted", "only ok === true lands");
+  assert.equal("steer" in withAuditedWrites({}, () => {}), false, "a panel without the seam gets no wrapper that would throw");
+});
+
+test("the panel's steer seam is the panel's: source panel, by panel (createDashboardDeps), so the planner's first refusal is the mode", async () => {
+  const deps = createDashboardDeps({ valkeyUrl: "redis://127.0.0.1:1" }, { makeQueueFn: () => ({ name: "pi-jobs", close: async () => {} }), redisFn: () => ({ on() {}, disconnect() {} }) });
+  try {
+    // source and by pass their checks (a mutated source or by would be refused before the mode); nothing is read.
+    assert.match((await deps.planSteer({ jobId: "j1", text: "x", mode: "sideways" })).refusal, /^the mode is not one of steer, followUp$/);
+    assert.match((await deps.planSteer({ jobId: "j1", text: "  ", mode: "steer" })).refusal, /the message is empty/);
+  } finally {
+    await deps.dispose();
+  }
+});
+
+test("the message input scrubs what it shows: a control byte in a refusal, a thrown error, the push's answer and the job id never reach the terminal; whitespace alone is empty; the left arrow edits", async () => {
+  const ESC = "\x1b";
+  const snap = { ...SNAPSHOT, activeJobId: `gh-${ESC}[2J`, active: [{ jobId: `gh-${ESC}[2J`, steer: true }] };
+  const run = async (over, keys) => {
+    const { deps, calls } = steerDeps(snap, over);
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: { ...deps, ...(over.deps ?? {}) } });
+    await flush();
+    comp.handleInput("t");
+    for (const k of keys) comp.handleInput(k);
+    const open = comp.render(140).join("\n");
+    comp.handleInput("\r");
+    await flush();
+    await flush();
+    const out = comp.render(140).join("\n");
+    await comp.dispose();
+    return { open, out, calls };
+  };
+  const a = await run({ refusal: `no ${ESC}[31mred${String.fromCharCode(7)}` }, ["x"]);
+  assert.ok(!a.open.includes(ESC) && !a.out.includes(ESC) && !a.out.includes(String.fromCharCode(7)), "the job id in the prompt and the refusal are scrubbed");
+  assert.match(a.out, /message not sent: no /);
+  const b = await run({ deps: { planSteer: async () => { throw new Error(`boom${ESC}]0;title`); } } }, ["x"]);
+  assert.match(b.out, /message not sent: boom/);
+  assert.ok(!b.out.includes(ESC));
+  const c = await run({ push: { ok: true, jobId: `gh-${ESC}[2J`, id: `${ESC}[1m`, mode: "steer", state: "queued" } }, ["x"]);
+  assert.match(c.out, /steer .* queued for gh-/);
+  assert.ok(!c.out.includes(ESC));
+  const d = await run({ push: { refusal: `the run has finished${ESC}[0m` } }, ["x"]);
+  assert.match(d.out, /message not sent: the run has finished/);
+  assert.ok(!d.out.includes(ESC));
+  const blank = await run({}, [" ", " ", "\t"]);
+  assert.deepEqual(blank.calls.plan, [], "whitespace alone is empty: nothing planned");
+  assert.match(stripAnsi(blank.out), /message not sent: it is empty/);
+  const edited = await run({}, ["a", "c", "\x1b[D", "b", "\x1b[H", ">", "\x1b[F", "!", "\x1b[C"]);
+  assert.equal(edited.calls.plan[0].text, ">abc!", "left, home, end and right move the cursor");
+});
+
+test("the degraded plain panel carries the open input, so a narrow terminal shows what is being typed and to whom", async () => {
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true }] };
+  const { deps } = steerDeps(snap);
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
+  await flush();
+  comp.handleInput("T");
+  for (const ch of "hi") comp.handleInput(ch);
+  // The plain path clips every line to the width, so the footer's head is what shows: the input's lead, not the hints.
+  const last = (w) => comp.render(w).map(stripAnsi).filter((l) => l !== "").at(-1);
+  assert.equal(last(6), "follo\u2026");
+  for (const line of comp.render(6)) assert.ok(visibleLen(line) <= 6);
+  comp.handleInput("\x1b");
+  assert.equal(last(6), "[p]au\u2026", "closed again: the key hints");
+  await comp.dispose();
+});

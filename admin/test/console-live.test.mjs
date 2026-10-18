@@ -422,6 +422,27 @@ test("stateOf: an unreadable parked list is parkedUnknown, so an empty list is n
   assert.deepEqual(lost.parked, []);
 });
 
+test("stateOf: a steer-armed active job carries its inbox, each entry rebuilt by name and never its text; unread is null, never []", () => {
+  const id = "0123456789abcdef0123456789abcdef";
+  const snap = {
+    ...SNAPSHOT,
+    active: [
+      { jobId: "j9", queue: "pi", startedAt: T0 - 1000, host: "h1", steer: true, inbox: [{ id, mode: "followUp", source: "console", state: "written", at: T0 - 50, bytes: 42, text: "INBOX-TEXT-CANARY", author: { kind: "operator", by: "inbox-author-canary" } }, { id: "<b>", mode: "shout", source: "evil", state: "gone", at: -1, bytes: "x" }] },
+      { jobId: "j10", queue: "pi", startedAt: T0 - 2000, host: "h1", steer: true, inbox: null },
+      { jobId: "j11", queue: "pi", startedAt: T0 - 3000, host: "h1", inbox: [{ id }] },
+    ],
+  };
+  for (const role of ["operator", "viewer"]) {
+    const st = stateOf(snap, role, { now: T0 });
+    assert.deepEqual(st.active.map((a) => [a.jobId, a.steer, a.inbox]), [
+      ["j9", true, [{ id, mode: "followUp", source: "console", state: "written", at: T0 - 50, bytes: 42 }, { id: null, mode: null, source: null, state: null, at: null, bytes: 0 }]],
+      ["j10", true, null],
+      ["j11", false, null],
+    ]);
+    assert.ok(!JSON.stringify(st).includes("INBOX-TEXT-CANARY") && !JSON.stringify(st).includes("inbox-author-canary"), "no text and no author ride along");
+  }
+});
+
 test("stateOf: the named fields only, numbers as numbers, no error text, no host path, and failedReason for an operator alone", () => {
   const op = stateOf(SNAPSHOT, "operator", { now: T0 });
   const viewer = stateOf(SNAPSHOT, "viewer", { now: T0 });
@@ -433,7 +454,7 @@ test("stateOf: the named fields only, numbers as numbers, no error text, no host
   assert.deepEqual(op.hosts, [{ name: "h1", lastBeatAgeMs: 1200, capacity: { memMiB: 4096, cpuCenti: null, concurrency: 2 }, running: 2 }]);
   assert.deepEqual(op.dollars.windows.map((w) => w.scope), [null, "openai/gpt"], "a folder scope's host path is dropped");
   assert.deepEqual(op.parked, [{ target: "o/r#12", kind: "github", ageMs: 3600000, chainCount: 2 }]);
-  assert.deepEqual(op.active, [{ jobId: "j9", queue: "pi", startedAt: T0 - 1000, host: "h1", progress: null }]);
+  assert.deepEqual(op.active, [{ jobId: "j9", queue: "pi", startedAt: T0 - 1000, host: "h1", progress: null, steer: false, inbox: null }]);
   assert.deepEqual(op.schedulers, [{ name: "nightly", next: T0 - 5000, overdue: true, overdueMs: 5000, stalls: 1 }]);
   assert.equal(op.failed.rows[0].failedReason, "repo o/r: token for alice@example.test refused");
   assert.equal("failedReason" in viewer.failed.rows[0], false, "a viewer gets the row without BullMQ's free text");

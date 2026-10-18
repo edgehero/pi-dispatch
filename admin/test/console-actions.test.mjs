@@ -11,6 +11,7 @@ import { makeConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/cons
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
+import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { ACTIONS, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, reserveText } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
@@ -41,6 +42,8 @@ const FILE = {
 };
 // The answer text the parked test types: it must reach the job and never an audit row, a log line or a session id.
 const ANSWER = "use the staging db, answer-canary-7f3e";
+// The message the steer test sends into a running job (issue #646): the same rule, it reaches the inbox and nothing else.
+const STEER_TEXT = "stop and run the migrations first, steer-canary-2d9a";
 
 const BASE = process.env.VALKEY_TEST_URL;
 const URL13 = BASE
@@ -230,6 +233,8 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "remove-all-failed": "failed-remove-all",
     rerun: "run-rerun",
     "parked-answer": "parked-answer",
+    steer: "steer",
+    "steer-withdraw": "steer-withdraw",
     "fleet-pause": "fleet-pause",
     "fleet-resume": "fleet-resume",
     "queue-pause": "queue-pause",
@@ -255,7 +260,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "priorities-set": "priorities-set",
     "allocation-revert": "allocation-revert",
   });
-  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "steer"]);
   assert.deepEqual(ACTIONS.filter((a) => a.bulk).map((a) => a.name).sort(), ["cancel-all-held", "remove-all-failed", "retry-all-failed"]);
   assert.equal(BULK_MAX, RM.BULK_MAX, "the console's bulk bound is job-actions' own");
 });
@@ -987,12 +992,125 @@ test("parked-answer on Valkey: the queued job is the plan's, by the session's to
   }
 });
 
+test("steer and steer-withdraw refuse by the planner's own words before any ticket: a bad mode, an empty or oversize message, a bad message id; a viewer is refused 403", async () => {
+  const { paths } = deployment();
+  const c = await start({ paths });
+  const bad = await c.act("steer", { jobId: "gh-1", text: "x", mode: "later" });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json().error, /mode must be steer or followUp; nothing was changed/);
+  const empty = await c.act("steer", { jobId: "gh-1", text: " \u0007 " });
+  assert.equal(empty.status, 400);
+  assert.match(empty.json().error, /the message is empty/);
+  const big = await c.act("steer", { jobId: "gh-1", text: "x".repeat(8193) });
+  assert.match(big.json().error, /above the 8192-byte limit; shorten it\. Nothing was sent/);
+  assert.match((await c.act("steer-withdraw", { jobId: "gh-1", id: "nope" })).json().error, /id must be a message id/);
+  for (const id of ["A".repeat(32), "a".repeat(31), "a".repeat(33), `x${"a".repeat(32)}`, `${"a".repeat(32)}\n`]) assert.equal((await c.act("steer-withdraw", { jobId: "gh-1", id })).status, 400, `the message id rule is exact: ${JSON.stringify(id)}`);
+  const viewer = await c.cookieFor(VIEW_TOKEN);
+  for (const name of ["steer", "steer-withdraw"]) {
+    const v = await c.post(`/api/act/${name}/preview`, { jobId: "gh-1", text: STEER_TEXT, id: "a".repeat(32) }, { cookie: viewer });
+    assert.equal(v.status, 403, `${name}: a viewer is refused`);
+  }
+  assert.equal(c.audit.rows.filter((r) => r.action === "write" && r.outcome === "ok").length, 0, "nothing was written");
+});
+
+test("steer on Valkey: the preview shows the text escaped, no new reserve and the sha256; the confirm pushes it as the session's message; only the digest is audited; withdraw says guaranteed or best effort", live, async () => {
+  const v = await freshValkey();
+  const { Worker } = await import("bullmq");
+  let release;
+  const held = new Promise((r) => (release = r));
+  let worker = null;
+  try {
+    const { paths } = deployment(URL13);
+    const shared = await v.q("pi-jobs");
+    await shared.add("github", { kind: "github", repo: "o/r", steer: true, target: { type: "issue", number: 4 } }, { jobId: "gh-st1" });
+    worker = new Worker("pi-jobs", () => held, { connection: parseConnection(URL13) });
+    await until(async () => (await (await shared.getJob("gh-st1"))?.getState()) === "active");
+    const c = await start({ paths });
+    // Active and armed, but the relay has not opened the run: refused at the preview with the CLI's sentence.
+    const shut = await c.act("steer", { jobId: "gh-st1", text: STEER_TEXT });
+    assert.equal(shut.status, 400);
+    assert.match(shut.json().error, /the run is not accepting messages/);
+    await registerLive({ redis: v.redis, runId: "gh-st1", host: "h1" });
+    const typed = `${STEER_TEXT}\n<b>bold</b>`;
+    const p = await c.act("steer", { jobId: "gh-st1", text: typed, mode: "followUp", by: "mallory" });
+    assert.equal(p.status, 200, p.text);
+    const pj = p.json();
+    assert.equal(pj.paid, true);
+    assert.equal(pj.reserve, null, "no new reserve");
+    assert.equal(pj.afterDigest, sha256(typed));
+    assert.ok(pj.diffHtml.includes("&lt;b&gt;bold&lt;/b&gt;") && !pj.diffHtml.includes("<b>bold"), "the text is shown escaped");
+    assert.match(pj.diffHtml, /spends from this run&#39;s existing reservation: no new reserve is taken/);
+    assert.match(pj.diffHtml, /Send a follow-up to running job gh-st1, as alice/);
+    assert.match(pj.diffHtml, /<li>The agent reads it once it would otherwise stop, and the run goes on from it\.<\/li>/);
+    assert.match(pj.diffHtml, /<li>The audit log keeps the message&#39;s sha256, never its text\.<\/li>/);
+    assert.match(pj.diffHtml, /<pre class="answer"><span>stop and run the migrations first, steer-canary-2d9a<\/span>\n<span>&lt;b&gt;bold&lt;\/b&gt;<\/span>\n<\/pre>/, "the text, one line per element, escaped");
+    const res = await c.confirm("steer", pj.ticket);
+    assert.equal(res.status, 200, res.text);
+    const rj = res.json();
+    assert.deepEqual(rj, { ok: true, jobId: "gh-st1", id: rj.id, mode: "followUp", state: "queued", action: "steer", kind: "steer", beforeDigest: null, afterDigest: sha256(typed) }, "the answer's whole shape: ids and states, never the text");
+    assert.match(rj.id, /^[0-9a-f]{32}$/);
+    const stored = (await readInbox({ redis: v.redis, runId: "gh-st1" })).entries;
+    assert.equal(stored.length, 1);
+    assert.deepEqual([stored[0].id, stored[0].source, stored[0].author, stored[0].text, stored[0].mode], [rj.id, "console", { kind: "operator", by: "alice" }, typed, "followUp"], "by is the session's token name, whatever the body said");
+    const row = lastWrite(c);
+    assert.deepEqual([row.kind, row.target, row.afterDigest, row.reserve ?? null], ["steer", `gh-st1#${rj.id}`, sha256(typed), null], "the row names the job and the message id, never the text, and no reserve");
+    assert.ok(!JSON.stringify(c.audit.rows).includes("steer-canary"), "the audit rows carry the digest, never the text");
+    // Withdraw: queued is guaranteed.
+    const w1 = await c.act("steer-withdraw", { jobId: "gh-st1", id: rj.id });
+    assert.equal(w1.status, 200, w1.text);
+    assert.match(w1.json().diffHtml, /It is queued: the worker has not written it into the run yet, so withdrawing it is guaranteed/);
+    const done1 = await c.confirm("steer-withdraw", w1.json().ticket);
+    assert.equal(done1.status, 200, done1.text);
+    assert.deepEqual([done1.json().prior, done1.json().guaranteed], ["queued", true]);
+    assert.match(done1.json().said, /\(guaranteed\)/);
+    assert.deepEqual([lastWrite(c).kind, lastWrite(c).target, lastWrite(c).outcome], ["steer-withdraw", `gh-st1#${rj.id}`, "ok"]);
+    // The default mode is steer, and its summary says when the agent reads it.
+    const dflt = (await c.act("steer", { jobId: "gh-st1", text: "default mode" })).json();
+    assert.match(dflt.diffHtml, /<li>Send a steer to running job gh-st1, as alice \(message [0-9a-f]{32}, 12 bytes\)<\/li><li>The agent reads it after its current tool calls, before its next model call\.<\/li>/);
+    const dj = (await c.confirm("steer", dflt.ticket)).json();
+    assert.equal(dj.mode, "steer");
+    assert.equal((await readInbox({ redis: v.redis, runId: "gh-st1" })).entries.at(-1).mode, "steer");
+    // A withdraw previewed queued whose message the relay writes before the confirm: the answer is the script's state.
+    const wm = await c.act("steer-withdraw", { jobId: "gh-st1", id: dj.id });
+    assert.match(wm.json().diffHtml, /It is queued/);
+    await markState({ redis: v.redis, runId: "gh-st1", id: dj.id, from: ["queued"], to: "written" });
+    const moved = (await c.confirm("steer-withdraw", wm.json().ticket)).json();
+    assert.deepEqual([moved.prior, moved.guaranteed], ["written", false], "the prior named is the one the withdraw met, not the preview's");
+    // Withdraw: written is best effort, in the preview and the answer.
+    const p2 = (await c.both("steer", { jobId: "gh-st1", text: "second" })).confirm.json();
+    await markState({ redis: v.redis, runId: "gh-st1", id: p2.id, from: ["queued"], to: "written" });
+    const w2 = await c.act("steer-withdraw", { jobId: "gh-st1", id: p2.id });
+    assert.match(w2.json().diffHtml, /already written into the run&#39;s inbox, so withdrawing it is best effort/);
+    const done2 = (await c.confirm("steer-withdraw", w2.json().ticket)).json();
+    assert.deepEqual([done2.prior, done2.guaranteed], ["written", false]);
+    assert.match(done2.said, /best effort/);
+    // A message delivered between the preview and the confirm: 409, nothing changed, a failed row.
+    const p3 = (await c.both("steer", { jobId: "gh-st1", text: "third" })).confirm.json();
+    const w3 = await c.act("steer-withdraw", { jobId: "gh-st1", id: p3.id });
+    await markState({ redis: v.redis, runId: "gh-st1", id: p3.id, from: ["queued"], to: "delivered" });
+    const late = await c.confirm("steer-withdraw", w3.json().ticket);
+    assert.equal(late.status, 409);
+    assert.match(late.json().error, /already delivered/);
+    assert.equal(c.audit.rows.at(-1).outcome, "failed");
+    // The run closes after a preview: the confirm is refused, never accepted and silently unseen.
+    const p4 = await c.act("steer", { jobId: "gh-st1", text: "fourth" });
+    await closeInbox({ redis: v.redis, runId: "gh-st1" });
+    const closed = await c.confirm("steer", p4.json().ticket);
+    assert.equal(closed.status, 409);
+    assert.match(closed.json().error, /the run has finished and its inbox is closed/);
+  } finally {
+    release();
+    await worker?.close();
+    await v.done();
+  }
+});
+
 // ---- the canary, last ----------------------------------------------------------------------------------------------
 
 test("leak canary: no audit row or log line carries a token, the answer text or a secret reference; every audit chain verifies", () => {
   assert.ok(seen.audit.length > 20 && seen.logs.length > 20, "the canary saw real traffic");
   for (const [kind, list] of Object.entries({ audit: seen.audit, logs: seen.logs })) {
-    for (const text of list) for (const needle of [OP_TOKEN, VIEW_TOKEN, "pdc_", "answer-canary", "secret-ref-canary", "secret-pass"]) assert.ok(!text.includes(needle), `${kind} carries ${needle.slice(0, 6)}: ${text.slice(0, 120)}`);
+    for (const text of list) for (const needle of [OP_TOKEN, VIEW_TOKEN, "pdc_", "answer-canary", "steer-canary", "secret-ref-canary", "secret-pass"]) assert.ok(!text.includes(needle), `${kind} carries ${needle.slice(0, 6)}: ${text.slice(0, 120)}`);
   }
   for (const body of seen.bodies) for (const needle of [OP_TOKEN, VIEW_TOKEN, "secret-ref-canary", "secret-pass"]) assert.ok(!body.includes(needle), `a response carries ${needle.slice(0, 6)}`);
   for (const dir of logsDirs) {
