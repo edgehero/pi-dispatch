@@ -474,6 +474,12 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
   assert.ok(Object.isFrozen(runs.query));
   assert.equal(pageQueryString("runs", runs.query), "repo=acme%2Fweb&outcome=failed&before=1760000000000");
   assert.deepEqual(q("runs", "").query, { filter: {}, before: null });
+  // Issue #668: a priced model id with a leading @ or ~ is a runs filter, and paging keeps it.
+  for (const model of ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", "~anthropic/claude-opus-latest"]) {
+    const byModel = q("runs", `model=${encodeURIComponent(model)}`);
+    assert.deepEqual(byModel.query, { filter: { model }, before: null }, model);
+    assert.deepEqual(q("runs", pageQueryString("runs", byModel.query)).query, byModel.query, `${model} round-trips`);
+  }
   const hostile = `<script>"${ESC}`;
   for (const [qs, re] of [
     [`repo=${encodeURIComponent(hostile)}`, /repo must be/],
