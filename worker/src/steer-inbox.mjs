@@ -10,7 +10,8 @@
  *   run:steer:target:<sha256(kind\0repo\0targetType\0number) hex32>  ZSET runId -> expiresAtMs, PEXPIRE 60 s
  *   run:steer:open:<runId>          STRING host name, PX 30 s: the ONE authority on whether a run takes messages
  *   run:inbox:<runId>               LIST of entry JSON, append only
- *   run:inbox:state:<runId>         HASH id -> queued|written|delivered|withdrawn|late, plus `_bytes` and `_count`
+ *   run:inbox:state:<runId>         HASH id -> queued|written|delivered|withdrawn|late, plus `_bytes` and `_count`,
+ *                                   and `m:<id>` -> "<seq> <mode> <source> <at> <bytes>" per message (issue #646 part 3)
  *   run:inbox:fallback:<runId>      HASH id -> the job the receiver would have enqueued (forge source, PR 2)
  *   run:inbox:closed:<runId>        STRING, set by the final close
  *
@@ -190,7 +191,9 @@ export function normalizeSteerEntry(entry, now = Date.now) {
 // whatever became of the run since (close answered it as late, or it was delivered). Saying `closed` instead would make
 // the receiver enqueue its fallback job a second time for one comment.
 // closed BEFORE gone: close also deletes the open key, and "the run has finished" is the truer of the two answers.
-// KEYS: open, closed, list, state. ARGV: id, entry JSON, text bytes, max count, max bytes, ttl ms.
+// KEYS: open, closed, list, state. ARGV: id, entry JSON, text bytes, max count, max bytes, ttl ms, meta.
+// The meta field (`m:<id>`, "<seq> <meta>") is what `listInboxPublic` reads instead of the list, so a surface that lists
+// the inbox every second never moves the text (part 3, review F3); `seq` is the accepted order, the list's own.
 const PUSH_SCRIPT = `if redis.call('HEXISTS', KEYS[4], ARGV[1]) == 1 then return 'dup' end
 if redis.call('EXISTS', KEYS[2]) == 1 then return 'closed' end
 if redis.call('EXISTS', KEYS[1]) == 0 then return 'gone' end
@@ -199,7 +202,7 @@ local bytes = tonumber(redis.call('HGET', KEYS[4], '_bytes') or '0') or 0
 local add = tonumber(ARGV[3])
 if count + 1 > tonumber(ARGV[4]) or bytes + add > tonumber(ARGV[5]) then return 'full' end
 redis.call('RPUSH', KEYS[3], ARGV[2])
-redis.call('HSET', KEYS[4], ARGV[1], 'queued', '_count', count + 1, '_bytes', bytes + add)
+redis.call('HSET', KEYS[4], ARGV[1], 'queued', '_count', count + 1, '_bytes', bytes + add, 'm:' .. ARGV[1], (count + 1) .. ' ' .. ARGV[7])
 redis.call('PEXPIRE', KEYS[3], ARGV[6])
 redis.call('PEXPIRE', KEYS[4], ARGV[6])
 return 'ok'`;
@@ -253,6 +256,28 @@ function stateOf(reply) {
 	return { state, count, bytes };
 }
 
+/**
+ * A normalized entry's public metadata as the state hash keeps it (`m:<id>`, after the script's seq): "<mode> <source>
+ * <at> <bytes>". Every part is from a closed vocabulary or an integer, so the field holds nothing a sender chose.
+ */
+function metaOf(entry) {
+	return `${entry.mode} ${entry.source} ${entry.at} ${Buffer.byteLength(entry.text, "utf8")}`;
+}
+
+/** The `m:<id>` fields of a state hash reply, `id -> { seq, mode, source, at, bytes }`; a malformed one is left out. */
+function metaFieldsOf(reply) {
+	const pairs = Array.isArray(reply) ? reply.flatMap((v, i, all) => (i % 2 === 0 ? [[v, all[i + 1]]] : [])) : Object.entries(reply ?? {});
+	const out = {};
+	for (const [k, v] of pairs) {
+		if (typeof k !== "string" || !k.startsWith("m:") || typeof v !== "string") continue;
+		const id = k.slice(2);
+		const m = /^([0-9]{1,6}) ([A-Za-z]{1,16}) ([a-z]{1,16}) ([0-9]{1,16}) ([0-9]{1,9})$/.exec(v);
+		if (!STEER_ID_RE.test(id) || m === null) continue;
+		out[id] = { seq: Number(m[1]), mode: m[2], source: m[3], at: Number(m[4]), bytes: Number(m[5]) };
+	}
+	return out;
+}
+
 /** LRANGE reply to entries; a line that does not parse as an entry object is dropped, never surfaced as text. */
 function entriesOf(list) {
 	const out = [];
@@ -277,7 +302,7 @@ export async function pushSteer({ redis, runId, entry, now = Date.now } = {}) {
 	const k = inboxKeys(runId);
 	const bytes = Buffer.byteLength(norm.entry.text, "utf8");
 	try {
-		const r = await redis.eval(PUSH_SCRIPT, 4, steerOpenKey(runId), k.closed, k.list, k.state, norm.entry.id, JSON.stringify(norm.entry), String(bytes), String(STEER_MAX_MESSAGES), String(STEER_TOTAL_MAX_BYTES), String(STEER_INBOX_TTL_MS));
+		const r = await redis.eval(PUSH_SCRIPT, 4, steerOpenKey(runId), k.closed, k.list, k.state, norm.entry.id, JSON.stringify(norm.entry), String(bytes), String(STEER_MAX_MESSAGES), String(STEER_TOTAL_MAX_BYTES), String(STEER_INBOX_TTL_MS), metaOf(norm.entry));
 		return ["ok", "dup", "closed", "gone", "full"].includes(r) ? r : { error: "bad-reply" };
 	} catch (error) {
 		return { error: codeOf(error) };
@@ -288,22 +313,24 @@ export async function pushSteer({ redis, runId, entry, now = Date.now } = {}) {
 // no open-key check (there is no live relay to set one), but every other rule of a push: refused when closed (that run
 // already ended, and a reset at its start would delete them anyway), a message already present is skipped, and the
 // run's two caps hold for the batch as a whole, all or nothing, decided before anything is written.
-// KEYS: closed, list, state. ARGV: ttl ms, max count, max bytes, then (id, entry JSON, text bytes) per message.
+// KEYS: closed, list, state. ARGV: ttl ms, max count, max bytes, then (id, entry JSON, text bytes, meta) per message.
 const PRESEED_SCRIPT = `if redis.call('EXISTS', KEYS[1]) == 1 then return {'closed', 0} end
 local count = tonumber(redis.call('HGET', KEYS[3], '_count') or '0') or 0
 local bytes = tonumber(redis.call('HGET', KEYS[3], '_bytes') or '0') or 0
 local add, addBytes = 0, 0
-for i = 4, #ARGV, 3 do
+for i = 4, #ARGV, 4 do
 	if redis.call('HEXISTS', KEYS[3], ARGV[i]) == 0 then
 		add = add + 1
 		addBytes = addBytes + tonumber(ARGV[i + 2])
 	end
 end
 if count + add > tonumber(ARGV[2]) or bytes + addBytes > tonumber(ARGV[3]) then return {'full', 0} end
-for i = 4, #ARGV, 3 do
+local seq = count
+for i = 4, #ARGV, 4 do
 	if redis.call('HEXISTS', KEYS[3], ARGV[i]) == 0 then
+		seq = seq + 1
 		redis.call('RPUSH', KEYS[2], ARGV[i + 1])
-		redis.call('HSET', KEYS[3], ARGV[i], 'queued')
+		redis.call('HSET', KEYS[3], ARGV[i], 'queued', 'm:' .. ARGV[i], seq .. ' ' .. ARGV[i + 3])
 	end
 end
 if add > 0 then redis.call('HSET', KEYS[3], '_count', count + add, '_bytes', bytes + addBytes) end
@@ -337,7 +364,7 @@ export async function preseedInbox({ redis, runId, entries, now = Date.now } = {
 		if (norm.refusal) return refused(norm.refusal);
 		if (seen.has(norm.entry.id)) continue;
 		seen.add(norm.entry.id);
-		argv.push(norm.entry.id, JSON.stringify(norm.entry), String(Buffer.byteLength(norm.entry.text, "utf8")));
+		argv.push(norm.entry.id, JSON.stringify(norm.entry), String(Buffer.byteLength(norm.entry.text, "utf8")), metaOf(norm.entry));
 	}
 	const k = inboxKeys(runId);
 	try {
@@ -408,8 +435,33 @@ export async function readInbox({ redis, runId } = {}) {
 /**
  * The inbox as a person may see it: `{ entries: [{ id, mode, source, state, at, bytes }], closed }`, NEVER the text
  * (the console state API and the CLI show it; INT-CONSOLE-STATE-API carries no attacker-chosen string).
+ *
+ * METADATA ONLY (part 3, review F3): one HGETALL of the state hash and an EXISTS, read from the `m:<id>` fields the push
+ * and the pre-seed write, in their `seq` order, so the console's snapshot, which lists up to 16 inboxes every second,
+ * never moves up to 64 KiB of text per run to count bytes. A message held without its field (pushed by a worker from
+ * before part 3, during a rolling upgrade) makes this one read fall back to the whole list, as it used to.
  */
 export async function listInboxPublic({ redis, runId } = {}) {
+	if (!validRunId(runId)) return refused("no run id");
+	const k = inboxKeys(runId);
+	let head;
+	try {
+		const res = await redis.multi().hgetall(k.state).exists(k.closed).exec();
+		if (!Array.isArray(res) || res.length !== 2) return { error: "bad-reply" };
+		const failed = res.find(([err]) => err);
+		if (failed) return { error: codeOf(failed[0]) };
+		head = { ...stateOf(res[0][1]), meta: metaFieldsOf(res[0][1]), closed: Number(res[1][1]) === 1 };
+	} catch (error) {
+		return { error: codeOf(error) };
+	}
+	const ids = Object.keys(head.state);
+	if (ids.every((id) => head.meta[id])) {
+		const entries = ids
+			.map((id) => ({ id, ...head.meta[id] }))
+			.sort((a, b) => a.seq - b.seq)
+			.map((m) => ({ id: m.id, mode: STEER_MODES.includes(m.mode) ? m.mode : null, source: STEER_SOURCES.includes(m.source) ? m.source : null, state: head.state[m.id], at: isMs(m.at) ? m.at : null, bytes: m.bytes }));
+		return { entries, closed: head.closed };
+	}
 	const r = await readInbox({ redis, runId });
 	if (r.error) return r;
 	const entries = r.entries.map((e) => ({
